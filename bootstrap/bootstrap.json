@@ -1,10 +1,23 @@
 {
   "format": 1,
   "network": "yandi",
-  "issued": 1791273635,
-  "expires": 1799049635,
-  "sequence": 1,
-  "entries": [],
+  "issued": 1791302851,
+  "expires": 1799078851,
+  "sequence": 2,
+  "entries": [
+    {
+      "id": "8b9bf100e7b830935e119d0ebd04d1f613037e08f8dceedbb716c2c62c0a3225",
+      "key": "94b13cd3e7d8ba454e21f2d3aa85cb8ce405c8803869190dff0112e02b7549fc",
+      "addr": [
+        "185.77.205.3:9000"
+      ],
+      "region": "RU",
+      "roles": [
+        "entry",
+        "relay"
+      ]
+    }
+  ],
   "signer": "89d4938a0bdbe9f6e302dabfee0f1d1d651bca3168b52d38edfa07497d042df2",
-  "signature": "58bda26fab07d901a325341a15db244a6c3dd263b2e079e02d1e50efda56852a52a337bdccebd59ccea5be729a7a3e6d75caebe10af72538e997b83ed4180e0d"
+  "signature": "21140063b9fdf6aec382bab88901ec45b9621153e8b7cda1a375b596368a2f959861550162149846a3014461ff27d1ad032a498237449f08a333ed839341cd03"
 }
