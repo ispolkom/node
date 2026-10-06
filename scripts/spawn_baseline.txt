@@ -6,6 +6,7 @@ src/mdns/discovery.rs:2
 src/mobile_tls.rs:6
 src/netlayer/cli.rs:12
 src/netlayer/rawip_tunnel.rs:1
+src/netlayer/tcp_carrier.rs:4
 src/netlayer/transport.rs:21
 src/netlayer/tun_device.rs:3
 src/netlayer/tun_exit.rs:1
@@ -20,7 +21,7 @@ src/protocol/tcp_tunnel_exit_v2.rs:4
 src/protocol/tcp_tunnel.rs:3
 src/proxy/client.rs:5
 src/proxy/gateway.rs:4
-src/reachability.rs:2
+src/reachability.rs:3
 src/socks5/exit_node.rs:3
 src/socks5/server.rs:8
 src/supervisor.rs:2

@@ -29,6 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::UdpSocket;
+use crate::netlayer::tcp_carrier::{self, CSocket};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 // Obfuscation settings
@@ -302,13 +303,13 @@ pub struct P2PTransport {
         dht: Arc<Mutex<Kademlia>>,
 
     /// Discovery socket (port 9000)
-    discovery_socket: Arc<UdpSocket>,
+    discovery_socket: Arc<CSocket>,
 
     /// Data receive socket (port 10000) - for recv_from only
-    data_recv_socket: Arc<UdpSocket>,
+    data_recv_socket: Arc<CSocket>,
 
     /// Data send socket (port 10000) - for send_to only
-    data_send_socket: Arc<UdpSocket>,
+    data_send_socket: Arc<CSocket>,
     /// Socket manager for port rotation
     socket_manager: Arc<SocketManager>,
     /// Port rotation notification channel
@@ -564,7 +565,10 @@ impl P2PTransport {
         let discovery_socket = UdpSocket::bind(format!("0.0.0.0:{}", discovery_port))
             .await
             .map_err(|e| format!("Failed to bind discovery socket: {}", e))?;
-        let discovery_socket = Arc::new(discovery_socket);
+        // носитель: UDP, а при неработающем UDP — запасной путь по TCP/TLS (`tcp_carrier`)
+        let carrier = tcp_carrier::install(identity.node_id().to_hex());
+        let discovery_socket = CSocket::new(Arc::new(discovery_socket), carrier.clone())
+            .map_err(|e| format!("Failed to wrap discovery socket: {}", e))?;
 
         println!(
             "[transport] 🔓 Fallback discovery socket bound to 0.0.0.0:{}",
@@ -613,7 +617,8 @@ impl P2PTransport {
         let data_socket = tokio::net::UdpSocket::from_std(std_socket)
             .map_err(|e| format!("Failed to convert socket to tokio: {}", e))?;
 
-        let data_recv_socket = Arc::new(data_socket);
+        let data_recv_socket = CSocket::new(Arc::new(data_socket), carrier.clone())
+            .map_err(|e| format!("Failed to wrap data socket: {}", e))?;
         let data_send_socket = Arc::clone(&data_recv_socket);
 
         println!(
@@ -1507,7 +1512,7 @@ impl P2PTransport {
 
     fn spawn_discovery_listener_task(
         transport: Arc<P2PTransport>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<CSocket>,
         shutdown: Option<oneshot::Receiver<()>>,
     ) {
         let peers = transport.peers.clone();
@@ -1541,7 +1546,7 @@ impl P2PTransport {
 
     fn spawn_data_listener_task(
         transport: Arc<P2PTransport>,
-        socket: Arc<UdpSocket>,
+        socket: Arc<CSocket>,
         shutdown: Option<oneshot::Receiver<()>>,
     ) {
         let peers = transport.peers.clone();
@@ -1763,7 +1768,7 @@ impl P2PTransport {
     async fn create_new_sockets(
         discovery_port: u16,
         data_port: u16,
-    ) -> Result<(Arc<UdpSocket>, Arc<UdpSocket>), String> {
+    ) -> Result<(Arc<CSocket>, Arc<CSocket>), String> {
         // Bind new discovery socket
         let new_discovery = UdpSocket::bind(format!("0.0.0.0:{}", discovery_port))
             .await
@@ -1797,12 +1802,18 @@ impl P2PTransport {
                 .map_err(|e| format!("Failed to convert back to tokio: {}", e))?;
             let new_data = Arc::new(new_data);
             
+            let carrier = tcp_carrier::global().ok_or_else(|| "tcp carrier is not installed".to_string())?;
+            let new_discovery = CSocket::new(new_discovery, carrier.clone()).map_err(|e| e.to_string())?;
+            let new_data = CSocket::new(new_data, carrier).map_err(|e| e.to_string())?;
             Ok((new_discovery, new_data))
         }
         
         #[cfg(not(unix))]
         {
             let new_data = Arc::new(new_data);
+            let carrier = tcp_carrier::global().ok_or_else(|| "tcp carrier is not installed".to_string())?;
+            let new_discovery = CSocket::new(new_discovery, carrier.clone()).map_err(|e| e.to_string())?;
+            let new_data = CSocket::new(new_data, carrier).map_err(|e| e.to_string())?;
             Ok((new_discovery, new_data))
         }
     }
@@ -1936,7 +1947,7 @@ impl P2PTransport {
     ///
     /// Handles Hello Request/Ack packets
     async fn discovery_listener(
-        socket: Arc<UdpSocket>,
+        socket: Arc<CSocket>,
         peers: Arc<Mutex<HashMap<HashId, PeerInfo>>>,
         hello_tx: tokio::sync::broadcast::Sender<HelloEvent>,
         dht: Arc<Mutex<Kademlia>>,
@@ -2297,7 +2308,7 @@ impl P2PTransport {
     ///
     /// Handles encrypted data packets
     async fn data_listener(transport: Arc<P2PTransport>, 
-        socket: Arc<UdpSocket>,
+        socket: Arc<CSocket>,
         peers: Arc<Mutex<HashMap<HashId, PeerInfo>>>,
         encryption: Arc<Mutex<EncryptionManager>>,
         tunnels: Arc<Mutex<TunnelManager>>,
@@ -4032,6 +4043,10 @@ impl P2PTransport {
     /// Send Hello Request to peer
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
         println!("[transport] 📤 Sending HELLO_REQ to {}", addr);
+        // куда стучаться по TCP, если UDP до этого узла не дойдёт
+        if let (Some(c), Ok(sa)) = (tcp_carrier::global(), addr.parse::<std::net::SocketAddr>()) {
+            c.hint(sa);
+        }
         let ports = self.port_manager.current_state();
 
         // Get CID from node ID (first 8 bytes)

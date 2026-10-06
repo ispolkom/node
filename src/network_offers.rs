@@ -412,6 +412,13 @@ fn queue_probe(o: NodeOffer) {
         let now = now_secs();
         if let Ok(mut d) = dir_cell().lock() {
             if ok {
+                if let Some(c) = crate::netlayer::tcp_carrier::global() {
+                    for a in &o.addr {
+                        if let Ok(sa) = a.parse::<std::net::SocketAddr>() {
+                            c.hint(sa);
+                        }
+                    }
+                }
                 d.mark_verified(&o.node_id, o.addr.clone(), now + crate::reachability::VERIFIED_SECS);
                 println!("[offers] узел {} достижим по заявленному адресу — карточка принята в списки", &o.node_id[..8]);
             } else {
@@ -477,7 +484,8 @@ pub fn start(
             o.country.as_deref().unwrap_or("неизвестна"), o.country_source, if o.public_ip { "есть" } else { "нет" }, o.power, if o.exit { "да" } else { "нет" });
     }
     // слушатель проб: на TCP-порту основной связи (порты TCP и UDP независимы)
-    let port = a.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port());
+    // порт TCP — номер порта обнаружения (по нему же слушает запасной путь по TCP, даже если внешний адрес ещё не известен)
+    let port = a.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port()).or_else(|| Some(crate::core::get_config().ports.discovery));
     if let Some(port) = port {
         let key = key.clone();
         crate::supervisor::supervise("reachability_listener", crate::supervisor::Policy::restart(), move || crate::reachability::serve(port, node_id, key.clone(), None));

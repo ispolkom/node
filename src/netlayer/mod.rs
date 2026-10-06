@@ -16,6 +16,7 @@ pub mod admission;
 pub mod transport;
 pub mod port_manager;
 pub mod socket_manager;
+pub mod tcp_carrier;
 pub mod adaptive;
 pub mod cli;
 pub mod tun_device;

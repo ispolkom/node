@@ -57,6 +57,18 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
     };
     loop {
         let Ok((mut s, _)) = l.accept().await else { continue };
+        // на этом же порту слушает запасной путь по TCP/TLS (`tcp_carrier`): TLS начинается с байта 0x16, проба достижимости — с «Y»
+        let mut first = [0u8; 1];
+        if let Ok(Ok(1)) = tokio::time::timeout(std::time::Duration::from_secs(3), s.peek(&mut first)).await {
+            if first[0] == 0x16 {
+                if let Some(c) = crate::netlayer::tcp_carrier::global() {
+                    tokio::spawn(async move {
+                        let _ = c.accept(s).await;
+                    });
+                }
+                continue;
+            }
+        }
         let key = key.clone();
         let advertised = advertised.clone();
         tokio::spawn(async move {

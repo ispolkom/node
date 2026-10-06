@@ -17,6 +17,7 @@
 //! Намеренно маленький модуль: никакой шины, поколений и квот — их добавят, когда в них появится реальная нужда (`docs/ROADMAP_KERNEL.md`).
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
+use std::sync::atomic::Ordering;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -69,6 +70,11 @@ struct Entry {
     restarts: u32,
     last_exit: Option<String>,
     since: Instant,
+    /// остановка самого присмотрщика и его текущей задачи (нужна, если то же имя регистрируют заново)
+    supervisor: Option<tokio::task::AbortHandle>,
+    child: Option<tokio::task::AbortHandle>,
+    /// номер регистрации: старый присмотрщик, потерявший его, больше ничего не пишет
+    generation: u64,
 }
 
 fn registry() -> &'static Mutex<HashMap<&'static str, Entry>> {
@@ -76,10 +82,34 @@ fn registry() -> &'static Mutex<HashMap<&'static str, Entry>> {
     R.get_or_init(Default::default)
 }
 
-fn set(name: &'static str, f: impl FnOnce(&mut Entry)) {
+fn new_entry(generation: u64) -> Entry {
+    Entry { state: State::Running, restarts: 0, last_exit: None, since: Instant::now(), supervisor: None, child: None, generation }
+}
+
+/// Записать в состояние, только если регистрация ещё «моя» (после замены того же имени старый присмотрщик молчит).
+fn set(name: &'static str, generation: u64, f: impl FnOnce(&mut Entry)) -> bool {
     let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
-    let e = g.entry(name).or_insert(Entry { state: State::Running, restarts: 0, last_exit: None, since: Instant::now() });
-    f(e);
+    match g.get_mut(name) {
+        Some(e) if e.generation == generation => {
+            f(e);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Занять имя: если оно уже было, прежний присмотрщик и его задача останавливаются, счётчики начинаются заново.
+fn claim(name: &'static str) -> u64 {
+    static GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let generation = GEN.fetch_add(1, Ordering::Relaxed);
+    let mut g = registry().lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(old) = g.insert(name, new_entry(generation)) {
+        eprintln!("[kernel] задача «{name}» зарегистрирована заново: прежняя останавливается");
+        for h in [old.supervisor, old.child].into_iter().flatten() {
+            h.abort();
+        }
+    }
+    generation
 }
 
 /// Состояние всех присматриваемых задач (по имени).
@@ -90,13 +120,16 @@ pub fn status() -> Vec<TaskInfo> {
     v
 }
 
+fn panic_message(p: &Box<dyn std::any::Any + Send>) -> String {
+    let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into());
+    msg.chars().take(200).collect()
+}
+
 fn panic_text(e: tokio::task::JoinError) -> String {
     if e.is_cancelled() {
         return "cancelled".into();
     }
-    let p = e.into_panic();
-    let msg = p.downcast_ref::<&str>().map(|s| s.to_string()).or_else(|| p.downcast_ref::<String>().cloned()).unwrap_or_else(|| "unknown panic".into());
-    format!("panic: {}", msg.chars().take(200).collect::<String>())
+    format!("panic: {}", panic_message(&e.into_panic()))
 }
 
 /// Запустить долгоживущую задачу под присмотром. `make` создаёт задачу заново при каждом (пере)запуске, поэтому всё нужное
@@ -116,29 +149,42 @@ where
     Fut: Future<Output = ()> + Send + 'static,
     X: Fn(i32) + Send + 'static,
 {
-    set(name, |e| {
-        e.state = State::Running;
-        e.since = Instant::now();
-    });
-    tokio::spawn(async move {
+    let generation = claim(name);
+    let sup = tokio::spawn(async move {
         let mut starts: VecDeque<Instant> = VecDeque::new();
         let mut streak = 0u32;
         loop {
             starts.push_back(Instant::now());
-            set(name, |e| {
+            if !set(name, generation, |e| {
                 e.state = State::Running;
                 e.since = Instant::now();
-            });
+            }) {
+                return; // имя занято более новой регистрацией
+            }
             let began = Instant::now();
-            let reason = match tokio::spawn(make()).await {
-                Ok(()) => "returned".to_string(),
-                Err(e) => panic_text(e),
+            // `make()` вызывается под защитой: паника при создании задачи — такое же событие, как паника внутри неё
+            let reason = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| make())) {
+                Err(p) => format!("panic while creating the task: {}", panic_message(&p)),
+                Ok(fut) => {
+                    let child = tokio::spawn(fut);
+                    let ah = child.abort_handle();
+                    if !set(name, generation, |e| e.child = Some(ah)) {
+                        child.abort();
+                        return;
+                    }
+                    match child.await {
+                        Ok(()) => "returned".to_string(),
+                        Err(e) => panic_text(e),
+                    }
+                }
             };
             eprintln!("[kernel] задача «{name}» закончилась: {reason}");
-            set(name, |e| e.last_exit = Some(reason.clone()));
+            if !set(name, generation, |e| e.last_exit = Some(reason.clone())) {
+                return;
+            }
             match policy {
                 Policy::Log => {
-                    set(name, |e| e.state = State::Finished);
+                    set(name, generation, |e| e.state = State::Finished);
                     return;
                 }
                 Policy::Fatal => {
@@ -155,19 +201,22 @@ where
                     streak = if began.elapsed() > window { 0 } else { streak + 1 };
                     if starts.len() as u32 > max {
                         eprintln!("[kernel] задача «{name}» падает слишком часто ({max} перезапусков за {} с) — больше не перезапускается", window.as_secs());
-                        set(name, |e| e.state = State::Failed);
+                        set(name, generation, |e| e.state = State::Failed);
                         return;
                     }
                     let wait = (backoff * 2u32.saturating_pow(streak.saturating_sub(1).min(10))).min(MAX_BACKOFF);
-                    set(name, |e| {
+                    if !set(name, generation, |e| {
                         e.state = State::Restarting;
                         e.restarts += 1;
-                    });
+                    }) {
+                        return;
+                    }
                     tokio::time::sleep(wait).await;
                 }
             }
         }
     });
+    set(name, generation, |e| e.supervisor = Some(sup.abort_handle()));
 }
 
 /// `GET /api/kernel/status` — состояние присматриваемых задач (под проверкой входа владельца).
@@ -263,6 +312,51 @@ mod tests {
         supervise_with_exit("t_critical", Policy::Fatal, || async { panic!("keys are corrupted") }, move |x| c.store(x as u32, Ordering::SeqCst));
         assert!(until(|| code.load(Ordering::SeqCst) == EXIT_CRITICAL as u32).await, "the process is asked to exit with the critical code");
         assert!(find("t_critical").last_exit.unwrap().contains("keys are corrupted"));
+    }
+
+    #[tokio::test]
+    async fn a_panic_while_creating_the_task_is_an_event_too_and_the_supervisor_survives() {
+        let tries = Arc::new(AtomicU32::new(0));
+        let t = tries.clone();
+        supervise("t_factory_panics", Policy::Restart { max: 5, window: Duration::from_secs(60), backoff: Duration::from_millis(5) }, move || {
+            if t.fetch_add(1, Ordering::SeqCst) < 2 {
+                panic!("factory exploded");
+            }
+            async { std::future::pending::<()>().await }
+        });
+        assert!(until(|| tries.load(Ordering::SeqCst) >= 3).await, "the supervisor kept going after the factory panicked");
+        assert!(until(|| find("t_factory_panics").state == State::Running && find("t_factory_panics").restarts == 2).await);
+        assert!(find("t_factory_panics").last_exit.unwrap().contains("factory exploded"));
+    }
+
+    #[tokio::test]
+    async fn registering_the_same_name_again_replaces_the_old_task_and_starts_clean() {
+        let old_alive = Arc::new(AtomicU32::new(0));
+        let o = old_alive.clone();
+        supervise("t_same_name", Policy::Restart { max: 1, window: Duration::from_secs(60), backoff: Duration::from_millis(5) }, move || {
+            let o = o.clone();
+            async move {
+                o.fetch_add(1, Ordering::SeqCst);
+                panic!("old one fails");
+            }
+        });
+        assert!(until(|| find("t_same_name").state == State::Failed).await);
+        let new_runs = Arc::new(AtomicU32::new(0));
+        let n = new_runs.clone();
+        supervise("t_same_name", Policy::Log, move || {
+            let n = n.clone();
+            async move {
+                n.fetch_add(1, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            }
+        });
+        assert!(until(|| new_runs.load(Ordering::SeqCst) == 1).await);
+        let info = find("t_same_name");
+        assert_eq!((info.state, info.restarts, info.last_exit), (State::Running, 0, None), "no stale counters or reasons from the old registration");
+        let seen = old_alive.load(Ordering::SeqCst);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(old_alive.load(Ordering::SeqCst), seen, "the old supervisor is gone and never restarts anything");
+        assert_eq!(find("t_same_name").state, State::Running, "and it cannot overwrite the new status");
     }
 
     #[test]
