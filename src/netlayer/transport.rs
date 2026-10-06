@@ -958,7 +958,9 @@ impl P2PTransport {
                                             Ok(s) => s,
                                             Err(_) => continue,
                                         };
-                                        if verify_resume_mac(&secret, session_id, &addr, &mac) {
+                                        if verify_resume_mac(&secret, session_id, &addr, &mac)
+                                            && Self::resume_node_matches(pk, &embedded_node_id)
+                                        {
                                             status = ResumeStatus::Ok;
                                             hit_pk = Some(pk.clone());
                                             sk = tok.session_key();
@@ -1021,9 +1023,37 @@ impl P2PTransport {
                             println!("[ws-server] 👋 Hello from {} ({})",
                                      hex::encode(&hello.node_id.0[..8]), conn.peer_addr);
 
+                            // Same barriers as the UDP discovery path: signature + self-certifying
+                            // identity + freshness, nonce replay, pinned/verified key conflict.
+                            if let Err(e) = P2PTransport::verify_peer_handshake_static(&hello) {
+                                eprintln!("[ws-server] {} Hello REJECTED: {}", conn.peer_addr, e);
+                                return;
+                            }
+                            {
+                                let mut seen = transport_for_pump.seen_hello_nonces.lock().await;
+                                if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
+                                    eprintln!("[ws-server] {} Hello REJECTED: replayed nonce", conn.peer_addr);
+                                    return;
+                                }
+                            }
+                            {
+                                let pins = transport_for_pump.pinned_identities.read().await;
+                                if Self::identity_conflict(&pins, hello.node_id, &hello.public_key) {
+                                    eprintln!("[ws-server] {} Hello REJECTED: pinned identity conflict", conn.peer_addr);
+                                    return;
+                                }
+                            }
+                            if let Some(existing) = transport_for_pump.peers.lock().await.get(&hello.node_id) {
+                                if matches!(existing.verified_signing_pubkey, Some(k) if k != hello.public_key) {
+                                    eprintln!("[ws-server] {} Hello REJECTED: verified key conflict", conn.peer_addr);
+                                    return;
+                                }
+                            }
+
                             let mut peer = PeerInfo::new(hello.node_id, &conn.peer_addr);
                             peer.caps_bits = hello.capabilities;
                             peer.jurisdiction = hello.jurisdiction.clone();
+                            peer.verified_signing_pubkey = Some(hello.public_key);
                             peer.touch();
                             transport_for_pump.peers.lock().await.insert(hello.node_id, peer);
                             transport_for_pump.ws_outgoing.lock().await
@@ -1034,12 +1064,19 @@ impl P2PTransport {
                             cid8.copy_from_slice(&my_node_id.0[..8]);
                             let ack = HelloPacket::new_ack(
                                 my_node_id,
-                                transport_for_pump.identity.public_key,
+                                transport_for_pump.identity.signing_public_key,
                                 transport_for_pump.identity.public_key,
                                 cid8,
                                 transport_for_pump.capabilities,
                                 hello.nonce,
                             );
+                            let ack = match transport_for_pump.sign_hello(ack) {
+                                Ok(a) => a,
+                                Err(e) => {
+                                    eprintln!("[ws-server] Hello-Ack sign: {}", e);
+                                    return;
+                                }
+                            };
                             match ack.to_bytes() {
                                 Ok(ack_bytes) => {
                                     if let Err(e) = conn.outgoing.send(ack_bytes).await {
@@ -1061,6 +1098,11 @@ impl P2PTransport {
                             };
                             match dec {
                                 Ok((sender_id, plain)) => {
+                                    if sender_id != peer_id {
+                                        eprintln!("[ws-server] dropped: packet from {} on a connection bound to {}",
+                                                  hex::encode(&sender_id.0[..8]), hex::encode(&peer_id.0[..8]));
+                                        continue;
+                                    }
                                     if let Some(p) = transport_for_pump.peers.lock().await.get_mut(&sender_id) {
                                         p.touch();
                                     }
@@ -1906,6 +1948,29 @@ impl P2PTransport {
                     }
                 }
             }
+        }
+    }
+
+    /// Sign a Hello/Hello-Ack with the node's identity (same scheme as the UDP discovery path).
+    fn sign_hello(&self, mut hello: HelloPacket) -> Result<HelloPacket, String> {
+        let signature = self.identity.sign(&hello.challenge_data())
+            .map_err(|e| format!("Failed to sign Hello: {}", e))?;
+        let mut sig_bytes = [0u8; 64];
+        sig_bytes.copy_from_slice(&signature);
+        hello.signature = crate::netlayer::packet::Signature(sig_bytes);
+        Ok(hello)
+    }
+
+    /// RESUME binding: the node id claimed in a plaintext RESUME must be the one derived
+    /// from the public key the token was issued to (store key = client pubkey hex).
+    fn resume_node_matches(client_pubkey_hex: &str, claimed: &HashId) -> bool {
+        match hex::decode(client_pubkey_hex) {
+            Ok(b) if b.len() == 32 => {
+                let mut k = [0u8; 32];
+                k.copy_from_slice(&b);
+                crate::util::types::NodeName::from_public_key(&k).0 == claimed.0
+            }
+            _ => false,
         }
     }
 
@@ -4442,6 +4507,11 @@ impl P2PTransport {
                             };
                             match dec {
                                 Ok((sender_id, plain)) => {
+                                    if sender_id != anchor_id {
+                                        eprintln!("[ws-client] dropped: packet from {} on a connection bound to {}",
+                                                  hex::encode(&sender_id.0[..8]), hex::encode(&anchor_id.0[..8]));
+                                        continue;
+                                    }
                                     if let Some(p) = transport_clone.peers.lock().await.get_mut(&sender_id) {
                                         p.touch();
                                     }
@@ -4484,11 +4554,12 @@ impl P2PTransport {
         cid8.copy_from_slice(&my_node_id.0[..8]);
         let hello = HelloPacket::new_request(
             my_node_id,
-            self.identity.public_key,
+            self.identity.signing_public_key,
             self.identity.public_key,
             cid8,
             self.capabilities,
         );
+        let hello = self.sign_hello(hello)?;
         let hello_bytes = hello.to_bytes()
             .map_err(|e| format!("Hello to_bytes: {}", e))?;
         conn.outgoing.send(hello_bytes).await
@@ -4504,6 +4575,9 @@ impl P2PTransport {
             .ok_or_else(|| "Hello-Ack: connection closed".to_string())?;
         let ack = HelloPacket::from_bytes(&ack_bytes)
             .map_err(|e| format!("Hello-Ack parse: {}", e))?;
+        if let Err(e) = P2PTransport::verify_peer_handshake_static(&ack) {
+            return Err(format!("Hello-Ack rejected: {}", e));
+        }
         let anchor_id = ack.node_id;
         println!("[ws-client] 👋 Hello-Ack from {}", hex::encode(&anchor_id.0[..8]));
 
@@ -4526,6 +4600,11 @@ impl P2PTransport {
                 };
                 match dec {
                     Ok((sender_id, plain)) => {
+                        if sender_id != anchor_id {
+                            eprintln!("[ws-client] dropped: packet from {} on a connection bound to {}",
+                                      hex::encode(&sender_id.0[..8]), hex::encode(&anchor_id.0[..8]));
+                            continue;
+                        }
                         if let Some(p) = transport_clone.peers.lock().await.get_mut(&sender_id) {
                             p.touch();
                         }
@@ -6198,6 +6277,39 @@ mod identity_pin_tests {
 
     fn key(byte: u8) -> [u8; 32] {
         [byte; 32]
+    }
+
+    #[test]
+    fn resume_is_bound_to_the_node_id_of_the_paired_key() {
+        let pk = [7u8; 32];
+        let own = HashId(crate::util::types::NodeName::from_public_key(&pk).0);
+        let other = HashId([9u8; 32]);
+        assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &own));
+        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other));
+        assert!(!P2PTransport::resume_node_matches("zz", &own));
+    }
+
+    #[test]
+    fn a_hello_signed_the_ws_way_is_accepted_and_tampering_is_not() {
+        let id = crate::core::NodeIdentity::new();
+        let mut h = HelloPacket::new_request(id.node_id(), id.signing_public_key, id.public_key, [0u8; 8], 0);
+        let sig = id.sign(&h.challenge_data()).unwrap();
+        let mut b = [0u8; 64];
+        b.copy_from_slice(&sig);
+        h.signature = crate::netlayer::packet::Signature(b);
+        assert!(P2PTransport::verify_peer_handshake_static(&h).is_ok());
+        h.capabilities ^= 1;
+        assert!(P2PTransport::verify_peer_handshake_static(&h).is_err());
+    }
+
+    #[test]
+    fn unsigned_hello_and_ack_are_rejected() {
+        let mut h = HelloPacket::new_request(
+            HashId([1u8; 32]), [2u8; 32], [2u8; 32], [0u8; 8], 0,
+        );
+        assert!(P2PTransport::verify_peer_handshake_static(&h).is_err());
+        h.node_id = HashId([3u8; 32]);
+        assert!(P2PTransport::verify_peer_handshake_static(&h).is_err());
     }
 
     #[test]

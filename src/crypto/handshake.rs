@@ -7,7 +7,7 @@ use crate::crypto::x25519::{derive_master, SecretKey};
 use crate::util::HashId;
 use hkdf::Hkdf;
 use sha2::Sha256;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 /// Два рукопожатия с одним узлом в пределах этого окна с разных сторон — встречное знакомство.
 const CROSSING_WINDOW_MS: u128 = 10_000;
@@ -19,6 +19,8 @@ pub struct HandshakeManager {
     our_id: HashId,
     /// Секреты одноразовых ключей для исходящих приглашений: номер приглашения → секрет (затирается при удалении).
     pending_ephemerals: HashMap<u64, SecretKey>,
+    /// Порядок появления приглашений (по нему вытесняется самое старое; номера приглашений случайны и о возрасте ничего не говорят).
+    pending_order: VecDeque<u64>,
 }
 
 impl Default for HandshakeManager {
@@ -31,7 +33,7 @@ impl Default for HandshakeManager {
 
 impl HandshakeManager {
     pub fn new(our_id: HashId) -> Self {
-        Self { store: SessionStore::new(our_id), our_id, pending_ephemerals: HashMap::new() }
+        Self { store: SessionStore::new(our_id), our_id, pending_ephemerals: HashMap::new(), pending_order: VecDeque::new() }
     }
 
     // ── Рукопожатие с одноразовыми ключами (прямая секретность) ─────────────────
@@ -42,10 +44,19 @@ impl HandshakeManager {
         let public = key.public;
         // стук к узлу, который не отвечает, повторяется каждые 30 с — неотвеченные секреты не копятся бесконечно
         if self.pending_ephemerals.len() >= MAX_PENDING_EPHEMERALS {
-            if let Some(oldest) = self.pending_ephemerals.keys().min().copied() {
-                self.pending_ephemerals.remove(&oldest);
+            // вытесняется действительно самое старое неотвеченное приглашение (использованные из очереди уже выпали сами)
+            while let Some(oldest) = self.pending_order.pop_front() {
+                if self.pending_ephemerals.remove(&oldest).is_some() {
+                    break;
+                }
             }
         }
+        if self.pending_order.len() > 4 * MAX_PENDING_EPHEMERALS {
+            let alive = &self.pending_ephemerals;
+            self.pending_order.retain(|n| alive.contains_key(n));
+        }
+        self.pending_order.retain(|n| *n != nonce); // тот же номер повторно — это новое приглашение
+        self.pending_order.push_back(nonce);
         self.pending_ephemerals.insert(nonce, key);
         public
     }
@@ -292,6 +303,24 @@ mod tests {
         }
         assert_eq!(m.pending_ephemerals.len(), MAX_PENDING_EPHEMERALS);
         assert!(m.pending_ephemerals.contains_key(&999), "the newest are kept");
+    }
+
+    #[test]
+    fn the_oldest_pending_invitation_is_evicted_not_the_one_with_the_smallest_number() {
+        let mut m = HandshakeManager::new(HashId([1; 32]));
+        // номера приглашений случайны: первое по времени имеет самый БОЛЬШОЙ номер, последнее — самый маленький
+        for i in 0..MAX_PENDING_EPHEMERALS as u64 {
+            m.generate_hello_ephemeral(10_000 - i);
+        }
+        m.generate_hello_ephemeral(5); // переполнение: уходит первое (10 000), а не наименьшее (10 000 - 63)
+        assert!(!m.pending_ephemerals.contains_key(&10_000), "the oldest is gone");
+        assert!(m.pending_ephemerals.contains_key(&(10_000 - 63)), "the newest of the old ones stays although its number is the smallest");
+        assert!(m.pending_ephemerals.contains_key(&5));
+        assert_eq!(m.pending_ephemerals.len(), MAX_PENDING_EPHEMERALS);
+        // использованное приглашение не занимает места в очереди вытеснения
+        let their = SecretKey::generate().public;
+        let _ = m.complete_hello_initiator(10_000 - 1, HashId([2; 32]), &their);
+        assert!(!m.pending_ephemerals.contains_key(&(10_000 - 1)));
     }
 
     /// Как в живом канале: рукопожатие (инициатор/ответчик), шифрование, расшифровка по отправителю из пакета — ровно исходные данные любого размера до предела.
