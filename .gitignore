@@ -1,0 +1,35 @@
+# Rust
+/target/
+**/*.rs.bk
+*.pdb
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Keys
+.yandi_keys/
+
+# Logs
+*.log
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (except examples)
+configs/supernodes.json
+*.json
+!examples/*.json
+!bootstrap/bootstrap.json
+.data/
+data/.yandi_cache/
+/target-mutants/
+
+# Локальные настройки и секреты владельца узла (не коммитить)
+nodes/bootstrap.json
+*.key
+bootstrap_cache.json

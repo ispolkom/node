@@ -1,0 +1,33 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  build-test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --all-targets
+      - run: cargo test --no-fail-fast
+  network:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: network tests on real node processes
+        run: |
+          cargo test --test testnet_test -- --ignored
+          cargo test --test testnet_comms_test -- --ignored
+          cargo test --test testnet_rekey_test -- --ignored
+  supply-chain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit cargo-deny --locked
+      - run: cargo audit
+      - run: cargo deny check

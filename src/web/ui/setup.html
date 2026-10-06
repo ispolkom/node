@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YANDI — Первичная настройка</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 40px;
+    width: 100%;
+    max-width: 440px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .logo {
+    text-align: center;
+    margin-bottom: 28px;
+  }
+  .logo h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #38bdf8;
+    letter-spacing: 2px;
+  }
+  .logo p {
+    color: #64748b;
+    font-size: 0.9rem;
+    margin-top: 4px;
+  }
+  .warning {
+    background: #451a03;
+    border: 1px solid #92400e;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 24px;
+    font-size: 0.85rem;
+    line-height: 1.5;
+    color: #fbbf24;
+  }
+  .warning strong { display: block; margin-bottom: 4px; font-size: 0.9rem; }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-bottom: 6px;
+    margin-top: 18px;
+  }
+  label:first-of-type { margin-top: 0; }
+  input[type=password], input[type=text] {
+    width: 100%;
+    padding: 12px 14px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #e2e8f0;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input:focus { border-color: #38bdf8; }
+  .hint {
+    font-size: 0.78rem;
+    color: #475569;
+    margin-top: 5px;
+    line-height: 1.4;
+  }
+  .separator {
+    border: none;
+    border-top: 1px solid #1e3a5f;
+    margin: 24px 0;
+  }
+  button {
+    width: 100%;
+    padding: 13px;
+    background: #0284c7;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 24px;
+    transition: background 0.2s;
+  }
+  button:hover { background: #0369a1; }
+  button:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  .error {
+    color: #f87171;
+    font-size: 0.85rem;
+    margin-top: 12px;
+    display: none;
+    text-align: center;
+  }
+  .strength {
+    height: 4px;
+    border-radius: 2px;
+    margin-top: 6px;
+    background: #1e3a5f;
+    overflow: hidden;
+  }
+  .strength-bar {
+    height: 100%;
+    width: 0%;
+    border-radius: 2px;
+    transition: width 0.3s, background 0.3s;
+  }
+  .section-label {
+    font-size: 0.78rem;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: #475569;
+    margin-bottom: 14px;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <h1>YANDI</h1>
+    <p>Первичная настройка ноды</p>
+  </div>
+
+  <div class="warning">
+    <strong>⚠️ Важно — прочитайте перед началом</strong>
+    Вы сами придумываете <strong>два пароля</strong>. Ничего не создаётся за вас.<br><br>
+    <strong>Мастер-пароль — это ваш ключ восстановления.</strong> Он понадобится, если вы забудете пароль входа или перенесёте ноду на другой
+    компьютер. Он не хранится нигде и <strong>не может быть восстановлен</strong>: потеряете — личность на новой машине вернуть будет нельзя.
+    <br><br>
+    <strong>Запишите мастер-пароль на бумаге</strong> и храните отдельно от компьютера. Проверьте, что записали именно то, что ввели:
+    поставьте галочку «Показать пароли» и сверьте.
+  </div>
+
+  <p class="section-label">Пароль для входа в интерфейс</p>
+  <label for="login_pw">Пароль входа</label>
+  <input type="password" id="login_pw" placeholder="Минимум 8 символов" autocomplete="new-password">
+  <label for="login_pw2">Повторите пароль входа</label>
+  <input type="password" id="login_pw2" placeholder="Повторите пароль входа" autocomplete="new-password">
+  <p class="hint">Открывает веб-интерфейс на этом компьютере.</p>
+
+  <hr class="separator">
+
+  <p class="section-label">Мастер-пароль (ключ восстановления)</p>
+  <label for="master_pw">Мастер-пароль</label>
+  <input type="password" id="master_pw" placeholder="Минимум 12 символов — лучше фраза из нескольких слов" autocomplete="new-password"
+         oninput="updateStrength(this.value)">
+  <div class="strength"><div class="strength-bar" id="strength-bar"></div></div>
+
+  <label for="master_pw2">Повторите мастер-пароль</label>
+  <input type="password" id="master_pw2" placeholder="Повторите мастер-пароль" autocomplete="new-password">
+  <p class="hint">Не совпадает с паролем входа. Используйте латинские буквы, если вводить его придётся на другом компьютере.</p>
+
+  <label class="remember" style="display:flex; gap:8px; align-items:center; margin:12px 0;">
+    <input type="checkbox" id="show_pw" onchange="togglePasswords(this.checked)"> Показать пароли
+  </label>
+
+  <div class="error" id="error-msg"></div>
+
+  <button id="setup-btn" onclick="doSetup()">Создать и запустить ноду</button>
+</div>
+
+<script>
+function updateStrength(pw) {
+  const bar = document.getElementById('strength-bar');
+  let score = 0;
+  if (pw.length >= 8) score++;
+  if (pw.length >= 12) score++;
+  if (/[A-Z]/.test(pw)) score++;
+  if (/[0-9]/.test(pw)) score++;
+  if (/[^A-Za-z0-9]/.test(pw)) score++;
+  const colors = ['#ef4444','#f97316','#eab308','#22c55e','#16a34a'];
+  const widths = ['20%','40%','60%','80%','100%'];
+  bar.style.background = colors[score] || '#334155';
+  bar.style.width = widths[score] || '0%';
+}
+
+function togglePasswords(show) {
+  for (const id of ['login_pw', 'login_pw2', 'master_pw', 'master_pw2']) {
+    document.getElementById(id).type = show ? 'text' : 'password';
+  }
+}
+
+async function doSetup() {
+  const loginPw = document.getElementById('login_pw').value;
+  const loginPw2 = document.getElementById('login_pw2').value;
+  const masterPw = document.getElementById('master_pw').value;
+  const masterPw2 = document.getElementById('master_pw2').value;
+  const errEl = document.getElementById('error-msg');
+  const btn = document.getElementById('setup-btn');
+
+  errEl.style.display = 'none';
+  if ([...loginPw].length < 8) { showError('Пароль входа: минимум 8 символов'); return; }
+  if (loginPw !== loginPw2) { showError('Пароли входа не совпадают'); return; }
+  if ([...masterPw].length < 12) { showError('Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)'); return; }
+  if (masterPw !== masterPw2) { showError('Мастер-пароли не совпадают'); return; }
+  if (masterPw === loginPw) { showError('Мастер-пароль должен отличаться от пароля входа'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Создание ключей…';
+
+  try {
+    const resp = await fetch('/api/auth/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ login_password: loginPw, login_password_repeat: loginPw2, master_password: masterPw, master_password_repeat: masterPw2 })
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      btn.textContent = 'Ключи созданы. Нода запускается…';
+      await waitForNode();
+    } else {
+      showError(data.error || 'Ошибка настройки');
+      btn.disabled = false;
+      btn.textContent = 'Создать и запустить ноду';
+    }
+  } catch (e) {
+    showError('Сетевая ошибка: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Создать и запустить ноду';
+  }
+}
+
+// After the keys exist the node goes on starting (identity, network); this page's server steps aside for the real interface.
+async function waitForNode() {
+  for (let i = 0; i < 120; i++) {
+    await new Promise(r => setTimeout(r, 1000));
+    try {
+      const r = await fetch('/login');
+      if (r.status === 200) { window.location.href = '/'; return; }
+    } catch (e) { /* the server is switching over */ }
+  }
+  window.location.href = '/';
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+document.addEventListener('keydown', e => { if (e.key === 'Enter') doSetup(); });
+</script>
+</body>
+</html>

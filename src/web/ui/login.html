@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YANDI — Вход</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #0f172a;
+    color: #e2e8f0;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+  .card {
+    background: #1e293b;
+    border: 1px solid #334155;
+    border-radius: 16px;
+    padding: 40px;
+    width: 100%;
+    max-width: 380px;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .logo {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  .logo h1 {
+    font-size: 2rem;
+    font-weight: 700;
+    color: #38bdf8;
+    letter-spacing: 2px;
+  }
+  .logo p { color: #64748b; font-size: 0.9rem; margin-top: 4px; }
+  label {
+    display: block;
+    font-size: 0.85rem;
+    color: #94a3b8;
+    margin-bottom: 6px;
+  }
+  input[type=password] {
+    width: 100%;
+    padding: 12px 14px;
+    background: #0f172a;
+    border: 1px solid #334155;
+    border-radius: 8px;
+    color: #e2e8f0;
+    font-size: 1rem;
+    outline: none;
+    transition: border-color 0.2s;
+  }
+  input:focus { border-color: #38bdf8; }
+  .remember {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 14px;
+    font-size: 0.85rem;
+    color: #94a3b8;
+    cursor: pointer;
+    user-select: none;
+  }
+  .remember input { width: auto; accent-color: #38bdf8; cursor: pointer; }
+  button {
+    width: 100%;
+    padding: 13px;
+    background: #0284c7;
+    color: #fff;
+    border: none;
+    border-radius: 8px;
+    font-size: 1rem;
+    font-weight: 600;
+    cursor: pointer;
+    margin-top: 24px;
+    transition: background 0.2s;
+  }
+  button:hover { background: #0369a1; }
+  button:disabled { background: #334155; color: #64748b; cursor: not-allowed; }
+  .error {
+    color: #f87171;
+    font-size: 0.85rem;
+    margin-top: 12px;
+    text-align: center;
+    display: none;
+  }
+  .rebind-notice {
+    background: #1e3a5f;
+    border: 1px solid #1d4ed8;
+    border-radius: 8px;
+    padding: 12px 14px;
+    font-size: 0.82rem;
+    color: #93c5fd;
+    margin-bottom: 20px;
+    display: none;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <div class="logo">
+    <h1>YANDI</h1>
+    <p id="subtitle">Добро пожаловать</p>
+  </div>
+
+  <div class="rebind-notice" id="rebind-notice">
+    🖥️ Это устройство не может открыть ключи само. Восстановление выполняется командой <b>yandi-keys recover</b> (код восстановления), затем запустите ноду снова.
+  </div>
+
+  <div id="login-section">
+    <label for="login_pw">Пароль входа</label>
+    <input type="password" id="login_pw" placeholder="Введите пароль" autocomplete="current-password">
+
+    <label class="remember">
+      <input type="checkbox" id="remember_me"> Запомнить меня (30 дней)
+    </label>
+  </div>
+
+  <div id="master-section" style="display:none; margin-top:16px;">
+    <label for="master_pw">Мастер-пароль шифрования</label>
+    <input type="password" id="master_pw" placeholder="Введите мастер-пароль">
+  </div>
+
+  <div class="error" id="error-msg"></div>
+
+  <button id="login-btn" onclick="doLogin()">Войти</button>
+
+  <p style="text-align:center; margin-top:18px; font-size:13px;">
+    <a href="#" id="forgot-link" onclick="showRecover(); return false;" style="color:#94a3b8;">Забыли пароль? Восстановить по мастер-паролю</a>
+  </p>
+
+  <div id="recover-section" style="display:none; margin-top:20px;">
+    <label for="rec_code">Мастер-пароль (или код восстановления)</label>
+    <input type="password" id="rec_code" placeholder="Мастер-пароль, который вы создали при настройке" autocomplete="off" spellcheck="false">
+    <label class="remember" style="display:flex; gap:8px; align-items:center; margin:-4px 0 10px; font-size:13px;"><input type="checkbox" onchange="document.getElementById('rec_code').type = this.checked ? 'text' : 'password'"> Показать</label>
+    <div style="font-size:12px; color:#94a3b8; margin:-4px 0 12px;">Тот, что вы придумали при первой настройке и записали на бумаге. Если у вас код вида XXXX-XXXX-…, регистр и дефисы не важны.</div>
+    <label for="rec_pw">Новый пароль входа</label>
+    <input type="password" id="rec_pw" placeholder="не короче 8 символов" autocomplete="new-password">
+    <label for="rec_pw2">Повторите новый пароль</label>
+    <input type="password" id="rec_pw2" autocomplete="new-password">
+    <div class="error" id="rec-error" style="display:none;"></div>
+    <button id="rec-btn" onclick="doRecover()">Восстановить доступ</button>
+    <p style="text-align:center; margin-top:14px; font-size:13px;"><a href="#" onclick="hideRecover(); return false;" style="color:#94a3b8;">← Назад ко входу</a></p>
+  </div>
+</div>
+
+<script>
+const needsRebind = document.cookie.includes('yandi_rebind=1') ||
+                    window.location.search.includes('rebind=1');
+
+if (needsRebind) {
+  document.getElementById('subtitle').textContent = 'Новое устройство';
+  document.getElementById('rebind-notice').style.display = 'block';
+  document.getElementById('master-section').style.display = 'block';
+  document.getElementById('login-btn').textContent = 'Привязать устройство';
+}
+
+async function doLogin() {
+  const loginPw = document.getElementById('login_pw').value;
+  const rememberMe = document.getElementById('remember_me').checked;
+  const masterPw = document.getElementById('master_pw')?.value || '';
+  const btn = document.getElementById('login-btn');
+
+  document.getElementById('error-msg').style.display = 'none';
+  if (!loginPw) { showError('Введите пароль'); return; }
+
+  btn.disabled = true;
+  btn.textContent = 'Проверка…';
+
+  const endpoint = needsRebind ? '/api/auth/rebind' : '/api/auth/login';
+  const body = needsRebind
+    ? { login_password: loginPw, master_password: masterPw, remember_me: rememberMe }
+    : { login_password: loginPw, remember_me: rememberMe };
+
+  try {
+    const resp = await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    });
+    const data = await resp.json();
+    if (resp.ok) {
+      window.location.href = '/';
+    } else {
+      showError(data.error || 'Неверный пароль');
+      btn.disabled = false;
+      btn.textContent = needsRebind ? 'Привязать устройство' : 'Войти';
+    }
+  } catch (e) {
+    showError('Сетевая ошибка: ' + e.message);
+    btn.disabled = false;
+    btn.textContent = 'Войти';
+  }
+}
+
+function showError(msg) {
+  const el = document.getElementById('error-msg');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+
+function showRecover() {
+  document.getElementById('recover-section').style.display = 'block';
+  document.getElementById('forgot-link').style.display = 'none';
+  document.getElementById('login-btn').style.display = 'none';
+  document.getElementById('login-section').style.display = 'none';
+  document.getElementById('error-msg').style.display = 'none';
+  document.getElementById('rec_code').focus();
+}
+function hideRecover() {
+  document.getElementById('recover-section').style.display = 'none';
+  document.getElementById('forgot-link').style.display = 'inline';
+  document.getElementById('login-btn').style.display = 'block';
+  document.getElementById('login-section').style.display = 'block';
+}
+function recError(msg) {
+  const el = document.getElementById('rec-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+async function doRecover() {
+  const code = document.getElementById('rec_code').value.trim();
+  const pw = document.getElementById('rec_pw').value;
+  const pw2 = document.getElementById('rec_pw2').value;
+  document.getElementById('rec-error').style.display = 'none';
+  if (!code) { recError('Введите мастер-пароль'); return; }
+  if (pw.length < 8) { recError('Новый пароль — не короче 8 символов'); return; }
+  if (pw !== pw2) { recError('Пароли не совпадают'); return; }
+  const btn = document.getElementById('rec-btn');
+  btn.disabled = true; btn.textContent = 'Проверка…';
+  try {
+    const resp = await fetch('/api/auth/recover', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ recovery_code: code, new_login_password: pw, remember_me: false })
+    });
+    const data = await resp.json();
+    if (resp.ok) { window.location.href = '/'; return; }
+    recError(data.error || 'Не удалось восстановить');
+  } catch (e) { recError('Сетевая ошибка: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Восстановить доступ';
+}
+
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Enter') return;
+  if (document.getElementById('recover-section').style.display === 'block') doRecover(); else doLogin();
+});
+document.getElementById('login_pw').focus();
+</script>
+</body>
+</html>

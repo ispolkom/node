@@ -1,0 +1,1272 @@
+/* ============================================
+   YANDI Web UI - ICQ GREEN STYLE (1999-2001)
+   ============================================ */
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+:root {
+    --icq-bg: #e8f0e8;
+    --icq-panel: #d4e0d4;
+    --icq-header: #2a6b2a;
+    --icq-header-light: #3a7b3a;
+    --icq-active: #c0e0c0;
+    --icq-border: #a0c0a0;
+    --icq-border-dark: #608060;
+    --icq-border-light: #f0fff0;
+    --icq-button: #e0e0e0;
+    --icq-text: #1a3a1a;
+    --icq-text-muted: #608060;
+    --icq-online: #00aa00;
+    --icq-offline: #a0a0a0;
+    --icq-message-bg: #ffffff;
+    --icq-message-border: #c0e0c0;
+    --icq-message-sent: #e0f0e0;
+    --primary-color: #2a6b2a;
+    --primary-dark: #1a4a1a;
+    --secondary-color: #608060;
+    --success-color: #00aa00;
+    --danger-color: #aa0000;
+    --warning-color: #cc8800;
+    --bg-primary: #ffffff;
+    --bg-secondary: #e8f0e8;
+    --text-primary: #1a3a1a;
+    --text-secondary: #2a5a2a;
+    --text-muted: #608060;
+    --border-color: #a0c0a0;
+    --border-radius: 4px;
+    --border-radius-sm: 2px;
+    --shadow-sm: 2px 2px 4px rgba(0,0,0,0.1);
+    --font-sans: 'MS Sans Serif', 'Tahoma', 'Segoe UI', 'Arial', sans-serif;
+}
+
+body {
+    font-family: var(--font-sans);
+    background: var(--icq-bg);
+    color: var(--icq-text);
+    font-size: 12px;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+}
+
+.container {
+    max-width: 1400px;
+    margin: 0 auto;
+    padding: 0 12px;
+    width: 100%;
+}
+
+.header {
+    background: var(--icq-header);
+    background: linear-gradient(180deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+    border-bottom: 2px solid var(--icq-border-light);
+    position: sticky;
+    top: 0;
+    z-index: 100;
+}
+
+.header-content {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 0;
+    gap: 20px;
+}
+
+.logo {
+    font-size: 16px;
+    font-weight: bold;
+    color: white;
+    text-shadow: 1px 1px 0 #1a4a1a;
+    white-space: nowrap;
+}
+
+.nav {
+    display: flex;
+    gap: 4px;
+}
+
+.nav-link {
+    padding: 4px 12px;
+    text-decoration: none;
+    color: white;
+    background: var(--icq-header-light);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    font-size: 11px;
+    font-weight: normal;
+}
+
+.nav-link:hover {
+    background: #4a8b4a;
+}
+
+.nav-link.active {
+    background: var(--icq-border-light);
+    color: var(--icq-header);
+    border-color: var(--icq-border-dark);
+    border-right-color: var(--icq-border-light);
+    border-bottom-color: var(--icq-border-light);
+}
+
+.mobile-menu-btn {
+    display: none;
+    flex-direction: column;
+    gap: 3px;
+    background: var(--icq-header-light);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 4px 8px;
+    cursor: pointer;
+}
+
+.mobile-menu-btn span {
+    width: 18px;
+    height: 2px;
+    background: white;
+}
+
+.main {
+    flex: 1;
+    padding: 16px 0;
+}
+
+/* === Карточки === */
+.card {
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+    border-right: 2px solid var(--icq-border-dark);
+    border-bottom: 2px solid var(--icq-border-dark);
+    margin-bottom: 16px;
+}
+
+.card-header {
+    background: var(--icq-header);
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--icq-border-light);
+}
+
+.card-title {
+    font-size: 12px;
+    font-weight: bold;
+    color: white;
+}
+
+.card-body {
+    padding: 12px;
+}
+
+/* === Кнопки === */
+.btn {
+    padding: 4px 12px;
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 11px;
+    text-decoration: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.btn:hover {
+    background: #f0f0f0;
+}
+
+.btn-primary {
+    background: var(--icq-header);
+    color: white;
+    border-color: var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+}
+
+.btn-primary:hover {
+    background: #3a7b3a;
+}
+
+.btn-danger {
+    background: #aa0000;
+    color: white;
+}
+
+.btn-success {
+    background: #00aa00;
+    color: white;
+}
+
+.btn-info {
+    background: #608060;
+    color: white;
+}
+
+.btn-secondary {
+    background: var(--icq-button);
+    color: var(--icq-text);
+}
+
+.btn-sm {
+    padding: 2px 8px;
+    font-size: 10px;
+}
+
+.btn-large {
+    padding: 6px 16px;
+    font-size: 12px;
+}
+
+/* === Статусы === */
+.status-badge {
+    padding: 2px 8px;
+    font-size: 10px;
+    border: 1px solid var(--icq-border);
+    background: var(--icq-panel);
+}
+
+.status-online {
+    background: #00aa00;
+    color: white;
+    border-color: #00cc00;
+}
+
+.status-offline {
+    background: var(--icq-panel);
+    color: var(--icq-text-muted);
+}
+
+/* === Статус сетка === */
+.status-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.status-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--icq-border);
+}
+
+.status-label {
+    font-size: 11px;
+    color: var(--icq-text-muted);
+}
+
+.status-value {
+    font-weight: bold;
+    font-size: 11px;
+    font-family: monospace;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    gap: 12px;
+    margin-bottom: 16px;
+}
+
+.stat-card {
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+    border-right: 2px solid var(--icq-border-dark);
+    border-bottom: 2px solid var(--icq-border-dark);
+    padding: 12px;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+}
+
+.stat-icon {
+    font-size: 18px;
+    line-height: 1;
+    margin-top: 2px;
+}
+
+.stat-content {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+}
+
+.stat-label {
+    font-size: 11px;
+    color: var(--icq-text-muted);
+}
+
+.stat-value {
+    font-weight: bold;
+    font-size: 14px;
+    color: var(--icq-text);
+    font-family: monospace;
+}
+
+.stat-label-loss {
+    font-size: 11px;
+    color: var(--icq-text-secondary);
+}
+
+/* === Формы === */
+.form-group {
+    margin-bottom: 12px;
+}
+
+.form-group label {
+    display: block;
+    margin-bottom: 4px;
+    font-size: 11px;
+    font-weight: 500;
+}
+
+.form-input {
+    width: 100%;
+    padding: 4px 6px;
+    background: white;
+    border: 1px solid var(--icq-border);
+    font-family: inherit;
+    font-size: 11px;
+}
+
+.form-input:focus {
+    outline: none;
+    border-color: var(--icq-header);
+}
+
+.form-help {
+    font-size: 10px;
+    color: var(--icq-text-muted);
+    margin-top: 2px;
+}
+
+.form-actions {
+    display: flex;
+    gap: 8px;
+    justify-content: flex-end;
+    margin-top: 16px;
+}
+
+/* === Модалки === */
+
+.modal.active {
+    display: flex;
+}
+
+.modal-content {
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    min-width: 350px;
+    max-width: 90%;
+}
+
+.modal-header {
+    background: var(--icq-header);
+    color: white;
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.modal-header h3 {
+    font-size: 12px;
+    margin: 0;
+}
+
+.modal-close {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    width: 20px;
+    height: 20px;
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1;
+}
+
+.modal-body {
+    padding: 16px;
+}
+
+/* === Скроллбар Windows 98 === */
+::-webkit-scrollbar {
+    width: 16px;
+    height: 16px;
+}
+
+::-webkit-scrollbar-track {
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+}
+
+::-webkit-scrollbar-thumb {
+    background: #c0c0c0;
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+}
+
+::-webkit-scrollbar-thumb:hover {
+    background: #d0d0d0;
+}
+
+::-webkit-scrollbar-button {
+    background: #c0c0c0;
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    height: 16px;
+    width: 16px;
+}
+
+/* === Футер === */
+/* === Футер === */
+.footer {
+    background: var(--icq-panel);
+    border-top: 1px solid var(--icq-border);
+    padding: 12px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--icq-text-muted);
+    margin-top: auto;
+}
+    color: var(--icq-text-muted);
+    margin-top: auto;
+}
+
+/* === Утилиты === */
+.text-muted {
+    color: var(--icq-text-muted);
+}
+
+.text-center {
+    text-align: center;
+}
+
+/* === Адаптивность === */
+@media (max-width: 768px) {
+    .mobile-menu-btn {
+        display: flex;
+    }
+    
+    .nav {
+        display: none;
+        position: absolute;
+        top: 100%;
+        left: 0;
+        right: 0;
+        background: var(--icq-header);
+        flex-direction: column;
+        padding: 8px;
+    }
+    
+    .nav.active {
+        display: flex;
+    }
+    
+    .nav-link {
+        width: 100%;
+        text-align: center;
+    }
+}
+
+/* === УВЕЛИЧЕНИЕ ИНТЕРФЕЙСА НА 50% === */
+body {
+    -moz-transform-origin: 0 0;
+}
+
+/* Компенсация для модалок и фиксированных элементов */
+
+.file-transfer-progress {
+}
+
+/* === УВЕЛИЧЕНИЕ ИНТЕРФЕЙСА НА 25-30% === */
+:root {
+    --base-font-size: 15px;  /* было 12px, +25% */
+    --base-spacing: 1.25rem; /* увеличенные отступы */
+}
+
+body {
+    font-size: var(--base-font-size);
+}
+
+/* Header */
+.header-content {
+    padding: 10px 0;
+}
+
+.logo {
+    font-size: 22px;
+}
+
+.nav-link {
+    padding: 6px 16px;
+    font-size: 14px;
+}
+
+/* Кнопки */
+.btn {
+    padding: 6px 16px;
+    font-size: 13px;
+}
+
+.btn-sm {
+    padding: 4px 12px;
+    font-size: 12px;
+}
+
+.btn-large {
+    padding: 8px 20px;
+    font-size: 14px;
+}
+
+/* Карточки */
+.card-header {
+    padding: 12px 16px;
+}
+
+.card-title {
+    font-size: 16px;
+}
+
+.card-body {
+    padding: 16px;
+}
+
+/* Формы */
+.form-input {
+    padding: 8px 10px;
+    font-size: 13px;
+}
+
+.form-group label {
+    font-size: 13px;
+}
+
+/* Модалки */
+.modal-content {
+    min-width: 450px;
+}
+
+.modal-header h3 {
+    font-size: 15px;
+}
+
+/* Три колонки чата */
+.chat-contacts-panel {
+    width: 320px;  /* было 280px */
+}
+
+.chat-info-panel {
+    width: 300px;  /* было 260px */
+}
+
+.contact-avatar {
+    width: 48px;
+    height: 48px;
+}
+
+.avatar-placeholder {
+    width: 100px;
+    height: 100px;
+    font-size: 48px;
+}
+
+.contact-name {
+    font-size: 13px;
+}
+
+.contact-id {
+    font-size: 11px;
+}
+
+/* Сообщения */
+.message {
+    padding: 8px 14px;
+}
+
+.message-time {
+    font-size: 10px;
+}
+
+.message-text {
+    font-size: 14px;
+}
+
+/* Поле ввода */
+.chat-input {
+    padding: 10px 12px;
+    font-size: 14px;
+}
+
+.chat-attach-btn {
+    padding: 10px 14px;
+    font-size: 18px;
+}
+
+/* Правая панель */
+.info-name {
+    font-size: 16px;
+}
+
+.info-cid {
+    font-size: 11px;
+}
+
+.info-stat {
+    font-size: 12px;
+    padding: 6px 0;
+}
+
+/* Статусные элементы */
+.status-badge {
+    padding: 4px 10px;
+    font-size: 12px;
+}
+
+.status-label {
+    font-size: 12px;
+}
+
+.status-value {
+    font-size: 13px;
+}
+
+/* === ДОПОЛНИТЕЛЬНОЕ УВЕЛИЧЕНИЕ ЕЩЁ НА 10% === */
+:root {
+    --base-font-size: 16.5px;  /* было 15px, +10% */
+}
+
+body {
+    font-size: var(--base-font-size);
+}
+
+/* Увеличиваем отступы и размеры пропорционально */
+.header-content {
+    padding: 12px 0;
+}
+
+.logo {
+    font-size: 24px;
+}
+
+.nav-link {
+    padding: 8px 18px;
+    font-size: 15px;
+}
+
+.btn {
+    padding: 7px 18px;
+    font-size: 14px;
+}
+
+.btn-sm {
+    padding: 5px 14px;
+    font-size: 13px;
+}
+
+.card-header {
+    padding: 14px 18px;
+}
+
+.card-title {
+    font-size: 17px;
+}
+
+.card-body {
+    padding: 18px;
+}
+
+.form-input {
+    padding: 9px 12px;
+    font-size: 14px;
+}
+
+.chat-contacts-panel {
+    width: 350px;  /* было 320px */
+}
+
+.chat-info-panel {
+    width: 330px;  /* было 300px */
+}
+
+.contact-avatar {
+    width: 54px;
+    height: 54px;
+}
+
+.avatar-placeholder {
+    width: 110px;
+    height: 110px;
+    font-size: 54px;
+}
+
+.contact-name {
+    font-size: 14px;
+}
+
+.contact-id {
+    font-size: 12px;
+}
+
+.message-text {
+    font-size: 15px;
+}
+
+.chat-input {
+    padding: 11px 14px;
+    font-size: 15px;
+}
+
+.chat-attach-btn {
+    padding: 11px 16px;
+    font-size: 20px;
+}
+
+.info-name {
+    font-size: 18px;
+}
+
+.info-stat {
+    font-size: 13px;
+}
+
+/* === МОДАЛКИ В СТИЛЕ ICQ (ЗЕЛЁНЫЕ) === */
+
+.modal-content {
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.3);
+    min-width: 450px;
+}
+
+.modal-header {
+    background: var(--icq-header);
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+    border-bottom: 1px solid var(--icq-border-light);
+    padding: 12px 16px;
+}
+
+.modal-header h3 {
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    text-shadow: 1px 1px 0 #1a4a1a;
+}
+
+.modal-close {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    color: var(--icq-text);
+    font-size: 16px;
+    font-weight: bold;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    transition: all 0.1s ease;
+}
+
+.modal-close:hover {
+    background: var(--icq-border-light);
+    transform: scale(0.95);
+}
+
+.modal-body {
+    padding: 20px;
+    background: var(--icq-panel);
+}
+
+.modal-body .form-group label {
+    color: var(--icq-text);
+    font-weight: bold;
+    margin-bottom: 6px;
+}
+
+.modal-body .form-input {
+    background: white;
+    border: 1px solid var(--icq-border);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 8px 10px;
+    font-size: 14px;
+}
+
+.modal-body .form-input:focus {
+    border-color: var(--icq-header);
+    outline: none;
+    box-shadow: 0 0 3px rgba(42, 107, 42, 0.5);
+}
+
+.modal-body .form-help {
+    color: var(--icq-text-muted);
+    font-size: 11px;
+    margin-top: 4px;
+}
+
+.modal-body .form-actions {
+    margin-top: 24px;
+    gap: 12px;
+}
+
+.modal-body .btn-primary {
+    background: var(--icq-header);
+    border-color: var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 8px 20px;
+    font-size: 13px;
+}
+
+.modal-body .btn-primary:hover {
+    background: var(--icq-header-light);
+    transform: translateY(-1px);
+}
+
+.modal-body .btn-secondary {
+    background: var(--icq-button);
+    border-color: var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 8px 20px;
+    font-size: 13px;
+}
+
+.modal-body .btn-secondary:hover {
+    background: var(--icq-border-light);
+}
+
+/* Анимация появления модалки как в Windows 98 */
+@keyframes modalWin98 {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.modal.active .modal-content {
+    animation: modalWin98 0.15s ease-out;
+}
+
+/* === ИНФОРМАЦИОННЫЕ МОДАЛКИ (зелёные) === */
+#fileTransferModal .modal-content,
+#fileTransferModal .modal-header,
+#fileTransferModal .modal-body {
+    background: var(--icq-panel) !important;
+}
+
+#fileTransferModal .modal-header {
+    background: var(--icq-header) !important;
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%) !important;
+}
+
+#fileTransferModal .modal-header h2 {
+    color: white !important;
+    font-size: 16px !important;
+    text-shadow: 1px 1px 0 #1a4a1a !important;
+}
+
+#fileTransferModal .close-btn {
+    background: var(--icq-button) !important;
+    border: 1px solid var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    color: var(--icq-text) !important;
+    width: 24px !important;
+    height: 24px !important;
+    cursor: pointer !important;
+}
+
+#fileTransferModal .file-drop-zone {
+    background: var(--icq-bg) !important;
+    border: 2px dashed var(--icq-border) !important;
+    color: var(--icq-text) !important;
+}
+
+#fileTransferModal .file-drop-zone:hover {
+    background: var(--icq-active) !important;
+    border-color: var(--icq-header) !important;
+}
+
+#fileTransferModal .file-info {
+    background: var(--icq-bg) !important;
+    border: 1px solid var(--icq-border) !important;
+}
+
+#fileTransferModal .file-name {
+    color: var(--icq-text) !important;
+}
+
+#fileTransferModal .transfer-progress {
+    background: var(--icq-bg) !important;
+    border: 1px solid var(--icq-border) !important;
+}
+
+#fileTransferModal .progress-bar {
+    background: var(--icq-panel) !important;
+}
+
+#fileTransferModal .progress-fill {
+    background: var(--icq-header) !important;
+}
+
+/* Модалка файлов (кнопка Файлы в контактах) */
+.file-transfer-progress {
+    background: var(--icq-panel) !important;
+    border: 2px solid var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+}
+
+.progress-bar-bg {
+    background: white !important;
+}
+
+.progress-bar-fill {
+    background: var(--icq-header) !important;
+}
+
+/* === Кнопка закрытия модалок === */
+.close-btn {
+    background: var(--icq-button) !important;
+    border: 1px solid var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    color: var(--icq-text) !important;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+    font-size: 16px;
+    font-weight: bold;
+}
+
+.close-btn:hover {
+    background: var(--icq-border-light) !important;
+    transform: scale(0.95);
+}
+
+/* === ФИКС МОДАЛОК - ЦЕНТРИРОВАНИЕ === */
+
+.custom-modal.active, .modal.active {
+    display: flex;
+}
+
+.custom-modal .modal-content, .modal .modal-content {
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.3);
+    min-width: 350px;
+    max-width: 450px;
+    animation: modalWin98 0.15s ease-out;
+    margin: 0 auto;
+}
+
+.custom-modal .modal-header, .modal .modal-header {
+    background: var(--icq-header);
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+    border-bottom: 1px solid var(--icq-border-light);
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.custom-modal .modal-header h3, .modal .modal-header h3 {
+    color: white;
+    font-size: 16px;
+    font-weight: bold;
+    text-shadow: 1px 1px 0 #1a4a1a;
+    margin: 0;
+}
+
+.custom-modal .modal-close, .modal .modal-close {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    color: var(--icq-text);
+    font-size: 16px;
+    font-weight: bold;
+    width: 24px;
+    height: 24px;
+    cursor: pointer;
+}
+
+.custom-modal .modal-close:hover, .modal .modal-close:hover {
+    background: var(--icq-border-light);
+    transform: scale(0.95);
+}
+
+.custom-modal .modal-body, .modal .modal-body {
+    padding: 20px;
+    background: var(--icq-panel);
+    text-align: center;
+}
+
+.custom-modal .modal-body p, .modal .modal-body p {
+    color: var(--icq-text);
+    font-size: 14px;
+    margin-bottom: 20px;
+    line-height: 1.5;
+}
+
+.custom-modal .modal-actions, .modal .modal-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 20px;
+}
+
+.custom-modal .btn, .modal .btn {
+    padding: 6px 20px;
+    font-size: 13px;
+    cursor: pointer;
+}
+
+.custom-modal .btn-primary, .modal .btn-primary {
+    background: var(--icq-header);
+    color: white;
+    border-color: var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+}
+
+.custom-modal .btn-primary:hover, .modal .btn-primary:hover {
+    background: var(--icq-header-light);
+    transform: translateY(-1px);
+}
+
+.custom-modal .btn-secondary, .modal .btn-secondary {
+    background: var(--icq-button);
+    color: var(--icq-text);
+    border-color: var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+}
+
+.custom-modal .btn-secondary:hover, .modal .btn-secondary:hover {
+    background: var(--icq-border-light);
+}
+
+/* Анимация */
+@keyframes modalWin98 {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.custom-modal.active .modal-content, .modal.active .modal-content {
+    animation: modalWin98 0.15s ease-out;
+}
+/* === МОДАЛКИ - ПО УМОЛЧАНИЮ СКРЫТЫ === */
+.modal, .custom-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 10000;
+    align-items: center;
+    justify-content: center;
+}
+
+.modal.active, .custom-modal.active {
+    display: flex;
+}
+
+.modal-content, .custom-modal .modal-content {
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.3);
+    min-width: 350px;
+    max-width: 450px;
+    animation: modalWin98 0.15s ease-out;
+}
+
+/* === Стили для групп === */
+.groups-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+}
+
+.group-card {
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+    border-right: 2px solid var(--icq-border-dark);
+    border-bottom: 2px solid var(--icq-border-dark);
+    overflow: hidden;
+}
+
+.group-header {
+    background: var(--icq-header);
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+    padding: 10px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.group-title {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.group-title h3 {
+    margin: 0;
+    font-size: 14px;
+    color: white;
+    text-shadow: 1px 1px 0 #1a4a1a;
+}
+
+.group-avatar {
+    font-size: 20px;
+}
+
+.group-badge {
+    background: rgba(255,255,255,0.2);
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 10px;
+    color: white;
+}
+
+.group-actions {
+    display: flex;
+    gap: 6px;
+}
+
+.group-body {
+    padding: 12px 16px;
+}
+
+.group-description {
+    color: var(--icq-text-muted);
+    font-size: 11px;
+    margin-bottom: 12px;
+}
+
+.group-members-preview {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+}
+
+.members-label {
+    font-size: 10px;
+    color: var(--icq-text-muted);
+}
+
+.member-chip {
+    background: var(--icq-bg);
+    border: 1px solid var(--icq-border);
+    padding: 2px 8px;
+    font-size: 10px;
+    border-radius: 3px;
+}
+
+.member-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px solid var(--icq-border);
+}
+
+.member-item:last-child {
+    border-bottom: none;
+}
+
+.role-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 3px;
+    background: var(--icq-bg);
+}
+
+/* === Стили для группового чата === */
+.group-chat-header {
+    background: var(--icq-header);
+    padding: 10px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    color: white;
+}
+
+.group-chat-info {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+.group-chat-name {
+    font-size: 14px;
+    font-weight: bold;
+}
+
+.group-chat-members {
+    font-size: 10px;
+    opacity: 0.8;
+}
+
+.group-chat-actions {
+    display: flex;
+    gap: 8px;
+}
+
+/* Адаптивность для групп */
+@media (max-width: 768px) {
+    .group-header {
+        flex-direction: column;
+        align-items: flex-start;
+    }
+    
+    .group-actions {
+        width: 100%;
+        justify-content: flex-start;
+    }
+    
+    .group-title {
+        width: 100%;
+    }
+}

@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Группы - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link active">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="chat-three-columns">
+                <!-- ЛЕВАЯ КОЛОНКА: Список групп -->
+                <div class="chat-contacts-panel">
+                    <div class="chat-contacts-header">
+                        <h3>👥 Мои группы</h3>
+                        <button class="btn btn-sm btn-primary" id="createGroupBtn">➕ Создать</button>
+                    </div>
+                    <div class="chat-contacts-search">
+                        <input type="text" id="searchGroupsInput" class="search-input" placeholder="🔍 Поиск групп...">
+                    </div>
+                    <div class="chat-contacts-list" id="groupsList">
+                        <p class="text-muted">Загрузка групп...</p>
+                    </div>
+                </div>
+
+                <!-- ЦЕНТРАЛЬНАЯ КОЛОНКА: Чат группы -->
+                <div class="chat-messages-panel">
+                    <div class="chat-header" id="chatHeader" style="display: none;">
+                        <div class="chat-header-info">
+                            <h2 id="chatGroupName">Группа</h2>
+                            <span class="chat-peer-status" id="chatGroupMembers">0 участников</span>
+                        </div>
+                        <div class="chat-header-buttons">
+                            <button class="btn btn-sm btn-danger" id="clearChatBtn" onclick="clearGroupChat()">🗑️ Очистить</button>
+                            <button class="btn btn-sm" onclick="closeGroupChat()">✖ Закрыть</button>
+                        </div>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="no-chat-selected">Выберите группу из списка слева</div>
+                    </div>
+                    <div class="chat-input-area" id="chatInputArea" style="display: none;">
+                        <button class="chat-attach-btn" onclick="attachGroupFile()" title="Прикрепить файл">📎</button>
+                        <button class="chat-emoji-btn" id="groupEmojiBtn" title="Смайлы">😊</button>
+                        <div class="emoji-picker" id="groupEmojiPicker" style="display: none;">
+                            <div class="emoji-grid">
+                                <span class="emoji">😊</span> <span class="emoji">😂</span> <span class="emoji">❤️</span>
+                                <span class="emoji">👍</span> <span class="emoji">🔥</span> <span class="emoji">🎉</span>
+                                <span class="emoji">😢</span> <span class="emoji">😡</span> <span class="emoji">😱</span>
+                                <span class="emoji">🤔</span> <span class="emoji">👋</span> <span class="emoji">💪</span>
+                                <span class="emoji">🙏</span> <span class="emoji">🤣</span> <span class="emoji">🥰</span>
+                                <span class="emoji">😎</span> <span class="emoji">😴</span> <span class="emoji">🤯</span>
+                            </div>
+                        </div>
+                        <input type="text" class="chat-input" id="messageInput" placeholder="Введите сообщение в группу..." onkeypress="handleGroupKeyPress(event)">
+                        <button class="btn btn-success" onclick="sendGroupMessage()">➤</button>
+                    </div>
+                    <input type="file" id="groupFileInput" style="display: none;" onchange="handleGroupFileAttachment(event)">
+                </div>
+
+                <!-- ПРАВАЯ КОЛОНКА: Информация о группе -->
+                <div class="chat-info-panel" id="groupInfoPanel" style="display: none;">
+                    <div class="info-avatar">
+                        <div class="avatar-placeholder" id="groupAvatar">👥</div>
+                    </div>
+                    <div class="info-name" id="infoGroupName">-</div>
+                    <div class="info-cid" id="infoGroupId">-</div>
+                    <div class="info-status" id="groupStatus"></div>
+                    <div class="info-stats">
+                        <div class="info-stat"><span>👥 Участники:</span> <span id="memberCount">0</span></div>
+                        <div class="info-stat"><span>🔒 Приватная:</span> <span id="groupPrivate">-</span></div>
+                        <div class="info-stat"><span>🔐 Шифрование:</span> <span id="groupEncrypted">-</span></div>
+                        <div class="info-stat"><span>📅 Создана:</span> <span id="groupCreatedAt">-</span></div>
+                    </div>
+                    <div class="info-actions">
+                        <button class="btn btn-primary btn-sm" id="addMemberBtn">➕ Добавить участника</button>
+                        <button class="btn btn-secondary btn-sm" id="editGroupBtn">✏️ Редактировать</button>
+                        <button class="btn btn-danger btn-sm" id="leaveGroupBtn">🚪 Покинуть группу</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Create Group Modal -->
+    <div class="modal" id="createGroupModal">
+        <div class="modal-content" style="min-width: 500px;">
+            <div class="modal-header">
+                <h3>➕ Создать группу</h3>
+                <button class="modal-close" id="closeCreateModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="createGroupForm">
+                    <div class="form-group">
+                        <label for="groupName">Название группы *</label>
+                        <input type="text" id="groupName" class="form-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="groupDescription">Описание</label>
+                        <textarea id="groupDescription" class="form-input" rows="3"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="groupPrivate" checked>
+                            <span>🔒 Приватная группа</span>
+                        </label>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="groupEncrypted" checked>
+                            <span>🔐 Сквозное шифрование</span>
+                        </label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelCreateBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Создать</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Add Member Modal -->
+    <div class="modal" id="addMemberModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>➕ Добавить участника</h3>
+                <button class="modal-close" id="closeMemberModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="addMemberForm">
+                    <input type="hidden" id="addMemberGroupId">
+                    <div class="form-group">
+                        <label for="memberShortId">Short ID участника</label>
+                        <input type="text" id="memberShortId" class="form-input" placeholder="0021944b" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="memberRole">Роль</label>
+                        <select id="memberRole" class="form-input">
+                            <option value="Member">Участник</option>
+                            <option value="Moderator">Модератор</option>
+                            <option value="Admin">Администратор</option>
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelMemberBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Добавить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Group Modal -->
+    <div class="modal" id="editGroupModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>✏️ Редактировать группу</h3>
+                <button class="modal-close" id="closeEditModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="editGroupForm">
+                    <input type="hidden" id="editGroupId">
+                    <div class="form-group">
+                        <label for="editGroupName">Название</label>
+                        <input type="text" id="editGroupName" class="form-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editGroupDescription">Описание</label>
+                        <textarea id="editGroupDescription" class="form-input" rows="3"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="editGroupPrivate">
+                            <span>Приватная группа</span>
+                        </label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelEditBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+
+    <script>
+        // === Глобальные переменные ===
+        let currentGroupId = null;
+        let currentGroupName = null;
+        let currentGroups = [];
+        let myShortId = null;
+        let myNodeId = null;
+        let autoRefreshInterval = null;
+
+        // === Вспомогательные функции ===
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function formatDate(timestamp) {
+            if (!timestamp) return '-';
+            return new Date(timestamp).toLocaleString();
+        }
+
+        // === Загрузка моей информации ===
+        async function loadMyInfo() {
+            try {
+                const response = await fetch('/api/status');
+                if (response.ok) {
+                    const data = await response.json();
+                    myShortId = data.short_id;
+                    myNodeId = data.node_id;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        // === Загрузка групп ===
+        async function loadGroups() {
+            try {
+                const response = await fetch('/api/groups');
+                if (response.ok) {
+                    const data = await response.json();
+                    currentGroups = data.groups || [];
+                    renderGroupsList(currentGroups);
+                }
+            } catch(e) { 
+                console.error(e);
+                document.getElementById('groupsList').innerHTML = '<p class="text-muted">Ошибка загрузки групп</p>';
+            }
+        }
+
+        function renderGroupsList(groups) {
+            const container = document.getElementById('groupsList');
+            if (!container) return;
+            
+            if (groups.length === 0) {
+                container.innerHTML = '<p class="text-muted">Нет групп. Нажмите "Создать"</p>';
+                return;
+            }
+            
+            container.innerHTML = groups.map(group => {
+                const activeClass = (currentGroupId === group.id) ? 'active' : '';
+                const memberCount = group.member_count || group.members?.length || 0;
+                return `
+                    <div class="contact-item ${activeClass}" data-group-id="${group.id}" onclick="selectGroup('${group.id}', '${escapeHTML(group.name)}')">
+                        <div class="contact-avatar">
+                            <span class="avatar-initial">👥</span>
+                        </div>
+                        <div class="contact-info">
+                            <div class="contact-name">${escapeHTML(group.name)}</div>
+                            <div class="contact-id">${escapeHTML(group.id.substring(0, 16))}...</div>
+                            <div class="contact-status">👥 ${memberCount} участников</div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        // === Выбор группы ===
+        async function selectGroup(groupId, groupName) {
+            currentGroupId = groupId;
+            currentGroupName = groupName;
+            
+            document.getElementById('chatHeader').style.display = 'flex';
+            document.getElementById('chatInputArea').style.display = 'flex';
+            document.getElementById('groupInfoPanel').style.display = 'block';
+            document.getElementById('chatGroupName').textContent = groupName;
+            
+            document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('active'));
+            const selectedEl = document.querySelector(`.contact-item[data-group-id="${groupId}"]`);
+            if (selectedEl) selectedEl.classList.add('active');
+            
+            await loadGroupInfo(groupId);
+            await loadGroupMessages(groupId);
+        }
+        
+        async function loadGroupInfo(groupId) {
+            try {
+                const response = await fetch(`/api/groups/${groupId}`);
+                if (response.ok) {
+                    const group = await response.json();
+                    
+                    document.getElementById('infoGroupName').textContent = group.name;
+                    document.getElementById('infoGroupId').textContent = group.id.substring(0, 16) + '...';
+                    document.getElementById('memberCount').textContent = group.members?.length || 0;
+                    document.getElementById('chatGroupMembers').textContent = (group.members?.length || 0) + ' участников';
+                    document.getElementById('groupPrivate').textContent = group.settings?.is_private ? '✅ Да' : '❌ Нет';
+                    document.getElementById('groupEncrypted').textContent = group.settings?.is_encrypted ? '✅ Да' : '❌ Нет';
+                    document.getElementById('groupCreatedAt').textContent = formatDate(group.created_at);
+                    
+                    const myRole = group.members?.find(m => m.short_id === myShortId)?.role;
+                    const canEdit = myRole === 'Owner' || myRole === 'Admin';
+                    document.getElementById('editGroupBtn').style.display = canEdit ? 'inline-block' : 'none';
+                    document.getElementById('addMemberBtn').style.display = canEdit ? 'inline-block' : 'none';
+                }
+            } catch(e) { console.error(e); }
+        }
+        
+        async function loadGroupMessages(groupId) {
+            if (!groupId) return;
+            try {
+                const response = await fetch(`/api/group-chat/history/${groupId}`);
+                if (response.ok) {
+                    const data = await response.json();
+                    renderGroupMessages(data.messages || []);
+                }
+            } catch(e) { console.error(e); }
+        }
+        
+        function renderGroupMessages(messages) {
+            const container = document.getElementById('chatMessages');
+            if (!container) return;
+            
+            if (messages.length === 0) {
+                container.innerHTML = '<p class="text-muted" style="text-align: center;">Нет сообщений</p>';
+                return;
+            }
+            
+            let html = '';
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i];
+                const isMe = msg.from_short === myShortId;
+                const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                const isSystem = msg.msg_type === 'System';
+                
+                if (isSystem) {
+                    html += `<div class="message system">${time} - ${escapeHTML(msg.text)}</div>`;
+                } else {
+                    html += `
+                        <div class="message ${isMe ? 'sent' : 'received'}">
+                            <div class="message-time">${escapeHTML(msg.from_short || 'Unknown')} • ${time}</div>
+                            <div class="message-text">${escapeHTML(msg.text)}</div>
+                        </div>
+                    `;
+                }
+            }
+            container.innerHTML = html;
+            container.scrollTop = container.scrollHeight;
+        }
+        
+        // === Отправка сообщения ===
+        async function sendGroupMessage() {
+            if (!currentGroupId) return;
+            const input = document.getElementById('messageInput');
+            const text = input.value.trim();
+            if (!text) return;
+            
+            try {
+                const response = await fetch(`/api/group-chat/send/${currentGroupId}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ text: text })
+                });
+                if (response.ok) {
+                    input.value = '';
+                    await loadGroupMessages(currentGroupId);
+                }
+            } catch(e) { console.error(e); }
+        }
+        
+        function handleGroupKeyPress(e) { if (e.key === 'Enter') sendGroupMessage(); }
+        
+        // === Создание группы ===
+        async function createGroup() {
+            const name = document.getElementById('groupName').value.trim();
+            const description = document.getElementById('groupDescription').value.trim();
+            const is_private = document.getElementById('groupPrivate').checked;
+            const is_encrypted = document.getElementById('groupEncrypted').checked;
+            
+            if (!name) {
+                alert('Введите название группы');
+                return;
+            }
+            
+            try {
+                const response = await fetch('/api/groups', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description, is_private, is_encrypted })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('createGroupModal').classList.remove('active');
+                    document.getElementById('createGroupForm').reset();
+                    await loadGroups();
+                    alert('✅ Группа создана!');
+                } else {
+                    const data = await response.json();
+                    alert('❌ Ошибка: ' + (data.message || 'Не удалось создать группу'));
+                }
+            } catch(e) { alert('❌ Ошибка: ' + e.message); }
+        }
+        
+        // === Добавление участника ===
+        function openAddMemberModal() {
+            if (!currentGroupId) return;
+            document.getElementById('addMemberGroupId').value = currentGroupId;
+            document.getElementById('addMemberForm').reset();
+            document.getElementById('addMemberModal').classList.add('active');
+        }
+        
+        async function addMemberToGroup() {
+            const groupId = document.getElementById('addMemberGroupId').value;
+            const shortId = document.getElementById('memberShortId').value.trim();
+            const role = document.getElementById('memberRole').value;
+            
+            if (!shortId) {
+                alert('Введите Short ID участника');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/groups/${groupId}/members`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ short_id: shortId, role })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('addMemberModal').classList.remove('active');
+                    await loadGroupInfo(groupId);
+                    alert('✅ Участник добавлен');
+                } else {
+                    const data = await response.json();
+                    alert('❌ Ошибка: ' + data.message);
+                }
+            } catch(e) { alert('❌ Ошибка: ' + e.message); }
+        }
+        
+        // === Редактирование группы ===
+        function openEditGroupModal() {
+            if (!currentGroupId) return;
+            document.getElementById('editGroupId').value = currentGroupId;
+            document.getElementById('editGroupName').value = currentGroupName;
+            document.getElementById('editGroupDescription').value = document.getElementById('infoGroupName')?.textContent || '';
+            document.getElementById('editGroupPrivate').checked = document.getElementById('groupPrivate').textContent === '✅ Да';
+            document.getElementById('editGroupModal').classList.add('active');
+        }
+        
+        async function editGroup() {
+            const groupId = document.getElementById('editGroupId').value;
+            const name = document.getElementById('editGroupName').value.trim();
+            const description = document.getElementById('editGroupDescription').value.trim();
+            const is_private = document.getElementById('editGroupPrivate').checked;
+            
+            if (!name) {
+                alert('Введите название группы');
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/api/groups/${groupId}`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, description, is_private })
+                });
+                
+                if (response.ok) {
+                    document.getElementById('editGroupModal').classList.remove('active');
+                    await loadGroups();
+                    if (currentGroupId === groupId) {
+                        await loadGroupInfo(groupId);
+                    }
+                    alert('✅ Группа обновлена');
+                } else {
+                    const data = await response.json();
+                    alert('❌ Ошибка: ' + data.message);
+                }
+            } catch(e) { alert('❌ Ошибка: ' + e.message); }
+        }
+        
+        // === Выход из группы ===
+        async function leaveGroup() {
+            if (!currentGroupId) return;
+            if (!confirm(`Покинуть группу "${currentGroupName}"?`)) return;
+            
+            try {
+                const response = await fetch(`/api/groups/${currentGroupId}/leave`, { method: 'POST' });
+                if (response.ok) {
+                    closeGroupChat();
+                    await loadGroups();
+                    alert('✅ Вы покинули группу');
+                } else {
+                    const data = await response.json();
+                    alert('❌ Ошибка: ' + data.message);
+                }
+            } catch(e) { alert('❌ Ошибка: ' + e.message); }
+        }
+        
+        // === Очистка чата ===
+        async function clearGroupChat() {
+            if (!currentGroupId) return;
+            if (!confirm('Удалить всю историю переписки в группе?')) return;
+            try {
+                await fetch(`/api/group-chat/clear/${currentGroupId}`, { method: 'POST' });
+                await loadGroupMessages(currentGroupId);
+                alert('✅ История очищена');
+            } catch(e) { alert('❌ Ошибка: ' + e.message); }
+        }
+        
+        function closeGroupChat() {
+            currentGroupId = null;
+            currentGroupName = null;
+            document.getElementById('chatHeader').style.display = 'none';
+            document.getElementById('chatInputArea').style.display = 'none';
+            document.getElementById('groupInfoPanel').style.display = 'none';
+            document.getElementById('chatMessages').innerHTML = '<div class="no-chat-selected">Выберите группу из списка слева</div>';
+            document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('active'));
+        }
+        
+        // === Поиск ===
+        function setupSearch() {
+            const searchInput = document.getElementById('searchGroupsInput');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    const term = e.target.value.toLowerCase();
+                    document.querySelectorAll('.contact-item').forEach(item => {
+                        const name = item.querySelector('.contact-name')?.textContent.toLowerCase() || '';
+                        item.style.display = name.includes(term) ? '' : 'none';
+                    });
+                });
+            }
+        }
+        
+        // === Смайлы ===
+        function setupEmojiPicker() {
+            const emojiBtn = document.getElementById('groupEmojiBtn');
+            const emojiPicker = document.getElementById('groupEmojiPicker');
+            if (emojiBtn && emojiPicker) {
+                emojiBtn.onclick = () => {
+                    emojiPicker.style.display = emojiPicker.style.display === 'none' ? 'block' : 'none';
+                };
+                document.querySelectorAll('.emoji').forEach(emoji => {
+                    emoji.onclick = () => {
+                        document.getElementById('messageInput').value += emoji.textContent;
+                        emojiPicker.style.display = 'none';
+                        document.getElementById('messageInput').focus();
+                    };
+                });
+                document.addEventListener('click', (e) => {
+                    if (!emojiBtn.contains(e.target) && !emojiPicker.contains(e.target)) {
+                        emojiPicker.style.display = 'none';
+                    }
+                });
+            }
+        }
+        
+        // === Автообновление ===
+        function startAutoRefresh() {
+            if (autoRefreshInterval) clearInterval(autoRefreshInterval);
+            autoRefreshInterval = setInterval(() => {
+                if (currentGroupId) {
+                    loadGroupMessages(currentGroupId);
+                    loadGroupInfo(currentGroupId);
+                }
+                loadGroups();
+            }, 5000);
+        }
+        
+        // === Инициализация ===
+        function setupEventHandlers() {
+            const createBtn = document.getElementById('createGroupBtn');
+            const createModal = document.getElementById('createGroupModal');
+            const closeCreate = document.getElementById('closeCreateModalBtn');
+            const cancelCreate = document.getElementById('cancelCreateBtn');
+            const createForm = document.getElementById('createGroupForm');
+            
+            if (createBtn) createBtn.onclick = () => createModal.classList.add('active');
+            if (closeCreate) closeCreate.onclick = () => createModal.classList.remove('active');
+            if (cancelCreate) cancelCreate.onclick = () => createModal.classList.remove('active');
+            if (createForm) createForm.onsubmit = (e) => { e.preventDefault(); createGroup(); };
+            
+            const addMemberBtn = document.getElementById('addMemberBtn');
+            const memberModal = document.getElementById('addMemberModal');
+            const closeMember = document.getElementById('closeMemberModalBtn');
+            const cancelMember = document.getElementById('cancelMemberBtn');
+            const memberForm = document.getElementById('addMemberForm');
+            
+            if (addMemberBtn) addMemberBtn.onclick = openAddMemberModal;
+            if (closeMember) closeMember.onclick = () => memberModal.classList.remove('active');
+            if (cancelMember) cancelMember.onclick = () => memberModal.classList.remove('active');
+            if (memberForm) memberForm.onsubmit = (e) => { e.preventDefault(); addMemberToGroup(); };
+            
+            const editGroupBtn = document.getElementById('editGroupBtn');
+            const editModal = document.getElementById('editGroupModal');
+            const closeEdit = document.getElementById('closeEditModalBtn');
+            const cancelEdit = document.getElementById('cancelEditBtn');
+            const editForm = document.getElementById('editGroupForm');
+            
+            if (editGroupBtn) editGroupBtn.onclick = openEditGroupModal;
+            if (closeEdit) closeEdit.onclick = () => editModal.classList.remove('active');
+            if (cancelEdit) cancelEdit.onclick = () => editModal.classList.remove('active');
+            if (editForm) editForm.onsubmit = (e) => { e.preventDefault(); editGroup(); };
+            
+            const leaveBtn = document.getElementById('leaveGroupBtn');
+            if (leaveBtn) leaveBtn.onclick = leaveGroup;
+            
+            createModal?.addEventListener('click', (e) => { if (e.target === createModal) createModal.classList.remove('active'); });
+            memberModal?.addEventListener('click', (e) => { if (e.target === memberModal) memberModal.classList.remove('active'); });
+            editModal?.addEventListener('click', (e) => { if (e.target === editModal) editModal.classList.remove('active'); });
+        }
+        
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadMyInfo();
+            await loadGroups();
+            setupEventHandlers();
+            setupSearch();
+            setupEmojiPicker();
+            startAutoRefresh();
+            
+            const soundToggle = document.getElementById('soundToggle');
+            if (soundToggle && window.toggleSound) soundToggle.onclick = window.toggleSound;
+        });
+        
+        window.selectGroup = selectGroup;
+        window.sendGroupMessage = sendGroupMessage;
+        window.handleGroupKeyPress = handleGroupKeyPress;
+        window.clearGroupChat = clearGroupChat;
+        window.closeGroupChat = closeGroupChat;
+        window.attachGroupFile = () => document.getElementById('groupFileInput').click();
+        window.handleGroupFileAttachment = (e) => { console.log('File:', e.target.files[0]); };
+    </script>
+</body>
+</html>

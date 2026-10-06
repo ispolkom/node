@@ -1,0 +1,30 @@
+[package]
+name = "yandi-key-root"
+version = "0.1.0"
+edition = "2021"
+description = "The root of YANDI's key chain: a recoverable root key with a device wrapper and a recovery-password wrapper, the identity file formats, and a load policy that never replaces an identity it cannot open (P1c-1)"
+license = "MIT"
+
+[lib]
+name = "key_root"
+path = "src/lib.rs"
+
+[[bin]]
+name = "yandi-keys"
+path = "src/bin/yandi-keys.rs"
+
+[dependencies]
+aes-gcm = "0.10"
+argon2 = "0.5"
+hkdf = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+zeroize = "1"
+libc = "0.2.180"
+base64 = "0.22.1"
+
+[dev-dependencies]
+tempfile = "3"

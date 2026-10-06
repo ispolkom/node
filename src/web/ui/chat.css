@@ -1,0 +1,1116 @@
+/* ============================================
+   ICQ GREEN STYLE - ТРИ КОЛОНКИ
+   ============================================ */
+
+.chat-three-columns {
+    display: flex;
+    height: calc(100vh - 52px);
+    gap: 2px;
+    background: var(--icq-bg);
+    padding: 4px;
+}
+
+/* === ЛЕВАЯ КОЛОНКА: Контакты === */
+.chat-contacts-panel {
+    width: 280px;
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+    border-right: 2px solid var(--icq-border-dark);
+    border-bottom: 2px solid var(--icq-border-dark);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.chat-contacts-header {
+    background: var(--icq-header);
+    padding: 8px 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--icq-border-light);
+}
+
+.chat-contacts-header h3 {
+    font-size: 12px;
+    font-weight: bold;
+    color: white;
+    margin: 0;
+}
+
+.chat-contacts-search {
+    padding: 8px;
+    border-bottom: 1px solid var(--icq-border);
+}
+
+.chat-contacts-search .search-input {
+    width: 100%;
+    padding: 4px 6px;
+    background: white;
+    border: 1px solid var(--icq-border);
+    font-size: 11px;
+}
+
+.chat-contacts-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 0;
+}
+
+/* Контакт в списке */
+.contact-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    cursor: pointer;
+    border-bottom: 1px solid var(--icq-border);
+    background: var(--icq-panel);
+}
+
+.contact-item:hover {
+    background: var(--icq-active);
+}
+
+.contact-item.active {
+    background: var(--icq-header);
+    color: white;
+}
+
+.contact-avatar {
+    width: 40px;
+    height: 40px;
+    background: var(--icq-header);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.avatar-initial {
+    color: white;
+    font-size: 18px;
+    font-weight: bold;
+}
+
+.contact-info {
+    flex: 1;
+    min-width: 0;
+}
+
+.contact-name {
+    font-weight: bold;
+    font-size: 11px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.contact-id {
+    font-size: 10px;
+    color: var(--icq-text-muted);
+    font-family: monospace;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.contact-status {
+    font-size: 9px;
+    margin-top: 2px;
+}
+
+.contact-online {
+    color: var(--icq-online);
+}
+
+.contact-offline {
+    color: var(--icq-offline);
+}
+
+.contact-item.active .contact-name,
+.contact-item.active .contact-id {
+    color: white;
+}
+
+.contact-item.active .contact-status {
+    color: #aaffaa;
+}
+
+/* === ЦЕНТРАЛЬНАЯ КОЛОНКА: Чат === */
+.chat-messages-panel {
+    flex: 1;
+    background: white;
+    border: 1px solid var(--icq-border);
+    border-left: 2px solid var(--icq-border-light);
+    border-bottom: 2px solid var(--icq-border-light);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.chat-header {
+    background: var(--icq-panel);
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--icq-border);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.chat-header-info {
+    display: flex;
+    align-items: baseline;
+    gap: 12px;
+}
+
+.chat-header-info h2 {
+    font-size: 12px;
+    font-weight: bold;
+    margin: 0;
+}
+
+.chat-peer-status {
+    font-size: 10px;
+    color: var(--icq-online);
+}
+
+.chat-header-buttons {
+    display: flex;
+    gap: 6px;
+}
+
+.chat-messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    background: var(--icq-message-bg);
+}
+
+.no-chat-selected {
+    text-align: center;
+    color: var(--icq-text-muted);
+    padding: 40px;
+    font-style: italic;
+}
+
+/* Сообщения */
+.message {
+    max-width: 75%;
+    padding: 6px 10px;
+    border: 1px solid var(--icq-message-border);
+    background: var(--icq-message-bg);
+    box-shadow: 1px 1px 0 rgba(0, 0, 0, 0.08);
+}
+
+.message.sent {
+    align-self: flex-end;
+    background: var(--icq-message-sent);
+}
+
+.message.received {
+    align-self: flex-start;
+    background: var(--icq-message-bg);
+}
+
+.message-time {
+    font-size: 9px;
+    color: var(--icq-text-muted);
+    margin-bottom: 4px;
+    font-family: monospace;
+}
+
+.message-text {
+    font-size: 11px;
+    line-height: 1.4;
+    word-wrap: break-word;
+}
+
+.message-attachment {
+    margin-bottom: 6px;
+}
+
+.file-attachment {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    background: var(--icq-panel);
+    padding: 6px 8px;
+    border: 1px solid var(--icq-border);
+}
+
+.file-icon {
+    font-size: 16px;
+}
+
+.attachment-meta {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+}
+
+.attachment-filename {
+    font-size: 10px;
+    font-weight: bold;
+}
+
+.file-size {
+    font-size: 9px;
+    color: var(--icq-text-muted);
+}
+
+.attachment-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.attachment-play-card {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-height: 46px;
+    padding: 8px 10px;
+    border: 1px solid var(--icq-border);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    background: linear-gradient(180deg, #fcfffc 0%, #dfeedd 100%);
+    color: #163516;
+    text-decoration: none;
+    cursor: pointer;
+}
+
+.attachment-play-card:hover {
+    background: linear-gradient(180deg, #ffffff 0%, #d2e7ce 100%);
+}
+
+.attachment-play-icon {
+    width: 28px;
+    height: 28px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    background: #3f8f3f;
+    color: white;
+    font-size: 14px;
+    flex-shrink: 0;
+}
+
+.attachment-play-label {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+}
+
+.attachment-play-title {
+    font-size: 11px;
+    font-weight: bold;
+}
+
+.attachment-play-subtitle {
+    font-size: 9px;
+    color: var(--icq-text-muted);
+}
+
+.attachment-download-link {
+    font-size: 10px;
+    font-weight: bold;
+    color: #1e5f1e;
+    text-decoration: none;
+    padding: 5px 8px;
+    border: 1px solid var(--icq-border);
+    background: #f7fbf6;
+}
+
+.attachment-download-link:hover {
+    background: #edf7eb;
+}
+
+.pending-upload .message-text {
+    color: var(--icq-text-muted);
+}
+
+.upload-progress {
+    width: 100%;
+    height: 10px;
+    background: #d8e1d6;
+    border: 1px solid var(--icq-border);
+    overflow: hidden;
+}
+
+.upload-progress-bar {
+    height: 100%;
+    background: linear-gradient(90deg, #53a753 0%, #8ccd5f 100%);
+    width: 0%;
+}
+
+.upload-progress-text {
+    font-size: 9px;
+    color: var(--icq-text-muted);
+    display: flex;
+    justify-content: space-between;
+    gap: 8px;
+}
+
+/* Область ввода */
+.chat-input-area {
+    padding: 10px 12px;
+    background: var(--icq-panel);
+    border-top: 1px solid var(--icq-border);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+}
+
+.chat-attach-btn {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 14px;
+}
+
+.chat-input {
+    flex: 1;
+    padding: 6px 8px;
+    background: white;
+    border: 1px solid var(--icq-border);
+    font-size: 11px;
+    font-family: inherit;
+}
+
+.chat-input:focus {
+    outline: none;
+    border-color: var(--icq-header);
+}
+
+/* === ПРАВАЯ КОЛОНКА: Инфо === */
+.chat-info-panel {
+    width: 260px;
+    background: var(--icq-panel);
+    border: 1px solid var(--icq-border);
+    border-left: 2px solid var(--icq-border-light);
+    border-bottom: 2px solid var(--icq-border-light);
+    display: flex;
+    flex-direction: column;
+    overflow-y: auto;
+    padding: 16px;
+}
+
+.info-avatar {
+    text-align: center;
+    margin-bottom: 16px;
+}
+
+.avatar-placeholder {
+    width: 80px;
+    height: 80px;
+    background: var(--icq-header);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin: 0 auto;
+    font-size: 40px;
+    color: white;
+}
+
+.info-name {
+    font-size: 14px;
+    font-weight: bold;
+    text-align: center;
+    margin-bottom: 4px;
+}
+
+.info-cid {
+    font-size: 10px;
+    color: var(--icq-text-muted);
+    text-align: center;
+    font-family: monospace;
+    margin-bottom: 16px;
+    word-break: break-all;
+}
+
+.info-status {
+    text-align: center;
+    margin-bottom: 16px;
+    padding: 8px;
+    background: var(--icq-bg);
+    border: 1px solid var(--icq-border);
+}
+
+.info-stats {
+    background: var(--icq-bg);
+    border: 1px solid var(--icq-border);
+    padding: 8px;
+    margin-bottom: 16px;
+}
+
+.info-stat {
+    display: flex;
+    justify-content: space-between;
+    font-size: 10px;
+    padding: 4px 0;
+    border-bottom: 1px solid var(--icq-border);
+}
+
+.info-stat:last-child {
+    border-bottom: none;
+}
+
+.info-actions {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.info-actions .btn {
+    width: 100%;
+    justify-content: center;
+}
+
+/* === Прогресс бар === */
+.file-transfer-progress {
+    position: fixed;
+    top: 60px;
+    left: 50%;
+    transform: translateX(-50%);
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 12px 20px;
+    z-index: 10000;
+    min-width: 300px;
+}
+
+.progress-bar-bg {
+    background: white;
+    border: 1px solid var(--icq-border);
+    height: 20px;
+    margin-top: 8px;
+}
+
+.progress-bar-fill {
+    background: var(--icq-header);
+    height: 100%;
+    width: 0%;
+}
+
+/* === Адаптивность === */
+@media (max-width: 900px) {
+    .chat-three-columns {
+        flex-direction: column;
+    }
+    
+    .chat-contacts-panel,
+    .chat-messages-panel,
+    .chat-info-panel {
+        width: 100%;
+        height: auto;
+        min-height: 200px;
+    }
+}
+/* === УВЕЛИЧИВАЕМ ШРИФТ В СООБЩЕНИЯХ === */
+.message-text {
+    font-size: 15px !important;
+    line-height: 1.5 !important;
+}
+
+.message-time {
+    font-size: 11px !important;
+}
+
+.chat-input {
+    font-size: 15px !important;
+}
+
+.chat-attach-btn {
+    font-size: 20px !important;
+}
+
+.contact-name {
+    font-size: 14px !important;
+}
+
+.contact-id {
+    font-size: 12px !important;
+}
+
+.contact-status {
+    font-size: 11px !important;
+}
+
+.info-name {
+    font-size: 18px !important;
+}
+
+.info-cid {
+    font-size: 12px !important;
+}
+
+.info-stat {
+    font-size: 13px !important;
+}
+
+.btn {
+    font-size: 13px !important;
+}
+/* === ЕЩЁ БОЛЬШЕ УВЕЛИЧИВАЕМ ШРИФТ === */
+body, .message-text, .chat-input, .contact-name, .contact-id, .info-name, .info-cid, .btn, .status-badge {
+    font-size: 1.1em !important;
+}
+
+.message-text {
+    font-size: 16px !important;
+}
+
+.chat-input {
+    font-size: 16px !important;
+}
+
+.contact-name {
+    font-size: 15px !important;
+}
+
+.contact-id {
+    font-size: 13px !important;
+}
+
+.info-name {
+    font-size: 20px !important;
+}
+
+.info-cid {
+    font-size: 13px !important;
+}
+
+.btn {
+    font-size: 14px !important;
+    padding: 6px 14px !important;
+}
+
+.btn-sm {
+    font-size: 12px !important;
+    padding: 4px 10px !important;
+}
+/* === ЕЩЁ БОЛЬШЕ УВЕЛИЧИВАЕМ ШРИФТ === */
+body, .message-text, .chat-input, .contact-name, .contact-id, .info-name, .info-cid, .btn, .status-badge {
+    font-size: 1.15em !important;
+}
+
+.message-text {
+    font-size: 17px !important;
+}
+
+.chat-input {
+    font-size: 17px !important;
+}
+
+.contact-name {
+    font-size: 16px !important;
+}
+
+.contact-id {
+    font-size: 14px !important;
+}
+
+.info-name {
+    font-size: 22px !important;
+}
+
+.info-cid {
+    font-size: 14px !important;
+}
+
+.btn {
+    font-size: 15px !important;
+    padding: 7px 16px !important;
+}
+
+.btn-sm {
+    font-size: 13px !important;
+    padding: 5px 12px !important;
+}
+
+/* Жёлтая кнопка для активного P2P тоннеля */
+.btn-p2p-active {
+    background: #f59e0b !important;
+    color: white !important;
+    border-color: #f39c12 !important;
+}
+
+.btn-p2p-active:hover {
+    background: #e67e22 !important;
+}
+
+/* === МОДАЛКИ ICQ (принудительные) === */
+.modal {
+    background: rgba(0, 0, 0, 0.5) !important;
+}
+
+.modal-content {
+    background: var(--icq-panel) !important;
+    border: 2px solid var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    box-shadow: 4px 4px 8px rgba(0, 0, 0, 0.3) !important;
+    min-width: 450px !important;
+}
+
+.modal-header {
+    background: var(--icq-header) !important;
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%) !important;
+    border-bottom: 1px solid var(--icq-border-light) !important;
+    padding: 12px 16px !important;
+}
+
+.modal-header h3 {
+    color: white !important;
+    font-size: 16px !important;
+    font-weight: bold !important;
+    text-shadow: 1px 1px 0 #1a4a1a !important;
+}
+
+.modal-close {
+    background: var(--icq-button) !important;
+    border: 1px solid var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    color: var(--icq-text) !important;
+    font-size: 16px !important;
+    font-weight: bold !important;
+    width: 24px !important;
+    height: 24px !important;
+    cursor: pointer !important;
+}
+
+.modal-close:hover {
+    background: var(--icq-border-light) !important;
+    transform: scale(0.95) !important;
+}
+
+.modal-body {
+    padding: 20px !important;
+    background: var(--icq-panel) !important;
+}
+
+.modal-body .form-group label {
+    color: var(--icq-text) !important;
+    font-weight: bold !important;
+    margin-bottom: 6px !important;
+}
+
+.modal-body .form-input {
+    background: white !important;
+    border: 1px solid var(--icq-border) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    padding: 8px 10px !important;
+    font-size: 14px !important;
+}
+
+.modal-body .form-input:focus {
+    border-color: var(--icq-header) !important;
+    outline: none !important;
+    box-shadow: 0 0 3px rgba(42, 107, 42, 0.5) !important;
+}
+
+.modal-body .form-help {
+    color: var(--icq-text-muted) !important;
+    font-size: 11px !important;
+    margin-top: 4px !important;
+}
+
+.modal-body .form-actions {
+    margin-top: 24px !important;
+    gap: 12px !important;
+}
+
+.modal-body .btn-primary {
+    background: var(--icq-header) !important;
+    border-color: var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    padding: 8px 20px !important;
+    font-size: 13px !important;
+}
+
+.modal-body .btn-primary:hover {
+    background: var(--icq-header-light) !important;
+    transform: translateY(-1px) !important;
+}
+
+.modal-body .btn-secondary {
+    background: var(--icq-button) !important;
+    border-color: var(--icq-border-light) !important;
+    border-right-color: var(--icq-border-dark) !important;
+    border-bottom-color: var(--icq-border-dark) !important;
+    padding: 8px 20px !important;
+    font-size: 13px !important;
+}
+
+.modal-body .btn-secondary:hover {
+    background: var(--icq-border-light) !important;
+}
+
+/* Анимация появления */
+@keyframes modalWin98 {
+    from {
+        opacity: 0;
+        transform: scale(0.95);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1);
+    }
+}
+
+.modal.active .modal-content {
+    animation: modalWin98 0.15s ease-out !important;
+}
+
+/* === Смайлы === */
+.chat-emoji-btn {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 6px 10px;
+    cursor: pointer;
+    font-size: 18px;
+}
+
+.emoji-picker {
+    position: absolute;
+    bottom: 60px;
+    left: 60px;
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    padding: 10px;
+    z-index: 1000;
+    box-shadow: 4px 4px 8px rgba(0,0,0,0.2);
+}
+
+.emoji-grid {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 8px;
+}
+
+.emoji {
+    font-size: 24px;
+    cursor: pointer;
+    text-align: center;
+    padding: 6px;
+    transition: transform 0.1s;
+}
+
+.emoji:hover {
+    transform: scale(1.2);
+    background: var(--icq-active);
+}
+
+/* === Аватар в правой панели === */
+.avatar-preview img {
+    border-radius: 50%;
+    object-fit: cover;
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+}
+
+/* === Call Modal Styles === */
+.call-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10001;
+    backdrop-filter: blur(4px);
+}
+
+.call-modal-content {
+    background: var(--icq-panel);
+    border: 2px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    border-radius: 8px;
+    width: 90%;
+    max-width: 400px;
+    box-shadow: 4px 4px 12px rgba(0, 0, 0, 0.5);
+    animation: callModalSlideIn 0.2s ease-out;
+}
+
+@keyframes callModalSlideIn {
+    from {
+        opacity: 0;
+        transform: scale(0.95) translateY(-20px);
+    }
+    to {
+        opacity: 1;
+        transform: scale(1) translateY(0);
+    }
+}
+
+.call-header {
+    background: var(--icq-header);
+    background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+    padding: 12px 16px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    border-bottom: 1px solid var(--icq-border-light);
+}
+
+.call-header h3 {
+    margin: 0;
+    font-size: 16px;
+    font-weight: bold;
+    color: white;
+    text-shadow: 1px 1px 0 #1a4a1a;
+}
+
+.call-close-btn {
+    background: var(--icq-button);
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    font-size: 18px;
+    cursor: pointer;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    border-radius: 4px;
+    color: var(--icq-text);
+}
+
+.call-close-btn:hover {
+    background: var(--icq-border-light);
+    transform: scale(0.95);
+}
+
+.call-body {
+    padding: 20px;
+    text-align: center;
+}
+
+.call-peer {
+    font-size: 16px;
+    font-weight: bold;
+    color: var(--icq-text);
+    background: var(--icq-bg);
+    padding: 8px 16px;
+    border-radius: 20px;
+    display: inline-block;
+    margin-bottom: 16px;
+    font-family: monospace;
+    border: 1px solid var(--icq-border);
+}
+
+.call-status {
+    font-size: 13px;
+    color: var(--icq-text-muted);
+    margin-bottom: 20px;
+    padding: 8px;
+    border-radius: 8px;
+    background: var(--icq-bg);
+    border: 1px solid var(--icq-border);
+}
+
+.call-volume {
+    margin: 20px 0;
+    text-align: left;
+}
+
+.volume-bar {
+    background: var(--icq-bg);
+    border: 1px solid var(--icq-border);
+    height: 12px;
+    border-radius: 6px;
+    overflow: hidden;
+    margin-bottom: 6px;
+}
+
+.volume-fill {
+    height: 100%;
+    width: 0%;
+    background: #3b82f6;
+    transition: width 0.05s linear;
+    border-radius: 6px;
+}
+
+.volume-label {
+    font-size: 11px;
+    color: var(--icq-text-muted);
+}
+
+.call-actions {
+    display: flex;
+    gap: 12px;
+    justify-content: center;
+    margin-top: 24px;
+}
+
+.call-end-btn {
+    background: #dc2626;
+    color: white;
+    padding: 8px 24px;
+    font-size: 14px;
+    font-weight: bold;
+    border: 1px solid #b91c1c;
+    border-radius: 24px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.call-end-btn:hover {
+    background: #b91c1c;
+    transform: scale(1.02);
+}
+
+.call-mute-btn {
+    background: var(--icq-button);
+    color: var(--icq-text);
+    padding: 8px 20px;
+    font-size: 13px;
+    border: 1px solid var(--icq-border-light);
+    border-right-color: var(--icq-border-dark);
+    border-bottom-color: var(--icq-border-dark);
+    border-radius: 24px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.call-mute-btn:hover {
+    background: var(--icq-border-light);
+}
+
+/* Video Call Modal Styles */
+.video-call-modal {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 10002;
+    backdrop-filter: blur(8px);
+}
+
+.video-call-modal-content {
+    background: #1e293b;
+    border-radius: 16px;
+    width: 90%;
+    max-width: 900px;
+    box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5);
+    border: 1px solid #334155;
+}
+
+.video-call-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 16px 20px;
+    border-bottom: 1px solid #334155;
+}
+
+.video-call-header h3 {
+    margin: 0;
+    font-size: 1.25rem;
+    color: #f1f5f9;
+}
+
+.video-container {
+    position: relative;
+    background: #0f172a;
+    border-radius: 12px;
+    overflow: hidden;
+    margin-bottom: 16px;
+    aspect-ratio: 16/9;
+}
+
+.remote-video {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    background: #0f172a;
+}
+
+.local-video {
+    position: absolute;
+    bottom: 16px;
+    right: 16px;
+    width: 200px;
+    height: 112px;
+    object-fit: cover;
+    border-radius: 8px;
+    border: 2px solid #3b82f6;
+    background: #0f172a;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.local-video:hover {
+    transform: scale(1.02);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+}
+
+.video-call-body {
+    padding: 20px;
+    text-align: center;
+}
+
+.call-video-btn {
+    background: #334155;
+    color: #f1f5f9;
+    padding: 8px 20px;
+    font-size: 13px;
+    border: none;
+    border-radius: 24px;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+
+.call-video-btn:hover {
+    background: #475569;
+}
+
+@media (max-width: 768px) {
+    .local-video {
+        width: 120px;
+        height: 68px;
+        bottom: 8px;
+        right: 8px;
+    }
+    
+    .video-call-modal-content {
+        width: 95%;
+        max-width: none;
+    }
+}

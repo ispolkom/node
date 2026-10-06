@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Шлюзы - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+    <style>
+        .gateways-list {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        
+        .gateway-card {
+            background: var(--icq-panel);
+            border: 1px solid var(--icq-border);
+            border-right: 2px solid var(--icq-border-dark);
+            border-bottom: 2px solid var(--icq-border-dark);
+            overflow: hidden;
+        }
+        
+        .gateway-card.connected {
+            border-left: 3px solid var(--icq-online);
+        }
+        
+        .gateway-header-green {
+            background: var(--icq-header);
+            background: linear-gradient(135deg, var(--icq-header-light) 0%, var(--icq-header) 100%);
+            padding: 10px 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 1px solid var(--icq-border-light);
+        }
+        
+        .gateway-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: white;
+            text-shadow: 1px 1px 0 #1a4a1a;
+            margin: 0;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
+        .gateway-title-star {
+            font-size: 14px;
+            color: #ffd700;
+        }
+        
+        .gateway-badge-header {
+            background: rgba(255, 255, 255, 0.2);
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 10px;
+            color: white;
+        }
+        
+        .gateway-body {
+            padding: 16px;
+        }
+        
+        .gateway-id-row {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+        }
+        
+        .gateway-short-id {
+            font-family: monospace;
+            font-size: 12px;
+            color: var(--icq-text-muted);
+            background: var(--icq-bg);
+            padding: 4px 8px;
+            border: 1px solid var(--icq-border);
+        }
+        
+        .gateway-country {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 12px;
+        }
+        
+        .gateway-stats {
+            display: flex;
+            gap: 24px;
+            margin-bottom: 16px;
+            padding: 8px 0;
+            border-top: 1px solid var(--icq-border);
+            border-bottom: 1px solid var(--icq-border);
+        }
+        
+        .gateway-stat {
+            display: flex;
+            gap: 6px;
+            font-size: 11px;
+        }
+        
+        .stat-label {
+            color: var(--icq-text-muted);
+        }
+        
+        .stat-value {
+            font-weight: bold;
+            color: var(--icq-text);
+        }
+        
+        .stat-value.connected {
+            color: var(--icq-online);
+        }
+        
+        .stat-value.disconnected {
+            color: var(--icq-offline);
+        }
+        
+        .gateway-actions {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+        
+        .gateway-actions .btn-sm {
+            font-size: 11px;
+            padding: 4px 10px;
+        }
+        
+        .page-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+        
+        .page-header h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link active">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="page-header">
+                <h2>🌐 Шлюзы (Интернет)</h2>
+                <button class="btn btn-primary" id="addGatewayBtn">➕ Добавить шлюз</button>
+            </div>
+
+            <div class="gateways-list" id="gatewaysList">
+                <p class="text-muted">Загрузка списка шлюзов...</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add Gateway Modal -->
+    <div class="modal" id="addGatewayModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Добавить шлюз</h3>
+                <button class="modal-close" id="closeGatewayModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="addGatewayForm">
+                    <input type="hidden" id="gatewayId">
+                    <div class="form-group">
+                        <label for="gatewayName">Название</label>
+                        <input type="text" id="gatewayName" class="form-input" placeholder="Мой шлюз" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="gatewayShortId">Short ID</label>
+                        <input type="text" id="gatewayShortId" class="form-input" placeholder="0021944b" required>
+                        <small class="form-help">Первые 8 символов Node ID</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="gatewayCountry">Страна</label>
+                        <select id="gatewayCountry" class="form-input" required>
+                            <option value="" disabled selected>Выберите страну</option>
+                            <option value="RU">🇷🇺 Россия</option>
+                            <option value="US">🇺🇸 США</option>
+                            <option value="NL">🇳🇱 Нидерланды</option>
+                            <option value="DE">🇩🇪 Германия</option>
+                            <option value="FR">🇫🇷 Франция</option>
+                            <option value="GB">🇬🇧 Великобритания</option>
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelGatewayBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+
+    <!-- ПЕРЕОПРЕДЕЛЕНИЕ alert/confirm ДО загрузки app.js -->
+    <script>
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function showModal(title, message, onConfirm, onCancel, confirmText, cancelText) {
+            confirmText = confirmText || 'OK';
+            cancelText = cancelText || 'Отмена';
+            
+            const existingModal = document.querySelector('.custom-modal');
+            if (existingModal) existingModal.remove();
+            
+            const modal = document.createElement('div');
+            modal.className = 'custom-modal active';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>${escapeHTML(title)}</h3>
+                        <button class="modal-close" onclick="this.closest('.custom-modal').remove()">✖</button>
+                    </div>
+                    <div class="modal-body">
+                        <p>${escapeHTML(message)}</p>
+                        <div class="modal-actions">
+                            ${onConfirm ? `<button class="btn btn-primary" id="modalConfirmBtn">${escapeHTML(confirmText)}</button>` : ''}
+                            ${onCancel !== false ? `<button class="btn btn-secondary" id="modalCancelBtn">${escapeHTML(cancelText)}</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            
+            if (onConfirm) {
+                modal.querySelector('#modalConfirmBtn')?.addEventListener('click', () => {
+                    modal.remove();
+                    onConfirm();
+                });
+            }
+            
+            const cancelBtn = modal.querySelector('#modalCancelBtn');
+            if (cancelBtn && onCancel !== false) {
+                cancelBtn.addEventListener('click', () => {
+                    modal.remove();
+                    if (onCancel) onCancel();
+                });
+            }
+            
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.remove();
+            });
+        }
+
+        function showConfirm(title, message, onConfirm, onCancel) {
+            showModal(title, message, onConfirm, onCancel, 'Да', 'Нет');
+        }
+
+        function showAlert(title, message) {
+            showModal(title, message, null, false, 'OK', null);
+        }
+
+        window.originalAlert = window.alert;
+        window.originalConfirm = window.confirm;
+        
+        window.alert = function(message) {
+            console.log('📢 Overridden alert:', message);
+            showAlert('Уведомление', message);
+        };
+        
+        window.confirm = function(message) {
+            console.log('❓ Overridden confirm:', message);
+            showConfirm('Подтверждение', message, () => {}, () => {});
+            return true;
+        };
+
+        console.log('✅ Alert/Confirm overridden');
+    </script>
+    
+    <script src="/app.js"></script>
+    
+    <script>
+        async function loadGatewaysList() {
+            try {
+                const [gatewaysRes, proxyRes] = await Promise.all([
+                    fetch('/api/gateways'),
+                    fetch('/api/proxy/status')
+                ]);
+                
+                if (gatewaysRes.ok && proxyRes.ok) {
+                    const gatewaysData = await gatewaysRes.json();
+                    const proxyStatus = await proxyRes.json();
+                    renderGateways(gatewaysData.gateways || [], proxyStatus);
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        function renderGateways(gateways, proxyStatus) {
+            const container = document.getElementById('gatewaysList');
+            if (!container) return;
+            
+            if (gateways.length === 0) {
+                container.innerHTML = '<p class="text-muted">Шлюзов не найдено. Нажмите "Добавить шлюз"</p>';
+                return;
+            }
+            
+            const activeProxyShortId = proxyStatus.active && proxyStatus.proxies.length > 0
+                ? proxyStatus.proxies[0].short_id
+                : null;
+            
+            container.innerHTML = gateways.map(gw => {
+                const hasActiveProxy = activeProxyShortId === gw.short_id;
+                const isConnected = gw.connected === true;
+                
+                return `
+                    <div class="gateway-card ${isConnected ? 'connected' : ''}">
+                        <div class="gateway-header-green">
+                            <div class="gateway-title">
+                                ${escapeHTML(gw.name)}
+                                ${isConnected ? '<span class="gateway-title-star">⭐</span>' : ''}
+                                ${hasActiveProxy ? '<span class="gateway-badge-header">🌐 Proxy Active</span>' : ''}
+                            </div>
+                            <div class="gateway-title">
+                                ${isConnected ? '<span class="gateway-badge-header">Активен</span>' : ''}
+                            </div>
+                        </div>
+                        <div class="gateway-body">
+                            <div class="gateway-id-row">
+                                <span class="gateway-short-id">${escapeHTML(gw.short_id)}</span>
+                                <span class="gateway-country">
+                                    <span>${getCountryFlag(gw.country)}</span>
+                                    <span>${gw.country || ''}</span>
+                                </span>
+                            </div>
+                            
+                            <div class="gateway-stats">
+                                <div class="gateway-stat">
+                                    <span class="stat-label">Задержка:</span>
+                                    <span class="stat-value">—</span>
+                                </div>
+                                <div class="gateway-stat">
+                                    <span class="stat-label">Статус:</span>
+                                    <span class="stat-value ${isConnected ? 'connected' : 'disconnected'}">
+                                        ${isConnected ? 'Подключен' : 'Отключен'}
+                                    </span>
+                                </div>
+                            </div>
+                            
+                            <div class="gateway-actions">
+                                ${isConnected
+                                    ? `<button class="btn btn-danger btn-sm" onclick="disconnectFromNode('${gw.short_id}')">🔴 Отключить</button>`
+                                    : `<button class="btn btn-primary btn-sm" onclick="connectToNode('${gw.short_id}')">🟡 Подключить</button>`
+                                }
+                                ${hasActiveProxy
+                                    ? `<button class="btn btn-danger btn-sm" onclick="stopProxy('${gw.short_id}')">🔴 Остановить Proxy</button>`
+                                    : `<button class="btn btn-success btn-sm" onclick="startProxy('${gw.short_id}')" ${activeProxyShortId ? 'disabled' : ''}>🌐 Proxy</button>`
+                                }
+                                <button class="btn btn-secondary btn-sm" onclick="startSocks5('${gw.short_id}')">🧦 SOCKS5</button>
+                                <button class="btn btn-warning btn-sm" onclick="editGateway('${gw.id}', '${escapeHTML(gw.name)}', '${gw.short_id}', '${gw.country}')">✏️</button>
+                                <button class="btn btn-danger btn-sm" onclick="deleteGateway('${gw.id}', '${escapeHTML(gw.name)}')">🗑️</button>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function getCountryFlag(country) {
+            const flags = { 'RU': '🇷🇺', 'US': '🇺🇸', 'NL': '🇳🇱', 'DE': '🇩🇪', 'FR': '🇫🇷', 'GB': '🇬🇧' };
+            return flags[country] || '🌐';
+        }
+
+        function editGateway(id, name, shortId, country) {
+            document.getElementById('gatewayId').value = id;
+            document.getElementById('gatewayName').value = name;
+            document.getElementById('gatewayShortId').value = shortId;
+            document.getElementById('gatewayCountry').value = country;
+            document.getElementById('addGatewayModal').classList.add('active');
+        }
+
+        function deleteGateway(id, name) {
+            showConfirm('🗑️ Удалить шлюз', `Удалить шлюз "${name}"?`, async () => {
+                try {
+                    const res = await fetch('/api/gateways', {
+                        method: 'DELETE',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id })
+                    });
+                    if (res.ok) {
+                        showAlert('✅ Успешно', 'Шлюз удалён');
+                        loadGatewaysList();
+                    } else {
+                        showAlert('❌ Ошибка', 'Не удалось удалить шлюз');
+                    }
+                } catch(e) { showAlert('❌ Ошибка', e.message); }
+            });
+        }
+
+        const addGatewayBtn = document.getElementById('addGatewayBtn');
+        const addGatewayModal = document.getElementById('addGatewayModal');
+        const closeGatewayModalBtn = document.getElementById('closeGatewayModalBtn');
+        const cancelGatewayBtn = document.getElementById('cancelGatewayBtn');
+        const addGatewayForm = document.getElementById('addGatewayForm');
+
+        if (addGatewayBtn) {
+            addGatewayBtn.onclick = () => {
+                document.getElementById('gatewayId').value = '';
+                addGatewayForm.reset();
+                addGatewayModal.classList.add('active');
+            };
+        }
+        if (closeGatewayModalBtn) closeGatewayModalBtn.onclick = () => addGatewayModal.classList.remove('active');
+        if (cancelGatewayBtn) cancelGatewayBtn.onclick = () => addGatewayModal.classList.remove('active');
+        
+        addGatewayModal?.addEventListener('click', (e) => {
+            if (e.target === addGatewayModal) addGatewayModal.classList.remove('active');
+        });
+
+        if (addGatewayForm) {
+            addGatewayForm.onsubmit = async (e) => {
+                e.preventDefault();
+                const id = document.getElementById('gatewayId').value;
+                const name = document.getElementById('gatewayName').value;
+                const shortId = document.getElementById('gatewayShortId').value;
+                const country = document.getElementById('gatewayCountry').value;
+                
+                try {
+                    const res = await fetch('/api/gateways', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ id: id || null, name, short_id: shortId, country })
+                    });
+                    if (res.ok) {
+                        addGatewayModal.classList.remove('active');
+                        addGatewayForm.reset();
+                        loadGatewaysList();
+                        showAlert('✅ Успешно', id ? 'Шлюз обновлён' : 'Шлюз добавлен');
+                    } else {
+                        showAlert('❌ Ошибка', 'Не удалось сохранить шлюз');
+                    }
+                } catch(e) { showAlert('❌ Ошибка', e.message); }
+            };
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadGatewaysList();
+            setInterval(loadGatewaysList, 10000);
+            
+            const langToggle = document.getElementById('langToggle');
+            if (langToggle) {
+                langToggle.onclick = () => {
+                    const newLang = currentLang === 'ru' ? 'en' : 'ru';
+                    if (window.setLanguage) window.setLanguage(newLang);
+                    else location.reload();
+                };
+            }
+        });
+    </script>
+</body>
+</html>

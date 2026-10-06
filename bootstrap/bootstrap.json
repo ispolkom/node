@@ -1,0 +1,10 @@
+{
+  "format": 1,
+  "network": "yandi",
+  "issued": 1791273635,
+  "expires": 1799049635,
+  "sequence": 1,
+  "entries": [],
+  "signer": "89d4938a0bdbe9f6e302dabfee0f1d1d651bca3168b52d38edfa07497d042df2",
+  "signature": "58bda26fab07d901a325341a15db244a6c3dd263b2e079e02d1e50efda56852a52a337bdccebd59ccea5be729a7a3e6d75caebe10af72538e997b83ed4180e0d"
+}

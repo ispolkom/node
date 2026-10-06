@@ -1,0 +1,154 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Контакты - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+    <!-- Header -->
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link" data-i18n="nav_main">Главная</a>
+                    <a href="/contacts" class="nav-link active" data-i18n="nav_contacts">Контакты</a>
+                    <a href="/gateways" class="nav-link" data-i18n="nav_gateways">Шлюзы</a>
+                    <a href="/relay" class="nav-link" data-i18n="nav_relay">Relay</a>
+                    <a href="/settings" class="nav-link" data-i18n="nav_settings">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main">
+        <div class="container">
+            <!-- Page Header -->
+            <div class="page-header">
+                <h2 data-i18n="contacts_title">👥 Контакты (P2P)</h2>
+                <div style="display:flex;gap:0.5rem;">
+                    <a href="/api/contacts/export" download="yandi_contacts.json" class="btn btn-secondary">
+                        Экспорт
+                    </a>
+                    <button class="btn btn-primary" id="addContactBtn" data-i18n="btn_add_contact">
+                        ➕ Добавить контакт
+                    </button>
+                </div>
+            </div>
+
+            <!-- Search -->
+            <div class="search-bar">
+                <input type="text" data-i18n-placeholder="search_contacts" class="search-input" id="searchInput" placeholder="🔍 Поиск контактов...">
+            </div>
+
+            <!-- Contacts List -->
+            <div class="contacts-list" id="contactsList">
+                <p class="text-muted">Загрузка контактов...</p>
+            </div>
+        </div>
+    </main>
+
+    <!-- Add Contact Modal -->
+    <div class="modal" id="addContactModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="modal_add_contact">Добавить контакт</h3>
+                <button class="modal-close" id="closeModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="addContactForm">
+                    <div class="form-group">
+                        <label for="contactName" data-i18n="label_name">Имя</label>
+                        <input type="text" id="contactName" class="form-input" placeholder="Вася" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="contactShortId">Short ID</label>
+                        <input type="text" id="contactShortId" class="form-input" placeholder="0021944b" required>
+                        <small class="form-help" data-i18n="label_short_id_placeholder">Первые 8 символов Node ID</small>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelBtn" data-i18n="btn_cancel">Отмена</button>
+                        <button type="submit" class="btn btn-primary" data-i18n="btn_save">Добавить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Contact Modal -->
+    <div class="modal" id="editContactModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3 data-i18n="modal_edit_contact">Редактировать контакт</h3>
+                <button class="modal-close" id="closeEditModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="editContactForm">
+                    <input type="hidden" id="editContactId">
+                    <div class="form-group">
+                        <label for="editContactName" data-i18n="label_name">Имя</label>
+                        <input type="text" id="editContactName" class="form-input" placeholder="Вася" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editContactShortId">Short ID</label>
+                        <input type="text" id="editContactShortId" class="form-input" placeholder="0021944b" required>
+                        <small class="form-help" data-i18n="label_short_id_placeholder">Первые 8 символов Node ID</small>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelEditBtn" data-i18n="btn_cancel">Отмена</button>
+                        <button type="submit" class="btn btn-primary" data-i18n="btn_save">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Footer -->
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+    <script>
+        // Apply translations to static elements
+        function applyTranslations() {
+            document.querySelectorAll('[data-i18n]').forEach(el => {
+                const key = el.getAttribute('data-i18n');
+                if (window.t && translations[currentLang][key]) {
+                    el.textContent = translations[currentLang][key];
+                }
+            });
+
+            // Apply to placeholders
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(el => {
+                const key = el.getAttribute('data-i18n-placeholder');
+                if (window.t && translations[currentLang][key]) {
+                    el.setAttribute('placeholder', translations[currentLang][key]);
+                }
+            });
+        }
+
+        // Language toggle button
+        const langToggle = document.getElementById('langToggle');
+        if (langToggle) {
+            langToggle.addEventListener('click', () => {
+                setLanguage(currentLang === 'ru' ? 'en' : 'ru');
+            });
+        }
+
+        // Apply translations on load
+        document.addEventListener('DOMContentLoaded', () => {
+            applyTranslations();
+        });
+    </script>
+</body>
+</html>

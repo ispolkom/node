@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Чат - YANDI v2</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+<script src="/app.js"></script>
+    <script src="/ui/voice-call.js"></script>
+    <script src="/ui/video-call.js"></script>
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link active">Чат</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="chat-three-columns">
+                <!-- ЛЕВАЯ КОЛОНКА: Контакты -->
+                <div class="chat-contacts-panel">
+                    <div class="chat-contacts-header">
+                        <h3>📋 Контакты</h3>
+                        <button class="btn btn-sm btn-primary" id="addContactBtn">➕ Добавить</button>
+                    </div>
+                    <div class="chat-contacts-search">
+                        <input type="text" id="searchInput" class="search-input" placeholder="🔍 Поиск контактов...">
+                    </div>
+                    <div class="chat-contacts-list" id="contactsList">
+                        <p class="text-muted">Загрузка контактов...</p>
+                    </div>
+                </div>
+
+                <!-- ЦЕНТРАЛЬНАЯ КОЛОНКА: Чат -->
+                <div class="chat-messages-panel">
+                    <div class="chat-header" id="chatHeader" style="display: none;">
+                        <div class="chat-header-info">
+                            <h2 id="chatPeerName">Peer</h2>
+                            <span class="chat-peer-status" id="chatPeerStatus"></span>
+                        </div>
+                        <div class="chat-header-buttons">
+                            <button class="btn btn-sm btn-success" id="headerCallBtn" title="Голосовой звонок" onclick="if(window.voiceCallManager&&currentContactShortId)window.voiceCallManager.startCall(currentContactShortId)">📞</button>
+                            <button class="btn btn-sm btn-danger" onclick="clearChatHistory()">🗑️ Очистить</button>
+                            <button class="btn btn-sm" onclick="closeChat()">✖ Закрыть</button>
+                        </div>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="no-chat-selected">Выберите контакт из списка слева</div>
+                    </div>
+                    <div class="chat-input-area" id="chatInputArea" style="display: none;">
+                        <button class="chat-attach-btn" onclick="attachFile()" title="Прикрепить файл">📎</button>
+                        <button class="chat-emoji-btn" id="emojiBtn" title="Смайлы">😊</button>
+                        <div class="emoji-picker" id="emojiPicker" style="display: none;">
+                            <div class="emoji-grid">
+                                <span class="emoji">😊</span> <span class="emoji">😂</span> <span class="emoji">❤️</span>
+                                <span class="emoji">👍</span> <span class="emoji">🔥</span> <span class="emoji">🎉</span>
+                                <span class="emoji">😢</span> <span class="emoji">😡</span> <span class="emoji">😱</span>
+                                <span class="emoji">🤔</span> <span class="emoji">👋</span> <span class="emoji">💪</span>
+                                <span class="emoji">🙏</span> <span class="emoji">🤣</span> <span class="emoji">🥰</span>
+                                <span class="emoji">😎</span> <span class="emoji">😴</span> <span class="emoji">🤯</span>
+                            </div>
+                        </div>
+                        <input type="text" class="chat-input" id="messageInput" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)">
+                        <button class="btn btn-success" onclick="sendMessage()">➤</button>
+                    </div>
+                    <input type="file" id="fileAttachmentInput" style="display: none;" onchange="handleFileAttachment(event)">
+                </div>
+
+                <!-- ПРАВАЯ КОЛОНКА: Инфо о контакте / статус ноды -->
+                <div class="chat-info-panel">
+                    <div id="contactInfoPanel" style="display: none;">
+                        <div class="info-avatar">
+                            <div class="avatar-placeholder" id="contactAvatar">👤</div>
+                        </div>
+                        <div class="info-name" id="infoContactName">-</div>
+                        <div class="info-cid" id="infoContactCid">-</div>
+                        <div class="info-actions">
+                            <button class="btn btn-info btn-sm" id="callBtn">📞 Звонок</button>
+                            <button class="btn btn-info btn-sm" id="videoCallBtn">🎥 Видеозвонок</button>
+                            <button class="btn btn-primary btn-sm" id="filesBtn">📁 Файлы</button>
+                            <button class="btn btn-secondary btn-sm" id="p2pTunnelBtn">🔗 P2P Тоннель</button>
+                            <button class="btn btn-warning btn-sm" id="editContactInfoBtn">✏️ Редактировать</button>
+                            <button class="btn btn-danger btn-sm" id="deleteContactInfoBtn">🗑️ Удалить</button>
+                        </div>
+                    </div>
+                    <div id="myInfoPanel" style="display: block;">
+                        <div class="info-avatar" id="myAvatar">
+                            <div class="avatar-placeholder">👤</div>
+                        </div>
+                        <div class="info-name" id="myShortId">-</div>
+                        <div class="info-cid" id="myCid">-</div>
+                        <div class="info-status">
+                            <span class="status-badge" id="myStatusBadge">🟢 Онлайн</span>
+                        </div>
+                        <div class="info-stats">
+                            <div class="info-stat"><span>📤 Отправлено:</span> <span id="mySentStats">0 B</span></div>
+                            <div class="info-stat"><span>📥 Получено:</span> <span id="myRecvStats">0 B</span></div>
+                            <div class="info-stat"><span>🔌 Пирры:</span> <span id="myPeerCount">0</span></div>
+                        </div>
+                        <div class="info-actions">
+                            <button class="btn btn-secondary btn-sm" id="shareContactBtn">📋 Поделиться контактом</button>
+                            <button class="btn btn-secondary btn-sm" id="editProfileBtn">✏️ Редактировать профиль</button>
+                            <button class="btn btn-danger btn-sm" id="startStopNodeBtn">⏹️ Остановить ноду</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+
+    <!-- Модалка профиля -->
+    <div class="modal" id="editProfileModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>✏️ Редактировать профиль</h3>
+                <button class="modal-close" id="closeProfileModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="editProfileForm">
+                    <div class="form-group">
+                        <label for="profileName">Отображаемое имя</label>
+                        <input type="text" id="profileName" class="form-input" placeholder="Ваше имя">
+                    </div>
+                    <div class="form-group">
+                        <label>Аватар</label>
+                        <div style="display: flex; gap: 8px; align-items: center; flex-wrap: wrap;">
+                            <input type="file" id="profileAvatarFile" accept="image/*" style="display: none;">
+                            <button type="button" class="btn btn-secondary" id="uploadAvatarBtn">📁 Выбрать файл</button>
+                            <button type="button" class="btn btn-danger btn-sm" id="removeAvatarBtn" style="display: none;">🗑️ Удалить</button>
+                        </div>
+                        <small class="form-help">PNG, JPG, GIF. Максимум 2MB</small>
+                    </div>
+                    <div class="avatar-preview" id="avatarPreview" style="margin: 10px 0; text-align: center;">
+                        <div class="avatar-placeholder" style="width: 80px; height: 80px; margin: 0 auto;">👤</div>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelProfileBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">💾 Сохранить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модалка добавления контакта -->
+    <div class="modal" id="addContactModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Добавить контакт</h3>
+                <button class="modal-close" id="closeModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="addContactForm">
+                    <div class="form-group">
+                        <label for="contactName">Имя</label>
+                        <input type="text" id="contactName" class="form-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="contactShortId">Short ID</label>
+                        <input type="text" id="contactShortId" class="form-input" required>
+                        <small class="form-help">Первые 8 символов Node ID</small>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Добавить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модалка редактирования контакта -->
+    <div class="modal" id="editContactModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Редактировать контакт</h3>
+                <button class="modal-close" id="closeEditModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="editContactForm">
+                    <input type="hidden" id="editContactId">
+                    <div class="form-group">
+                        <label for="editContactName">Имя</label>
+                        <input type="text" id="editContactName" class="form-input" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="editContactShortId">Short ID</label>
+                        <input type="text" id="editContactShortId" class="form-input" required>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelEditBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Сохранить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // === Escape HTML ===
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        // === Модалки ===
+        function showModal(title, message, onConfirm, onCancel, confirmText, cancelText) {
+            confirmText = confirmText || 'OK';
+            cancelText = cancelText || 'Отмена';
+            const existingModal = document.querySelector('.custom-modal');
+            if (existingModal) existingModal.remove();
+            const modal = document.createElement('div');
+            modal.className = 'custom-modal active';
+            modal.innerHTML = '<div class="modal-content"><div class="modal-header"><h3>' + escapeHTML(title) + '</h3><button class="modal-close" onclick="this.closest(\'.custom-modal\').remove()">✖</button></div><div class="modal-body"><p>' + escapeHTML(message) + '</p><div class="modal-actions">' + (onConfirm ? '<button class="btn btn-primary" id="modalConfirmBtn">' + escapeHTML(confirmText) + '</button>' : '') + (onCancel !== false ? '<button class="btn btn-secondary" id="modalCancelBtn">' + escapeHTML(cancelText) + '</button>' : '') + '</div></div></div>';
+            document.body.appendChild(modal);
+            if (onConfirm) modal.querySelector('#modalConfirmBtn')?.addEventListener('click', function() { modal.remove(); onConfirm(); });
+            var cancelBtn = modal.querySelector('#modalCancelBtn');
+            if (cancelBtn && onCancel !== false) cancelBtn.addEventListener('click', function() { modal.remove(); if (onCancel) onCancel(); });
+            modal.addEventListener('click', function(e) { if (e.target === modal) modal.remove(); });
+        }
+        function showConfirm(title, message, onConfirm, onCancel) { showModal(title, message, onConfirm, onCancel, 'Да', 'Нет'); }
+        function showAlert(title, message) { showModal(title, message, null, false, 'OK', null); }
+        window.alert = function(message) { showAlert('Уведомление', message); };
+        window.confirm = function(message) { showConfirm('Подтверждение', message, function() {}, function() {}); return true; };
+
+        // === Логика чата ===
+        var currentContactId = null, currentContactShortId = null, currentContactName = null, myNodeId = null, autoRefreshInterval = null, pendingAttachment = null, lastMessageCount = 0, lastIncomingCount = 0;
+        var pendingTransfers = {};
+        var onlineContacts = new Set();   // short_id контактов, которые сейчас онлайн
+        var contactsInitialized = false;  // не играть звук при первой загрузке
+
+        document.addEventListener('DOMContentLoaded', function() {
+            loadMyInfo();
+            loadContacts();
+            setupEventHandlers();
+            startAutoRefresh();
+            loadMyProfile();
+            if (Notification.permission === 'default') Notification.requestPermission();
+        });
+
+        function loadMyInfo() {
+            fetch('/api/status').then(function(res) { return res.ok ? res.json() : null; }).then(function(data) {
+                if (data) { myNodeId = data.node_id; document.getElementById('myShortId').textContent = data.short_id || '-'; document.getElementById('myCid').textContent = data.cid || '-'; }
+            }).catch(function(e) { console.error(e); });
+        }
+
+        function loadContacts() {
+            fetch('/api/contacts').then(function(res) { return res.ok ? res.json() : null; }).then(function(data) {
+                if (data) renderContacts(data.contacts || []);
+            }).catch(function(e) { console.error(e); });
+        }
+
+        function renderContacts(contacts) {
+            var container = document.getElementById('contactsList');
+            if (!container) return;
+            if (contacts.length === 0) { container.innerHTML = '<p class="text-muted">Нет контактов. Нажмите "Добавить"</p>'; contactsInitialized = true; return; }
+            // Детектор перехода offline→online
+            if (contactsInitialized) {
+                contacts.forEach(function(c) {
+                    if (c.online && !onlineContacts.has(c.short_id)) {
+                        if (window.playOnlineSound) window.playOnlineSound();
+                    }
+                });
+            }
+            // Обновляем Set текущего онлайн-состояния
+            onlineContacts = new Set(contacts.filter(function(c) { return c.online; }).map(function(c) { return c.short_id; }));
+            contactsInitialized = true;
+            var html = '';
+            for (var i = 0; i < contacts.length; i++) {
+                var c = contacts[i];
+                var activeClass = (currentContactShortId === c.short_id) ? 'active' : '';
+                html += '<div class="contact-item ' + activeClass + '" data-contact-id="' + c.id + '" data-short-id="' + c.short_id + '" data-name="' + escapeHTML(c.name) + '" onclick="selectContact(\'' + c.id + '\', \'' + c.short_id + '\', \'' + escapeHTML(c.name) + '\')">';
+                html += '<div class="contact-avatar" id="avatar-' + c.short_id + '"></div>';
+                html += '<div class="contact-info">';
+                html += '<div class="contact-name">' + escapeHTML(c.name) + '</div>';
+                html += '<div class="contact-id">' + escapeHTML(c.short_id) + '</div>';
+                html += '<div class="contact-status ' + (c.online ? 'contact-online' : 'contact-offline') + '">' + (c.online ? '🟢 Онлайн' : '⚪ Офлайн') + '</div>';
+                html += '</div></div>';
+            }
+            container.innerHTML = html;
+            for (var j = 0; j < contacts.length; j++) {
+                var contact = contacts[j];
+                var avatarDiv = document.getElementById('avatar-' + contact.short_id);
+                if (avatarDiv) {
+                    var img = document.createElement('img');
+                    img.src = '/api/avatar/' + contact.short_id;
+                    img.style.cssText = 'width: 40px; height: 40px; border-radius: 4px; object-fit: cover;';
+                    img.onerror = function(shortId, name) {
+                        return function() { document.getElementById('avatar-' + shortId).innerHTML = '<span class="avatar-initial">' + name.charAt(0).toUpperCase() + '</span>'; };
+                    }(contact.short_id, contact.name);
+                    avatarDiv.appendChild(img);
+                }
+            }
+        }
+
+        function updateContactStatus(shortId) {
+            fetch('/api/contacts').then(function(res) { return res.ok ? res.json() : null; }).then(function(data) {
+                if (!data) return;
+                var contact = data.contacts.find(function(c) { return c.short_id === shortId; });
+                if (contact) {
+                    var contactItem = document.querySelector('.contact-item[data-short-id="' + shortId + '"]');
+                    if (contactItem) {
+                        var statusSpan = contactItem.querySelector('.contact-status');
+                        if (statusSpan) {
+                            statusSpan.className = 'contact-status ' + (contact.online ? 'contact-online' : 'contact-offline');
+                            statusSpan.textContent = contact.online ? '🟢 Онлайн' : '⚪ Офлайн';
+                        }
+                    }
+                    var statusSpan = document.getElementById('chatPeerStatus');
+                    if (statusSpan && currentContactShortId === shortId) statusSpan.textContent = contact.online ? '🟢 Онлайн' : '🔴 Офлайн';
+                }
+            }).catch(function(e) { console.error(e); });
+        }
+
+        function selectContact(contactId, shortId, name) {
+            currentContactId = contactId;
+            currentContactShortId = shortId;
+            currentContactName = name;
+            document.getElementById('contactInfoPanel').style.display = 'block';
+            document.getElementById('myInfoPanel').style.display = 'none';
+            document.getElementById('chatHeader').style.display = 'flex';
+            document.getElementById('chatInputArea').style.display = 'flex';
+            document.getElementById('chatPeerName').textContent = name;
+            document.getElementById('infoContactName').textContent = name;
+            document.getElementById('infoContactCid').textContent = shortId;
+            document.getElementById('contactAvatar').textContent = name.charAt(0).toUpperCase();
+            document.querySelectorAll('.contact-item').forEach(function(el) { el.classList.remove('active'); });
+            var activeEl = document.querySelector('.contact-item[data-short-id="' + shortId + '"]');
+            if (activeEl) activeEl.classList.add('active');
+            updateContactStatus(shortId);
+            loadMessages(shortId);
+            lastMessageCount = 0;
+            lastIncomingCount = 0;
+        }
+
+        function loadMessages(peerId) {
+            if (!peerId) return;
+            fetch('/api/chat/history/' + peerId).then(function(res) { return res.ok ? res.json() : null; }).then(function(data) {
+                if (data && data.status === 'success') renderMessages(data.messages);
+            }).catch(function(e) { console.error(e); });
+        }
+
+        function renderPendingTransfer(transfer) {
+            var progress = transfer.totalChunks > 0 ? Math.min(100, Math.round((transfer.sentChunks / transfer.totalChunks) * 100)) : 0;
+            var statusText = transfer.error ? transfer.error : (transfer.complete ? 'Файл загружен, сообщение отправляется...' : 'Идёт отправка файла...');
+            var html = '<div class="message sent pending-upload">';
+            html += '<div class="message-time">' + escapeHTML(transfer.timeLabel || '') + '</div>';
+            html += '<div class="message-attachment"><div class="file-attachment">';
+            html += '<div class="attachment-meta">';
+            html += '<div class="attachment-filename">📤 ' + escapeHTML(transfer.filename) + '</div>';
+            html += '<div class="file-size">' + formatFileSize(transfer.size) + '</div>';
+            html += '</div>';
+            html += '<div class="upload-progress"><div class="upload-progress-bar" style="width:' + progress + '%;"></div></div>';
+            html += '<div class="upload-progress-text"><span>' + escapeHTML(statusText) + '</span><span>' + transfer.sentChunks + '/' + transfer.totalChunks + '</span></div>';
+            if (transfer.text) html += '<div class="message-text">' + escapeHTML(transfer.text) + '</div>';
+            html += '</div></div></div>';
+            return html;
+        }
+
+        function currentTimeLabel() {
+            return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        }
+
+        function renderMessages(messages) {
+            var div = document.getElementById('chatMessages');
+            var items = Array.isArray(messages) ? messages.slice() : [];
+            items.sort(function(a, b) {
+                var at = Number(a.timestamp || 0);
+                var bt = Number(b.timestamp || 0);
+                if (at !== bt) return at - bt;
+                return String(a.msg_id || '').localeCompare(String(b.msg_id || ''));
+            });
+
+            var pendingForPeer = Object.keys(pendingTransfers)
+                .map(function(key) { return pendingTransfers[key]; })
+                .filter(function(item) { return item.peerId === currentContactShortId; });
+
+            if (items.length === 0 && pendingForPeer.length === 0) { div.innerHTML = '<p class="text-muted" style="text-align: center;">Нет сообщений</p>'; lastMessageCount = 0; return; }
+            var html = '';
+            for (var i = 0; i < items.length; i++) {
+                var msg = items[i];
+                var isSent = (msg.from === myNodeId);
+                var time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                html += '<div class="message ' + (isSent ? 'sent' : 'received') + '">';
+                html += '<div class="message-time">' + time + '</div>';
+                if (msg.attachment) html += renderAttachment(msg.attachment);
+                if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
+                html += '</div>';
+            }
+            for (var j = 0; j < pendingForPeer.length; j++) html += renderPendingTransfer(pendingForPeer[j]);
+            div.innerHTML = html;
+            div.scrollTop = div.scrollHeight;
+            var incomingCount = items.filter(function(m) { return m.from !== myNodeId; }).length;
+            if (incomingCount > lastIncomingCount) {
+                if (window.playMessageSound) window.playMessageSound();
+                if (document.hidden && Notification.permission === 'granted') new Notification('Новое сообщение', { body: currentContactName ? 'Сообщение от ' + currentContactName : 'Новое сообщение', icon: '/favicon.ico' });
+            }
+            lastIncomingCount = incomingCount;
+            lastMessageCount = items.length;
+        }
+
+        function formatFileSize(size) {
+            if (!size || size < 1024) return (size || 0) + ' B';
+            if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
+            if (size < 1024 * 1024 * 1024) return (size / (1024 * 1024)).toFixed(1) + ' MB';
+            return (size / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+        }
+
+        function attachmentContentUrl(attachment) {
+            if (!attachment || !attachment.file_ref || !attachment.file_ref.file_id) return null;
+            return '/api/files/content/' + encodeURIComponent(attachment.file_ref.file_id) + '/' + encodeURIComponent(attachment.filename);
+        }
+
+        // Проверить доступность файла и обновить UI если нужно (до 5 попыток, с задержкой)
+        function watchAttachmentReady(fileId, filename, elementId, attempt) {
+            if (attempt > 5) return;
+            fetch('/api/files/status/' + encodeURIComponent(fileId) + '/' + encodeURIComponent(filename))
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    if (data.exists) {
+                        var el = document.getElementById(elementId);
+                        if (el) {
+                            el.innerHTML = '<span style="color:#22c55e;">✅ Файл доставлен</span> — <a href="/api/files/content/' + encodeURIComponent(fileId) + '/' + encodeURIComponent(filename) + '" target="_blank">Открыть</a> / <a href="/api/files/content/' + encodeURIComponent(fileId) + '/' + encodeURIComponent(filename) + '" download="' + escapeHTML(filename) + '">Скачать</a>';
+                        }
+                    } else {
+                        setTimeout(function() { watchAttachmentReady(fileId, filename, elementId, attempt + 1); }, 2000 * attempt);
+                    }
+                })
+                .catch(function() {});
+        }
+
+        function renderAttachment(attachment) {
+            if (!attachment) return '';
+            var contentUrl = attachmentContentUrl(attachment);
+            var mime = attachment.mime_type || 'application/octet-stream';
+            var hasFileRef = !!(attachment.file_ref && attachment.file_ref.file_id);
+            var watchId = hasFileRef ? ('watch_' + attachment.file_ref.file_id.replace(/[^a-zA-Z0-9]/g, '_')) : null;
+            var html = '<div class="message-attachment"><div class="file-attachment">';
+
+            if (mime.startsWith('image/')) {
+                var imageSrc = contentUrl || attachment.data || '';
+                html += '<div class="attachment-meta" style="max-width:260px;">';
+                if (imageSrc) html += '<img src="' + imageSrc + '" alt="' + escapeHTML(attachment.filename) + '" style="max-width:260px;max-height:220px;border:1px solid #808080;background:#fff;object-fit:contain;">';
+                html += '<div class="attachment-filename">' + escapeHTML(attachment.filename) + '</div>';
+                html += '<div class="file-size">' + formatFileSize(attachment.size) + '</div>';
+                if (contentUrl) html += '<div class="attachment-actions"><a class="attachment-play-card" href="' + contentUrl + '" target="_blank" rel="noopener"><span class="attachment-play-icon">▶</span><span class="attachment-play-label"><span class="attachment-play-title">Открыть</span><span class="attachment-play-subtitle">Во встроенном просмотре браузера</span></span></a><a class="attachment-download-link" href="' + contentUrl + '" download="' + escapeHTML(attachment.filename) + '">Скачать</a></div>';
+                html += '</div>';
+            } else if (mime.startsWith('audio/')) {
+                html += '<div class="attachment-meta" style="min-width:220px;">';
+                html += '<div class="attachment-filename">🎵 ' + escapeHTML(attachment.filename) + '</div>';
+                html += '<div class="file-size">' + formatFileSize(attachment.size) + '</div>';
+                if (contentUrl) html += '<div class="attachment-actions"><a class="attachment-play-card" href="' + contentUrl + '" target="_blank" rel="noopener"><span class="attachment-play-icon">▶</span><span class="attachment-play-label"><span class="attachment-play-title">Проиграть</span><span class="attachment-play-subtitle">Откроется в новой вкладке</span></span></a><a class="attachment-download-link" href="' + contentUrl + '" download="' + escapeHTML(attachment.filename) + '">Скачать</a></div>';
+                html += '</div>';
+            } else if (mime.startsWith('video/')) {
+                html += '<div class="attachment-meta" style="max-width:280px;">';
+                html += '<div class="attachment-filename">🎬 ' + escapeHTML(attachment.filename) + '</div>';
+                html += '<div class="file-size">' + formatFileSize(attachment.size) + '</div>';
+                if (contentUrl) html += '<div class="attachment-actions"><a class="attachment-play-card" href="' + contentUrl + '" target="_blank" rel="noopener"><span class="attachment-play-icon">▶</span><span class="attachment-play-label"><span class="attachment-play-title">Проиграть</span><span class="attachment-play-subtitle">Откроется в новой вкладке</span></span></a><a class="attachment-download-link" href="' + contentUrl + '" download="' + escapeHTML(attachment.filename) + '">Скачать</a></div>';
+                html += '</div>';
+            } else {
+                html += '<div class="file-icon">📎</div>';
+                html += '<div class="attachment-meta">';
+                html += '<div class="attachment-filename">' + escapeHTML(attachment.filename) + '</div>';
+                html += '<div class="file-size">' + formatFileSize(attachment.size) + '</div>';
+                if (contentUrl) {
+                    html += '<div class="attachment-actions"><a class="attachment-play-card" href="' + contentUrl + '" target="_blank" rel="noopener"><span class="attachment-play-icon">↗</span><span class="attachment-play-label"><span class="attachment-play-title">Открыть файл</span><span class="attachment-play-subtitle">В новой вкладке</span></span></a><a class="attachment-download-link" href="' + contentUrl + '" download="' + escapeHTML(attachment.filename) + '">Скачать</a></div>';
+                } else if (hasFileRef) {
+                    html += '<div class="attachment-actions" id="' + watchId + '"><span style="color:#888;">⏳ Ожидание файла...</span></div>';
+                }
+                html += '</div>';
+            }
+
+            html += '</div></div>';
+            // Запустить проверку готовности файла если его ещё нет локально
+            if (hasFileRef && watchId) {
+                setTimeout(function() {
+                    var el = document.getElementById(watchId);
+                    // Если элемент с watchId существует — файл ещё не доступен, запустить watch
+                    if (el) watchAttachmentReady(attachment.file_ref.file_id, attachment.filename, watchId, 1);
+                }, 500);
+            }
+            return html;
+        }
+
+        function sendMessage() {
+            if (!currentContactShortId) return;
+            var input = document.getElementById('messageInput');
+            var text = input.value.trim();
+            if (pendingAttachment) { sendFileMessage(text); return; }
+            if (!text) return;
+            fetch('/api/chat/send/' + currentContactShortId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) }).then(function(res) { return res.json(); }).then(function(data) {
+                if (data.status === 'success') { input.value = ''; loadMessages(currentContactShortId); }
+                else showAlert('❌ Ошибка', data.message);
+            }).catch(function() { showAlert('❌ Ошибка', 'Ошибка отправки сообщения'); });
+        }
+        function handleKeyPress(e) { if (e.key === 'Enter') sendMessage(); }
+
+        // === Смайлы ===
+        var emojiBtn = document.getElementById('emojiBtn'), emojiPicker = document.getElementById('emojiPicker');
+        if (emojiBtn) {
+            emojiBtn.addEventListener('click', function() { emojiPicker.style.display = emojiPicker.style.display === 'none' ? 'block' : 'none'; });
+            document.querySelectorAll('.emoji').forEach(function(emoji) {
+                emoji.addEventListener('click', function() { document.getElementById('messageInput').value += emoji.textContent; emojiPicker.style.display = 'none'; document.getElementById('messageInput').focus(); });
+            });
+            document.addEventListener('click', function(e) { if (!emojiBtn.contains(e.target) && !emojiPicker.contains(e.target)) emojiPicker.style.display = 'none'; });
+        }
+
+        function attachFile() { document.getElementById('fileAttachmentInput').click(); }
+        function handleFileAttachment(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            if (file.size > 200 * 1024 * 1024) { showAlert('❌ Ошибка', 'Файл слишком большой! Максимум 200 MB.'); return; }
+            pendingAttachment = file;
+            document.getElementById('messageInput').placeholder = '📎 ' + file.name + ' - введите сообщение или отправьте';
+        }
+        function sendFileMessage(messageText) {
+            if (!pendingAttachment) {
+                showAlert('⚠️', 'Нет файла для отправки');
+                return;
+            }
+            if (!currentContactShortId) {
+                showAlert('❌', 'Не выбран собеседник');
+                return;
+            }
+            
+            const targetPeerShortId = currentContactShortId;
+            const file = pendingAttachment;
+            const CHUNK_SIZE = 700;
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            let file_id = null;
+            const transferLocalId = 'upload_' + Date.now() + '_' + Math.random().toString(16).slice(2);
+            pendingTransfers[transferLocalId] = {
+                peerId: targetPeerShortId,
+                filename: file.name,
+                size: file.size,
+                totalChunks: totalChunks,
+                sentChunks: 0,
+                text: messageText || '',
+                complete: false,
+                error: null,
+                timeLabel: currentTimeLabel()
+            };
+            clearAttachment();
+            loadMessages(targetPeerShortId);
+            
+            (async function() {
+                try {
+                    for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                        const start = chunkIndex * CHUNK_SIZE;
+                        const end = Math.min(start + CHUNK_SIZE, file.size);
+                        const chunk = file.slice(start, end);
+                        
+                        const formData = new FormData();
+                        formData.append('file', chunk);
+                        formData.append('filename', file.name);
+                        formData.append('mime_type', file.type || 'application/octet-stream');
+                        formData.append('file_size', file.size.toString());
+                        formData.append('chunk_index', chunkIndex.toString());
+                        formData.append('total_chunks', totalChunks.toString());
+                        if (file_id) formData.append('file_id', file_id);
+                        
+                        const response = await fetch(`/api/files/send-chunk/${targetPeerShortId}`, {
+                            method: 'POST',
+                            body: formData
+                        });
+                        const data = await response.json();
+                        if (data.status !== 'success') throw new Error(data.message);
+                        if (!file_id && data.file_id) file_id = data.file_id;
+                        pendingTransfers[transferLocalId].sentChunks = chunkIndex + 1;
+                        pendingTransfers[transferLocalId].complete = data.complete === true;
+                        if (currentContactShortId === pendingTransfers[transferLocalId].peerId) loadMessages(currentContactShortId);
+                    }
+                    const chatResponse = await fetch('/api/chat/send/' + targetPeerShortId, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            text: messageText || '',
+                            attachment: {
+                                filename: file.name,
+                                size: file.size,
+                                mime_type: file.type || 'application/octet-stream',
+                                data: null,
+                                file_ref: {
+                                    file_id: file_id,
+                                    total_chunks: totalChunks
+                                }
+                            }
+                        })
+                    });
+                    const chatData = await chatResponse.json();
+                    if (chatData.status !== 'success') throw new Error(chatData.message || 'Не удалось создать сообщение с файлом');
+                    delete pendingTransfers[transferLocalId];
+                    if (currentContactShortId === targetPeerShortId) loadMessages(currentContactShortId);
+                } catch (error) {
+                    pendingTransfers[transferLocalId].error = 'Ошибка: ' + error.message;
+                    if (currentContactShortId === pendingTransfers[transferLocalId].peerId) loadMessages(currentContactShortId);
+                }
+            })();
+        }
+        function clearAttachment() { document.getElementById('messageInput').value = ''; document.getElementById('messageInput').placeholder = 'Введите сообщение...'; document.getElementById('fileAttachmentInput').value = ''; pendingAttachment = null; }
+
+        function closeChat() {
+            currentContactId = currentContactShortId = currentContactName = null;
+            document.getElementById('chatHeader').style.display = 'none';
+            document.getElementById('chatInputArea').style.display = 'none';
+            document.getElementById('contactInfoPanel').style.display = 'none';
+            document.getElementById('myInfoPanel').style.display = 'block';
+            document.getElementById('chatMessages').innerHTML = '<div class="no-chat-selected">Выберите контакт из списка слева</div>';
+            document.querySelectorAll('.contact-item').forEach(function(el) { el.classList.remove('active'); });
+            lastMessageCount = 0;
+        }
+        function clearChatHistory() {
+            if (!currentContactShortId) return;
+            showConfirm('🗑️ Очистка истории', 'Удалить всю историю переписки?', function() {
+                fetch('/api/chat/clear/' + currentContactShortId, { method: 'POST' }).then(function() { loadMessages(currentContactShortId); showAlert('✅ Успешно', 'История очищена'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка очистки'); });
+            });
+        }
+        // function startCall() moved to voice-call.js
+        // function startVideoCall() moved to voice-call.js
+        function openFileTransfer() { showAlert('📁 Отправка файлов', 'Отправка файлов через кнопку "Файлы" будет доступна в следующей версии'); }
+        function startP2PTunnel() {
+            if (!currentContactShortId) return;
+            showConfirm('🔗 P2P Тоннель', 'Создать P2P тоннель с ' + currentContactName + '?', function() {
+                fetch('/api/tunnel/start/' + currentContactShortId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ type: 'generic' }) }).then(function(res) { return res.json(); }).then(function(data) {
+                    if (data.status === 'success') showAlert('✅ Успешно', 'P2P тоннель установлен');
+                    else showAlert('❌ Ошибка', data.message);
+                }).catch(function() { showAlert('❌ Ошибка', 'Ошибка создания тоннеля'); });
+            });
+        }
+        function openEditContactModal() {
+            if (!currentContactId) return;
+            document.getElementById('editContactId').value = currentContactId;
+            document.getElementById('editContactName').value = currentContactName;
+            document.getElementById('editContactShortId').value = currentContactShortId;
+            document.getElementById('editContactModal').classList.add('active');
+        }
+        function deleteContact() {
+            if (!currentContactId) return;
+            showConfirm('🗑️ Удалить контакт', 'Удалить контакт "' + currentContactName + '"?', function() {
+                fetch('/api/contacts', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: currentContactId }) }).then(function(res) {
+                    if (res.ok) { closeChat(); loadContacts(); showAlert('✅ Успешно', 'Контакт удалён'); }
+                    else showAlert('❌ Ошибка', 'Ошибка удаления');
+                }).catch(function() { showAlert('❌ Ошибка', 'Ошибка'); });
+            });
+        }
+
+        function setupEventHandlers() {
+            var addBtn = document.getElementById('addContactBtn'), addModal = document.getElementById('addContactModal'), closeModal = document.getElementById('closeModalBtn'), cancelBtn = document.getElementById('cancelBtn'), addForm = document.getElementById('addContactForm');
+            var editModal = document.getElementById('editContactModal'), closeEdit = document.getElementById('closeEditModalBtn'), cancelEdit = document.getElementById('cancelEditBtn'), editForm = document.getElementById('editContactForm'), searchInput = document.getElementById('searchInput');
+            if (addBtn) addBtn.onclick = function() { addModal.classList.add('active'); };
+            if (closeModal) closeModal.onclick = function() { addModal.classList.remove('active'); };
+            if (cancelBtn) cancelBtn.onclick = function() { addModal.classList.remove('active'); };
+            if (closeEdit) closeEdit.onclick = function() { editModal.classList.remove('active'); };
+            if (cancelEdit) cancelEdit.onclick = function() { editModal.classList.remove('active'); };
+            if (addModal) addModal.onclick = function(e) { if (e.target === addModal) addModal.classList.remove('active'); };
+            if (editModal) editModal.onclick = function(e) { if (e.target === editModal) editModal.classList.remove('active'); };
+            if (addForm) addForm.onsubmit = function(e) { e.preventDefault(); var name = document.getElementById('contactName').value, shortId = document.getElementById('contactShortId').value; fetch('/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, short_id: shortId }) }).then(function(res) { if (res.ok) { addModal.classList.remove('active'); addForm.reset(); loadContacts(); showAlert('✅ Успешно', 'Контакт добавлен'); } else showAlert('❌ Ошибка', 'Ошибка добавления'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка'); }); };
+            if (editForm) editForm.onsubmit = function(e) { e.preventDefault(); var id = document.getElementById('editContactId').value, name = document.getElementById('editContactName').value, shortId = document.getElementById('editContactShortId').value; fetch('/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id, name: name, short_id: shortId }) }).then(function(res) { if (res.ok) { editModal.classList.remove('active'); editForm.reset(); loadContacts(); if (currentContactId === id) { currentContactName = name; currentContactShortId = shortId; document.getElementById('infoContactName').textContent = name; document.getElementById('infoContactCid').textContent = shortId; document.getElementById('chatPeerName').textContent = name; } showAlert('✅ Успешно', 'Контакт обновлён'); } else showAlert('❌ Ошибка', 'Ошибка обновления'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка'); }); };
+            if (searchInput) searchInput.addEventListener('input', function(e) { var term = e.target.value.toLowerCase(); document.querySelectorAll('.contact-item').forEach(function(el) { var name = el.getAttribute('data-name')?.toLowerCase() || '', shortId = el.getAttribute('data-short-id')?.toLowerCase() || ''; el.style.display = (name.includes(term) || shortId.includes(term)) ? '' : 'none'; }); });
+            document.getElementById('callBtn').onclick = function() { if (window.voiceCallManager && currentContactShortId) window.voiceCallManager.startCall(currentContactShortId); else if (window.startCall) window.startCall(currentContactShortId); };
+            document.getElementById('videoCallBtn').onclick = function() { if (window.videoCallManager && currentContactShortId) window.videoCallManager.startVideoCall(currentContactShortId); else if (window.startVideoCall) window.startVideoCall(currentContactShortId); };
+            document.getElementById('filesBtn').onclick = openFileTransfer;
+            document.getElementById('p2pTunnelBtn').onclick = startP2PTunnel;
+            document.getElementById('editContactInfoBtn').onclick = openEditContactModal;
+            document.getElementById('deleteContactInfoBtn').onclick = deleteContact;
+            document.getElementById('shareContactBtn').onclick = function() { fetch('/api/status').then(function(res) { return res.json(); }).then(function(data) { var info = '📇 Контакта YANDI ноды:\nShort ID: ' + data.short_id + '\nРоль: ' + data.role + '\nNAT статус: ' + (data.nat_status || 'Unknown'); navigator.clipboard.writeText(info); showAlert('✅ Успешно', 'Контакт скопирован в буфер обмена!'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка копирования'); }); };
+            var nodeRunning = true;
+            document.getElementById('startStopNodeBtn').onclick = function() { var btn = document.getElementById('startStopNodeBtn'); if (nodeRunning) { btn.textContent = '⏳ Остановка...'; fetch('/api/node/stop', { method: 'POST' }).then(function() { nodeRunning = false; btn.textContent = '▶️ Запустить ноду'; btn.classList.remove('btn-danger'); btn.classList.add('btn-success'); document.getElementById('myStatusBadge').innerHTML = '🔴 Офлайн'; }); } else { btn.textContent = '⏳ Запуск...'; fetch('/api/node/start', { method: 'POST' }).then(function() { nodeRunning = true; btn.textContent = '⏹️ Остановить ноду'; btn.classList.remove('btn-success'); btn.classList.add('btn-danger'); document.getElementById('myStatusBadge').innerHTML = '🟢 Онлайн'; }); } };
+        }
+
+        function startAutoRefresh() {
+            autoRefreshInterval = setInterval(function() {
+                if (currentContactShortId) { loadMessages(currentContactShortId); updateContactStatus(currentContactShortId); }
+                loadMyInfo();
+            }, 5000);
+        }
+
+        // === Профиль ===
+        var myProfile = null, selectedAvatarFile = null;
+
+        function loadMyProfile() {
+            fetch('/api/profile/me').then(function(res) { return res.ok ? res.json() : null; }).then(function(data) {
+                if (data && data.status === 'success') {
+                    myProfile = data.profile;
+                    if (myProfile.display_name) window.myDisplayName = myProfile.display_name;
+                    var myNameEl = document.getElementById('myShortId');
+                    if (myNameEl && myProfile.display_name) myNameEl.textContent = myProfile.display_name;
+                    var myAvatar = document.getElementById('myAvatar');
+                    if (myAvatar && myProfile.avatar) myAvatar.innerHTML = '<img src="' + myProfile.avatar + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+                    else if (myAvatar) myAvatar.innerHTML = '<div class="avatar-placeholder">👤</div>';
+                }
+            }).catch(function(e) { console.error(e); });
+        }
+
+        function openEditProfileModal() {
+            var modal = document.getElementById('editProfileModal');
+            if (!modal) return;
+            document.getElementById('profileName').value = myProfile?.display_name || '';
+            var preview = document.getElementById('avatarPreview');
+            if (preview && myProfile?.avatar) preview.innerHTML = '<img src="' + myProfile.avatar + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+            else if (preview) preview.innerHTML = '<div class="avatar-placeholder" style="width: 80px; height: 80px; margin: 0 auto;">👤</div>';
+            document.getElementById('removeAvatarBtn').style.display = myProfile?.avatar ? 'inline-block' : 'none';
+            selectedAvatarFile = null;
+            document.getElementById('profileAvatarFile').value = '';
+            modal.classList.add('active');
+        }
+
+        function uploadAvatar(file) {
+            var formData = new FormData();
+            formData.append('avatar', file);
+            return fetch('/api/profile/avatar', { method: 'POST', body: formData }).then(function(res) { return res.json(); }).then(function(data) {
+                if (data.status === 'success') {
+                    myProfile.avatar = data.avatar_url;
+                    var preview = document.getElementById('avatarPreview');
+                    if (preview) preview.innerHTML = '<img src="' + data.avatar_url + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+                    document.getElementById('removeAvatarBtn').style.display = 'inline-block';
+                    showAlert('✅', 'Аватар загружен');
+                    return true;
+                } else { showAlert('❌', data.message); return false; }
+            }).catch(function() { showAlert('❌', 'Ошибка загрузки'); return false; });
+        }
+
+        function removeAvatar() {
+            fetch('/api/profile/me', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ avatar: '' }) }).then(function(res) { return res.json(); }).then(function(data) {
+                if (data.status === 'success') {
+                    myProfile.avatar = null;
+                    var preview = document.getElementById('avatarPreview');
+                    if (preview) preview.innerHTML = '<div class="avatar-placeholder" style="width: 80px; height: 80px; margin: 0 auto;">👤</div>';
+                    document.getElementById('removeAvatarBtn').style.display = 'none';
+                    document.getElementById('profileAvatarFile').value = '';
+                    selectedAvatarFile = null;
+                    showAlert('✅', 'Аватар удалён');
+                } else showAlert('❌', data.message);
+            }).catch(function() { showAlert('❌', 'Ошибка удаления'); });
+        }
+
+        function saveProfile() {
+            var display_name = document.getElementById('profileName').value.trim();
+            var payload = {};
+            if (display_name) payload.display_name = display_name;
+            var uploadPromise = selectedAvatarFile ? uploadAvatar(selectedAvatarFile) : Promise.resolve(true);
+            uploadPromise.then(function(uploaded) {
+                if (!uploaded && selectedAvatarFile) return;
+                if (Object.keys(payload).length === 0 && !selectedAvatarFile) { showAlert('⚠️', 'Ничего не изменено'); return; }
+                if (Object.keys(payload).length > 0) {
+                    fetch('/api/profile/me', { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }).then(function(res) { return res.json(); }).then(function(data) {
+                        if (data.status === 'success') {
+                            myProfile = data.profile;
+                            document.getElementById('myShortId').textContent = myProfile.display_name;
+                            showAlert('✅', 'Имя обновлено');
+                            loadContacts();
+                        } else showAlert('❌', data.message);
+                    }).catch(function() { showAlert('❌', 'Ошибка сохранения'); });
+                }
+                document.getElementById('editProfileModal').classList.remove('active');
+            });
+        }
+
+        var editProfileBtn = document.getElementById('editProfileBtn');
+        if (editProfileBtn) editProfileBtn.onclick = openEditProfileModal;
+        var closeProfileModalBtn = document.getElementById('closeProfileModalBtn');
+        if (closeProfileModalBtn) closeProfileModalBtn.onclick = function() { document.getElementById('editProfileModal').classList.remove('active'); };
+        var cancelProfileBtn = document.getElementById('cancelProfileBtn');
+        if (cancelProfileBtn) cancelProfileBtn.onclick = function() { document.getElementById('editProfileModal').classList.remove('active'); };
+        var editProfileForm = document.getElementById('editProfileForm');
+        if (editProfileForm) editProfileForm.onsubmit = function(e) { e.preventDefault(); saveProfile(); };
+        var uploadAvatarBtn = document.getElementById('uploadAvatarBtn');
+        var avatarFileInput = document.getElementById('profileAvatarFile');
+        if (uploadAvatarBtn) uploadAvatarBtn.onclick = function() { avatarFileInput.click(); };
+        if (avatarFileInput) avatarFileInput.onchange = function(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            if (file.size > 2 * 1024 * 1024) { showAlert('❌', 'Файл слишком большой! Максимум 2MB'); return; }
+            selectedAvatarFile = file;
+            var preview = document.getElementById('avatarPreview');
+            if (preview) {
+                var reader = new FileReader();
+                reader.onload = function(ev) { preview.innerHTML = '<img src="' + ev.target.result + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">'; };
+                reader.readAsDataURL(file);
+            }
+        };
+        var removeAvatarBtn = document.getElementById('removeAvatarBtn');
+        if (removeAvatarBtn) removeAvatarBtn.onclick = removeAvatar;
+    </script>
+</body>
+</html>

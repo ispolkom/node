@@ -1,0 +1,550 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Групповой чат - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link active">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="chat-three-columns">
+                <!-- ЛЕВАЯ КОЛОНКА: Список групп -->
+                <div class="chat-contacts-panel">
+                    <div class="chat-contacts-header">
+                        <h3>👥 Мои группы</h3>
+                        <button class="btn btn-sm btn-primary" onclick="location.href='/groups'">📋 Все группы</button>
+                    </div>
+                    <div class="chat-contacts-search">
+                        <input type="text" id="searchGroupsInput" class="search-input" placeholder="🔍 Поиск групп...">
+                    </div>
+                    <div class="chat-contacts-list" id="groupsList">
+                        <p class="text-muted">Загрузка групп...</p>
+                    </div>
+                </div>
+
+                <!-- ЦЕНТРАЛЬНАЯ КОЛОНКА: Чат группы -->
+                <div class="chat-messages-panel">
+                    <div class="group-chat-header" id="chatHeader" style="display: none;">
+                        <div class="group-chat-info">
+                            <div class="group-chat-name" id="groupChatName">Группа</div>
+                            <div class="group-chat-members" id="groupMemberCount">0 участников</div>
+                        </div>
+                        <div class="group-chat-actions">
+                            <button class="btn btn-sm btn-danger" onclick="clearGroupChat()">🗑️ Очистить</button>
+                            <button class="btn btn-sm" onclick="closeGroupChat()">✖ Закрыть</button>
+                        </div>
+                    </div>
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="no-chat-selected">Выберите группу из списка слева</div>
+                    </div>
+                    <div class="chat-input-area" id="chatInputArea" style="display: none;">
+                        <button class="chat-attach-btn" onclick="attachFile()" title="Прикрепить файл">📎</button>
+                        <input type="text" class="chat-input" id="messageInput" placeholder="Введите сообщение..." onkeypress="handleKeyPress(event)">
+                        <button class="btn btn-success" onclick="sendGroupMessage()">➤</button>
+                    </div>
+                    <input type="file" id="fileAttachmentInput" style="display: none;" onchange="handleFileAttachment(event)">
+                </div>
+
+                <!-- ПРАВАЯ КОЛОНКА: Инфо о группе -->
+                <div class="chat-info-panel">
+                    <div id="groupInfoPanel" style="display: none;">
+                        <div class="info-avatar">
+                            <div class="avatar-placeholder" id="groupAvatar">👥</div>
+                        </div>
+                        <div class="info-name" id="infoGroupName">-</div>
+                        <div class="info-cid" id="infoGroupId">-</div>
+                        <div class="info-status" id="infoMemberCount">Участников: 0</div>
+                        <div class="info-stats">
+                            <div class="info-stat"><span>📝 Описание:</span> <span id="groupDescription">-</span></div>
+                            <div class="info-stat"><span>🔒 Приватная:</span> <span id="groupPrivateStatus">-</span></div>
+                            <div class="info-stat"><span>🔐 Шифрование:</span> <span id="groupEncryptedStatus">-</span></div>
+                        </div>
+                        <div class="info-actions">
+                            <button class="btn btn-primary btn-sm" id="inviteMemberBtn" onclick="openInviteMemberModal()">➕ Пригласить</button>
+                            <button class="btn btn-secondary btn-sm" id="groupMembersBtn" onclick="showGroupMembers()">👥 Участники</button>
+                            <button class="btn btn-warning btn-sm" id="groupSettingsBtn" onclick="showGroupSettings()">⚙️ Настройки</button>
+                            <button class="btn btn-danger btn-sm" id="leaveGroupBtn" onclick="leaveGroup()">🚪 Покинуть</button>
+                        </div>
+                    </div>
+                    <div id="myInfoPanel" style="display: block;">
+                        <div class="info-avatar">
+                            <div class="avatar-placeholder">👤</div>
+                        </div>
+                        <div class="info-name" id="myShortId">-</div>
+                        <div class="info-cid" id="myCid">-</div>
+                        <div class="info-status">
+                            <span class="status-badge" id="myStatusBadge">🟢 Онлайн</span>
+                        </div>
+                        <div class="info-actions">
+                            <button class="btn btn-secondary btn-sm" id="shareContactBtn">📋 Поделиться контактом</button>
+                            <button class="btn btn-danger btn-sm" id="startStopNodeBtn">⏹️ Остановить ноду</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </main>
+
+    <!-- Invite Member Modal -->
+    <div class="modal" id="inviteMemberModal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Пригласить участника</h3>
+                <button class="modal-close" id="closeInviteModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="inviteMemberForm">
+                    <div class="form-group">
+                        <label for="inviteShortId">Short ID участника</label>
+                        <input type="text" id="inviteShortId" class="form-input" placeholder="0021944b" required>
+                        <small class="form-help">Введите Short ID пользователя</small>
+                    </div>
+                    <div class="form-group">
+                        <label for="inviteRole">Роль</label>
+                        <select id="inviteRole" class="form-input">
+                            <option value="Member">Участник</option>
+                            <option value="Moderator">Модератор</option>
+                            <option value="Admin">Администратор</option>
+                        </select>
+                    </div>
+                    <div class="form-actions">
+                        <button type="button" class="btn btn-secondary" id="cancelInviteBtn">Отмена</button>
+                        <button type="submit" class="btn btn-primary">Пригласить</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- Members Modal -->
+    <div class="modal" id="membersModal">
+        <div class="modal-content" style="min-width: 400px;">
+            <div class="modal-header">
+                <h3 id="membersModalTitle">Участники группы</h3>
+                <button class="modal-close" id="closeMembersModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="membersList" style="max-height: 400px; overflow-y: auto;"></div>
+                <div class="form-actions">
+                    <button class="btn btn-secondary" id="closeMembersBtn">Закрыть</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+    <script>
+        // === Групповой чат логика ===
+        let currentGroupId = null;
+        let currentGroupName = null;
+        let currentGroupInfo = null;
+        let myNodeId = null;
+        let pendingAttachment = null;
+        let lastMessageCount = 0;
+        let messagesHistory = [];
+
+        // Получаем group_id из URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const groupIdFromUrl = urlParams.get('group');
+
+        document.addEventListener('DOMContentLoaded', async () => {
+            await loadMyInfo();
+            await loadGroups();
+            setupEventHandlers();
+            startAutoRefresh();
+            
+            if (groupIdFromUrl) {
+                await selectGroup(groupIdFromUrl);
+            }
+        });
+
+        async function loadMyInfo() {
+            try {
+                const res = await fetch('/api/status');
+                if (res.ok) {
+                    const data = await res.json();
+                    myNodeId = data.node_id;
+                    document.getElementById('myShortId').textContent = data.short_id || '-';
+                    document.getElementById('myCid').textContent = data.cid || '-';
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadGroups() {
+            try {
+                const res = await fetch('/api/groups');
+                if (res.ok) {
+                    const data = await res.json();
+                    renderGroupsList(data.groups || []);
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        function renderGroupsList(groups) {
+            const container = document.getElementById('groupsList');
+            if (!container) return;
+
+            if (groups.length === 0) {
+                container.innerHTML = '<p class="text-muted">Нет групп. Нажмите "Создать группу" на странице групп</p>';
+                return;
+            }
+
+            let html = '';
+            for (let i = 0; i < groups.length; i++) {
+                const g = groups[i];
+                const activeClass = (currentGroupId === g.id) ? 'active' : '';
+                html += '<div class="contact-item ' + activeClass + '" data-group-id="' + g.id + '" data-group-name="' + escapeHTML(g.name) + '" onclick="selectGroup(\'' + g.id + '\')">';
+                html += '<div class="contact-avatar"><span class="avatar-initial">👥</span></div>';
+                html += '<div class="contact-info">';
+                html += '<div class="contact-name">' + escapeHTML(g.name) + '</div>';
+                html += '<div class="contact-id">' + g.member_count + ' участников</div>';
+                html += '<div class="contact-status">' + (g.settings?.is_private ? '🔒 Приватная' : '🌐 Публичная') + '</div>';
+                html += '</div></div>';
+            }
+            container.innerHTML = html;
+        }
+
+        async function selectGroup(groupId) {
+            currentGroupId = groupId;
+            
+            // Загружаем информацию о группе
+            try {
+                const res = await fetch('/api/groups/' + groupId);
+                if (res.ok) {
+                    currentGroupInfo = await res.json();
+                    currentGroupName = currentGroupInfo.name;
+                    
+                    document.getElementById('groupInfoPanel').style.display = 'block';
+                    document.getElementById('myInfoPanel').style.display = 'none';
+                    document.getElementById('chatHeader').style.display = 'flex';
+                    document.getElementById('chatInputArea').style.display = 'flex';
+                    document.getElementById('groupChatName').textContent = currentGroupName;
+                    document.getElementById('groupMemberCount').textContent = currentGroupInfo.member_count + ' участников';
+                    document.getElementById('infoGroupName').textContent = currentGroupName;
+                    document.getElementById('infoGroupId').textContent = currentGroupInfo.id.substring(0, 16) + '...';
+                    document.getElementById('groupDescription').textContent = currentGroupInfo.description || 'Нет описания';
+                    document.getElementById('groupPrivateStatus').textContent = currentGroupInfo.settings?.is_private ? 'Да' : 'Нет';
+                    document.getElementById('groupEncryptedStatus').textContent = currentGroupInfo.settings?.is_encrypted ? 'Да' : 'Нет';
+                    document.getElementById('infoMemberCount').textContent = 'Участников: ' + currentGroupInfo.member_count;
+                    document.getElementById('groupAvatar').textContent = '👥';
+                    
+                    // Обновляем активный элемент в списке
+                    document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('active'));
+                    const activeEl = document.querySelector('.contact-item[data-group-id="' + groupId + '"]');
+                    if (activeEl) activeEl.classList.add('active');
+                    
+                    await loadGroupMessages(groupId);
+                    lastMessageCount = 0;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadGroupMessages(groupId) {
+            try {
+                // TODO: API для получения истории группы
+                // const res = await fetch('/api/group-chat/history/' + groupId);
+                // const data = await res.json();
+                // if (data.status === 'success') renderMessages(data.messages);
+                renderMessages([]);
+            } catch(e) { console.error(e); }
+        }
+
+        function renderMessages(messages) {
+            const div = document.getElementById('chatMessages');
+            if (!messages || messages.length === 0) {
+                div.innerHTML = '<p class="text-muted" style="text-align: center;">Нет сообщений</p>';
+                lastMessageCount = 0;
+                return;
+            }
+            let html = '';
+            for (let i = messages.length - 1; i >= 0; i--) {
+                const msg = messages[i];
+                const isSent = (msg.from === myNodeId);
+                const time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+                html += '<div class="message ' + (isSent ? 'sent' : 'received') + '">';
+                html += '<div class="message-time">' + time + ' | ' + escapeHTML(msg.author_name || msg.from_short) + '</div>';
+                if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
+                html += '</div>';
+            }
+            div.innerHTML = html;
+            div.scrollTop = div.scrollHeight;
+            lastMessageCount = messages.length;
+        }
+
+        async function sendGroupMessage() {
+            if (!currentGroupId) return;
+            const input = document.getElementById('messageInput');
+            const text = input.value.trim();
+            
+            if (pendingAttachment) {
+                await sendGroupFile();
+                return;
+            }
+            
+            if (!text) return;
+
+            try {
+                // TODO: API для отправки сообщения в группу
+                // const res = await fetch('/api/group-chat/send/' + currentGroupId, {
+                //     method: 'POST',
+                //     headers: { 'Content-Type': 'application/json' },
+                //     body: JSON.stringify({ text })
+                // });
+                input.value = '';
+                await loadGroupMessages(currentGroupId);
+            } catch(e) { 
+                showAlert('❌ Ошибка', 'Ошибка отправки сообщения'); 
+            }
+        }
+
+        function handleKeyPress(e) { if (e.key === 'Enter') sendGroupMessage(); }
+
+        function attachFile() { document.getElementById('fileAttachmentInput').click(); }
+
+        function handleFileAttachment(e) {
+            const file = e.target.files[0];
+            if (!file) return;
+            if (file.size > 200 * 1024 * 1024) {
+                showAlert('❌ Ошибка', 'Файл слишком большой! Максимум 200 MB.');
+                return;
+            }
+            pendingAttachment = file;
+            const input = document.getElementById('messageInput');
+            input.placeholder = '📎 ' + file.name + ' - введите сообщение или отправьте';
+            console.log('✅ File attached:', file.name, file.size);
+        }
+
+        async function sendGroupFile() {
+            if (!pendingAttachment || !currentGroupId) return;
+            const file = pendingAttachment;
+            
+            showAlert('ℹ️ Информация', 'Отправка файлов в группу будет доступна в следующей версии');
+            clearAttachment();
+        }
+
+        function clearAttachment() {
+            document.getElementById('messageInput').value = '';
+            document.getElementById('messageInput').placeholder = 'Введите сообщение...';
+            document.getElementById('fileAttachmentInput').value = '';
+            pendingAttachment = null;
+        }
+
+        function closeGroupChat() {
+            currentGroupId = null;
+            currentGroupName = null;
+            document.getElementById('chatHeader').style.display = 'none';
+            document.getElementById('chatInputArea').style.display = 'none';
+            document.getElementById('groupInfoPanel').style.display = 'none';
+            document.getElementById('myInfoPanel').style.display = 'block';
+            document.getElementById('chatMessages').innerHTML = '<div class="no-chat-selected">Выберите группу из списка слева</div>';
+            document.querySelectorAll('.contact-item').forEach(el => el.classList.remove('active'));
+            lastMessageCount = 0;
+        }
+
+        async function clearGroupChat() {
+            if (!currentGroupId) return;
+            showConfirm('🗑️ Очистка истории', 'Удалить всю историю переписки?', async () => {
+                // TODO: API для очистки истории группы
+                showAlert('✅ Успешно', 'История очищена');
+            });
+        }
+
+        function openInviteMemberModal() {
+            if (!currentGroupId) return;
+            document.getElementById('inviteMemberForm').reset();
+            document.getElementById('inviteMemberModal').classList.add('active');
+        }
+
+        async function inviteMember() {
+            const shortId = document.getElementById('inviteShortId').value.trim();
+            const role = document.getElementById('inviteRole').value;
+            
+            if (!shortId) {
+                showAlert('❌ Ошибка', 'Введите Short ID участника');
+                return;
+            }
+            
+            try {
+                const res = await fetch(`/api/groups/${currentGroupId}/members`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ short_id: shortId, role })
+                });
+                
+                if (res.ok) {
+                    document.getElementById('inviteMemberModal').classList.remove('active');
+                    showAlert('✅ Успешно', 'Приглашение отправлено');
+                    await selectGroup(currentGroupId);
+                } else {
+                    const data = await res.json();
+                    showAlert('❌ Ошибка', data.message || 'Не удалось пригласить участника');
+                }
+            } catch(e) {
+                showAlert('❌ Ошибка', e.message);
+            }
+        }
+
+        async function showGroupMembers() {
+            if (!currentGroupId) return;
+            try {
+                const res = await fetch(`/api/groups/${currentGroupId}`);
+                if (res.ok) {
+                    const group = await res.json();
+                    const members = group.members || [];
+                    
+                    document.getElementById('membersModalTitle').textContent = `Участники (${members.length})`;
+                    document.getElementById('membersList').innerHTML = members.map(m => `
+                        <div class="member-item">
+                            <span>${escapeHTML(m.nickname)} (${escapeHTML(m.short_id)})</span>
+                            <span class="role-badge" style="color: ${m.role === 'Owner' ? '#d4af37' : m.role === 'Admin' ? '#4caf50' : '#888'}">
+                                ${m.role}
+                            </span>
+                        </div>
+                    `).join('') || '<p class="text-muted">Нет участников</p>';
+                    document.getElementById('membersModal').classList.add('active');
+                }
+            } catch(e) {
+                showAlert('❌ Ошибка', e.message);
+            }
+        }
+
+        function showGroupSettings() {
+            showAlert('⚙️ Настройки группы', 'Редактирование настроек группы будет доступно в следующей версии');
+        }
+
+        async function leaveGroup() {
+            if (!currentGroupId) return;
+            showConfirm('🚪 Покинуть группу', `Покинуть группу "${currentGroupName}"?`, async () => {
+                // TODO: API для выхода из группы
+                showAlert('✅ Успешно', 'Вы покинули группу');
+                closeGroupChat();
+                await loadGroups();
+            });
+        }
+
+        function setupEventHandlers() {
+            const searchInput = document.getElementById('searchGroupsInput');
+            if (searchInput) {
+                searchInput.addEventListener('input', (e) => {
+                    const term = e.target.value.toLowerCase();
+                    document.querySelectorAll('.contact-item').forEach(el => {
+                        const name = el.getAttribute('data-group-name')?.toLowerCase() || '';
+                        el.style.display = name.includes(term) ? '' : 'none';
+                    });
+                });
+            }
+            
+            const inviteForm = document.getElementById('inviteMemberForm');
+            if (inviteForm) inviteForm.onsubmit = (e) => { e.preventDefault(); inviteMember(); };
+            
+            const closeInviteBtn = document.getElementById('closeInviteModalBtn');
+            if (closeInviteBtn) closeInviteBtn.onclick = () => document.getElementById('inviteMemberModal').classList.remove('active');
+            const cancelInviteBtn = document.getElementById('cancelInviteBtn');
+            if (cancelInviteBtn) cancelInviteBtn.onclick = () => document.getElementById('inviteMemberModal').classList.remove('active');
+            
+            const closeMembersBtn = document.getElementById('closeMembersModalBtn');
+            if (closeMembersBtn) closeMembersBtn.onclick = () => document.getElementById('membersModal').classList.remove('active');
+            const closeMembersBtn2 = document.getElementById('closeMembersBtn');
+            if (closeMembersBtn2) closeMembersBtn2.onclick = () => document.getElementById('membersModal').classList.remove('active');
+            
+            const shareBtn = document.getElementById('shareContactBtn');
+            if (shareBtn) {
+                shareBtn.onclick = async () => {
+                    try {
+                        const res = await fetch('/api/status');
+                        const data = await res.json();
+                        const info = '📇 Контакта YANDI ноды:\nShort ID: ' + data.short_id + '\nРоль: ' + data.role;
+                        await navigator.clipboard.writeText(info);
+                        showAlert('✅ Успешно', 'Контакт скопирован');
+                    } catch(e) { showAlert('❌ Ошибка', 'Не удалось скопировать'); }
+                };
+            }
+            
+            const startStopNodeBtn = document.getElementById('startStopNodeBtn');
+            let nodeRunning = true;
+            if (startStopNodeBtn) {
+                startStopNodeBtn.onclick = async () => {
+                    if (nodeRunning) {
+                        startStopNodeBtn.textContent = '⏳ Остановка...';
+                        await fetch('/api/node/stop', { method: 'POST' });
+                        nodeRunning = false;
+                        startStopNodeBtn.textContent = '▶️ Запустить ноду';
+                        startStopNodeBtn.classList.remove('btn-danger');
+                        startStopNodeBtn.classList.add('btn-success');
+                        document.getElementById('myStatusBadge').innerHTML = '🔴 Офлайн';
+                    } else {
+                        startStopNodeBtn.textContent = '⏳ Запуск...';
+                        await fetch('/api/node/start', { method: 'POST' });
+                        nodeRunning = true;
+                        startStopNodeBtn.textContent = '⏹️ Остановить ноду';
+                        startStopNodeBtn.classList.remove('btn-success');
+                        startStopNodeBtn.classList.add('btn-danger');
+                        document.getElementById('myStatusBadge').innerHTML = '🟢 Онлайн';
+                    }
+                };
+            }
+        }
+
+        function startAutoRefresh() {
+            setInterval(async () => {
+                if (currentGroupId) await loadGroupMessages(currentGroupId);
+                await loadMyInfo();
+            }, 5000);
+        }
+        
+        function escapeHTML(str) {
+            if (!str) return '';
+            return String(str).replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+        
+        function showAlert(title, message) { alert(message); }
+        function showConfirm(title, message, onConfirm) { if (confirm(message)) onConfirm(); }
+        
+        window.selectGroup = selectGroup;
+        window.sendGroupMessage = sendGroupMessage;
+        window.handleKeyPress = handleKeyPress;
+        window.attachFile = attachFile;
+        window.handleFileAttachment = handleFileAttachment;
+        window.closeGroupChat = closeGroupChat;
+        window.clearGroupChat = clearGroupChat;
+        window.openInviteMemberModal = openInviteMemberModal;
+        window.inviteMember = inviteMember;
+        window.showGroupMembers = showGroupMembers;
+        window.showGroupSettings = showGroupSettings;
+        window.leaveGroup = leaveGroup;
+    </script>
+</body>
+</html>

@@ -1,0 +1,483 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>YANDI Control Panel</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link active">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <a href="/api/auth/logout" class="btn btn-sm btn-secondary" style="text-decoration:none;">Выйти</a>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <!-- Status Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Статус ноды</h2>
+                    <span class="status-badge status-online" id="statusBadge">🟢 Online</span>
+                </div>
+                <div class="card-body">
+                    <div class="status-grid">
+                        <div class="status-item">
+                            <span class="status-label">Short ID</span>
+                            <span class="status-value" id="statusShortId">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">CID</span>
+                            <span class="status-value" id="statusCid">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Роль</span>
+                            <span class="status-value" id="statusRole">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Тип</span>
+                            <span class="status-value" id="statusIsLocal">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Внешний IP</span>
+                            <span class="status-value" id="statusExternalIp">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Виртуальный IPv6</span>
+                            <span class="status-value" id="statusVirtualIpv6">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">IPv6 Short</span>
+                            <span class="status-value" id="statusIpv6Short">-</span>
+                        </div>
+                        <div class="status-item">
+                            <span class="status-label">Порты</span>
+                            <span class="status-value" id="statusPorts">-</span>
+                        </div>
+                    </div>
+                    <div style="margin-top: 1rem;">
+                        <button id="shareContactBtn" class="btn btn-secondary btn-sm">📋 Поделиться контактом</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Control Card -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Управление</h2>
+                </div>
+                <div class="card-body">
+                    <div class="control-panel">
+                        <button id="startStopBtn" class="btn btn-danger btn-large">⏹️ Остановить ноду</button>
+                        <button id="refreshNodesBtn" class="btn btn-primary">🔄 Обновить список нод</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Discovered Nodes -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Обнаруженные ноды</h2>
+                    <span class="badge" id="nodeCount">0</span>
+                </div>
+                <div class="card-body">
+                    <div id="nodesList" class="nodes-list">
+                        <p class="text-muted">Поиск нод в сети...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Gateway Control -->
+            <div class="card">
+                <div class="card-header">
+                    <h2 class="card-title">Gateway режим</h2>
+                </div>
+                <div class="card-body">
+                    <div class="control-panel">
+                        <button id="startGatewayBtn" class="btn btn-success">🚀 Запустить Gateway</button>
+                        <button id="stopGatewayBtn" class="btn btn-danger" style="display: none;">⏹️ Остановить Gateway</button>
+                    </div>
+                    <p class="text-muted" style="margin-top: 1rem;">
+                        Gateway режим позволяет другим нодам использовать ваше интернет-соединение
+                    </p>
+                </div>
+            </div>
+
+            <!-- Stats Cards -->
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-icon">📤</div>
+                    <div class="stat-content">
+                        <span class="stat-label">TX raw</span>
+                        <span class="stat-value" id="txSpeed">0 KB/s</span>
+                        <span class="stat-label-loss" id="lossOutgoing">Peer RX: --</span>
+                        <span class="stat-label-loss" id="peerPath0Loss">Peer Path0: --%</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">📥</div>
+                    <div class="stat-content">
+                        <span class="stat-label">RX raw</span>
+                        <span class="stat-value" id="rxSpeed">0 KB/s</span>
+                        <span class="stat-label-loss" id="lossIncoming">Path0 потери: --%</span>
+                        <span class="stat-label-loss" id="cloneHits">Clone hits: --%</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">⚡</div>
+                    <div class="stat-content">
+                        <span class="stat-label">Пинг</span>
+                        <span class="stat-value" id="pingValue">-- ms</span>
+                        <span class="stat-label-loss" id="wagonsRate">Wagons/s: --</span>
+                        <span class="stat-label-loss" id="peerCount">Peers: --</span>
+                        <span class="stat-label-loss" id="dropCrc">Drop+CRC: --%</span>
+                    </div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-icon">🚂</div>
+                    <div class="stat-content">
+                        <span class="stat-label">Транспорт</span>
+                        <span class="stat-value" id="depotUsage">Depot: --</span>
+                        <span class="stat-label-loss" id="activeTrains">Active trains: --</span>
+                        <span class="stat-label-loss" id="evictions">Evict: --</span>
+                        <span class="stat-label-loss" id="wagonHealth">Retrans: -- | RX: --</span>
+                    </div>
+                </div>
+            </div>
+            </div>
+        </div>
+    </main>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+
+    <script src="/app.js"></script>
+    <script src="/speed.js"></script>
+    <script>
+        // === Стилизованные модалки ===
+        function escapeHTML(str) {
+            if (!str) return '';
+            return str.replace(/[&<>]/g, function(m) {
+                if (m === '&') return '&amp;';
+                if (m === '<') return '&lt;';
+                if (m === '>') return '&gt;';
+                return m;
+            });
+        }
+
+        function showModal(title, message, onConfirm, onCancel, confirmText, cancelText) {
+            confirmText = confirmText || 'OK';
+            cancelText = cancelText || 'Отмена';
+            
+            const existingModal = document.querySelector('.custom-modal');
+            if (existingModal) existingModal.remove();
+            
+            const modal = document.createElement('div');
+            modal.className = 'custom-modal active';
+            modal.innerHTML = `
+                <div class="modal-content">
+                    <div class="modal-header">
+                        <h3>${escapeHTML(title)}</h3>
+                        <button class="modal-close" onclick="this.closest('.custom-modal').remove()">✖</button>
+                    </div>
+                    <div class="modal-body">
+                        <p>${escapeHTML(message)}</p>
+                        <div class="modal-actions">
+                            ${onConfirm ? `<button class="btn btn-primary" id="modalConfirmBtn">${escapeHTML(confirmText)}</button>` : ''}
+                            ${onCancel !== false ? `<button class="btn btn-secondary" id="modalCancelBtn">${escapeHTML(cancelText)}</button>` : ''}
+                        </div>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+            
+            if (onConfirm) {
+                modal.querySelector('#modalConfirmBtn')?.addEventListener('click', () => {
+                    modal.remove();
+                    onConfirm();
+                });
+            }
+            
+            const cancelBtn = modal.querySelector('#modalCancelBtn');
+            if (cancelBtn && onCancel !== false) {
+                cancelBtn.addEventListener('click', () => {
+                    modal.remove();
+                    if (onCancel) onCancel();
+                });
+            }
+            
+            modal.addEventListener('click', (e) => {
+                if (e.target === modal) modal.remove();
+            });
+        }
+
+        function showConfirm(title, message, onConfirm, onCancel) {
+            showModal(title, message, onConfirm, onCancel, 'Да', 'Нет');
+        }
+
+        function showAlert(title, message) {
+            showModal(title, message, null, false, 'OK', null);
+        }
+
+        window.originalAlert = window.alert;
+        window.originalConfirm = window.confirm;
+        
+        window.alert = function(message) {
+            console.log('📢 Overridden alert:', message);
+            showAlert('Уведомление', message);
+        };
+        
+        window.confirm = function(message) {
+            console.log('❓ Overridden confirm:', message);
+            showConfirm('Подтверждение', message, () => {}, () => {});
+            return true;
+        };
+
+        console.log('✅ Alert/Confirm overridden');
+
+        // === Основная логика ===
+        async function loadStatus() {
+            try {
+                const res = await fetch('/api/status');
+                const data = await res.json();
+                
+                document.getElementById('statusShortId').textContent = data.short_id || '-';
+                document.getElementById('statusCid').textContent = data.cid || '-';
+                document.getElementById('statusRole').textContent = data.role || '-';
+                document.getElementById('statusIsLocal').textContent = data.is_local ? 'Локальная' : 'Удалённая';
+                document.getElementById('statusExternalIp').textContent = data.external_ip || '-';
+                document.getElementById('statusVirtualIpv6').textContent = data.virtual_ipv6 || '-';
+                document.getElementById('statusIpv6Short').textContent = data.ipv6_short || '-';
+                document.getElementById('statusPorts').textContent = `D:${data.discovery_port} D:${data.data_port} W:${data.web_port}`;
+                
+                const statusBadge = document.getElementById('statusBadge');
+                const isOnline = data.status === 'online';
+                
+                if (isOnline) {
+                    statusBadge.textContent = '🟢 Online';
+                    statusBadge.classList.remove('status-offline');
+                    statusBadge.classList.add('status-online');
+                } else {
+                    statusBadge.textContent = '🔴 Offline';
+                    statusBadge.classList.remove('status-online');
+                    statusBadge.classList.add('status-offline');
+                }
+                
+                const startStopBtn = document.getElementById('startStopBtn');
+                if (startStopBtn) {
+                    if (isOnline) {
+                        startStopBtn.textContent = '⏹️ Остановить ноду';
+                        startStopBtn.classList.remove('btn-primary');
+                        startStopBtn.classList.add('btn-danger');
+                    } else {
+                        startStopBtn.textContent = '▶️ Запустить ноду';
+                        startStopBtn.classList.remove('btn-danger');
+                        startStopBtn.classList.add('btn-primary');
+                    }
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function loadNodes() {
+            try {
+                const res = await fetch('/api/nodes');
+                const data = await res.json();
+                renderNodes(data.nodes || []);
+                document.getElementById('nodeCount').textContent = data.nodes?.length || 0;
+            } catch(e) { console.error(e); }
+        }
+
+        function renderNodes(nodes) {
+            const container = document.getElementById('nodesList');
+            if (!container) return;
+            
+            if (nodes.length === 0) {
+                container.innerHTML = '<p class="text-muted">Нод не обнаружено.</p>';
+                return;
+            }
+            
+            container.innerHTML = nodes.map(node => `
+                <div class="node-item" data-short-id="${node.short_id}">
+                    <div class="node-avatar">
+                        <span class="avatar-initial">${node.short_id?.charAt(0).toUpperCase() || '?'}</span>
+                    </div>
+                    <div class="node-info">
+                        <h3 class="node-name">${escapeHTML(node.hostname || node.short_id)}</h3>
+                        <p class="node-id">${escapeHTML(node.short_id)}</p>
+                        <p class="node-role">${escapeHTML(node.role || 'P2P Peer')}</p>
+                        <span class="node-badge">${node.source === 'mdns' ? 'mDNS' : 'P2P'}</span>
+                        ${node.nat_status ? `<span class="node-badge">${node.nat_status === 'Public' ? '🌐 Public' : '🔒 ' + node.nat_status}</span>` : ''}
+                    </div>
+                    <div class="node-actions">
+                        <button class="btn btn-sm btn-primary btn-connect" data-short-id="${node.short_id}">🔗 Connect</button>
+                        <button class="btn btn-sm btn-success btn-proxy" data-short-id="${node.short_id}">🌐 Proxy</button>
+                    </div>
+                </div>
+            `).join('');
+            
+            setupNodeActions();
+        }
+
+        function setupNodeActions() {
+            document.querySelectorAll('.btn-connect').forEach(btn => {
+                btn.onclick = async (e) => {
+                    const shortId = e.target.dataset.shortId;
+                    showConfirm('🔗 Подключение', `Подключиться к ноде ${shortId}?`, async () => {
+                        try {
+                            const res = await fetch(`/api/connect/${shortId}`, { method: 'POST' });
+                            if (res.ok) {
+                                showAlert('✅ Успешно', `Подключение к ${shortId} установлено`);
+                                loadNodes();
+                            } else {
+                                showAlert('❌ Ошибка', 'Не удалось подключиться');
+                            }
+                        } catch(e) { showAlert('❌ Ошибка', e.message); }
+                    });
+                };
+            });
+            
+            document.querySelectorAll('.btn-proxy').forEach(btn => {
+                btn.onclick = async (e) => {
+                    const shortId = e.target.dataset.shortId;
+                    showConfirm('🌐 Proxy', `Запустить HTTP Proxy через ноду ${shortId}?`, async () => {
+                        try {
+                            const res = await fetch(`/api/proxy/start/${shortId}`, { method: 'POST' });
+                            const data = await res.json();
+                            if (res.ok) {
+                                showAlert('✅ Успешно', `Proxy запущен на порту ${data.local_port || 8080}`);
+                            } else {
+                                showAlert('❌ Ошибка', data.message);
+                            }
+                        } catch(e) { showAlert('❌ Ошибка', e.message); }
+                    });
+                };
+            });
+        }
+
+        function setupEventHandlers() {
+            const startStopBtn = document.getElementById('startStopBtn');
+            if (startStopBtn) {
+                startStopBtn.onclick = async () => {
+                    const isRunning = document.getElementById('statusBadge').classList.contains('status-online');
+                    if (isRunning) {
+                        showConfirm('⏹️ Остановка ноды', 'Остановить P2P ноду? Это разорвёт все соединения.', async () => {
+                            try {
+                                const res = await fetch('/api/node/stop', { method: 'POST' });
+                                if (res.ok) {
+                                    showAlert('✅ Успешно', 'Нода остановлена');
+                                    await loadStatus();
+                                } else {
+                                    showAlert('❌ Ошибка', 'Не удалось остановить ноду');
+                                }
+                            } catch(e) { showAlert('❌ Ошибка', e.message); }
+                        });
+                    } else {
+                        showConfirm('▶️ Запуск ноды', 'Запустить P2P ноду?', async () => {
+                            try {
+                                const res = await fetch('/api/node/start', { method: 'POST' });
+                                if (res.ok) {
+                                    showAlert('✅ Успешно', 'Нода запущена');
+                                    await loadStatus();
+                                } else {
+                                    showAlert('❌ Ошибка', 'Не удалось запустить ноду');
+                                }
+                            } catch(e) { showAlert('❌ Ошибка', e.message); }
+                        });
+                    }
+                };
+            }
+            
+            const refreshBtn = document.getElementById('refreshNodesBtn');
+            if (refreshBtn) refreshBtn.onclick = () => loadNodes();
+            
+            const shareBtn = document.getElementById('shareContactBtn');
+            if (shareBtn) {
+                shareBtn.onclick = async () => {
+                    try {
+                        const res = await fetch('/api/status');
+                        const data = await res.json();
+                        const info = `📇 Контакта YANDI ноды:\nShort ID: ${data.short_id}\nРоль: ${data.role}\nNAT статус: ${data.nat_status || 'Unknown'}`;
+                        await navigator.clipboard.writeText(info);
+                        showAlert('✅ Успешно', 'Контакт скопирован в буфер обмена!');
+                    } catch(e) { showAlert('❌ Ошибка', 'Не удалось скопировать контакт'); }
+                };
+            }
+            
+            const startGatewayBtn = document.getElementById('startGatewayBtn');
+            const stopGatewayBtn = document.getElementById('stopGatewayBtn');
+            
+            if (startGatewayBtn) {
+                startGatewayBtn.onclick = async () => {
+                    showConfirm('🚀 Gateway режим', 'Запустить Gateway режим? Это позволит другим нодам использовать ваше интернет-соединение.', async () => {
+                        try {
+                            const res = await fetch('/api/gateway/start', { method: 'POST' });
+                            if (res.ok) {
+                                startGatewayBtn.style.display = 'none';
+                                stopGatewayBtn.style.display = 'inline-block';
+                                showAlert('✅ Успешно', 'Gateway режим запущен');
+                            } else {
+                                showAlert('❌ Ошибка', 'Не удалось запустить Gateway');
+                            }
+                        } catch(e) { showAlert('❌ Ошибка', e.message); }
+                    });
+                };
+            }
+            
+            if (stopGatewayBtn) {
+                stopGatewayBtn.onclick = async () => {
+                    showConfirm('⏹️ Остановка Gateway', 'Остановить Gateway режим?', async () => {
+                        try {
+                            const res = await fetch('/api/gateway/stop', { method: 'POST' });
+                            if (res.ok) {
+                                stopGatewayBtn.style.display = 'none';
+                                startGatewayBtn.style.display = 'inline-block';
+                                showAlert('✅ Успешно', 'Gateway режим остановлен');
+                            } else {
+                                showAlert('❌ Ошибка', 'Не удалось остановить Gateway');
+                            }
+                        } catch(e) { showAlert('❌ Ошибка', e.message); }
+                    });
+                };
+            }
+            
+            const langToggle = document.getElementById('langToggle');
+            if (langToggle) {
+                langToggle.onclick = () => {
+                    const newLang = currentLang === 'ru' ? 'en' : 'ru';
+                    if (window.setLanguage) window.setLanguage(newLang);
+                    else location.reload();
+                };
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadStatus();
+            loadNodes();
+            setInterval(loadStatus, 5000);
+            setInterval(loadNodes, 10000);
+            setupEventHandlers();
+        });
+    </script>
+</body>
+</html>
