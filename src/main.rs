@@ -666,11 +666,14 @@ async fn main() -> anyhow::Result<()> {
         if let Some(tls_port) = yandi::mobile_tls::configured_port() {
             let socks_port = config.ports.mobile_gateway;
             let node_hex = hex::encode(identity.node_id().0);
-            tokio::spawn(async move {
+            yandi::supervisor::supervise("mobile_tls", yandi::supervisor::Policy::restart(), move || {
+        let node_hex = node_hex.clone();
+        async move {
                 if let Err(e) = yandi::mobile_tls::serve(tls_port, socks_port, node_hex).await {
                     eprintln!("[mobile-tls] {e}");
                 }
-            });
+            }
+    });
         }
         yandi::relay_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key), std::env::var("YANDI_CLIENT_ONLY").map(|v| v == "1").unwrap_or(false));
         yandi::hops_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key));
@@ -1095,7 +1098,9 @@ async fn main() -> anyhow::Result<()> {
         let transport_for_bootstrap = transport.clone();
         let external_ip_for_bootstrap = external_ip.clone();
         let bootstrap_path_for_refresh = bootstrap_path.clone();
-        tokio::spawn(async move {
+        yandi::supervisor::supervise("bootstrap_refresh", yandi::supervisor::Policy::restart(), move || {
+        let (transport_for_bootstrap, external_ip_for_bootstrap, bootstrap_path_for_refresh) = (transport_for_bootstrap.clone(), external_ip_for_bootstrap.clone(), bootstrap_path_for_refresh.clone());
+        async move {
             let mut known: std::collections::HashSet<String> = std::collections::HashSet::new();
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(6 * 3600)).await;
@@ -1105,7 +1110,8 @@ async fn main() -> anyhow::Result<()> {
                     let _ = transport_for_bootstrap.bootstrap(fresh, external_ip_for_bootstrap.clone()).await;
                 }
             }
-        });
+        }
+    });
     }
 
     match bootstrap_config {

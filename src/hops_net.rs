@@ -167,14 +167,18 @@ fn now() -> u64 {
 
 /// Включить цепочки на этом узле (один раз при запуске).
 pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
-    let (tx, mut rx) = mpsc::unbounded_channel::<Out>();
+    let (tx, rx) = mpsc::unbounded_channel::<Out>();
+    let rx = Arc::new(tokio::sync::Mutex::new(rx));
     let h = Arc::new(Hops { transport: transport.clone(), me, router: Mutex::new(Router::new(me, key)), out: tx, exit_circuits: Default::default(), clients: Default::default() });
     if cell().set(h.clone()).is_err() {
         return;
     }
     // единая очередь отправки: ячейки одной цепочки уходят в том порядке, в каком созданы
     let hh = h.clone();
-    tokio::spawn(async move {
+    crate::supervisor::supervise("hops_sender", crate::supervisor::Policy::restart(), move || {
+        let (rx, transport, hh) = (rx.clone(), transport.clone(), hh.clone());
+        async move {
+        let mut rx = rx.lock().await;
         while let Some(o) = rx.recv().await {
             if transport.send_encrypted(HashId(o.to), &o.bytes).await.is_err() && o.bytes.first() == Some(&hops::PKT_CREATE) && o.bytes.len() >= 9 {
                 let cid = u64::from_be_bytes(o.bytes[1..9].try_into().unwrap());
@@ -184,10 +188,13 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
                 }
             }
         }
+    }
     });
     // уборка: простаивающие цепочки и старые отправительские
     let hh = h.clone();
-    tokio::spawn(async move {
+    crate::supervisor::supervise("hops_cleanup", crate::supervisor::Policy::restart(), move || {
+        let hh = hh.clone();
+        async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let outs = hh.router.lock().unwrap_or_else(|e| e.into_inner()).gc(now());
@@ -200,6 +207,7 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
                 !c.dead && t.saturating_sub(c.born) < CIRCUIT_LIFE_SECS * 2
             });
         }
+    }
     });
 }
 

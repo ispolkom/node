@@ -6,6 +6,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 mode="${1:-быстро}"
 echo "== сборка =="; cargo build --offline --all-targets 2>&1 | tail -1
+echo "== запуски задач =="; scripts/check_spawn.sh
 echo "== тесты =="; cargo test --offline --no-fail-fast 2>&1 | grep -E "^test result|FAILED|panicked" | awk '/FAILED|panicked/ {print; bad=1} /^test result/ {p+=$4; f+=$6} END {print "прошло:", p, " упало:", f; exit (f>0||bad)}'
 if [ "$mode" = "полностью" ]; then
   echo "== сетевые тесты (настоящие узлы) =="

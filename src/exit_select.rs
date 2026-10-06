@@ -173,7 +173,9 @@ pub fn start_pool(transport: std::sync::Arc<crate::netlayer::transport::P2PTrans
     let pool = std::sync::Arc::new(ExitPool::default());
     pool.set_want(country.clone());
     let p = pool.clone();
-    tokio::spawn(async move {
+    crate::supervisor::supervise("exit_pool", crate::supervisor::Policy::restart(), move || {
+        let (transport, country, p) = (transport.clone(), country.clone(), p.clone());
+        async move {
         let me = transport.identity().node_id().to_hex();
         let mut told: HashSet<String> = HashSet::new();
         loop {
@@ -191,6 +193,7 @@ pub fn start_pool(transport: std::sync::Arc<crate::netlayer::transport::P2PTrans
             }
             tokio::time::sleep(std::time::Duration::from_secs(20)).await;
         }
+    }
     });
     pool
 }
@@ -259,7 +262,9 @@ pub async fn probe_country(proxy: std::net::SocketAddr, password: &str, exit_id:
 /// Фоновая проверка: каждые 15 с одному ещё не измеренному выходу задаётся вопрос «из какой ты страны». Обманувший (измеренная
 /// страна не совпала с заявленной) выпадает из очереди; не ответивший пробуется снова не раньше чем через 10 минут.
 pub fn start_verifier(pool: std::sync::Arc<ExitPool>, proxy: std::net::SocketAddr, password: String) {
-    tokio::spawn(async move {
+    crate::supervisor::supervise("exit_verifier", crate::supervisor::Policy::restart(), move || {
+        let (pool, password) = (pool.clone(), password.clone());
+        async move {
         let mut retry_after: HashMap<String, u64> = HashMap::new();
         tokio::time::sleep(std::time::Duration::from_secs(10)).await;
         loop {
@@ -278,6 +283,7 @@ pub fn start_verifier(pool: std::sync::Arc<ExitPool>, proxy: std::net::SocketAdd
             }
             tokio::time::sleep(std::time::Duration::from_secs(15)).await;
         }
+    }
     });
 }
 

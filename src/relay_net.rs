@@ -245,7 +245,9 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
 
 /// Запуск менеджера: решает, узел это или клиент; клиент держит связь с двумя ретрансляторами и объявляет запись.
 pub fn start(transport: std::sync::Arc<crate::netlayer::transport::P2PTransport>, node_id: [u8; 32], key: SigningKey, forced_client: bool) {
-    tokio::spawn(async move {
+    crate::supervisor::supervise("relay_manager", crate::supervisor::Policy::restart(), move || {
+        let (transport, key) = (transport.clone(), key.clone());
+        async move {
         let started = now();
         let my_hex = hex::encode(node_id);
         let mut last_pub = 0u64;
@@ -299,6 +301,7 @@ pub fn start(transport: std::sync::Arc<crate::netlayer::transport::P2PTransport>
             store_cell().lock().unwrap_or_else(|e| e.into_inner()).forget_expired(t);
             tokio::time::sleep(std::time::Duration::from_secs(if t.saturating_sub(started) < 600 { 30 } else { 60 })).await;
         }
+    }
     });
 }
 

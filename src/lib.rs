@@ -57,6 +57,7 @@ pub mod reachability;
 pub mod relay_net;
 pub mod mobile_tls;
 pub mod route_rules;
+pub mod supervisor;
 
 // Re-exports for convenience
 pub use core::{NodeIdentity, NetConfig, YandiConfig, PortsConfig, ClientConfig, WsConfig, init_config, get_config, update_config, set_ws_bind_override, effective_ws_bind};

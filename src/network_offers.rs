@@ -479,13 +479,16 @@ pub fn start(
     // слушатель проб: на TCP-порту основной связи (порты TCP и UDP независимы)
     let port = a.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port());
     if let Some(port) = port {
-        tokio::spawn(crate::reachability::serve(port, node_id, key.clone(), None));
+        let key = key.clone();
+        crate::supervisor::supervise("reachability_listener", crate::supervisor::Policy::restart(), move || crate::reachability::serve(port, node_id, key.clone(), None));
     }
     let a = std::sync::Arc::new(Mutex::new(a));
     let wake = std::sync::Arc::new(tokio::sync::Notify::new());
     if watch_ip {
         let (a, wake) = (a.clone(), wake.clone());
-        tokio::spawn(async move {
+        crate::supervisor::supervise("ip_watch", crate::supervisor::Policy::restart(), move || {
+        let (a, wake, on_address_change) = (a.clone(), wake.clone(), on_address_change.clone());
+        async move {
             let svc = crate::netlayer::external_ip::ExternalIpService::new();
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
@@ -505,9 +508,12 @@ pub fn start(
                     wake.notify_one();
                 }
             }
-        });
+        }
+    });
     }
-    tokio::spawn(async move {
+    crate::supervisor::supervise("offers_gossip", crate::supervisor::Policy::restart(), move || {
+        let (transport, key, a, wake) = (transport.clone(), key.clone(), a.clone(), wake.clone());
+        async move {
         let started = now_secs();
         let mut last_sign = started;
         tokio::time::sleep(std::time::Duration::from_secs(15)).await;
@@ -541,6 +547,7 @@ pub fn start(
                 _ = wake.notified() => {}
             }
         }
+    }
     });
 }
 

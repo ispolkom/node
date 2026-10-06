@@ -392,6 +392,7 @@ impl WebServer {
             .merge(crate::network_offers::router())
             .merge(crate::hops_net::router())
             .merge(crate::relay_net::router())
+            .merge(crate::supervisor::router())
             .route("/contacts", get(contacts_handler))
             .route("/gateways", get(gateways_handler))
             .route("/settings", get(settings_handler))

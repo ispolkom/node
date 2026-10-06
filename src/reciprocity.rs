@@ -103,11 +103,13 @@ pub fn flush() {
 
 /// Раз в 30 секунд сбрасывать учёт на диск (чтобы остаток после последней передачи не пропал).
 pub fn start() {
-    tokio::spawn(async {
+    crate::supervisor::supervise("reciprocity_flush", crate::supervisor::Policy::restart(), move || {
+        async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(30)).await;
             flush();
         }
+    }
     });
 }
 
