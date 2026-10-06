@@ -35,7 +35,7 @@ hkdf = "0.12"
 argon2 = "0.5"
 
 # Image processing
-image = { version = "0.25", features = ["jpeg", "png", "gif"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
 
 # QR-код для pairing flow (Hardening Step 3). Чистый Rust, без C-зависимостей.
 qrcode = { version = "0.14", default-features = false, features = ["svg"] }

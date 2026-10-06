@@ -1,10 +1,20 @@
 # Проверка зависимостей: известные уязвимости, лицензии, источники.
 [advisories]
 yanked = "deny"
+# Известные предупреждения «не поддерживается / ненадёжно» без уязвимости; каждое — осознанно, с причиной и планом.
+ignore = [
+    { id = "RUSTSEC-2026-0150", reason = "audiopus_sys (обёртка libopus) не поддерживается; замена кодека звука — в плане изоляции декодеров" },
+    { id = "RUSTSEC-2025-0141", reason = "bincode 1.x закреплён форматом пакетов на проводе; замена требует новой версии протокола" },
+    { id = "RUSTSEC-2024-0436", reason = "paste: макрос времени компиляции, приходит через зависимости" },
+    { id = "RUSTSEC-2025-0134", reason = "rustls-pemfile: только чтение собственных PEM-файлов; перейти на rustls-pki-types при ближайшей правке TLS" },
+]
+
 [licenses]
-allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "Zlib", "MPL-2.0", "OpenSSL"]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0", "Unicode-DFS-2016", "CC0-1.0", "Zlib", "MPL-2.0", "OpenSSL", "CDLA-Permissive-2.0", "WTFPL", "NCSA"]
+
 [bans]
 multiple-versions = "warn"
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
