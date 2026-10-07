@@ -540,6 +540,42 @@ async fn host_guard(req: axum::extract::Request, next: Next) -> Response {
 mod host_guard_tests {
     use super::{host_allowed, media_name_ok};
 
+    /// How many bytes a handler written like ours (`while let Ok(Some(field))`, `field.bytes()`) manages to buffer from a 3 MB upload.
+    async fn buffered_from_3mb(limit: Option<usize>) -> usize {
+        use axum::{extract::Multipart, routing::post, Router};
+        use tower::ServiceExt;
+        async fn take(mut m: Multipart) -> String {
+            let mut total = 0usize;
+            while let Ok(Some(f)) = m.next_field().await {
+                match f.bytes().await {
+                    Ok(b) => total += b.len(),
+                    Err(_) => break,
+                }
+            }
+            total.to_string()
+        }
+        let mut app = Router::new().route("/", post(take));
+        if let Some(n) = limit {
+            app = app.layer(axum::extract::DefaultBodyLimit::max(n));
+        }
+        let mut body = b"--B\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n\r\n".to_vec();
+        body.extend(std::iter::repeat(0u8).take(3 * 1024 * 1024));
+        body.extend_from_slice(b"\r\n--B--\r\n");
+        let req = axum::http::Request::builder().method("POST").uri("/").header("content-type", "multipart/form-data; boundary=B").body(axum::body::Body::from(body)).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
+        String::from_utf8_lossy(&bytes).parse().unwrap_or(0)
+    }
+
+    /// The upload handlers buffer a whole multipart field, so they rely on the framework's default body limit (2 MB), which
+    /// must refuse a 3 MB upload before the handler can buffer it. If a route ever raises the limit explicitly, this documents
+    /// that the limit is what protects memory.
+    #[tokio::test]
+    async fn the_default_body_limit_stops_a_3mb_multipart_upload_and_a_raised_limit_lets_it_through() {
+        assert_eq!(buffered_from_3mb(None).await, 0, "the default limit refuses a 3 MB upload");
+        assert_eq!(buffered_from_3mb(Some(10 * 1024 * 1024)).await, 3 * 1024 * 1024, "a raised limit lets it through");
+    }
+
     #[test]
     fn media_names_cannot_leave_the_media_directory() {
         for ok in ["ring.mp3", "sounds/ring.wav"] {
