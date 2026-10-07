@@ -112,10 +112,26 @@ fn split_seq(d: &[u8]) -> Option<(u32, Vec<u8>)> {
     (d.len() >= 4).then(|| (u32::from_be_bytes(d[..4].try_into().unwrap()), d[4..].to_vec()))
 }
 
+/// Every cell for the send queue goes through here so the queue's size is known.
+fn push_out(tx: &mpsc::UnboundedSender<Out>, o: Out) -> Result<(), ()> {
+    let n = o.bytes.len();
+    OUT_QUEUED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
+    tx.send(o).map_err(|_| {
+        OUT_QUEUED.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+    })
+}
+
 // ---------------------------------------------------------------- состояние
+
+/// Most bytes one exit stream may have waiting for its (possibly slow or silent) destination before the stream is closed.
+const STREAM_QUEUE_MAX: usize = 2 * 1024 * 1024;
+/// Bytes waiting in the shared send queue above which exits stop reading from their destinations (backpressure).
+const OUT_QUEUE_HIGH: usize = 8 * 1024 * 1024;
+static OUT_QUEUED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 struct ExitStream {
     to_target: mpsc::UnboundedSender<Option<Vec<u8>>>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
     reorder: Reorder,
 }
 
@@ -180,11 +196,12 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
         async move {
         let mut rx = rx.lock().await;
         while let Some(o) = rx.recv().await {
+            OUT_QUEUED.fetch_sub(o.bytes.len(), std::sync::atomic::Ordering::Relaxed);
             if transport.send_encrypted(HashId(o.to), &o.bytes).await.is_err() && o.bytes.first() == Some(&hops::PKT_CREATE) && o.bytes.len() >= 9 {
                 let cid = u64::from_be_bytes(o.bytes[1..9].try_into().unwrap());
                 let outs = hh.router.lock().unwrap_or_else(|e| e.into_inner()).extend_failed(o.to, cid);
                 for x in outs {
-                    let _ = hh.out.send(x);
+                    let _ = push_out(&hh.out, x);
                 }
             }
         }
@@ -199,7 +216,7 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
             tokio::time::sleep(Duration::from_secs(60)).await;
             let outs = hh.router.lock().unwrap_or_else(|e| e.into_inner()).gc(now());
             for o in outs {
-                let _ = hh.out.send(o);
+                let _ = push_out(&hh.out, o);
             }
             let t = now();
             hh.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, c| {
@@ -226,7 +243,7 @@ pub fn on_packet(sender: &[u8; 32], plain: &[u8]) {
     }
     let (outs, events) = h.router.lock().unwrap_or_else(|e| e.into_inner()).on_packet(*sender, plain, now());
     for o in outs {
-        let _ = h.out.send(o);
+        let _ = push_out(&h.out, o);
     }
     for e in events {
         h.exit_event(e);
@@ -252,6 +269,11 @@ impl Hops {
                     let mut g = self.exit_circuits.lock().unwrap_or_else(|e| e.into_inner());
                     if let Some(s) = g.get_mut(&handle).and_then(|c| c.streams.get_mut(&stream)) {
                         for d in s.reorder.push(seq, bytes) {
+                            // the destination is not keeping up: do not buffer without limit, close the stream
+                            if s.queued.fetch_add(d.len(), std::sync::atomic::Ordering::Relaxed) + d.len() > STREAM_QUEUE_MAX {
+                                let _ = s.to_target.send(None);
+                                break;
+                            }
                             let _ = s.to_target.send(Some(d));
                         }
                     }
@@ -269,7 +291,7 @@ impl Hops {
     fn reply(&self, h: Handle, cmd: u8, stream: u16, data: &[u8]) {
         let o = self.router.lock().unwrap_or_else(|e| e.into_inner()).reply(h, cmd, stream, data);
         if let Some(o) = o {
-            let _ = self.out.send(o);
+            let _ = push_out(&self.out, o);
         }
     }
 
@@ -329,16 +351,20 @@ impl Hops {
             let _ = stream_conn.set_nodelay(true);
             let (mut rd, mut wr) = stream_conn.into_split();
             let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+            let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
             {
                 let mut g = me.exit_circuits.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(c) = g.get_mut(&handle) else { return };
-                c.streams.insert(stream, ExitStream { to_target: tx, reorder: Reorder::default() });
+                c.streams.insert(stream, ExitStream { to_target: tx, queued: queued.clone(), reorder: Reorder::default() });
             }
             me.reply(handle, hops::CMD_CONNECTED, stream, &[]);
             // от отправителя к цели
             tokio::spawn(async move {
                 while let Some(Some(d)) = rx.recv().await {
-                    if wr.write_all(&d).await.is_err() {
+                    let n = d.len();
+                    let r = wr.write_all(&d).await;
+                    queued.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+                    if r.is_err() {
                         break;
                     }
                 }
@@ -348,6 +374,10 @@ impl Hops {
             let mut seq = 0u32;
             let mut buf = vec![0u8; CHUNK];
             loop {
+                // backpressure: while the shared send queue is full, stop reading from the destination
+                while OUT_QUEUED.load(std::sync::atomic::Ordering::Relaxed) > OUT_QUEUE_HIGH {
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
                 match rd.read(&mut buf).await {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
@@ -371,7 +401,7 @@ impl Hops {
             g.circuit.on_packet(from, plain)
         };
         for o in outs {
-            let _ = self.out.send(o);
+            let _ = push_out(&self.out, o);
         }
         let mut g = c.lock().unwrap_or_else(|e| e.into_inner());
         for e in events {
@@ -466,7 +496,7 @@ impl Hops {
         let (tx, rx) = oneshot::channel();
         let c = Arc::new(Mutex::new(ClientCircuit { circuit, exit, route, born: now(), next_stream: 1, streams: HashMap::new(), ready: Some(tx), dead: false }));
         self.clients.lock().unwrap_or_else(|e| e.into_inner()).insert(cid, c.clone());
-        let _ = self.out.send(first);
+        let _ = push_out(&self.out, first);
         match tokio::time::timeout(BUILD_TIMEOUT, rx).await {
             Ok(Ok(Ok(()))) => Ok(c),
             other => {
@@ -555,7 +585,7 @@ async fn open_stream(h: Arc<Hops>, circuit: Arc<Mutex<ClientCircuit>>, begin: St
         g.streams.insert(s, ClientStream { connected: Some(ctx), to_app, reorder: Reorder::default() });
         let o = g.circuit.send_exit(hops::CMD_BEGIN, s, begin.as_bytes());
         if let Some(o) = o {
-            let _ = h.out.send(o);
+            let _ = push_out(&h.out, o);
         } else {
             g.streams.remove(&s);
             return Err(END_FAILED);
@@ -602,7 +632,7 @@ impl HopWriter {
         for chunk in data.chunks(CHUNK) {
             let Some(o) = g.circuit.send_exit(hops::CMD_DATA, self.stream, &with_seq(self.seq, chunk)) else { return false };
             self.seq += 1;
-            if self.hops.out.send(o).is_err() {
+            if push_out(&self.hops.out, o).is_err() {
                 return false;
             }
         }
@@ -613,7 +643,7 @@ impl HopWriter {
         let mut g = self.circuit.lock().unwrap_or_else(|e| e.into_inner());
         g.streams.remove(&self.stream);
         if let Some(o) = g.circuit.send_exit(hops::CMD_END, self.stream, &[0]) {
-            let _ = self.hops.out.send(o);
+            let _ = push_out(&self.hops.out, o);
         }
     }
 }
