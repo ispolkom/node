@@ -321,21 +321,16 @@ fn parse_stun_response(response: &[u8]) -> Option<String> {
         // Check for XOR-MAPPED-ADDRESS (0x0020)
         if attr_type == 0x0020 && attr_len >= 8 {
             let family = response[pos + 1];
-            if family == 0x02 {
+            // an IPv6 address needs 20 bytes of attribute (reserved, family, port, 16 address bytes)
+            if family == 0x02 && attr_len >= 20 {
                 // IPv6
-                let port_xor = u16::from_be_bytes([response[pos + 2], response[pos + 3]]);
                 let addr_xor = &response[pos + 4..pos + 20];
 
-                // XOR with magic cookie
-                let magic = [0x21, 0x12, 0xa4, 0x42];
-                let mut port_bytes = [0u8; 2];
+                // RFC 5389: the 16 address bytes are XORed with the magic cookie followed by the 12-byte transaction id,
+                // i.e. with bytes 4..20 of the message header.
                 let mut addr_bytes = [0u8; 16];
-
-                for i in 0..2 {
-                    port_bytes[i] = (port_xor.to_be_bytes()[i] ^ magic[i]) as u8;
-                }
                 for i in 0..16 {
-                    addr_bytes[i] = addr_xor[i] ^ magic[i % 4];
+                    addr_bytes[i] = addr_xor[i] ^ response[4 + i];
                 }
 
                 let addr = Ipv6Addr::from(addr_bytes);
@@ -352,6 +347,33 @@ fn parse_stun_response(response: &[u8]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stun_response(attr_len: u16, address: [u8; 16], total_attr: usize) -> Vec<u8> {
+        // header: type 0x0101, length, magic cookie, transaction id
+        let txid: [u8; 12] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+        let mut r = vec![0x01, 0x01, 0, 0, 0x21, 0x12, 0xa4, 0x42];
+        r.extend_from_slice(&txid);
+        r.extend_from_slice(&[0x00, 0x20]);
+        r.extend_from_slice(&attr_len.to_be_bytes());
+        r.extend_from_slice(&[0, 0x02, 0, 0]);
+        let mut key = vec![0x21, 0x12, 0xa4, 0x42];
+        key.extend_from_slice(&txid);
+        for (i, b) in address.iter().enumerate() {
+            r.push(b ^ key[i]);
+        }
+        r.truncate(20 + 4 + total_attr);
+        r
+    }
+
+    #[test]
+    fn an_ipv6_mapped_address_is_decoded_with_the_transaction_id_and_a_short_attribute_is_refused() {
+        let addr: std::net::Ipv6Addr = "2001:db8:1234:5678:9abc:def0:1111:2222".parse().unwrap();
+        let ok = stun_response(20, addr.octets(), 20);
+        assert_eq!(parse_stun_response(&ok), Some(addr.to_string()));
+        // an attribute that says "IPv6" but carries only 8 bytes must not panic
+        let short = stun_response(8, addr.octets(), 8);
+        assert_eq!(parse_stun_response(&short), None);
+    }
 
     #[test]
     fn test_stun_discovery() {

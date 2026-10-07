@@ -9,6 +9,9 @@ use tokio::sync::{mpsc, Mutex};
 use anyhow::Result;
 use tracing::{info, error, debug};
 
+/// Most bytes of incoming tunnel data kept waiting for a reader.
+const MAX_QUEUED_TUNNEL_BYTES: usize = 1024 * 1024;
+
 /// P2P тоннель точка-точка (чистый P2P, БЕЗ выхода в интернет)
 #[derive(Clone)]
 pub struct P2PTunnel {
@@ -23,6 +26,8 @@ pub struct P2PTunnel {
     /// Канал для исходящих данных
     data_rx: Arc<Mutex<Option<mpsc::UnboundedReceiver<Vec<u8>>>>>,
     created_at: u64,
+    /// Bytes put into `data_tx` and not yet taken out (nobody has to read the queue, so it must not grow without limit)
+    queued: Arc<std::sync::atomic::AtomicUsize>,
     bytes_sent: Arc<Mutex<u64>>,
     bytes_received: Arc<Mutex<u64>>,
 }
@@ -48,6 +53,7 @@ impl P2PTunnel {
             data_tx,
             data_rx: Arc::new(Mutex::new(Some(data_rx))),
             created_at: now_ms(),
+            queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             bytes_sent: Arc::new(Mutex::new(0)),
             bytes_received: Arc::new(Mutex::new(0)),
         }
@@ -113,7 +119,11 @@ impl P2PTunnel {
         let data_len = data.len();
         debug!("📨 Received {} bytes from P2P tunnel", data_len);
 
-        // Отправить в канал для обработки (VoIP/Video/File)
+        // Отправить в канал для обработки (VoIP/Video/File) — но не больше MAX_QUEUED_TUNNEL_BYTES невостребованных байт
+        if self.queued.load(std::sync::atomic::Ordering::Relaxed) + data_len > MAX_QUEUED_TUNNEL_BYTES {
+            return Err(anyhow::anyhow!("tunnel receive queue is full"));
+        }
+        self.queued.fetch_add(data_len, std::sync::atomic::Ordering::Relaxed);
         let _ = self.data_tx.send(data);
 
         // Обновить статистику
@@ -121,6 +131,11 @@ impl P2PTunnel {
         *received += data_len as u64;
 
         Ok(())
+    }
+
+    /// A consumer reports how many bytes it has taken out of the queue.
+    pub fn data_consumed(&self, n: usize) {
+        let _ = self.queued.fetch_update(std::sync::atomic::Ordering::Relaxed, std::sync::atomic::Ordering::Relaxed, |q| Some(q.saturating_sub(n)));
     }
 
     /// Получить информацию о тоннеле

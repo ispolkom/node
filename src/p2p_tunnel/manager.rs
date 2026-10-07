@@ -10,6 +10,9 @@ use tokio::sync::{Mutex, RwLock};
 use anyhow::Result;
 use tracing::{info, error, debug, warn};
 
+/// Most P2P tunnels open at once.
+const MAX_TUNNELS: usize = 256;
+
 /// Менеджер P2P тоннелей
 #[derive(Clone)]
 pub struct P2PTunnelManager {
@@ -111,14 +114,17 @@ impl P2PTunnelManager {
 
         let tunnel_id = tunnel.id();
 
-        // Сохранить
+        // Сохранить: один тоннель на узла (новый запрос заменяет старый), всего не больше MAX_TUNNELS
         {
             let mut tunnels = self.tunnels.write().await;
-            tunnels.insert(tunnel_id, tunnel.clone());
-        }
-
-        {
             let mut peer_tunnels = self.peer_tunnels.lock().await;
+            if let Some(old) = peer_tunnels.get(&from).copied() {
+                tunnels.remove(&old);
+            }
+            if tunnels.len() >= MAX_TUNNELS {
+                return Err(anyhow::anyhow!("too many P2P tunnels"));
+            }
+            tunnels.insert(tunnel_id, tunnel.clone());
             peer_tunnels.insert(from, tunnel_id);
         }
 
@@ -133,8 +139,15 @@ impl P2PTunnelManager {
         let packet = TunnelPacket::tunnel_response(&response)?;
         let packet_bytes = packet.to_bytes();
 
-        self.transport.send_encrypted(from, &packet_bytes).await
-            .map_err(|e| anyhow::anyhow!("Failed to send tunnel accept: {}", e))?;
+        if let Err(e) = self.transport.send_encrypted(from, &packet_bytes).await {
+            // the peer never heard the accept: do not keep the tunnel
+            self.tunnels.write().await.remove(&tunnel_id);
+            let mut peer_tunnels = self.peer_tunnels.lock().await;
+            if peer_tunnels.get(&from) == Some(&tunnel_id) {
+                peer_tunnels.remove(&from);
+            }
+            return Err(anyhow::anyhow!("Failed to send tunnel accept: {}", e));
+        }
 
         info!("✅ Tunnel ACCEPTED and established with {}", hex::encode(&from.0[..8]));
 

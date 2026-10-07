@@ -285,10 +285,12 @@ pub async fn connect_to_anchor(
     let url = anchor_url
         .parse::<url::Url>()
         .with_context(|| format!("parse {}", anchor_url))?;
-    let host = url
-        .host_str()
-        .ok_or_else(|| anyhow::anyhow!("anchor URL без host"))?
-        .to_string();
+    // host_str() keeps the brackets of an IPv6 address ("[::1]"), which is neither a valid address nor a valid server name
+    let (host, server_name) = match url.host().ok_or_else(|| anyhow::anyhow!("anchor URL без host"))? {
+        url::Host::Domain(d) => (d.to_string(), rustls::pki_types::ServerName::try_from(d.to_string()).with_context(|| format!("ServerName parse {}", d))?),
+        url::Host::Ipv4(a) => (a.to_string(), rustls::pki_types::ServerName::IpAddress(std::net::IpAddr::V4(a).into())),
+        url::Host::Ipv6(a) => (a.to_string(), rustls::pki_types::ServerName::IpAddress(std::net::IpAddr::V6(a).into())),
+    };
     let port = url
         .port()
         .ok_or_else(|| anyhow::anyhow!("anchor URL без port"))?;
@@ -303,8 +305,6 @@ pub async fn connect_to_anchor(
         .await
         .map_err(|_| anyhow::anyhow!("TCP connect {}:{} timed out", host, port))?
         .with_context(|| format!("TCP connect {}:{}", host, port))?;
-    let server_name = rustls::pki_types::ServerName::try_from(host.clone())
-        .with_context(|| format!("ServerName parse {}", host))?;
     let tls_stream = tokio::time::timeout(PHASE, connector.connect(server_name, tcp))
         .await
         .map_err(|_| anyhow::anyhow!("TLS connect timed out"))?

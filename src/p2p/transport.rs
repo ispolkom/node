@@ -34,7 +34,17 @@ struct PacketCache {
     max_bytes: usize,
     /// Текущий размер в байтах
     current_bytes: usize,
+    /// Last time expired entries were swept
+    last_prune: std::time::Instant,
 }
+
+/// Limits for packets that arrive BEFORE they are authenticated: how long and how many entries are kept, how many fragments one
+/// packet may have.
+const PENDING_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_PENDING_PACKETS: usize = 20_000;
+const MAX_FRAGMENTS: u32 = 64;
+/// Largest reassembled packet (the wire format carries the payload length in 16 bits).
+const MAX_ASSEMBLED: usize = u16::MAX as usize;
 
 /// Пакет в процессе сборки
 struct PendingPacket {
@@ -57,7 +67,41 @@ impl PacketCache {
             packets: std::collections::HashMap::new(),
             max_bytes,
             current_bytes: 0,
+            last_prune: std::time::Instant::now(),
         }
+    }
+
+    /// Bytes of payload held by one pending packet.
+    fn stored(p: &PendingPacket) -> usize {
+        p.parts.values().chain(p.originals.values()).chain(p.clones.values()).map(|v| v.len()).sum()
+    }
+
+    fn drop_entry(&mut self, packet_id: u64) {
+        if let Some(p) = self.packets.remove(&packet_id) {
+            self.current_bytes = self.current_bytes.saturating_sub(Self::stored(&p));
+        }
+    }
+
+    /// Make room for `extra` more payload bytes (and one more entry): expired entries are swept once a second, and when
+    /// the cache is still full the oldest entries go. Returns false only if the cache cannot take the packet at all.
+    fn admit(&mut self, extra: usize) -> bool {
+        if self.last_prune.elapsed() >= std::time::Duration::from_secs(1) {
+            self.last_prune = std::time::Instant::now();
+            let expired: Vec<u64> = self.packets.iter().filter(|(_, p)| p.last_update.elapsed() > PENDING_TTL).map(|(id, _)| *id).collect();
+            for id in expired {
+                self.drop_entry(id);
+            }
+        }
+        let mut guard = 0;
+        while (self.packets.len() >= MAX_PENDING_PACKETS || self.current_bytes + extra > self.max_bytes) && !self.packets.is_empty() && guard < 64 {
+            let oldest = self.packets.iter().min_by_key(|(_, p)| p.last_update).map(|(id, _)| *id);
+            match oldest {
+                Some(id) => self.drop_entry(id),
+                None => break,
+            }
+            guard += 1;
+        }
+        self.packets.len() < MAX_PENDING_PACKETS && self.current_bytes + extra <= self.max_bytes
     }
 
     fn add_packet(&mut self, packet_id: u64, sender: HashId, seq_num: u32, total_parts: u32, data: Vec<u8>) -> Option<Vec<u8>> {
@@ -387,11 +431,8 @@ impl P2PTransport {
         let sealed = {
             let enc = self.p2p_encryption.lock().await;
             if enc.has_session(&peer_id) {
-                // Prefix payload with 4-byte original length (the receiver strips it after decryption).
-                let original_len = packet.payload.len() as u32;
-                let mut prefixed = Vec::with_capacity(4 + packet.payload.len());
-                prefixed.extend_from_slice(&original_len.to_be_bytes());
-                prefixed.extend_from_slice(&packet.payload);
+                // Inside the encrypted part: marker, the packet type (so it cannot be changed on the way) and the original length.
+                let prefixed = seal_prefix(packet.packet_type.to_byte(), &packet.payload);
                 Some(enc.encrypt(&peer_id, &prefixed))
             } else {
                 None
@@ -490,12 +531,21 @@ impl P2PTransport {
                         let sender = p2p_packet.sender;
                         let payload = p2p_packet.payload.clone();
 
+                        // These numbers come from an unauthenticated sender: a packet is at most MAX_FRAGMENTS parts and its part
+                        // number must be inside it (otherwise the completeness count and the assembly loop can be steered by the sender).
+                        if total_parts > MAX_FRAGMENTS || (total_parts > 0 && seq_num >= total_parts) {
+                            continue;
+                        }
+
                         // Обычные одиночные пакеты не требуют сборки по частям.
                         // Здесь нужна только дедупликация dual-path, чтобы Path1 не вызывал
                         // повторную доставку того же сообщения.
                         if total_parts == 0 {
                             let is_new = {
                                 let mut cache = self.packet_cache.lock().await;
+                                if !cache.packets.contains_key(&packet_id) {
+                                    let _ = cache.admit(0); // makes room (expired / oldest entries go); single packets store no payload
+                                }
                                 use std::collections::hash_map::Entry;
 
                                 match cache.packets.entry(packet_id) {
@@ -504,9 +554,9 @@ impl P2PTransport {
                                         let already_received = pending.received.contains(&0);
 
                                         if p2p_packet.is_clone {
-                                            pending.clones.insert(0, payload.clone());
+                                            pending.clones.insert(0, Vec::new());
                                         } else {
-                                            pending.originals.insert(0, payload.clone());
+                                            pending.originals.insert(0, Vec::new());
                                         }
 
                                         pending.received.insert(0);
@@ -525,9 +575,9 @@ impl P2PTransport {
                                         };
 
                                         if p2p_packet.is_clone {
-                                            pending.clones.insert(0, payload.clone());
+                                            pending.clones.insert(0, Vec::new());
                                         } else {
-                                            pending.originals.insert(0, payload.clone());
+                                            pending.originals.insert(0, Vec::new());
                                         }
                                         pending.received.insert(0);
                                         entry.insert(pending);
@@ -562,9 +612,15 @@ impl P2PTransport {
 
                             let mut cache = self.packet_cache.lock().await;
 
+                            // an unauthenticated fragment is kept only while the cache has room for it
+                            if !cache.admit(payload.len()) {
+                                continue;
+                            }
+                            let bytes_before = cache.packets.get(&packet_id).map(PacketCache::stored).unwrap_or(0);
+
                             use std::collections::hash_map::Entry;
 
-                            match cache.packets.entry(packet_id) {
+                            let outcome = match cache.packets.entry(packet_id) {
 
                                 Entry::Occupied(mut entry) => {
 
@@ -636,8 +692,11 @@ impl P2PTransport {
 
                                 }
 
-                            }
-
+                            };
+                            // account for what this fragment added (a repeated part replaces the old bytes)
+                            let bytes_after = cache.packets.get(&packet_id).map(PacketCache::stored).unwrap_or(0);
+                            cache.current_bytes = (cache.current_bytes + bytes_after).saturating_sub(bytes_before);
+                            outcome
                         };
 
 
@@ -722,6 +781,11 @@ impl P2PTransport {
 
 
 
+                            if complete_data.len() > MAX_ASSEMBLED {
+                                // cannot be a real packet (the wire format holds 16-bit payload lengths): drop it instead of panicking later
+                                self.packet_cache.lock().await.drop_entry(packet_id);
+                                continue;
+                            }
                             if !complete_data.is_empty() {
 
                                 self.stats_recv_packets.fetch_add(1, Ordering::Relaxed);
@@ -766,7 +830,7 @@ impl P2PTransport {
 
                                 let mut cache = self.packet_cache.lock().await;
 
-                                cache.packets.remove(&packet_id);
+                                cache.drop_entry(packet_id);
 
                             }
 
@@ -1077,17 +1141,12 @@ impl P2PTransport {
                             hex::encode(&sender_id.0[..8])
                         ));
                     }
-                    // Strip the 4-byte length prefix and trailing padding
-                    if decrypted_padded.len() < 4 {
-                        return Err("[P2P] ❌ Decrypted payload too short".to_string());
+                    // Check the type carried inside the encryption, strip the prefix and the trailing padding
+                    let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                    match open_prefix(p2p_packet.packet_type.to_byte(), &decrypted_padded, now_s) {
+                        Ok(payload) => p2p_packet.payload = payload,
+                        Err(why) => return Err(format!("[P2P] ❌ {} (from {})", why, from)),
                     }
-                    let original_len = u32::from_be_bytes(
-                        decrypted_padded[..4].try_into().unwrap()
-                    ) as usize;
-                    if 4 + original_len > decrypted_padded.len() {
-                        return Err("[P2P] ❌ Length prefix exceeds decrypted data".to_string());
-                    }
-                    p2p_packet.payload = decrypted_padded[4..4 + original_len].to_vec();
                 }
                 Err(e) => {
                     return Err(format!("[P2P] ❌ Decryption failed from {}: {}", from, e));
@@ -1240,5 +1299,121 @@ impl P2PTransport {
             .map_err(|e| format!("Failed to send: {}", e))?;
         println!("[P2P] ✅ HELLO_REQ sent to {} (PFS ephemeral key)", addr);
         Ok(())
+    }
+}
+
+/// First byte of the plaintext of a packet whose type is authenticated (a legacy plaintext starts with the high byte of a
+/// 4-byte length, which is 0x00 for any real payload).
+const TYPED_MARKER: u8 = 0xA7;
+
+/// `[marker][type][len:4][payload]` — the type travels INSIDE the encryption, so a header byte changed on the way is noticed.
+fn seal_prefix(packet_type: u8, payload: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(6 + payload.len());
+    out.push(TYPED_MARKER);
+    out.push(packet_type);
+    out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    out.extend_from_slice(payload);
+    out
+}
+
+/// Reverse of `seal_prefix` for the decrypted (padded) bytes. `header_type` is the type written in the unprotected header: it
+/// must equal the one inside. The old format (no marker, no type) is accepted only before the sunset date.
+fn open_prefix(header_type: u8, decrypted_padded: &[u8], now: u64) -> Result<Vec<u8>, &'static str> {
+    let (len_at, typed) = if decrypted_padded.first() == Some(&TYPED_MARKER) {
+        if decrypted_padded.len() < 6 {
+            return Err("Decrypted payload too short");
+        }
+        if decrypted_padded[1] != header_type {
+            return Err("packet type does not match the authenticated type");
+        }
+        (2usize, true)
+    } else {
+        if now >= crate::util::types::LEGACY_ID_SUNSET {
+            return Err("packet without an authenticated type refused");
+        }
+        (0usize, false)
+    };
+    let start = len_at + 4;
+    if decrypted_padded.len() < start {
+        return Err("Decrypted payload too short");
+    }
+    let original_len = u32::from_be_bytes(decrypted_padded[len_at..start].try_into().map_err(|_| "bad length")?) as usize;
+    if start.checked_add(original_len).map_or(true, |end| end > decrypted_padded.len()) {
+        return Err("Length prefix exceeds decrypted data");
+    }
+    let _ = typed;
+    Ok(decrypted_padded[start..start + original_len].to_vec())
+}
+
+#[cfg(test)]
+mod pending_packet_tests {
+    use super::*;
+
+    fn pending(bytes: usize, age: std::time::Duration) -> PendingPacket {
+        let mut originals = std::collections::HashMap::new();
+        originals.insert(0u32, vec![0u8; bytes]);
+        PendingPacket {
+            sender: HashId([1; 32]),
+            total_parts: 2,
+            parts: std::collections::HashMap::new(),
+            last_update: std::time::Instant::now() - age,
+            originals,
+            clones: std::collections::HashMap::new(),
+            received: std::collections::HashSet::new(),
+        }
+    }
+
+    fn put(c: &mut PacketCache, id: u64, bytes: usize, age: std::time::Duration) {
+        c.current_bytes += bytes;
+        c.packets.insert(id, pending(bytes, age));
+    }
+
+    #[test]
+    fn the_cache_of_unauthenticated_packets_stays_within_its_byte_and_entry_limits() {
+        let mut c = PacketCache::new(10_000);
+        for id in 0..50u64 {
+            // every new packet first asks for room; oldest entries make way when the byte limit is reached
+            assert!(c.admit(1_000));
+            put(&mut c, id, 1_000, std::time::Duration::from_secs(id));
+        }
+        assert!(c.current_bytes <= 10_000, "{}", c.current_bytes);
+        assert!(c.packets.len() <= 10);
+        // a packet bigger than the whole cache is never admitted
+        assert!(!c.admit(20_000));
+    }
+
+    #[test]
+    fn old_entries_expire_and_their_bytes_are_returned() {
+        let mut c = PacketCache::new(1_000_000);
+        put(&mut c, 1, 500, PENDING_TTL + std::time::Duration::from_secs(5));
+        put(&mut c, 2, 700, std::time::Duration::from_secs(1));
+        c.last_prune = std::time::Instant::now() - std::time::Duration::from_secs(5);
+        assert!(c.admit(0));
+        assert!(!c.packets.contains_key(&1));
+        assert!(c.packets.contains_key(&2));
+        assert_eq!(c.current_bytes, 700);
+    }
+
+    #[test]
+    fn the_packet_type_is_carried_inside_the_encryption_and_a_changed_header_type_is_refused() {
+        let sealed = seal_prefix(0xB0, b"call me");
+        assert_eq!(open_prefix(0xB0, &sealed, 1).unwrap(), b"call me".to_vec());
+        // an on-path attacker flips the unprotected type byte of a valid packet: the inner type no longer matches
+        assert!(open_prefix(0xB1, &sealed, 1).is_err());
+        // padding after the payload is ignored
+        let mut padded = sealed.clone();
+        padded.extend_from_slice(&[0u8; 40]);
+        assert_eq!(open_prefix(0xB0, &padded, 1).unwrap(), b"call me".to_vec());
+        // a truncated or lying length is refused, not panicked on
+        assert!(open_prefix(0xB0, &[TYPED_MARKER, 0xB0, 0, 0, 0xFF, 0xFF, 1], 1).is_err());
+        assert!(open_prefix(0xB0, &[TYPED_MARKER], 1).is_err());
+    }
+
+    #[test]
+    fn old_untyped_packets_are_accepted_only_before_the_sunset() {
+        let mut legacy = (5u32).to_be_bytes().to_vec();
+        legacy.extend_from_slice(b"hello");
+        assert_eq!(open_prefix(0xA0, &legacy, 1).unwrap(), b"hello".to_vec());
+        assert!(open_prefix(0xA0, &legacy, crate::util::types::LEGACY_ID_SUNSET).is_err());
     }
 }

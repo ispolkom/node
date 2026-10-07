@@ -17,6 +17,9 @@ pub const YANDI_SERVICE_TYPE: &str = "_yandi._tcp.local.";
 /// mDNS service type for HTTP admin interface
 pub const YANDI_ADMIN_TYPE: &str = "_yandi-admin._tcp.local.";
 
+/// Most nodes remembered from local-network announcements.
+const MAX_DISCOVERED: usize = 512;
+
 /// Information about a discovered YANDI node
 #[derive(Debug, Clone)]
 pub struct DiscoveredNode {
@@ -228,15 +231,18 @@ impl MdnsBrowser {
                     if let Some(si) = node_info {
                         info!("✅ mDNS: Found node {} ({})", si.short_id, si.role);
                         let mut map = discovered.lock().await;
-                        map.insert(si.short_id.clone(), si);
+                        // anyone on the local network can announce names: the table has a fixed size
+                        if map.len() < MAX_DISCOVERED || map.contains_key(&si.short_id) {
+                            map.insert(si.short_id.clone(), si);
+                        }
                     }
                 }
                 ServiceEvent::ServiceRemoved(_type, full_name) => {
                     debug!("🔍 mDNS: Service removed: {}", full_name);
                     // Extract short ID from full name
-                    let short_id = full_name.split('.').next().unwrap_or("");
+                    let short_id = Self::key_of(&full_name);
                     let mut map = discovered.lock().await;
-                    map.remove(short_id);
+                    map.remove(&short_id);
                 }
                 ServiceEvent::ServiceFound(_type, full_name) => {
                     debug!("🔍 mDNS: Service found: {}", full_name);
@@ -246,10 +252,17 @@ impl MdnsBrowser {
         }
     }
 
+    /// The table key for a host or service name: its first label ("abc.local." and "abc._yandi._udp.local." both give "abc"),
+    /// so that adding and removing use the same key.
+    fn key_of(name: &str) -> String {
+        name.trim_end_matches('.').split('.').next().unwrap_or("").chars().take(64).collect()
+    }
+
     /// Parse service info from mDNS response
     fn parse_service_info(info: &ServiceInfo) -> Option<DiscoveredNode> {
         let hostname = info.get_hostname();
-        let short_id = hostname.trim_end_matches(".local");
+        let short_id = Self::key_of(hostname);
+        let short_id = short_id.as_str();
 
         let admin_port = info.get_port();
 
@@ -389,5 +402,18 @@ impl MdnsService {
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod key_tests {
+    use super::*;
+
+    #[test]
+    fn a_host_name_and_its_service_name_give_the_same_table_key() {
+        assert_eq!(MdnsBrowser::key_of("abc.local."), "abc");
+        assert_eq!(MdnsBrowser::key_of("abc._yandi._udp.local."), "abc");
+        assert_eq!(MdnsBrowser::key_of("abc"), "abc");
+        assert_eq!(MdnsBrowser::key_of(&"x".repeat(200)).len(), 64);
     }
 }

@@ -79,9 +79,15 @@ impl StreamRegistry {
 
     /// Generate new stream ID
     pub fn next_stream_id(&mut self) -> u32 {
-        let id = self.next_stream_id;
-        self.next_stream_id = id.wrapping_add(1);
-        id
+        // skip ids that are taken (a peer may have opened an incoming stream under the number we would pick next)
+        for _ in 0..=u32::MAX.min(1 << 20) {
+            let id = self.next_stream_id;
+            self.next_stream_id = id.wrapping_add(1);
+            if !self.streams.contains_key(&id) {
+                return id;
+            }
+        }
+        self.next_stream_id
     }
 
     /// Create new stream
@@ -92,7 +98,7 @@ impl StreamRegistry {
         }
 
         // Check per-peer stream limit
-        let peer_count = self.peer_streams.entry(peer_id).or_default().len();
+        let peer_count = self.peer_streams.get(&peer_id).map_or(0, |v| v.len());
         if peer_count >= self.limits.max_streams_per_peer {
             return Err(format!("Max streams per peer reached: {}", peer_count));
         }
@@ -122,7 +128,7 @@ impl StreamRegistry {
         }
 
         // Check per-peer stream limit
-        let peer_count = self.peer_streams.entry(peer_id).or_default().len();
+        let peer_count = self.peer_streams.get(&peer_id).map_or(0, |v| v.len());
         if peer_count >= self.limits.max_streams_per_peer {
             return Err(format!("Max streams per peer reached: {}", peer_count));
         }
@@ -151,8 +157,17 @@ impl StreamRegistry {
     pub fn remove_stream(&mut self, stream_id: u32) -> Option<ReliableStream> {
         if let Some(stream) = self.streams.remove(&stream_id) {
             // Remove from peer_streams
-            if let Some(streams) = self.peer_streams.get_mut(&stream.peer_id) {
-                streams.retain(|id| *id != stream_id);
+            let now_empty = match self.peer_streams.get_mut(&stream.peer_id) {
+                Some(streams) => {
+                    streams.retain(|id| *id != stream_id);
+                    streams.is_empty()
+                }
+                None => false,
+            };
+            if now_empty {
+                // no stream left: no per-peer bookkeeping either (identities are free, so this must not pile up)
+                self.peer_streams.remove(&stream.peer_id);
+                self.peer_buffered_bytes.remove(&stream.peer_id);
             }
 
             println!("[stream-registry] Removed stream {} for peer {}",
@@ -251,3 +266,23 @@ pub struct StreamRegistryStats {
 
 /// Shared stream registry
 pub type SharedStreamRegistry = Arc<Mutex<StreamRegistry>>;
+
+#[cfg(test)]
+mod namespace_tests {
+    use super::*;
+
+    #[test]
+    fn a_local_stream_never_takes_the_number_of_an_incoming_one_and_bookkeeping_goes_with_the_last_stream() {
+        let mut r = StreamRegistry::new();
+        let (a, b) = (HashId([1; 32]), HashId([2; 32]));
+        // a peer opens incoming stream 1; our own allocator would pick 1 next
+        r.create_stream_with_id(a, 1).unwrap();
+        let ours = r.create_stream(b).unwrap();
+        assert_ne!(ours, 1, "the incoming stream must not be replaced");
+        assert_eq!(r.get_stream(1).unwrap().peer_id, a);
+        // removing the last stream of a peer removes its bookkeeping entry
+        r.remove_stream(1);
+        assert!(r.get_peer_streams(&a).is_empty());
+        assert!(!r.peer_streams.contains_key(&a));
+    }
+}

@@ -55,6 +55,14 @@ impl TlsIdentity {
             return load_pems(&cert_pem, &key_pem);
         }
 
+        // Only one thread creates the pair: simultaneous first connections must not each write their own certificate and key
+        // (a certificate of one run with the key of another would break every later start).
+        static CREATE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = CREATE.lock().unwrap_or_else(|e| e.into_inner());
+        if cert_pem.exists() && key_pem.exists() {
+            return load_pems(&cert_pem, &key_pem);
+        }
+
         // Генерим новый self-signed cert.
         let (cert_pem_str, key_pem_str) = generate_self_signed(node_id_hex)?;
         fs::write(&cert_pem, &cert_pem_str)
@@ -226,32 +234,28 @@ impl rustls::client::danger::ServerCertVerifier for PinnedFingerprintVerifier {
         }
     }
 
+    // The pin only says "this is the certificate we expect"; the handshake signature proves that the server holds the matching
+    // PRIVATE key. Without checking it, anyone could replay the (public) certificate and complete the handshake with their own key.
     fn verify_tls12_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &rustls::crypto::ring::default_provider().signature_verification_algorithms)
     }
 
     fn verify_tls13_signature(
         &self,
-        _message: &[u8],
-        _cert: &CertificateDer<'_>,
-        _dss: &rustls::DigitallySignedStruct,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
     ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
-        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &rustls::crypto::ring::default_provider().signature_verification_algorithms)
     }
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
-        vec![
-            rustls::SignatureScheme::ECDSA_NISTP256_SHA256,
-            rustls::SignatureScheme::ECDSA_NISTP384_SHA384,
-            rustls::SignatureScheme::ED25519,
-            rustls::SignatureScheme::RSA_PSS_SHA256,
-            rustls::SignatureScheme::RSA_PKCS1_SHA256,
-        ]
+        rustls::crypto::ring::default_provider().signature_verification_algorithms.supported_schemes()
     }
 }
 
@@ -259,6 +263,60 @@ impl rustls::client::danger::ServerCertVerifier for PinnedFingerprintVerifier {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn many_threads_asking_at_once_get_the_same_certificate_and_a_matching_key() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let p = path.clone();
+                std::thread::spawn(move || TlsIdentity::load_or_generate_in(&p, "racecafe00").map(|i| i.fingerprint_hex))
+            })
+            .collect();
+        let prints: Vec<String> = handles.into_iter().map(|h| h.join().unwrap().expect("every caller gets a usable identity")).collect();
+        assert!(prints.windows(2).all(|w| w[0] == w[1]), "all callers see one certificate");
+        // and the stored pair works as a server configuration
+        let id = TlsIdentity::load_or_generate_in(&path, "racecafe00").unwrap();
+        assert!(build_server_config(&id).is_ok());
+    }
+
+    /// A pinned certificate is public: someone who replays it must still prove they hold its private key.
+    /// The rogue server below presents the pinned certificate but signs the handshake with a different key.
+    #[tokio::test]
+    async fn a_server_that_replays_the_pinned_certificate_without_its_key_is_refused() {
+        use rustls::server::{ClientHello, ResolvesServerCert};
+        use rustls::sign::CertifiedKey;
+        ensure_crypto_provider();
+        let (da, db) = (tempdir().unwrap(), tempdir().unwrap());
+        let real = TlsIdentity::load_or_generate_in(da.path(), "aaaa000000").unwrap();
+        let rogue_key = TlsIdentity::load_or_generate_in(db.path(), "bbbb000000").unwrap();
+        let signing = rustls::crypto::ring::sign::any_supported_type(&rogue_key.private_key.clone_key()).unwrap();
+
+        #[derive(Debug)]
+        struct Replay(Arc<CertifiedKey>);
+        impl ResolvesServerCert for Replay {
+            fn resolve(&self, _: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+                Some(self.0.clone())
+            }
+        }
+        let certified = Arc::new(CertifiedKey::new(real.cert_chain.clone(), signing));
+        let cfg = rustls::ServerConfig::builder().with_no_client_auth().with_cert_resolver(Arc::new(Replay(certified)));
+        let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(cfg));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::task::spawn(async move {
+            if let Ok((tcp, _)) = listener.accept().await {
+                let _ = acceptor.accept(tcp).await;
+            }
+        });
+
+        let client = tokio_rustls::TlsConnector::from(build_client_config_pinned(&real.fingerprint_hex).unwrap());
+        let tcp = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        assert!(client.connect(name, tcp).await.is_err(), "the replayed certificate must not be enough");
+    }
+
 
     #[test]
     fn generate_then_load_roundtrip() {
