@@ -84,6 +84,9 @@ pub struct SessionToken {
     /// backward-compat'a со старыми (Iter 4) токенами — там этого поля не было.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_key_hex: Option<String>,
+    /// Node id this token was first resumed under (remembered at the first resume): later resumes must claim the same id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node_id_hex: Option<String>,
 }
 
 impl SessionToken {
@@ -102,6 +105,7 @@ impl SessionToken {
             resume_secret_hex: hex::encode(secret),
             expires_at: now_secs().saturating_add(ttl_secs),
             session_key_hex: None,
+            node_id_hex: None,
         }
     }
 
@@ -299,6 +303,7 @@ pub fn decode_session_issue(data: &[u8]) -> Result<(SessionToken, [u8; 32])> {
         resume_secret_hex: hex::encode(resume_secret),
         expires_at,
         session_key_hex: Some(hex::encode(session_key)),
+        node_id_hex: None,
     };
     Ok((tok, session_key))
 }

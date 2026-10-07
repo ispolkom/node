@@ -4712,7 +4712,20 @@ async fn api_profile_avatar(
             "message": "No file uploaded"
         }));
     }
-    
+    if file_data.len() > 4 * 1024 * 1024 {
+        return Json(serde_json::json!({"status": "error", "message": "Avatar is larger than 4 MB"}));
+    }
+    // the type comes from the file itself, not from what the browser claims
+    file_ext = if file_data.starts_with(&[0x89, b'P', b'N', b'G']) {
+        "png"
+    } else if file_data.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "jpg"
+    } else if file_data.starts_with(b"GIF8") {
+        "gif"
+    } else {
+        return Json(serde_json::json!({"status": "error", "message": "Avatar must be a PNG, JPEG or GIF image"}));
+    }.to_string();
+
     // Save file
     let avatar_path = avatar_dir.join(format!("{}.{}", short_id, file_ext));
     if let Err(e) = tokio::fs::write(&avatar_path, &file_data).await {
@@ -5193,7 +5206,9 @@ async fn pair_issue_handler(
     let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
     let origin = headers.get("origin").and_then(|v| v.to_str().ok()).unwrap_or("");
     if !origin.is_empty() {
-        let ok = host.is_empty() || origin.ends_with(host) || origin.contains("localhost") || origin.contains("127.0.0.1");
+        // the Origin's host must be one of this computer's names (a name that merely CONTAINS "localhost" is not)
+        let origin_host = origin.split_once("://").map(|(_, rest)| rest.split('/').next().unwrap_or("")).unwrap_or("");
+        let ok = host_allowed(origin_host);
         if !ok {
             return (StatusCode::FORBIDDEN, Json(PairIssueResponse {
                 status: "error".into(),
@@ -5213,6 +5228,16 @@ async fn pair_issue_handler(
             })).into_response();
         }
     };
+
+    // the key is stored and later used to look the client up: exactly 32 bytes of hex, nothing else
+    if req.client_pubkey_hex.len() != 64 || !req.client_pubkey_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return (StatusCode::BAD_REQUEST, Json(PairIssueResponse {
+            status: "error".into(),
+            session_id: None, resume_secret_hex: None, expires_at: None, session_key_hex: None,
+            message: Some("client_pubkey_hex must be 64 hex characters".into()),
+        })).into_response();
+    }
+    let req = PairIssueRequest { client_pubkey_hex: req.client_pubkey_hex.to_ascii_lowercase(), ..req };
 
     let ttl = req.ttl_secs.unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
 

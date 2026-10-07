@@ -960,6 +960,7 @@ impl P2PTransport {
                                         };
                                         if verify_resume_mac(&secret, session_id, &addr, &mac)
                                             && Self::resume_node_matches(pk, &embedded_node_id)
+                                            && tok.node_id_hex.as_deref().map_or(true, |h| h == hex::encode(embedded_node_id.0))
                                         {
                                             status = ResumeStatus::Ok;
                                             hit_pk = Some(pk.clone());
@@ -987,6 +988,9 @@ impl P2PTransport {
                                 let path = crate::netlayer::pairing::default_paired_clients_path();
                                 let mut store = transport_for_pump.paired_clients.lock().await;
                                 store.refresh(&pk, DEFAULT_SESSION_TTL_SECS);
+                                if let Some(t) = store.clients.get_mut(&pk) {
+                                    t.node_id_hex.get_or_insert_with(|| hex::encode(embedded_node_id.0));
+                                }
                                 if let Err(e) = store.save(&path) {
                                     eprintln!("[ws-server] persist paired_clients: {}", e);
                                 }
@@ -1961,14 +1965,16 @@ impl P2PTransport {
         Ok(hello)
     }
 
-    /// RESUME binding: the node id claimed in a plaintext RESUME must be the one derived
-    /// from the public key the token was issued to (store key = client pubkey hex).
+    /// RESUME binding: the node id claimed in a plaintext RESUME must be acceptable for the Ed25519 key the token was issued to
+    /// (store key = client signing key, hex): a tagged id has to be derived from that key; an old random id is accepted
+    /// only before the sunset (and is then remembered in the token, see `SessionToken::node_id_hex`).
     fn resume_node_matches(client_pubkey_hex: &str, claimed: &HashId) -> bool {
         match hex::decode(client_pubkey_hex) {
             Ok(b) if b.len() == 32 => {
                 let mut k = [0u8; 32];
                 k.copy_from_slice(&b);
-                crate::util::types::NodeName::from_public_key(&k).0 == claimed.0
+                let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+                crate::util::types::id_acceptable(&claimed.0, &k, now_s)
             }
             _ => false,
         }
@@ -6300,10 +6306,12 @@ mod identity_pin_tests {
     #[test]
     fn resume_is_bound_to_the_node_id_of_the_paired_key() {
         let pk = [7u8; 32];
-        let own = HashId(crate::util::types::NodeName::from_public_key(&pk).0);
-        let other = HashId([9u8; 32]);
+        let own = HashId(crate::util::types::derive_node_id(&pk));
+        let other_bound = HashId(crate::util::types::derive_node_id(&[8u8; 32]));
+        let legacy = HashId([9u8; 32]);
         assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &own));
-        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other));
+        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other_bound), "a bound id of another key is refused");
+        assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &legacy), "an old random id is still accepted before the sunset");
         assert!(!P2PTransport::resume_node_matches("zz", &own));
     }
 
