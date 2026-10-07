@@ -88,11 +88,44 @@ struct Inner {
     conns: Vec<Arc<Conn>>,
 }
 
+const MAX_HANDSHAKES: usize = 64;
+const MAX_HANDSHAKES_PER_IP: usize = 4;
+
+/// Slot held while a TLS handshake is in progress, so slow handshakes cannot pile up before the connection limits apply.
+struct HandshakeSlot {
+    map: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>,
+    ip: IpAddr,
+}
+
+impl HandshakeSlot {
+    fn take(map: &Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>, ip: IpAddr) -> Option<Self> {
+        let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
+        if m.values().sum::<usize>() >= MAX_HANDSHAKES || m.get(&ip).copied().unwrap_or(0) >= MAX_HANDSHAKES_PER_IP {
+            return None;
+        }
+        *m.entry(ip).or_insert(0) += 1;
+        Some(Self { map: map.clone(), ip: ip })
+    }
+}
+
+impl Drop for HandshakeSlot {
+    fn drop(&mut self) {
+        let mut m = self.map.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = m.get_mut(&self.ip) {
+            *n -= 1;
+            if *n == 0 {
+                m.remove(&self.ip);
+            }
+        }
+    }
+}
+
 pub struct Carrier {
     inner: Mutex<Inner>,
     mode: Mode,
     node_hex: String,
     next_id: AtomicU64,
+    handshakes: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>,
 }
 
 fn cell() -> &'static OnceLock<Arc<Carrier>> {
@@ -106,7 +139,7 @@ pub fn global() -> Option<Arc<Carrier>> {
 }
 
 pub fn install(node_hex: String) -> Arc<Carrier> {
-    cell().get_or_init(|| Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode: mode_from_env(), node_hex, next_id: AtomicU64::new(1) })).clone()
+    cell().get_or_init(|| Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode: mode_from_env(), node_hex, next_id: AtomicU64::new(1), handshakes: Default::default() })).clone()
 }
 
 enum Route {
@@ -268,10 +301,15 @@ impl Carrier {
                 return Ok(());
             }
         }
+        let _hs = match HandshakeSlot::take(&self.handshakes, peer.ip()) {
+            Some(h) => h,
+            None => return Ok(()),
+        };
         let _ = tcp.set_nodelay(true);
         let identity = crate::netlayer::tls_cert::TlsIdentity::load_or_generate_default(&self.node_hex).map_err(|e| io::Error::other(e.to_string()))?;
         let cfg = crate::netlayer::tls_cert::build_server_config(&identity).map_err(|e| io::Error::other(e.to_string()))?;
         let tls = tokio::time::timeout(Duration::from_secs(10), tokio_rustls::TlsAcceptor::from(cfg).accept(tcp)).await.map_err(|_| io::Error::other("tls timeout"))??;
+        drop(_hs);
         println!("[carrier] принято TCP-соединение от {}", peer.ip());
         self.run_conn(tls, peer.ip(), None).await;
         Ok(())
@@ -326,7 +364,7 @@ impl Carrier {
                     let mut g = self.lock();
                     for i in 0..cnt {
                         let p = u16::from_be_bytes([body[2 + 2 * i], body[3 + 2 * i]]);
-                        g.by_dest.insert(SocketAddr::new(conn.remote_ip, p), conn.clone());
+                        Self::claim_route(&mut g, SocketAddr::new(conn.remote_ip, p), conn);
                     }
                     drop(g);
                     self.flush_pending(conn);
@@ -340,7 +378,7 @@ impl Carrier {
                     let from = SocketAddr::new(conn.remote_ip, src);
                     let tx = {
                         let mut g = self.lock();
-                        g.by_dest.insert(from, conn.clone());
+                        Self::claim_route(&mut g, from, conn);
                         g.tcp_rx.insert(from, Instant::now());
                         if g.tcp_rx.len() > 4096 {
                             g.tcp_rx.retain(|_, t| t.elapsed() < TCP_RX_FRESH);
@@ -352,6 +390,17 @@ impl Carrier {
                     }
                 }
                 _ => return Err(io::Error::other("unknown frame")),
+            }
+        }
+    }
+
+    /// A route to ip:port may be taken over by another connection only when the current owner is dead
+    /// (a second host behind the same IP cannot steal a live route).
+    fn claim_route(g: &mut Inner, addr: SocketAddr, conn: &Arc<Conn>) {
+        match g.by_dest.get(&addr) {
+            Some(cur) if cur.id != conn.id && cur.alive.load(Ordering::Relaxed) => {}
+            _ => {
+                g.by_dest.insert(addr, conn.clone());
             }
         }
     }
@@ -471,12 +520,41 @@ impl CSocket {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn slow_handshakes_are_limited_per_ip_and_slots_are_returned() {
+        let map: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>> = Default::default();
+        let ip: IpAddr = "203.0.113.5".parse().unwrap();
+        let other: IpAddr = "203.0.113.6".parse().unwrap();
+        let held: Vec<_> = (0..MAX_HANDSHAKES_PER_IP).map(|_| HandshakeSlot::take(&map, ip).unwrap()).collect();
+        assert!(HandshakeSlot::take(&map, ip).is_none());
+        assert!(HandshakeSlot::take(&map, other).is_some());
+        drop(held);
+        assert!(HandshakeSlot::take(&map, ip).is_some());
+    }
+
+    #[test]
+    fn a_live_route_is_not_stolen_by_another_connection_but_a_dead_one_is_replaced() {
+        let mk = |id: u64| {
+            let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
+            Arc::new(Conn { id, tx, remote_ip: "198.51.100.1".parse().unwrap(), alive: AtomicBool::new(true), dialed: None })
+        };
+        let (a, b) = (mk(1), mk(2));
+        let addr: SocketAddr = "198.51.100.1:10000".parse().unwrap();
+        let mut g = Inner::default();
+        Carrier::claim_route(&mut g, addr, &a);
+        Carrier::claim_route(&mut g, addr, &b);
+        assert_eq!(g.by_dest[&addr].id, 1);
+        a.alive.store(false, Ordering::Relaxed);
+        Carrier::claim_route(&mut g, addr, &b);
+        assert_eq!(g.by_dest[&addr].id, 2);
+    }
+
     use super::*;
 
     async fn node(mode: Mode, name: &str) -> (Arc<Carrier>, Arc<CSocket>, SocketAddr) {
         let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
         let addr = udp.local_addr().unwrap();
-        let carrier = Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode, node_hex: name.to_string(), next_id: AtomicU64::new(1) });
+        let carrier = Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode, node_hex: name.to_string(), next_id: AtomicU64::new(1), handshakes: Default::default() });
         let sock = CSocket::new(udp, carrier.clone()).unwrap();
         (carrier, sock, addr)
     }

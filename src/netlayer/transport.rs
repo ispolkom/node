@@ -2534,12 +2534,20 @@ impl P2PTransport {
                                                     p.touch();
                                                     // 🌐 Direct путь жив — сбросим miss streak и
                                                     // вернёмся на direct, если были на relay.
-                                                    if p.use_relay {
-                                                        println!("[transport] 🛰→📡 peer {} direct restored, leaving relay",
-                                                                 hex::encode(&p.id.0[..8]));
+                                                    // Only an ACK that really came from the peer's own address proves the
+                                                    // direct path; one forwarded by a relay arrives from the relay's address.
+                                                    let own_ip = |a: &str| a.parse::<SocketAddr>().map(|x| x.ip()).ok()
+                                                        .or_else(|| a.split(':').next().and_then(|h| h.parse().ok()));
+                                                    let from_peer = own_ip(&p.addr) == Some(from.ip())
+                                                        || p.data_addr.as_deref().and_then(|a| own_ip(a)) == Some(from.ip());
+                                                    if from_peer {
+                                                        if p.use_relay {
+                                                            println!("[transport] 🛰→📡 peer {} direct restored, leaving relay",
+                                                                     hex::encode(&p.id.0[..8]));
+                                                        }
+                                                        p.direct_miss_streak = 0;
+                                                        p.use_relay = false;
                                                     }
-                                                    p.direct_miss_streak = 0;
-                                                    p.use_relay = false;
                                                 }
                                             }
                                             {
@@ -3802,6 +3810,10 @@ impl P2PTransport {
                                                 continue;
                                             }
                                             match bincode::deserialize::<RelayDataPacket>(&decrypted[1..]) {
+                                                Ok(relay_pkt) if relay_pkt.source_peer != peer_id => {
+                                                    eprintln!("[relay] ⛔ source {} does not match the authenticated sender {} — dropping",
+                                                              hex::encode(&relay_pkt.source_peer.0[..8]), hex::encode(&peer_id.0[..8]));
+                                                }
                                                 Ok(relay_pkt) => {
                                                     let target_id = relay_pkt.target_peer;
                                                     let target = {
