@@ -14,6 +14,8 @@ use crate::dht::record::NodeRecord;
 pub const DHT_TTL: u64 = 24 * 60 * 60;
 
 /// Maximum record size (1MB)
+/// How long a value written by one origin is protected from being overwritten by another origin.
+pub const FOREIGN_OVERWRITE_LOCK_SECS: u64 = 60 * 60;
 pub const MAX_RECORD_SIZE: usize = 1024 * 1024;
 
 /// Maximum number of records
@@ -199,19 +201,20 @@ impl DhtStorage {
         Ok(())
     }
 
-    /// Check storage quotas
-    fn check_storage_quotas(&self, new_value_size: usize) -> Result<(), String> {
+    /// Check storage quotas. `replacing` is the size of the value under the same key that this write replaces (0 for a new key):
+    /// a replacement is judged by its net growth, so a full store still lets existing records be updated.
+    fn check_storage_quotas(&self, new_value_size: usize, replacing: Option<usize>) -> Result<(), String> {
         if new_value_size > MAX_RECORD_SIZE {
             return Err(format!("Record size {} exceeds maximum {}", new_value_size, MAX_RECORD_SIZE));
         }
 
-        if self.records.len() >= MAX_RECORDS {
+        if replacing.is_none() && self.records.len() >= MAX_RECORDS {
             return Err(format!("Storage has {} records, maximum {}", self.records.len(), MAX_RECORDS));
         }
 
-        if self.storage_bytes.saturating_add(new_value_size) > MAX_STORAGE_BYTES {
-            return Err(format!("Storage size {} bytes exceeds maximum {}",
-                self.storage_bytes.saturating_add(new_value_size), MAX_STORAGE_BYTES));
+        let after = self.storage_bytes.saturating_sub(replacing.unwrap_or(0)).saturating_add(new_value_size);
+        if after > MAX_STORAGE_BYTES {
+            return Err(format!("Storage size {} bytes exceeds maximum {}", after, MAX_STORAGE_BYTES));
         }
 
         Ok(())
@@ -243,18 +246,31 @@ impl DhtStorage {
         self.storage_bytes = self.storage_bytes.saturating_sub(freed_space);
     }
 
-    /// Store value with quota checks and rate limiting
+    /// Store value with quota checks and rate limiting.
+    ///
+    /// A key that already holds a value written by ANOTHER origin cannot be overwritten by a different origin while that value is
+    /// fresh (`FOREIGN_OVERWRITE_LOCK_SECS`), and a signed NodeRecord can never be replaced by a plain value: whoever wrote a key
+    /// first keeps it, so a hostile peer cannot take over other nodes' records. Signed NodeRecords go through `store_node_record`.
     pub fn store_with_quota(&mut self, key: HashId, value: Vec<u8>, origin: String) -> Result<(), String> {
+        self.store_inner(key, value, origin, false)
+    }
+
+    /// `signed_owner`: the value is a NodeRecord whose signature was just verified, so the key's owner is proven and the
+    /// writer-lock does not apply (a record may be relayed by any peer).
+    fn store_inner(&mut self, key: HashId, value: Vec<u8>, origin: String, signed_owner: bool) -> Result<(), String> {
         self.check_rate_limit(&origin, RequestType::Store)?;
 
         let value_size = value.len();
-        self.check_storage_quotas(value_size)?;
-
-        // Free space if needed
-        if self.storage_bytes.saturating_add(value_size) > MAX_STORAGE_BYTES {
-            let needed_space = self.storage_bytes.saturating_add(value_size).saturating_sub(MAX_STORAGE_BYTES);
-            self.evict_oldest_records(needed_space);
+        let existing = self.records.get(&key).map(|r| (r.origin.clone(), r.timestamp, r.size, NodeRecord::from_bytes(&r.value).is_ok()));
+        if let Some((old_origin, old_ts, _, old_is_node_record)) = existing.as_ref().filter(|_| !signed_owner) {
+            if *old_is_node_record && NodeRecord::from_bytes(&value).is_err() {
+                return Err("a signed node record cannot be replaced by a plain value".to_string());
+            }
+            if *old_origin != origin && Self::now().saturating_sub(*old_ts) < FOREIGN_OVERWRITE_LOCK_SECS {
+                return Err("this key is held by another writer".to_string());
+            }
         }
+        self.check_storage_quotas(value_size, existing.as_ref().map(|e| e.2))?;
 
         // Remove old record if exists
         if let Some(old_record) = self.records.get(&key) {
@@ -294,10 +310,10 @@ impl DhtStorage {
         // Store under node_name as key
         let key = HashId(record.node_name.0);
 
-        // Check for existing record with higher sequence
+        // Check for existing record with higher sequence (only a record that itself verifies counts)
         if let Some(existing_value) = self.get(&key) {
             if let Ok(existing_record) = NodeRecord::from_bytes(&existing_value) {
-                if existing_record.sequence >= record.sequence {
+                if existing_record.verify() && existing_record.sequence >= record.sequence {
                     return Err(format!("Rejected stale NodeRecord (seq {} vs {})",
                         record.sequence, existing_record.sequence));
                 }
@@ -305,15 +321,15 @@ impl DhtStorage {
         }
 
         // Store with quota checks
-        self.store_with_quota(key, value, origin)
+        self.store_inner(key, value, origin, true)
     }
 
     /// Get NodeRecord by node name
     pub fn get_node_record(&mut self, node_name: &HashId) -> Option<NodeRecord> {
         if let Some(data) = self.get(node_name) {
             if let Ok(record) = NodeRecord::from_bytes(&data) {
-                // Verify on retrieval too
-                if record.verify() && !record.is_expired() {
+                // Verify on retrieval too — and the record must belong to the key it was asked under
+                if record.node_name.0 == node_name.0 && record.verify() && !record.is_expired() {
                     return Some(record);
                 }
             }
@@ -607,5 +623,71 @@ mod hostile_peer_origin_isolation_tests {
             storage.get_with_quota(&key, &honest_origin).is_ok(),
             "CROSS-PEER DOS: an honest peer's lookup was blocked by a DIFFERENT peer's rate limit"
         );
+    }
+}
+
+#[cfg(test)]
+mod writer_tests {
+    use super::*;
+    use crate::core::NodeIdentity;
+
+    fn key(b: u8) -> HashId {
+        HashId([b; 32])
+    }
+
+    #[test]
+    fn a_key_written_by_one_peer_cannot_be_taken_over_by_another_but_its_writer_can_update_it() {
+        let mut st = DhtStorage::new();
+        st.store_with_quota(key(1), b"mine".to_vec(), "alice".into()).unwrap();
+        assert!(st.store_with_quota(key(1), b"stolen".to_vec(), "mallory".into()).is_err());
+        st.store_with_quota(key(1), b"mine v2".to_vec(), "alice".into()).unwrap();
+        assert_eq!(st.get(&key(1)).unwrap(), b"mine v2".to_vec());
+    }
+
+    #[test]
+    fn a_signed_node_record_is_not_replaced_by_a_plain_value_or_by_a_forged_higher_sequence() {
+        let mut st = DhtStorage::new();
+        let id = NodeIdentity::new();
+        let rec = NodeRecord::new(&id, 5, Some("203.0.113.5:9000".into()), 1).unwrap();
+        st.store_node_record(&rec, "relayer-a".into()).unwrap();
+        let k = HashId(rec.node_name.0);
+        // a plain value under the same key
+        assert!(st.store_with_quota(k, b"garbage".to_vec(), "mallory".into()).is_err());
+        // an unsigned copy claiming a huge sequence does not poison later honest updates
+        let mut forged = rec.clone();
+        forged.sequence = u64::MAX;
+        assert!(st.store_node_record(&forged, "mallory".into()).is_err(), "invalid signature");
+        let newer = NodeRecord::new(&id, 6, Some("203.0.113.5:9000".into()), 1).unwrap();
+        st.store_node_record(&newer, "relayer-b".into()).expect("the honest update is still accepted, from any relaying peer");
+        assert_eq!(st.get_node_record(&k).unwrap().sequence, 6);
+    }
+
+    #[test]
+    fn a_record_is_only_returned_under_its_own_name() {
+        let mut st = DhtStorage::new();
+        let id = NodeIdentity::new();
+        let rec = NodeRecord::new(&id, 1, None, 0).unwrap();
+        // the owner's valid record written under SOMEONE ELSE's key
+        let other = key(9);
+        st.store_with_quota(other, rec.to_bytes().unwrap(), "attacker".into()).unwrap();
+        assert!(st.get_node_record(&other).is_none(), "a valid record under another node's key is not that node's record");
+    }
+
+    #[test]
+    fn a_full_store_still_lets_existing_keys_be_updated() {
+        let mut st = DhtStorage::new();
+        for n in 0..MAX_RECORDS {
+            let mut k = [0u8; 32];
+            k[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            st.records.insert(HashId(k), DhtRecord { value: vec![0], timestamp: DhtStorage::now(), origin: "local".into(), size: 1, access_count: 0 });
+        }
+        st.storage_bytes = MAX_RECORDS;
+        let mut existing = [0u8; 32];
+        existing[..8].copy_from_slice(&5u64.to_be_bytes());
+        // a brand-new key is refused, a replacement of an existing key (same writer) is not
+        let mut fresh = [0u8; 32];
+        fresh[31] = 0xAA;
+        assert!(st.store_with_quota(HashId(fresh), vec![1], "local".into()).is_err());
+        assert!(st.store_with_quota(HashId(existing), vec![1, 2], "local".into()).is_ok());
     }
 }

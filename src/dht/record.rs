@@ -54,8 +54,8 @@ impl NodeRecord {
             .unwrap()
             .as_secs();
 
-        // Create signature payload
-        let payload = Self::create_signature_payload(&node_name, &public_key, timestamp, sequence);
+        // Create signature payload (v2: also covers the endpoint and the capabilities)
+        let payload = Self::create_signature_payload_v2(&node_name, &public_key, timestamp, sequence, &endpoint, capabilities);
         let signature = identity.sign(&payload)?;
 
         let signature_vec = signature.to_vec();
@@ -81,6 +81,23 @@ impl NodeRecord {
         payload
     }
 
+    /// Payload of version 2: everything a reader acts on is signed — endpoint and capabilities included, so a captured record
+    /// cannot be re-submitted with another address or other claimed abilities.
+    pub fn create_signature_payload_v2(node_name: &NodeName, public_key: &[u8; 32], timestamp: u64, sequence: u64, endpoint: &Option<String>, capabilities: u16) -> Vec<u8> {
+        let mut payload = b"yandi-node-record-v2\0".to_vec();
+        payload.extend_from_slice(&Self::create_signature_payload(node_name, public_key, timestamp, sequence));
+        match endpoint {
+            Some(e) => {
+                payload.push(1);
+                payload.extend_from_slice(&(e.len() as u32).to_be_bytes());
+                payload.extend_from_slice(e.as_bytes());
+            }
+            None => payload.push(0),
+        }
+        payload.extend_from_slice(&capabilities.to_be_bytes());
+        payload
+    }
+
     /// Verify the signature on this NodeRecord
     pub fn verify(&self) -> bool {
         // Step 1: Verify self-certifying identity
@@ -92,12 +109,21 @@ impl NodeRecord {
         if self.signature.len() != 64 {
             return false;
         }
-        let payload = Self::create_signature_payload(&self.node_name, &self.public_key, self.timestamp, self.sequence);
-        
         // Convert Vec<u8> to [u8; 64] for verification
         let mut sig_bytes = [0u8; 64];
         sig_bytes.copy_from_slice(&self.signature[..64]);
-        NodeIdentity::verify_node(&self.node_name, &self.public_key, &sig_bytes, &payload)
+        let v2 = Self::create_signature_payload_v2(&self.node_name, &self.public_key, self.timestamp, self.sequence, &self.endpoint, self.capabilities);
+        if NodeIdentity::verify_node(&self.node_name, &self.public_key, &sig_bytes, &v2) {
+            return true;
+        }
+        // Records made before version 2 do not cover the endpoint and capabilities; accepted only until the sunset
+        // (the same date after which old random node ids stop being accepted).
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        if now < crate::util::types::LEGACY_ID_SUNSET {
+            let v1 = Self::create_signature_payload(&self.node_name, &self.public_key, self.timestamp, self.sequence);
+            return NodeIdentity::verify_node(&self.node_name, &self.public_key, &sig_bytes, &v1);
+        }
+        false
     }
 
     /// Check if this record is newer than another (by sequence number)
@@ -162,6 +188,19 @@ impl NodeRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn changing_the_endpoint_or_capabilities_of_a_signed_record_breaks_the_signature() {
+        let id = NodeIdentity::new();
+        let rec = NodeRecord::new(&id, 1, Some("203.0.113.5:9000".into()), 0x0007).unwrap();
+        assert!(rec.verify());
+        let mut moved = rec.clone();
+        moved.endpoint = Some("198.51.100.9:9000".into());
+        assert!(!moved.verify(), "another endpoint");
+        let mut stronger = rec.clone();
+        stronger.capabilities = 0xFFFF;
+        assert!(!stronger.verify(), "other capabilities");
+    }
     use crate::core::NodeIdentity;
 
     #[test]

@@ -7,6 +7,9 @@
 use crate::util::HashId;
 use std::time::{SystemTime, Duration};
 
+/// A peer silent this long (seconds) may be replaced by a newcomer when its bucket is full.
+pub const BUCKET_STALE_SECS: u64 = 15 * 60;
+
 /// Maximum bucket size (Kademlia recommends K=20)
 pub const K_BUCKET_SIZE: usize = 20;
 
@@ -66,7 +69,13 @@ impl KBucket {
             return;
         }
 
-        // Bucket full - apply LRU eviction
+        // Bucket full: a long-known live peer is never pushed out by a newcomer (that would let an attacker with many free
+        // identities replace the honest routing table). Only a peer that has been silent for a long time makes room.
+        let now = Self::now();
+        let oldest_is_stale = self.peers.iter().map(|p| p.last_seen).min().map_or(false, |t| now.saturating_sub(t) > BUCKET_STALE_SECS);
+        if !oldest_is_stale {
+            return;
+        }
         self.evict_lru_peer();
         self.peers.push(peer);
     }
@@ -247,4 +256,31 @@ pub fn xor_distance(a: &HashId, b: &HashId) -> [u8; 32] {
         out[i] = a_bytes[i] ^ b_bytes[i];
     }
     out
+}
+
+#[cfg(test)]
+mod arrival_tests {
+    use super::*;
+
+    fn peer(n: u8, last_seen: u64) -> BucketPeer {
+        BucketPeer { id: HashId([n; 32]), addr: format!("10.0.0.{n}:1"), last_seen, access_count: 0 }
+    }
+
+    #[test]
+    fn a_full_bucket_keeps_its_live_peers_and_makes_room_only_for_a_long_silent_one() {
+        let mut b = KBucket::new();
+        let now = KBucket::now();
+        for n in 0..K_BUCKET_SIZE as u8 {
+            b.peers.push(peer(n, now));
+        }
+        b.add_peer(peer(200, 0));
+        assert!(!b.peers.iter().any(|p| p.id == HashId([200; 32])), "a newcomer does not push out live peers");
+        assert_eq!(b.peers.len(), K_BUCKET_SIZE);
+        // one peer silent for hours
+        b.peers[3].last_seen = now - BUCKET_STALE_SECS - 10;
+        let stale = b.peers[3].id;
+        b.add_peer(peer(201, 0));
+        assert!(b.peers.iter().any(|p| p.id == HashId([201; 32])));
+        assert!(!b.peers.iter().any(|p| p.id == stale), "the silent peer was replaced");
+    }
 }

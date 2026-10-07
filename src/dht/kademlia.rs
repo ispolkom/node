@@ -24,6 +24,9 @@ pub const ALPHA: usize = 3;  // Parallelism factor
 pub const K: usize = 20;      // Bucket size (k-bucket capacity)
 
 /// Main Kademlia structure for our node
+/// Most DHT requests waiting for an answer at once.
+const MAX_PENDING_DHT_REQUESTS: usize = 1024;
+
 pub struct Kademlia {
     pub node_id: HashId,
     pub ktable: KTable,
@@ -366,19 +369,26 @@ impl Kademlia {
             .collect()
     }
 
-    /// Refresh buckets
+    /// Refresh buckets: for each of the first 160 buckets, a random id that shares exactly `i` leading bits with ours,
+    /// so a lookup of it exercises that bucket.
     pub fn refresh_buckets(&self) -> Vec<HashId> {
         let mut targets = Vec::new();
-        for i in 0..160 {
-            let bucket_prefix = i as u8;
+        for i in 0..160usize {
             let mut random_id = [0u8; 32];
-            if bucket_prefix < 32 {
-                let first_byte = rand::random::<u8>();
-                let mask = 0xFFu8 << (8 - bucket_prefix);
-                random_id[0] = (first_byte & (!mask)) | (self.node_id.0[0] & mask);
+            for byte in random_id.iter_mut() {
+                *byte = rand::random::<u8>();
             }
-            for j in 1..32 {
-                random_id[j] = rand::random::<u8>();
+            let bit = |id: &[u8; 32], n: usize| (id[n / 8] >> (7 - (n % 8))) & 1;
+            for n in 0..=i {
+                let ours = bit(&self.node_id.0, n);
+                // bits before `i` are copied from our id, bit `i` is the opposite one
+                let want = if n < i { ours } else { 1 - ours };
+                let mask = 1u8 << (7 - (n % 8));
+                if want == 1 {
+                    random_id[n / 8] |= mask;
+                } else {
+                    random_id[n / 8] &= !mask;
+                }
             }
             targets.push(HashId(random_id));
         }
@@ -428,8 +438,21 @@ impl Kademlia {
     /// Register pending request
     pub fn register_pending(&self, request_id: u64) -> oneshot::Receiver<Vec<u8>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_requests.lock().unwrap().insert(request_id, tx);
+        let mut pending = self.pending_requests.lock().unwrap();
+        // requests whose caller has gone away are dropped here; the table never grows past a fixed size
+        pending.retain(|_, t| !t.is_closed());
+        if pending.len() >= MAX_PENDING_DHT_REQUESTS {
+            if let Some(oldest) = pending.keys().min().copied() {
+                pending.remove(&oldest);
+            }
+        }
+        pending.insert(request_id, tx);
         rx
+    }
+
+    /// Forget a pending request (the query failed or timed out).
+    pub fn forget_pending(&self, request_id: u64) {
+        self.pending_requests.lock().unwrap().remove(&request_id);
     }
     
     /// Handle incoming DHT response
@@ -559,5 +582,42 @@ impl std::fmt::Debug for AdaptiveAlpha {
             .field("timeout_count", &self.timeout_count)
             .field("success_count", &self.success_count)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod refresh_tests {
+    use super::*;
+
+    #[test]
+    fn refresh_targets_fall_into_their_own_buckets_and_never_overflow() {
+        let k = Kademlia::new(HashId([0xA5; 32]));
+        let targets = k.refresh_buckets();
+        assert_eq!(targets.len(), 160);
+        for (i, t) in targets.iter().enumerate() {
+            // the first differing bit between our id and the target is bit i
+            let me = [0xA5u8; 32];
+            let mut first = None;
+            for n in 0..256usize {
+                let (a, b) = ((me[n / 8] >> (7 - n % 8)) & 1, (t.0[n / 8] >> (7 - n % 8)) & 1);
+                if a != b {
+                    first = Some(n);
+                    break;
+                }
+            }
+            assert_eq!(first, Some(i), "target {i}");
+        }
+    }
+
+    #[test]
+    fn pending_requests_are_bounded_and_can_be_forgotten() {
+        let k = Kademlia::new(HashId([1; 32]));
+        let mut keep = Vec::new();
+        for id in 0..(MAX_PENDING_DHT_REQUESTS as u64 + 50) {
+            keep.push(k.register_pending(id));
+        }
+        assert!(k.pending_requests.lock().unwrap().len() <= MAX_PENDING_DHT_REQUESTS);
+        k.forget_pending(MAX_PENDING_DHT_REQUESTS as u64 + 49);
+        assert!(!k.handle_response(MAX_PENDING_DHT_REQUESTS as u64 + 49, vec![]));
     }
 }

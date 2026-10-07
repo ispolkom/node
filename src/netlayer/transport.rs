@@ -3616,7 +3616,15 @@ impl P2PTransport {
                                                 // identity) so the limit is local to this one peer.
                                                 let mut dht_lock = dht.lock().await;
 
-                                                if let Err(e) = dht_lock.storage.store_with_quota(key, value, hex::encode(&peer_id.0)) {
+                                                // A signed node record is checked (signature, expiry, sequence) and must sit under its own name;
+                                                // any other value goes through the quota path, where a key held by another writer is protected.
+                                                let origin = hex::encode(&peer_id.0);
+                                                let stored = match crate::dht::NodeRecord::from_bytes(&value) {
+                                                    Ok(rec) if rec.node_name.0 == key.0 => dht_lock.storage.store_node_record(&rec, origin),
+                                                    Ok(_) => Err("node record stored under a key that is not its own name".to_string()),
+                                                    Err(_) => dht_lock.storage.store_with_quota(key, value, origin),
+                                                };
+                                                if let Err(e) = stored {
                                                     println!("[dht] ⛔ STORE rejected from {}: {}", crate::util::mask_hash_id(&peer_id), e);
                                                 }
 
@@ -5988,10 +5996,17 @@ impl P2PTransport {
         let data = query_with_id.to_bytes();
         
         // Send encrypted
-        self.send_encrypted(peer_id, &data).await?;
+        if let Err(e) = self.send_encrypted(peer_id, &data).await {
+            self.dht.lock().await.forget_pending(request_id);
+            return Err(e);
+        }
         
         // Wait for response with timeout
-        match tokio::time::timeout(tokio::time::Duration::from_secs(5), rx).await {
+        let waited = tokio::time::timeout(tokio::time::Duration::from_secs(5), rx).await;
+        if !matches!(waited, Ok(Ok(_))) {
+            self.dht.lock().await.forget_pending(request_id);
+        }
+        match waited {
             Ok(Ok(data)) => {
                 // Deserialize response
                 match DhtResponse::from_bytes(&data) {

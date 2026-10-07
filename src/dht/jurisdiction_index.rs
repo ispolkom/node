@@ -14,6 +14,9 @@ use std::collections::HashMap;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 
+/// Most entries kept in the index in total.
+const MAX_JURISDICTION_ENTRIES: usize = 20_000;
+
 #[derive(Debug, Clone)]
 pub struct JurisdictionEntry {
     pub node_id: HashId,
@@ -41,10 +44,31 @@ impl JurisdictionIndex {
     /// Запомнить anchor с заданной jurisdiction. Вызывается при приёме Hello'а с TLV.
     pub fn announce(&self, country: &str, node_id: HashId, addr: String) {
         let key = country.to_uppercase();
-        if key.is_empty() {
+        // a country code is two ASCII letters; anything else (the string comes from a remote Hello) is ignored
+        if key.len() != 2 || !key.bytes().all(|b| b.is_ascii_uppercase()) {
             return;
         }
         let mut map = self.inner.write().unwrap();
+        // one node claims one country at a time: its older claims elsewhere are removed
+        for (c, entries) in map.iter_mut() {
+            if *c != key {
+                entries.retain(|e| e.node_id != node_id);
+            }
+        }
+        map.retain(|_, v| !v.is_empty());
+        // bounded size: expired entries go first, and a full table takes no new nodes
+        let total: usize = map.values().map(|v| v.len()).sum();
+        if total >= MAX_JURISDICTION_ENTRIES {
+            for entries in map.values_mut() {
+                entries.retain(|e| e.last_seen.elapsed() <= self.ttl);
+            }
+            map.retain(|_, v| !v.is_empty());
+            let total: usize = map.values().map(|v| v.len()).sum();
+            let known = map.get(&key).map_or(false, |v| v.iter().any(|e| e.node_id == node_id));
+            if total >= MAX_JURISDICTION_ENTRIES && !known {
+                return;
+            }
+        }
         let entries = map.entry(key).or_default();
         // Если запись для node_id уже есть — обновим last_seen.
         if let Some(e) = entries.iter_mut().find(|e| e.node_id == node_id) {
@@ -106,6 +130,19 @@ mod tests {
     use super::*;
 
     fn nid(b: u8) -> HashId { HashId([b; 32]) }
+
+    #[test]
+    fn one_node_holds_one_country_and_odd_country_strings_are_ignored() {
+        let idx = JurisdictionIndex::new();
+        idx.announce("de", nid(1), "1.1.1.1:1".into());
+        idx.announce("NL", nid(1), "1.1.1.1:1".into());
+        assert!(idx.lookup("DE").is_empty(), "the older claim is gone");
+        assert_eq!(idx.lookup("NL").len(), 1);
+        for junk in ["", "D", "DEU", "1!", "ДЕ"] {
+            idx.announce(junk, nid(2), "2.2.2.2:2".into());
+        }
+        assert_eq!(idx.country_count(), 1);
+    }
 
     #[test]
     fn announce_and_lookup() {
