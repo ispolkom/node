@@ -173,6 +173,12 @@ async fn wait_ready(c: &reqwest::Client, p: &Ports, cookie: &str, secs: u64) -> 
     None
 }
 
+#[cfg(not(unix))]
+fn spawn_node(_dir: &Path, _p: &Ports) -> std::io::Result<u32> {
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the training network (`yandi testnet`) runs on Linux and macOS only"))
+}
+
+#[cfg(unix)]
 fn spawn_node(dir: &Path, p: &Ports) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
@@ -323,6 +329,7 @@ async fn down() -> Result<(), String> {
         let dir = node_dir(&stand, k);
         let Some(pid) = pid_alive_here(&dir) else { continue };
         // узел — глава своей группы процессов; сигнал останавливает его вместе с дочерними процессами
+        #[cfg(unix)]
         unsafe {
             libc::kill(pid, libc::SIGTERM);
         }
@@ -333,6 +340,7 @@ async fn down() -> Result<(), String> {
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         if pid_alive_here(&dir).is_some() {
+            #[cfg(unix)]
             unsafe {
                 libc::kill(-pid, libc::SIGKILL);
             }

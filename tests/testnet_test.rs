@@ -4,6 +4,9 @@
 //! Домашняя папка владельца подменена временной — его данные не читаются и не трогаются.
 //! `#[ignore]` (поднимает настоящие узлы, около минуты):
 //!     cargo test --offline --test testnet_test -- --ignored
+// the training network and file permissions are Unix-only; Windows does not build this test.
+#![cfg(unix)]
+
 #![cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::Command;

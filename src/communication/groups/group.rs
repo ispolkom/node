@@ -130,6 +130,7 @@ pub struct Group {
     pub created_by: HashId,
     pub created_at: u64,
     pub settings: GroupSettings,
+    #[serde(with = "crate::util::types::hashid_map")]
     pub members: HashMap<HashId, GroupMember>,
     pub version: u64,
 }

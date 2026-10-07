@@ -116,11 +116,16 @@ impl RelaySession {
 /// Two modes:
 /// 1. Relay Server: Public node that forwards traffic between NAT'd peers
 /// 2. Relay Client: Node behind NAT that initiates relay connections
+/// Most relay sessions kept at once; a full relay refuses new pairs until idle ones expire.
+pub const MAX_RELAY_SESSIONS: usize = 4096;
+
 pub struct RelayManager {
     /// Active relay sessions (relay server mode)
     sessions: HashMap<u64, RelaySession>,
     /// Peer to session mapping (for quick lookup)
     peer_to_session: HashMap<HashId, u64>,
+    /// (source, target) -> session: forwarded packets of one pair share one session
+    by_pair: HashMap<(HashId, HashId), u64>,
     /// Session ID counter
     next_session_id: u64,
     /// Timeout configuration
@@ -134,6 +139,7 @@ impl RelayManager {
         Self {
             sessions: HashMap::new(),
             peer_to_session: HashMap::new(),
+            by_pair: HashMap::new(),
             next_session_id: 1,
             timeout_config: RelayTimeout::default(),
             is_relay_server: false,
@@ -144,6 +150,7 @@ impl RelayManager {
         Self {
             sessions: HashMap::new(),
             peer_to_session: HashMap::new(),
+            by_pair: HashMap::new(),
             next_session_id: 1,
             timeout_config,
             is_relay_server: false,
@@ -204,6 +211,27 @@ impl RelayManager {
         }
     }
 
+    /// Account one forwarded packet to the session of its (source, target) pair, creating the session on first use.
+    /// Returns false when the relay is full of live sessions: the packet must then be dropped, not forwarded.
+    pub fn account_forward(&mut self, source: HashId, target: HashId, bytes: usize) -> bool {
+        if let Some(id) = self.by_pair.get(&(source, target)).copied() {
+            if self.update_session_activity(id, bytes).is_ok() {
+                return true;
+            }
+            self.by_pair.remove(&(source, target));
+        }
+        if self.sessions.len() >= MAX_RELAY_SESSIONS {
+            self.check_expired_sessions();
+            if self.sessions.len() >= MAX_RELAY_SESSIONS {
+                return false;
+            }
+        }
+        let id = self.create_session(source, target);
+        self.by_pair.insert((source, target), id);
+        let _ = self.update_session_activity(id, bytes);
+        true
+    }
+
     /// Update session activity (relay server mode)
     pub fn update_session_activity(&mut self, session_id: u64, bytes: usize) -> Result<(), String> {
         if let Some(session) = self.sessions.get_mut(&session_id) {
@@ -218,6 +246,7 @@ impl RelayManager {
     pub fn close_session(&mut self, session_id: u64, reason: &str) {
         if let Some(mut session) = self.sessions.remove(&session_id) {
             session.status = RelaySessionStatus::Closed;
+            self.by_pair.remove(&(session.source_peer, session.target_peer));
             self.peer_to_session.remove(&session.source_peer);
             self.peer_to_session.remove(&session.target_peer);
 
@@ -355,6 +384,25 @@ pub async fn relay_monitor_task(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn forwarded_packets_of_one_pair_share_one_session_and_the_relay_never_grows_without_limit() {
+        let mut m = RelayManager::new();
+        let (a, b) = (HashId([1; 32]), HashId([2; 32]));
+        for _ in 0..1000 {
+            assert!(m.account_forward(a, b, 100));
+        }
+        assert_eq!(m.session_count(), 1, "1000 packets of one pair are one session");
+        // many different pairs fill the table, then new pairs are refused (nothing is idle yet)
+        for n in 0..(MAX_RELAY_SESSIONS * 2) {
+            let mut src = [0u8; 32];
+            src[..8].copy_from_slice(&(n as u64).to_be_bytes());
+            let _ = m.account_forward(HashId(src), b, 1);
+        }
+        assert!(m.session_count() <= MAX_RELAY_SESSIONS);
+        assert!(!m.account_forward(HashId([9; 32]), HashId([8; 32]), 1), "a full relay refuses a new pair");
+        assert!(m.account_forward(a, b, 1), "a pair that already has a session keeps working");
+    }
 
     #[test]
     fn test_relay_session_creation() {

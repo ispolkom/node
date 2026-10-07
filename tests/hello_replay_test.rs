@@ -19,6 +19,11 @@ use yandi::core::identity::NodeIdentity;
 use yandi::netlayer::packet::{HelloPacket, Signature};
 use yandi::netlayer::transport::P2PTransport;
 
+/// `discovery_addr()` reports the bind address (0.0.0.0:port); only the loopback form can be sent to on every system.
+fn loopback_of(a: &SocketAddr) -> SocketAddr {
+    SocketAddr::from(([127, 0, 0, 1], a.port()))
+}
+
 fn make_identity() -> NodeIdentity {
     NodeIdentity::new()
 }
@@ -104,7 +109,7 @@ async fn replayed_hello_from_different_address_is_rejected() {
     pins.insert(victim_identity.node_id(), victim_identity.signing_public_key);
     transport_a.set_pinned_identities(pins).await;
 
-    let discovery_addr_a = transport_a.discovery_addr();
+    let discovery_addr_a = loopback_of(&transport_a.discovery_addr());
 
     // The REAL peer's one genuine Hello, captured once (this is the exact
     // byte sequence the victim's real node would send).
@@ -163,7 +168,7 @@ async fn two_genuinely_fresh_hellos_from_same_peer_both_accepted() {
     let peer_identity = make_identity();
 
     let transport_a = spawn_transport(identity_a, 19311, 19312).await;
-    let discovery_addr_a = transport_a.discovery_addr();
+    let discovery_addr_a = loopback_of(&transport_a.discovery_addr());
 
     // First genuine Hello, from address 1.
     let (sock1, addr1) = spawn_bare_udp_socket().await;

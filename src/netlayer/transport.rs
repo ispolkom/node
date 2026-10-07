@@ -3836,6 +3836,11 @@ impl P2PTransport {
                                                             };
                                                             let bytes = relay_pkt.data;
                                                             let bytes_len = bytes.len();
+                                                            // one session per (source, target) pair, bounded; a full relay drops instead of forwarding
+                                                            if !transport.relay_manager.lock().await.account_forward(relay_pkt.source_peer, target_id, bytes_len) {
+                                                                eprintln!("[relay] ⛔ relay is full of live sessions — dropping a packet for {}", hex::encode(&target_id.0[..8]));
+                                                                continue;
+                                                            }
                                                             if let Err(e) = transport
                                                                 .socket_manager
                                                                 .data()
@@ -3846,14 +3851,6 @@ impl P2PTransport {
                                                                 eprintln!("[relay] ❌ forward to {} failed: {}",
                                                                           hex::encode(&target_id.0[..8]), e);
                                                             } else {
-                                                                let mut rm = transport.relay_manager.lock().await;
-                                                                if rm.get_session(relay_pkt.session_id).is_none() {
-                                                                    rm.create_session(relay_pkt.source_peer, target_id);
-                                                                }
-                                                                let _ = rm.update_session_activity(
-                                                                    relay_pkt.session_id,
-                                                                    bytes_len,
-                                                                );
                                                                 println!("[relay] 🔁 forwarded {} B from {} to {} (session {})",
                                                                          bytes_len,
                                                                          hex::encode(&relay_pkt.source_peer.0[..8]),

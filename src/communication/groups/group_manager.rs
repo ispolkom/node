@@ -21,6 +21,9 @@ pub struct GroupManager {
     
     /// Пендинг приглашения
     pending_invites: Arc<Mutex<HashMap<GroupId, Vec<HashId>>>>,
+
+    /// Where groups.json lives (tests point it at a temporary folder; None = the owner's data folder)
+    dir_override: Option<std::path::PathBuf>,
 }
 
 impl GroupManager {
@@ -29,6 +32,21 @@ impl GroupManager {
             my_groups: Arc::new(Mutex::new(HashMap::new())),
             sync_states: Arc::new(Mutex::new(HashMap::new())),
             pending_invites: Arc::new(Mutex::new(HashMap::new())),
+            dir_override: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn in_dir(dir: std::path::PathBuf) -> Self {
+        let mut m = Self::new();
+        m.dir_override = Some(dir);
+        m
+    }
+
+    fn groups_dir(&self) -> Result<std::path::PathBuf, String> {
+        match &self.dir_override {
+            Some(d) => Ok(d.clone()),
+            None => Ok(dirs::home_dir().ok_or("No home directory")?.join(".yandi/data/groups")),
         }
     }
     
@@ -50,7 +68,11 @@ impl GroupManager {
         states.insert(group.id, GroupSyncState::new(group.id));
         
         info!("📁 Group created: {} (id: {})", group.name, group.id);
-        
+
+        // the locks must be released first: saving takes the groups lock itself
+        drop(states);
+        drop(groups);
+
         // Save to disk
         if let Err(e) = self.save_to_disk().await {
             warn!("Failed to save group to disk: {}", e);
@@ -91,6 +113,7 @@ impl GroupManager {
         
         if group.add_member(member) {
             info!("➕ Member added to group {}", group_id);
+            drop(groups);
             let _ = self.save_to_disk().await;
             Ok(())
         } else {
@@ -118,6 +141,7 @@ impl GroupManager {
         
         if group.remove_member(node_id) {
             info!("➖ Member removed from group {}", group_id);
+            drop(groups);
             let _ = self.save_to_disk().await;
             Ok(())
         } else {
@@ -163,6 +187,7 @@ impl GroupManager {
         group.version += 1;
         
         info!("⚙️ Group settings updated: {}", group_id);
+        drop(groups);
         let _ = self.save_to_disk().await;
         Ok(())
     }
@@ -225,9 +250,7 @@ impl GroupManager {
     
     /// Save all groups to disk
     pub async fn save_to_disk(&self) -> Result<(), String> {
-        let groups_dir = dirs::home_dir()
-            .ok_or("No home directory")?
-            .join(".yandi/data/groups");
+        let groups_dir = self.groups_dir()?;
         
         tokio::fs::create_dir_all(&groups_dir).await
             .map_err(|e| format!("Failed to create groups dir: {}", e))?;
@@ -252,9 +275,7 @@ impl GroupManager {
     
     /// Load groups from disk
     pub async fn load_from_disk(&self) -> Result<(), String> {
-        let groups_dir = dirs::home_dir()
-            .ok_or("No home directory")?
-            .join(".yandi/data/groups");
+        let groups_dir = self.groups_dir()?;
         
         let groups_file = groups_dir.join("groups.json");
         if !groups_file.exists() {
@@ -320,7 +341,11 @@ impl GroupManager {
                 }
                 
                 let group = signed.get_group()?;
-                
+
+                // The signature only proves that the key INSIDE the record signed it. The record must be about the group we
+                // asked for, and it must be signed by the group's owner (a node id derived from that very key).
+                check_group_record(&signed, &group, group_id)?;
+
                 let mut groups = self.my_groups.lock().await;
                 groups.insert(group.id, group.clone());
                 
@@ -349,21 +374,30 @@ impl GroupManager {
         
         let mut groups = self.my_groups.lock().await;
         let local_group = groups.get_mut(group_id);
-        
+        let mut changed = false;
+
         match local_group {
             Some(local) => {
+                // a record for an existing group may only come from the same owner, and only a newer one replaces ours
+                if remote_group.created_by != local.created_by {
+                    return Err("Group record has another owner than the local group".to_string());
+                }
                 if remote_group.version > local.version {
                     info!("🔄 Syncing group {}: local v{} -> remote v{}", 
                         group_id, local.version, remote_group.version);
                     *local = remote_group;
-                    let _ = self.save_to_disk().await;
+                    changed = true;
                 }
             }
             None => {
                 groups.insert(remote_group.id, remote_group);
-                let _ = self.save_to_disk().await;
                 info!("📥 New group synced from DHT: {}", group_id);
+                changed = true;
             }
+        }
+        drop(groups);
+        if changed {
+            let _ = self.save_to_disk().await;
         }
         
         Ok(())
@@ -385,5 +419,72 @@ impl GroupManager {
         transport.dht_store(key, value).await;
         info!("📡 Signed group stored in DHT: {}", group.id);
         Ok(())
+    }
+}
+
+/// A group record from the DHT is acceptable only if it is about the requested group and signed by that group's owner,
+/// whose node id must be derived from the signing key (an old random id proves nothing and is refused here).
+fn check_group_record(signed: &crate::dht::group_record::SignedGroupRecord, group: &Group, wanted: &GroupId) -> Result<(), String> {
+    if group.id != *wanted || signed.group_id != *wanted {
+        return Err("Group record is about another group".to_string());
+    }
+    if !matches!(group.members.get(&group.created_by).map(|m| &m.role), Some(GroupRole::Owner)) {
+        return Err("Group record has no owner".to_string());
+    }
+    if !crate::util::types::id_bound_to_key(&group.created_by.0, &signed.public_key) {
+        return Err("Group record is not signed by the group's owner".to_string());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod dht_record_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn creating_a_group_and_changing_its_members_does_not_hang_and_the_groups_survive_a_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let (owner, friend) = (HashId([1; 32]), HashId([2; 32]));
+        let m = GroupManager::in_dir(dir.path().to_path_buf());
+        let work = async {
+            let g = m.create_group("g".into(), "d".into(), owner, GroupSettings::default()).await;
+            m.add_member(&g.id, GroupMember::new(friend, "friend".into(), GroupRole::Member), &owner).await.unwrap();
+            m.update_settings(&g.id, &owner, |_| {}).await.unwrap();
+            m.remove_member(&g.id, &friend, &owner).await.unwrap();
+            g.id
+        };
+        let id = tokio::time::timeout(std::time::Duration::from_secs(5), work).await.expect("a group operation hung (lock held across save)");
+        let again = GroupManager::in_dir(dir.path().to_path_buf());
+        again.load_from_disk().await.unwrap();
+        assert!(again.get_group(&id).await.is_some(), "the group is still there after a restart");
+    }
+
+    #[test]
+    fn a_group_with_members_can_be_written_to_json() {
+        let owner = NodeIdentity::new();
+        let group = Group::new("g".into(), "d".into(), owner.node_id(), GroupSettings::default());
+        let r = serde_json::to_string(&group);
+        assert!(r.is_ok(), "groups are saved to disk as JSON: {:?}", r.err());
+        let back: Group = serde_json::from_str(&r.unwrap()).unwrap();
+        assert_eq!(back.members.len(), 1);
+    }
+    use crate::dht::group_record::SignedGroupRecord;
+
+    /// A record as the DHT would hand it over (signed by `key`); built by hand because `SignedGroupRecord::new` cannot serialize
+    /// a group with members at all (JSON maps need string keys) — the DHT group sync has never worked, see the review notes.
+    fn record(group: &Group, signer: &NodeIdentity, about: GroupId) -> SignedGroupRecord {
+        SignedGroupRecord { group_id: about, group_data: Vec::new(), public_key: signer.signing_public_key, timestamp: 0, sequence: 1, signature: Vec::new() }
+    }
+
+    #[test]
+    fn only_the_owner_of_a_group_can_publish_its_record() {
+        let owner = NodeIdentity::new();
+        let impostor = NodeIdentity::new();
+        let group = Group::new("g".into(), "d".into(), owner.node_id(), GroupSettings::default());
+        assert!(check_group_record(&record(&group, &owner, group.id), &group, &group.id).is_ok());
+        // someone else signs a record for the same group
+        assert!(check_group_record(&record(&group, &impostor, group.id), &group, &group.id).is_err());
+        // a record for another group is refused even when the owner signed it
+        assert!(check_group_record(&record(&group, &owner, GroupId::random()), &group, &group.id).is_err());
     }
 }

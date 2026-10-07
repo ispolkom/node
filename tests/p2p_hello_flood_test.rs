@@ -1,5 +1,7 @@
 //! Наплыв поддельных личностей на канал переписки (p2p): с одного адреса принимается не больше положенного числа новых узлов в минуту.
 //! (Все сценарии в одной функции: порты p2p-транспорта берутся из переменных окружения процесса.)
+// These checks send from several loopback addresses (127.0.0.2 ...) or rely on Linux-only behaviour; macOS has only 127.0.0.1.
+#![cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration};

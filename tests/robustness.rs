@@ -5,6 +5,9 @@
 //! так видно и аварийное завершение, которое внутри одного процесса поймать нельзя.
 //!
 //! Родитель запускает по одному ребёнку на разборщик (`child_decoder` с переменной `YANDI_PROBE=<имя>`).
+// process memory limits and child-process probes are Unix tools; Windows does not build this test.
+#![cfg(unix)]
+
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -238,6 +241,8 @@ fn decoders_survive_hostile_bytes() {
 }
 
 /// Проверка самой проверки: паника, попытка занять 8 ГБ и зависание обязаны быть пойманы.
+/// (предел памяти процесса задаётся средствами Linux; на macOS он не действует)
+#[cfg(target_os = "linux")]
 #[test]
 fn harness_detects_failures() {
     let failures = run_probes(vec!["selftest_panic", "selftest_alloc", "selftest_hang"], true);

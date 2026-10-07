@@ -214,6 +214,19 @@ async fn a_gateway_behind_nat_is_found_through_its_announced_relays_and_reached_
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
     assert!(known, "the phone copy learns the announcement of the gateway");
+    // The first announcement may list only the phone copy itself as the relay (the only card checked so far), and a phone cannot
+    // be its own relay. Wait until the gateway announces two relays, then give the neighbours time to pass the newer record on.
+    let mut two = false;
+    for _ in 0..240 {
+        let log1 = std::fs::read_to_string(stand.join("node1/node.log")).unwrap_or_default();
+        if log1.contains("через 2 ретранслятор") {
+            two = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    assert!(two, "the gateway finds two relays and announces them");
+    tokio::time::sleep(Duration::from_secs(40)).await;
     let st1: Value = http.get(format!("{web1x}/api/network/relay")).header("cookie", &ck1x).send().await.unwrap().json().await.unwrap();
     assert_eq!(st1["client"], true, "copy 1 plays a node behind NAT");
     assert!(gw["secret"].as_str().unwrap().len() == 64 && gw["secret"] != relay["secret"], "every node has its own device secret");
@@ -258,10 +271,20 @@ async fn a_gateway_behind_nat_is_found_through_its_announced_relays_and_reached_
     assert!(log1.contains("(своё устройство)"), "the gateway knows it is its own device");
     let log2 = std::fs::read_to_string(stand.join("node2/node.log")).unwrap();
     let log4 = std::fs::read_to_string(stand.join("node4/node.log")).unwrap();
-    let line = log4.lines().find(|l| l.contains("[hops] строю цепочку")).expect("the phone built a circuit");
-    let names: Vec<&str> = line.split(": ").last().unwrap().split(" → ").collect();
-    assert_eq!(names.len(), 2, "relay → gateway, found by the announcement, not given by hand: {line}");
-    assert!(gw_id.starts_with(names[1]), "{line}");
-    assert!(!gw_id.starts_with(names[0]), "the relay is another node: {line}");
+    // the phone may build other circuits too (e.g. to measure exits); the one for the gateway is the one that ends at it
+    let circuits: Vec<&str> = log4.lines().filter(|l| l.contains("[hops] строю цепочку")).collect();
+    assert!(!circuits.is_empty(), "the phone built a circuit");
+    let names_of = |l: &str| -> Vec<String> { l.split(": ").last().unwrap().split(" → ").map(|s| s.trim().to_string()).collect() };
+    let line = circuits.iter().find(|l| { let n = names_of(l); n.len() == 2 && gw_id.starts_with(n[1].as_str()) })
+        .unwrap_or_else(|| {
+            if let Ok(dst) = std::env::var("YANDI_KEEP_LOGS") {
+                for k in 1..=4 {
+                    let _ = std::fs::copy(stand.join(format!("node{k}/node.log")), format!("{dst}/node{k}.log"));
+                }
+            }
+            panic!("no circuit relay → gateway, found by the announcement, not given by hand; the phone built: {circuits:#?}")
+        });
+    let names = names_of(line);
+    assert!(!gw_id.starts_with(names[0].as_str()), "the relay is another node: {line}");
     let _ = (relay, log2);
 }

@@ -194,3 +194,24 @@ mod bound_id_tests {
         assert!(!id_acceptable(&legacy, &key, LEGACY_ID_SUNSET));
     }
 }
+
+/// serde helper for `HashMap<HashId, T>`: JSON objects need string keys, so the ids are written as hex strings.
+/// Use as `#[serde(with = "crate::util::types::hashid_map")]`.
+pub mod hashid_map {
+    use super::HashId;
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::collections::HashMap;
+
+    pub fn serialize<S: Serializer, T: Serialize>(map: &HashMap<HashId, T>, ser: S) -> Result<S::Ok, S::Error> {
+        let as_text: std::collections::BTreeMap<String, &T> = map.iter().map(|(k, v)| (hex::encode(k.0), v)).collect();
+        as_text.serialize(ser)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>, T: Deserialize<'de>>(de: D) -> Result<HashMap<HashId, T>, D::Error> {
+        let as_text: HashMap<String, T> = HashMap::deserialize(de)?;
+        as_text
+            .into_iter()
+            .map(|(k, v)| HashId::from_hex(&k).map(|id| (id, v)).map_err(serde::de::Error::custom))
+            .collect()
+    }
+}

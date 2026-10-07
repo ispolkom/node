@@ -2,6 +2,8 @@
 //!
 //! Без допуска каждое такое приветствие занимало место в таблице пиров, в DHT и в списке виденных одноразовых номеров. Здесь живой UDP на одной машине:
 //! с одного адреса принимается не больше положенного числа новых личностей в минуту, а узел с другого адреса и уже известные узлы продолжают работать.
+// These checks send from several loopback addresses (127.0.0.2 ...) or rely on Linux-only behaviour; macOS has only 127.0.0.1.
+#![cfg(target_os = "linux")]
 use std::net::SocketAddr;
 use tokio::net::UdpSocket;
 use tokio::time::{sleep, Duration};
