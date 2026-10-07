@@ -38,21 +38,18 @@ pub const END_FAILED: u8 = 5;
 /// никаких правил «выхода для всех». Домашняя сеть и адрес самого компьютера всё равно закрыты.
 pub fn device_secret() -> std::io::Result<[u8; 32]> {
     let path = crate::util::data_dir::data_dir().join("device_secret");
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if let Ok(b) = hex::decode(s.trim()) {
-            if let Ok(a) = <[u8; 32]>::try_from(b) {
-                return Ok(a);
-            }
-        }
-    }
-    let mut a = [0u8; 32];
-    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut a);
-    if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
-    }
-    // секрет создаётся сразу закрытым (0600), без окна, когда он читаем другими
-    crate::util::private_file::write_private(&path, hex::encode(a).as_bytes())?;
-    Ok(a)
+    // first use creates it exactly once, even when several callers (or nodes sharing the folder) ask at the same moment
+    let bytes = crate::util::private_file::read_or_create_private(
+        &path,
+        &|| {
+            let mut a = [0u8; 32];
+            rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut a);
+            hex::encode(a).into_bytes()
+        },
+        &|b| std::str::from_utf8(b).ok().and_then(|s| hex::decode(s.trim()).ok()).map_or(false, |v| v.len() == 32),
+    )?;
+    let decoded = hex::decode(String::from_utf8_lossy(&bytes).trim()).map_err(std::io::Error::other)?;
+    <[u8; 32]>::try_from(decoded).map_err(|_| std::io::Error::other("device secret has the wrong length"))
 }
 
 /// Метка своего устройства под просьбой «соединиться с `цель`».
@@ -123,6 +120,11 @@ fn push_out(tx: &mpsc::UnboundedSender<Out>, o: Out) -> Result<(), ()> {
 
 // ---------------------------------------------------------------- состояние
 
+/// Most bytes of an exit's data one client stream may hold for a slow application before the stream is closed.
+const CLIENT_STREAM_QUEUE_MAX: usize = 2 * 1024 * 1024;
+/// A circuit with open streams is kept this many times longer than an idle one before it is retired.
+const BUSY_CIRCUIT_FACTOR: u64 = 6;
+
 /// Most bytes one exit stream may have waiting for its (possibly slow or silent) destination before the stream is closed.
 const STREAM_QUEUE_MAX: usize = 2 * 1024 * 1024;
 /// Bytes waiting in the shared send queue above which exits stop reading from their destinations (backpressure).
@@ -148,6 +150,8 @@ enum ToApp {
 struct ClientStream {
     connected: Option<oneshot::Sender<Result<(), u8>>>,
     to_app: mpsc::UnboundedSender<ToApp>,
+    /// bytes handed to the application side and not yet delivered to it
+    pending: Arc<std::sync::atomic::AtomicUsize>,
     reorder: Reorder,
 }
 
@@ -197,7 +201,9 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
         let mut rx = rx.lock().await;
         while let Some(o) = rx.recv().await {
             OUT_QUEUED.fetch_sub(o.bytes.len(), std::sync::atomic::Ordering::Relaxed);
-            if transport.send_encrypted(HashId(o.to), &o.bytes).await.is_err() && o.bytes.first() == Some(&hops::PKT_CREATE) && o.bytes.len() >= 9 {
+            // one stalled neighbour must not stop every circuit: a send gets a deadline
+            let sent = tokio::time::timeout(Duration::from_secs(5), transport.send_encrypted(HashId(o.to), &o.bytes)).await.unwrap_or_else(|_| Err("send timeout".to_string()));
+            if sent.is_err() && o.bytes.first() == Some(&hops::PKT_CREATE) && o.bytes.len() >= 9 {
                 let cid = u64::from_be_bytes(o.bytes[1..9].try_into().unwrap());
                 let outs = hh.router.lock().unwrap_or_else(|e| e.into_inner()).extend_failed(o.to, cid);
                 for x in outs {
@@ -220,8 +226,18 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
             }
             let t = now();
             hh.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, c| {
-                let c = c.lock().unwrap_or_else(|e| e.into_inner());
-                !c.dead && t.saturating_sub(c.born) < CIRCUIT_LIFE_SECS * 2
+                let mut c = c.lock().unwrap_or_else(|e| e.into_inner());
+                let age = t.saturating_sub(c.born);
+                // a circuit that still carries streams is not cut off from its packets: it is kept (longer) and only retired
+                // with its streams told to end, so no application socket is left waiting on a circuit nobody listens to
+                let keep = !c.dead && (age < CIRCUIT_LIFE_SECS * 2 || (!c.streams.is_empty() && age < CIRCUIT_LIFE_SECS * 2 * BUSY_CIRCUIT_FACTOR));
+                if !keep {
+                    for (_, st) in c.streams.drain() {
+                        let _ = st.to_app.send(ToApp::End);
+                    }
+                    c.dead = true;
+                }
+                keep
             });
         }
     }
@@ -426,7 +442,12 @@ impl Hops {
                         let _ = r.send(Err("closed"));
                     }
                 }
-                ClientEvent::Cell { cmd, stream, data, .. } => {
+                ClientEvent::Cell { hop, cmd, stream, data } => {
+                    // stream replies come from the EXIT only: a middle node that guesses a stream number must not be able to
+                    // answer in its place
+                    if hop + 1 != g.circuit.len() {
+                        continue;
+                    }
                     let Some(s) = g.streams.get_mut(&stream) else { continue };
                     match cmd {
                         hops::CMD_CONNECTED => {
@@ -435,9 +456,24 @@ impl Hops {
                             }
                         }
                         hops::CMD_DATA => {
+                            // data may overtake CONNECTED on the network; what the application has not read is capped
+                            let mut overflow = false;
                             if let Some((seq, bytes)) = split_seq(&data) {
                                 for d in s.reorder.push(seq, bytes) {
+                                    let n = d.len();
+                                    if s.pending.fetch_add(n, std::sync::atomic::Ordering::Relaxed) + n > CLIENT_STREAM_QUEUE_MAX {
+                                        overflow = true;
+                                        break;
+                                    }
                                     let _ = s.to_app.send(ToApp::Data(d));
+                                }
+                            }
+                            if overflow {
+                                // the application is not keeping up: end the stream instead of buffering without limit
+                                let _ = s.to_app.send(ToApp::End);
+                                g.streams.remove(&stream);
+                                if let Some(o) = g.circuit.send_exit(hops::CMD_END, stream, &[0]) {
+                                    let _ = push_out(&self.out, o);
                                 }
                             }
                         }
@@ -577,12 +613,23 @@ pub async fn connect_personal(path: Vec<PathHop>, secret: &[u8; 32], host: &str,
 async fn open_stream(h: Arc<Hops>, circuit: Arc<Mutex<ClientCircuit>>, begin: String) -> Result<(HopWriter, HopReader), u8> {
     let (ctx, crx) = oneshot::channel();
     let (to_app, mut from_net) = mpsc::unbounded_channel::<ToApp>();
-    let (rx_tx, rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+    // towards the application the queue is bounded: a slow reader slows the forwarder, and the byte counter below ends the stream
+    let (rx_tx, rx) = mpsc::channel::<Option<Vec<u8>>>(64);
+    let pending = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let stream = {
         let mut g = circuit.lock().unwrap_or_else(|e| e.into_inner());
-        let s = g.next_stream;
-        g.next_stream = g.next_stream.wrapping_add(1).max(1);
-        g.streams.insert(s, ClientStream { connected: Some(ctx), to_app, reorder: Reorder::default() });
+        // the next FREE stream number (numbers wrap; an occupied one must never be overwritten)
+        let mut s = g.next_stream;
+        let mut tries = 0u32;
+        while g.streams.contains_key(&s) {
+            s = s.wrapping_add(1).max(1);
+            tries += 1;
+            if tries > u16::MAX as u32 {
+                return Err(END_FAILED);
+            }
+        }
+        g.next_stream = s.wrapping_add(1).max(1);
+        g.streams.insert(s, ClientStream { connected: Some(ctx), to_app, pending: pending.clone(), reorder: Reorder::default() });
         let o = g.circuit.send_exit(hops::CMD_BEGIN, s, begin.as_bytes());
         if let Some(o) = o {
             let _ = push_out(&h.out, o);
@@ -596,17 +643,20 @@ async fn open_stream(h: Arc<Hops>, circuit: Arc<Mutex<ClientCircuit>>, begin: St
         while let Some(m) = from_net.recv().await {
             match m {
                 ToApp::Data(d) => {
-                    let _ = rx_tx.send(Some(d));
+                    pending.fetch_sub(d.len().min(pending.load(std::sync::atomic::Ordering::Relaxed)), std::sync::atomic::Ordering::Relaxed);
+                    if rx_tx.send(Some(d)).await.is_err() {
+                        break;
+                    }
                 }
                 ToApp::End => {
-                    let _ = rx_tx.send(None);
+                    let _ = rx_tx.send(None).await;
                     break;
                 }
             }
         }
     });
     match tokio::time::timeout(BEGIN_TIMEOUT, crx).await {
-        Ok(Ok(Ok(()))) => Ok((HopWriter { hops: h, circuit, stream, seq: 0 }, rx)),
+        Ok(Ok(Ok(()))) => Ok((HopWriter { hops: h, circuit, stream, seq: 0, done: false }, rx)),
         Ok(Ok(Err(code))) => Err(code),
         _ => {
             circuit.lock().unwrap_or_else(|e| e.into_inner()).streams.remove(&stream);
@@ -621,9 +671,18 @@ pub struct HopWriter {
     circuit: Arc<Mutex<ClientCircuit>>,
     stream: u16,
     seq: u32,
+    /// the stream has been closed from this side (closing is done once, also when the writer is simply dropped)
+    done: bool,
 }
 
-type HopReader = mpsc::UnboundedReceiver<Option<Vec<u8>>>;
+type HopReader = mpsc::Receiver<Option<Vec<u8>>>;
+
+impl Drop for HopWriter {
+    fn drop(&mut self) {
+        // a writer that is dropped without close() (e.g. the SOCKS hand-off failed) must not leave its stream open
+        self.close();
+    }
+}
 
 impl HopWriter {
     /// Передать данные цели (режутся на ячейки).
@@ -640,6 +699,10 @@ impl HopWriter {
     }
 
     pub fn close(&mut self) {
+        if self.done {
+            return;
+        }
+        self.done = true;
         let mut g = self.circuit.lock().unwrap_or_else(|e| e.into_inner());
         g.streams.remove(&self.stream);
         if let Some(o) = g.circuit.send_exit(hops::CMD_END, self.stream, &[0]) {
@@ -654,6 +717,10 @@ pub async fn pump(client: tokio::net::TcpStream, mut w: HopWriter, mut rx: HopRe
     let up = async {
         let mut buf = vec![0u8; 16 * 1024];
         loop {
+            // do not read from the local application while the shared send queue is full (backpressure)
+            while OUT_QUEUED.load(std::sync::atomic::Ordering::Relaxed) > OUT_QUEUE_HIGH {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
             match cr.read(&mut buf).await {
                 Ok(0) | Err(_) => break,
                 Ok(n) => {

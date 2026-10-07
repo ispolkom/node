@@ -214,22 +214,33 @@ impl RelayManager {
     /// Account one forwarded packet to the session of its (source, target) pair, creating the session on first use.
     /// Returns false when the relay is full of live sessions: the packet must then be dropped, not forwarded.
     pub fn account_forward(&mut self, source: HashId, target: HashId, bytes: usize) -> bool {
+        match self.session_for(source, target) {
+            Some(id) => {
+                let _ = self.update_session_activity(id, bytes);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The one session of a (source, target) pair — created on first use. `None` when the table is full of live sessions.
+    /// Both the relay side (forwarding) and the sending side (wrapping packets for a relay) use this same index.
+    pub fn session_for(&mut self, source: HashId, target: HashId) -> Option<u64> {
         if let Some(id) = self.by_pair.get(&(source, target)).copied() {
-            if self.update_session_activity(id, bytes).is_ok() {
-                return true;
+            if self.sessions.contains_key(&id) {
+                return Some(id);
             }
             self.by_pair.remove(&(source, target));
         }
         if self.sessions.len() >= MAX_RELAY_SESSIONS {
             self.check_expired_sessions();
             if self.sessions.len() >= MAX_RELAY_SESSIONS {
-                return false;
+                return None;
             }
         }
         let id = self.create_session(source, target);
         self.by_pair.insert((source, target), id);
-        let _ = self.update_session_activity(id, bytes);
-        true
+        Some(id)
     }
 
     /// Update session activity (relay server mode)

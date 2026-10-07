@@ -58,6 +58,9 @@ impl Entry {
     }
 }
 
+/// Most peers with a live encrypted session at once.
+pub const MAX_SESSIONS: usize = 4096;
+
 pub struct SessionStore {
     our_id: HashId,
     sessions: HashMap<HashId, Entry>,
@@ -91,6 +94,13 @@ impl SessionStore {
             entry.fallbacks = keep;
         }
         eprintln!("[keys] {}: ключ v{} рабочий (начал {}), прежних для чтения: {}", short(&peer), entry.version, initiator.map(|i| short(&i)).unwrap_or_else(|| "-".into()), entry.fallbacks.len());
+        // The number of sessions is bounded (identities are free, every new one would otherwise keep keys and a replay window
+        // for ever): when the table is full the session unused for the longest time makes room.
+        if self.sessions.len() >= MAX_SESSIONS && !self.sessions.contains_key(&peer) {
+            if let Some(oldest) = self.sessions.iter().min_by_key(|(_, e)| e.last_used).map(|(id, _)| *id) {
+                self.sessions.remove(&oldest);
+            }
+        }
         self.sessions.insert(peer, entry);
         self.counter
     }
@@ -347,7 +357,8 @@ fn strip_padding(inner: &[u8]) -> Result<Vec<u8>, String> {
         return Err("Decrypted payload too short (missing length prefix)".to_string());
     }
     let len = u32::from_le_bytes([inner[0], inner[1], inner[2], inner[3]]) as usize;
-    if inner.len() < 4 + len {
+    // compared without adding: a length near the top of the range must not overflow (32-bit targets) or slice backwards
+    if len > inner.len() - 4 {
         return Err(format!("Decrypted length prefix {} exceeds payload {}", len, inner.len() - 4));
     }
     Ok(inner[4..4 + len].to_vec())
@@ -356,6 +367,26 @@ fn strip_padding(inner: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_length_prefix_near_the_top_of_the_range_is_refused_not_sliced() {
+        assert!(strip_padding(&[0xff, 0xff, 0xff, 0xff]).is_err());
+        assert!(strip_padding(&[0xff, 0xff, 0xff, 0xff, 1, 2, 3]).is_err());
+        assert_eq!(strip_padding(&[2, 0, 0, 0, 9, 8, 7, 7]).unwrap(), vec![9, 8]);
+    }
+
+    #[test]
+    fn the_session_table_does_not_grow_past_its_limit() {
+        let me = HashId([1; 32]);
+        let mut s = SessionStore::new(me);
+        for n in 0..(MAX_SESSIONS as u32 + 200) {
+            let mut id = [0u8; 32];
+            id[..4].copy_from_slice(&n.to_be_bytes());
+            id[31] = 9;
+            s.install(HashId(id), [3; 32], None);
+        }
+        assert!(s.sessions.len() <= MAX_SESSIONS, "{}", s.sessions.len());
+    }
 
     fn pair() -> (SessionStore, SessionStore, HashId, HashId) {
         let (a, b) = (HashId([1; 32]), HashId([2; 32]));

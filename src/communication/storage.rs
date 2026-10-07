@@ -221,6 +221,9 @@ impl ChatStorage {
         
         for msg in messages.iter_mut() {
             if msg.msg_id == *msg_id {
+                if msg.status == status {
+                    return Ok(()); // nothing changes: no need to rewrite the whole history
+                }
                 msg.status = status;
                 updated = true;
                 break;
@@ -240,7 +243,9 @@ impl ChatStorage {
         let chat_file = self.chat_file_path_enc(peer_id);
         let tmp = chat_file.with_extension("enc.tmp");
         let _ = std::fs::remove_file(&tmp);
-        for msg in messages {
+        // `messages` comes from load_history (newest first); the file is chronological, oldest first — write it back the way it was
+        // (writing it in the given order reversed the whole history on every status update)
+        for msg in messages.iter().rev() {
             self.append_encrypted_message(&tmp, msg)?;
         }
         if messages.is_empty() {
@@ -386,6 +391,27 @@ mod concurrency_tests {
         let f = dir.path().join(format!("chat_{}.enc", hex::encode(peer.0)));
         std::fs::write(&f, vec![b'0'; (MAX_CHAT_FILE_BYTES + 1) as usize]).unwrap();
         assert!(st.save_incoming(&peer, &ChatMessage::new(peer, me, "x".into())).is_err());
+    }
+
+    #[test]
+    fn a_status_update_keeps_the_order_of_the_history_and_a_repeated_one_changes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (me, peer) = (HashId([1; 32]), HashId([2; 32]));
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let msgs: Vec<ChatMessage> = (0..5).map(|i| ChatMessage::new(peer, me, format!("m{i}"))).collect();
+        for m in &msgs {
+            st.save_incoming(&peer, m).unwrap();
+        }
+        let order = |st: &ChatStorage| st.load_history(&peer, usize::MAX).unwrap().iter().map(|m| m.text.clone()).collect::<Vec<_>>();
+        let before = order(&st);
+        for _ in 0..3 {
+            st.update_message_status(&peer, &msgs[2].msg_id, MessageStatus::Read).unwrap();
+            assert_eq!(order(&st), before, "a status update must not reorder the history");
+        }
+        let file = dir.path().join(format!("chat_{}.enc", hex::encode(peer.0)));
+        let stamp = std::fs::metadata(&file).unwrap().modified().unwrap();
+        st.update_message_status(&peer, &msgs[2].msg_id, MessageStatus::Read).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), stamp, "an unchanged status does not rewrite the file");
     }
 
     #[test]

@@ -189,6 +189,17 @@ pub fn relay_enabled() -> bool {
     std::fs::read_to_string(relay_file()).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok()).and_then(|v| v["enabled"].as_bool()).unwrap_or(true)
 }
 
+/// `relay_enabled()` reads a file; the packet path asks often, so the answer is kept for a few seconds.
+pub fn relay_enabled_cached() -> bool {
+    static C: OnceLock<Mutex<(std::time::Instant, bool)>> = OnceLock::new();
+    let m = C.get_or_init(|| Mutex::new((std::time::Instant::now() - std::time::Duration::from_secs(60), true)));
+    let mut g = m.lock().unwrap_or_else(|e| e.into_inner());
+    if g.0.elapsed() > std::time::Duration::from_secs(5) {
+        *g = (std::time::Instant::now(), relay_enabled());
+    }
+    g.1
+}
+
 // ---------------------------------------------------------------- живое состояние
 
 fn store_cell() -> &'static Mutex<ViaStore> {

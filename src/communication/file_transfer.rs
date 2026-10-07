@@ -41,6 +41,13 @@ const ACK_ROUND_TIMEOUT_MS: u64 = 2000;
 const MAX_RETRY_ROUNDS: usize = 6;
 const MAX_PRESTART_CHUNKS_PER_FILE: usize = 256;
 const MAX_PRESTART_FILES: usize = 64;
+/// Pre-start buffering: most bytes kept in total and how long a buffered chunk waits for its transfer to start.
+const MAX_PRESTART_BYTES: usize = 4 * 1024 * 1024;
+const PRESTART_TTL: std::time::Duration = std::time::Duration::from_secs(60);
+/// Records of finished incoming transfers kept (a repeated end of a finished transfer is answered from them).
+const MAX_COMPLETED_RECORDS: usize = 4096;
+/// Most missing ranges named in one FileMissing message (the rest is reported in the next round).
+const MAX_RANGES_PER_MESSAGE: usize = 1000;
 
 /// Hard cap on a single incoming transfer's declared size. This
 /// mechanism (700B chunks) is sized for chat-style attachments, not
@@ -141,20 +148,23 @@ fn storage_filename(file_id: &str, filename: &str) -> String {
 const MAX_MISSING_RANGES: usize = 4096;
 
 fn chunk_ranges_to_indices(ranges: &[crate::communication::FileChunkRange], total_chunks: u32) -> Vec<u32> {
-    let mut seen = vec![false; total_chunks as usize];
-    let mut result = Vec::new();
-    for range in ranges.iter().take(MAX_MISSING_RANGES) {
-        if range.start > range.end || range.start >= total_chunks {
-            continue;
-        }
-        for idx in range.start..=range.end.min(total_chunks - 1) {
-            if !seen[idx as usize] {
-                seen[idx as usize] = true;
-                result.push(idx);
-            }
+    // keep the valid ranges (clamped to the file), merge the overlapping ones, then expand: the work is bounded by the number of
+    // ranges plus the number of chunks, whatever the peer sends
+    let mut valid: Vec<(u32, u32)> = ranges
+        .iter()
+        .take(MAX_MISSING_RANGES)
+        .filter(|r| r.start <= r.end && r.start < total_chunks)
+        .map(|r| (r.start, r.end.min(total_chunks - 1)))
+        .collect();
+    valid.sort_unstable();
+    let mut merged: Vec<(u32, u32)> = Vec::new();
+    for (start, end) in valid {
+        match merged.last_mut() {
+            Some(last) if start <= last.1.saturating_add(1) => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
         }
     }
-    result
+    merged.into_iter().flat_map(|(start, end)| start..=end).collect()
 }
 
 fn collect_missing_ranges(received_chunks: &[bool]) -> Vec<crate::communication::FileChunkRange> {
@@ -224,7 +234,8 @@ pub struct FileTransferManager {
 
     /// Недавно завершённые входящие передачи.
     /// Нужны, чтобы повторно ответить FileComplete, если финальный ACK потерялся.
-    completed_incoming: Mutex<HashSet<String>>,
+    /// finished incoming transfers: id -> the peer that sent it (an id finished for one peer is not reusable by another)
+    completed_incoming: Mutex<HashMap<String, HashId>>,
 
     /// Чанки, пришедшие раньше FileTransferStart из-за reorder в dual-path.
     prestart_chunks: Mutex<HashMap<String, Vec<BufferedChunk>>>,
@@ -271,7 +282,9 @@ const INCOMING_STALE_AFTER: std::time::Duration = std::time::Duration::from_secs
 
 /// `file_id` приходит от собеседника и попадает в имя файла на диске: только безопасные знаки.
 pub fn valid_file_id(id: &str) -> bool {
-    !id.is_empty() && id.len() <= 64 && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    // "__" separates the id from the file name in the stored file's name, so an id must not contain it (otherwise two different
+    // (id, name) pairs could map to one path)
+    !id.is_empty() && id.len() <= 64 && !id.contains("__") && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
 }
 
 /// Можно ли начать ещё один приём. `existing` — (от кого, как давно была активность) по каждому идущему приёму.
@@ -282,6 +295,7 @@ pub fn incoming_admissible(existing: &[(HashId, std::time::Duration)], from: &Ha
 
 #[derive(Debug, Clone)]
 struct BufferedChunk {
+    at: std::time::Instant,
     from: HashId,
     chunk_index: u32,
     total_chunks: u32,
@@ -296,7 +310,7 @@ impl FileTransferManager {
             transport,
             outgoing_disk: Mutex::new(HashMap::new()),
             incoming: Mutex::new(HashMap::new()),
-            completed_incoming: Mutex::new(HashSet::new()),
+            completed_incoming: Mutex::new(HashMap::new()),
             prestart_chunks: Mutex::new(HashMap::new()),
         }
     }
@@ -676,9 +690,29 @@ impl FileTransferManager {
                     }
                 }
             }
+            // a repeated start from the same peer: identical details change nothing (received data is kept); different details
+            // replace the transfer, and the old partial file is deleted rather than left behind
+            if let Some(t) = incoming.get_mut(&start.file_id) {
+                if t.filename == start.filename && t.file_size == start.file_size && t.total_chunks == start.total_chunks {
+                    t.last_activity = std::time::Instant::now();
+                    return Ok(());
+                }
+                let _ = std::fs::remove_file(&t.temp_path);
+                incoming.remove(&start.file_id);
+            }
         }
 
-        self.completed_incoming.lock().await.remove(&start.file_id);
+        {
+            let mut done = self.completed_incoming.lock().await;
+            match done.get(&start.file_id) {
+                Some(owner) if *owner != from => {
+                    return Err(anyhow::anyhow!("rejected file transfer from {}: file_id already used by another peer", hex::encode(&from.0[..8])));
+                }
+                _ => {
+                    done.remove(&start.file_id);
+                }
+            }
+        }
 
         let downloads_dir = crate::communication::files_dir("downloads");
         std::fs::create_dir_all(&downloads_dir)?;
@@ -749,9 +783,18 @@ impl FileTransferManager {
                 if !prestart.contains_key(&file_id) && prestart.len() >= MAX_PRESTART_FILES {
                     return Ok(false); // ждущих начала файлов слишком много
                 }
+                // chunks that wait for a transfer to start: expired ones go, one chunk is at most a chunk long (plus the
+                        // encryption overhead), and the total is bounded
+                prestart.values_mut().for_each(|v| v.retain(|c| c.at.elapsed() < PRESTART_TTL));
+                prestart.retain(|_, v| !v.is_empty());
+                let held: usize = prestart.values().flat_map(|v| v.iter()).map(|c| c.data.len()).sum();
+                if chunk_data.len() > FILE_TRANSFER_CHUNK_SIZE + 64 || held + chunk_data.len() > MAX_PRESTART_BYTES {
+                    return Ok(false);
+                }
                 let entry = prestart.entry(file_id.clone()).or_default();
                 if entry.len() < MAX_PRESTART_CHUNKS_PER_FILE {
                     entry.push(BufferedChunk {
+                        at: std::time::Instant::now(),
                         from,
                         chunk_index,
                         total_chunks,
@@ -805,15 +848,24 @@ impl FileTransferManager {
 
         if transfer.total_chunks != total_chunks {
             warn!(
-                "⚠️ total_chunks mismatch for {}: start={} chunk={}",
+                "⚠️ total_chunks mismatch for {}: start={} chunk={} — chunk dropped",
                 file_id,
                 transfer.total_chunks,
                 total_chunks
             );
+            return Ok(false);
         }
 
         let idx = chunk_index as usize;
         if idx >= transfer.received_chunks.len() {
+            return Ok(false);
+        }
+        // every chunk has exactly the length its place in the file demands: an empty chunk must not count as received, and a long
+        // one must not spill over into its neighbour
+        let offset = (chunk_index as u64) * (FILE_TRANSFER_CHUNK_SIZE as u64);
+        let expected_len = transfer.file_size.saturating_sub(offset).min(FILE_TRANSFER_CHUNK_SIZE as u64) as usize;
+        if plain_data.len() != expected_len {
+            warn!("⚠️ chunk {} of {} has {} bytes, expected {} — dropped", chunk_index, file_id, plain_data.len(), expected_len);
             return Ok(false);
         }
 
@@ -846,8 +898,10 @@ impl FileTransferManager {
         &self,
         to: HashId,
         file_id: &str,
-        missing_ranges: Vec<crate::communication::FileChunkRange>,
+        mut missing_ranges: Vec<crate::communication::FileChunkRange>,
     ) -> Result<()> {
+        // a message must fit the wire format: the rest is reported in the next round
+        missing_ranges.truncate(MAX_RANGES_PER_MESSAGE);
         let payload = serde_json::to_vec(&crate::communication::FileMissing {
             file_id: file_id.to_string(),
             missing_ranges,
@@ -907,6 +961,7 @@ impl FileTransferManager {
             let incoming = self.incoming.lock().await;
             incoming.get(file_id).map(|transfer| {
                 (
+                    transfer.from_peer,
                     transfer.received_count == transfer.total_chunks,
                     collect_missing_ranges(&transfer.received_chunks),
                     transfer.filename.clone(),
@@ -918,8 +973,8 @@ impl FileTransferManager {
             })
         };
 
-        let Some((is_complete, missing_ranges, filename, mime_type, temp_path, final_path, file_size)) = maybe_transfer else {
-            let already_completed = self.completed_incoming.lock().await.contains(file_id);
+        let Some((owner, is_complete, missing_ranges, filename, mime_type, temp_path, final_path, file_size)) = maybe_transfer else {
+            let already_completed = self.completed_incoming.lock().await.get(file_id) == Some(&from);
             if already_completed {
                 info!("🔁 Re-sending FileComplete for already finalized transfer {}", file_id);
                 self.send_transfer_complete(from, file_id).await?;
@@ -927,6 +982,10 @@ impl FileTransferManager {
             }
             return Err(anyhow::anyhow!("Incoming transfer not found"));
         };
+        // only the peer that is sending this file may end it, learn what is missing, or have it finalised
+        if owner != from {
+            return Err(anyhow::anyhow!("transfer end from a peer that does not own the transfer"));
+        }
 
         if is_complete {
             let actual_size = std::fs::metadata(&temp_path)?.len();
@@ -946,7 +1005,13 @@ impl FileTransferManager {
                 actual_size,
                 mime_type
             );
-            self.completed_incoming.lock().await.insert(file_id.to_string());
+            {
+                let mut done = self.completed_incoming.lock().await;
+                if done.len() >= MAX_COMPLETED_RECORDS {
+                    done.clear(); // old records only serve to answer a repeated end of an already finished transfer
+                }
+                done.insert(file_id.to_string(), from);
+            }
             self.send_transfer_complete(from, file_id).await?;
             self.incoming.lock().await.remove(file_id);
         } else {
@@ -1048,6 +1113,27 @@ mod hostile_peer_tests {
         assert_eq!(sanitize_filename("nul.txt"), "_nul.txt");
         assert_eq!(sanitize_filename("com1"), "_com1");
         assert_eq!(sanitize_filename("console.txt"), "console.txt");
+    }
+
+    #[test]
+    fn two_different_id_and_name_pairs_cannot_share_one_stored_path() {
+        // ("x", "a__b") and ("x__a", "b") would both be stored as "x__a__b"; the second id is not accepted at all
+        assert!(valid_file_id("x"));
+        assert!(!valid_file_id("x__a"));
+        assert!(valid_file_id("0123456789abcdef_0011223344556677"), "the ids this program makes are fine");
+    }
+
+    #[test]
+    fn many_overlapping_ranges_cost_no_more_than_the_file_has_chunks() {
+        use crate::communication::FileChunkRange as R;
+        let many: Vec<R> = (0..1000).map(|_| R { start: 0, end: 300_000 }).collect();
+        let t = std::time::Instant::now();
+        let out = chunk_ranges_to_indices(&many, 300_001);
+        assert_eq!(out.len(), 300_001);
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "{:?}", t.elapsed());
+        // touching ranges merge, gaps stay
+        let out = chunk_ranges_to_indices(&[R { start: 5, end: 6 }, R { start: 7, end: 8 }, R { start: 20, end: 21 }, R { start: 1, end: 2 }], 100);
+        assert_eq!(out, vec![1, 2, 5, 6, 7, 8, 20, 21]);
     }
 
     #[test]

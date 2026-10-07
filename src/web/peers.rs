@@ -208,9 +208,9 @@ pub fn decode_card(text: &str) -> Result<NodeCard, String> {
     card.check()
 }
 
-/// Визитка этого узла; при смене внешнего адреса заменяется (старая остаётся в памяти — это пара сотен байт на смену).
-fn my_card_cell() -> &'static std::sync::RwLock<Option<&'static NodeCard>> {
-    static C: std::sync::RwLock<Option<&'static NodeCard>> = std::sync::RwLock::new(None);
+/// Визитка этого узла; при смене внешнего адреса заменяется (старая освобождается, когда ею перестают пользоваться).
+fn my_card_cell() -> &'static std::sync::RwLock<Option<std::sync::Arc<NodeCard>>> {
+    static C: std::sync::RwLock<Option<std::sync::Arc<NodeCard>>> = std::sync::RwLock::new(None);
     &C
 }
 
@@ -229,11 +229,11 @@ pub fn install_my_card(node_id: &[u8; 32], signing_pubkey: &[u8; 32], addresses:
     if let Err(e) = std::fs::write(&path, encode_card(&card) + "\n") {
         eprintln!("[peers] не удалось записать визитку {}: {e}", path.display());
     }
-    *my_card_cell().write().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(card)));
+    *my_card_cell().write().unwrap_or_else(|e| e.into_inner()) = Some(std::sync::Arc::new(card));
 }
 
-pub fn my_card() -> Option<&'static NodeCard> {
-    *my_card_cell().read().unwrap_or_else(|e| e.into_inner())
+pub fn my_card() -> Option<std::sync::Arc<NodeCard>> {
+    my_card_cell().read().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
 /// Канал переписки, файлов и звонков (ставится при запуске узла): к доверенным узлам этот узел стучится и по нему.
@@ -371,7 +371,7 @@ async fn list() -> Json<Value> {
         "addresses": p.addresses,
         "online": online.contains(&p.node_id_hex.to_ascii_lowercase()),
     })).collect();
-    Json(json!({"card": my_card().map(encode_card), "peers": peers}))
+    Json(json!({"card": my_card().map(|c| encode_card(&c)), "peers": peers}))
 }
 
 #[derive(Deserialize)]

@@ -260,6 +260,19 @@ impl ChatManager {
             hex::encode(&from.0[..8])
         );
 
+        // An acknowledgement makes the node decrypt and rewrite a whole history, so it must be worth it: for a message we are still
+        // waiting on, only the peer it was sent to may confirm it; for anything else (e.g. after a restart) one per peer every 2 s.
+        let owner = self.pending_acks.lock().await.get(&msg_id).map(|p| p.peer);
+        match owner {
+            Some(o) if o != from => return Ok(()),
+            Some(_) => {}
+            None => {
+                if !ack_gate(&from) {
+                    return Ok(());
+                }
+            }
+        }
+
         // Обновить статус: Read
         self.storage.update_message_status(&from, &msg_id, MessageStatus::Read)?;
 
@@ -446,6 +459,21 @@ impl ChatManager {
 }
 
 // TODO: После тестов remove
+
+/// At most one acknowledgement per peer every two seconds is allowed to touch the stored history when the message is not one we wait on.
+fn ack_gate(from: &HashId) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static G: OnceLock<Mutex<HashMap<[u8; 32], std::time::Instant>>> = OnceLock::new();
+    let mut m = G.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 2048 {
+        m.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(2));
+    }
+    let ok = m.get(&from.0).map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(2));
+    if ok {
+        m.insert(from.0, std::time::Instant::now());
+    }
+    ok
+}
 
 /// Most text (bytes) and most inline attachment data (base64 chars) accepted in one incoming chat message.
 const MAX_INCOMING_TEXT: usize = 100_000;

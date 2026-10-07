@@ -157,21 +157,17 @@ pub async fn connect_public(target: &str, limit: Duration) -> std::io::Result<to
 /// Пароль локального прокси этого узла: создаётся один раз (20 случайных знаков), лежит в папке данных узла с правами 0600.
 pub fn local_proxy_password() -> std::io::Result<String> {
     let path = crate::util::data_dir::data_dir().join("local_proxy_password");
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        let s = s.trim().to_string();
-        if s.len() >= 16 {
-            return Ok(s);
-        }
-    }
-    use rand::Rng;
-    const A: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut r = rand::thread_rng();
-    let pw: String = (0..20).map(|_| A[r.gen_range(0..A.len())] as char).collect();
-    if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    crate::util::private_file::write_private(&path, pw.as_bytes())?;
-    Ok(pw)
+    let bytes = crate::util::private_file::read_or_create_private(
+        &path,
+        &|| {
+            use rand::Rng;
+            const A: &[u8] = b"abcdefghijkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+            let mut r = rand::thread_rng();
+            (0..20).map(|_| A[r.gen_range(0..A.len())]).collect()
+        },
+        &|b| std::str::from_utf8(b).map_or(false, |s| s.trim().len() >= 16),
+    )?;
+    Ok(String::from_utf8_lossy(&bytes).trim().to_string())
 }
 
 #[derive(Deserialize)]

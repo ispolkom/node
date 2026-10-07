@@ -284,6 +284,46 @@ pub struct ProxyGatewayRequest {
     pub short_id: String,
 }
 
+/// A relay forwards only to public destinations (outside testnet), and one source may push this many bytes per second through it.
+const RELAY_BYTES_PER_SEC_PER_SOURCE: usize = 2 * 1024 * 1024;
+
+fn relay_destination_ok(addr: &str) -> bool {
+    addr.parse::<std::net::SocketAddr>().map(|sa| crate::testnet::active() || crate::exit_policy::public_only(&sa.ip())).unwrap_or(false)
+}
+
+fn relay_quota_ok(source: &HashId, bytes: usize) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static Q: OnceLock<Mutex<HashMap<[u8; 32], (Instant, usize)>>> = OnceLock::new();
+    let mut m = Q.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 4096 {
+        m.retain(|_, (t, _)| t.elapsed() < std::time::Duration::from_secs(2));
+    }
+    let e = m.entry(source.0).or_insert((Instant::now(), 0));
+    if e.0.elapsed() >= std::time::Duration::from_secs(1) {
+        *e = (Instant::now(), 0);
+    }
+    e.1 = e.1.saturating_add(bytes);
+    e.1 <= RELAY_BYTES_PER_SEC_PER_SOURCE
+}
+
+/// One hole-punch introduction per introducer and per destination every 10 seconds.
+fn punch_gate(introducer: &HashId, dest: &str) -> bool {
+    use std::sync::{Mutex, OnceLock};
+    static G: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+    let mut m = G.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap_or_else(|e| e.into_inner());
+    if m.len() > 2048 {
+        m.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(10));
+    }
+    let (kp, kd) = (format!("p:{}", hex::encode(introducer.0)), format!("d:{dest}"));
+    let fresh = |k: &String| m.get(k).map_or(true, |t| t.elapsed() >= std::time::Duration::from_secs(10));
+    if !fresh(&kp) || !fresh(&kd) {
+        return false;
+    }
+    m.insert(kp, Instant::now());
+    m.insert(kd, Instant::now());
+    true
+}
+
 /// Most entries read from one peer-exchange packet, and most never-verified (hearsay) peers kept in the table.
 const MAX_PEER_EXCHANGE_LIST: usize = 32;
 const MAX_HEARSAY_PEERS: usize = 256;
@@ -3871,6 +3911,12 @@ impl P2PTransport {
                                                             };
                                                             let bytes = relay_pkt.data;
                                                             let bytes_len = bytes.len();
+                                                            // The destination is whatever address the target announced about itself, so it must be a
+                                                            // public address (not this machine's network), and one source gets a byte budget per second.
+                                                            if !relay_destination_ok(&target_addr) || !relay_quota_ok(&relay_pkt.source_peer, bytes_len) {
+                                                                eprintln!("[relay] ⛔ forwarding for {} refused (destination policy or budget)", hex::encode(&relay_pkt.source_peer.0[..8]));
+                                                                continue;
+                                                            }
                                                             // one session per (source, target) pair, bounded; a full relay drops instead of forwarding
                                                             if !transport.relay_manager.lock().await.account_forward(relay_pkt.source_peer, target_id, bytes_len) {
                                                                 eprintln!("[relay] ⛔ relay is full of live sessions — dropping a packet for {}", hex::encode(&target_id.0[..8]));
@@ -4063,7 +4109,7 @@ impl P2PTransport {
                                             let dest_ok = addr.parse::<std::net::SocketAddr>()
                                                 .map(|sa| crate::testnet::active() || crate::exit_policy::public_only(&sa.ip()))
                                                 .unwrap_or(false);
-                                            if !dest_ok || PUNCH_TASKS.load(std::sync::atomic::Ordering::Relaxed) >= MAX_PUNCH_TASKS {
+                                            if !dest_ok || !punch_gate(&peer_id, &addr) || PUNCH_TASKS.load(std::sync::atomic::Ordering::Relaxed) >= MAX_PUNCH_TASKS {
                                                 eprintln!("[punch] ⛔ intro from {} refused (destination not public or too many bursts)", hex::encode(&peer_id.0[..8]));
                                                 continue;
                                             }
@@ -4092,6 +4138,12 @@ impl P2PTransport {
                                         0xA1 => {
                                             let new_addr = from.to_string();
                                             let mut peers_lock = peers.lock().await;
+                                            // a probe that arrives from ANOTHER known peer's address came through that peer (a relay): it
+                                            // proves nothing about the direct path and must not redirect traffic to the relay's socket
+                                            let via_other = peers_lock.iter().any(|(id, q)| *id != peer_id && (q.addr == new_addr || q.data_addr.as_deref() == Some(new_addr.as_str())));
+                                            if via_other {
+                                                continue;
+                                            }
                                             if let Some(p) = peers_lock.get_mut(&peer_id) {
                                                 let was_relay = p.use_relay;
                                                 p.data_addr = Some(new_addr.clone());
@@ -4704,7 +4756,8 @@ impl P2PTransport {
 
     pub fn can_serve_relay(&self) -> bool {
         use crate::netlayer::packet::hello_caps::{RELAY, MOBILE};
-        (self.capabilities & RELAY) != 0 && (self.capabilities & MOBILE) == 0
+        // the owner's choice ("relay off") also stops forwarding, not only the advertising of the ability
+        (self.capabilities & RELAY) != 0 && (self.capabilities & MOBILE) == 0 && crate::relay_net::relay_enabled_cached()
     }
 
     pub fn can_introduce_peers(&self) -> bool {
@@ -4785,11 +4838,9 @@ impl P2PTransport {
         // Сессия relay: одна на пару (source, target).
         let session_id = {
             let mut rm = self.relay_manager.lock().await;
-            if let Some(s) = rm.get_session_by_peer(&target.id) {
-                s.session_id
-            } else {
-                rm.create_session(self.identity.node_id(), target.id)
-            }
+            // the same pair index the relay side uses: sending repeatedly must not create a session per packet
+            rm.session_for(self.identity.node_id(), target.id)
+                .ok_or_else(|| "too many relay sessions".to_string())?
         };
 
         let relay_pkt = crate::netlayer::packet::RelayDataPacket::new(
@@ -6444,5 +6495,38 @@ mod identity_pin_tests {
         // A totally unrelated, unpinned node_id must remain unaffected —
         // pinning B must not accidentally restrict discovery of anyone else.
         assert!(!P2PTransport::identity_conflict(&pins, node_id_other, &key(0xFF)));
+    }
+}
+
+#[cfg(test)]
+mod relay_policy_tests {
+    use super::*;
+
+    #[test]
+    fn a_relay_forwards_only_to_public_socket_addresses() {
+        assert!(relay_destination_ok("8.8.8.8:9000"));
+        for bad in ["127.0.0.1:22", "192.168.1.5:80", "10.0.0.1:9", "169.254.169.254:80", "[::1]:80", "example.com:80", "8.8.8.8", ""] {
+            assert!(!relay_destination_ok(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn one_source_gets_a_byte_budget_per_second_through_a_relay() {
+        let a = HashId([0xA1; 32]);
+        let b = HashId([0xB2; 32]);
+        let chunk = RELAY_BYTES_PER_SEC_PER_SOURCE / 4;
+        let ok = (0..4).filter(|_| relay_quota_ok(&a, chunk)).count();
+        assert_eq!(ok, 4);
+        assert!(!relay_quota_ok(&a, chunk), "the fifth quarter is over the budget");
+        assert!(relay_quota_ok(&b, chunk), "another source has its own budget");
+    }
+
+    #[test]
+    fn a_punch_introduction_is_allowed_once_per_introducer_and_per_destination() {
+        let (p1, p2) = (HashId([0xC1; 32]), HashId([0xC2; 32]));
+        assert!(punch_gate(&p1, "203.0.113.7:4000"));
+        assert!(!punch_gate(&p1, "203.0.113.8:4000"), "same introducer again");
+        assert!(!punch_gate(&p2, "203.0.113.7:4000"), "same destination from another introducer");
+        assert!(punch_gate(&p2, "203.0.113.9:4000"));
     }
 }

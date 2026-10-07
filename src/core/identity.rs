@@ -422,7 +422,9 @@ impl NodeIdentity {
                     return identity;
                 }
                 Err(e) => {
-                    println!("[identity] Failed to load identity: {}", e);
+                    // A saved identity that cannot be read (wrong password, damaged file, a read error) must NEVER be replaced by a
+                    // new one: that would silently destroy the node's identity. Stop and let the owner fix the cause.
+                    panic!("[identity] the saved identity for port {} cannot be loaded ({}); refusing to create a new one over it", port, e);
                 }
             }
         }

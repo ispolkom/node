@@ -55,10 +55,14 @@ async fn query_external_ip(sock: &UdpSocket, gateway: Ipv4Addr) -> Result<Ipv4Ad
         .await
         .map_err(|e| format!("NAT-PMP send: {}", e))?;
     let mut buf = [0u8; 64];
-    let (n, _) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+    let (n, from) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
         .await
         .map_err(|_| "NAT-PMP timeout".to_string())?
         .map_err(|e| format!("NAT-PMP recv: {}", e))?;
+    // only the gateway itself may answer (the socket is open to the whole network)
+    if from.ip() != IpAddr::V4(gateway) || from.port() != NAT_PMP_PORT {
+        return Err(format!("NAT-PMP reply from {} is not the gateway", from));
+    }
     if n < 12 {
         return Err(format!("NAT-PMP reply too short: {}", n));
     }
@@ -93,10 +97,13 @@ async fn map_udp_port(
         .await
         .map_err(|e| format!("NAT-PMP map send: {}", e))?;
     let mut buf = [0u8; 64];
-    let (n, _) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
+    let (n, from) = timeout(Duration::from_secs(2), sock.recv_from(&mut buf))
         .await
         .map_err(|_| "NAT-PMP map timeout".to_string())?
         .map_err(|e| format!("NAT-PMP map recv: {}", e))?;
+    if from.ip() != IpAddr::V4(gateway) || from.port() != NAT_PMP_PORT {
+        return Err(format!("NAT-PMP map reply from {} is not the gateway", from));
+    }
     if n < 16 {
         return Err(format!("NAT-PMP map reply too short: {}", n));
     }
@@ -106,6 +113,10 @@ async fn map_udp_port(
     let result_code = u16::from_be_bytes([buf[2], buf[3]]);
     if result_code != 0 {
         return Err(format!("NAT-PMP map error: {}", result_code));
+    }
+    // the reply must be about the mapping we asked for
+    if u16::from_be_bytes([buf[8], buf[9]]) != internal_port {
+        return Err("NAT-PMP map reply is for another internal port".to_string());
     }
     let mapped_external = u16::from_be_bytes([buf[10], buf[11]]);
     let granted_lifetime = u32::from_be_bytes([buf[12], buf[13], buf[14], buf[15]]);
