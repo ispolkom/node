@@ -84,15 +84,20 @@ impl Socks5Server {
     /// Handle single SOCKS5 client connection
     async fn handle_client(mut stream: TcpStream, client_addr: SocketAddr, config: Socks5Config) -> Result<()> {
         // Phase 1: Authentication selection
-        let auth_method = Self::do_auth_selection(&mut stream, &config).await?;
+        // every handshake phase runs under a deadline: a connection that goes silent cannot hold the task
+        let hs = std::time::Duration::from_secs(20);
+        let auth_method = tokio::time::timeout(hs, Self::do_auth_selection(&mut stream, &config)).await
+            .map_err(|_| anyhow!("SOCKS5 handshake timeout"))??;
 
         // Phase 2: Handle authentication (if required)
         if auth_method == Socks5AuthMethod::UserPass {
-            Self::do_username_password_auth(&mut stream, &config).await?;
+            tokio::time::timeout(hs, Self::do_username_password_auth(&mut stream, &config)).await
+                .map_err(|_| anyhow!("SOCKS5 auth timeout"))??;
         }
 
         // Phase 3: Connection request
-        let request = Self::read_request(&mut stream).await?;
+        let request = tokio::time::timeout(hs, Self::read_request(&mut stream)).await
+            .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
         println!("[socks5] Request from {}: {:?}", client_addr, request.command);
 
@@ -189,7 +194,7 @@ impl Socks5Server {
                         if good { pin = Some(p.to_ascii_lowercase()); }
                         good
                     }).unwrap_or(false);
-                user_ok && password == *expected_pass
+                user_ok & bool::from(subtle::ConstantTimeEq::ct_eq(password.as_bytes(), expected_pass.as_bytes()))
             })
             .unwrap_or(false);
 
@@ -518,16 +523,20 @@ impl Socks5ProxyServer {
     /// Handle single P2P SOCKS5 client connection
     async fn handle_client_p2p(&self, mut client_stream: TcpStream, client_addr: SocketAddr) -> Result<()> {
         // Phase 1: Authentication selection
-        let auth_method = Socks5Server::do_auth_selection(&mut client_stream, &self.config).await?;
+        let hs = std::time::Duration::from_secs(20); // a silent connection must not hold the task
+        let auth_method = tokio::time::timeout(hs, Socks5Server::do_auth_selection(&mut client_stream, &self.config)).await
+            .map_err(|_| anyhow!("SOCKS5 handshake timeout"))??;
 
         // Phase 2: Handle authentication (if required)
         let mut pin = None;
         if auth_method == Socks5AuthMethod::UserPass {
-            pin = Socks5Server::do_username_password_auth(&mut client_stream, &self.config).await?;
+            pin = tokio::time::timeout(hs, Socks5Server::do_username_password_auth(&mut client_stream, &self.config)).await
+                .map_err(|_| anyhow!("SOCKS5 auth timeout"))??;
         }
 
         // Phase 3: Connection request
-        let request = Socks5Server::read_request(&mut client_stream).await?;
+        let request = tokio::time::timeout(hs, Socks5Server::read_request(&mut client_stream)).await
+            .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
         debug!("📨 SOCKS5 request from {}: {:?}", client_addr, request.command);
 
