@@ -32,6 +32,9 @@ use tokio_tungstenite::{
 
 use crate::netlayer::tls_cert::TlsIdentity;
 
+/// How long an established connection may stay completely silent (heartbeats and pings keep it alive).
+const IDLE_LIMIT: Duration = Duration::from_secs(300);
+
 /// Размер канала per-connection в обе стороны.
 const CHANNEL_CAPACITY: usize = 256;
 
@@ -65,9 +68,15 @@ impl WsConnection {
         let peer_addr_for_pump = peer_addr.clone();
         let pump = tokio::spawn(async move {
             let (mut sink, mut stream) = ws.split();
+            // a connection that sends nothing at all (not even a ping) for this long is closed: silent peers must not keep a slot forever
+            let mut last_heard = tokio::time::Instant::now();
 
             loop {
                 tokio::select! {
+                    _ = tokio::time::sleep_until(last_heard + IDLE_LIMIT) => {
+                        eprintln!("[ws] {} silent for {:?}, closing", peer_addr_for_pump, IDLE_LIMIT);
+                        break;
+                    }
                     // App кладёт байты на отправку.
                     msg = out_rx.recv() => {
                         match msg {
@@ -82,6 +91,7 @@ impl WsConnection {
                     }
                     // По сети пришли байты.
                     next = stream.next() => {
+                        if next.is_some() { last_heard = tokio::time::Instant::now(); }
                         match next {
                             Some(Ok(Message::Binary(data))) => {
                                 if in_tx.send(data.to_vec()).await.is_err() {
@@ -287,18 +297,22 @@ pub async fn connect_to_anchor(
         crate::netlayer::tls_cert::build_client_config_pinned(expected_fingerprint_hex)?;
     let connector = TlsConnector::from(client_cfg);
 
-    let tcp = TcpStream::connect((host.as_str(), port))
+    // every phase has a deadline: an anchor that does not answer must not hang the caller (the reconnect loop) forever
+    const PHASE: Duration = Duration::from_secs(15);
+    let tcp = tokio::time::timeout(PHASE, TcpStream::connect((host.as_str(), port)))
         .await
+        .map_err(|_| anyhow::anyhow!("TCP connect {}:{} timed out", host, port))?
         .with_context(|| format!("TCP connect {}:{}", host, port))?;
     let server_name = rustls::pki_types::ServerName::try_from(host.clone())
         .with_context(|| format!("ServerName parse {}", host))?;
-    let tls_stream = connector
-        .connect(server_name, tcp)
+    let tls_stream = tokio::time::timeout(PHASE, connector.connect(server_name, tcp))
         .await
+        .map_err(|_| anyhow::anyhow!("TLS connect timed out"))?
         .context("TLS connect")?;
 
-    let (ws_stream, _resp) = client_async(anchor_url, tls_stream)
+    let (ws_stream, _resp) = tokio::time::timeout(PHASE, client_async(anchor_url, tls_stream))
         .await
+        .map_err(|_| anyhow::anyhow!("WS handshake timed out"))?
         .context("WS handshake")?;
 
     let peer_addr = format!("{}:{}", host, port);
