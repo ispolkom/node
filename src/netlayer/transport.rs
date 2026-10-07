@@ -284,6 +284,14 @@ pub struct ProxyGatewayRequest {
     pub short_id: String,
 }
 
+/// Most entries read from one peer-exchange packet, and most never-verified (hearsay) peers kept in the table.
+const MAX_PEER_EXCHANGE_LIST: usize = 32;
+const MAX_HEARSAY_PEERS: usize = 256;
+
+/// Most hole-punch bursts running at once.
+const MAX_PUNCH_TASKS: usize = 16;
+static PUNCH_TASKS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// P2P Transport Manager
 ///
 /// Manages two UDP sockets:
@@ -2575,6 +2583,16 @@ impl P2PTransport {
                                                 // Handle in stream registry
                                                 let mut streams_lock = streams.lock().await;
 
+                                                // A stream belongs to the peer it was made with: frames for it from anyone else are dropped
+                                                // (stream ids are small numbers and easy to guess).
+                                                if let Some(existing) = streams_lock.get_stream(stream_id) {
+                                                    if existing.peer_id != peer_id {
+                                                        eprintln!("[transport] ⛔ frame for stream {} from {} but the stream belongs to another peer — dropped",
+                                                                  stream_id, hex::encode(&peer_id.0[..8]));
+                                                        continue;
+                                                    }
+                                                }
+
                                                 // If stream doesn't exist and this is a SYN, create it (incoming connection)
                                                 if !streams_lock.get_stream(stream_id).is_some() {
                                                     if stream_frame.header.msg_type == crate::dataplane::stream::StreamMsgType::Syn {
@@ -3058,7 +3076,7 @@ impl P2PTransport {
                                                         println!("[transport] 🚂 YTP Wagon from {} (train #{}, wagon {}/{}, {} KB)",
                                                                  crate::util::mask_hash_id(&peer_id),
                                                                  wagon.train_id,
-                                                                 wagon.wagon_num + 1,
+                                                                 wagon.wagon_num.saturating_add(1),
                                                                  wagon.total_wagons,
                                                                  wagon.cargo.len() / 1024
                                                         );
@@ -3430,7 +3448,15 @@ impl P2PTransport {
                                                 
                                                 // Добавляем новых пиров
 
-                                                for (new_peer_id, new_addr) in peer_list {
+                                                // Hearsay from one peer is bounded: a list longer than this is cut, the address must be a plain
+                                                // public socket address (never a name to resolve or an internal address), and the number of
+                                                // never-verified entries in the table is capped.
+                                                let testnet = crate::testnet::active();
+                                                for (new_peer_id, new_addr) in peer_list.into_iter().take(MAX_PEER_EXCHANGE_LIST) {
+                                                    match new_addr.parse::<std::net::SocketAddr>() {
+                                                        Ok(sa) if testnet || crate::exit_policy::public_only(&sa.ip()) => {}
+                                                        _ => continue,
+                                                    }
 
                                                     // Skip our own node ID
                                                     if new_peer_id == local_id {
@@ -3452,7 +3478,8 @@ impl P2PTransport {
                                                     // Only that node's OWN verified Hello may do that.
                                                     let is_pinned = transport.pinned_identities.read().await.contains_key(&new_peer_id);
 
-                                                    if !peers_lock.contains_key(&new_peer_id) && !is_pinned {
+                                                    let hearsay = peers_lock.values().filter(|p| p.verified_signing_pubkey.is_none()).count();
+                                                    if !peers_lock.contains_key(&new_peer_id) && !is_pinned && hearsay < MAX_HEARSAY_PEERS {
 
                                                         println!("[transport] ➕ Adding new peer from list: {} @ {}",
 
@@ -4031,6 +4058,15 @@ impl P2PTransport {
                                                 let peers_lock = peers.lock().await;
                                                 peers_lock.get(&other_id).cloned()
                                             };
+                                            // the destination must be a plain public socket address (a name would be resolved, an internal
+                                            // address would make us send packets into a private network), and bursts are bounded
+                                            let dest_ok = addr.parse::<std::net::SocketAddr>()
+                                                .map(|sa| crate::testnet::active() || crate::exit_policy::public_only(&sa.ip()))
+                                                .unwrap_or(false);
+                                            if !dest_ok || PUNCH_TASKS.load(std::sync::atomic::Ordering::Relaxed) >= MAX_PUNCH_TASKS {
+                                                eprintln!("[punch] ⛔ intro from {} refused (destination not public or too many bursts)", hex::encode(&peer_id.0[..8]));
+                                                continue;
+                                            }
                                             if let Some(op) = other_peer {
                                                 let enc_lock = encryption.lock().await;
                                                 let probe_payload = vec![0xA1u8];
@@ -4039,12 +4075,14 @@ impl P2PTransport {
                                                 if let Some(probe_enc) = probe_enc {
                                                     let socket_send = transport.socket_manager.data().await.clone();
                                                     let addr_clone = addr.clone();
+                                                    PUNCH_TASKS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                                                     tokio::spawn(async move {
                                                         for i in 0..5 {
                                                             let _ = socket_send.send_to(&probe_enc, &addr_clone).await;
                                                             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                                                             tracing::debug!("[punch] probe #{} → {}", i + 1, addr_clone);
                                                         }
+                                                        PUNCH_TASKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                                     });
                                                 }
                                             }
@@ -5256,8 +5294,13 @@ impl P2PTransport {
         };
         let mut store = self.paired_anchors.lock().await;
         // Anchor должен уже быть в store (mobile делал pair-import заранее).
-        // Если нет — добавим минимальный entry.
+        // Only an anchor paired by the owner (QR import) may issue a session; an ordinary authenticated peer must not
+        // be able to write itself into the pairing store.
         let exists = store.anchors.iter().any(|e| e.payload.anchor_id == sender);
+        if !exists {
+            eprintln!("[session-issue] refused: {} is not a paired anchor", hex::encode(&sender.0[..8]));
+            return;
+        }
         if !exists {
             // Создаём placeholder с anchor_id и пустыми остальными полями. URL и fingerprint
             // mobile получит позже (через QR-import или /pair/qr).

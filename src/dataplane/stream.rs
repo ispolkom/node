@@ -189,6 +189,9 @@ pub enum StreamState {
     Reset,
 }
 
+/// Most received-but-unread bytes one stream may hold.
+pub const MAX_RECV_BUFFER: usize = 1024 * 1024;
+
 /// Reliable ordered stream
 pub struct ReliableStream {
     pub stream_id: u32,
@@ -329,8 +332,9 @@ impl ReliableStream {
 
         match frame.header.msg_type {
             StreamMsgType::Syn => {
-                // Incoming connection request
+                // Incoming connection request: the SYN itself takes sequence number `seq`, so data starts right after it
                 if self.state == StreamState::Closed {
+                    self.recv_seq = frame.header.seq.wrapping_add(1);
                     Some(self.accept())
                 } else {
                     None
@@ -350,28 +354,10 @@ impl ReliableStream {
                 None
             }
             StreamMsgType::Data => {
-                // Data packet
-                if frame.header.seq == self.recv_seq {
-                    // In-order packet
-                    eprintln!("[stream-{}] ✅ Received IN-ORDER Data: seq={}, len={}",
-                             self.stream_id, frame.header.seq, frame.data.len());
-                    self.recv_seq = self.recv_seq.wrapping_add(1);
-                    self.recv_buffer.extend(&frame.data);
-                    eprintln!("[stream-{}] 📥 recv_buffer now has {} bytes",
-                             self.stream_id, self.recv_buffer.len());
-
-                    // Update RTT
-                    let now = Instant::now();
-                    if let Some(sent) = self.unacked.front() {
-                        let rtt = now.duration_since(sent.sent_at).as_millis() as u32;
-                        self.rtt_ms = (self.rtt_ms * 3 + rtt) / 4; // EMA
-                        self.rto_ms = (self.rtt_ms * 2).max(200);
-                    }
-
-                    // Send ACK
-                    Some(StreamFrame::ack(self.stream_id, self.recv_seq, self.recv_window))
-                } else if frame.header.seq == self.recv_seq.wrapping_add(1) {
-                    // Next expected sequence number (for incoming streams)
+                // Data packet: only the expected sequence number is taken, anything else is answered with what we expect.
+                // Data nobody has read yet is capped (the sender is told the window is closed), so a peer that streams
+                // without end cannot grow this buffer without limit.
+                if frame.header.seq == self.recv_seq && self.recv_buffer.len() + frame.data.len() <= MAX_RECV_BUFFER {
                     self.recv_seq = self.recv_seq.wrapping_add(1);
                     self.recv_buffer.extend(&frame.data);
 
@@ -382,13 +368,10 @@ impl ReliableStream {
                         self.rtt_ms = (self.rtt_ms * 3 + rtt) / 4; // EMA
                         self.rto_ms = (self.rtt_ms * 2).max(200);
                     }
-
-                    // Send ACK
-                    Some(StreamFrame::ack(self.stream_id, self.recv_seq, self.recv_window))
-                } else {
-                    // Out of order - just ACK what we expect
-                    Some(StreamFrame::ack(self.stream_id, self.recv_seq, self.recv_window))
                 }
+                let free = MAX_RECV_BUFFER.saturating_sub(self.recv_buffer.len());
+                self.recv_window = free.min(u16::MAX as usize) as u16;
+                Some(StreamFrame::ack(self.stream_id, self.recv_seq, self.recv_window))
             }
             StreamMsgType::Ack => {
                 // Remove acked packets
@@ -524,5 +507,48 @@ impl ReliableStream {
     /// Check for timeout
     pub fn is_expired(&self, timeout: Duration) -> bool {
         self.last_activity.elapsed() > timeout
+    }
+}
+
+#[cfg(test)]
+mod receive_tests {
+    use super::*;
+
+    fn incoming() -> ReliableStream {
+        let mut s = ReliableStream::new(1, HashId([1; 32]));
+        // the opener's SYN takes sequence 0, its first data frame carries 1
+        let syn = StreamFrame::new(StreamMsgType::Syn, 1, 0, 0, vec![]);
+        assert!(s.handle_frame(&syn).is_some());
+        s
+    }
+
+    fn data(seq: u32, bytes: &[u8]) -> StreamFrame {
+        StreamFrame::new(StreamMsgType::Data, 1, seq, 0, bytes.to_vec())
+    }
+
+    #[test]
+    fn data_is_taken_once_and_in_order_after_the_syn() {
+        let mut s = incoming();
+        s.handle_frame(&data(1, b"a"));
+        s.handle_frame(&data(1, b"a")); // the same frame again
+        s.handle_frame(&data(3, b"c")); // a frame from the future
+        s.handle_frame(&data(2, b"b"));
+        let mut out = [0u8; 8];
+        let n = s.read(&mut out);
+        assert_eq!(&out[..n], b"ab", "no duplicates, no gaps, no reordering");
+    }
+
+    #[test]
+    fn unread_data_stops_at_the_cap_and_the_window_closes() {
+        let mut s = incoming();
+        let chunk = vec![0u8; 64 * 1024];
+        let mut seq = 1;
+        for _ in 0..40 {
+            s.handle_frame(&data(seq, &chunk));
+            seq += 1;
+        }
+        assert!(s.recv_buffer.len() <= MAX_RECV_BUFFER, "{}", s.recv_buffer.len());
+        let ack = s.handle_frame(&data(seq, &chunk)).unwrap();
+        assert_eq!(ack.header.msg_type, StreamMsgType::Ack);
     }
 }
