@@ -4754,7 +4754,12 @@ async fn api_avatar_get(
     let avatar_dir = dirs::home_dir()
         .expect("No home directory")
         .join(".yandi/avatars");
-    
+
+    // the name comes from the address: only a plain hex id may be used to build a file name
+    if short_id.is_empty() || short_id.len() > 64 || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+
     for ext in ["png", "jpg", "gif"] {
         let path = avatar_dir.join(format!("{}.{}", short_id, ext));
         if path.exists() {

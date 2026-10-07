@@ -22,6 +22,9 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Largest history file accepted from one peer's incoming messages.
+const MAX_CHAT_FILE_BYTES: u64 = 32 * 1024 * 1024;
+
 /// Хранилище чатов (локальное для каждой ноды) с AES-256-GCM шифрованием
 pub struct ChatStorage {
     my_node_id: HashId,
@@ -95,9 +98,17 @@ impl ChatStorage {
     }
 
     /// Получить путь к зашифрованному файлу чата
+    /// The file is named by the FULL node id: with only a prefix, a peer whose id starts like another contact's would write into
+    /// that contact's history. A history made under the old short name is adopted by the first peer that asks for it.
     fn chat_file_path_enc(&self, peer_id: &HashId) -> PathBuf {
-        let short_id = hex::encode(&peer_id.0[..8]);
-        self.chats_dir.join(format!("chat_{}.enc", short_id))
+        let full = self.chats_dir.join(format!("chat_{}.enc", hex::encode(peer_id.0)));
+        if !full.exists() {
+            let legacy = self.chats_dir.join(format!("chat_{}.enc", hex::encode(&peer_id.0[..8])));
+            if legacy.exists() {
+                let _ = std::fs::rename(&legacy, &full);
+            }
+        }
+        full
     }
 
     /// Сохранить исходящее сообщение (шифрованное)
@@ -111,6 +122,10 @@ impl ChatStorage {
     pub fn save_incoming(&self, from: &HashId, msg: &ChatMessage) -> Result<()> {
         let _g = self.locked();
         let chat_file = self.chat_file_path_enc(from);
+        // a peer cannot grow a history without limit
+        if std::fs::metadata(&chat_file).map_or(false, |m| m.len() > MAX_CHAT_FILE_BYTES) {
+            return Err(anyhow::anyhow!("chat history of this peer is full"));
+        }
         self.append_encrypted_message(&chat_file, msg)
     }
 
@@ -316,8 +331,14 @@ impl ChatStorage {
                 let short_id = &filename_str[5..filename_str.len()-4];
                 let mut bytes = [0u8; 32];
                 if let Ok(short_bytes) = hex::decode(short_id) {
+                    if short_bytes.is_empty() || short_bytes.len() > 32 {
+                        continue;
+                    }
                     bytes[..short_bytes.len()].copy_from_slice(&short_bytes);
-                    peers.push(HashId(bytes));
+                    // an old short-named file and a full-named one of the same peer are one chat
+                    if !peers.iter().any(|p: &HashId| p.0[..8] == bytes[..8]) {
+                        peers.push(HashId(bytes));
+                    }
                 }
             }
         }
@@ -334,6 +355,39 @@ mod concurrency_tests {
 
     /// Найдено на живой сети: подтверждения доставки (приходят дублями) меняют статус через «прочитать всё, удалить файл, записать заново»;
     /// сообщение, дописанное в этот момент, пропадало из истории (в журнале «сохранено», в истории нет).
+    #[test]
+    fn two_peers_with_the_same_id_prefix_get_separate_histories_and_old_files_are_adopted() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = HashId([1; 32]);
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let a = HashId([7; 32]);
+        let mut b = [7u8; 32];
+        b[31] = 9; // the same first 8 bytes, a different peer
+        let b = HashId(b);
+        st.save_incoming(&a, &ChatMessage::new(a, me, "from a".into())).unwrap();
+        st.save_incoming(&b, &ChatMessage::new(b, me, "from b".into())).unwrap();
+        assert_eq!(st.load_history(&a, 10).unwrap().len(), 1);
+        assert_eq!(st.load_history(&b, 10).unwrap().len(), 1);
+        assert_eq!(st.list_chats().unwrap().len(), 1, "same prefix counts as one entry in the list");
+        // a history written under the old short name is picked up by the full name
+        let c = HashId([5; 32]);
+        std::fs::write(dir.path().join(format!("chat_{}.enc", hex::encode(&c.0[..8]))), b"").unwrap();
+        let _ = st.load_history(&c, 10);
+        assert!(dir.path().join(format!("chat_{}.enc", hex::encode(c.0))).exists());
+        assert!(!dir.path().join(format!("chat_{}.enc", hex::encode(&c.0[..8]))).exists());
+    }
+
+    #[test]
+    fn a_peers_incoming_history_stops_growing_at_the_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let me = HashId([1; 32]);
+        let peer = HashId([2; 32]);
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let f = dir.path().join(format!("chat_{}.enc", hex::encode(peer.0)));
+        std::fs::write(&f, vec![b'0'; (MAX_CHAT_FILE_BYTES + 1) as usize]).unwrap();
+        assert!(st.save_incoming(&peer, &ChatMessage::new(peer, me, "x".into())).is_err());
+    }
+
     #[test]
     fn messages_are_never_lost_while_statuses_are_being_updated() {
         let dir = tempfile::tempdir().unwrap();
