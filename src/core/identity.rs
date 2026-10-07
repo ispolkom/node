@@ -156,8 +156,6 @@ fn decrypt_private_keys(
 impl NodeIdentity {
     pub fn new() -> Self {
         let mut rng = OsRng;
-        let addr = HashId::new_random();
-
         let x25519_secret = EphemeralSecret::random_from_rng(&mut rng);
         let x25519_public = PublicKey::from(&x25519_secret);
 
@@ -166,6 +164,8 @@ impl NodeIdentity {
 
         let ed25519_signing_key = ed25519_dalek::SigningKey::generate(&mut rng);
         let ed25519_verifying_key = ed25519_signing_key.verifying_key();
+        // the node id is the hash of the signing key: nobody else can claim it (older identities keep their random id)
+        let addr = HashId(crate::util::types::derive_node_id(ed25519_verifying_key.as_bytes()));
 
         println!("[identity] Generated cryptographic key pair");
         println!("[identity] Public X25519: {}", hex::encode(&x25519_public.as_bytes()[..8]));

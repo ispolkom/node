@@ -5545,6 +5545,12 @@ impl P2PTransport {
         }
         println!("[transport] ✅ Phase 1: Self-certifying identity verified");
 
+        // the node id must be bound to the signing key (or be a legacy id before the sunset)
+        let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        if !crate::util::types::id_acceptable(&hello_packet.node_id.0, &hello_packet.public_key, now_s) {
+            return Err("Phase 1 FAILED: node_id is not bound to the signing key".to_string());
+        }
+
         let challenge = hello_packet.challenge_data();
         if !NodeIdentity::verify_node(&hello_packet.node_name, &hello_packet.public_key, &hello_packet.signature.0, &challenge) {
             return Err("Phase 2 FAILED: Invalid signature".to_string());
@@ -6312,6 +6318,21 @@ mod identity_pin_tests {
         assert!(P2PTransport::verify_peer_handshake_static(&h).is_ok());
         h.capabilities ^= 1;
         assert!(P2PTransport::verify_peer_handshake_static(&h).is_err());
+    }
+
+    #[test]
+    fn a_hello_claiming_a_bound_node_id_of_another_key_is_rejected() {
+        let victim = crate::core::NodeIdentity::new();
+        let attacker = crate::core::NodeIdentity::new();
+        // the attacker signs a Hello that carries the victim's node id
+        let mut h = HelloPacket::new_request(victim.node_id(), attacker.signing_public_key, attacker.public_key, [0u8; 8], 0);
+        let sig = attacker.sign(&h.challenge_data()).unwrap();
+        let mut b = [0u8; 64];
+        b.copy_from_slice(&sig);
+        h.signature = crate::netlayer::packet::Signature(b);
+        assert!(P2PTransport::verify_peer_handshake_static(&h).is_err());
+        // a new identity's id is bound to its own key
+        assert!(crate::util::types::id_bound_to_key(&victim.node_id().0, &victim.signing_public_key));
     }
 
     #[test]

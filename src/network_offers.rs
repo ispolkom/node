@@ -120,6 +120,9 @@ impl NodeOffer {
             return Err("time");
         }
         let key = hex_bytes::<32>(&self.key).and_then(|k| VerifyingKey::from_bytes(&k).ok()).ok_or("key")?;
+        if !hex_bytes::<32>(&self.node_id).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes(), now)) {
+            return Err("id not bound to key");
+        }
         let sig = hex_bytes::<64>(&self.sig).map(|s| Signature::from_bytes(&s)).ok_or("sig")?;
         key.verify(&self.signing_bytes(), &sig).map_err(|_| "signature")
     }
@@ -600,6 +603,18 @@ mod tests {
     fn key(n: u8) -> SigningKey {
         SigningKey::from_bytes(&[n; 32])
     }
+    #[test]
+    fn a_bound_node_id_cannot_be_claimed_with_another_key() {
+        let now = 1_800_000_000;
+        let a = SelfAssessment { country: None, country_source: "unknown", public_ip: true, power: "low", cpu_cores: 1, ram_gb: 1, latency_ms: None, addr: vec![] };
+        let victim = key(41);
+        let victim_id = crate::util::types::derive_node_id(&victim.verifying_key().to_bytes());
+        // the owner's own offer is accepted
+        assert_eq!(build_offer_for_test(&victim_id, &victim, &a, now).check(now), Ok(()));
+        // an impostor signs the victim's id with its own key
+        assert_eq!(build_offer_for_test(&victim_id, &key(42), &a, now).check(now), Err("id not bound to key"));
+    }
+
     fn offer(n: u8, country: Option<&str>, now: u64) -> NodeOffer {
         let a = SelfAssessment { country: country.map(String::from), country_source: "ip_lookup", public_ip: true, power: "high", cpu_cores: 8, ram_gb: 32, latency_ms: Some(17), addr: vec![format!("203.0.113.{n}:9000")] };
         build_offer_for_test(&[n; 32], &key(n), &a, now)

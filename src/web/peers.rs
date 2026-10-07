@@ -177,6 +177,12 @@ impl NodeCard {
         }
         self.id = self.id.to_ascii_lowercase();
         self.key = self.key.to_ascii_lowercase();
+        let (id, key) = (hex::decode(&self.id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()), hex::decode(&self.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()));
+        if let (Some(id), Some(key)) = (id, key) {
+            if !crate::util::types::id_acceptable(&id, &key, crate::network_offers::now_secs()) {
+                return Err("Номер узла в визитке не сходится с его ключом.".into());
+            }
+        }
         if self.addr.len() > MAX_ADDRESSES || !self.addr.iter().all(|a| valid_address(a)) || self.p2p.len() > MAX_ADDRESSES || !self.p2p.iter().all(|a| valid_address(a)) {
             return Err("В визитке неверные адреса.".into());
         }

@@ -78,6 +78,9 @@ impl ViaRecord {
             return Err("time");
         }
         let key = hex::decode(&self.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
+        if !hex::decode(&self.node_id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes(), now)) {
+            return Err("id not bound to key");
+        }
         let sig = hex::decode(&self.sig).ok().and_then(|b| <[u8; 64]>::try_from(b).ok()).map(|b| Signature::from_bytes(&b)).ok_or("sig")?;
         key.verify(&self.signing_bytes(), &sig).map_err(|_| "signature")
     }
@@ -320,6 +323,15 @@ mod tests {
     }
     fn rec(n: u8, relays: &[u8], issued: u64) -> ViaRecord {
         ViaRecord { v: 1, node_id: id(n), key: String::new(), relays: relays.iter().map(|r| id(*r)).collect(), issued, expires: issued + VIA_TTL_SECS, sig: String::new() }.sign(&key(n))
+    }
+
+    #[test]
+    fn a_bound_node_id_cannot_be_claimed_with_another_key_in_a_via_record() {
+        let victim = key(51);
+        let vid = hex::encode(crate::util::types::derive_node_id(&victim.verifying_key().to_bytes()));
+        let mk = |k: &SigningKey| ViaRecord { v: 1, node_id: vid.clone(), key: String::new(), relays: vec![id(2)], issued: NOW, expires: NOW + VIA_TTL_SECS, sig: String::new() }.sign(k);
+        assert_eq!(mk(&victim).check(NOW), Ok(()));
+        assert_eq!(mk(&key(52)).check(NOW), Err("id not bound to key"));
     }
 
     #[test]

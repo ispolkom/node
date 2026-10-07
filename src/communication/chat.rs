@@ -349,7 +349,7 @@ impl ChatManager {
                 debug!("📭 FileMissing from {}", hex::encode(&from.0[..8]));
                 if let Some(ref ftm) = self.file_transfer_manager {
                     if let Ok(missing) = serde_json::from_slice::<super::FileMissing>(&packet.data) {
-                        if let Err(e) = ftm.handle_missing(&missing.file_id, missing.missing_ranges).await {
+                        if let Err(e) = ftm.handle_missing(from, &missing.file_id, missing.missing_ranges).await {
                             error!("❌ Failed to handle missing chunks: {}", e);
                         }
                     }
@@ -359,7 +359,7 @@ impl ChatManager {
                 info!("✅ FileComplete from {}", hex::encode(&from.0[..8]));
                 if let Some(ref ftm) = self.file_transfer_manager {
                     if let Ok(complete) = serde_json::from_slice::<super::FileTransferComplete>(&packet.data) {
-                        if let Err(e) = ftm.handle_transfer_complete(&complete.file_id).await {
+                        if let Err(e) = ftm.handle_transfer_complete(from, &complete.file_id).await {
                             error!("❌ Failed to handle file complete: {}", e);
                         }
                     }

@@ -119,8 +119,15 @@ fn sanitize_filename(filename: &str) -> String {
     let trimmed = sanitized.trim_start_matches('.');
     let trimmed = trimmed.trim_end_matches(|c: char| c == '.' || c == ' ');
 
+    // Windows device names (CON, NUL, COM1, ...) are not valid file names there, with or without an extension
+    let stem = trimmed.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let reserved = matches!(stem.as_str(), "CON" | "PRN" | "AUX" | "NUL")
+        || ((stem.starts_with("COM") || stem.starts_with("LPT")) && stem.len() == 4 && stem.as_bytes()[3].is_ascii_digit());
+
     if trimmed.is_empty() {
         "file".to_string()
+    } else if reserved {
+        format!("_{}", trimmed.chars().take(199).collect::<String>())
     } else {
         trimmed.chars().take(200).collect()
     }
@@ -130,11 +137,21 @@ fn storage_filename(file_id: &str, filename: &str) -> String {
     format!("{}__{}", file_id, sanitize_filename(filename))
 }
 
-fn chunk_ranges_to_indices(ranges: &[crate::communication::FileChunkRange]) -> Vec<u32> {
+/// Chunk numbers a peer says it still misses: at most `MAX_MISSING_RANGES` ranges, clamped to the real chunk count, no duplicates.
+const MAX_MISSING_RANGES: usize = 4096;
+
+fn chunk_ranges_to_indices(ranges: &[crate::communication::FileChunkRange], total_chunks: u32) -> Vec<u32> {
+    let mut seen = vec![false; total_chunks as usize];
     let mut result = Vec::new();
-    for range in ranges {
-        for idx in range.start..=range.end {
-            result.push(idx);
+    for range in ranges.iter().take(MAX_MISSING_RANGES) {
+        if range.start > range.end || range.start >= total_chunks {
+            continue;
+        }
+        for idx in range.start..=range.end.min(total_chunks - 1) {
+            if !seen[idx as usize] {
+                seen[idx as usize] = true;
+                result.push(idx);
+            }
         }
     }
     result
@@ -222,6 +239,8 @@ struct OutgoingTransferDisk {
     mime_type: String,
     total_chunks: u32,
     file_id: String,
+    /// who this file is being sent to: only this peer may report missing chunks or completion
+    to_peer: HashId,
     file_path: std::path::PathBuf,
     last_checkpoint: u32,
     pending_missing: Option<Vec<u32>>,
@@ -340,6 +359,7 @@ impl FileTransferManager {
             mime_type,
             total_chunks,
             file_id: file_id.clone(),
+            to_peer: to,
             file_path: file_path.clone(),
             last_checkpoint: 0,
             pending_missing: None,
@@ -412,6 +432,7 @@ impl FileTransferManager {
             mime_type,
             total_chunks,
             file_id: file_id.clone(),
+            to_peer: to,
             file_path,
             last_checkpoint: 0,
             pending_missing: None,
@@ -857,21 +878,22 @@ impl FileTransferManager {
 
     pub async fn handle_missing(
         &self,
+        from: HashId,
         file_id: &str,
         missing_ranges: Vec<crate::communication::FileChunkRange>,
     ) -> Result<()> {
         let mut outgoing_disk = self.outgoing_disk.lock().await;
-        if let Some(transfer) = outgoing_disk.get_mut(file_id) {
-            transfer.pending_missing = Some(chunk_ranges_to_indices(&missing_ranges));
+        if let Some(transfer) = outgoing_disk.get_mut(file_id).filter(|t| t.to_peer == from) {
+            transfer.pending_missing = Some(chunk_ranges_to_indices(&missing_ranges, transfer.total_chunks));
             transfer.response_version += 1;
             let _ = transfer.response_tx.send(transfer.response_version);
         }
         Ok(())
     }
 
-    pub async fn handle_transfer_complete(&self, file_id: &str) -> Result<()> {
+    pub async fn handle_transfer_complete(&self, from: HashId, file_id: &str) -> Result<()> {
         let mut outgoing_disk = self.outgoing_disk.lock().await;
-        if let Some(transfer) = outgoing_disk.get_mut(file_id) {
+        if let Some(transfer) = outgoing_disk.get_mut(file_id).filter(|t| t.to_peer == from) {
             transfer.remote_completed = true;
             transfer.pending_missing = None;
             transfer.response_version += 1;
@@ -1020,6 +1042,26 @@ impl FileTransferManager {
 
 #[cfg(test)]
 mod hostile_peer_tests {
+    #[test]
+    fn windows_device_names_are_not_used_as_file_names() {
+        assert_eq!(sanitize_filename("CON"), "_CON");
+        assert_eq!(sanitize_filename("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_filename("com1"), "_com1");
+        assert_eq!(sanitize_filename("console.txt"), "console.txt");
+    }
+
+    #[test]
+    fn missing_ranges_from_a_peer_are_clamped_deduplicated_and_capped() {
+        use crate::communication::FileChunkRange as R;
+        // a range of four billion chunks on a 10-chunk file expands to at most the 10 real chunks
+        assert_eq!(chunk_ranges_to_indices(&[R { start: 0, end: u32::MAX }], 10), (0..10).collect::<Vec<u32>>());
+        // reversed and out-of-file ranges are ignored, overlaps are not repeated
+        assert_eq!(chunk_ranges_to_indices(&[R { start: 5, end: 2 }, R { start: 50, end: 60 }, R { start: 1, end: 3 }, R { start: 2, end: 4 }], 10), vec![1, 2, 3, 4]);
+        // endless ranges do not allocate more than the file has
+        let many: Vec<R> = (0..100_000).map(|_| R { start: 0, end: u32::MAX }).collect();
+        assert_eq!(chunk_ranges_to_indices(&many, 10).len(), 10);
+    }
+
     use super::*;
 
     #[test]

@@ -142,3 +142,55 @@ impl From<HashId> for NodeName {
 
 // Legacy type alias for compatibility
 pub type LegacyHashId = [u8; 8];
+
+/// Marker at the END of every bound node id (the start stays random, so the short ids shown and searched by prefix keep telling nodes apart). An id carrying it MUST be derived from the signing key,
+/// so nobody can pass a victim's bound id off as an "old random one" (the chance that an old random id starts with it is 2^-32).
+pub const BOUND_ID_TAG: [u8; 4] = *b"YB1\0";
+
+/// The node id derived from a signing key: the first 28 bytes of SHA-256(key) + tag.
+pub fn derive_node_id(signing_key: &[u8; 32]) -> [u8; 32] {
+    let h = NodeName::from_public_key(signing_key).0;
+    let mut id = [0u8; 32];
+    id[..28].copy_from_slice(&h[..28]);
+    id[28..].copy_from_slice(&BOUND_ID_TAG);
+    id
+}
+
+/// A node id is "bound" when it is exactly the id derived from this signing key: nobody else can claim it.
+pub fn id_bound_to_key(node_id: &[u8; 32], signing_key: &[u8; 32]) -> bool {
+    &derive_node_id(signing_key) == node_id
+}
+
+/// Unix time after which node ids without the tag (made before binding existed) are no longer accepted (2027-04-01 UTC).
+/// Until then they are accepted on a first-claim basis (a key is pinned to the id at first sight), so existing nodes keep working.
+pub const LEGACY_ID_SUNSET: u64 = 1_806_537_600;
+
+/// Is this (node id, signing key) pair acceptable at time `now`?
+/// A tagged id must be bound to the key, always. An untagged (legacy) id is accepted only before the sunset
+/// and when `YANDI_REQUIRE_BOUND_IDS` is not set.
+pub fn id_acceptable(node_id: &[u8; 32], signing_key: &[u8; 32], now: u64) -> bool {
+    if node_id[28..] == BOUND_ID_TAG {
+        return id_bound_to_key(node_id, signing_key);
+    }
+    now < LEGACY_ID_SUNSET && std::env::var_os("YANDI_REQUIRE_BOUND_IDS").is_none()
+}
+
+#[cfg(test)]
+mod bound_id_tests {
+    use super::*;
+
+    #[test]
+    fn a_bound_id_belongs_only_to_its_key_and_a_legacy_one_is_accepted_only_before_the_sunset() {
+        let key = [7u8; 32];
+        let bound = derive_node_id(&key);
+        let legacy = [9u8; 32];
+        assert_eq!(&bound[28..], &BOUND_ID_TAG);
+        assert!(id_bound_to_key(&bound, &key));
+        assert!(!id_bound_to_key(&legacy, &key));
+        // an attacker with another key cannot claim the victim's bound id, even before the sunset
+        assert!(!id_acceptable(&bound, &[8u8; 32], LEGACY_ID_SUNSET - 1));
+        assert!(id_acceptable(&bound, &key, LEGACY_ID_SUNSET + 1));
+        assert!(id_acceptable(&legacy, &key, LEGACY_ID_SUNSET - 1));
+        assert!(!id_acceptable(&legacy, &key, LEGACY_ID_SUNSET));
+    }
+}
