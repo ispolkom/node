@@ -37,6 +37,9 @@ pub struct Train {
     /// 🔄 DUAL-PATH: клоны вагонов (is_clone=true)
     pub wagons_clone: HashMap<u32, Wagon>,
 
+    /// How many distinct wagon numbers (original or clone) have arrived; keeps the completeness check O(1)
+    received_distinct: u32,
+
     /// ⚡ Максимальный полученный offset
     pub max_received_offset: u64,
 
@@ -70,6 +73,9 @@ pub enum TrainState {
 }
 
 impl Train {
+    /// Upper bound on wagons per train (16384 x 60 KB = 1 GB) — a hostile peer cannot ask for more
+    pub const MAX_WAGONS: u32 = 16384;
+
     /// Создать новый поезд для отправки
     pub fn new(
         source: crate::util::HashId,
@@ -87,6 +93,7 @@ impl Train {
             wagons_by_offset: BTreeMap::new(),
             wagons: HashMap::new(),
             wagons_clone: HashMap::new(),  // 🔄 DUAL-PATH: клоны
+            received_distinct: 0,
             max_received_offset: 0,
             state: TrainState::Assembling,
             created_at: Instant::now(),
@@ -109,6 +116,7 @@ impl Train {
             wagons_by_offset: BTreeMap::new(),
             wagons: HashMap::new(),
             wagons_clone: HashMap::new(),  // 🔄 DUAL-PATH
+            received_distinct: 0,
             max_received_offset: 0,
             state: TrainState::Assembling,
             created_at: Instant::now(),
@@ -158,6 +166,11 @@ impl Train {
             return Err(TrainError::WagonCountMismatch);
         }
 
+        // total_wagons and wagon_num come from the peer: bound both before any state or loop depends on them
+        if self.total_wagons == 0 || self.total_wagons > Self::MAX_WAGONS || wagon.wagon_num >= self.total_wagons {
+            return Err(TrainError::WagonCountMismatch);
+        }
+
         // 🔍 DEBUG (читаем поля ДО move!)
         let wagon_num = wagon.wagon_num;
         let is_clone = wagon.is_clone;
@@ -171,26 +184,22 @@ impl Train {
         };
 
         // 🔄 DUAL-PATH: разделяем оригиналы и клоны
+        let known = self.wagons.contains_key(&wagon_num) || self.wagons_clone.contains_key(&wagon_num);
         if is_clone {
-            // Клон - сохраняем как запасной
-            self.wagons_clone.insert(wagon_num, wagon);
+            // Клон - сохраняем как запасной (повтор не перезаписывает первый)
+            self.wagons_clone.entry(wagon_num).or_insert(wagon);
         } else {
-            // Оригинал - сохраняем как основной
-            self.wagons.insert(wagon_num, wagon);
+            // Оригинал - сохраняем как основной (повтор не перезаписывает первый)
+            self.wagons.entry(wagon_num).or_insert(wagon);
+        }
+        if !known {
+            self.received_distinct += 1;
         }
 
         self.last_activity = Instant::now();
 
-        // 🔄 Проверяем: собран ли поезд (оригиналы + клоны)
-        let mut total_received = 0;
-        for i in 0..self.total_wagons {
-            if self.wagons.contains_key(&i) || self.wagons_clone.contains_key(&i) {
-                total_received += 1;
-            }
-        }
-
         // 🔄 Возвращаем (complete, path0_lost)
-        let complete = total_received == self.total_wagons && self.state != TrainState::Complete;
+        let complete = self.received_distinct == self.total_wagons && self.state != TrainState::Complete;
         if complete {
             self.state = TrainState::Complete;
         }
@@ -452,6 +461,35 @@ pub enum TrainError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_hostile_wagon_count_or_number_is_refused_before_any_work() {
+        let src = crate::util::HashId::default();
+        // a train claiming billions of wagons
+        let mut t = Train::new_receiving(7, src, u32::MAX);
+        let w = Wagon::new(7, 0, u32::MAX, 0, vec![1], 0);
+        assert!(t.add_wagon(w).is_err());
+        // wagon number outside the train
+        let mut t = Train::new_receiving(7, src, 2);
+        let w = Wagon::new(7, 5, 2, 0, vec![1], 0);
+        assert!(t.add_wagon(w).is_err());
+        assert!(t.wagons.is_empty());
+    }
+
+    #[test]
+    fn a_repeated_wagon_does_not_overwrite_the_first_and_does_not_complete_the_train_early() {
+        let src = crate::util::HashId::default();
+        let mut t = Train::new_receiving(9, src, 2);
+        let first = Wagon::new(9, 0, 2, 0, vec![1, 2, 3], 0);
+        let evil = Wagon::new(9, 0, 2, 0, vec![9, 9, 9], 0);
+        let (done, _) = t.add_wagon(first).unwrap();
+        assert!(!done);
+        let (done, _) = t.add_wagon(evil).unwrap();
+        assert!(!done, "the same wagon twice is still one wagon");
+        assert_eq!(t.wagons[&0].cargo, vec![1, 2, 3]);
+        let (done, _) = t.add_wagon(Wagon::new(9, 1, 2, 3, vec![4], 0)).unwrap();
+        assert!(done);
+    }
 
     #[test]
     fn test_train_creation() {
