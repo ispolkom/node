@@ -538,7 +538,17 @@ async fn host_guard(req: axum::extract::Request, next: Next) -> Response {
 
 #[cfg(test)]
 mod host_guard_tests {
-    use super::host_allowed;
+    use super::{host_allowed, media_name_ok};
+
+    #[test]
+    fn media_names_cannot_leave_the_media_directory() {
+        for ok in ["ring.mp3", "sounds/ring.wav"] {
+            assert!(media_name_ok(ok), "{ok}");
+        }
+        for bad in ["", "../secret", "a/../../b", "/etc/passwd", "..\\x", "a\0b", "./.."] {
+            assert!(!media_name_ok(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn only_this_computer_names_pass() {
@@ -3961,7 +3971,18 @@ async fn api_config_get() -> impl IntoResponse {
 }
 
 // === Media files handler ===
+/// Only plain relative names below the media directory: no `..`, no absolute paths, no backslashes.
+fn media_name_ok(path: &str) -> bool {
+    !path.is_empty()
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+}
+
 async fn media_handler(PathExtractor(path): PathExtractor<String>) -> impl IntoResponse {
+    if !media_name_ok(&path) {
+        return (StatusCode::NOT_FOUND, [(axum::http::header::CONTENT_TYPE, "text/plain")], Vec::<u8>::new());
+    }
     let media_path = format!("ui/media/{}", path);
     match std::fs::read(media_path) {
         Ok(data) => {

@@ -40,8 +40,8 @@ pub struct Socks5Config {
 impl Default for Socks5Config {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:9111".parse().unwrap(),  // ✅ Внешний доступ (нестандартный порт)
-            auth_required: false,
+            listen_addr: "127.0.0.1:9111".parse().unwrap(),  // по умолчанию — только этот компьютер и только с паролем (открытый прокси наружу — вред)
+            auth_required: true,
             username: None,
             password: None,
             enable_udp: true,
