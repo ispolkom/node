@@ -231,6 +231,8 @@ pub struct P2PTransport {
     admission: Arc<Mutex<crate::netlayer::admission::Admission>>,
     /// Когда в последний раз просили новый ключ у узла (не чаще раза в минуту)
     rekey_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
+    /// when a broken session with a peer was last repaired by a new handshake (see `request_resync`)
+    resync_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
 
     /// Statistics
     stats_sent_packets: Arc<AtomicU64>,
@@ -310,6 +312,7 @@ impl P2PTransport {
             bootstrap_fingerprints: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(Mutex::new(HashMap::new())),
+            resync_requested: Arc::new(Mutex::new(HashMap::new())),
             admission: Arc::new(Mutex::new(crate::netlayer::admission::Admission::new(crate::netlayer::admission::AdmissionConfig::default()))),
             stats_sent_packets: Arc::new(AtomicU64::new(0)),
             stats_recv_packets: Arc::new(AtomicU64::new(0)),
@@ -995,7 +998,7 @@ impl P2PTransport {
                                         id: peer_id,
                                         addr: from.to_string(),
                                         data_addr: None,
-                                        p2p_data_addr: Some(hello.p2p_data_addr.clone()),
+                                        p2p_data_addr: Some(observed_data_addr(&hello.p2p_data_addr, from.ip())),
                                         local_addr: None,
                                         public_addr: None,
                                         ipv6_virtual: None,
@@ -1008,6 +1011,7 @@ impl P2PTransport {
                                 }
                                 P2PHelloType::Ack => {
                                     let peer_id = hello.node_id;
+                                    let mut key_confirmed = true;
                                     // PFS: use stored ephemeral secret (keyed by nonce) to complete ECDH
                                     {
                                         let mut enc = self.p2p_encryption.lock().await;
@@ -1016,13 +1020,14 @@ impl P2PTransport {
                                         // неизвестное приглашение.
                                         if let Err(e) = enc.complete_hello_initiator(hello.nonce, peer_id, &hello.x25519_public) {
                                             eprintln!("[P2P] PFS initiator: {}", e);
+                                            key_confirmed = false;
                                         }
                                     }
                                     let p2p_peer = P2PPeer {
                                         id: peer_id,
                                         addr: from.to_string(),
                                         data_addr: None,
-                                        p2p_data_addr: Some(hello.p2p_data_addr.clone()),
+                                        p2p_data_addr: Some(observed_data_addr(&hello.p2p_data_addr, from.ip())),
                                         local_addr: None,
                                         public_addr: None,
                                         ipv6_virtual: None,
@@ -1032,6 +1037,15 @@ impl P2PTransport {
                                     };
                                     self.peers.lock().await.insert(peer_id, p2p_peer);
                                     println!("[P2P] ✅ Added peer {} via ACK [PFS]", hex::encode(&peer_id.0[..8]));
+                                    // Ответчик переходит на новый ключ только получив первый пакет, зашифрованный им. Если слать нечего, обе стороны
+                                    // остаются в разных ключах и не слышат друг друга — поэтому сразу отправляем пустую «служебную» весточку.
+                                    if key_confirmed {
+                                        let this = self.clone();
+                                        tokio::task::spawn(async move {
+                                            let pkt = P2PPacket::new(P2PPacketType::ChatTyping, this.identity.node_id(), false, Vec::new());
+                                            let _ = this.send_packet_dual_path(peer_id, pkt).await;
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -1148,6 +1162,12 @@ impl P2PTransport {
                     }
                 }
                 Err(e) => {
+                    // keys that do not match (not a harmless duplicate of a packet already seen) are repaired by a new handshake
+                    if e.contains("authentication failed") || e.contains("No session") {
+                        let sender = p2p_packet.sender;
+                        drop(enc);
+                        self.request_resync(sender).await;
+                    }
                     return Err(format!("[P2P] ❌ Decryption failed from {}: {}", from, e));
                 }
             }
@@ -1271,6 +1291,27 @@ impl P2PTransport {
     pub async fn derive_file_key(&self, peer_id: &HashId, file_id: &str) -> Option<[u8; 32]> {
         let enc = self.p2p_encryption.lock().await;
         enc.derive_file_key(peer_id, file_id)
+    }
+
+    /// A session that has stopped working (packets from a known peer do not decrypt, messages are not acknowledged) is renegotiated:
+    /// ask the peer for a fresh handshake — at most once every 5 seconds per peer. Without this, two nodes whose keys ended up different
+    /// (handshakes crossing, answers lost or reordered) stay unable to talk until something else happens to renew the key.
+    pub async fn request_resync(&self, peer_id: HashId) {
+        {
+            let mut asked = self.resync_requested.lock().await;
+            if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
+                return;
+            }
+            asked.insert(peer_id, std::time::Instant::now());
+            if asked.len() > 4096 {
+                asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
+            }
+        }
+        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
+        if let Some(addr) = addr {
+            println!("[P2P] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+            let _ = self.send_hello_request(&addr).await;
+        }
     }
 
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
@@ -1403,5 +1444,29 @@ mod pending_packet_tests {
         let mut untyped = (5u32).to_be_bytes().to_vec();
         untyped.extend_from_slice(b"hello");
         assert!(open_prefix(0xA0, &untyped).is_err());
+    }
+}
+
+/// Адрес для данных собеседника: порт — тот, что он назвал, а IP — тот, с которого пришло его приветствие. Узел за NAT называет свой
+/// внутренний адрес (192.168.x.x), и слать данные по нему публичному собеседнику бесполезно.
+fn observed_data_addr(declared: &str, seen: std::net::IpAddr) -> String {
+    match declared.parse::<std::net::SocketAddr>() {
+        Ok(a) if a.ip() == seen => declared.to_string(),
+        Ok(a) => std::net::SocketAddr::new(seen, a.port()).to_string(),
+        Err(_) => declared.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod observed_addr_tests {
+    use super::observed_data_addr;
+
+    #[test]
+    fn a_node_behind_nat_is_reached_at_the_address_it_was_seen_from() {
+        let seen: std::net::IpAddr = "11.77.254.1".parse().unwrap();
+        assert_eq!(observed_data_addr("192.168.1.11:26104", seen), "11.77.254.1:26104");
+        assert_eq!(observed_data_addr("0.0.0.0:26104", seen), "11.77.254.1:26104");
+        assert_eq!(observed_data_addr("11.77.254.1:26104", seen), "11.77.254.1:26104");
+        assert_eq!(observed_data_addr("garbage", seen), "garbage");
     }
 }

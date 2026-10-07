@@ -22,6 +22,15 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// One message waiting for its recipient's confirmation (see the outgoing queue in chat.rs).
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct OutboxEntry {
+    pub peer: HashId,
+    pub msg: ChatMessage,
+    /// when it was first sent (unix seconds): the queue gives up on a message a day after this
+    pub first_sent: u64,
+}
+
 /// Largest history file accepted from one peer's incoming messages.
 const MAX_CHAT_FILE_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -155,6 +164,41 @@ impl ChatStorage {
 
         writeln!(file, "{}", hex::encode(encrypted_data))?;
         Ok(())
+    }
+
+    /// The outgoing queue (messages not yet confirmed by their recipients), kept encrypted in one file so that it survives a restart.
+    pub fn save_outbox(&self, entries: &[OutboxEntry]) -> Result<()> {
+        let _g = self.locked();
+        let path = self.chats_dir.join("outbox.enc");
+        if entries.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            return Ok(());
+        }
+        let plaintext = serde_json::to_vec(entries)?;
+        let key_bytes = self.get_encryption_key();
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce_bytes), plaintext.as_slice()).map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        let mut out = nonce_bytes.to_vec();
+        out.extend_from_slice(&ciphertext);
+        crate::util::private_file::write_private(&path, hex::encode(out).as_bytes())?;
+        Ok(())
+    }
+
+    pub fn load_outbox(&self) -> Vec<OutboxEntry> {
+        let _g = self.locked();
+        let Ok(text) = std::fs::read_to_string(self.chats_dir.join("outbox.enc")) else { return Vec::new() };
+        let Ok(bytes) = hex::decode(text.trim()) else { return Vec::new() };
+        if bytes.len() < 12 {
+            return Vec::new();
+        }
+        let key_bytes = self.get_encryption_key();
+        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+        match cipher.decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..]) {
+            Ok(p) => serde_json::from_slice(&p).unwrap_or_default(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Загрузить историю чата (расшифрованную)

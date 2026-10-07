@@ -71,6 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let mut ip_country: Option<String> = None;
     let external_ip = match ip_service.get_external_ip().await {
         Ok(ip) => {
+            yandi::ip_history::observe(&ip);
             match ip_service.get_detailed_ip_info().await {
                 Ok(info) => {
                     // Info already printed in get_detailed_ip_info

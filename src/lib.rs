@@ -49,6 +49,7 @@ pub mod p2p;
 pub mod testnet;
 pub mod exit_policy;
 pub mod network_offers;
+pub mod ip_history;
 pub mod exit_select;
 pub mod reciprocity;
 pub mod hops;

@@ -14,15 +14,28 @@ use tokio::sync::{mpsc, Mutex};
 use anyhow::Result;
 use tracing::{info, error, debug};
 
-/// A message sitting in `Shipping`, waiting for the peer's ChatAck.
-/// Delivery underneath (Station dual-path) is fire-and-forget with no
-/// retransmission — if both copies of a wagon are lost, the train times
-/// out silently and no ACK/NACK signals it. Without this, a message could
-/// sit in `Shipping` forever with no visible failure. See
-/// `spawn_delivery_timeout_task`.
+/// An outgoing message waiting for the recipient's ChatAck.
+/// Delivery underneath (dual-path UDP) has no retransmission of its own: a packet can be lost, or the session keys of the two sides can
+/// be out of step for a while (a new contact, a restarted node). So the message is kept here and SENT AGAIN, with growing pauses, until
+/// the recipient confirms it — delivery "at least once"; the receiver ignores repeats (same `msg_id`). It is given up on only after
+/// `MAX_DELIVERY_AGE`. The queue is also written to disk, so a restart does not lose it. See `spawn_delivery_timeout_task`.
 struct PendingAck {
     peer: HashId,
     sent_at: Instant,
+    /// unix seconds of the first send (survives a restart; `sent_at` does not)
+    first_sent: u64,
+    attempts: u32,
+    next_try: Instant,
+    msg: ChatMessage,
+}
+
+/// Pause before the n-th resend: 3, 6, 12, 24, 48 s, then every 60 s.
+fn retry_delay(attempts: u32) -> Duration {
+    Duration::from_secs((3u64 << attempts.saturating_sub(1).min(5)).min(60))
+}
+
+fn unix_now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 /// Менеджер чата
@@ -37,12 +50,18 @@ pub struct ChatManager {
     file_transfer_manager: Option<std::sync::Arc<super::FileTransferManager>>,
     /// Messages sent but not yet ACKed by the peer — see `PendingAck`.
     pending_acks: Arc<Mutex<HashMap<HashId, PendingAck>>>,
+    /// the queue changed since it was last written to disk
+    outbox_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// ids of recent incoming messages (a resend of one we already have is acknowledged again but not stored twice)
+    seen_incoming: Arc<Mutex<(std::collections::HashSet<HashId>, std::collections::VecDeque<HashId>)>>,
 }
 
-/// How long to wait for a ChatAck before marking a message Failed.
-/// Station's own train_timeout is 30s; this gives a margin for dual-path
-/// completion + the ACK's own round trip before giving up.
-const CHAT_ACK_TIMEOUT: Duration = Duration::from_secs(45);
+/// How long a message is retried before it is marked Failed.
+const MAX_DELIVERY_AGE: Duration = Duration::from_secs(24 * 3600);
+/// Most messages waiting in the outgoing queue.
+const MAX_OUTBOX: usize = 2000;
+/// Incoming message ids remembered to recognise repeats.
+const SEEN_INCOMING_MAX: usize = 20_000;
 
 impl ChatManager {
     /// Создать новый ChatManager
@@ -72,6 +91,24 @@ impl ChatManager {
         let e2e_encryption = Arc::new(E2EEncryption::new());
         let (incoming_tx, _incoming_rx) = mpsc::unbounded_channel();
 
+        // messages that were still waiting for their recipients when the node last stopped
+        let mut restored = HashMap::new();
+        for e in storage.load_outbox() {
+            let age = unix_now().saturating_sub(e.first_sent);
+            if age < MAX_DELIVERY_AGE.as_secs() {
+                restored.insert(e.msg.msg_id, PendingAck {
+                    peer: e.peer,
+                    sent_at: Instant::now().checked_sub(Duration::from_secs(age)).unwrap_or_else(Instant::now),
+                    first_sent: e.first_sent,
+                    attempts: 0,
+                    next_try: Instant::now() + Duration::from_secs(5),
+                    msg: e.msg,
+                });
+            }
+        }
+        if !restored.is_empty() {
+            info!("📮 {} unconfirmed messages restored from the outgoing queue", restored.len());
+        }
         Ok(Self {
             my_node_id,
             storage,
@@ -79,7 +116,9 @@ impl ChatManager {
             e2e_encryption,
             incoming_tx,
             file_transfer_manager: None,
-            pending_acks: Arc::new(Mutex::new(HashMap::new())),
+            pending_acks: Arc::new(Mutex::new(restored)),
+            outbox_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            seen_incoming: Arc::new(Mutex::new((Default::default(), Default::default()))),
         })
     }
 
@@ -89,7 +128,7 @@ impl ChatManager {
     /// unconfirmed forever. Mirrors Station's own `spawn_cleanup_task`.
     pub fn spawn_delivery_timeout_task(self: Arc<Self>) {
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(5));
+            let mut interval = tokio::time::interval(Duration::from_secs(2));
             loop {
                 interval.tick().await;
                 self.sweep_expired_acks().await;
@@ -97,35 +136,74 @@ impl ChatManager {
         });
     }
 
-    /// One sweep of `pending_acks`: anything older than `CHAT_ACK_TIMEOUT`
-    /// gets marked `Failed` and dropped from tracking. Split out from
-    /// `spawn_delivery_timeout_task` so it's directly callable (incl. from
-    /// tests) without waiting on the real interval.
+    /// One round of the outgoing queue: messages whose time has come are sent again; messages older than `MAX_DELIVERY_AGE`
+    /// are marked `Failed`. (Split out so it can be called directly, e.g. from tests.)
     async fn sweep_expired_acks(&self) {
         let now = Instant::now();
-        let expired: Vec<(HashId, HashId)> = {
-            let pending = self.pending_acks.lock().await;
-            pending
-                .iter()
-                .filter(|(_, p)| now.duration_since(p.sent_at) > CHAT_ACK_TIMEOUT)
-                .map(|(msg_id, p)| (*msg_id, p.peer))
-                .collect()
-        };
-        if expired.is_empty() {
-            return;
+        let mut due: Vec<(HashId, HashId, ChatMessage)> = Vec::new();
+        let mut gave_up: Vec<(HashId, HashId)> = Vec::new();
+        {
+            let mut pending = self.pending_acks.lock().await;
+            for (msg_id, p) in pending.iter_mut() {
+                if now.duration_since(p.sent_at) > MAX_DELIVERY_AGE {
+                    gave_up.push((*msg_id, p.peer));
+                } else if now >= p.next_try {
+                    // reserve the slot so that a slow send is not started twice
+                    p.attempts += 1;
+                    p.next_try = now + retry_delay(p.attempts);
+                    due.push((*msg_id, p.peer, p.msg.clone()));
+                }
+            }
+            for (msg_id, _) in &gave_up {
+                pending.remove(msg_id);
+            }
         }
-        let mut pending = self.pending_acks.lock().await;
-        for (msg_id, peer) in expired {
-            pending.remove(&msg_id);
-            if let Err(e) = self.storage.update_message_status(&peer, &msg_id, MessageStatus::Failed) {
+        for (msg_id, peer) in &gave_up {
+            if let Err(e) = self.storage.update_message_status(peer, msg_id, MessageStatus::Failed) {
                 error!("❌ Failed to mark message {} as Failed: {}", hex::encode(&msg_id.0[..8]), e);
             } else {
-                error!("⏰ Message {} to {} never ACKed within {:?} — marked Failed",
-                    hex::encode(&msg_id.0[..8]), hex::encode(&peer.0[..8]), CHAT_ACK_TIMEOUT);
+                error!("⏰ Message {} to {} not delivered within {:?} — marked Failed", hex::encode(&msg_id.0[..8]), hex::encode(&peer.0[..8]), MAX_DELIVERY_AGE);
             }
+        }
+        if !gave_up.is_empty() {
+            self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        for (msg_id, peer, msg) in due {
+            match self.send_once(&msg).await {
+                Ok(()) => debug!("🔁 resent message {} to {}", hex::encode(&msg_id.0[..8]), hex::encode(&peer.0[..8])),
+                Err(e) => debug!("🔁 resend of {} to {} failed (will retry): {}", hex::encode(&msg_id.0[..8]), hex::encode(&peer.0[..8]), e),
+            }
+            // the keys of the two sides may be out of step: renegotiate (rate-limited inside)
+            self.transport.request_resync(peer).await;
+        }
+        self.persist_outbox_if_dirty().await;
+    }
+
+    /// Write the outgoing queue to disk if it changed.
+    async fn persist_outbox_if_dirty(&self) {
+        if !self.outbox_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        let entries: Vec<super::storage::OutboxEntry> = self
+            .pending_acks
+            .lock()
+            .await
+            .values()
+            .map(|p| super::storage::OutboxEntry { peer: p.peer, msg: p.msg.clone(), first_sent: p.first_sent })
+            .collect();
+        if let Err(e) = self.storage.save_outbox(&entries) {
+            error!("❌ could not write the outgoing queue: {}", e);
+            self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
+    /// One attempt to put a message on the wire.
+    async fn send_once(&self, msg: &ChatMessage) -> Result<()> {
+        let msg_data = serde_json::to_vec(msg)?;
+        let encrypted = self.e2e_encryption.encrypt_for_peer(msg.to, &msg_data).await?;
+        let p2p_packet = P2PPacket::new(P2PPacketType::ChatMessage, self.my_node_id, false, encrypted);
+        self.transport.send_packet_dual_path(msg.to, p2p_packet).await.map_err(|e| anyhow::anyhow!("{}", e))
+    }
 
     /// Установить File Transfer Manager
     pub fn set_file_transfer_manager(&mut self, manager: std::sync::Arc<super::FileTransferManager>) {
@@ -156,38 +234,35 @@ impl ChatManager {
             msg.attachment = Some(att);
         }
 
+        if self.pending_acks.lock().await.len() >= MAX_OUTBOX {
+            return Err(anyhow::anyhow!("too many messages are waiting for delivery"));
+        }
+
         // 2. Сохранить у себя (outgoing)
         self.storage.save_outgoing(&to, &msg)?;
 
-        // 3. Подготовить данные для отправки
-        let msg_data = serde_json::to_vec(&msg)?;
-
-        // 4. Зашифровать (E2E)
-        let encrypted = self.e2e_encryption.encrypt_for_peer(to, &msg_data).await?;
-
-        // 5. Упаковать в P2PPacket (с sender ID!)
-        let p2p_packet = P2PPacket::new(
-            P2PPacketType::ChatMessage,
-            self.my_node_id,  // sender = полный CID
-            false,  // encrypted = false (E2E уже зашифрован)
-            encrypted,  // payload = зашифрованные данные
-        );
-
-        // 6. Отправить через P2P transport (Dual-Path!)
-        match self.transport.send_packet_dual_path(to, p2p_packet).await {
-            Ok(_) => {
-                msg.status = MessageStatus::Shipping;  // В процессе доставки
+        // 3-6. Отправить; что не ушло или не подтверждено — остаётся в очереди и отправляется снова (см. PendingAck)
+        let first_try = self.send_once(&msg).await;
+        let attempts = if first_try.is_ok() { 1 } else { 0 };
+        match &first_try {
+            Ok(()) => {
+                msg.status = MessageStatus::Shipping;
                 info!("✅ Message sent to {}", hex::encode(&to.0[..8]));
-                // Track until ChatAck arrives — see spawn_delivery_timeout_task.
-                self.pending_acks.lock().await.insert(msg.msg_id, PendingAck { peer: to, sent_at: Instant::now() });
             }
             Err(e) => {
                 msg.status = MessageStatus::Pending;
-                error!("❌ Failed to send message: {}", e);
-                // TODO: Сохранить в pending outbox
-                return Err(anyhow::anyhow!("Failed to send message: {}", e));
+                info!("📮 Message to {} queued, will be delivered when the connection is ready: {}", hex::encode(&to.0[..8]), e);
             }
         }
+        self.pending_acks.lock().await.insert(msg.msg_id, PendingAck {
+            peer: to,
+            sent_at: Instant::now(),
+            first_sent: unix_now(),
+            attempts,
+            next_try: Instant::now() + retry_delay(attempts.max(1)),
+            msg: msg.clone(),
+        });
+        self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
 
         // 7. Обновить статус в файле
         self.storage.update_message_status(&to, &msg.msg_id, msg.status.clone())?;
@@ -209,6 +284,28 @@ impl ChatManager {
         if let Err(why) = check_incoming(&msg, from, self.my_node_id) {
             error!("❌ Chat message from {} refused: {}", hex::encode(&from.0[..8]), why);
             return Err(anyhow::anyhow!("Message refused: {}", why));
+        }
+
+        // A resend of a message we already have (our confirmation was lost): confirm again, store and show it only once.
+        let first_time = {
+            let mut seen = self.seen_incoming.lock().await;
+            if seen.0.contains(&msg.msg_id) {
+                false
+            } else {
+                seen.0.insert(msg.msg_id);
+                seen.1.push_back(msg.msg_id);
+                if seen.1.len() > SEEN_INCOMING_MAX {
+                    if let Some(old) = seen.1.pop_front() {
+                        seen.0.remove(&old);
+                    }
+                }
+                true
+            }
+        };
+        if !first_time {
+            debug!("♻️ repeat of message {} from {} — confirmed again, not stored twice", hex::encode(&msg.msg_id.0[..8]), hex::encode(&from.0[..8]));
+            self.send_ack(from, msg.msg_id).await?;
+            return Ok(msg);
         }
 
         // 4. Обновить статус
@@ -282,6 +379,7 @@ impl ChatManager {
             let mut pending = self.pending_acks.lock().await;
             if pending.get(&msg_id).map_or(false, |p| p.peer == from) {
                 pending.remove(&msg_id);
+                self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
             }
         }
 
@@ -539,50 +637,69 @@ mod tests {
         ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager")
     }
 
-    /// Covers both delivery-timeout scenarios in one test (see
-    /// test_chat_manager's doc comment for why they share one instance):
-    ///
-    /// 1. A message that never gets a ChatAck must eventually be marked
-    ///    Failed — before this fix it stayed in Shipping forever with no
-    ///    way for the sender to know delivery silently didn't happen
-    ///    (Station's dual-path send has no retransmission/ACK of its own).
-    /// 2. A message that DOES get ACKed in time must NOT be touched by
-    ///    the timeout sweep — the fix must not turn reliable, timely
-    ///    delivery into a false failure.
+    fn pending(peer: HashId, msg: ChatMessage, age: Duration, due_in: Duration) -> PendingAck {
+        PendingAck { peer, sent_at: Instant::now().checked_sub(age).unwrap_or_else(Instant::now), first_sent: unix_now().saturating_sub(age.as_secs()), attempts: 1, next_try: Instant::now() + due_in, msg }
+    }
+
+    /// The outgoing queue: a message nobody confirmed for a whole day is marked Failed; a confirmed one is left alone; a young
+    /// unconfirmed one is NOT failed — it stays in the queue and is sent again (it used to be marked Failed after 45 seconds, and lost).
     #[tokio::test]
-    async fn delivery_timeout_marks_only_the_truly_unacked_message_failed() {
+    async fn the_queue_fails_only_day_old_messages_and_keeps_young_ones_for_resending() {
         let cm = test_chat_manager().await;
 
-        let unacked_peer = crate::util::HashId::new_random();
-        let unacked_msg = ChatMessage::new(cm.my_node_id, unacked_peer, "hello?".to_string());
-        cm.storage.save_outgoing(&unacked_peer, &unacked_msg).unwrap();
-        // Simulate "sent long ago, no ACK ever arrived" without a real sleep.
-        cm.pending_acks.lock().await.insert(
-            unacked_msg.msg_id,
-            PendingAck { peer: unacked_peer, sent_at: Instant::now() - CHAT_ACK_TIMEOUT - Duration::from_secs(1) },
-        );
+        let old_peer = crate::util::HashId::new_random();
+        let old_msg = ChatMessage::new(cm.my_node_id, old_peer, "hello?".to_string());
+        cm.storage.save_outgoing(&old_peer, &old_msg).unwrap();
+        cm.pending_acks.lock().await.insert(old_msg.msg_id, pending(old_peer, old_msg.clone(), MAX_DELIVERY_AGE + Duration::from_secs(1), Duration::from_secs(3600)));
+
+        let young_peer = crate::util::HashId::new_random();
+        let young_msg = ChatMessage::new(cm.my_node_id, young_peer, "still trying".to_string());
+        cm.storage.save_outgoing(&young_peer, &young_msg).unwrap();
+        cm.pending_acks.lock().await.insert(young_msg.msg_id, pending(young_peer, young_msg.clone(), Duration::from_secs(300), Duration::ZERO));
 
         let acked_peer = crate::util::HashId::new_random();
         let acked_msg = ChatMessage::new(cm.my_node_id, acked_peer, "hi".to_string());
         cm.storage.save_outgoing(&acked_peer, &acked_msg).unwrap();
-        cm.pending_acks.lock().await.insert(
-            acked_msg.msg_id,
-            PendingAck { peer: acked_peer, sent_at: Instant::now() },
-        );
-        // Real ACK arrives promptly for this one.
-        let ack_data = serde_json::to_vec(&acked_msg.msg_id).unwrap();
-        cm.handle_ack(acked_peer, ack_data).await.unwrap();
+        cm.pending_acks.lock().await.insert(acked_msg.msg_id, pending(acked_peer, acked_msg.clone(), Duration::ZERO, Duration::from_secs(3600)));
+        cm.handle_ack(acked_peer, serde_json::to_vec(&acked_msg.msg_id).unwrap()).await.unwrap();
 
         cm.sweep_expired_acks().await;
 
-        let unacked_history = cm.storage.load_history(&unacked_peer, 10).unwrap();
-        let unacked_stored = unacked_history.iter().find(|m| m.msg_id == unacked_msg.msg_id).expect("message present");
-        assert_eq!(unacked_stored.status, MessageStatus::Failed, "never-ACKed message must be marked Failed");
-        assert!(!cm.pending_acks.lock().await.contains_key(&unacked_msg.msg_id));
-
-        let acked_history = cm.storage.load_history(&acked_peer, 10).unwrap();
-        let acked_stored = acked_history.iter().find(|m| m.msg_id == acked_msg.msg_id).expect("message present");
-        assert_eq!(acked_stored.status, MessageStatus::Read, "promptly-ACKed message must stay Read, never Failed");
+        let status = |peer: &HashId, id: &HashId| cm.storage.load_history(peer, 10).unwrap().into_iter().find(|m| m.msg_id == *id).expect("message present").status;
+        assert_eq!(status(&old_peer, &old_msg.msg_id), MessageStatus::Failed, "a day-old unconfirmed message is given up on");
+        assert!(!cm.pending_acks.lock().await.contains_key(&old_msg.msg_id));
+        assert_ne!(status(&young_peer, &young_msg.msg_id), MessageStatus::Failed, "a young message must not be failed");
+        let q = cm.pending_acks.lock().await;
+        let y = q.get(&young_msg.msg_id).expect("the young message stays in the queue");
+        assert!(y.attempts >= 2 && y.next_try > Instant::now(), "it was tried again and its next try is later");
+        drop(q);
+        assert_eq!(status(&acked_peer, &acked_msg.msg_id), MessageStatus::Read);
         assert!(!cm.pending_acks.lock().await.contains_key(&acked_msg.msg_id));
+
+        // the queue is written to disk and read back (a restart does not lose it)
+        let peer = crate::util::HashId::new_random();
+        let msg = ChatMessage::new(cm.my_node_id, peer, "wait for me".to_string());
+        cm.storage.save_outgoing(&peer, &msg).unwrap();
+        cm.pending_acks.lock().await.insert(msg.msg_id, pending(peer, msg.clone(), Duration::from_secs(10), Duration::from_secs(3600)));
+        cm.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        cm.persist_outbox_if_dirty().await;
+        let back = cm.storage.load_outbox();
+        assert_eq!(back.len(), 2, "the young message from above and this one are both still waiting");
+        let mine = back.iter().find(|e| e.msg.msg_id == msg.msg_id).expect("the queued message was written");
+        assert_eq!(mine.peer, peer);
+
+        // a message arriving twice (the sender did not get our confirmation): one entry in the history
+        let from = crate::util::HashId::new_random();
+        let incoming = ChatMessage::new(from, cm.my_node_id, "once".to_string());
+        let bytes = serde_json::to_vec(&incoming).unwrap();
+        let _ = cm.handle_incoming_message(from, bytes.clone()).await;
+        let _ = cm.handle_incoming_message(from, bytes).await;
+        assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 1, "a resend is not stored twice");
+    }
+
+    #[test]
+    fn resend_pauses_grow_and_stop_at_a_minute() {
+        let d: Vec<u64> = (1..=9).map(|n| retry_delay(n).as_secs()).collect();
+        assert_eq!(d, vec![3, 6, 12, 24, 48, 60, 60, 60, 60]);
     }
 }

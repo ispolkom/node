@@ -130,7 +130,7 @@ mod tests {
     use super::*;
 
     fn card(can_exit: bool, exit: bool) -> NodeOffer {
-        NodeOffer { v: 1, node_id: "00".repeat(32), key: String::new(), country: None, country_source: "unknown".into(), public_ip: can_exit, power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![], exit, can_exit, relay: false, issued: 0, expires: 0, sig: String::new() }
+        NodeOffer { v: 1, node_id: "00".repeat(32), key: String::new(), country: None, country_source: "unknown".into(), public_ip: can_exit, power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![], exit, can_exit, relay: false, dynamic_ip: false, issued: 0, expires: 0, sig: String::new() }
     }
 
     #[test]

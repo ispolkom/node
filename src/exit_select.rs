@@ -307,6 +307,7 @@ mod tests {
             exit,
             can_exit: exit,
             relay: false,
+            dynamic_ip: false,
             issued: 0,
             expires: 0,
             sig: String::new(),

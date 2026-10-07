@@ -20,6 +20,8 @@ use serde::{Deserialize, Serialize};
 /// Тип пакета основной связи: обмен карточками.
 pub const PKT_OFFERS: u8 = 0xD8;
 pub const OFFER_TTL_SECS: u64 = 2 * 3600;
+/// Срок карточки узла с динамическим адресом: сеть перепроверяет такой адрес чаще.
+pub const DYNAMIC_OFFER_TTL_SECS: u64 = 15 * 60;
 pub const RESIGN_EVERY_SECS: u64 = 30 * 60;
 /// Сколько карточек в одном пакете обмена (своя + чужие).
 pub const GOSSIP_BATCH: usize = 24;
@@ -55,6 +57,9 @@ pub struct NodeOffer {
     /// готов быть ретранслятором: держит соединения клиентов за NAT и передаёт к ним цепочки
     #[serde(default)]
     pub relay: bool,
+    /// внешний адрес узла менялся дважды за месяц: ему не стоит верить долго
+    #[serde(default)]
+    pub dynamic_ip: bool,
     pub issued: u64,
     pub expires: u64,
     /// подпись Ed25519 (128 hex) всего остального
@@ -116,7 +121,7 @@ impl NodeOffer {
         if self.addr.len() > 4 || self.addr.iter().any(|a| a.len() > 262 || a.parse::<std::net::SocketAddr>().is_err()) {
             return Err("addr");
         }
-        if self.expires <= now || self.issued > now + CLOCK_SKEW_SECS || self.expires < self.issued || self.expires - self.issued > OFFER_TTL_SECS {
+        if self.expires <= now || self.issued > now + CLOCK_SKEW_SECS || self.expires < self.issued || self.expires - self.issued > if self.dynamic_ip { DYNAMIC_OFFER_TTL_SECS } else { OFFER_TTL_SECS } {
             return Err("time");
         }
         let key = hex_bytes::<32>(&self.key).and_then(|k| VerifyingKey::from_bytes(&k).ok()).ok_or("key")?;
@@ -323,6 +328,7 @@ pub fn normalise_country(s: &str) -> Option<String> {
 pub fn build_own(node_id: &[u8; 32], key: &SigningKey, a: &SelfAssessment, now: u64) -> NodeOffer {
     let can_exit = a.public_ip && a.power != "low";
     let exit = can_exit && crate::exit_policy::mode() != crate::exit_policy::ExitMode::Off;
+    let dynamic_ip = crate::ip_history::is_dynamic();
     NodeOffer {
         v: 1,
         node_id: to_hex(node_id),
@@ -338,8 +344,9 @@ pub fn build_own(node_id: &[u8; 32], key: &SigningKey, a: &SelfAssessment, now: 
         exit,
         can_exit,
         relay: can_exit && crate::relay_net::relay_enabled(),
+        dynamic_ip,
         issued: now,
-        expires: now + OFFER_TTL_SECS,
+        expires: now + if dynamic_ip { DYNAMIC_OFFER_TTL_SECS } else { OFFER_TTL_SECS },
         sig: String::new(),
     }
     .sign(key)
@@ -509,6 +516,7 @@ pub fn start(
             loop {
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
                 let Ok(ip) = svc.get_external_ip().await else { continue };
+                crate::ip_history::observe(&ip);
                 let (port, old) = {
                     let g = a.lock().unwrap_or_else(|e| e.into_inner());
                     (g.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port()), g.addr.first().cloned())
@@ -621,7 +629,7 @@ mod tests {
     }
     // без правил выхода (они глобальные) — те же поля руками
     fn build_offer_for_test(node_id: &[u8; 32], k: &SigningKey, a: &SelfAssessment, now: u64) -> NodeOffer {
-        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
+        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, dynamic_ip: false, issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
     }
     const NOW: u64 = 1_800_000_000;
 
@@ -738,6 +746,18 @@ mod tests {
         assert_eq!(d.accept(moved, NOW + 60), Accept::Newer);
         assert!(!d.is_verified(&id, NOW + 60), "a new address has to be proved again");
         assert!(d.needs_probe(&id, NOW + 60));
+    }
+
+    #[test]
+    fn an_offer_with_a_dynamic_address_may_only_live_a_short_time() {
+        let mut o = offer(1, Some("NL"), NOW);
+        o.dynamic_ip = true;
+        let k = key(1);
+        let o2 = o.clone();
+        let long = NodeOffer { sig: String::new(), ..o2 }.sign(&k);
+        assert_eq!(long.check(NOW), Err("time"), "dynamic offer with a two-hour life is refused");
+        let short = NodeOffer { expires: NOW + DYNAMIC_OFFER_TTL_SECS, sig: String::new(), ..o }.sign(&k);
+        assert_eq!(short.check(NOW), Ok(()));
     }
 
     #[test]

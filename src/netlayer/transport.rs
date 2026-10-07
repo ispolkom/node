@@ -460,6 +460,8 @@ pub struct P2PTransport {
     admission: Arc<tokio::sync::Mutex<crate::netlayer::admission::Admission>>,
     /// Когда в последний раз просили новый ключ у узла (не чаще раза в минуту)
     rekey_requested: Arc<tokio::sync::Mutex<HashMap<HashId, Instant>>>,
+    /// when a broken session with a peer was last repaired by a new handshake (see `request_resync`)
+    resync_requested: Arc<tokio::sync::Mutex<HashMap<HashId, Instant>>>,
 
     /// New peer notification sender (optional, for P2P transport synchronization)
     new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
@@ -880,6 +882,7 @@ impl P2PTransport {
             pinned_identities: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            resync_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             admission: Arc::new(tokio::sync::Mutex::new(crate::netlayer::admission::Admission::new(crate::netlayer::admission::AdmissionConfig::for_power(
                 crate::util::NodePower::from_capability_bits(capabilities).unwrap_or(crate::util::NodePower::Medium),
             )))),
@@ -1331,6 +1334,7 @@ impl P2PTransport {
                 interval.tick().await;
                 match svc.get_external_ip().await {
                     Ok(new_ip) => {
+                        crate::ip_history::observe(&new_ip);
                         let prev = transport_arc_ip_refresh.external_ip.read().await.clone();
                         let changed = match &prev {
                             Some(p) => p != &new_ip,
@@ -4205,6 +4209,13 @@ impl P2PTransport {
                                 println!("[transport] ❌ Decryption failed: {}", e);
                                 println!("[transport]    Possible mismatched session keys!");
                                 println!("[transport] 🛡️  SECURITY: Packet dropped - invalid encryption");
+                                drop(enc);
+                                // keys that do not match (not a harmless duplicate) are repaired by a new handshake
+                                if (e.contains("authentication failed") || e.contains("No session")) && data.len() >= 32 {
+                                    let mut sender = [0u8; 32];
+                                    sender.copy_from_slice(&data[..32]);
+                                    transport.request_resync(HashId(sender)).await;
+                                }
                             }
                         }
                 }
@@ -4439,6 +4450,30 @@ impl P2PTransport {
         println!("[transport] 🔑 session key with {} is old — asking for a new one", hex::encode(&peer.id.0[..8]));
         if let Err(e) = self.send_hello_request(&peer.addr).await {
             println!("[transport] ⚠️  rekey request failed: {}", e);
+        }
+    }
+
+    /// A session that has stopped working — packets from a KNOWN peer do not decrypt ("authentication failed": the two sides ended with
+    /// different keys; "No session": we lost ours, e.g. after a restart) — is renegotiated at once: ask the peer for a fresh handshake,
+    /// at most once every 5 seconds per peer. Before, such a pair stayed deaf for as long as it took some other event (the next
+    /// periodic knock) to produce a handshake — a minute or more in the chaos test.
+    pub async fn request_resync(&self, peer_id: HashId) {
+        {
+            let mut asked = self.resync_requested.lock().await;
+            if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
+                return;
+            }
+            asked.insert(peer_id, Instant::now());
+            if asked.len() > 4096 {
+                asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
+            }
+        }
+        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
+        if let Some(addr) = addr {
+            println!("[transport] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+            if let Err(e) = self.send_hello_request(&addr).await {
+                println!("[transport] ⚠️  resync request failed: {}", e);
+            }
         }
     }
 
