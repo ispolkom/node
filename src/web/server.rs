@@ -1373,7 +1373,7 @@ async fn api_socks5_start(
             let p = if rules_mode { p.with_rules(crate::route_rules::Rules::load()) } else { p };
             if hops_mode { p.with_hops() } else { p }
         }
-        (None, None) => unreachable!("either a peer or auto"),
+        (None, None) => return Json(serde_json::json!({"status": "error", "message": "choose a gateway or automatic selection"})),
     };
 
     // Регистрируем Station
@@ -2196,34 +2196,38 @@ async fn api_settings_put(
     // Получаем текущую конфигурацию
     let mut config = crate::get_config();
 
-    // Обновляем порты если указаны
+    // Обновляем порты если указаны (только 1..=65535; раньше число молча обрезалось до 16 бит)
+    let port_of = |v: &serde_json::Value| v.as_u64().filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
     if let Some(network) = settings.get("network") {
-        if let Some(discovery) = network.get("discovery_port").and_then(|v| v.as_u64()) {
-            config.ports.discovery = discovery as u16;
-        }
-        if let Some(data) = network.get("data_port").and_then(|v| v.as_u64()) {
-            config.ports.data = data as u16;
-        }
-        if let Some(mobile_gateway) = network.get("mobile_gateway").and_then(|v| v.as_u64()) {
-            config.ports.mobile_gateway = mobile_gateway as u16;
-        }
-        if let Some(mobile_p2p) = network.get("mobile_p2p").and_then(|v| v.as_u64()) {
-            config.ports.mobile_p2p = mobile_p2p as u16;
-        }
-        if let Some(http_proxy) = network.get("http_proxy").and_then(|v| v.as_u64()) {
-            config.ports.http_proxy = http_proxy as u16;
-        }
-        if let Some(web_ui) = network.get("web_ui").and_then(|v| v.as_u64()) {
-            config.ports.web_ui = web_ui as u16;
+        for (key, slot) in [
+            ("discovery_port", &mut config.ports.discovery),
+            ("data_port", &mut config.ports.data),
+            ("mobile_gateway", &mut config.ports.mobile_gateway),
+            ("mobile_p2p", &mut config.ports.mobile_p2p),
+            ("http_proxy", &mut config.ports.http_proxy),
+            ("web_ui", &mut config.ports.web_ui),
+        ] {
+            if let Some(v) = network.get(key) {
+                match port_of(v) {
+                    Some(p) => *slot = p,
+                    None => return Json(serde_json::json!({"status": "error", "message": format!("{key}: port must be a number from 1 to 65535")})),
+                }
+            }
         }
     }
 
-    // Обновляем серверные настройки если указаны
+    // Обновляем серверные настройки если указаны (адрес — настоящий IP, уровень журнала — из известных)
     if let Some(server) = settings.get("server") {
         if let Some(bind_address) = server.get("bind_address").and_then(|v| v.as_str()) {
+            if bind_address.parse::<std::net::IpAddr>().is_err() {
+                return Json(serde_json::json!({"status": "error", "message": "bind_address must be an IP address"}));
+            }
             config.server.bind_address = bind_address.to_string();
         }
         if let Some(log_level) = server.get("log_level").and_then(|v| v.as_str()) {
+            if !["error", "warn", "info", "debug", "trace"].contains(&log_level) {
+                return Json(serde_json::json!({"status": "error", "message": "log_level must be error, warn, info, debug or trace"}));
+            }
             config.server.log_level = log_level.to_string();
         }
     }
@@ -3022,7 +3026,12 @@ struct PendingFileUpload {
     temp_path: std::path::PathBuf,
     received_chunks: Vec<bool>,
     received_count: u32,
+    started: std::time::Instant,
 }
+
+/// Most unfinished browser uploads at once, and how long an unfinished one is kept.
+const MAX_PENDING_UPLOADS: usize = 32;
+const PENDING_UPLOAD_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Глобальное хранилище незавершённых загрузок
 static CHUNK_UPLOADS: LazyLock<TokioMutex<HashMap<String, PendingFileUpload>>> = LazyLock::new(|| TokioMutex::new(HashMap::new()));
@@ -3208,8 +3217,29 @@ async fn api_files_send_chunk(
         }));
     }
 
+    // limits before anything is allocated: the numbers come from the browser request
+    let max_chunks = (crate::communication::MAX_FILE_TRANSFER_SIZE as usize / BROWSER_UPLOAD_CHUNK_SIZE + 1) as u32;
+    if total_chunks == 0 || total_chunks > max_chunks || file_size > crate::communication::MAX_FILE_TRANSFER_SIZE {
+        return Json(serde_json::json!({"status": "error", "message": "File is larger than the allowed size"}));
+    }
+    // the id is used in a file name: only plain characters
+    if upload_id.is_empty() || upload_id.len() > 80 || !upload_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Json(serde_json::json!({"status": "error", "message": "Invalid file_id"}));
+    }
+
     // Сохраняем чанк сразу в temp-файл
     let mut uploads = CHUNK_UPLOADS.lock().await;
+    // forget abandoned uploads (and their temp files), refuse too many at once
+    uploads.retain(|_, u| {
+        let alive = u.started.elapsed() < PENDING_UPLOAD_TTL;
+        if !alive {
+            let _ = std::fs::remove_file(&u.temp_path);
+        }
+        alive
+    });
+    if !uploads.contains_key(&upload_id) && uploads.len() >= MAX_PENDING_UPLOADS {
+        return Json(serde_json::json!({"status": "error", "message": "Too many unfinished uploads"}));
+    }
     let mut created = false;
 
     let upload = uploads.entry(upload_id.clone()).or_insert_with(|| {
@@ -3221,6 +3251,7 @@ async fn api_files_send_chunk(
             temp_path: uploads_dir.join(format!("{}__{}", upload_id, sanitize_storage_filename(&filename))),
             received_chunks: vec![false; total_chunks as usize],
             received_count: 0,
+            started: std::time::Instant::now(),
         }
     });
 

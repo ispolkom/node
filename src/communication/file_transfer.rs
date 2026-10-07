@@ -56,7 +56,7 @@ const MAX_PRESTART_FILES: usize = 64;
 /// see node/tests/valid_peer_resource_exhaustion_test.rs) — transport
 /// authentication only proves who sent a message, never that its
 /// content is safe to act on.
-const MAX_FILE_TRANSFER_SIZE: u64 = 200 * 1024 * 1024;
+pub const MAX_FILE_TRANSFER_SIZE: u64 = 200 * 1024 * 1024;
 
 
 /// Сохранить чекпоинт передачи в файл
