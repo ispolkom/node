@@ -201,6 +201,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ipv6_transition_and_reserved_ranges_are_never_public() {
+        for bad in ["::127.0.0.1", "::10.0.0.1", "::1", "::", "fc00::1", "fd12::1", "fe80::1", "fec0::1", "ff02::1", "2002:7f00:1::1", "2002:c0a8:1::1",
+                    "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:db8::1", "64:ff9b::7f00:1", "::ffff:127.0.0.1", "::ffff:192.168.1.1", "3fff::1", "100::1"] {
+            let ip: std::net::IpAddr = bad.parse().unwrap();
+            assert!(!public_only(&ip), "{bad}");
+        }
+        for good in ["2606:4700:4700::1111", "2a00:1450:4001:81b::200e", "2001:4860:4860::8888", "::ffff:8.8.8.8"] {
+            let ip: std::net::IpAddr = good.parse().unwrap();
+            assert!(public_only(&ip), "{good}");
+        }
+    }
+
+    #[test]
     fn targets_are_split_with_ipv6_brackets() {
         assert_eq!(split_host_port("example.org:443"), Some(("example.org".into(), 443)));
         assert_eq!(split_host_port("[2001:db8::1]:80"), Some(("2001:db8::1".into(), 80)));
@@ -258,7 +271,15 @@ pub fn public_only(ip: &IpAddr) -> bool {
                 return public_only(&IpAddr::V4(m));
             }
             let s = v.segments();
-            !(v.is_loopback() || v.is_unspecified() || v.is_multicast() || (s[0] & 0xfe00) == 0xfc00 || (s[0] & 0xffc0) == 0xfe80 || (s[0] == 0x2001 && s[1] == 0x0db8) || (s[0] == 0x64 && s[1] == 0xff9b))
+            // Only global unicast 2000::/3 can be public; inside it the transition and documentation ranges are not
+            // (6to4 2002::/16 and Teredo 2001:0::/32 carry an IPv4 address inside, 2001:db8::/32 and 3fff::/20 are documentation,
+            // 2001:10::/28 and 2001:20::/28 are ORCHID, 64:ff9b::/32 is NAT64 and lies outside 2000::/3 anyway).
+            // Everything else — ::/8 (incl. IPv4-compatible ::a.b.c.d), fc00::/7, fe80::/10, fec0::/10, ff00::/8 — is refused.
+            (s[0] & 0xe000) == 0x2000
+                && s[0] != 0x2002
+                && !(s[0] == 0x2001 && (s[1] == 0 || s[1] == 0x0db8 || (s[1] & 0xfff0) == 0x0010 || (s[1] & 0xfff0) == 0x0020))
+                && (s[0] & 0xfff0) != 0x3ff0
+                && !(s[0] == 0x3fff && (s[1] & 0xf000) == 0)
         }
     }
 }
