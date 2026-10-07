@@ -120,7 +120,7 @@ impl NodeOffer {
             return Err("time");
         }
         let key = hex_bytes::<32>(&self.key).and_then(|k| VerifyingKey::from_bytes(&k).ok()).ok_or("key")?;
-        if !hex_bytes::<32>(&self.node_id).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes(), now)) {
+        if !hex_bytes::<32>(&self.node_id).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes())) {
             return Err("id not bound to key");
         }
         let sig = hex_bytes::<64>(&self.sig).map(|s| Signature::from_bytes(&s)).ok_or("sig")?;
@@ -617,7 +617,7 @@ mod tests {
 
     fn offer(n: u8, country: Option<&str>, now: u64) -> NodeOffer {
         let a = SelfAssessment { country: country.map(String::from), country_source: "ip_lookup", public_ip: true, power: "high", cpu_cores: 8, ram_gb: 32, latency_ms: Some(17), addr: vec![format!("203.0.113.{n}:9000")] };
-        build_offer_for_test(&[n; 32], &key(n), &a, now)
+        build_offer_for_test(&crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes()), &key(n), &a, now)
     }
     // без правил выхода (они глобальные) — те же поля руками
     fn build_offer_for_test(node_id: &[u8; 32], k: &SigningKey, a: &SelfAssessment, now: u64) -> NodeOffer {
@@ -635,7 +635,6 @@ mod tests {
             |o: &mut NodeOffer| o.power = "low".into(),
             |o: &mut NodeOffer| o.addr = vec!["198.51.100.9:9000".into()],
             |o: &mut NodeOffer| o.expires -= 60,
-            |o: &mut NodeOffer| o.node_id = "ab".repeat(32),
         ] {
             let mut t = o.clone();
             tamper(&mut t);
@@ -643,7 +642,10 @@ mod tests {
         }
         let mut other_key = o.clone();
         other_key.key = to_hex(&key(9).verifying_key().to_bytes());
-        assert_eq!(other_key.check(NOW), Err("signature"), "someone else's key cannot vouch for this card");
+        assert_eq!(other_key.check(NOW), Err("id not bound to key"), "someone else's key cannot vouch for this card");
+        let mut other_id = o.clone();
+        other_id.node_id = "ab".repeat(32);
+        assert_eq!(other_id.check(NOW), Err("id not bound to key"), "a card cannot carry an id that is not derived from its key");
     }
 
     #[test]
@@ -669,14 +671,14 @@ mod tests {
         assert_eq!(d.accept(offer(1, Some("NL"), NOW), NOW), Accept::New);
         assert_eq!(d.accept(offer(1, Some("NL"), NOW), NOW), Accept::Stale);
         assert_eq!(d.accept(offer(1, Some("DE"), NOW + 60), NOW + 60), Accept::Newer, "moved: the newest card wins");
-        // тот же номер узла, чужой ключ — отказ
+        // тот же номер узла, чужой ключ — отказ (номер выводится из ключа, поэтому чужой ключ не может его занять)
         let mut impostor = offer(1, Some("NL"), NOW + 120);
         impostor = NodeOffer { key: String::new(), ..impostor }.sign(&key(7));
-        assert_eq!(d.accept(impostor, NOW + 120), Accept::Refused("key changed"));
+        assert_eq!(d.accept(impostor, NOW + 120), Accept::Refused("id not bound to key"));
         d.accept(offer(2, Some("NL"), NOW), NOW);
         d.accept(offer(3, None, NOW), NOW);
-        let nl: Vec<String> = d.by_country(Some("NL"), NOW + 60).iter().map(|o| o.node_id[..2].to_string()).collect();
-        assert_eq!(nl, vec!["02"]);
+        let nl: Vec<String> = d.by_country(Some("NL"), NOW + 60).iter().map(|o| o.node_id.clone()).collect();
+        assert_eq!(nl, vec![offer(2, Some("NL"), NOW).node_id]);
         assert_eq!(d.by_country(Some("DE"), NOW + 60).len(), 1);
         assert_eq!(d.countries(NOW + 60).into_iter().collect::<Vec<_>>(), vec![("??".to_string(), 1), ("DE".to_string(), 1), ("NL".to_string(), 1)]);
         // просроченные выпадают

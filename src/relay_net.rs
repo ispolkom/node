@@ -78,7 +78,7 @@ impl ViaRecord {
             return Err("time");
         }
         let key = hex::decode(&self.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
-        if !hex::decode(&self.node_id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes(), now)) {
+        if !hex::decode(&self.node_id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map_or(false, |id| crate::util::types::id_acceptable(&id, key.as_bytes())) {
             return Err("id not bound to key");
         }
         let sig = hex::decode(&self.sig).ok().and_then(|b| <[u8; 64]>::try_from(b).ok()).map(|b| Signature::from_bytes(&b)).ok_or("sig")?;
@@ -329,8 +329,9 @@ mod tests {
     fn key(n: u8) -> SigningKey {
         SigningKey::from_bytes(&[n; 32])
     }
+    /// the node id of "node n": derived from its key, as every real node id is
     fn id(n: u8) -> String {
-        hex::encode([n; 32])
+        hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes()))
     }
     fn rec(n: u8, relays: &[u8], issued: u64) -> ViaRecord {
         ViaRecord { v: 1, node_id: id(n), key: String::new(), relays: relays.iter().map(|r| id(*r)).collect(), issued, expires: issued + VIA_TTL_SECS, sig: String::new() }.sign(&key(n))
@@ -359,11 +360,14 @@ mod tests {
     fn a_record_is_signed_by_the_node_and_any_change_or_forgery_is_refused() {
         let r = rec(1, &[2, 3], NOW);
         assert_eq!(r.check(NOW), Ok(()));
-        for tamper in [|r: &mut ViaRecord| r.relays = vec![hex::encode([9u8; 32])], |r: &mut ViaRecord| r.expires -= 1, |r: &mut ViaRecord| r.node_id = hex::encode([7u8; 32])] {
+        for tamper in [|r: &mut ViaRecord| r.relays = vec![hex::encode([9u8; 32])], |r: &mut ViaRecord| r.expires -= 1] {
             let mut t = r.clone();
             tamper(&mut t);
             assert_eq!(t.check(NOW), Err("signature"));
         }
+        let mut moved = r.clone();
+        moved.node_id = hex::encode([7u8; 32]);
+        assert_eq!(moved.check(NOW), Err("id not bound to key"), "a record cannot carry an id that is not derived from its key");
         assert_eq!(rec(1, &[], NOW).check(NOW), Err("relays"));
         assert_eq!(rec(1, &[1], NOW).check(NOW), Err("relays"), "a node is not its own relay");
         assert_eq!(rec(1, &[2], NOW).check(NOW + VIA_TTL_SECS), Err("time"), "expired");
@@ -384,7 +388,7 @@ mod tests {
         assert_eq!(s.lookup(&id(1), &real_key, NOW + 60).unwrap().relays, vec![id(3)]);
         // самозванец публикует запись под номером узла 1 со своим ключом: она хранится, но найти по настоящему ключу её нельзя
         let fake = ViaRecord { v: 1, node_id: id(1), key: String::new(), relays: vec![id(8)], issued: NOW + 120, expires: NOW + 120 + VIA_TTL_SECS, sig: String::new() }.sign(&key(66));
-        assert_eq!(s.accept(fake, NOW + 120), Taken::New);
+        assert_eq!(s.accept(fake, NOW + 120), Taken::Refused("id not bound to key"), "an id cannot be taken with another key");
         assert_eq!(s.lookup(&id(1), &real_key, NOW + 120).unwrap().relays, vec![id(3)], "the forger cannot redirect the owner's devices");
         assert!(s.lookup(&id(1), &real_key, NOW + 60 + VIA_TTL_SECS).is_none(), "expired");
         // чужих записей под одним номером — не больше четырёх

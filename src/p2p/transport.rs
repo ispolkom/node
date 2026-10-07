@@ -1142,8 +1142,7 @@ impl P2PTransport {
                         ));
                     }
                     // Check the type carried inside the encryption, strip the prefix and the trailing padding
-                    let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                    match open_prefix(p2p_packet.packet_type.to_byte(), &decrypted_padded, now_s) {
+                    match open_prefix(p2p_packet.packet_type.to_byte(), &decrypted_padded) {
                         Ok(payload) => p2p_packet.payload = payload,
                         Err(why) => return Err(format!("[P2P] ❌ {} (from {})", why, from)),
                     }
@@ -1302,8 +1301,7 @@ impl P2PTransport {
     }
 }
 
-/// First byte of the plaintext of a packet whose type is authenticated (a legacy plaintext starts with the high byte of a
-/// 4-byte length, which is 0x00 for any real payload).
+/// First byte of the plaintext of every packet: marks the format in which the packet type travels inside the encryption.
 const TYPED_MARKER: u8 = 0xA7;
 
 /// `[marker][type][len:4][payload]` — the type travels INSIDE the encryption, so a header byte changed on the way is noticed.
@@ -1317,31 +1315,22 @@ fn seal_prefix(packet_type: u8, payload: &[u8]) -> Vec<u8> {
 }
 
 /// Reverse of `seal_prefix` for the decrypted (padded) bytes. `header_type` is the type written in the unprotected header: it
-/// must equal the one inside. The old format (no marker, no type) is accepted only before the sunset date.
-fn open_prefix(header_type: u8, decrypted_padded: &[u8], now: u64) -> Result<Vec<u8>, &'static str> {
-    let (len_at, typed) = if decrypted_padded.first() == Some(&TYPED_MARKER) {
-        if decrypted_padded.len() < 6 {
-            return Err("Decrypted payload too short");
-        }
-        if decrypted_padded[1] != header_type {
-            return Err("packet type does not match the authenticated type");
-        }
-        (2usize, true)
-    } else {
-        if now >= crate::util::types::LEGACY_ID_SUNSET {
-            return Err("packet without an authenticated type refused");
-        }
-        (0usize, false)
-    };
-    let start = len_at + 4;
-    if decrypted_padded.len() < start {
+/// must equal the one inside. A packet without the marker is refused.
+fn open_prefix(header_type: u8, decrypted_padded: &[u8]) -> Result<Vec<u8>, &'static str> {
+    if decrypted_padded.first() != Some(&TYPED_MARKER) {
+        return Err("packet without an authenticated type refused");
+    }
+    if decrypted_padded.len() < 6 {
         return Err("Decrypted payload too short");
     }
-    let original_len = u32::from_be_bytes(decrypted_padded[len_at..start].try_into().map_err(|_| "bad length")?) as usize;
+    if decrypted_padded[1] != header_type {
+        return Err("packet type does not match the authenticated type");
+    }
+    let start = 6usize;
+    let original_len = u32::from_be_bytes(decrypted_padded[2..6].try_into().map_err(|_| "bad length")?) as usize;
     if start.checked_add(original_len).map_or(true, |end| end > decrypted_padded.len()) {
         return Err("Length prefix exceeds decrypted data");
     }
-    let _ = typed;
     Ok(decrypted_padded[start..start + original_len].to_vec())
 }
 
@@ -1397,23 +1386,22 @@ mod pending_packet_tests {
     #[test]
     fn the_packet_type_is_carried_inside_the_encryption_and_a_changed_header_type_is_refused() {
         let sealed = seal_prefix(0xB0, b"call me");
-        assert_eq!(open_prefix(0xB0, &sealed, 1).unwrap(), b"call me".to_vec());
+        assert_eq!(open_prefix(0xB0, &sealed).unwrap(), b"call me".to_vec());
         // an on-path attacker flips the unprotected type byte of a valid packet: the inner type no longer matches
-        assert!(open_prefix(0xB1, &sealed, 1).is_err());
+        assert!(open_prefix(0xB1, &sealed).is_err());
         // padding after the payload is ignored
         let mut padded = sealed.clone();
         padded.extend_from_slice(&[0u8; 40]);
-        assert_eq!(open_prefix(0xB0, &padded, 1).unwrap(), b"call me".to_vec());
+        assert_eq!(open_prefix(0xB0, &padded).unwrap(), b"call me".to_vec());
         // a truncated or lying length is refused, not panicked on
-        assert!(open_prefix(0xB0, &[TYPED_MARKER, 0xB0, 0, 0, 0xFF, 0xFF, 1], 1).is_err());
-        assert!(open_prefix(0xB0, &[TYPED_MARKER], 1).is_err());
+        assert!(open_prefix(0xB0, &[TYPED_MARKER, 0xB0, 0, 0, 0xFF, 0xFF, 1]).is_err());
+        assert!(open_prefix(0xB0, &[TYPED_MARKER]).is_err());
     }
 
     #[test]
-    fn old_untyped_packets_are_accepted_only_before_the_sunset() {
-        let mut legacy = (5u32).to_be_bytes().to_vec();
-        legacy.extend_from_slice(b"hello");
-        assert_eq!(open_prefix(0xA0, &legacy, 1).unwrap(), b"hello".to_vec());
-        assert!(open_prefix(0xA0, &legacy, crate::util::types::LEGACY_ID_SUNSET).is_err());
+    fn a_packet_without_the_authenticated_type_is_refused() {
+        let mut untyped = (5u32).to_be_bytes().to_vec();
+        untyped.extend_from_slice(b"hello");
+        assert!(open_prefix(0xA0, &untyped).is_err());
     }
 }

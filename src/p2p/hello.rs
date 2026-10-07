@@ -112,8 +112,7 @@ impl P2PHelloPacket {
         let verifying_key = ed25519_dalek::VerifyingKey::from_bytes(&self.ed25519_public)
             .map_err(|e| format!("Invalid ed25519 key: {}", e))?;
         let sig = ed25519_dalek::Signature::from_bytes(&self.signature);
-        let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        if !crate::util::types::id_acceptable(&self.node_id.0, &self.ed25519_public, now_s) {
+        if !crate::util::types::id_acceptable(&self.node_id.0, &self.ed25519_public) {
             return Err("node_id is not bound to the signing key".to_string());
         }
         verifying_key

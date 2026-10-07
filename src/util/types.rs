@@ -144,7 +144,7 @@ impl From<HashId> for NodeName {
 pub type LegacyHashId = [u8; 8];
 
 /// Marker at the END of every bound node id (the start stays random, so the short ids shown and searched by prefix keep telling nodes apart). An id carrying it MUST be derived from the signing key,
-/// so nobody can pass a victim's bound id off as an "old random one" (the chance that an old random id starts with it is 2^-32).
+/// so nobody can pass a victim's bound id off as an "old random one".
 pub const BOUND_ID_TAG: [u8; 4] = *b"YB1\0";
 
 /// The node id derived from a signing key: the first 28 bytes of SHA-256(key) + tag.
@@ -161,18 +161,10 @@ pub fn id_bound_to_key(node_id: &[u8; 32], signing_key: &[u8; 32]) -> bool {
     &derive_node_id(signing_key) == node_id
 }
 
-/// Unix time after which node ids without the tag (made before binding existed) are no longer accepted (2027-04-01 UTC).
-/// Until then they are accepted on a first-claim basis (a key is pinned to the id at first sight), so existing nodes keep working.
-pub const LEGACY_ID_SUNSET: u64 = 1_806_537_600;
-
-/// Is this (node id, signing key) pair acceptable at time `now`?
-/// A tagged id must be bound to the key, always. An untagged (legacy) id is accepted only before the sunset
-/// and when `YANDI_REQUIRE_BOUND_IDS` is not set.
-pub fn id_acceptable(node_id: &[u8; 32], signing_key: &[u8; 32], now: u64) -> bool {
-    if node_id[28..] == BOUND_ID_TAG {
-        return id_bound_to_key(node_id, signing_key);
-    }
-    now < LEGACY_ID_SUNSET && std::env::var_os("YANDI_REQUIRE_BOUND_IDS").is_none()
+/// Is this (node id, signing key) pair acceptable? Only a node id derived from the key is: nobody else can hold it.
+/// (The network is new, so there are no older random ids to tolerate: an id that is not derived from its key is refused everywhere.)
+pub fn id_acceptable(node_id: &[u8; 32], signing_key: &[u8; 32]) -> bool {
+    id_bound_to_key(node_id, signing_key)
 }
 
 #[cfg(test)]
@@ -180,18 +172,14 @@ mod bound_id_tests {
     use super::*;
 
     #[test]
-    fn a_bound_id_belongs_only_to_its_key_and_a_legacy_one_is_accepted_only_before_the_sunset() {
+    fn a_node_id_belongs_only_to_the_key_it_is_derived_from() {
         let key = [7u8; 32];
         let bound = derive_node_id(&key);
-        let legacy = [9u8; 32];
         assert_eq!(&bound[28..], &BOUND_ID_TAG);
-        assert!(id_bound_to_key(&bound, &key));
-        assert!(!id_bound_to_key(&legacy, &key));
-        // an attacker with another key cannot claim the victim's bound id, even before the sunset
-        assert!(!id_acceptable(&bound, &[8u8; 32], LEGACY_ID_SUNSET - 1));
-        assert!(id_acceptable(&bound, &key, LEGACY_ID_SUNSET + 1));
-        assert!(id_acceptable(&legacy, &key, LEGACY_ID_SUNSET - 1));
-        assert!(!id_acceptable(&legacy, &key, LEGACY_ID_SUNSET));
+        assert!(id_acceptable(&bound, &key));
+        assert!(!id_acceptable(&bound, &[8u8; 32]), "another key cannot claim it");
+        assert!(!id_acceptable(&[9u8; 32], &key), "a random id is not accepted for any key");
+        assert!(!id_acceptable(&[0u8; 32], &key));
     }
 }
 

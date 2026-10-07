@@ -116,13 +116,6 @@ impl NodeRecord {
         if NodeIdentity::verify_node(&self.node_name, &self.public_key, &sig_bytes, &v2) {
             return true;
         }
-        // Records made before version 2 do not cover the endpoint and capabilities; accepted only until the sunset
-        // (the same date after which old random node ids stop being accepted).
-        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        if now < crate::util::types::LEGACY_ID_SUNSET {
-            let v1 = Self::create_signature_payload(&self.node_name, &self.public_key, self.timestamp, self.sequence);
-            return NodeIdentity::verify_node(&self.node_name, &self.public_key, &sig_bytes, &v1);
-        }
         false
     }
 

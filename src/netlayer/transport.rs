@@ -2013,16 +2013,14 @@ impl P2PTransport {
         Ok(hello)
     }
 
-    /// RESUME binding: the node id claimed in a plaintext RESUME must be acceptable for the Ed25519 key the token was issued to
-    /// (store key = client signing key, hex): a tagged id has to be derived from that key; an old random id is accepted
-    /// only before the sunset (and is then remembered in the token, see `SessionToken::node_id_hex`).
+    /// RESUME binding: the node id claimed in a plaintext RESUME must be the one derived from the Ed25519 key the token was
+    /// issued to (store key = client signing key, hex); the first resume also remembers it in the token (`SessionToken::node_id_hex`).
     fn resume_node_matches(client_pubkey_hex: &str, claimed: &HashId) -> bool {
         match hex::decode(client_pubkey_hex) {
             Ok(b) if b.len() == 32 => {
                 let mut k = [0u8; 32];
                 k.copy_from_slice(&b);
-                let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-                crate::util::types::id_acceptable(&claimed.0, &k, now_s)
+                crate::util::types::id_acceptable(&claimed.0, &k)
             }
             _ => false,
         }
@@ -5650,9 +5648,8 @@ impl P2PTransport {
         }
         println!("[transport] ✅ Phase 1: Self-certifying identity verified");
 
-        // the node id must be bound to the signing key (or be a legacy id before the sunset)
-        let now_s = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-        if !crate::util::types::id_acceptable(&hello_packet.node_id.0, &hello_packet.public_key, now_s) {
+        // the node id must be the one derived from the signing key
+        if !crate::util::types::id_acceptable(&hello_packet.node_id.0, &hello_packet.public_key) {
             return Err("Phase 1 FAILED: node_id is not bound to the signing key".to_string());
         }
 
@@ -6417,7 +6414,7 @@ mod identity_pin_tests {
         let legacy = HashId([9u8; 32]);
         assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &own));
         assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other_bound), "a bound id of another key is refused");
-        assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &legacy), "an old random id is still accepted before the sunset");
+        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &legacy), "a random id is refused");
         assert!(!P2PTransport::resume_node_matches("zz", &own));
     }
 

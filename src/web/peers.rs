@@ -179,7 +179,7 @@ impl NodeCard {
         self.key = self.key.to_ascii_lowercase();
         let (id, key) = (hex::decode(&self.id).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()), hex::decode(&self.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()));
         if let (Some(id), Some(key)) = (id, key) {
-            if !crate::util::types::id_acceptable(&id, &key, crate::network_offers::now_secs()) {
+            if !crate::util::types::id_acceptable(&id, &key) {
                 return Err("Номер узла в визитке не сходится с его ключом.".into());
             }
         }
@@ -422,8 +422,13 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 mod tests {
     use super::*;
 
+    /// the node id that belongs to the test key "cd"*32
+    fn good_id() -> String {
+        hex::encode(crate::util::types::derive_node_id(&[0xcd; 32]))
+    }
+
     fn card() -> NodeCard {
-        NodeCard { id: "ab".repeat(32), key: "CD".repeat(32), addr: vec!["203.0.113.5:9000".into(), "node.example.org:9000".into(), "[2001:db8::1]:9000".into()], p2p: vec!["203.0.113.5:9001".into()], name: Some("Друг".into()) }
+        NodeCard { id: good_id(), key: "CD".repeat(32), addr: vec!["203.0.113.5:9000".into(), "node.example.org:9000".into(), "[2001:db8::1]:9000".into()], p2p: vec!["203.0.113.5:9001".into()], name: Some("Друг".into()) }
     }
 
     #[test]
@@ -441,16 +446,16 @@ mod tests {
         assert!(decode_card("hello").unwrap_err().contains("не визитка"));
         assert!(decode_card("YANDI-NODE-1:!!!").unwrap_err().contains("повреждена"));
         assert!(decode_card(&enc(json!({"id": "ab".repeat(31), "key": "cd".repeat(32)}))).unwrap_err().contains("номер"));
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "zz".repeat(32)}))).is_err());
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "secret": 1}))).is_err(), "unknown fields are refused");
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "addr": ["no-port"]}))).unwrap_err().contains("адрес"));
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "addr": ["h:0"]}))).is_err());
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "p2p": ["no-port"]}))).is_err(), "chat channel addresses are checked too");
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "p2p": ["a:1", "b:2", "c:3", "d:4", "e:5"]}))).is_err());
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "addr": ["a:1", "b:2", "c:3", "d:4", "e:5"]}))).is_err(), "at most 4 addresses");
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "name": "x".repeat(65)}))).is_err());
-        assert!(decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "name": "a\u{7}b"}))).is_err());
-        let ok = decode_card(&enc(json!({"id": "ab".repeat(32), "key": "cd".repeat(32), "name": "я".repeat(64)}))).unwrap();
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "zz".repeat(32)}))).is_err());
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "secret": 1}))).is_err(), "unknown fields are refused");
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "addr": ["no-port"]}))).unwrap_err().contains("адрес"));
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "addr": ["h:0"]}))).is_err());
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "p2p": ["no-port"]}))).is_err(), "chat channel addresses are checked too");
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "p2p": ["a:1", "b:2", "c:3", "d:4", "e:5"]}))).is_err());
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "addr": ["a:1", "b:2", "c:3", "d:4", "e:5"]}))).is_err(), "at most 4 addresses");
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "name": "x".repeat(65)}))).is_err());
+        assert!(decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "name": "a\u{7}b"}))).is_err());
+        let ok = decode_card(&enc(json!({"id": good_id(), "key": "cd".repeat(32), "name": "я".repeat(64)}))).unwrap();
         assert_eq!(ok.addr, Vec::<String>::new());
         assert!(decode_card(&format!("{PREFIX}{}", "A".repeat(MAX_CARD_CHARS))).unwrap_err().contains("длинная"));
     }

@@ -4,7 +4,7 @@
 //! yandi bootstrap keygen <файл-ключа>                       новый ключ подписи (секрет — в файл 0600, открытый ключ — на экран)
 //! yandi bootstrap show   [файл]                             прочитать и показать список
 //! yandi bootstrap verify [файл]                             проверить подпись закреплённым ключом проекта
-//! yandi bootstrap add    [файл] --id H --key H --addr A [--addr A] [--region NL] [--roles entry,relay,exit]
+//! yandi bootstrap add    [файл] [--id H] --key H --addr A [--addr A] [--region NL] [--roles entry,relay,exit]
 //! yandi bootstrap from-card [файл] <визитка>                добавить узел по его визитке (`~/.yandi/node_card.txt` или страница узла)
 //! yandi bootstrap remove [файл] --id H                      убрать узел
 //! yandi bootstrap sign   [файл] --key <файл-ключа> [--days 90] [--network yandi]   подписать (выпуск +1, срок +N дней)
@@ -90,9 +90,12 @@ pub fn run(args: Vec<String>) -> (i32, String) {
         "add" => {
             let f = file(0);
             let mut d = load(&f)?;
+            let key_hex = arg(rest, "--key").ok_or("нужен --key")?.to_ascii_lowercase();
+            // the id is derived from the key; --id may be omitted (a given one must agree with the key, which check_shape verifies)
+            let derived_id = hex::decode(&key_hex).ok().and_then(|k| <[u8; 32]>::try_from(k).ok()).map(|k| hex::encode(crate::util::types::derive_node_id(&k)));
             let e = Entry {
-                id: arg(rest, "--id").ok_or("нужен --id")?.to_ascii_lowercase(),
-                key: arg(rest, "--key").ok_or("нужен --key")?.to_ascii_lowercase(),
+                id: arg(rest, "--id").map(|i| i.to_ascii_lowercase()).or(derived_id).ok_or("нужен --id или правильный --key")?,
+                key: key_hex,
                 addr: all_args(rest, "--addr"),
                 region: arg(rest, "--region").map(|r| r.to_ascii_uppercase()),
                 roles: arg(rest, "--roles").map(|r| r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_else(|| vec!["entry".into()]),
@@ -158,7 +161,7 @@ pub fn run(args: Vec<String>) -> (i32, String) {
 }
 
 fn usage() -> String {
-    "Использование:\n  yandi bootstrap keygen <файл-ключа>\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] --id H --key H --addr A [--addr A] [--region XX] [--roles entry,relay,exit]\n  yandi bootstrap from-card [файл] <визитка> [--region XX] [--roles ...]\n  yandi bootstrap remove [файл] --id H\n  yandi bootstrap sign [файл] --key <файл-ключа> [--days 90] [--network yandi]".to_string()
+    "Использование:\n  yandi bootstrap keygen <файл-ключа>\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] [--id H] --key H --addr A [--addr A] [--region XX] [--roles entry,relay,exit]\n  yandi bootstrap from-card [файл] <визитка> [--region XX] [--roles ...]\n  yandi bootstrap remove [файл] --id H\n  yandi bootstrap sign [файл] --key <файл-ключа> [--days 90] [--network yandi]".to_string()
 }
 
 #[cfg(test)]
@@ -173,8 +176,8 @@ mod tool_tests {
         let (code, out) = run(s(&["keygen", &keyfile]));
         assert_eq!(code, 0, "{out}");
         assert_eq!(run(s(&["keygen", &keyfile])).0, 2, "an existing key is never overwritten");
-        let id = "ab".repeat(32);
         let key = hex::encode(SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes());
+        let id = hex::encode(crate::util::types::derive_node_id(&SigningKey::from_bytes(&[3; 32]).verifying_key().to_bytes()));
         let (code, out) = run(s(&["add", &list, "--id", &id, "--key", &key, "--addr", "203.0.113.5:9000", "--region", "nl", "--roles", "entry,relay"]));
         assert_eq!(code, 0, "{out}");
         assert_eq!(run(s(&["add", &list, "--id", "nothex", "--key", &key, "--addr", "203.0.113.5:9000"])).0, 2, "a broken entry is refused");

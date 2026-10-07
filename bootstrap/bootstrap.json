@@ -1,12 +1,12 @@
 {
   "format": 1,
   "network": "yandi",
-  "issued": 1791302851,
-  "expires": 1799078851,
-  "sequence": 2,
+  "issued": 1791402893,
+  "expires": 1799178893,
+  "sequence": 3,
   "entries": [
     {
-      "id": "8b9bf100e7b830935e119d0ebd04d1f613037e08f8dceedbb716c2c62c0a3225",
+      "id": "0b7ce6e489b3963c5da023ce6fb61d33b3f8fe01cbd62f7643f370b459423100",
       "key": "94b13cd3e7d8ba454e21f2d3aa85cb8ce405c8803869190dff0112e02b7549fc",
       "addr": [
         "185.77.205.3:9000"
@@ -19,5 +19,5 @@
     }
   ],
   "signer": "89d4938a0bdbe9f6e302dabfee0f1d1d651bca3168b52d38edfa07497d042df2",
-  "signature": "21140063b9fdf6aec382bab88901ec45b9621153e8b7cda1a375b596368a2f959861550162149846a3014461ff27d1ad032a498237449f08a333ed839341cd03"
+  "signature": "388ef3c68c26a107fa1fc261217d5ea15a879d0d489cb86a7666ae3cec51ae62389b234789a3646bd97e6f189ae20623fa3c6a5d232784e949b8c23c6a6f790b"
 }

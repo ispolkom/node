@@ -151,6 +151,16 @@ fn decrypt_private_keys(
     Ok((private_key, signing_private_key))
 }
 
+/// The node id a loaded identity uses: always the one derived from its signing key. An identity saved before node ids were bound
+/// to keys (a random id) keeps all its keys and simply gets its bound id; nothing else about it changes.
+fn bound_address(stored: [u8; 32], signing_public_key: &[u8; 32]) -> HashId {
+    let derived = crate::util::types::derive_node_id(signing_public_key);
+    if stored != derived {
+        println!("[identity] the saved node id is not derived from the signing key — using the derived one ({})", hex::encode(&derived[..8]));
+    }
+    HashId(derived)
+}
+
 // ── NodeIdentity ───────────────────────────────────────────────────────────
 
 impl NodeIdentity {
@@ -368,7 +378,7 @@ impl NodeIdentity {
         println!("[identity] Identity loaded (node_id: {}, decrypted)", hex::encode(&stored.address[..8]));
 
         Ok(Self {
-            address: HashId(stored.address),
+            address: bound_address(stored.address, &stored.signing_public_key),
             public_key: stored.public_key,
             private_key,
             signing_public_key: stored.signing_public_key,
@@ -383,7 +393,7 @@ impl NodeIdentity {
             .map_err(|e| format!("Failed to parse legacy identity: {}", e))?;
 
         let identity = Self {
-            address: HashId(stored.address),
+            address: bound_address(stored.address, &stored.signing_public_key),
             public_key: stored.public_key,
             private_key: stored.private_key,
             signing_public_key: stored.signing_public_key,
@@ -461,7 +471,7 @@ impl NodeIdentity {
 
     fn from_material(m: key_root::IdentityMaterial) -> Self {
         Self {
-            address: HashId(m.address),
+            address: bound_address(m.address, &m.signing_public_key),
             public_key: m.public_key,
             private_key: *m.private_key,
             signing_public_key: m.signing_public_key,
@@ -544,6 +554,17 @@ mod key_root_tests {
         let back = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
         assert!(same(&original, &back));
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn an_identity_saved_with_a_random_id_gets_its_bound_id_and_keeps_every_key() {
+        let mut old = NodeIdentity::new();
+        old.address = HashId([0x33; 32]); // what an older version stored
+        let loaded = NodeIdentity::from_material(old.to_material());
+        assert_eq!(loaded.address.0, crate::util::types::derive_node_id(&old.signing_public_key));
+        assert_eq!(loaded.signing_public_key, old.signing_public_key);
+        assert_eq!(loaded.signing_private_key, old.signing_private_key);
+        assert_eq!(loaded.private_key, old.private_key);
     }
 
     #[test]

@@ -133,6 +133,12 @@ impl Doc {
             if !is_hex(&e.id, 64) || !is_hex(&e.key, 64) {
                 return Err(BootstrapError::Shape("номер или ключ узла"));
             }
+            // the node id is the one derived from the node's key: a list that names another id would send nodes to an entry that
+            // can never prove to be that id
+            let derived = hex::decode(&e.key).ok().and_then(|k| <[u8; 32]>::try_from(k).ok()).map(|k| hex::encode(crate::util::types::derive_node_id(&k)));
+            if derived.as_deref() != Some(e.id.to_ascii_lowercase().as_str()) {
+                return Err(BootstrapError::Shape("номер узла не выведен из его ключа"));
+            }
             if e.addr.is_empty() || e.addr.len() > 4 || e.addr.iter().any(|a| a.len() > 262 || a.parse::<std::net::SocketAddr>().is_err()) {
                 return Err(BootstrapError::Shape("адрес узла"));
             }
@@ -308,7 +314,7 @@ mod tests {
         hex::encode(key(n).verifying_key().to_bytes())
     }
     fn entry(n: u8) -> Entry {
-        Entry { id: hex::encode([n; 32]), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()] }
+        Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()] }
     }
     fn doc(seq: u64) -> Doc {
         Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], signer: String::new(), signature: String::new() }.sign(&key(99))
@@ -322,7 +328,6 @@ mod tests {
         // подмена адреса, ключа входного узла, срока, номера выпуска, роли
         for tamper in [
             |d: &mut Doc| d.entries[0].addr = vec!["198.51.100.9:9000".into()],
-            |d: &mut Doc| d.entries[0].key = hex::encode([7u8; 32]),
             |d: &mut Doc| d.expires += 1,
             |d: &mut Doc| d.sequence += 1,
             |d: &mut Doc| d.entries[1].roles = vec!["exit".into()],
@@ -332,6 +337,10 @@ mod tests {
             tamper(&mut t);
             assert_eq!(t.verify(&[&s], NOW, None), Err(BootstrapError::BadSignature));
         }
+        // ключ входного узла подменён: номер узла больше не выводится из ключа — список не принимается даже до проверки подписи
+        let mut other_key = d.clone();
+        other_key.entries[0].key = hex::encode([7u8; 32]);
+        assert!(other_key.verify(&[&s], NOW, None).is_err());
         // подписан чужим ключом (подставлен весь файл целиком)
         let forged = Doc { signer: String::new(), signature: String::new(), ..d.clone() }.sign(&key(7));
         assert_eq!(forged.verify(&[&s], NOW, None), Err(BootstrapError::UnknownSigner));
