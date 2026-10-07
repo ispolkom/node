@@ -205,10 +205,10 @@ impl ChatManager {
         // 2. Десериализовать
         let mut msg: ChatMessage = serde_json::from_slice(&decrypted)?;
 
-        // 3. Проверить: нам ли?
-        if msg.to != self.my_node_id {
-            error!("❌ Message not for us! to={:?}, we={:?}", msg.to, self.my_node_id);
-            return Err(anyhow::anyhow!("Message not for us"));
+        // 3. Проверить: нам ли, от того ли, чьим ключом расшифровано, и в пределах размеров
+        if let Err(why) = check_incoming(&msg, from, self.my_node_id) {
+            error!("❌ Chat message from {} refused: {}", hex::encode(&from.0[..8]), why);
+            return Err(anyhow::anyhow!("Message refused: {}", why));
         }
 
         // 4. Обновить статус
@@ -264,7 +264,13 @@ impl ChatManager {
         self.storage.update_message_status(&from, &msg_id, MessageStatus::Read)?;
 
         // Confirmed delivered — no longer at risk of a timeout marking it Failed.
-        self.pending_acks.lock().await.remove(&msg_id);
+        // Only the peer the message was sent to can confirm it (someone else knowing the id must not).
+        {
+            let mut pending = self.pending_acks.lock().await;
+            if pending.get(&msg_id).map_or(false, |p| p.peer == from) {
+                pending.remove(&msg_id);
+            }
+        }
 
         Ok(())
     }
@@ -440,9 +446,44 @@ impl ChatManager {
 }
 
 // TODO: После тестов remove
+
+/// Most text (bytes) and most inline attachment data (base64 chars) accepted in one incoming chat message.
+const MAX_INCOMING_TEXT: usize = 100_000;
+const MAX_INCOMING_INLINE_DATA: usize = 6 * 1024 * 1024;
+
+/// An incoming message must be addressed to us, claim to be from the peer whose key decrypted it, and stay in size.
+fn check_incoming(msg: &ChatMessage, authenticated_sender: HashId, me: HashId) -> Result<(), &'static str> {
+    if msg.to != me {
+        return Err("not addressed to us");
+    }
+    if msg.from != authenticated_sender {
+        return Err("sender does not match the key it was decrypted with");
+    }
+    if msg.text.len() > MAX_INCOMING_TEXT {
+        return Err("text too long");
+    }
+    if msg.attachment.as_ref().and_then(|a| a.data.as_ref()).map_or(false, |d| d.len() > MAX_INCOMING_INLINE_DATA) {
+        return Err("inline attachment too large");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn plain_msg(from: u8, to: u8, text: &str) -> ChatMessage {
+        ChatMessage { msg_id: HashId([1; 32]), from: HashId([from; 32]), to: HashId([to; 32]), timestamp: 0, text: text.into(), encrypted: true, status: MessageStatus::Pending, edited: false, edit_timestamp: None, attachment: None }
+    }
+
+    #[test]
+    fn an_incoming_message_must_come_from_its_real_sender_and_stay_in_size() {
+        let me = HashId([2; 32]);
+        assert_eq!(check_incoming(&plain_msg(5, 2, "hi"), HashId([5; 32]), me), Ok(()));
+        assert!(check_incoming(&plain_msg(6, 2, "hi"), HashId([5; 32]), me).is_err(), "peer 5 cannot speak as peer 6");
+        assert!(check_incoming(&plain_msg(5, 3, "hi"), HashId([5; 32]), me).is_err(), "addressed to someone else");
+        assert!(check_incoming(&plain_msg(5, 2, &"x".repeat(MAX_INCOMING_TEXT + 1)), HashId([5; 32]), me).is_err());
+    }
     use crate::core::NodeIdentity;
     use crate::p2p::P2PTransport;
 
