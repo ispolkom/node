@@ -47,15 +47,18 @@ pub async fn serve(port: u16, socks_port: u16, node_hex: String) -> anyhow::Resu
 
 async fn run(listener: TcpListener, acceptor: TlsAcceptor, socks_port: u16) {
     let active = Arc::new(AtomicUsize::new(0));
+    let handshakes: Arc<std::sync::Mutex<std::collections::HashMap<std::net::IpAddr, usize>>> = Default::default();
     loop {
-        let Ok((tcp, _)) = listener.accept().await else { continue };
+        let Ok((tcp, from)) = listener.accept().await else { continue };
         if active.load(Ordering::Relaxed) >= MAX_CONNECTIONS {
             continue; // закрываем, не отвечая
         }
+        // slow handshakes from one address must not fill every slot: they are limited per address and in total
+        let Some(slot) = crate::netlayer::tcp_carrier::HandshakeSlot::take(&handshakes, from.ip()) else { continue };
         active.fetch_add(1, Ordering::Relaxed);
         let (acceptor, active) = (acceptor.clone(), active.clone());
         tokio::spawn(async move {
-            let _ = handle(tcp, acceptor, socks_port).await;
+            let _ = handle(tcp, acceptor, socks_port, slot).await;
             active.fetch_sub(1, Ordering::Relaxed);
         });
     }
@@ -86,9 +89,10 @@ fn decoy_response(request: &[u8]) -> Vec<u8> {
     out
 }
 
-async fn handle(tcp: TcpStream, acceptor: TlsAcceptor, socks_port: u16) -> std::io::Result<()> {
+async fn handle(tcp: TcpStream, acceptor: TlsAcceptor, socks_port: u16, slot: crate::netlayer::tcp_carrier::HandshakeSlot) -> std::io::Result<()> {
     let _ = tcp.set_nodelay(true);
     let mut tls = tokio::time::timeout(Duration::from_secs(10), acceptor.accept(tcp)).await.map_err(|_| std::io::Error::other("tls timeout"))??;
+    drop(slot);
     // первые байты решают: приветствие SOCKS5 (0x05) — свой, всё остальное — посетитель сайта
     let mut first = vec![0u8; 4096];
     let n = tokio::time::timeout(Duration::from_secs(10), tls.read(&mut first)).await.map_err(|_| std::io::Error::other("no data"))??;

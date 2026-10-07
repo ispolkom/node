@@ -55,23 +55,26 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
             return;
         }
     };
+    let budget = std::sync::Arc::new(tokio::sync::Semaphore::new(128));
     loop {
         let Ok((mut s, _)) = l.accept().await else { continue };
-        // на этом же порту слушает запасной путь по TCP/TLS (`tcp_carrier`): TLS начинается с байта 0x16, проба достижимости — с «Y»
-        let mut first = [0u8; 1];
-        if let Ok(Ok(1)) = tokio::time::timeout(std::time::Duration::from_secs(3), s.peek(&mut first)).await {
-            if first[0] == 0x16 {
-                if let Some(c) = crate::netlayer::tcp_carrier::global() {
-                    tokio::spawn(async move {
-                        let _ = c.accept(s).await;
-                    });
-                }
-                continue;
-            }
-        }
+        // a hostile host holding connections open must not stall accepting: everything below runs in its own task, under a budget
+        let Ok(permit) = budget.clone().try_acquire_owned() else { continue };
         let key = key.clone();
         let advertised = advertised.clone();
         tokio::spawn(async move {
+            let permit = permit;
+            // на этом же порту слушает запасной путь по TCP/TLS (`tcp_carrier`): TLS начинается с байта 0x16, проба достижимости — с «Y»
+            let mut first = [0u8; 1];
+            if let Ok(Ok(1)) = tokio::time::timeout(std::time::Duration::from_secs(3), s.peek(&mut first)).await {
+                if first[0] == 0x16 {
+                    drop(permit); // the carrier connection lives long: it must not hold a probe slot
+                    if let Some(c) = crate::netlayer::tcp_carrier::global() {
+                        let _ = c.accept(s).await;
+                    }
+                    return;
+                }
+            }
             let work = async {
                 let mut req = [0u8; 20];
                 s.read_exact(&mut req).await.ok()?;
@@ -94,6 +97,7 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
                 Some(())
             };
             let _ = tokio::time::timeout(std::time::Duration::from_secs(PROBE_TIMEOUT_SECS), work).await;
+            drop(permit);
         });
     }
 }

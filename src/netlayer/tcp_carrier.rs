@@ -92,13 +92,13 @@ const MAX_HANDSHAKES: usize = 64;
 const MAX_HANDSHAKES_PER_IP: usize = 4;
 
 /// Slot held while a TLS handshake is in progress, so slow handshakes cannot pile up before the connection limits apply.
-struct HandshakeSlot {
+pub(crate) struct HandshakeSlot {
     map: Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>,
     ip: IpAddr,
 }
 
 impl HandshakeSlot {
-    fn take(map: &Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>, ip: IpAddr) -> Option<Self> {
+    pub(crate) fn take(map: &Arc<Mutex<std::collections::HashMap<IpAddr, usize>>>, ip: IpAddr) -> Option<Self> {
         let mut m = map.lock().unwrap_or_else(|e| e.into_inner());
         if m.values().sum::<usize>() >= MAX_HANDSHAKES || m.get(&ip).copied().unwrap_or(0) >= MAX_HANDSHAKES_PER_IP {
             return None;

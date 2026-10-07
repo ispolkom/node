@@ -102,6 +102,11 @@ impl ViaStore {
         if let Err(e) = r.check(now) {
             return Taken::Refused(e);
         }
+        // an update of a record we already hold never needs new room; a new record is refused BEFORE a bucket is created
+        let known = self.by_node.get(&r.node_id).map_or(false, |l| l.iter().any(|o| o.key == r.key));
+        if !known && self.total >= MAX_RECORDS {
+            return Taken::Refused("full");
+        }
         let list = self.by_node.entry(r.node_id.clone()).or_default();
         if let Some(old) = list.iter_mut().find(|o| o.key == r.key) {
             if old.issued >= r.issued {
@@ -109,9 +114,6 @@ impl ViaStore {
             }
             *old = r;
             return Taken::Newer;
-        }
-        if self.total >= MAX_RECORDS {
-            return Taken::Refused("full");
         }
         list.push(r);
         self.total += 1;
@@ -318,6 +320,16 @@ mod tests {
     }
     fn rec(n: u8, relays: &[u8], issued: u64) -> ViaRecord {
         ViaRecord { v: 1, node_id: id(n), key: String::new(), relays: relays.iter().map(|r| id(*r)).collect(), issued, expires: issued + VIA_TTL_SECS, sig: String::new() }.sign(&key(n))
+    }
+
+    #[test]
+    fn a_full_store_refuses_new_nodes_without_creating_empty_buckets() {
+        let mut st = ViaStore::default();
+        st.total = MAX_RECORDS;
+        for n in 1..20u8 {
+            assert_eq!(st.accept(rec(n, &[100], NOW), NOW), Taken::Refused("full"));
+        }
+        assert!(st.by_node.is_empty());
     }
 
     #[test]

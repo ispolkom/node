@@ -195,7 +195,11 @@ fn save_cache(d: &Doc) {
     if let Some(dir) = p.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let _ = std::fs::write(&p, serde_json::to_vec_pretty(d).unwrap_or_default());
+    // write a temporary file and rename it: a stop in the middle never leaves a torn cache
+    let tmp = p.with_extension("json.tmp");
+    if std::fs::write(&tmp, serde_json::to_vec_pretty(d).unwrap_or_default()).is_ok() {
+        let _ = std::fs::rename(&tmp, &p);
+    }
 }
 
 fn urls() -> Vec<String> {
@@ -216,7 +220,31 @@ pub async fn fetch(signers: &[&str]) -> Option<Doc> {
         if !resp.status().is_success() {
             continue;
         }
-        let Ok(bytes) = resp.bytes().await else { continue };
+        if resp.content_length().map_or(false, |n| n as usize > MAX_BYTES) {
+            continue;
+        }
+        let mut resp = resp;
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut ok = true;
+        loop {
+            match resp.chunk().await {
+                Ok(Some(c)) => {
+                    if bytes.len() + c.len() > MAX_BYTES {
+                        ok = false;
+                        break;
+                    }
+                    bytes.extend_from_slice(&c);
+                }
+                Ok(None) => break,
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        if !ok {
+            continue;
+        }
         match parse(&bytes).and_then(|d| d.verify(signers, t, known).map(|_| d)) {
             Ok(d) => {
                 println!("[bootstrap] список входных узлов получен ({} узлов, выпуск {})", d.entries.len(), d.sequence);

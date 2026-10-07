@@ -168,6 +168,11 @@ impl Directory {
                 return Accept::Refused("full");
             }
         }
+        if self.pinned.len() >= MAX_DIRECTORY * 4 {
+            // pins of nodes no longer in the directory are dropped when the table is far over its size
+            let alive: std::collections::HashSet<&String> = self.by_node.keys().collect();
+            self.pinned.retain(|k, _| alive.contains(k));
+        }
         self.pinned.insert(o.node_id.clone(), o.key.clone());
         self.by_node.insert(o.node_id.clone(), o);
         Accept::New
