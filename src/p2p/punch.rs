@@ -36,6 +36,7 @@ struct Attempt {
     ips: Vec<IpAddr>,
     expires: Instant,
     hello_sent: bool,
+    introducer: HashId,
 }
 
 #[derive(Default)]
@@ -47,12 +48,17 @@ pub(super) struct PunchState {
     introduced: StdMutex<HashMap<(HashId, HashId), Instant>>,
     /// client side: when an introduction from this introducer was last accepted
     intro_from: StdMutex<HashMap<HashId, Instant>>,
-    /// the outside data address a probe of this peer came from
+    /// the outside data address a probe of this peer came from (or, for a relayed peer, the relay's port)
     data_seen: StdMutex<HashMap<HashId, (SocketAddr, Instant)>>,
     running: AtomicUsize,
 }
 
 impl PunchState {
+    /// Remember the data address to use for `peer` when its hello completes (a relay's port, for instance).
+    pub(super) fn note_data_addr(&self, peer: HashId, addr: SocketAddr) {
+        self.data_seen.lock().unwrap().insert(peer, (addr, Instant::now()));
+    }
+
     /// The data address to use for a peer that has just completed a hello: the one its probe came from, if that is recent; otherwise the guess
     /// from its hello.
     pub(super) fn data_addr_for(&self, peer: &HashId, declared: &str, seen_ip: IpAddr) -> String {
@@ -74,7 +80,7 @@ fn public(a: &SocketAddr) -> bool {
 }
 
 /// the two outside addresses (data, discovery) of a peer, if both are known, public and were confirmed by a genuine packet a short while ago
-fn endpoints(p: &P2PPeer) -> Option<(SocketAddr, SocketAddr)> {
+pub(super) fn endpoints(p: &P2PPeer) -> Option<(SocketAddr, SocketAddr)> {
     let data: SocketAddr = p.p2p_data_addr.as_deref()?.parse().ok()?;
     let disc: SocketAddr = p.addr.parse().ok()?;
     if !public(&data) || !public(&disc) || now_ms().saturating_sub(p.last_seen) > FRESH_MS {
@@ -209,7 +215,7 @@ impl P2PTransport {
             if ex.len() >= MAX_ATTEMPTS || ex.contains_key(&token) {
                 return; // too many at once, or the same introduction arriving a second time (the two paths of a dual send)
             }
-            ex.insert(token, Attempt { peer, ips: vec![data.ip(), disc.ip()], expires: Instant::now() + ATTEMPT_LIFE, hello_sent: false });
+            ex.insert(token, Attempt { peer, ips: vec![data.ip(), disc.ip()], expires: Instant::now() + ATTEMPT_LIFE, hello_sent: false, introducer });
         }
         if self.punch.running.fetch_add(1, Ordering::Relaxed) >= MAX_ATTEMPTS {
             self.punch.running.fetch_sub(1, Ordering::Relaxed);
@@ -217,6 +223,7 @@ impl P2PTransport {
         }
         println!("[punch] 🤝 introduced to {} by {}: probing {} and {}", hex::encode(&peer.0[..8]), hex::encode(&introducer.0[..8]), data, disc);
         let (data_sock, disc_sock, state) = (self.data_send_socket.clone(), self.discovery_socket.clone(), self.punch.clone());
+        let this = self.self_ref.get().and_then(|w| w.upgrade());
         let msg = probe(&token, &me);
         tokio::spawn(async move {
             for _ in 0..PROBES {
@@ -228,6 +235,26 @@ impl P2PTransport {
                 tokio::time::sleep(PROBE_EVERY).await;
             }
             state.running.fetch_sub(1, Ordering::Relaxed);
+            // three seconds of probes and the other side never answered: there is no direct way. Ask the introducer to relay.
+            // (when several introducers introduced the same pair, only the one with the lowest id is asked: both sides then pick the same relay)
+            let failed = {
+                let ex = state.expected.lock().unwrap();
+                ex.get(&token).is_some_and(|a| !a.hello_sent)
+                    && !ex.values().any(|o| o.peer == peer && o.expires > Instant::now() && o.introducer.0 < introducer.0)
+            };
+            if failed {
+                if let Some(this) = this {
+                    println!("[punch] ❌ no direct way to {}", hex::encode(&peer.0[..8]));
+                    // the side with the lower id asks; the other waits for the grant that follows and asks only if none comes (one allocation per pair)
+                    if me.0 > peer.0 {
+                        tokio::time::sleep(Duration::from_secs(4)).await;
+                        if this.relay_route_to(&peer) {
+                            return;
+                        }
+                    }
+                    this.request_relay(peer, introducer).await;
+                }
+            }
         });
     }
 

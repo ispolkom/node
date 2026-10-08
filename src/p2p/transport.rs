@@ -28,6 +28,8 @@ use tracing::debug;
 
 #[path = "punch.rs"]
 mod punch;
+#[path = "relay.rs"]
+mod relay;
 
 /// 📦 Кэш пакетов для сборки DUAL-PATH (аналог Depot из netlayer)
 struct PacketCache {
@@ -238,6 +240,10 @@ pub struct P2PTransport {
     resync_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
     /// hole punching through introducers (src/p2p/punch.rs)
     punch: Arc<punch::PunchState>,
+    /// a UDP relay for the pairs that cannot be connected directly (src/p2p/relay.rs)
+    relay: Arc<relay::RelayState>,
+    /// this transport itself, for background tasks that need to call back into it
+    self_ref: std::sync::OnceLock<std::sync::Weak<P2PTransport>>,
 
     /// Statistics
     stats_sent_packets: Arc<AtomicU64>,
@@ -319,6 +325,8 @@ impl P2PTransport {
             rekey_requested: Arc::new(Mutex::new(HashMap::new())),
             resync_requested: Arc::new(Mutex::new(HashMap::new())),
             punch: Arc::new(punch::PunchState::default()),
+            relay: Arc::new(relay::RelayState::default()),
+            self_ref: std::sync::OnceLock::new(),
             admission: Arc::new(Mutex::new(crate::netlayer::admission::Admission::new(crate::netlayer::admission::AdmissionConfig::default()))),
             stats_sent_packets: Arc::new(AtomicU64::new(0)),
             stats_recv_packets: Arc::new(AtomicU64::new(0)),
@@ -329,6 +337,8 @@ impl P2PTransport {
             stats_sent_path1: Arc::new(AtomicU64::new(0)),
             stats_recv_path1: Arc::new(AtomicU64::new(0)),
         });
+
+        let _ = transport.self_ref.set(Arc::downgrade(&transport));
 
         // Spawn receive loop
         let transport_clone = transport.clone();
@@ -351,7 +361,8 @@ impl P2PTransport {
                 loop {
                     tokio::time::sleep(KEEPALIVE_EVERY).await;
                     let Some(t) = keep.upgrade() else { return };
-                    let ids: Vec<HashId> = t.peers.lock().await.keys().copied().collect();
+                    t.relay_housekeeping().await;
+                let ids: Vec<HashId> = t.peers.lock().await.keys().copied().collect();
                     for id in ids {
                         let pkt = P2PPacket::new(P2PPacketType::ChatTyping, t.identity.node_id(), false, Vec::new());
                         let _ = t.send_packet_dual_path(id, pkt).await;
@@ -1270,6 +1281,12 @@ impl P2PTransport {
             }
             P2PPacketType::PunchIntro => {
                 self.handle_punch_intro(sender, &p2p_packet.payload).await;
+            }
+            P2PPacketType::RelayReq => {
+                self.handle_relay_req(sender, &p2p_packet.payload).await;
+            }
+            P2PPacketType::RelayGrant => {
+                self.handle_relay_grant(sender, &p2p_packet.payload).await;
             }
 
             // Voice (0xB0-0xBF) - пока не реализовано, логируем

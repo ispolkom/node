@@ -33,6 +33,10 @@ pub enum P2PPacketType {
     PunchReq = 0xE0,
     /// from an introducer: the other side's outside addresses and the one-time token of the attempt
     PunchIntro = 0xE1,
+    /// to a relay: please forward between me and this node (src/p2p/relay.rs)
+    RelayReq = 0xE3,
+    /// from a relay: the ports to use for talking to the other node through it
+    RelayGrant = 0xE4,
 }
 
 impl P2PPacketType {
@@ -61,6 +65,8 @@ impl P2PPacketType {
             0xD5 => Some(P2PPacketType::FileComplete),
             0xE0 => Some(P2PPacketType::PunchReq),
             0xE1 => Some(P2PPacketType::PunchIntro),
+            0xE3 => Some(P2PPacketType::RelayReq),
+            0xE4 => Some(P2PPacketType::RelayGrant),
             _ => None,
         }
     }
