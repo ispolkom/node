@@ -154,7 +154,11 @@ impl P2PTransport {
                 }
             }
         }
+        if introducers.is_empty() {
+            println!("[punch] ⚠️  nobody to ask for an introduction to {} (no session with any other node)", hex::encode(&target.0[..8]));
+        }
         for intro in introducers {
+            println!("[punch] 🙋 asking {} to introduce me to {}", hex::encode(&intro.0[..8]), hex::encode(&target.0[..8]));
             let pkt = P2PPacket::new(P2PPacketType::PunchReq, me, false, target.0.to_vec());
             let _ = self.send_packet_dual_path(intro, pkt).await;
         }
@@ -168,23 +172,30 @@ impl P2PTransport {
         if b == a || b == me || a == me {
             return;
         }
-        {
-            let mut gate = self.punch.introduced.lock().unwrap();
-            if gate.get(&(a, b)).is_some_and(|t| t.elapsed() < INTRO_PER_PAIR) {
-                return;
-            }
-            gate.insert((a, b), Instant::now());
-            if gate.len() > 4096 {
-                gate.retain(|_, t| t.elapsed() < Duration::from_secs(60));
-            }
+        if self.punch.introduced.lock().unwrap().get(&(a, b)).is_some_and(|t| t.elapsed() < INTRO_PER_PAIR) {
+            return;
         }
         let (ea, eb) = {
             let peers = self.peers.lock().await;
             match (peers.get(&a).and_then(endpoints), peers.get(&b).and_then(endpoints)) {
                 (Some(x), Some(y)) => (x, y),
-                _ => return, // one of them is not known well enough here: silence is the answer
+                (xa, xb) => {
+                    // one of them is not known well enough here: no answer to the asker (it asks others), but the reason goes to the log
+                    println!("[punch] introducer: cannot introduce {} to {}: {} {}", hex::encode(&a.0[..8]), hex::encode(&b.0[..8]),
+                        if xa.is_none() { "the asker is not known here (recently, at a public address)" } else { "" },
+                        if xb.is_none() { "the target is not known here (recently, at a public address)" } else { "" });
+                    return;
+                }
             }
         };
+        {
+            // the pair is "used up" only by an introduction that was actually made
+            let mut gate = self.punch.introduced.lock().unwrap();
+            gate.insert((a, b), Instant::now());
+            if gate.len() > 4096 {
+                gate.retain(|_, t| t.elapsed() < Duration::from_secs(60));
+            }
+        }
         let token: [u8; 16] = rand::random();
         let to_a = P2PPacket::new(P2PPacketType::PunchIntro, me, false, intro_payload(&token, &b, &eb.0, &eb.1));
         let to_b = P2PPacket::new(P2PPacketType::PunchIntro, me, false, intro_payload(&token, &a, &ea.0, &ea.1));

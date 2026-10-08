@@ -5,7 +5,8 @@ Real nodes in the rootless lab. Phases (each prints one line):
   reply    - B answers A
   silence  - 75 s of silence on the application level (keepalive keeps the NAT open), then a message
   ipchange - the outside address of A's router changes; seconds until messages flow again
-Usage: python3 chaos/natchat.py [kind-of-router-B: full|symmetric] [binary] [out] [kind-of-router-A: full|symmetric] [relay-loss: 0|1]
+Usage: python3 chaos/natchat.py [kind-of-router-B: full|symmetric] [binary] [out] [kind-of-router-A: full|symmetric] [relay-loss: 0|1] [restart-both: 0|1]
+  with restart-both=1 both clients are killed and started again (their contact lists and unsent messages are on disk); the time until a message gets through is measured
   with relay-loss=1 the node that holds the relay allocation is killed after the first phases and the time until the chat works again is measured
 """
 import json, os, sys, time, subprocess, threading
@@ -48,6 +49,7 @@ def main():
     nets = {k: lab.public_node(k) for k in (1, 2, 3)}
     kind_a = sys.argv[4] if len(sys.argv) > 4 else "full"
     lose_relay = len(sys.argv) > 5 and sys.argv[5] == "1"
+    restart_both = len(sys.argv) > 6 and sys.argv[6] == "1"
     lab.router(1, kind_a)
     lab.router(2, kind_b)
     nets[4] = lab.natted_node(4, 1)
@@ -74,6 +76,21 @@ def main():
     time.sleep(75)
     res["after_silence_s"] = send_and_wait(A, B, "silence-1", 30)
     print("after 75 s of silence A->B (s):", res["after_silence_s"], flush=True)
+    if restart_both:
+        A.kill(); B.kill()
+        A.start(); B.start()
+        assert A.login(120) and A.ready(120) and B.login(120) and B.ready(120)
+        t = time.time()  # from the moment both nodes are up: starting a process and logging in is not the network's time
+        back = None
+        n_ = 0
+        while time.time() - t < 150:
+            n_ += 1
+            d = send_and_wait(A, B, f"restart-{n_}", 8)
+            if d is not None:
+                back = round(time.time() - t, 1)
+                break
+        res["restart_both_recovery_s"] = back
+        print("both clients were killed and started again; a message gets through after (s):", back, flush=True)
     if lose_relay:
         holder = None
         for n in pub:
