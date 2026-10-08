@@ -1479,7 +1479,9 @@ mod pending_packet_tests {
     }
 }
 
-/// how often a packet is sent to every known peer so that NATs keep the conversation in memory
+/// how often a packet is sent to every known peer so that NATs keep the conversation in memory.
+/// MEASURED (chaos/punchtest2.py, 2026-10-08): a punched UDP path stays alive through 20 s of silence and is dead after 30 s; with a
+/// packet every 15 s it stayed alive through 90 s and longer. Do not raise this without repeating that measurement.
 pub const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Адрес для данных собеседника: порт — тот, что он назвал, а IP — тот, с которого пришло его приветствие. Узел за NAT называет свой
