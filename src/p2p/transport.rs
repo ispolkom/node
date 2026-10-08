@@ -335,6 +335,22 @@ impl P2PTransport {
             transport_clone2.discovery_listener().await;
         });
 
+        // Keep the doors in the NAT open: a node behind NAT hears from the outside only while its NAT remembers a conversation, and an idle
+        // UDP flow is forgotten within half a minute. A tiny authenticated packet to every known peer keeps the memory alive, and each one
+        // also tells the peer our current outside address.
+        let keep = Arc::downgrade(&transport);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(KEEPALIVE_EVERY).await;
+                let Some(t) = keep.upgrade() else { return };
+                let ids: Vec<HashId> = t.peers.lock().await.keys().copied().collect();
+                for id in ids {
+                    let pkt = P2PPacket::new(P2PPacketType::ChatTyping, t.identity.node_id(), false, Vec::new());
+                    let _ = t.send_packet_dual_path(id, pkt).await;
+                }
+            }
+        });
+
         Ok(transport)
     }
 
@@ -1173,6 +1189,19 @@ impl P2PTransport {
             }
         }
 
+        // The packet is genuine (it opened under the key of exactly this peer, and a replay would have been refused above): the address it
+        // really came from is where this peer is now. A node behind NAT is reachable only at the address its NAT shows to the outside, and
+        // that address (and port) can change; what the peer said about itself in the hello is only a first guess.
+        {
+            let seen = from.to_string();
+            let mut peers = self.peers.lock().await;
+            if let Some(p) = peers.get_mut(&p2p_packet.sender) {
+                if p.p2p_data_addr.as_deref() != Some(seen.as_str()) {
+                    p.p2p_data_addr = Some(seen);
+                }
+            }
+        }
+
         // Логируем
         let packet_type_name = match p2p_packet.packet_type {
             P2PPacketType::ChatMessage => "ChatMessage",
@@ -1446,6 +1475,9 @@ mod pending_packet_tests {
         assert!(open_prefix(0xA0, &untyped).is_err());
     }
 }
+
+/// how often a packet is sent to every known peer so that NATs keep the conversation in memory
+pub const KEEPALIVE_EVERY: std::time::Duration = std::time::Duration::from_secs(15);
 
 /// Адрес для данных собеседника: порт — тот, что он назвал, а IP — тот, с которого пришло его приветствие. Узел за NAT называет свой
 /// внутренний адрес (192.168.x.x), и слать данные по нему публичному собеседнику бесполезно.
