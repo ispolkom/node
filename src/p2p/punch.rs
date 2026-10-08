@@ -30,6 +30,9 @@ const MAX_INTRODUCERS_ASKED: usize = 3;
 const SEEN_LIFE: Duration = Duration::from_secs(60);
 /// an address learned from a genuine packet is fresh for this long (ms) when an introducer vouches for it
 const FRESH_MS: u128 = 60_000;
+/// how long a challenge to a new address waits for its answer, and how soon the same address is challenged again
+const CHALLENGE_LIFE: Duration = Duration::from_secs(10);
+const CHALLENGE_AGAIN: Duration = Duration::from_secs(3);
 
 struct Attempt {
     peer: HashId,
@@ -51,6 +54,8 @@ pub(super) struct PunchState {
     /// the outside data address a probe of this peer came from (or, for a relayed peer, the relay's port)
     data_seen: StdMutex<HashMap<HashId, (SocketAddr, Instant)>>,
     running: AtomicUsize,
+    /// path validation: a peer's packets came from this new address and it was challenged with this number
+    candidates: StdMutex<HashMap<HashId, (SocketAddr, [u8; 8], Instant)>>,
 }
 
 impl PunchState {
@@ -304,6 +309,113 @@ impl P2PTransport {
     }
 }
 
+/// What to do with a genuine packet that came from `seen` when the peer is known at `current` (path validation).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AddrAction {
+    /// the packet came from the known address
+    Same,
+    /// nothing is known yet: take it
+    Take,
+    /// a different address: ask it to prove itself, with this number
+    Challenge([u8; 8]),
+    /// that address was challenged a moment ago: wait for the answer
+    Waiting,
+}
+
+pub(super) fn decide_address(current: Option<&str>, seen: &SocketAddr, candidate: Option<&(SocketAddr, [u8; 8], Instant)>, fresh_token: [u8; 8]) -> AddrAction {
+    match current {
+        None => AddrAction::Take,
+        Some(c) if c == seen.to_string() => AddrAction::Same,
+        Some(_) => match candidate {
+            Some((addr, _, at)) if addr == seen && at.elapsed() < CHALLENGE_AGAIN => AddrAction::Waiting,
+            _ => AddrAction::Challenge(fresh_token),
+        },
+    }
+}
+
+impl P2PTransport {
+    /// A genuine packet of `peer` arrived from `from`. The known address is changed only after the peer has answered a challenge sent to the new
+    /// one: whoever merely forwards a captured packet cannot answer (the answer is sealed with the session key), so replies cannot be steered.
+    pub(super) async fn learn_address(&self, peer: HashId, from: SocketAddr) {
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        let action = {
+            let mut peers = self.peers.lock().await;
+            let Some(p) = peers.get_mut(&peer) else { return };
+            let cand = self.punch.candidates.lock().unwrap().get(&peer).cloned();
+            let act = decide_address(p.p2p_data_addr.as_deref(), &from, cand.as_ref(), rand::random());
+            match &act {
+                AddrAction::Same => {
+                    p.last_seen = now;
+                    self.punch.candidates.lock().unwrap().remove(&peer);
+                }
+                AddrAction::Take => {
+                    p.p2p_data_addr = Some(from.to_string());
+                    p.last_seen = now;
+                }
+                _ => {}
+            }
+            act
+        };
+        if let AddrAction::Challenge(token) = action {
+            {
+                let mut c = self.punch.candidates.lock().unwrap();
+                c.insert(peer, (from, token, Instant::now()));
+                if c.len() > 1024 {
+                    c.retain(|_, (_, _, t)| t.elapsed() < CHALLENGE_LIFE);
+                }
+            }
+            println!("[path] packets of {} now come from {}: challenging that address", hex::encode(&peer.0[..8]), from);
+            self.send_sealed_to(peer, P2PPacketType::PathChallenge, token.to_vec(), from).await;
+        }
+    }
+
+    /// Seal a small packet with the session of `peer` and send it to one given address.
+    async fn send_sealed_to(&self, peer: HashId, kind: P2PPacketType, payload: Vec<u8>, to: SocketAddr) {
+        let sealed = {
+            let enc = self.p2p_encryption.lock().await;
+            if !enc.has_session(&peer) {
+                return;
+            }
+            enc.encrypt(&peer, &seal_prefix(kind.to_byte(), &payload))
+        };
+        let Ok(ct) = sealed else { return };
+        let mut pkt = P2PPacket::new(kind, self.identity.node_id(), true, ct);
+        pkt.line_id = 0;
+        let _ = self.data_send_socket.send_to(&pkt.to_bytes(), to).await;
+    }
+
+    /// The peer asks us to prove that we are at the address its challenge reached: answer to the address it came from.
+    pub(super) async fn on_path_challenge(&self, peer: HashId, from: SocketAddr, payload: &[u8]) {
+        if payload.len() != 8 {
+            return;
+        }
+        self.send_sealed_to(peer, P2PPacketType::PathResponse, payload.to_vec(), from).await;
+    }
+
+    /// The answer came back: if it came from the address that was challenged and carries its number, that address becomes the peer's.
+    pub(super) async fn on_path_response(&self, peer: HashId, from: SocketAddr, payload: &[u8]) {
+        let ok = {
+            let mut c = self.punch.candidates.lock().unwrap();
+            match c.get(&peer) {
+                Some((addr, token, at)) if *addr == from && token[..] == *payload && at.elapsed() < CHALLENGE_LIFE => {
+                    c.remove(&peer);
+                    true
+                }
+                _ => false,
+            }
+        };
+        if !ok {
+            return;
+        }
+        let mut peers = self.peers.lock().await;
+        if let Some(p) = peers.get_mut(&peer) {
+            println!("[path] {} confirmed at {}", hex::encode(&peer.0[..8]), from);
+            p.p2p_data_addr = Some(from.to_string());
+            p.last_seen = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -360,5 +472,19 @@ mod tests {
         st.data_seen.lock().unwrap().insert(id(1), ("203.0.113.5:40000".parse().unwrap(), Instant::now()));
         assert_eq!(st.data_addr_for(&id(1), "192.168.1.5:26104", ip), "203.0.113.5:40000", "the fresh observation");
         assert_eq!(st.data_addr_for(&id(2), "192.168.1.5:26104", ip), "203.0.113.5:26104", "another peer is not affected");
+    }
+
+    #[test]
+    fn a_changed_address_is_challenged_not_believed() {
+        let a: SocketAddr = "203.0.113.5:26104".parse().unwrap();
+        let b: SocketAddr = "198.51.100.9:40000".parse().unwrap();
+        let t = [7u8; 8];
+        assert_eq!(decide_address(None, &a, None, t), AddrAction::Take, "nothing known: take it");
+        assert_eq!(decide_address(Some("203.0.113.5:26104"), &a, None, t), AddrAction::Same);
+        assert_eq!(decide_address(Some("203.0.113.5:26104"), &b, None, t), AddrAction::Challenge(t), "a new address must prove itself");
+        let pending = (b, [1u8; 8], Instant::now());
+        assert_eq!(decide_address(Some("203.0.113.5:26104"), &b, Some(&pending), t), AddrAction::Waiting, "and is not challenged again at once");
+        let other = ("192.0.2.1:1".parse().unwrap(), [1u8; 8], Instant::now());
+        assert_eq!(decide_address(Some("203.0.113.5:26104"), &b, Some(&other), t), AddrAction::Challenge(t), "a challenge to another address does not cover this one");
     }
 }

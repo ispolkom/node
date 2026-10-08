@@ -113,7 +113,8 @@ class Node:
         os.makedirs(os.path.join(self.dir, "home"), exist_ok=True)
         with open(os.path.join(self.dir, "config.yaml"), "w") as f:
             f.write(self.config())
-        log = open(os.path.join(self.dir, "node.log"), "ab")
+        # CHAOS_NOLOG=1: the node's output goes nowhere (to see what the per-packet printing costs)
+        log = subprocess.DEVNULL if os.environ.get("CHAOS_NOLOG") == "1" else open(os.path.join(self.dir, "node.log"), "ab")
         args = [self.binary] + (["--anchor"] if self.anchor else [])
         if self.net:
             args = ["ip", "netns", "exec", self.net["ns"]] + args

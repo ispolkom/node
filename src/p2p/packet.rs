@@ -37,6 +37,10 @@ pub enum P2PPacketType {
     RelayReq = 0xE3,
     /// from a relay: the ports to use for talking to the other node through it
     RelayGrant = 0xE4,
+    /// to a new address a peer's packets came from: prove you are there (src/p2p/punch.rs, path validation)
+    PathChallenge = 0xE5,
+    /// the answer, from that same address
+    PathResponse = 0xE6,
 }
 
 impl P2PPacketType {
@@ -67,6 +71,8 @@ impl P2PPacketType {
             0xE1 => Some(P2PPacketType::PunchIntro),
             0xE3 => Some(P2PPacketType::RelayReq),
             0xE4 => Some(P2PPacketType::RelayGrant),
+            0xE5 => Some(P2PPacketType::PathChallenge),
+            0xE6 => Some(P2PPacketType::PathResponse),
             _ => None,
         }
     }

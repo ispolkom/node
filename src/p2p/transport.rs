@@ -1220,18 +1220,9 @@ impl P2PTransport {
         }
 
         // The packet is genuine (it opened under the key of exactly this peer, and a replay would have been refused above): the address it
-        // really came from is where this peer is now. A node behind NAT is reachable only at the address its NAT shows to the outside, and
-        // that address (and port) can change; what the peer said about itself in the hello is only a first guess.
-        {
-            let seen = from.to_string();
-            let mut peers = self.peers.lock().await;
-            if let Some(p) = peers.get_mut(&p2p_packet.sender) {
-                if p.p2p_data_addr.as_deref() != Some(seen.as_str()) {
-                    p.p2p_data_addr = Some(seen);
-                }
-                p.last_seen = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
-            }
-        }
+        // came from is a candidate for where the peer now is. A node behind NAT is reachable only at the address its NAT shows to the
+        // outside, and that can change; but the known address is replaced only after the new one has answered a challenge (path validation).
+        self.learn_address(p2p_packet.sender, from).await;
 
         // Логируем
         let packet_type_name = match p2p_packet.packet_type {
@@ -1287,6 +1278,12 @@ impl P2PTransport {
             }
             P2PPacketType::RelayGrant => {
                 self.handle_relay_grant(sender, &p2p_packet.payload).await;
+            }
+            P2PPacketType::PathChallenge => {
+                self.on_path_challenge(sender, from, &p2p_packet.payload).await;
+            }
+            P2PPacketType::PathResponse => {
+                self.on_path_response(sender, from, &p2p_packet.payload).await;
             }
 
             // Voice (0xB0-0xBF) - пока не реализовано, логируем
