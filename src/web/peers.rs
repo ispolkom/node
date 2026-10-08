@@ -94,6 +94,12 @@ impl PeerDirectory {
     }
 }
 
+/// The signing key of a trusted contact, if the owner has one with this node id.
+pub fn key_hex_of(node_hex: &str) -> Option<String> {
+    let dir = PeerDirectory::load_or_default(&default_peer_directory_path());
+    dir.peers.iter().find(|p| p.node_id_hex.eq_ignore_ascii_case(node_hex)).map(|p| p.signing_pubkey_hex.to_ascii_lowercase())
+}
+
 pub fn default_peer_directory_path() -> PathBuf {
     let home = std::env::var_os("YANDI_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(PathBuf::from)).unwrap_or_else(|| PathBuf::from("."));
     home.join(".yandi").join("trusted_peers.json")

@@ -12,7 +12,7 @@ src/netlayer/tun_device.rs:3
 src/netlayer/tun_exit.rs:1
 src/netlayer/ws_transport.rs:6
 src/network_offers.rs:1
-src/p2p/punch.rs:1
+src/p2p/punch.rs:2
 src/p2p/relay.rs:2
 src/p2p/transport.rs:2
 src/protocol/ordering.rs:1

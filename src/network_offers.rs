@@ -60,6 +60,9 @@ pub struct NodeOffer {
     /// внешний адрес узла менялся дважды за месяц: ему не стоит верить долго
     #[serde(default)]
     pub dynamic_ip: bool,
+    /// port where the node accepts the hello of the chat channel (0 = not announced): lets a contact find the node as a home node of a client
+    #[serde(default)]
+    pub p2p: u16,
     pub issued: u64,
     pub expires: u64,
     /// подпись Ed25519 (128 hex) всего остального
@@ -345,6 +348,7 @@ pub fn build_own(node_id: &[u8; 32], key: &SigningKey, a: &SelfAssessment, now: 
         can_exit,
         relay: can_exit && crate::relay_net::relay_enabled(),
         dynamic_ip,
+        p2p: crate::p2p::transport::configured_ports().1,
         issued: now,
         expires: now + if dynamic_ip { DYNAMIC_OFFER_TTL_SECS } else { OFFER_TTL_SECS },
         sig: String::new(),
@@ -447,6 +451,16 @@ fn queue_probe(o: NodeOffer) {
             }
         }
     });
+}
+
+/// Where the chat channel of a node can be greeted (public address from its card + the announced port), if its card is known and fresh.
+pub fn p2p_discovery_addr(node_hex: &str) -> Option<std::net::SocketAddr> {
+    let o = offer_of(node_hex)?;
+    if o.p2p == 0 {
+        return None;
+    }
+    let ip = o.addr.first()?.parse::<std::net::SocketAddr>().ok()?.ip();
+    crate::exit_policy::public_only(&ip).then(|| std::net::SocketAddr::new(ip, o.p2p))
 }
 
 /// Карточка узла из каталога (свежая), если есть.
@@ -629,7 +643,7 @@ mod tests {
     }
     // без правил выхода (они глобальные) — те же поля руками
     fn build_offer_for_test(node_id: &[u8; 32], k: &SigningKey, a: &SelfAssessment, now: u64) -> NodeOffer {
-        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, dynamic_ip: false, issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
+        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
     }
     const NOW: u64 = 1_800_000_000;
 

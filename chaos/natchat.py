@@ -5,7 +5,8 @@ Real nodes in the rootless lab. Phases (each prints one line):
   reply    - B answers A
   silence  - 75 s of silence on the application level (keepalive keeps the NAT open), then a message
   ipchange - the outside address of A's router changes; seconds until messages flow again
-Usage: python3 chaos/natchat.py [kind-of-router-B: full|symmetric] [binary] [out] [kind-of-router-A: full|symmetric] [relay-loss: 0|1] [restart-both: 0|1]
+Usage: python3 chaos/natchat.py [kind-of-router-B: full|symmetric] [binary] [out] [kind-of-router-A: full|symmetric] [relay-loss: 0|1] [restart-both: 0|1] [topology: all|disjoint]
+  topology=disjoint: client A knows only public node 1, client B only public node 2 (and each other): they have NO common acquaintance, so an introduction must go through the home nodes announced in B's signed record
   with restart-both=1 both clients are killed and started again (their contact lists and unsent messages are on disk); the time until a message gets through is measured
   with relay-loss=1 the node that holds the relay allocation is killed after the first phases and the time until the chat works again is measured
 """
@@ -50,24 +51,31 @@ def main():
     kind_a = sys.argv[4] if len(sys.argv) > 4 else "full"
     lose_relay = len(sys.argv) > 5 and sys.argv[5] == "1"
     restart_both = len(sys.argv) > 6 and sys.argv[6] == "1"
+    disjoint = len(sys.argv) > 7 and sys.argv[7] == "disjoint"
     lab.router(1, kind_a)
     lab.router(2, kind_b)
     nets[4] = lab.natted_node(4, 1)
     nets[5] = lab.natted_node(5, 2)
     for k in nets:
         lab.netem(k, 20, 5, 0.5)
-    nodes = [C.Node(k, out, binary, anchor=(k == 1), net=nets[k]) for k in range(1, 6)]
+    nodes = [C.Node(k, out, binary, anchor=(k == 1), client=(disjoint and k in (4, 5)), net=nets[k]) for k in range(1, 6)]
     pub, A, B = nodes[:3], nodes[3], nodes[4]
     for n in nodes:
         n.start()
     for n in nodes:
         assert n.login(120) and n.ready(120), n.k
     # everyone knows the public nodes; A and B are contacts of each other (their cards carry only their private addresses)
-    for n in nodes:
-        for m in nodes:
-            if m is not n:
-                n.trust(m)
-    time.sleep(35)
+    if disjoint:
+        links = [(1, 2), (1, 3), (2, 3), (4, 1), (5, 2), (4, 5)]
+        for a_, b_ in links:
+            nodes[a_ - 1].trust(nodes[b_ - 1]); nodes[b_ - 1].trust(nodes[a_ - 1])
+        time.sleep(60)  # the signed records of the clients (their home nodes) travel through the network
+    else:
+        for n in nodes:
+            for m in nodes:
+                if m is not n:
+                    n.trust(m)
+        time.sleep(35)
     res = {"router_A": kind_a, "router_B": kind_b}
     res["first_s"] = send_and_wait(A, B, "first-1", 60)
     print("first contact A->B (s):", res["first_s"], flush=True)
@@ -135,4 +143,16 @@ def main():
         x.kill()
 
 
-main()
+try:
+    main()
+finally:
+    # never leave nodes behind, whatever happened
+    import subprocess as _sp
+    for _p in _sp.run(['pgrep', '-x', 'yandi'], capture_output=True, text=True).stdout.split():
+        try:
+            _env = open(f'/proc/{_p}/environ', 'rb').read().split(b'\0')
+            if any(e.startswith(b'YANDI_CONFIG=') and (b'/natchat' in e) for e in _env):
+                os.kill(int(_p), 9)
+        except OSError:
+            pass
+

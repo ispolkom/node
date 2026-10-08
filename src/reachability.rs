@@ -146,7 +146,7 @@ mod tests {
     fn card_for(sk: &SigningKey, id: [u8; 32], addr: &str) -> NodeOffer {
         NodeOffer {
             v: 1, node_id: hex::encode(id), key: hex::encode(sk.verifying_key().to_bytes()), country: None, country_source: "unknown".into(), public_ip: true,
-            power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![addr.into()], exit: true, can_exit: true, relay: false, dynamic_ip: false, issued: 0, expires: 0, sig: String::new(),
+            power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![addr.into()], exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, issued: 0, expires: 0, sig: String::new(),
         }
     }
 

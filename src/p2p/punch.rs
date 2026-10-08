@@ -26,6 +26,7 @@ const ASK_EVERY: Duration = Duration::from_secs(8);
 const INTRO_PER_PAIR: Duration = Duration::from_secs(5);
 const INTRO_PER_INTRODUCER: Duration = Duration::from_secs(2);
 const MAX_INTRODUCERS_ASKED: usize = 3;
+const MAX_HOME_NODES: usize = 3;
 /// how long the address a probe came from is trusted as the peer's data address
 const SEEN_LIFE: Duration = Duration::from_secs(60);
 /// an address learned from a genuine packet is fresh for this long (ms) when an introducer vouches for it
@@ -56,6 +57,8 @@ pub(super) struct PunchState {
     running: AtomicUsize,
     /// path validation: a peer's packets came from this new address and it was challenged with this number
     candidates: StdMutex<HashMap<HashId, (SocketAddr, [u8; 8], Instant)>>,
+    /// when the quick follow-up request after greeting a home node was last made for this target (at most once in a while)
+    followup: StdMutex<HashMap<HashId, Instant>>,
 }
 
 impl PunchState {
@@ -146,6 +149,14 @@ impl P2PTransport {
                 asked.retain(|_, t| t.elapsed() < Duration::from_secs(60));
             }
         }
+        self.ask_introducers(target).await;
+        // and make sure we are connected to the nodes the target is connected to: they know it
+        self.reach_home_nodes(target).await;
+    }
+
+    /// Ask the nodes we have a session with (up to three) to introduce us to `target`.
+    async fn ask_introducers(&self, target: HashId) {
+        let me = self.identity.node_id();
         let known: Vec<HashId> = self.peers.lock().await.keys().filter(|id| **id != target).copied().collect();
         let mut introducers = Vec::new();
         {
@@ -166,6 +177,46 @@ impl P2PTransport {
             println!("[punch] 🙋 asking {} to introduce me to {}", hex::encode(&intro.0[..8]), hex::encode(&target.0[..8]));
             let pkt = P2PPacket::new(P2PPacketType::PunchReq, me, false, target.0.to_vec());
             let _ = self.send_packet_dual_path(intro, pkt).await;
+        }
+    }
+
+    /// A contact behind a NAT is reachable through the nodes it keeps links to (its home nodes, announced in its signed availability record). If we
+    /// have no session with such a node yet, greet it: the next request for an introduction can then go through it, because it knows the contact.
+    async fn reach_home_nodes(&self, target: HashId) {
+        let target_hex = hex::encode(target.0);
+        let Some(key_hex) = crate::web::peers::key_hex_of(&target_hex) else { return };
+        let homes = crate::relay_net::lookup_relays(&target_hex, &key_hex);
+        let me = self.identity.node_id();
+        let mut greeted = false;
+        for h in homes.iter().take(MAX_HOME_NODES) {
+            let Some(id) = hex::decode(h).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).map(HashId) else { continue };
+            if id == me || id == target || self.peers.lock().await.contains_key(&id) {
+                continue;
+            }
+            let Some(addr) = crate::network_offers::p2p_discovery_addr(h) else { continue };
+            println!("[punch] 🏠 {} is reached through its home node {}: greeting {}", hex::encode(&target.0[..8]), &h[..16], addr);
+            let _ = self.send_hello_request(&addr.to_string()).await;
+            greeted = true;
+        }
+        let quick = greeted && {
+            let mut f = self.punch.followup.lock().unwrap();
+            let ok = f.get(&target).map_or(true, |t| t.elapsed() > Duration::from_secs(20));
+            if ok {
+                f.insert(target, Instant::now());
+                if f.len() > 1024 {
+                    f.retain(|_, t| t.elapsed() < Duration::from_secs(60));
+                }
+            }
+            ok
+        };
+        if quick {
+            // the new session is there in a moment: ask again at once instead of waiting for the next round of the chat's resends
+            if let Some(this) = self.self_ref.get().and_then(|w| w.upgrade()) {
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    this.ask_introducers(target).await;
+                });
+            }
         }
     }
 
