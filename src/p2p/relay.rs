@@ -354,11 +354,13 @@ impl P2PTransport {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     async fn sock(ip: &str) -> Arc<UdpSocket> {
         Arc::new(UdpSocket::bind((ip, 0)).await.unwrap())
     }
 
     /// four relay sockets on loopback, two "sides" at 127.0.0.1 and 127.0.0.2
+    #[cfg(target_os = "linux")]
     async fn rig() -> ([Arc<UdpSocket>; 4], Arc<UdpSocket>, Arc<UdpSocket>, tokio::task::JoinHandle<()>) {
         let relay = [sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await];
         let a = sock("127.0.0.1").await;
@@ -368,6 +370,7 @@ mod tests {
         (relay, a, b, h)
     }
 
+    #[cfg(target_os = "linux")]
     fn flood_task(a: Arc<UdpSocket>, to: SocketAddr) -> tokio::task::JoinHandle<()> {
         tokio::task::spawn(async move {
             let big = vec![1u8; 60_000];
@@ -377,11 +380,14 @@ mod tests {
         })
     }
 
+    #[cfg(target_os = "linux")]
     async fn recv(s: &UdpSocket) -> Option<(Vec<u8>, SocketAddr)> {
         let mut b = vec![0u8; 2048];
         tokio::time::timeout(Duration::from_millis(400), s.recv_from(&mut b)).await.ok()?.ok().map(|(n, f)| (b[..n].to_vec(), f))
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn datagrams_cross_the_relay_both_ways_from_the_port_of_the_receiving_side() {
         let (relay, a, b, _h) = rig().await;
@@ -399,6 +405,8 @@ mod tests {
         assert_eq!(from, ra);
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_datagram_from_a_stranger_changes_nothing_and_gets_no_answer() {
         let (relay, a, b, _h) = rig().await;
@@ -417,6 +425,8 @@ mod tests {
         assert_eq!(recv(&b).await.unwrap().0, b"still");
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_discovery_and_the_data_ports_are_kept_apart() {
         let (relay, a, b, _h) = rig().await;
@@ -434,6 +444,8 @@ mod tests {
         assert_eq!(recv(&b).await.unwrap().0, b"data2");
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn the_byte_budget_cuts_a_flood_and_an_idle_relay_ends() {
         let relay = [sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await];
@@ -462,6 +474,8 @@ mod tests {
         assert!(h.is_finished(), "an idle allocation ends by itself");
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_side_that_shows_up_at_a_new_address_is_served_once_the_record_is_updated() {
         let relay = [sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await, sock("127.0.0.1").await];
@@ -484,6 +498,8 @@ mod tests {
         assert_eq!(recv(&a2).await.unwrap().0, b"back", "and the replies now go to the new address");
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_full_port_range_refuses_cleanly_and_gives_the_ports_back() {
         // a range of three ports, picked where nothing else listens
@@ -504,6 +520,8 @@ mod tests {
         assert_eq!(bind_in(lo, hi).await.map(|x| x.1), Some(p), "a port that was given back is found again");
     }
 
+    // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
+    #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn a_flood_through_one_allocation_does_not_slow_another() {
         let (relay1, a1, b1, _h1) = rig().await;
