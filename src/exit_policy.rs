@@ -142,6 +142,12 @@ pub async fn resolve_public(target: &str) -> std::io::Result<Vec<SocketAddr>> {
 
 /// Соединиться с целью в интернете — ровно с проверенным адресом (первым, что ответит), не дольше `limit`.
 pub async fn connect_public(target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
+    // Пока включён внешний прокси, весь выход идёт ТОЛЬКО через него; прямого соединения не будет, даже если прокси не отвечает.
+    if let Some(p) = crate::upstream_proxy::active() {
+        let r = connect_through_proxy(&p, target, limit).await;
+        crate::upstream_proxy::note(&r);
+        return r;
+    }
     let addrs = resolve_public(target).await?;
     let mut last = None;
     for a in addrs {
@@ -152,6 +158,26 @@ pub async fn connect_public(target: &str, limit: Duration) -> std::io::Result<to
         }
     }
     Err(last.unwrap_or_else(|| std::io::Error::other("no address")))
+}
+
+/// Имена, на которые отвечает чья-то внутренняя сеть, а не интернет: через прокси к ним не ходим (прокси разрешает имена у себя, и проверить
+/// адрес здесь нельзя, поэтому отсекаем по виду имени).
+fn local_name(host: &str) -> bool {
+    let h = host.to_ascii_lowercase();
+    !h.contains('.') || h == "localhost" || [".localhost", ".local", ".internal", ".lan", ".home", ".corp", ".intranet", ".home.arpa"].iter().any(|s| h.ends_with(s))
+}
+
+/// Выход через внешний прокси. Прокси сам находит имя цели; адреса вида «этот компьютер» и «домашняя сеть» отсекаются здесь, как и без прокси.
+async fn connect_through_proxy(p: &crate::upstream_proxy::Settings, target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
+    let (host, port) = split_host_port(target).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("неверная цель {target}")))?;
+    let refuse = |what: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{target}: {what} — выход туда не пускает"));
+    match host.parse::<IpAddr>() {
+        Ok(ip) if !public_destination(&ip) => return Err(refuse("адрес этого компьютера или домашней сети")),
+        Ok(_) => {}
+        Err(_) if local_name(&host) => return Err(refuse("имя внутренней сети")),
+        Err(_) => {}
+    }
+    crate::upstream_proxy::connect(p, &host, port, limit).await
 }
 
 /// Пароль локального прокси этого узла: создаётся один раз (20 случайных знаков), лежит в папке данных узла с правами 0600.
@@ -227,6 +253,31 @@ mod tests {
         }
         assert!(resolve_public("8.8.8.8:53").await.is_ok());
         assert!(resolve_public("[2001:4860:4860::8888]:53").await.is_ok());
+    }
+
+    #[test]
+    fn names_of_an_internal_network_are_not_sent_to_a_proxy() {
+        for n in ["localhost", "printer", "nas.local", "router.lan", "db.internal", "x.home.arpa", "A.LOCALHOST", "intranet"] {
+            assert!(local_name(n), "{n}");
+        }
+        for n in ["example.org", "sub.example.co.uk", "xn--80ak6aa92e.com"] {
+            assert!(!local_name(n), "{n}");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_a_proxy_on_nothing_goes_around_it_and_the_home_network_stays_closed() {
+        // a proxy address where nobody listens: every public target fails, none is reached directly
+        let dead = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = dead.local_addr().unwrap().port();
+        drop(dead);
+        crate::upstream_proxy::set_for_test(Some(crate::upstream_proxy::Settings { enabled: true, kind: crate::upstream_proxy::Kind::Socks5, host: "127.0.0.1".into(), port, auth: crate::upstream_proxy::Auth::None }));
+        let e = connect_public("8.8.8.8:53", Duration::from_secs(2)).await.unwrap_err();
+        assert!(e.to_string().contains("прокси"), "failed because of the proxy, not connected directly: {e}");
+        for t in ["127.0.0.1:22", "192.168.1.1:80", "[::1]:80", "localhost:80", "nas.local:80", "printer:80"] {
+            assert_eq!(connect_public(t, Duration::from_secs(2)).await.unwrap_err().kind(), std::io::ErrorKind::PermissionDenied, "{t}");
+        }
+        crate::upstream_proxy::set_for_test(None);
     }
 
     #[test]

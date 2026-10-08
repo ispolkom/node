@@ -386,6 +386,7 @@ impl WebServer {
             .route("/", get(index_handler))
             // кто может выходить в интернет через этот узел (выбор владельца)
             .merge(crate::exit_policy::router())
+            .merge(crate::upstream_proxy::router())
             // карточки узлов и списки сети по странам
             // доверенные узлы: визитка этого узла, добавить/убрать узел
             .merge(crate::web::peers::router())

@@ -173,6 +173,57 @@
 
                 <div class="card">
                     <div class="card-header">
+                        <h3 class="card-title">Внешний прокси для выхода в интернет</h3>
+                    </div>
+                    <div class="card-body">
+                        <p class="form-help">Если из вашей страны нельзя выйти в интернет напрямую, пропишите свой прокси (например, купленный). Пока он включён, весь выход в интернет через ваш узел идёт только через него; если прокси перестанет отвечать, выход закроется, напрямую трафик не уйдёт. Переписка, звонки и файлы между людьми идут по нашему транспорту внутри сети и прокси не используют. Выключите прокси, и выход снова пойдёт через сеть.</p>
+                        <div class="form-group">
+                            <label for="upKind">Тип соединения</label>
+                            <select id="upKind" class="form-input">
+                                <option value="socks5">SOCKS5</option>
+                                <option value="http_connect">HTTP (CONNECT)</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="upHost">Адрес сервера</label>
+                            <input type="text" id="upHost" class="form-input" placeholder="например, proxy.example.com или 203.0.113.5" maxlength="253" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="upPort">Порт</label>
+                            <input type="number" id="upPort" class="form-input" min="1" max="65535" value="1080">
+                        </div>
+                        <div class="form-group">
+                            <label for="upAuth">Авторизация</label>
+                            <select id="upAuth" class="form-input">
+                                <option value="none">Нет</option>
+                                <option value="password">Логин и пароль</option>
+                            </select>
+                        </div>
+                        <div id="upAuthFields" style="display:none">
+                            <div class="form-group">
+                                <label for="upUser">Логин</label>
+                                <input type="text" id="upUser" class="form-input" maxlength="255" autocomplete="off">
+                            </div>
+                            <div class="form-group">
+                                <label for="upPass">Пароль</label>
+                                <input type="password" id="upPass" class="form-input" maxlength="255" autocomplete="new-password">
+                                <span id="upPassHint" class="form-help"></span>
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label><input type="checkbox" id="upEnabled"> Использовать этот прокси для выхода в интернет</label>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-primary" id="upSaveBtn" type="button">Сохранить</button>
+                            <button class="btn" id="upTestBtn" type="button">Проверить</button>
+                            <span id="upSaved" class="form-help"></span>
+                            <div id="upStatus" class="form-help" style="margin-top:8px"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
                         <h3 class="card-title">Мой выход в интернет через сеть</h3>
                     </div>
                     <div class="card-body">
@@ -369,6 +420,42 @@
                 fetch('/api/exit/settings', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ mode: sel.value }) })
                     .then(function (r) { return r.json(); })
                     .then(function (j) { saved.textContent = j.ok ? 'Сохранено.' : (j.error || 'Не удалось сохранить.'); loadExit(); })
+                    .catch(function () { saved.textContent = 'Нет связи с узлом.'; });
+            });
+        })();
+
+        // === Внешний прокси для выхода ===
+        (function () {
+            var el = function (id) { return document.getElementById(id); };
+            var saved = el('upSaved'), status = el('upStatus');
+            function authShow() { el('upAuthFields').style.display = el('upAuth').value === 'password' ? '' : 'none'; }
+            el('upAuth').addEventListener('change', authShow);
+            function show(j) {
+                if (!j.configured) { status.textContent = 'Прокси не настроен.'; authShow(); return; }
+                el('upKind').value = j.kind; el('upHost').value = j.host; el('upPort').value = j.port;
+                el('upAuth').value = j.auth; el('upUser').value = j.user || ''; el('upPass').value = '';
+                el('upPassHint').textContent = j.has_password ? 'Пароль сохранён; оставьте поле пустым, чтобы не менять.' : '';
+                el('upEnabled').checked = !!j.enabled; authShow();
+                var t = j.enabled ? 'Прокси включён.' : 'Прокси выключен: выход идёт через сеть.';
+                if (j.last_error) t += ' Последняя ошибка: ' + j.last_error;
+                else if (j.enabled && j.last_ok_secs_ago !== null) t += ' Последнее успешное соединение: ' + j.last_ok_secs_ago + ' с назад.';
+                status.textContent = t;
+            }
+            function load() { fetch('/api/upstream-proxy').then(function (r) { return r.json(); }).then(show).catch(function () {}); }
+            load();
+            el('upSaveBtn').addEventListener('click', function () {
+                var body = { enabled: el('upEnabled').checked, kind: el('upKind').value, host: el('upHost').value, port: parseInt(el('upPort').value, 10) || 0,
+                             auth: el('upAuth').value, user: el('upUser').value, password: el('upPass').value };
+                fetch('/api/upstream-proxy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+                    .then(function (r) { return r.json(); })
+                    .then(function (j) { saved.textContent = j.ok ? 'Сохранено.' : (j.error || 'Не удалось сохранить.'); if (j.ok) load(); })
+                    .catch(function () { saved.textContent = 'Нет связи с узлом.'; });
+            });
+            el('upTestBtn').addEventListener('click', function () {
+                saved.textContent = 'Проверяю…';
+                fetch('/api/upstream-proxy/test', { method: 'POST' })
+                    .then(function (r) { return r.json(); })
+                    .then(function (j) { saved.textContent = j.ok ? 'Прокси работает (' + j.ms + ' мс).' : ('Не работает: ' + (j.error || 'нет ответа')); load(); })
                     .catch(function () { saved.textContent = 'Нет связи с узлом.'; });
             });
         })();
