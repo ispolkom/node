@@ -78,8 +78,18 @@ fn pair_key(a: &HashId, b: &HashId) -> (HashId, HashId) {
 
 async fn bind_in_range() -> Option<(Arc<UdpSocket>, u16)> {
     let (lo, hi) = port_range();
+    bind_in(lo, hi).await
+}
+
+/// A free port of [lo, hi]: random tries first, then a sweep, so that a nearly full range still finds its last free port.
+async fn bind_in(lo: u16, hi: u16) -> Option<(Arc<UdpSocket>, u16)> {
     for _ in 0..40 {
         let port = lo + (rand::random::<u16>() % (hi - lo + 1));
+        if let Ok(s) = UdpSocket::bind(("0.0.0.0", port)).await {
+            return Some((Arc::new(s), port));
+        }
+    }
+    for port in lo..=hi {
         if let Ok(s) = UdpSocket::bind(("0.0.0.0", port)).await {
             return Some((Arc::new(s), port));
         }
@@ -358,6 +368,15 @@ mod tests {
         (relay, a, b, h)
     }
 
+    fn flood_task(a: Arc<UdpSocket>, to: SocketAddr) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn(async move {
+            let big = vec![1u8; 60_000];
+            for _ in 0..200 {
+                let _ = a.send_to(&big, to).await;
+            }
+        })
+    }
+
     async fn recv(s: &UdpSocket) -> Option<(Vec<u8>, SocketAddr)> {
         let mut b = vec![0u8; 2048];
         tokio::time::timeout(Duration::from_millis(400), s.recv_from(&mut b)).await.ok()?.ok().map(|(n, f)| (b[..n].to_vec(), f))
@@ -463,6 +482,50 @@ mod tests {
         assert_eq!(recv(&b).await.unwrap().0, b"3");
         b.send_to(b"back", rb).await.unwrap();
         assert_eq!(recv(&a2).await.unwrap().0, b"back", "and the replies now go to the new address");
+    }
+
+    #[tokio::test]
+    async fn a_full_port_range_refuses_cleanly_and_gives_the_ports_back() {
+        // a range of three ports, picked where nothing else listens
+        let probe = UdpSocket::bind(("0.0.0.0", 0)).await.unwrap();
+        let base = probe.local_addr().unwrap().port();
+        drop(probe);
+        let (lo, hi) = (base.saturating_add(100).min(65000), base.saturating_add(102).min(65002));
+        let mut held = Vec::new();
+        for _ in 0..3 {
+            held.push(bind_in(lo, hi).await.expect("a free port"));
+        }
+        let mut ports: Vec<u16> = held.iter().map(|(_, p)| *p).collect();
+        ports.sort();
+        assert_eq!(ports, vec![lo, lo + 1, lo + 2], "every port of the range is used exactly once");
+        assert!(bind_in(lo, hi).await.is_none(), "a full range is refused, without a panic or a hang");
+        let (s, p) = held.remove(1);
+        drop(s);
+        assert_eq!(bind_in(lo, hi).await.map(|x| x.1), Some(p), "a port that was given back is found again");
+    }
+
+    #[tokio::test]
+    async fn a_flood_through_one_allocation_does_not_slow_another() {
+        let (relay1, a1, b1, _h1) = rig().await;
+        let (relay2, a2, b2, _h2) = rig().await;
+        let (ra1, rb1) = (relay1[1].local_addr().unwrap(), relay1[3].local_addr().unwrap());
+        let (ra2, rb2) = (relay2[1].local_addr().unwrap(), relay2[3].local_addr().unwrap());
+        b1.send_to(b"x", rb1).await.unwrap();
+        b2.send_to(b"x", rb2).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let flood = flood_task(a1.clone(), ra1);
+        let t = Instant::now();
+        let mut ok = 0;
+        for i in 0..20u8 {
+            a2.send_to(&[i; 100], ra2).await.unwrap();
+            if recv(&b2).await.is_some_and(|(d, _)| d[0] == i) {
+                ok += 1;
+            }
+        }
+        flood.await.unwrap();
+        assert_eq!(ok, 20, "every datagram of the quiet allocation arrived");
+        assert!(t.elapsed() < Duration::from_secs(5), "and without waiting for the other one");
+        let _ = b1;
     }
 
     #[test]
