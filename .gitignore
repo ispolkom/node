@@ -33,3 +33,5 @@ data/.yandi_cache/
 nodes/bootstrap.json
 *.key
 bootstrap_cache.json
+__pycache__/
+*.pyc
