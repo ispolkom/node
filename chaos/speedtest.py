@@ -2,7 +2,7 @@
 """Throughput of the exit path in the rootless lab: client node --(SOCKS5 proxy of the node)--> exit node --> "internet" host in the sandbox.
 Reports MB/s and Mbit/s for downloads and uploads of one stream and of several parallel streams, and a baseline without the nodes (the same
 transfer straight over the lab network), so a limit of the lab or of the link is not mistaken for a limit of the node.
-Usage: python3 chaos/speedtest.py [delay_ms=0] [rate=] [megabytes=64] [binary] [out]      e.g.  speedtest.py 20 300mbit 64
+Usage: [LOSS=percent] python3 chaos/speedtest.py [delay_ms=0] [rate=] [megabytes=64] [binary] [out]      e.g.  LOSS=1 speedtest.py 20 300mbit 64
 """
 import json, os, socket, struct, sys, threading, time
 
@@ -115,6 +115,7 @@ def measure(label, opener, mb, parallel, out):
 
 def main():
     delay = int(sys.argv[1]) if len(sys.argv) > 1 else 0
+    loss = float(os.environ.get('LOSS', '0'))
     rate = sys.argv[2] if len(sys.argv) > 2 and sys.argv[2] else None
     mb = int(sys.argv[3]) if len(sys.argv) > 3 else 64
     binary = os.path.abspath(sys.argv[4]) if len(sys.argv) > 4 else os.path.abspath("target/release/yandi")
@@ -128,8 +129,8 @@ def main():
     lab.router(1, 'full')
     nets[2] = lab.natted_node(2, 1)
     for k in nets:
-        if delay or rate:
-            lab.netem(k, delay, 0, 0.0, 0.0, rate)
+        if delay or rate or loss:
+            lab.netem(k, delay, 0, loss, 0.0, rate)
     threading.Thread(target=server, daemon=True).start()
     # the client must be a client-only node: a public node keeps the proxy channels for its own exit server role
     nodes = [C.Node(k, out_dir, binary, client=(k == 2), anchor=(k == 1), net=nets[k]) for k in (1, 2, 3)]
