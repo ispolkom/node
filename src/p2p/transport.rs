@@ -339,14 +339,17 @@ impl P2PTransport {
         // UDP flow is forgotten within half a minute. A tiny authenticated packet to every known peer keeps the memory alive, and each one
         // also tells the peer our current outside address.
         let keep = Arc::downgrade(&transport);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(KEEPALIVE_EVERY).await;
-                let Some(t) = keep.upgrade() else { return };
-                let ids: Vec<HashId> = t.peers.lock().await.keys().copied().collect();
-                for id in ids {
-                    let pkt = P2PPacket::new(P2PPacketType::ChatTyping, t.identity.node_id(), false, Vec::new());
-                    let _ = t.send_packet_dual_path(id, pkt).await;
+        crate::supervisor::supervise("p2p_keepalive", crate::supervisor::Policy::Log, move || {
+            let keep = keep.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(KEEPALIVE_EVERY).await;
+                    let Some(t) = keep.upgrade() else { return };
+                    let ids: Vec<HashId> = t.peers.lock().await.keys().copied().collect();
+                    for id in ids {
+                        let pkt = P2PPacket::new(P2PPacketType::ChatTyping, t.identity.node_id(), false, Vec::new());
+                        let _ = t.send_packet_dual_path(id, pkt).await;
+                    }
                 }
             }
         });
