@@ -29,6 +29,10 @@ pub enum P2PPacketType {
     FileTransferCancel = 0xD3,
     FileMissing = 0xD4,
     FileComplete = 0xD5,
+    /// to an introducer: please introduce me to this node (hole punching, src/p2p/punch.rs)
+    PunchReq = 0xE0,
+    /// from an introducer: the other side's outside addresses and the one-time token of the attempt
+    PunchIntro = 0xE1,
 }
 
 impl P2PPacketType {
@@ -55,6 +59,8 @@ impl P2PPacketType {
             0xD3 => Some(P2PPacketType::FileTransferCancel),
             0xD4 => Some(P2PPacketType::FileMissing),
             0xD5 => Some(P2PPacketType::FileComplete),
+            0xE0 => Some(P2PPacketType::PunchReq),
+            0xE1 => Some(P2PPacketType::PunchIntro),
             _ => None,
         }
     }

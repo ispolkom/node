@@ -175,6 +175,8 @@ impl ChatManager {
             }
             // the keys of the two sides may be out of step: renegotiate (rate-limited inside)
             self.transport.request_resync(peer).await;
+            // and the way to the peer may be closed (a NAT that has forgotten us, a new outside address): ask for an introduction (rate-limited inside)
+            self.transport.request_punch(peer).await;
         }
         self.persist_outbox_if_dirty().await;
     }
@@ -252,6 +254,7 @@ impl ChatManager {
             Err(e) => {
                 msg.status = MessageStatus::Pending;
                 info!("📮 Message to {} queued, will be delivered when the connection is ready: {}", hex::encode(&to.0[..8]), e);
+                self.transport.request_punch(to).await; // no way to the peer yet: ask a mutual acquaintance to introduce us
             }
         }
         self.pending_acks.lock().await.insert(msg.msg_id, PendingAck {

@@ -26,6 +26,9 @@ use tokio::net::UdpSocket;
 use tokio::sync::{Mutex, mpsc, broadcast};
 use tracing::debug;
 
+#[path = "punch.rs"]
+mod punch;
+
 /// 📦 Кэш пакетов для сборки DUAL-PATH (аналог Depot из netlayer)
 struct PacketCache {
     /// Пакеты в процессе сборки: packet_id -> PendingPacket
@@ -233,6 +236,8 @@ pub struct P2PTransport {
     rekey_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
     /// when a broken session with a peer was last repaired by a new handshake (see `request_resync`)
     resync_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
+    /// hole punching through introducers (src/p2p/punch.rs)
+    punch: Arc<punch::PunchState>,
 
     /// Statistics
     stats_sent_packets: Arc<AtomicU64>,
@@ -313,6 +318,7 @@ impl P2PTransport {
             seen_hello_nonces: Arc::new(Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(Mutex::new(HashMap::new())),
             resync_requested: Arc::new(Mutex::new(HashMap::new())),
+            punch: Arc::new(punch::PunchState::default()),
             admission: Arc::new(Mutex::new(crate::netlayer::admission::Admission::new(crate::netlayer::admission::AdmissionConfig::default()))),
             stats_sent_packets: Arc::new(AtomicU64::new(0)),
             stats_recv_packets: Arc::new(AtomicU64::new(0)),
@@ -895,6 +901,10 @@ impl P2PTransport {
             match socket.recv_from(&mut buf).await {
                 Ok((len, from)) => {
                     let data = &buf[..len];
+                    if len == punch::PROBE_LEN && data[0] == punch::PROBE_MAGIC {
+                        self.on_punch_probe(data, from, true).await;
+                        continue;
+                    }
                     match P2PHelloPacket::from_bytes(data) {
                         Ok(hello) => {
                             println!("[P2P] 📨 Received P2P Hello from {}: {:?}", from, hello.hello_type);
@@ -1017,7 +1027,7 @@ impl P2PTransport {
                                         id: peer_id,
                                         addr: from.to_string(),
                                         data_addr: None,
-                                        p2p_data_addr: Some(observed_data_addr(&hello.p2p_data_addr, from.ip())),
+                                        p2p_data_addr: Some(self.punch.data_addr_for(&peer_id, &hello.p2p_data_addr, from.ip())),
                                         local_addr: None,
                                         public_addr: None,
                                         ipv6_virtual: None,
@@ -1046,7 +1056,7 @@ impl P2PTransport {
                                         id: peer_id,
                                         addr: from.to_string(),
                                         data_addr: None,
-                                        p2p_data_addr: Some(observed_data_addr(&hello.p2p_data_addr, from.ip())),
+                                        p2p_data_addr: Some(self.punch.data_addr_for(&peer_id, &hello.p2p_data_addr, from.ip())),
                                         local_addr: None,
                                         public_addr: None,
                                         ipv6_virtual: None,
@@ -1089,6 +1099,12 @@ impl P2PTransport {
         }
 
         let packet_type_byte = data[0];
+
+        // a hole punching probe (49 bytes, never parsed as anything else)
+        if packet_type_byte == punch::PROBE_MAGIC && data.len() == punch::PROBE_LEN {
+            self.on_punch_probe(data, from, false).await;
+            return Ok(());
+        }
 
         // Старые открытые форматы (CommPacket 0x50-0x6F, пакеты туннеля 0x80-0x8F) не принимаются: они не зашифрованы, а отправитель
         // в них определялся только по адресу — подделать «сообщение от друга» мог любой, кто знает адрес узла. Никто их больше не шлёт.
@@ -1202,6 +1218,7 @@ impl P2PTransport {
                 if p.p2p_data_addr.as_deref() != Some(seen.as_str()) {
                     p.p2p_data_addr = Some(seen);
                 }
+                p.last_seen = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
             }
         }
 
@@ -1245,6 +1262,14 @@ impl P2PTransport {
                         let _ = tx.send((sender, comm_packet)).await;
                     }
                 }
+            }
+
+            // Hole punching between the peers of an introducer
+            P2PPacketType::PunchReq => {
+                self.handle_punch_req(sender, &p2p_packet.payload).await;
+            }
+            P2PPacketType::PunchIntro => {
+                self.handle_punch_intro(sender, &p2p_packet.payload).await;
             }
 
             // Voice (0xB0-0xBF) - пока не реализовано, логируем
