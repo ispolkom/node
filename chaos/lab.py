@@ -215,6 +215,10 @@ table ip filter {{
     def link(self, k, up):
         """Cut or restore the network cable of node k (the process keeps running: a pure network outage)."""
         sh([IP, "-n", self.nets[k]["ns"], "link", "set", "e0", "up" if up else "down"])
+        n = self.nets[k]
+        if up and n["group"] is not None:
+            # the kernel drops the routes of an interface that goes down; a home router's address comes back with the cable, so the way out must too
+            sh([IP, "-n", n["ns"], "route", "replace", "default", "via", f"192.168.{n['group']}.1"])
 
     def nspath(self, k):
         return f"/run/netns/{self.nets[k]['ns']}"
