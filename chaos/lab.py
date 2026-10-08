@@ -220,5 +220,13 @@ table ip filter {{
             # the kernel drops the routes of an interface that goes down; a home router's address comes back with the cable, so the way out must too
             sh([IP, "-n", n["ns"], "route", "replace", "default", "via", f"192.168.{n['group']}.1"])
 
+    def net_ready(self, k):
+        """The node's network is really back: the interface is up and there is a way to the 'internet' (a process that is alive proves neither)."""
+        ns = self.nets[k]["ns"]
+        link = sh([IP, "-n", ns, "-o", "link", "show", "e0"], check=False)
+        if link.returncode != 0 or "state UP" not in link.stdout and "UP" not in link.stdout.split("<")[1].split(">")[0].split(","):
+            return False
+        return sh([IP, "-n", ns, "route", "get", f"{INTERNET_NET}.0.1"], check=False).returncode == 0
+
     def nspath(self, k):
         return f"/run/netns/{self.nets[k]['ns']}"

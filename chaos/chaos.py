@@ -333,6 +333,9 @@ class Chaos:
                 # was the recipient (and the sender) up for a while? A message to a node that was just restarted or is down is
                 # a different question from a message between two settled nodes.
                 settled = bool(a.up_since and b.up_since and now() - a.up_since > 60 and now() - b.up_since > 60)
+                # alive for a minute is not enough: the network under the process must be back too
+                if settled and self.lab is not None and a.net and b.net:
+                    settled = self.lab.net_ready(a.k) and self.lab.net_ready(b.k)
                 self.probes.append({"t": t, "a": a.k, "b": b.k, "text": text, "sent_ok": ok, "delivered": None, "settled": settled})
             threading.Thread(target=self.check_probe, args=(self.probes[-1], a, b), daemon=True).start()
 
