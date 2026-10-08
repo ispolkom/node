@@ -300,7 +300,7 @@ impl Station {
         let total_wagons = Train::calculate_wagon_count(&data);
         let sent_at = Instant::now();
 
-        println!("🚂🔄 STATION[{}] DUAL-PATH train #{} ({} wagons, {} MB) → STATION[{}]",
+        tracing::trace!("🚂🔄 STATION[{}] DUAL-PATH train #{} ({} wagons, {} MB) → STATION[{}]",
                  self.id_short(),
                  train_id,
                  total_wagons,
@@ -371,7 +371,7 @@ impl Station {
                     transport.send_encrypted(dest, &packet).await
                         .map_err(|e| StationError::SendError(e.to_string()))?;
 
-                    println!("📦 [WAGON {}/{}] ORIG sent ({} B) → Path#0",
+                    tracing::trace!("📦 [WAGON {}/{}] ORIG sent ({} B) → Path#0",
                              wagon_num + 1, total_wagons, chunk_len);
 
                     use crate::netlayer::transport::get_wagon_stats;
@@ -416,7 +416,7 @@ impl Station {
                     transport.send_encrypted(dest, &packet).await
                         .map_err(|e| StationError::SendError(e.to_string()))?;
 
-                    println!("📦 [WAGON {}/{}] CLONE sent ({} B) → Path#1",
+                    tracing::trace!("📦 [WAGON {}/{}] CLONE sent ({} B) → Path#1",
                              wagon_num + 1, total_wagons, chunk_len);
 
                     use crate::netlayer::transport::get_wagon_stats;
@@ -438,7 +438,7 @@ impl Station {
             }
         }
 
-        println!("✅ Train #{} sent on DUAL-PATH! (Path#0 + Path#1)", train_id);
+        tracing::trace!("✅ Train #{} sent on DUAL-PATH! (Path#0 + Path#1)", train_id);
 
         Ok(train_id)
     }
@@ -479,7 +479,7 @@ impl Station {
             return Ok(None);
         }
 
-        println!("📥 [WAGON {}/{}] received from train #{} ({} KB)",
+        tracing::trace!("📥 [WAGON {}/{}] received from train #{} ({} KB)",
                  wagon.wagon_num + 1,
                  wagon.total_wagons,
                  wagon.train_id,
@@ -522,7 +522,7 @@ impl Station {
         }
         if train_complete {
             let train_id = depot.get_last_completed_train_id();
-            println!("✅ Train #{} assembled!", train_id);
+            tracing::trace!("✅ Train #{} assembled!", train_id);
 
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;
@@ -549,7 +549,7 @@ impl Station {
             return Ok(None);
         }
 
-        println!("📥 [WAGON {}/{}] received from train #{} ({} KB)",
+        tracing::trace!("📥 [WAGON {}/{}] received from train #{} ({} KB)",
                  wagon.wagon_num + 1,
                  wagon.total_wagons,
                  wagon.train_id,
@@ -592,7 +592,7 @@ impl Station {
         }
         if train_complete {
             let train_id = depot.get_last_completed_train_id();
-            println!("✅ Train #{} assembled!", train_id);
+            tracing::trace!("✅ Train #{} assembled!", train_id);
 
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;

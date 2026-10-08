@@ -1642,70 +1642,93 @@ impl P2PTransport {
         });
     }
 
+    /// How many tasks read one data socket at the same time. EXPERIMENT, off by default (1): the kernel hands each datagram to exactly one reader, so
+    /// the receive path can run on several cores, but in the lab four readers made uploads through an exit stall at ceilings where one reader
+    /// was stable (wagons of one stream handled at the same moment end up in the wrong order or half-built). Until that is understood, keep 1.
+    /// `YANDI_DATA_WORKERS` changes it.
+    fn data_workers() -> usize {
+        std::env::var("YANDI_DATA_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(1)
+    }
+
     fn spawn_data_listener_task(
         transport: Arc<P2PTransport>,
         socket: Arc<CSocket>,
-        shutdown: Option<oneshot::Receiver<()>>,
+        mut shutdown: Option<oneshot::Receiver<()>>,
     ) {
-        let peers = transport.peers.clone();
-        let encryption = transport.encryption.clone();
-        let tunnels = transport.tunnels.clone();
-        let dht = transport.dht.clone();
-        let local_id = transport.local_id.clone();
-        let streams = transport.streams.clone();
-        let exit_handler_tx = transport.exit_handler_tx.clone();
-        let proxy_gateway_tx = transport.proxy_gateway_tx.clone();
-        let proxy_request_tx = transport.proxy_request_tx.clone();
-        let proxy_response_tx = transport.proxy_response_tx.clone();
-        let proxy_tunnel_data_tx = transport.proxy_tunnel_data_tx.clone();
-        let nack_tx = transport.nack_tx.clone();
-        let socks5_gateway_tx = transport.socks5_gateway_tx.clone();
-        let socks5_request_tx = transport.socks5_request_tx.clone();
-        let socks5_response_tx = transport.socks5_response_tx.clone();
-        let socks5_tunnel_data_tx = transport.socks5_tunnel_data_tx.clone();
-        let tun_wagon_tx = transport.tun_wagon_tx.clone();
-        let tun_wagon_resp_tx = transport.tun_wagon_resp_tx.clone();
-        let p2p_tunnel_tx = transport.p2p_tunnel_tx.clone();
-        let chat_packet_tx = transport.chat_packet_tx.clone();
-        let group_packet_tx = transport.group_packet_tx.clone();
-        let station = Some(transport.station.clone());
-        let relay_request_tx = transport.relay_request_tx.clone();
-        let relay_response_tx = transport.relay_response_tx.clone();
-        let relay_data_tx = transport.relay_data_tx.clone();
-        let transport_for_listener = transport.clone();
+        // the extra readers stop together with the first one (when its socket is retired or the node stops)
+        let mut extra_stops: Vec<oneshot::Sender<()>> = Vec::new();
+        let mut extra_shutdowns: Vec<oneshot::Receiver<()>> = Vec::new();
+        for _ in 1..Self::data_workers() {
+            let (tx, rx) = oneshot::channel();
+            extra_stops.push(tx);
+            extra_shutdowns.push(rx);
+        }
+        for worker in 0..Self::data_workers() {
+            let socket = socket.clone();
+            let peers = transport.peers.clone();
+            let encryption = transport.encryption.clone();
+            let tunnels = transport.tunnels.clone();
+            let dht = transport.dht.clone();
+            let local_id = transport.local_id.clone();
+            let streams = transport.streams.clone();
+            let exit_handler_tx = transport.exit_handler_tx.clone();
+            let proxy_gateway_tx = transport.proxy_gateway_tx.clone();
+            let proxy_request_tx = transport.proxy_request_tx.clone();
+            let proxy_response_tx = transport.proxy_response_tx.clone();
+            let proxy_tunnel_data_tx = transport.proxy_tunnel_data_tx.clone();
+            let nack_tx = transport.nack_tx.clone();
+            let socks5_gateway_tx = transport.socks5_gateway_tx.clone();
+            let socks5_request_tx = transport.socks5_request_tx.clone();
+            let socks5_response_tx = transport.socks5_response_tx.clone();
+            let socks5_tunnel_data_tx = transport.socks5_tunnel_data_tx.clone();
+            let tun_wagon_tx = transport.tun_wagon_tx.clone();
+            let tun_wagon_resp_tx = transport.tun_wagon_resp_tx.clone();
+            let p2p_tunnel_tx = transport.p2p_tunnel_tx.clone();
+            let chat_packet_tx = transport.chat_packet_tx.clone();
+            let group_packet_tx = transport.group_packet_tx.clone();
+            let station = Some(transport.station.clone());
+            let relay_request_tx = transport.relay_request_tx.clone();
+            let relay_response_tx = transport.relay_response_tx.clone();
+            let relay_data_tx = transport.relay_data_tx.clone();
+            let transport_for_listener = transport.clone();
+            let (my_shutdown, stops) = if worker == 0 { (shutdown.take(), std::mem::take(&mut extra_stops)) } else { (extra_shutdowns.pop(), Vec::new()) };
 
-        tokio::spawn(async move {
-            Self::data_listener(
-                transport_for_listener,
-                socket,
-                peers,
-                encryption,
-                tunnels,
-                dht,
-                local_id,
-                streams,
-                exit_handler_tx,
-                proxy_gateway_tx,
-                proxy_request_tx,
-                proxy_response_tx,
-                proxy_tunnel_data_tx,
-                nack_tx,
-                socks5_gateway_tx,
-                socks5_request_tx,
-                socks5_response_tx,
-                socks5_tunnel_data_tx,
-                tun_wagon_tx,
-                tun_wagon_resp_tx,
-                p2p_tunnel_tx,
-                chat_packet_tx,
-                group_packet_tx,
-                station,
-                relay_request_tx,
-                relay_response_tx,
-                relay_data_tx,
-                shutdown,
-            ).await;
-        });
+            tokio::spawn(async move {
+                Self::data_listener(
+                    transport_for_listener,
+                    socket,
+                    peers,
+                    encryption,
+                    tunnels,
+                    dht,
+                    local_id,
+                    streams,
+                    exit_handler_tx,
+                    proxy_gateway_tx,
+                    proxy_request_tx,
+                    proxy_response_tx,
+                    proxy_tunnel_data_tx,
+                    nack_tx,
+                    socks5_gateway_tx,
+                    socks5_request_tx,
+                    socks5_response_tx,
+                    socks5_tunnel_data_tx,
+                    tun_wagon_tx,
+                    tun_wagon_resp_tx,
+                    p2p_tunnel_tx,
+                    chat_packet_tx,
+                    group_packet_tx,
+                    station,
+                    relay_request_tx,
+                    relay_response_tx,
+                    relay_data_tx,
+                    my_shutdown,
+                ).await;
+                for tx in stops {
+                    let _ = tx.send(());
+                }
+            });
+        }
     }
 
     fn rewrite_unspecified_endpoint(endpoint: &str, actual_ip: &std::net::IpAddr) -> String {
@@ -3038,7 +3061,7 @@ impl P2PTransport {
                                                     PacketType::Socks5TunnelData => {
                                                         // SOCKS5 tunnel data
                                                         if let Some(tunnel_data) = crate::socks5::Socks5TunnelData::parse(&decrypted[1..]) {
-                                                            println!("[transport] 📨 Socks5TunnelData #{}: {} bytes, close={}",
+                                                            tracing::trace!("[transport] 📨 Socks5TunnelData #{}: {} bytes, close={}",
                                                                      tunnel_data.tunnel_id, tunnel_data.data.len(), tunnel_data.close);
 
                                                             if let Some(ref tx) = socks5_tunnel_data_tx {
@@ -3115,7 +3138,7 @@ impl P2PTransport {
                                                             continue;
                                                         }
 
-                                                        println!("[transport] 🚂 YTP Wagon from {} (train #{}, wagon {}/{}, {} KB)",
+                                                        tracing::trace!("[transport] 🚂 YTP Wagon from {} (train #{}, wagon {}/{}, {} KB)",
                                                                  crate::util::mask_hash_id(&peer_id),
                                                                  wagon.train_id,
                                                                  wagon.wagon_num.saturating_add(1),
@@ -4483,7 +4506,7 @@ impl P2PTransport {
     }
 
     pub async fn send_encrypted(&self, peer_id: HashId, data: &[u8]) -> Result<(), String> {
-        println!("[transport] 📤 [SEND-START] Preparing to send {} bytes to peer: {}",
+        tracing::trace!("[transport] 📤 [SEND-START] Preparing to send {} bytes to peer: {}",
                  data.len(), hex::encode(&peer_id.0[..8]));
 
         let peer = {
@@ -4550,7 +4573,7 @@ impl P2PTransport {
             }
         };
 
-        println!("[transport] 📤 [SEND-ENCRYPTED] Encrypted to {} bytes, sending to: {}",
+        tracing::trace!("[transport] 📤 [SEND-ENCRYPTED] Encrypted to {} bytes, sending to: {}",
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
 
         // Send on SEND socket (separate from recv socket!)
@@ -4560,7 +4583,7 @@ impl P2PTransport {
 
         self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
 
-        println!("[transport] ✅ [SEND-COMPLETE] Sent {} bytes to {} - socket should be free now",
+        tracing::trace!("[transport] ✅ [SEND-COMPLETE] Sent {} bytes to {} - socket should be free now",
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
 
         Ok(())
