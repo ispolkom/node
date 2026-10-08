@@ -168,6 +168,12 @@ table ip filter {{
     iifname "lan" accept
     ct state established,related accept
   }}
+  chain incoming {{
+    # a packet from outside that nobody asked for is dropped BEFORE it is remembered: otherwise it would leave a record in the
+    # connection table that later forces the router to change the port of the host's own packet (real routers do not do that)
+    type filter hook input priority 0; policy accept;
+    iifname "w0" ct state new drop
+  }}
 }}
 """
         r = subprocess.run(["ip", "netns", "exec", ns, NFT, "-f", "-"], input=rules, text=True, capture_output=True)
