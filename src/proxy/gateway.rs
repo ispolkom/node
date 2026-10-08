@@ -631,7 +631,7 @@ impl HttpProxyGateway {
             .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
 
         // 💾 СОХРАНЯЕМ wagons для NACK fallback (если оба пути потеряли!)
-        let wagon_size = crate::protocol::Wagon::MAX_CARGO_SIZE;
+        let wagon_size = crate::protocol::Wagon::PAYLOAD_SIZE;
         let mut sent_trains = self.sent_trains.lock().await;
         let sent_train = sent_trains.entry(train_id)
             .or_insert_with(|| SentTrain::new(train_id, target_node));

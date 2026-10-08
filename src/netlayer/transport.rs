@@ -3037,7 +3037,7 @@ impl P2PTransport {
                                                     }
                                                     PacketType::Socks5TunnelData => {
                                                         // SOCKS5 tunnel data
-                                                        if let Ok(tunnel_data) = serde_json::from_slice::<crate::socks5::Socks5TunnelData>(&decrypted[1..]) {
+                                                        if let Some(tunnel_data) = crate::socks5::Socks5TunnelData::parse(&decrypted[1..]) {
                                                             println!("[transport] 📨 Socks5TunnelData #{}: {} bytes, close={}",
                                                                      tunnel_data.tunnel_id, tunnel_data.data.len(), tunnel_data.close);
 
@@ -3178,7 +3178,7 @@ impl P2PTransport {
                                                                             }
                                                                         }
                                                                         // Потом SOCKS5
-                                                                        else if let Ok(socks5_tunnel) = serde_json::from_slice::<crate::socks5::Socks5TunnelData>(&data) {
+                                                                        else if let Some(socks5_tunnel) = crate::socks5::Socks5TunnelData::parse(&data) {
                                                                             let tunnel_id = socks5_tunnel.tunnel_id;
                                                                             let data_len = socks5_tunnel.data.len();
 
@@ -3373,7 +3373,7 @@ impl P2PTransport {
                                                                 }
                                                             }
                                                             // Потом SOCKS5
-                                                            else if let Ok(socks5_tunnel) = serde_json::from_slice::<crate::socks5::Socks5TunnelData>(data) {
+                                                            else if let Some(socks5_tunnel) = crate::socks5::Socks5TunnelData::parse(data) {
                                                                 let tunnel_id = socks5_tunnel.tunnel_id;
                                                                 let data_len = socks5_tunnel.data.len();
 

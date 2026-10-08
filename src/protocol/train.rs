@@ -73,8 +73,8 @@ pub enum TrainState {
 }
 
 impl Train {
-    /// Upper bound on wagons per train (16384 x 60 KB = 1 GB) — a hostile peer cannot ask for more
-    pub const MAX_WAGONS: u32 = 16384;
+    /// Upper bound on wagons per train (131072 x 1200 B = 150 MB, above the depot's own 100 MB limit) — a hostile peer cannot ask for more
+    pub const MAX_WAGONS: u32 = 131072;
 
     /// Создать новый поезд для отправки
     pub fn new(
@@ -142,7 +142,7 @@ impl Train {
             return 1;
         }
 
-        let max_wagon_size = Wagon::MAX_CARGO_SIZE;
+        let max_wagon_size = Wagon::PAYLOAD_SIZE;
         ((data.len() + max_wagon_size - 1) / max_wagon_size) as u32
     }
 
@@ -519,8 +519,8 @@ mod tests {
             crate::util::HashId::default(),
             large_data,
         );
-        // 150KB / 60KB (MAX_CARGO_SIZE=61440) = 3 вагона
-        assert_eq!(train.total_wagons, 3);
+        // 150000 B / 1200 B (PAYLOAD_SIZE) = 125 вагонов
+        assert_eq!(train.total_wagons, 125);
     }
 
     #[test]

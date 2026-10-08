@@ -276,3 +276,76 @@ mod tests {
         assert_eq!(rc.max_rate_mbps, 1000);
     }
 }
+
+
+/// Real pacing for the sender of a station, open loop (no feedback): every wagon copy that goes to the wire reserves its place in a stream of
+/// at most `rate` bits per second, shared by everything the station sends, and waits only if its place is still in the future. It replaces a
+/// pause of at least a millisecond per wagon (the timer's resolution), which capped the speed by accident. A short burst (a couple of
+/// milliseconds' worth) is allowed so that small trains do not wait at all.
+pub struct Pacer {
+    /// bits per second
+    rate_bps: AtomicU64,
+    next: std::sync::Mutex<Option<Instant>>,
+}
+
+/// how far behind real time the stream may be (unused credit that can be spent at once)
+const PACER_BURST: Duration = Duration::from_millis(2);
+
+impl Pacer {
+    pub fn new(rate_mbps: u64) -> Self {
+        Self { rate_bps: AtomicU64::new(rate_mbps.max(1) * 1_000_000), next: std::sync::Mutex::new(None) }
+    }
+
+    pub fn rate_mbps(&self) -> u64 {
+        self.rate_bps.load(Ordering::Relaxed) / 1_000_000
+    }
+
+    /// The moment when `bytes` may go to the wire (not before `now`'s credit). Reserves that stretch of the stream.
+    pub fn reserve_at(&self, now: Instant, bytes: usize) -> Instant {
+        let bps = self.rate_bps.load(Ordering::Relaxed).max(1);
+        let cost = Duration::from_nanos((bytes as u64).saturating_mul(8).saturating_mul(1_000_000_000) / bps);
+        let mut n = self.next.lock().unwrap_or_else(|e| e.into_inner());
+        let floor = now.checked_sub(PACER_BURST).unwrap_or(now);
+        let start = n.map_or(floor, |t| t.max(floor));
+        *n = Some(start + cost);
+        start
+    }
+
+    /// How long a wagon of `bytes` must wait before it goes out (zero while it is within the allowed burst).
+    pub fn reserve(&self, bytes: usize) -> Duration {
+        let now = Instant::now();
+        self.reserve_at(now, bytes).saturating_duration_since(now)
+    }
+}
+
+#[cfg(test)]
+mod pacer_tests {
+    use super::*;
+
+    #[test]
+    fn a_stream_is_spread_at_the_rate_and_the_idle_credit_is_limited() {
+        let p = Pacer::new(100); // 100 Mbit/s = 12.5 MB/s: 1250 bytes take 100 us
+        let t0 = Instant::now();
+        // an idle pacer lets the first wagons go at once (the burst credit is 2 ms = 20 wagons of 1250 B)
+        let mut waits = Vec::new();
+        for _ in 0..200 {
+            waits.push(p.reserve_at(t0, 1250).saturating_duration_since(t0));
+        }
+        assert_eq!(waits[0], Duration::ZERO);
+        assert!(waits[10] == Duration::ZERO, "inside the burst");
+        // 200 wagons of 1250 B = 250 KB at 12.5 MB/s = 20 ms, minus the 2 ms of credit
+        let last = *waits.last().unwrap();
+        assert!(last >= Duration::from_millis(17) && last <= Duration::from_millis(19), "{last:?}");
+        // after a long silence the credit does not pile up beyond the burst
+        let later = t0 + Duration::from_secs(10);
+        let w: Vec<_> = (0..100).map(|_| p.reserve_at(later, 1250).saturating_duration_since(later)).collect();
+        assert_eq!(w[0], Duration::ZERO);
+        assert!(w[99] >= Duration::from_millis(7), "ten ms of data cannot all leave at once: {:?}", w[99]);
+    }
+
+    #[test]
+    fn the_rate_is_what_was_asked_for() {
+        assert_eq!(Pacer::new(300).rate_mbps(), 300);
+        assert_eq!(Pacer::new(0).rate_mbps(), 1, "zero is not a rate");
+    }
+}

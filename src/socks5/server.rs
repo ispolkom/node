@@ -755,13 +755,7 @@ impl Socks5ProxyServer {
                         debug!("🔚 Client closed connection");
                         // Send close message
                         let tunnel_close = Socks5TunnelData::close(request_id);
-                        let close_bytes = match serde_json::to_vec(&tunnel_close) {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                error!("❌ Failed to serialize close message: {}", e);
-                                break;
-                            }
-                        };
+                        let close_bytes = tunnel_close.encode();
                         let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, close_bytes).await
                             .map(|_| ())
                             .map_err(|e| anyhow!("send_train: {}", e));
@@ -775,13 +769,7 @@ impl Socks5ProxyServer {
 
                         // Send tunnel data
                         let tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
-                        let data_bytes = match serde_json::to_vec(&tunnel_data) {
-                            Ok(bytes) => bytes,
-                            Err(e) => {
-                                error!("❌ Failed to serialize tunnel data: {}", e);
-                                break;
-                            }
-                        };
+                        let data_bytes = tunnel_data.encode();
 
                         let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, data_bytes).await
                             .map(|_| ())

@@ -94,6 +94,16 @@ def cpu_seconds(pid):
 NODES = []
 
 
+def udp_rcvbuf_errors(ns):
+    """Datagrams the kernel threw away because the receive buffer of a socket in this namespace was full."""
+    import subprocess
+    out = subprocess.run(["ip", "netns", "exec", ns, "cat", "/proc/net/snmp"], capture_output=True, text=True).stdout.splitlines()
+    heads = [l.split()[1:] for l in out if l.startswith("Udp:")]
+    if len(heads) < 2:
+        return -1
+    return int(dict(zip(heads[0], heads[1]))["RcvbufErrors"])
+
+
 def measure(label, opener, mb, parallel, out):
     for mode, name in ((b"D", "download"), (b"U", "upload")):
         res = []
@@ -173,12 +183,32 @@ def main():
         except Exception:
             time.sleep(1)
     print(f"--- lab link: delay {delay} ms each way per node, rate {rate or 'unlimited'}; {mb} MB per stream", flush=True)
-    measure("direct (no node)", direct, mb, 1, results)
-    measure("through the exit", via_node, mb, 1, results)
-    measure("through the exit", via_node, mb, 4, results)
+    only = os.environ.get("ONLY", "")
+    if only == "upload":
+        par = int(os.environ.get("PAR", "1"))
+        def up():
+            try:
+                print("upload only:", round(transfer(via_node, b"U", mb), 2), "s", flush=True)
+            except Exception as e:
+                print("upload failed:", repr(e), flush=True)
+        r0 = {k: udp_rcvbuf_errors(f"n{k}") for k in (1, 2)}
+        ths = [threading.Thread(target=up) for _ in range(par)]
+        [x.start() for x in ths]; [x.join() for x in ths]
+        print("kernel receive-buffer drops during the run:", {k: udp_rcvbuf_errors(f"n{k}") - r0[k] for k in (1, 2)}, flush=True)
+    else:
+        measure("direct (no node)", direct, mb, 1, results)
+        measure("through the exit", via_node, mb, 1, results)
+        measure("through the exit", via_node, mb, 4, results)
     json.dump({"delay_ms": delay, "rate": rate, "results": results}, open(os.path.join(out_dir, "result.json"), "w"), indent=1)
     for n in nodes:
         n.kill()
 
 
-main()
+try:
+    main()
+finally:
+    for _n in NODES:
+        try:
+            _n.kill()
+        except Exception:
+            pass

@@ -12,7 +12,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use super::{Train, TrainId, Wagon, WagonFlags};
 use super::express::{ExpressTrain, ExpressStrategy, TrainAckMessage, TrainPriority};
-use super::rate_controller::{RateController, RateAction};
+use super::rate_controller::{RateController, RateAction, Pacer};
 use crate::util::HashId;
 use crate::netlayer::{P2PTransport, transport::get_wagon_stats};
 use serde::{Serialize, Deserialize};
@@ -111,6 +111,10 @@ pub struct StationConfig {
 
     /// ⚡ Включить batching (агрегацию пакетов)
     pub enable_batching: bool,
+
+    /// 🚦 Потолок скорости отправки на провод, Мбит/с (учитывает обе копии каждого вагона). Отправитель «отправил и забыл», обратной связи нет,
+    /// поэтому потолок задаётся заранее: по умолчанию 300, `YANDI_PACE_MBPS` меняет. Выше канала ставить нельзя: излишек теряется и поток рвётся.
+    pub pace_mbps: u64,
 }
 
 impl Default for StationConfig {
@@ -118,7 +122,7 @@ impl Default for StationConfig {
         Self {
             role: StationRole::Both,
             train_timeout: Duration::from_secs(30),
-            max_wagon_size: Wagon::MAX_CARGO_SIZE,
+            max_wagon_size: Wagon::PAYLOAD_SIZE,
             stealth_mode: false,
             base_wagon_delay_ms: 1,  // ⚡ 1ms minimal delay to prevent congestion
             min_wagon_delay_ms: 0,
@@ -126,6 +130,7 @@ impl Default for StationConfig {
             rtt_window_size: 10,
             batch_timeout_ms: 50,  // ⚡ 50ms batching window (увеличено для лучшей агрегации)
             enable_batching: true,  // ⚡ Batching включен по умолчанию
+            pace_mbps: std::env::var("YANDI_PACE_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(300),
         }
     }
 }
@@ -176,6 +181,9 @@ pub struct Station {
 
     /// 🚀 Адаптивный контроллер скорости
     rate_controller: Arc<RateController>,
+
+    /// 🚦 Общий для всех поездов ограничитель скорости на проводе (с учётом дублирования), без обратной связи
+    pacer: Arc<Pacer>,
 }
 
 impl Station {
@@ -193,6 +201,7 @@ impl Station {
             5000,         // 5000 поездов
             Duration::from_secs(30),
         )));
+        let pace_mbps = config.pace_mbps;
         let initial_delay = config.base_wagon_delay_ms;
         let rtt_window = config.rtt_window_size;
 
@@ -209,6 +218,7 @@ impl Station {
             line_counter: Arc::new(AtomicU8::new(0)),
             train_send_mutex: Arc::new(Mutex::new(())),
             rate_controller: Arc::new(RateController::new()),
+            pacer: Arc::new(Pacer::new(pace_mbps)),
         };
 
         // ⚡ Запускаем background task для периодической отправки batched wagons
@@ -335,8 +345,8 @@ impl Station {
             let offset = (i * wagon_size) as u64;
             let chunk_len = chunk.len();
 
-            // 🚀 Вычисляем pacing delay
-            let pacing_delay = rate_controller.wagon_delay_for_rate(chunk_len);
+            // 🚦 Место каждой копии в общем потоке на проводе (в каждой копии накладные расходы вагона и шифрования ~150 байт)
+            let wire_bytes = chunk_len + 150;
 
             // 🔄 Path0: ОРИГИНАЛ
             {
@@ -344,10 +354,14 @@ impl Station {
                 let dest = dest;
                 let transport = self.transport.clone();
                 let sem = semaphore.clone();
+                let wait = self.pacer.reserve(wire_bytes);
 
                 let task = tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
-                    tokio::time::sleep(pacing_delay).await;
+                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
+                    if wait >= std::time::Duration::from_micros(500) {
+                        tokio::time::sleep(wait).await;
+                    }
 
                     let wagon_bytes = wagon.to_bytes()
                         .map_err(|e| StationError::SerializationError(e.to_string()))?;
@@ -385,10 +399,14 @@ impl Station {
                 let dest = dest;
                 let transport = self.transport.clone();
                 let sem = semaphore.clone();
+                let wait = self.pacer.reserve(wire_bytes);
 
                 let task = tokio::spawn(async move {
                     let _permit = sem.acquire().await.unwrap();
-                    tokio::time::sleep(pacing_delay).await;
+                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
+                    if wait >= std::time::Duration::from_micros(500) {
+                        tokio::time::sleep(wait).await;
+                    }
 
                     let wagon_bytes = wagon.to_bytes()
                         .map_err(|e| StationError::SerializationError(e.to_string()))?;
@@ -1230,6 +1248,7 @@ impl Clone for Station {
             line_counter: self.line_counter.clone(),
             train_send_mutex: self.train_send_mutex.clone(),
             rate_controller: self.rate_controller.clone(),
+            pacer: self.pacer.clone(),
         }
     }
 }

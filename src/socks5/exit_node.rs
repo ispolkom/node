@@ -214,7 +214,7 @@ impl ExitNodeHandler {
                     debug!("🔚 Target closed connection");
                     // Send close message
                     let tunnel_close = Socks5TunnelData::close(tunnel_id);
-                    let close_bytes = serde_json::to_vec(&tunnel_close)?;
+                    let close_bytes = tunnel_close.encode();
                     station_clone.send_train(source_node_clone, close_bytes).await?;
                     break;
                 }
@@ -223,7 +223,7 @@ impl ExitNodeHandler {
 
                 // Send tunnel data
                 let tunnel_data = Socks5TunnelData::new(tunnel_id, buf[..n].to_vec());
-                let data_bytes = serde_json::to_vec(&tunnel_data)?;
+                let data_bytes = tunnel_data.encode();
                 station_clone.send_train(source_node_clone, data_bytes).await?;
             }
             Ok::<(), anyhow::Error>(())
