@@ -605,7 +605,7 @@
                 .then(function (r) { return r.json(); })
                 .then(function (d) {
                     if (d.status !== 'ok') { msg.textContent = d.message || 'Ошибка'; return; }
-                    box.innerHTML = d.qr_svg;
+                    box.innerHTML = d.qr_svg + '<p class="form-help" style="word-break:break-all;color:#000;font-size:11px;user-select:all">' + d.qr_text.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</p>';
                     msg.textContent = 'Адрес ' + d.host + ':' + d.port + ', действует 5 минут';
                 })
                 .catch(function () { msg.textContent = 'Нет ответа от узла'; });

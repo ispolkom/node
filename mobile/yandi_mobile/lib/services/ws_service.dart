@@ -231,9 +231,8 @@ class WsService {
     final cached = await StorageService.getPeerX25519Pub(peerId);
     if (cached != null) return base64.decode(cached);
 
-    // TODO: запросить с ноды через API (/mobile/pubkey/:peer_id)
-    // Будет реализовано в api_service.dart
-    return null;
+    // ключ есть только у других телефонов владельца; у обычных собеседников нода отвечает 404 — тогда текст идёт внутри TLS
+    return _getPeerPub == null ? null : await _getPeerPub!(peerId);
   }
 
   void _sendRaw(Uint8List bytes) => _channel?.sink.add(bytes);

@@ -36,6 +36,8 @@ class YandiVpnService {
   Future<bool> startVpn({
     required String serverAddress,
     required int serverPort,
+    String fingerprint = '',
+    String token = '',
   }) async {
     // Сначала проверяем разрешение
     if (!await isVpnPrepared()) {
@@ -49,6 +51,8 @@ class YandiVpnService {
     final result = await _channel.invokeMethod<bool>('startVpn', {
       'serverAddress': serverAddress,
       'serverPort': serverPort,
+      'fingerprint': fingerprint,
+      'token': token,
     });
 
     if (result == true) {
@@ -97,29 +101,18 @@ class YandiVpnService {
     );
   }
 
-  Future<bool> start({
-    required String socksHost,
-    required int    socksPort,
-    String? socksUser,
-    String? socksPass,
-  }) => startVpn(serverAddress: socksHost, serverPort: socksPort);
-
-  Future<void> stop() => stopVpn();
-
   /// Освободить ресурсы
   void dispose() {
     _packetSubscription?.cancel();
     _packetController.close();
   }
-}
 
-extension YandiVpnServiceExt on YandiVpnService {
   Future<bool> start({
-    required String socksHost,
-    required int    socksPort,
-    String? socksUser,
-    String? socksPass,
-  }) => startVpn(serverAddress: socksHost, serverPort: socksPort);
+    required String host,
+    required int port,
+    required String fingerprint,
+    required String token,
+  }) => startVpn(serverAddress: host, serverPort: port, fingerprint: fingerprint, token: token);
 
   Future<void> stop() => stopVpn();
 }

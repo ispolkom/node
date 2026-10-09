@@ -20,6 +20,7 @@ class PairScreen extends StatefulWidget {
 class _PairScreenState extends State<PairScreen> {
   bool _processing = false;
   String? _error;
+  final TextEditingController _manual = TextEditingController();
 
   final MobileScannerController _scanner = MobileScannerController(
     detectionSpeed: DetectionSpeed.noDuplicates,
@@ -29,6 +30,7 @@ class _PairScreenState extends State<PairScreen> {
   @override
   void dispose() {
     _scanner.dispose();
+    _manual.dispose();
     super.dispose();
   }
 
@@ -120,7 +122,7 @@ class _PairScreenState extends State<PairScreen> {
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 24),
             child: Text(
-              'Откройте веб-интерфейс ноды и нажмите\n"Подключить мобильное устройство".\nПосканируйте QR-код.',
+              'Откройте настройки ноды, карточка\n«Приложение на телефоне», «Показать QR».\nПосканируйте QR-код или вставьте текст под ним.',
               textAlign: TextAlign.center,
               style: TextStyle(color: AppTheme.textSecondary, fontSize: 14),
             ),
@@ -139,6 +141,23 @@ class _PairScreenState extends State<PairScreen> {
                       },
                     ),
                   ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            child: Row(children: [
+              Expanded(
+                child: TextField(
+                  controller: _manual,
+                  style: const TextStyle(color: AppTheme.text, fontSize: 12),
+                  decoration: const InputDecoration(hintText: 'Текст из QR (если камера не читает)'),
+                ),
+              ),
+              const SizedBox(width: 8),
+              ElevatedButton(
+                onPressed: _processing ? null : () => _onQr(_manual.text.trim()),
+                child: const Text('Подключить'),
+              ),
+            ]),
           ),
           if (_error != null)
             Padding(

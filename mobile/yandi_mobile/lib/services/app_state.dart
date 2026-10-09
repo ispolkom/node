@@ -303,14 +303,13 @@ class AppState extends ChangeNotifier {
       notifyListeners();
       return;
     }
-    if (proxyHost == null) await refreshProxyInfo();
-    if (proxyHost == null) return;
-
+    final node = nodeManager.activeNode;
+    if (node == null || node.token == null) return;
     final ok = await vpn.start(
-      socksHost: proxyHost!,
-      socksPort: proxyPort!,
-      socksUser: 'yandi',
-      socksPass: 'yandi123',
+      host: node.host,
+      port: node.port,
+      fingerprint: node.fingerprint,
+      token: node.token!,
     );
     vpnRunning = ok;
     notifyListeners();
@@ -332,7 +331,7 @@ class AppState extends ChangeNotifier {
 
   void _onIncomingChat(IncomingChatEvent e) async {
     final msg = ChatMessage(
-      id:        '${e.fromPeerId}_${e.timestamp.millisecondsSinceEpoch}',
+      id:        'inbox_${e.timestamp.millisecondsSinceEpoch}',
       peerId:    e.fromPeerId,
       outgoing:  false,
       text:      e.text,

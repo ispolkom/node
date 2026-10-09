@@ -151,6 +151,155 @@ ws_send(s, bytes([0x30]) + bytes.fromhex(b.id) + struct.pack("<I", len(payload))
 time.sleep(5)
 st, h = b.api("GET", f"/api/chat/history/{a.id}")
 check("Bob received the socket message", any(m["text"] == "sent by socket" for m in h.get("messages", [])), h)
+# ---- two phones of the owner through the PC
+def pair_phone(name):
+    st, q = a.api("GET", "/api/mobile/pairing?host=127.0.0.1")
+    code = json.loads(q["qr_text"])["pairing_code"]
+    st, r = req("POST", "/mobile/pair", {"pairing_code": code, "device_name": name})
+    return r["token"]
+tok1 = tok
+tok2 = pair_phone("YANDI Mobile")
+st, i1 = req("GET", "/mobile/info", token=tok1)
+st, i2 = req("GET", "/mobile/info", token=tok2)
+d1, d2 = i1["device_id"], i2["device_id"]
+check("each phone has its own id", d1 and d2 and d1 != d2 and len(d1) == 64, (d1, d2))
+st, c1 = req("GET", "/mobile/contacts", token=tok1)
+other = [x for x in c1["contacts"] if x["peer_id"] == d2]
+check("phone 1 sees phone 2 as a contact (offline, distinct name)", len(other) == 1 and not other[0]["online"] and "YANDI Mobile" in other[0]["display_name"], c1)
+check("a phone does not see itself", not any(x["peer_id"] == d1 for x in c1["contacts"]))
+kx = base64.b64encode(os.urandom(32)).decode(); ke = base64.b64encode(os.urandom(32)).decode()
+st, _ = req("POST", "/mobile/pubkeys", {"ed25519_pub": ke, "x25519_pub": kx}, token=tok2)
+st, r = req("GET", f"/mobile/pubkey/{d2}", token=tok1)
+check("phone 1 can fetch phone 2's key", st == 200 and r["x25519_pub"] == kx, (st, r))
+st, _ = req("GET", f"/mobile/pubkey/{b.id}", token=tok1)
+check("an ordinary contact has no key (plain text over TLS)", st == 404, st)
+# offline mail: phone 2 is not connected
+blob = b"\x01opaque-e2e-blob-from-phone-1"
+s1, _l = ws_open(tok1)
+ws_send(s1, bytes([0x30]) + bytes.fromhex(d2) + struct.pack("<I", len(blob)) + blob)
+time.sleep(1)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+m = [x for x in r.get("messages", []) if x["from_peer_id"] == d1]
+check("mail waits in phone 2's inbox, bytes untouched", len(m) == 1 and base64.b64decode(m[0]["payload_b64"]) == blob, r)
+check("phone 1's inbox does not get it", not [x for x in req("GET", "/mobile/inbox", token=tok1)[1].get("messages", []) if x["from_peer_id"] == d1])
+# live: phone 2 connects, presence + live message
+s2, _l = ws_open(tok2)
+op, d = ws_recv(s1, 10)
+check("phone 1 is told phone 2 came online", d[:1] == bytes([0x12]) and d[1:33] == bytes.fromhex(d2) and d[33] == 1, d)
+blob2 = b"live blob"
+ws_send(s1, bytes([0x30]) + bytes.fromhex(d2) + struct.pack("<I", len(blob2)) + blob2)
+got = None
+for _ in range(5):
+    op, d = ws_recv(s2, 10)
+    if d[:1] == bytes([0x10]) and d[1:33] == bytes.fromhex(d1):
+        got = d
+        break
+ok = got is not None and got[45:45 + struct.unpack("<I", got[41:45])[0]] == blob2
+check("live message from phone 1 reaches phone 2", ok, got)
+st, c1 = req("GET", "/mobile/contacts", token=tok1)
+check("phone 2 shows online", any(x["peer_id"] == d2 and x["online"] for x in c1["contacts"]))
+st, r = req("GET", "/mobile/inbox", token=tok2)
+ids = [x["id"] for x in r["messages"] if x["from_peer_id"] == d1]
+req("POST", "/mobile/inbox/ack", {"ids": ids}, token=tok2)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+check("after ack phone 2's inbox is empty", not [x for x in r["messages"] if x["from_peer_id"] == d1], r)
+s2.close(); s1.close()
+
+# ---- internet through the PC
+def connect_via(token, target, send=b"", proxy_auth=True):
+    c = ctx().wrap_socket(socket.create_connection(("127.0.0.1", PORT), timeout=15))
+    hdr = f"CONNECT {target} HTTP/1.1\r\nHost: {target}\r\n" + (f"Proxy-Authorization: Bearer {token}\r\n" if proxy_auth else "") + "\r\n"
+    c.sendall(hdr.encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        x = c.recv(1024)
+        if not x:
+            break
+        buf += x
+    status = buf.split(b"\r\n")[0]
+    echo = b""
+    if b" 200 " in status and send:
+        c.sendall(send)
+        c.settimeout(10)
+        while len(echo) < len(send):
+            x = c.recv(4096)
+            if not x:
+                break
+            echo += x
+    c.close()
+    return status, echo
+
+st1, _e = connect_via(tok1, "example.org:80", proxy_auth=False)
+check("CONNECT without a token is refused", b"407" in st1, st1)
+st1, _e = connect_via("0" * 64, "example.org:80")
+check("CONNECT with a wrong token is refused", b"407" in st1, st1)
+st1, _e = connect_via(tok1, "127.0.0.1:22")
+check("CONNECT to the PC itself is refused", b"403" in st1, st1)
+st1, _e = connect_via(tok1, "192.168.1.1:80")
+check("CONNECT to the home network is refused", b"403" in st1, st1)
+# the owner's upstream proxy: a fake SOCKS5 server that connects to a local echo
+import threading
+echo_srv = socket.socket(); echo_srv.bind(("127.0.0.1", 0)); echo_srv.listen(5)
+def echo_loop():
+    while True:
+        try:
+            cs, _ = echo_srv.accept()
+        except Exception:
+            return
+        def one(cs=cs):
+            while True:
+                d = cs.recv(4096)
+                if not d:
+                    break
+                cs.sendall(d)
+            cs.close()
+        threading.Thread(target=one, daemon=True).start()
+threading.Thread(target=echo_loop, daemon=True).start()
+seen_targets = []
+px = socket.socket(); px.bind(("127.0.0.1", 0)); px.listen(5)
+def rd(c, n):
+    b = b""
+    while len(b) < n:
+        x = c.recv(n - len(b))
+        if not x:
+            raise EOFError
+        b += x
+    return b
+def px_loop():
+    while True:
+        try:
+            cs, _ = px.accept()
+        except Exception:
+            return
+        def one(cs=cs):
+            try:
+                rd(cs, 1); n = rd(cs, 1)[0]; rd(cs, n); cs.sendall(b"\x05\x00")
+                rd(cs, 3); t = rd(cs, 1)[0]
+                host = rd(cs, rd(cs, 1)[0]).decode() if t == 3 else ""
+                rd(cs, 2)
+                seen_targets.append(host)
+                up = socket.create_connection(echo_srv.getsockname())
+                cs.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                def pipe(x, y):
+                    try:
+                        while True:
+                            d = x.recv(4096)
+                            if not d:
+                                break
+                            y.sendall(d)
+                    except Exception:
+                        pass
+                threading.Thread(target=pipe, args=(up, cs), daemon=True).start()
+                pipe(cs, up)
+            except Exception:
+                pass
+        threading.Thread(target=one, daemon=True).start()
+threading.Thread(target=px_loop, daemon=True).start()
+st, _r = a.api("POST", "/api/upstream-proxy", {"enabled": True, "kind": "socks5", "host": "127.0.0.1", "port": px.getsockname()[1], "auth": "none"})
+check("owner's upstream proxy accepted", st == 200, (st, _r))
+st1, echo = connect_via(tok2, "youtube.com:443", b"hello through the pc")
+check("phone 2 reaches the internet through the PC's proxy (echo)", b" 200 " in st1 and echo == b"hello through the pc", (st1, echo))
+check("the proxy got the NAME, not a local lookup", "youtube.com" in seen_targets, seen_targets)
 # the proxy still works next to the API, and the decoy still answers a stranger
 h2 = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=10)
 h2.request("GET", "/")
