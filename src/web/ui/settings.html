@@ -173,6 +173,24 @@
 
                 <div class="card">
                     <div class="card-header">
+                        <h3 class="card-title">Приложение на телефоне</h3>
+                    </div>
+                    <div class="card-body">
+                        <p class="form-help">Нажмите кнопку и отсканируйте QR приложением YANDI на телефоне. Код действует 5 минут и подходит один раз. Нужен включённый вход для телефона (порт в mobile_tls.json) и адрес, доступный телефону. Если телефон в той же сети, что и компьютер, впишите адрес компьютера в сети.</p>
+                        <div class="form-group">
+                            <label for="mobHost">Адрес узла для телефона (пусто — внешний адрес узла)</label>
+                            <input id="mobHost" class="form-input" maxlength="253" placeholder="например, 192.168.1.20 или node.example.com" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-primary" id="mobQrBtn" type="button">Показать QR</button>
+                            <span id="mobQrMsg" class="form-help"></span>
+                        </div>
+                        <div id="mobQr" style="max-width:300px;background:#fff;padding:8px"></div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
                         <h3 class="card-title">Внешний прокси для выхода в интернет</h3>
                     </div>
                     <div class="card-body">
@@ -574,6 +592,25 @@
                 };
             }
         });
+    </script>
+    <script>
+    (function () {
+        var btn = document.getElementById('mobQrBtn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var msg = document.getElementById('mobQrMsg'), box = document.getElementById('mobQr');
+            var h = document.getElementById('mobHost').value.trim();
+            msg.textContent = '…'; box.innerHTML = '';
+            fetch('/api/mobile/pairing' + (h ? '?host=' + encodeURIComponent(h) : ''), { cache: 'no-store' })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (d.status !== 'ok') { msg.textContent = d.message || 'Ошибка'; return; }
+                    box.innerHTML = d.qr_svg;
+                    msg.textContent = 'Адрес ' + d.host + ':' + d.port + ', действует 5 минут';
+                })
+                .catch(function () { msg.textContent = 'Нет ответа от узла'; });
+        });
+    })();
     </script>
 </body>
 </html>

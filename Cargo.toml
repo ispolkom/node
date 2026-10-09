@@ -52,6 +52,8 @@ url = "2.5"
 # Web server
 axum = { version = "0.7", features = ["multipart", "ws"] }
 tower = "0.5"
+hyper = { version = "1", features = ["server", "http1"] }
+hyper-util = { version = "0.1", features = ["tokio", "service"] }
 tower-http = { version = "0.5", features = ["fs", "trace"] }
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = "1.9"

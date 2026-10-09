@@ -582,6 +582,7 @@ async fn main() -> anyhow::Result<()> {
 
     let chat_manager = std::sync::Arc::new(chat_manager);
     chat_manager.clone().spawn_delivery_timeout_task();
+    yandi::mobile_api::init(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
 
     // Spawn Chat packet handler
     let chat_manager_clone = chat_manager.clone();

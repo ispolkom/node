@@ -4431,6 +4431,8 @@ dependencies = [
  "hex",
  "hkdf",
  "hound",
+ "hyper",
+ "hyper-util",
  "image",
  "libc",
  "mdns-sd",

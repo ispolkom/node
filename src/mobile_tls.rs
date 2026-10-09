@@ -99,6 +99,9 @@ async fn handle(tcp: TcpStream, acceptor: TlsAcceptor, socks_port: u16, slot: cr
     if n == 0 {
         return Ok(());
     }
+    if first[0] != 0x05 && crate::mobile_api::is_mobile_request(&first[..n]) {
+        return crate::mobile_api::serve_connection(tls, first[..n].to_vec()).await;
+    }
     if first[0] != 0x05 {
         tls.write_all(&decoy_response(&first[..n])).await?;
         let _ = tls.shutdown().await;

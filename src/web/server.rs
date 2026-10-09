@@ -496,6 +496,7 @@ impl WebServer {
             .route("/api/media/video/call/:call_id/reject", post(media_api::reject_video_call))
             .route("/api/media/video/call/end", post(media_api::end_active_video_call))
             // Pairing endpoints
+            .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
@@ -5198,6 +5199,32 @@ async fn current_pairing_payload(state: &AppState) -> Result<crate::netlayer::pa
         fingerprint_hex,
         anchor_url,
     })
+}
+
+/// QR для приложения на телефоне: адрес узла, порт TLS-входа, отпечаток сертификата и новый разовый код (живёт 5 минут).
+async fn mobile_pairing_handler(State(state): State<AppState>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let Some(port) = crate::mobile_tls::configured_port() else {
+        return (StatusCode::CONFLICT, Json(serde_json::json!({"status": "error", "message": "Вход для телефона выключен: задайте порт в mobile_tls.json ({\"port\": 443}) или YANDI_MOBILE_TLS_PORT и перезапустите узел"}))).into_response();
+    };
+    let Some(transport) = state.transport.as_ref() else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"status": "error", "message": "Транспорт не готов"}))).into_response();
+    };
+    let node_hex = hex::encode(&transport.identity().node_id().0[..8]);
+    let fp = match crate::netlayer::tls_cert::TlsIdentity::load_or_generate_default(&node_hex) {
+        Ok(t) => t.fingerprint_hex,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e.to_string()}))).into_response(),
+    };
+    let host = q.get("host").cloned().filter(|h| !h.is_empty() && h.len() < 256).unwrap_or_else(|| {
+        if state.node_info.external_ip != "unknown" && !state.node_info.external_ip.is_empty() { state.node_info.external_ip.clone() } else { "127.0.0.1".to_string() }
+    });
+    let text = crate::mobile_api::pairing_qr_json(&host, port, &fp);
+    let svg = match qrcode::QrCode::new(text.as_bytes()) {
+        Ok(qr) => qr.render::<qrcode::render::svg::Color>().min_dimensions(256, 256).build(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e.to_string()}))).into_response(),
+    };
+    let mut resp = Json(serde_json::json!({"status": "ok", "host": host, "port": port, "fingerprint": fp, "expires_in_secs": 300, "qr_text": text, "qr_svg": svg})).into_response();
+    resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    resp
 }
 
 async fn pair_qr_json_handler(State(state): State<AppState>) -> impl IntoResponse {

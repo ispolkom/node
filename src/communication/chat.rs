@@ -324,6 +324,7 @@ impl ChatManager {
 
         // 7. Уведомить Web UI (через канал)
         let _ = self.incoming_tx.send(msg.clone());
+        crate::mobile_api::publish(&msg);
 
         Ok(msg)
     }
