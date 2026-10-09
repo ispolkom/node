@@ -1,0 +1,72 @@
+# yandi-node.service — узел YANDI как служба: сам запускается при старте системы, перезапускается при сбое.
+#
+# Установка (один раз):
+#   sudo cp deploy/yandi-node.service /etc/systemd/system/yandi-node.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now yandi-node
+#
+# Если узел уже запущен вручную (nohup ./target/release/yandi), остановите его ПЕРЕД первым запуском службы: порты заняты.
+#   pkill -x yandi
+#
+# Повседневное:
+#   systemctl status yandi-node           состояние
+#   journalctl -u yandi-node -f           журнал (то, что узел печатает на экран)
+#   sudo systemctl restart yandi-node     перезапуск, например после новой сборки (cargo build --release)
+#
+# Пути и пользователь ниже — под этот компьютер (узел собран в /home/iam/node и работает от iam). Если папка или пользователь
+# другие, поправьте User=, Group=, WorkingDirectory= и ExecStart=.
+# Данные узла (ключи, сопряжённые устройства, файлы, настройки) лежат в ~/.local/share/yandi этого пользователя и от службы не зависят.
+
+[Unit]
+Description=YANDI node (P2P, TLS entry for phones, web UI on 127.0.0.1:9999)
+Documentation=file:///home/iam/node/DEPLOYMENT.md
+# сеть и брандмауэр должны быть готовы до узла: порты телефонов и звонков открывает /etc/nftables.conf
+After=network-online.target nftables.service
+Wants=network-online.target
+# не сдаваться навсегда, но и не крутиться в бесконечном перезапуске: 10 неудач за 5 минут — стоп
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=iam
+Group=iam
+# узел читает часть файлов относительно рабочей папки (например contacts.json), поэтому она именно эта
+WorkingDirectory=/home/iam/node
+ExecStart=/home/iam/node/target/release/yandi
+# у узла есть консоль, читающая стандартный ввод; под systemd ввода нет (/dev/null), консоль закрывается, узел продолжает работу
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yandi-node
+
+Restart=on-failure
+RestartSec=5
+# SIGTERM узел понимает и останавливается аккуратно; если за 30 секунд не успел — принудительно
+KillSignal=SIGTERM
+TimeoutStopSec=30
+# много одновременных соединений (телефоны, туннели, соседние узлы)
+LimitNOFILE=65536
+
+# ── Ограничения: не требуют прав и не мешают работе узла ──────────────────────
+# Узлу нужна запись только в свою домашнюю папку (данные в ~/.local/share/yandi и файлы рядом с бинарником), поэтому ProtectHome
+# и ProtectSystem=strict здесь не включены: они сломали бы запись данных. Включены те, что безопасны.
+NoNewPrivileges=yes
+PrivateTmp=yes
+# /usr, /boot и /etc только для чтения для этого процесса
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+# узлу нужны обычные сокеты, локальные сокеты и запрос сетевых интерфейсов (netlink); остальные семейства закрыты
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+# Намеренно НЕ включено без проверки на живом узле: PrivateDevices (может понадобиться /dev/net/tun), MemoryDenyWriteExecute,
+# SystemCallFilter. Включать по одному и смотреть, что узел стартует.
+
+[Install]
+WantedBy=multi-user.target

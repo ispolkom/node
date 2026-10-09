@@ -23,6 +23,23 @@ sudo sysctl -p /etc/sysctl.d/99-yandi.conf
 
 При запуске нода логирует warning если `rmem_max < 4MB` — это маркер что sysctl не применён.
 
+## Автозапуск узла (systemd)
+
+Юнит лежит в [`deploy/yandi-node.service`](deploy/yandi-node.service): узел стартует вместе с системой, перезапускается при сбое и пишет в журнал.
+
+```bash
+pkill -x yandi                     # если узел запущен вручную: порты заняты
+sudo cp deploy/yandi-node.service /etc/systemd/system/yandi-node.service
+sudo systemctl daemon-reload
+sudo systemctl enable --now yandi-node
+systemctl status yandi-node
+journalctl -u yandi-node -f
+```
+
+После новой сборки (`cargo build --release`) достаточно `sudo systemctl restart yandi-node`. Пользователь и пути в юните (`iam`, `/home/iam/node`) под этот компьютер; на другом поправьте `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=`.
+
+Порты узла для телефонов и звонков (в `/etc/nftables.conf`): 8444/TCP (вход для приложения), 3478 TCP+UDP и 50000-50199 UDP (сервер звонков, ставится `sudo bash scripts/setup-turn.sh <внешний адрес>`).
+
 ## Сборка
 
 ```bash
