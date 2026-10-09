@@ -457,18 +457,34 @@ async fn main() -> anyhow::Result<()> {
             p2p_transport.set_bootstrap_fingerprints(fps);
         }
 
+        // Свой собственный адрес из списка входных узлов пропускаем: иначе узел бесконечно «знакомится сам с собой»
+        // (встречный Hello → REPLAY, Decryption failed, session out of step в логе). UDP-ветка bootstrap так уже делает.
+        let own_ips: std::collections::HashSet<String> = get_config()
+            .network
+            .public_ip
+            .clone()
+            .into_iter()
+            .chain(external_ip.clone())
+            .collect();
         let p2p_nodes: Vec<String> = config.get_enabled_nodes()
             .iter()
             .filter_map(|n| {
                 let parts: Vec<&str> = n.address.split(":").collect();
                 if parts.len() == 2 {
-                    Some(format!("{}:9001", parts[0]))
+                    let ip = parts[0];
+                    if ip == "127.0.0.1" || ip == "localhost" || own_ips.contains(ip) {
+                        return None;
+                    }
+                    Some(format!("{}:9001", ip))
                 } else {
                     None
                 }
             })
             .collect();
 
+        if p2p_nodes.is_empty() {
+            println!("[P2P] ⏭️  Нет других входных узлов для знакомства (в списке только свой адрес)");
+        }
         for addr in p2p_nodes {
             println!("[P2P] 🔗 Connecting to {}:9001...", addr);
             if let Err(e) = p2p_transport.send_hello_request(&addr).await {
