@@ -10,7 +10,6 @@ const _taskDiscovery = 'com.yandi.discovery';
 Future<void> initBackgroundWorker() async {
   await Workmanager().initialize(
     _callbackDispatcher,
-    isInDebugMode: false,
   );
 
   // Запускаем periodic-задачу: раз в сутки, только на зарядке и WiFi
@@ -23,7 +22,7 @@ Future<void> initBackgroundWorker() async {
       requiresCharging:     true,                  // только на зарядке
       requiresBatteryNotLow: true,
     ),
-    existingWorkPolicy: ExistingWorkPolicy.keep,
+    existingWorkPolicy: ExistingPeriodicWorkPolicy.keep,
   );
 }
 
