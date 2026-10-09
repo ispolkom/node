@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
@@ -206,19 +205,14 @@ class WsService {
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
 
-    String text;
-
-    // Пробуем расшифровать если это E2E blob
-    if (E2ECrypto.isEncrypted(payload)) {
-      final decrypted = await E2ECrypto.decrypt(
-        Uint8List.fromList(payload),
-        (theirPub) => _identity.ecdh(theirPub),
-      );
-      text = decrypted ?? '[не удалось расшифровать]';
-    } else {
-      // Plaintext — обратная совместимость (нода старой версии)
-      text = utf8.decode(payload, allowMalformed: true);
-    }
+    // Обычный чат принимает только E2E-конверт. Транспортный plaintext и
+    // старый legacy-пакет не должны превращаться в сообщение пользователя.
+    if (!E2ECrypto.isEncrypted(payload)) return;
+    final text = await E2ECrypto.decrypt(
+      Uint8List.fromList(payload),
+      (theirPub) => _identity.ecdh(theirPub),
+    );
+    if (text == null) return;
 
     _chatCtrl.add(IncomingChatEvent(
       fromPeerId: from,
@@ -250,19 +244,15 @@ class WsService {
 
   // ── Отправка ──────────────────────────────────────────────────────────────
 
-  Future<void> sendMessage(String toPeerIdHex, String text) async {
+  /// Sends only an encrypted payload. Missing recipient keys are a failure;
+  /// there is intentionally no plaintext fallback.
+  Future<bool> sendMessage(String toPeerIdHex, String text) async {
+    if (_channel == null) return false;
     // Получаем публичный X25519 ключ получателя (из кэша или с ноды)
     final recipientPub = await _getRecipientPub(toPeerIdHex);
+    if (recipientPub == null) return false;
 
-    List<int> payload;
-    if (recipientPub != null) {
-      // E2E шифрование
-      final blob = await E2ECrypto.encrypt(text, recipientPub);
-      payload = blob;
-    } else {
-      // Fallback: plaintext (если ключ недоступен)
-      payload = utf8.encode(text);
-    }
+    final payload = await E2ECrypto.encrypt(text, recipientPub);
 
     final peerBytes = _hexToBytes(toPeerIdHex);
     final buf = BytesBuilder();
@@ -271,6 +261,7 @@ class WsService {
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
     _sendRaw(buf.toBytes());
+    return true;
   }
 
   /// Отправить только зашифрованно. Если ключа получателя нет или сокет не подключён, не отправляет ничего и возвращает false
@@ -339,12 +330,15 @@ class WsService {
   // ── TLS pinning ────────────────────────────────────────────────────────────
 
   static HttpClient _buildPinnedClient(String expectedFp) {
+    final normalizedFp = expectedFp.trim().toLowerCase();
+    if (normalizedFp.isEmpty) {
+      throw StateError('TLS certificate fingerprint is required');
+    }
     final ctx = SecurityContext(withTrustedRoots: false);
     return HttpClient(context: ctx)
       ..badCertificateCallback = (X509Certificate cert, String host, int port) {
-          if (expectedFp.isEmpty) return true;
           final fp = crypto.sha256.convert(cert.der).toString();
-          return fp.toLowerCase() == expectedFp.toLowerCase();
+          return fp.toLowerCase() == normalizedFp;
         };
   }
 
