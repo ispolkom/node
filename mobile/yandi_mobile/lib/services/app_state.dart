@@ -9,6 +9,7 @@ import '../models/contact.dart';
 import '../models/message.dart';
 import '../models/file_offer.dart';
 import '../models/file_state.dart';
+import '../models/receipt.dart';
 import '../crypto/identity.dart';
 import '../crypto/e2e_crypto.dart';
 import 'storage_service.dart';
@@ -108,6 +109,7 @@ class AppState extends ChangeNotifier {
         // сокет открылся (первый раз или после обрыва): статусы за время обрыва не приходили, берём заново, и забираем накопленную почту
         unawaited(refreshContacts());
         unawaited(_syncInbox());
+        announceReceiptSupport();
       },
       getPeerPub: (peerId) => _api!.getPeerX25519Pub(peerId),
     );
@@ -183,16 +185,22 @@ class AppState extends ChangeNotifier {
           text = utf8.decode(payloadBytes, allowMalformed: true);
         }
 
+        final res = _classifyIncoming(fromPeerId, text);
+        if (res == null) { ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
+        final showText = res.$1;
+        final remoteId = res.$2;
         final msg = ChatMessage(
           id:        'inbox_$id',
           peerId:    fromPeerId,
           outgoing:  false,
-          text:      text,
+          text:      showText,
           timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs),
           status:    MessageStatus.delivered,
+          remoteId:  remoteId,
         );
         // ConflictAlgorithm.ignore в saveMessage гарантирует идемпотентность
         await StorageService.saveMessage(msg);
+        if (remoteId != null) _sendDeliveredReceipt(fromPeerId, remoteId);
         ackIds.add(id);
       }
 
@@ -314,6 +322,7 @@ class AppState extends ChangeNotifier {
       }
       contacts = merged;
       notifyListeners();
+      announceReceiptSupport();
     } catch (_) {}
   }
 
@@ -381,6 +390,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _onLiveSignal(LiveSignalEvent e) {
+    if (MsgChannel.isCapPing(e.text)) { _receiptCapable.add(e.fromPeerId); return; }
     final sig = CallSignal.tryParse(e.text);
     if (sig != null) unawaited(calls.onSignal(e.fromPeerId, sig));
   }
@@ -490,12 +500,102 @@ class AppState extends ChangeNotifier {
     }
   }
 
+  // ── Статусы доставки (квитанции, всё E2E, узел их не отличает от чата) ──────
+  //
+  // Квитанции ходят как обычные зашифрованные сообщения с меткой: «доставлено» шлёт получатель при приёме, «прочитано» — при
+  // открытии чата. Чтобы на не обновлённой сборке не показывались служебные строки, конверт сообщения мы отправляем только тем
+  // устройствам, что подтвердили поддержку коротким E2E-пингом (старые сборки пинг игнорируют, им идёт обычный текст).
+
+  final Set<String> _receiptCapable = {};   // устройства, умеющие квитанции
+  final Set<String> _readAcked = {};         // remoteId, по которым уже отправили «прочитано»
+
+  int _statusRank(MessageStatus s) => switch (s) {
+    MessageStatus.failed    => -1,
+    MessageStatus.pending   => 0,
+    MessageStatus.delivered => 1,
+    MessageStatus.read      => 2,
+  };
+
+  /// Разобрать входящий текст. Служебное (квитанция/пинг) обрабатываем здесь и возвращаем null; обычное сообщение —
+  /// (текст для показа, remoteId|null). remoteId не null, если пришёл конверт с id (значит собеседник ждёт квитанций).
+  (String, String?)? _classifyIncoming(String from, String rawText) {
+    final rcpt = MsgChannel.parseReceipt(rawText);
+    if (rcpt != null) { _applyReceipt(from, rcpt.$1, rcpt.$2); return null; }
+    if (MsgChannel.isCapPing(rawText)) { _receiptCapable.add(from); return null; }
+    final env = MsgChannel.parseMessage(rawText);
+    if (env != null) { _receiptCapable.add(from); return (env.$2, env.$1); } // (cmid, text) -> (text, cmid)
+    return (rawText, null);
+  }
+
+  void _applyReceipt(String from, String kind, List<String> ids) {
+    final list = _chats[from];
+    if (list == null) return;
+    final target = kind == 'read' ? MessageStatus.read : MessageStatus.delivered;
+    var changed = false;
+    for (var i = 0; i < list.length; i++) {
+      final m = list[i];
+      if (m.outgoing && ids.contains(m.id) && _statusRank(m.status) < _statusRank(target)) {
+        list[i] = m.copyWith(status: target);
+        unawaited(StorageService.updateMessageStatus(m.id, target));
+        changed = true;
+      }
+    }
+    if (changed) notifyListeners();
+  }
+
+  void _sendDeliveredReceipt(String to, String cmid) {
+    unawaited(_ws?.sendMessage(to, MsgChannel.receipt('delivered', [cmid])) ?? Future<void>.value());
+  }
+
+  /// Объявить своим устройствам, что эта сборка умеет квитанции (пинг «вживую», старые сборки его игнорируют).
+  void announceReceiptSupport() {
+    for (final c in contacts) {
+      if (!c.isManual) { // устройство владельца, не ручной контакт
+        unawaited(_ws?.sendLive(c.peerId, MsgChannel.capPing()) ?? Future<bool>.value(false));
+      }
+    }
+  }
+
+  /// Чат открыт/дошли новые — отправить «прочитано» по входящим этого собеседника.
+  void markChatRead(String peerId) {
+    final list = _chats[peerId];
+    if (list == null) return;
+    final ids = <String>[];
+    for (final m in list) {
+      final rid = m.remoteId;
+      if (!m.outgoing && rid != null && !_readAcked.contains(rid)) {
+        ids.add(rid);
+        _readAcked.add(rid);
+      }
+    }
+    if (ids.isNotEmpty) {
+      unawaited(_ws?.sendMessage(peerId, MsgChannel.receipt('read', ids)) ?? Future<void>.value());
+    }
+  }
+
+  /// Удалить выбранные сообщения — только у себя (у собеседника остаются; у него тоже только ручное удаление).
+  Future<void> deleteMessages(String peerId, Set<String> ids) async {
+    final list = _chats[peerId];
+    if (list != null) list.removeWhere((m) => ids.contains(m.id));
+    await StorageService.deleteMessages(ids.toList());
+    notifyListeners();
+  }
+
+  /// Очистить переписку с собеседником (локально).
+  Future<void> clearChat(String peerId) async {
+    _chats[peerId]?.clear();
+    await StorageService.clearChat(peerId);
+    notifyListeners();
+  }
+
   Future<void> sendMessage(String peerId, String text) async {
-    // WsService шифрует если есть ключ (получает его сам из кэша)
-    _ws?.sendMessage(peerId, text);
+    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    // тем, кто умеет квитанции, шлём конверт с id (чтобы получатель мог ответить «доставлено/прочитано»); остальным — обычный текст
+    final payload = _receiptCapable.contains(peerId) ? MsgChannel.wrapMessage(id, text) : text;
+    _ws?.sendMessage(peerId, payload);
 
     final msg = ChatMessage(
-      id:        DateTime.now().millisecondsSinceEpoch.toString(),
+      id:        id,
       peerId:    peerId,
       outgoing:  true,
       text:      text,
@@ -565,16 +665,29 @@ class AppState extends ChangeNotifier {
   // ── WebSocket события ─────────────────────────────────────────────────────
 
   void _onIncomingChat(IncomingChatEvent e) async {
+    final res = _classifyIncoming(e.fromPeerId, e.text);
+    if (res == null) { notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
+    final showText = res.$1;
+    final remoteId = res.$2;
     final msg = ChatMessage(
       id:        'inbox_${e.timestamp.millisecondsSinceEpoch}',
       peerId:    e.fromPeerId,
       outgoing:  false,
-      text:      e.text,
+      text:      showText,
       timestamp: e.timestamp,
       status:    MessageStatus.delivered,
+      remoteId:  remoteId,
     );
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
+    if (remoteId != null) {
+      _sendDeliveredReceipt(e.fromPeerId, remoteId);
+      // чат открыт — сразу «прочитано»
+      if (activeChatPeerId == e.fromPeerId && !_readAcked.contains(remoteId)) {
+        _readAcked.add(remoteId);
+        unawaited(_ws?.sendMessage(e.fromPeerId, MsgChannel.receipt('read', [remoteId])) ?? Future<void>.value());
+      }
+    }
 
     if (activeChatPeerId != e.fromPeerId) {
       _player.play(AssetSource('sounds/icq.mp3'));
@@ -583,7 +696,7 @@ class AppState extends ChangeNotifier {
       unawaited(NotificationService.showMessage(
         fromPeerId:  e.fromPeerId,
         displayName: name,
-        text:        FileOffer.preview(e.text),
+        text:        FileOffer.preview(showText),
       ));
     } else {
       // Чат открыт — убираем старые уведомления от этого пира

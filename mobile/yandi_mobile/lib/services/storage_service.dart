@@ -208,6 +208,18 @@ class StorageService {
     );
   }
 
+  /// Удалить сообщения по id (только локально у этого пользователя).
+  static Future<void> deleteMessages(List<String> ids) async {
+    if (ids.isEmpty) return;
+    final q = List.filled(ids.length, '?').join(',');
+    await db.delete('messages', where: 'id IN ($q)', whereArgs: ids);
+  }
+
+  /// Очистить всю переписку с собеседником (локально).
+  static Future<void> clearChat(String peerId) async {
+    await db.delete('messages', where: 'peer_id = ?', whereArgs: [peerId]);
+  }
+
   // ── Inbox sync timestamp ───────────────────────────────────────────────────
 
   static Future<int> getLastInboxSyncMs() async {

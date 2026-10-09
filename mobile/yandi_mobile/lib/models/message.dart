@@ -10,6 +10,10 @@ class ChatMessage {
   final DateTime      timestamp;
   final MessageStatus status;
 
+  /// id этого сообщения у ОТПРАВИТЕЛЯ (из конверта), чтобы прислать ему квитанцию «прочитано».
+  /// Только для входящих и только в памяти (в БД не хранится): квитанции — вещь текущей сессии.
+  final String?       remoteId;
+
   const ChatMessage({
     required this.id,
     required this.peerId,
@@ -17,6 +21,7 @@ class ChatMessage {
     required this.text,
     required this.timestamp,
     this.status = MessageStatus.pending,
+    this.remoteId,
   });
 
   static String generateId() {
@@ -33,5 +38,6 @@ class ChatMessage {
     text:      text,
     timestamp: timestamp,
     status:    status ?? this.status,
+    remoteId:  remoteId,
   );
 }

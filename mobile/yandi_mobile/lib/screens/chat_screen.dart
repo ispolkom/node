@@ -23,6 +23,45 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  final Set<String> _selected = {};
+
+  bool get _selecting => _selected.isNotEmpty;
+
+  void _toggleSelect(String id) {
+    setState(() {
+      if (!_selected.remove(id)) _selected.add(id);
+    });
+  }
+
+  Future<void> _deleteSelected() async {
+    final n = _selected.length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text('Удалить $n ${_plural(n)}?', style: const TextStyle(color: AppTheme.text)),
+        content: const Text('Удалится только у вас. У собеседника останется.',
+            style: TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    await context.read<AppState>().deleteMessages(widget.peerId, Set.of(_selected));
+    if (mounted) setState(() => _selected.clear());
+  }
+
+  static String _plural(int n) {
+    final a = n % 100, b = n % 10;
+    if (a >= 11 && a <= 14) return 'сообщений';
+    if (b == 1) return 'сообщение';
+    if (b >= 2 && b <= 4) return 'сообщения';
+    return 'сообщений';
+  }
 
   @override
   void initState() {
@@ -30,7 +69,7 @@ class _ChatScreenState extends State<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final state = context.read<AppState>();
       state.activeChatPeerId = widget.peerId;
-      state.loadChatHistory(widget.peerId);
+      state.loadChatHistory(widget.peerId).then((_) { if (mounted) state.markChatRead(widget.peerId); });
     });
   }
 
@@ -102,41 +141,62 @@ class _ChatScreenState extends State<ChatScreen> {
     final saved    = contact?.saved ?? false;
     final title    = (contact?.displayName.isNotEmpty ?? false) ? contact!.displayName : widget.title;
 
-    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _scrollToBottom();
+      state.markChatRead(widget.peerId);
+    });
 
     return Scaffold(
       backgroundColor: AppTheme.bg,
-      appBar: AppBar(
-        backgroundColor: AppTheme.surface,
-        elevation: 0,
-        title: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(title, style: const TextStyle(color: AppTheme.text, fontSize: 16)),
-            Text(widget.peerId.substring(0, 16) + '...',
-                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
-          ],
-        ),
-        iconTheme: const IconThemeData(color: AppTheme.text),
-        actions: [
-          IconButton(
-            tooltip: 'Позвонить',
-            icon: const Icon(Icons.call, color: AppTheme.accent),
-            onPressed: () => _call(video: false),
-          ),
-          IconButton(
-            tooltip: 'Видеозвонок',
-            icon: const Icon(Icons.videocam, color: AppTheme.accent),
-            onPressed: () => _call(video: true),
-          ),
-          if (!saved)
-            IconButton(
-              tooltip: 'Добавить в контакты',
-              icon: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
-              onPressed: () => showSaveContactDialog(context, widget.peerId, title),
+      appBar: _selecting
+          ? AppBar(
+              backgroundColor: AppTheme.surface,
+              elevation: 0,
+              iconTheme: const IconThemeData(color: AppTheme.text),
+              leading: IconButton(
+                icon: const Icon(Icons.close),
+                onPressed: () => setState(() => _selected.clear()),
+              ),
+              title: Text('Выбрано: ${_selected.length}', style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+              actions: [
+                IconButton(
+                  tooltip: 'Удалить',
+                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                  onPressed: _deleteSelected,
+                ),
+              ],
+            )
+          : AppBar(
+              backgroundColor: AppTheme.surface,
+              elevation: 0,
+              title: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(title, style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+                  Text(widget.peerId.substring(0, 16) + '...',
+                      style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                ],
+              ),
+              iconTheme: const IconThemeData(color: AppTheme.text),
+              actions: [
+                IconButton(
+                  tooltip: 'Позвонить',
+                  icon: const Icon(Icons.call, color: AppTheme.accent),
+                  onPressed: () => _call(video: false),
+                ),
+                IconButton(
+                  tooltip: 'Видеозвонок',
+                  icon: const Icon(Icons.videocam, color: AppTheme.accent),
+                  onPressed: () => _call(video: true),
+                ),
+                if (!saved)
+                  IconButton(
+                    tooltip: 'Добавить в контакты',
+                    icon: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
+                    onPressed: () => showSaveContactDialog(context, widget.peerId, title),
+                  ),
+              ],
             ),
-        ],
-      ),
       body: Column(
         children: [
           if (!saved)
@@ -168,7 +228,17 @@ class _ChatScreenState extends State<ChatScreen> {
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.all(12),
                     itemCount: messages.length,
-                    itemBuilder: (_, i) => _MessageBubble(msg: messages[i]),
+                    itemBuilder: (_, i) {
+                      final m = messages[i];
+                      return GestureDetector(
+                        onLongPress: () => _toggleSelect(m.id),
+                        onTap: _selecting ? () => _toggleSelect(m.id) : null,
+                        child: Container(
+                          color: _selected.contains(m.id) ? AppTheme.accent.withOpacity(0.18) : null,
+                          child: _MessageBubble(msg: m),
+                        ),
+                      );
+                    },
                   ),
           ),
           _InputBar(
@@ -222,7 +292,7 @@ class _MessageBubble extends StatelessWidget {
                     color: AppTheme.textSecondary, fontSize: 10)),
                 if (isOut) ...[
                   const SizedBox(width: 4),
-                  Icon(_statusIcon(msg.status), size: 12, color: AppTheme.textSecondary),
+                  Icon(_statusIcon(msg.status), size: 13, color: _statusColor(msg.status)),
                 ],
               ],
             ),
@@ -233,10 +303,16 @@ class _MessageBubble extends StatelessWidget {
   }
 
   IconData _statusIcon(MessageStatus s) => switch (s) {
-    MessageStatus.pending   => Icons.access_time,
-    MessageStatus.delivered => Icons.done,
-    MessageStatus.read      => Icons.done_all,
+    MessageStatus.pending   => Icons.check,        // 1 серая — отправлено
+    MessageStatus.delivered => Icons.done_all,     // 2 серые — доставлено
+    MessageStatus.read      => Icons.done_all,     // 2 жёлтые — прочитано
     MessageStatus.failed    => Icons.error_outline,
+  };
+
+  Color _statusColor(MessageStatus s) => switch (s) {
+    MessageStatus.read   => const Color(0xFFFFC107),  // жёлтый
+    MessageStatus.failed => Colors.redAccent,
+    _                    => AppTheme.textSecondary,   // серый: отправлено / доставлено
   };
 }
 
