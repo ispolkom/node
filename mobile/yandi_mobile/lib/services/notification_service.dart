@@ -110,6 +110,36 @@ class NotificationService {
     );
   }
 
+  // ── Входящий звонок: на весь экран, если телефон заблокирован ──────────────
+
+  static const int _callId = 0x0CA11;
+
+  static Future<void> showIncomingCall({required String fromPeerId, required String displayName, required bool video}) async {
+    final details = NotificationDetails(
+      android: AndroidNotificationDetails(
+        'yandi_calls',
+        'Звонки',
+        channelDescription: 'Входящие звонки и видеозвонки YANDI',
+        importance: Importance.max,
+        priority:   Priority.max,
+        icon:       '@drawable/ic_notification',
+        color:      const Color(0xFF00E5FF),
+        category:   AndroidNotificationCategory.call,
+        fullScreenIntent: true,
+        ongoing:    true,
+        autoCancel: false,
+        playSound:  false, // мелодию играет сам звонок
+        visibility: NotificationVisibility.public,
+        timeoutAfter: 45000,
+      ),
+    );
+    await _plugin.show(_callId, displayName, video ? 'Входящий видеозвонок' : 'Входящий звонок', details, payload: fromPeerId);
+  }
+
+  static Future<void> cancelIncomingCall() async {
+    await _plugin.cancel(_callId);
+  }
+
   // ── Убрать уведомления для конкретного чата ─────────────────────────────────
 
   static Future<void> cancelForPeer(String fromPeerId) async {

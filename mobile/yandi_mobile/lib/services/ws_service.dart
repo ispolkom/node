@@ -16,12 +16,24 @@ const int ftChatMsg    = 0x10;
 const int ftMsgStatus  = 0x11;
 const int ftPeerStatus = 0x12;
 const int ftSendMsg    = 0x30;
+// сигналы звонков: только вживую, узел их не хранит (зашифрованы телефоном для телефона)
+const int ftLiveMsg     = 0x13;
+const int ftPeerOffline = 0x14;
+const int ftSendLive    = 0x31;
 
 class IncomingChatEvent {
   final String   fromPeerId;
   final DateTime timestamp;
   final String   text;
   const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text});
+}
+
+/// Живой сигнал от другого телефона (звонок): расшифрованный текст.
+class LiveSignalEvent {
+  final String   fromPeerId;
+  final DateTime timestamp;
+  final String   text;
+  const LiveSignalEvent({required this.fromPeerId, required this.timestamp, required this.text});
 }
 
 class PeerStatusEvent {
@@ -70,13 +82,21 @@ class WsService {
   final _chatCtrl      = StreamController<IncomingChatEvent>.broadcast();
   final _statusCtrl    = StreamController<PeerStatusEvent>.broadcast();
   final _fileOfferCtrl = StreamController<FileOfferEvent>.broadcast();
+  final _liveCtrl      = StreamController<LiveSignalEvent>.broadcast();
+  final _offlineCtrl   = StreamController<String>.broadcast();
 
   Stream<IncomingChatEvent> get chatStream      => _chatCtrl.stream;
   Stream<PeerStatusEvent>   get statusStream    => _statusCtrl.stream;
   Stream<FileOfferEvent>    get fileOfferStream => _fileOfferCtrl.stream;
+  Stream<LiveSignalEvent>   get liveStream      => _liveCtrl.stream;
+  /// Номер телефона, которому сигнал не доставлен: его нет на связи.
+  Stream<String>            get offlineStream   => _offlineCtrl.stream;
   bool get connected => _channel != null;
 
-  WsService(this._identity, {this.onPermanentLoss, Future<List<int>?> Function(String)? getPeerPub})
+  /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
+  final void Function()? onOpen;
+
+  WsService(this._identity, {this.onPermanentLoss, this.onOpen, Future<List<int>?> Function(String)? getPeerPub})
       : _getPeerPub = getPeerPub;
 
   final Future<List<int>?> Function(String)? _getPeerPub;
@@ -107,7 +127,9 @@ class WsService {
     try {
       final httpClient = _buildPinnedClient(node.fingerprint);
       _channel = IOWebSocketChannel.connect(wsUrl, customClient: httpClient);
-      _channel!.stream.listen(
+      final ch = _channel!;
+      ch.ready.then((_) { if (identical(_channel, ch)) onOpen?.call(); }).catchError((_) {});
+      ch.stream.listen(
         _onData,
         onError: (_) => _scheduleReconnect(),
         onDone:  ()  => _scheduleReconnect(),
@@ -161,6 +183,12 @@ class WsService {
 
       case ftPeerStatus:
         _handlePeerStatus(data);
+
+      case ftLiveMsg:
+        await _handleLiveMsg(data);
+
+      case ftPeerOffline:
+        if (data.length >= 33) _offlineCtrl.add(_bytesToHex(data.sublist(1, 33)));
     }
   }
 
@@ -192,6 +220,20 @@ class WsService {
       timestamp:  DateTime.fromMillisecondsSinceEpoch(tsMs),
       text:       text,
     ));
+  }
+
+  /// [1B 0x13][32B от кого][8B время][4B длина][зашифрованный сигнал]. Открытый текст не принимаем: сигналы звонка только E2E.
+  Future<void> _handleLiveMsg(Uint8List data) async {
+    if (data.length < 45) return;
+    final from = _bytesToHex(data.sublist(1, 33));
+    final tsMs = ByteData.sublistView(data, 33, 41).getInt64(0, Endian.little);
+    final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
+    if (data.length < 45 + pLen) return;
+    final payload = Uint8List.fromList(data.sublist(45, 45 + pLen));
+    if (!E2ECrypto.isEncrypted(payload)) return;
+    final text = await E2ECrypto.decrypt(payload, (theirPub) => _identity.ecdh(theirPub));
+    if (text == null) return;
+    _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
   }
 
   void _handlePeerStatus(Uint8List data) {
@@ -226,6 +268,41 @@ class WsService {
     _sendRaw(buf.toBytes());
   }
 
+  /// Отправить только зашифрованно. Если ключа получателя нет или сокет не подключён, не отправляет ничего и возвращает false
+  /// (никогда не откатывается на открытый текст: так передаются ключи от файлов).
+  Future<bool> sendEncryptedOnly(String toPeerIdHex, String text) async {
+    if (_channel == null) return false;
+    final recipientPub = await _getRecipientPub(toPeerIdHex);
+    if (recipientPub == null) return false;
+    final payload = await E2ECrypto.encrypt(text, recipientPub);
+    final buf = BytesBuilder();
+    buf.addByte(ftSendMsg);
+    buf.add(_hexToBytes(toPeerIdHex));
+    buf.add(_uint32LE(payload.length));
+    buf.add(payload);
+    _sendRaw(buf.toBytes());
+    return true;
+  }
+
+  /// Живой сигнал (звонок): шифруется для получателя, уходит только если он на связи, нигде не хранится.
+  /// false — нет сокета или ключа получателя. Если получатель не на связи, придёт [offlineStream].
+  Future<bool> sendLive(String toPeerIdHex, String text) async {
+    if (_channel == null) return false;
+    final recipientPub = await _getRecipientPub(toPeerIdHex);
+    if (recipientPub == null) return false;
+    final payload = await E2ECrypto.encrypt(text, recipientPub);
+    final buf = BytesBuilder();
+    buf.addByte(ftSendLive);
+    buf.add(_hexToBytes(toPeerIdHex));
+    buf.add(_uint32LE(payload.length));
+    buf.add(payload);
+    _sendRaw(buf.toBytes());
+    return true;
+  }
+
+  /// Есть ли ключ получателя (то есть это своё устройство и E2E возможен).
+  Future<bool> canEncryptTo(String peerId) async => (await _getRecipientPub(peerId)) != null;
+
   Future<List<int>?> _getRecipientPub(String peerId) async {
     // Проверяем SQLite кэш (TTL 24ч)
     final cached = await StorageService.getPeerX25519Pub(peerId);
@@ -250,6 +327,8 @@ class WsService {
     disconnect();
     _chatCtrl.close();
     _statusCtrl.close();
+    _liveCtrl.close();
+    _offlineCtrl.close();
   }
 
   // ── TLS pinning ────────────────────────────────────────────────────────────

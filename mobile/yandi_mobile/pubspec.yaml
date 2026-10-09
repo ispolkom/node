@@ -26,6 +26,7 @@ dependencies:
 
   # Crypto
   cryptography: ^2.7.0
+  cryptography_flutter: ^2.3.2   # быстрый AES-GCM средствами Android (в чистом Dart файлы шифровались бы очень медленно)
   crypto: ^3.0.3
 
   # UI / QR
@@ -43,10 +44,19 @@ dependencies:
 
   # File transfer
   file_picker: ^8.1.2
+  open_filex: ^4.5.0
+
+  # Звонки и видеозвонки (WebRTC: звук и видео шифруются между телефонами, DTLS-SRTP)
+  flutter_webrtc: ^1.0.0
+  wakelock_plus: ^1.2.8
 
   # Utils
   intl: ^0.19.0
   uuid: ^4.5.1
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
 
 flutter:
   uses-material-design: true

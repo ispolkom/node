@@ -36,6 +36,19 @@ class ApiService {
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
+  /// Временные учётные данные сервера звонков (TURN) или null, если он на узле не настроен.
+  Future<Map<String, dynamic>?> getTurn() async {
+    try {
+      final res = await _client
+          .get(_url('/mobile/turn'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<List<Contact>> getContacts() async {
     final res = await _client
         .get(_url('/mobile/contacts'), headers: _headers)

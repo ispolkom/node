@@ -1,7 +1,12 @@
 package com.yandi.yandi_mobile
 
 import android.app.Activity
+import android.content.ContentValues
 import android.content.Intent
+import android.os.Build
+import android.os.Environment
+import android.provider.MediaStore
+import java.io.File
 import android.net.VpnService
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -23,6 +28,22 @@ class MainActivity : FlutterActivity() {
             override fun onListen(args: Any?, sink: EventChannel.EventSink?) {}
             override fun onCancel(args: Any?) {}
         })
+
+        MethodChannel(messenger, "com.yandi.yandi_mobile/files").setMethodCallHandler { call, result ->
+            when (call.method) {
+                "saveToDownloads" -> {
+                    val path = call.argument<String>("path")
+                    val name = call.argument<String>("name") ?: "file"
+                    val mime = call.argument<String>("mime") ?: "application/octet-stream"
+                    if (path == null) { result.error("arg", "нет пути", null); return@setMethodCallHandler }
+                    Thread {
+                        val r = runCatching { saveToDownloads(File(path), name, mime) }
+                        runOnUiThread { r.fold({ result.success(it) }, { result.error("save", it.message, null) }) }
+                    }.start()
+                }
+                else -> result.notImplemented()
+            }
+        }
 
         MethodChannel(messenger, "com.yandi/chat").setMethodCallHandler { call, result ->
             when (call.method) {
@@ -75,5 +96,27 @@ class MainActivity : FlutterActivity() {
             @Suppress("DEPRECATION")
             super.onActivityResult(requestCode, resultCode, data)
         }
+    }
+
+    /** Копия файла в общую папку «Загрузки»: через MediaStore на Android 10+, обычной записью на старых. */
+    private fun saveToDownloads(src: File, name: String, mime: String): String {
+        if (Build.VERSION.SDK_INT >= 29) {
+            val values = ContentValues().apply {
+                put(MediaStore.Downloads.DISPLAY_NAME, name)
+                put(MediaStore.Downloads.MIME_TYPE, mime)
+                put(MediaStore.Downloads.IS_PENDING, 1)
+            }
+            val uri = contentResolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: error("не удалось создать файл")
+            contentResolver.openOutputStream(uri)!!.use { out -> src.inputStream().use { it.copyTo(out) } }
+            values.clear(); values.put(MediaStore.Downloads.IS_PENDING, 0)
+            contentResolver.update(uri, values, null, null)
+            return uri.toString()
+        }
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS).apply { mkdirs() }
+        var dst = File(dir, name)
+        var n = 1
+        while (dst.exists()) { dst = File(dir, "${name.substringBeforeLast('.', name)} ($n)${if (name.contains('.')) "." + name.substringAfterLast('.') else ""}"); n++ }
+        src.copyTo(dst)
+        return dst.absolutePath
     }
 }

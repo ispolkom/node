@@ -1,10 +1,14 @@
 import 'dart:async' as async_lib;
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
 import '../models/trusted_node.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
+import '../models/file_offer.dart';
+import '../models/file_state.dart';
 import '../crypto/identity.dart';
 import '../crypto/e2e_crypto.dart';
 import 'storage_service.dart';
@@ -15,6 +19,11 @@ import 'chat_bg_service.dart';
 import 'node_manager.dart';
 import 'node_discovery.dart';
 import 'notification_service.dart';
+import 'file_transfer_service.dart';
+import 'call_service.dart';
+import '../models/call_signal.dart';
+import '../screens/call_screen.dart';
+import 'package:flutter/material.dart' show MaterialPageRoute;
 
 /// Центральный state приложения.
 ///
@@ -95,19 +104,33 @@ class AppState extends ChangeNotifier {
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
+      onOpen: () {
+        // сокет открылся (первый раз или после обрыва): статусы за время обрыва не приходили, берём заново, и забираем накопленную почту
+        unawaited(refreshContacts());
+        unawaited(_syncInbox());
+      },
       getPeerPub: (peerId) => _api!.getPeerX25519Pub(peerId),
     );
     _ws!.connect(node);
     _ws!.chatStream.listen(_onIncomingChat);
     _ws!.statusStream.listen(_onPeerStatus);
     _ws!.fileOfferStream.listen(_onFileOffer);
+    _ws!.liveStream.listen(_onLiveSignal);
+    _ws!.offlineStream.listen(calls.onPeerOffline);
 
     chatBg.start(node);
+
+    // статусы «в сети» ещё и подтягиваем раз в 20 секунд: события о смене могут потеряться при обрыве связи
+    _presenceTimer?.cancel();
+    _presenceTimer = async_lib.Timer.periodic(const Duration(seconds: 20), (_) => unawaited(refreshContacts()));
 
     unawaited(_loadInitialData());
   }
 
+  async_lib.Timer? _presenceTimer;
+
   Future<void> _loadInitialData() async {
+    unawaited(_initDownloadsDir());
     try {
       final info = await _api!.getInfo();
       nodeOnline = info['online'] as bool? ?? false;
@@ -192,14 +215,45 @@ class AppState extends ChangeNotifier {
 
   Future<void> setPreferredNode(String id)  => nodeManager.setPreferred(id).then((_) => notifyListeners());
   Future<void> removeNode(String id)        => unpairNode(id);
+  Contact? contactFor(String peerId) {
+    for (final c in contacts) {
+      if (c.peerId == peerId) return c;
+    }
+    return null;
+  }
+
+  bool isSaved(String peerId) => contactFor(peerId)?.saved ?? false;
+
+  String _plainName(String name) => name.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim();
+
+  /// Добавить в контакты: новый человек по Peer ID или уже видимое устройство.
   Future<void> addManualContact(String peerId, String name) async {
-    await StorageService.saveManualContact(peerId, name);
-    contacts.add(Contact(peerId: peerId, displayName: name.isEmpty ? peerId.substring(0, 12) : name, online: false, isManual: true));
+    final existing = contactFor(peerId);
+    final shown = name.trim().isNotEmpty
+        ? name.trim()
+        : (existing != null ? _plainName(existing.displayName) : '');
+    final finalName = shown.isNotEmpty ? shown : peerId.substring(0, 12);
+    await StorageService.saveManualContact(peerId, finalName);
+    if (existing != null) {
+      contacts[contacts.indexOf(existing)] = Contact(
+        peerId: peerId, displayName: finalName, online: existing.online,
+        isManual: existing.isManual, saved: true,
+      );
+    } else {
+      contacts.add(Contact(peerId: peerId, displayName: finalName, online: false, isManual: true));
+    }
     notifyListeners();
   }
+
+  /// Убрать из контактов. Контакты, заведённые на самом узле, остаются (их удаляют там).
   Future<void> removeManualContact(String peerId) async {
     await StorageService.deleteManualContact(peerId);
-    contacts.removeWhere((c) => c.peerId == peerId);
+    final c = contactFor(peerId);
+    if (c != null && !c.isManual) {
+      contacts[contacts.indexOf(c)] = c.copyWith(saved: false);
+    } else {
+      contacts.removeWhere((x) => x.peerId == peerId);
+    }
     notifyListeners();
   }
 
@@ -238,7 +292,27 @@ class AppState extends ChangeNotifier {
 
   Future<void> refreshContacts() async {
     try {
-      contacts = await _api!.getContacts();
+      final fromNode = await _api!.getContacts();
+      // то, что человек добавил в приложении, не должно пропадать при обновлении списка с узла
+      final saved = <String, String>{
+        for (final r in await StorageService.loadManualContacts())
+          r['peer_id'] as String: (r['name'] as String?) ?? '',
+      };
+      final merged = <Contact>[];
+      final seen = <String>{};
+      for (final c in fromNode) {
+        seen.add(c.peerId);
+        final name = saved[c.peerId];
+        merged.add(name == null || name.isEmpty
+            ? c
+            : Contact(peerId: c.peerId, displayName: c.isManual ? c.displayName : name, online: c.online, isManual: c.isManual, saved: true));
+      }
+      for (final e in saved.entries) {
+        if (seen.contains(e.key)) continue;
+        // знакомый только по Peer ID: «в сети», если узел видит его под тем же полным номером
+        merged.add(Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true));
+      }
+      contacts = merged;
       notifyListeners();
     } catch (_) {}
   }
@@ -261,6 +335,159 @@ class AppState extends ChangeNotifier {
         notifyListeners();
       }
     } catch (_) {}
+  }
+
+  // ── Звонки ─────────────────────────────────────────────────────────────────
+
+  late final CallService calls = CallService(
+    sendSignal: (peerId, text) async => await (_ws?.sendLive(peerId, text) ?? Future.value(false)),
+    fetchTurn:  () async => await _api?.getTurn(),
+    nodeHost:   () => nodeManager.activeNode?.host,
+    nameOf:     (peerId) => contactFor(peerId)?.displayName ?? _contactName(peerId),
+    showScreen: _showCallScreen,
+    onIncomingNotify: (peerId, name, video) =>
+        unawaited(NotificationService.showIncomingCall(fromPeerId: peerId, displayName: name, video: video)),
+    onIncomingCancel: () => unawaited(NotificationService.cancelIncomingCall()),
+    onLog: (peerId, outgoing, text) => unawaited(addLocalMessage(peerId, outgoing, text)),
+  );
+
+  bool _callScreenOpen = false;
+
+  void _showCallScreen() {
+    if (_callScreenOpen) return;
+    final nav = NotificationService.navigatorKey.currentState;
+    if (nav == null) return;
+    _callScreenOpen = true;
+    nav.push(MaterialPageRoute(builder: (_) => const CallScreen())).whenComplete(() => _callScreenOpen = false);
+  }
+
+  /// Позвонить своему устройству. null — звонок начат, иначе причина отказа.
+  Future<String?> startCall(String peerId, {required bool video}) async {
+    if (!await canSendFiles(peerId)) {
+      return 'Звонить можно только на свои устройства (у этого собеседника нет ключа шифрования)';
+    }
+    return calls.start(peerId, withVideo: video);
+  }
+
+  /// Запись в чат, которую видит только этот телефон (итог звонка).
+  Future<void> addLocalMessage(String peerId, bool outgoing, String text) async {
+    final msg = ChatMessage(
+      id: 'local_${DateTime.now().microsecondsSinceEpoch}', peerId: peerId, outgoing: outgoing, text: text,
+      timestamp: DateTime.now(), status: MessageStatus.delivered,
+    );
+    _chats.putIfAbsent(peerId, () => []).add(msg);
+    await StorageService.saveMessage(msg);
+    notifyListeners();
+  }
+
+  void _onLiveSignal(LiveSignalEvent e) {
+    final sig = CallSignal.tryParse(e.text);
+    if (sig != null) unawaited(calls.onSignal(e.fromPeerId, sig));
+  }
+
+  // ── Файлы ──────────────────────────────────────────────────────────────────
+
+  /// Состояние передач по номеру: идёт ли загрузка/скачивание, прогресс, ошибка.
+  final Map<String, FileState> fileStates = {};
+  /// Откуда отправлен исходящий файл (для превью и открытия), пока приложение запущено.
+  final Map<String, String> _outgoingPaths = {};
+  Directory? _downloadsDir;
+
+  FileState? fileStateOf(String tid) => fileStates[tid];
+
+  /// Где лежит полученный файл, если он уже скачан.
+  String? localPathFor(FileOffer o) {
+    final dir = _downloadsDir;
+    if (dir == null) return null;
+    final p = '${dir.path}/${FileTransferService.localName(o)}';
+    return File(p).existsSync() ? p : _outgoingPaths[o.tid];
+  }
+
+  Future<void> _initDownloadsDir() async {
+    _downloadsDir ??= await FileTransferService.downloadsDir();
+  }
+
+  /// Файлы можно слать только на своё устройство: у него есть ключ для E2E.
+  Future<bool> canSendFiles(String peerId) async => await (_ws?.canEncryptTo(peerId) ?? Future.value(false));
+
+  /// Отправить файл: шифрование на телефоне, куски на узел, ключ получателю в зашифрованном сообщении.
+  Future<String?> sendFile(String peerId, String path, {String? name}) async {
+    if (_api == null || _ws == null) return 'Нет связи с узлом';
+    final svc = FileTransferService(_api!);
+    late FileOffer offer;
+    try {
+      if (!await canSendFiles(peerId)) return 'Файлы можно отправлять только на свои устройства, у этого собеседника нет ключа';
+      offer = await svc.prepare(toPeerId: peerId, path: path, name: name);
+    } on TransferException catch (e) {
+      return e.message;
+    } catch (e) {
+      return 'Не удалось начать отправку: $e';
+    }
+    _outgoingPaths[offer.tid] = path;
+    fileStates[offer.tid] = FileState.working(0);
+    // сообщение в чате появляется сразу и показывает ход отправки; получателю предложение уйдёт, когда всё залито
+    final msg = ChatMessage(
+      id: 'file_${offer.tid}', peerId: peerId, outgoing: true, text: offer.encode(),
+      timestamp: DateTime.now(), status: MessageStatus.pending,
+    );
+    _chats.putIfAbsent(peerId, () => []).add(msg);
+    await StorageService.saveMessage(msg);
+    notifyListeners();
+    try {
+      final done = await svc.upload(offer, path, onProgress: (f) {
+        fileStates[offer.tid] = FileState.working(f);
+        notifyListeners();
+      });
+      final sent = await _ws!.sendEncryptedOnly(peerId, done.encode());
+      if (!sent) throw TransferException('Файл залит, но предложение не отправлено: нет связи или ключа получателя');
+      fileStates.remove(offer.tid);
+      final delivered = msg.copyWith(status: MessageStatus.delivered);
+      _replaceMessage(peerId, msg.id, delivered);
+      await StorageService.saveMessage(delivered);
+    } catch (e) {
+      fileStates[offer.tid] = FileState.failed(e is TransferException ? e.message : '$e');
+      final failed = msg.copyWith(status: MessageStatus.failed);
+      _replaceMessage(peerId, msg.id, failed);
+      await StorageService.saveMessage(failed);
+    }
+    notifyListeners();
+    return null;
+  }
+
+  void _replaceMessage(String peerId, String id, ChatMessage m) {
+    final list = _chats[peerId];
+    if (list == null) return;
+    final i = list.indexWhere((x) => x.id == id);
+    if (i >= 0) list[i] = m;
+  }
+
+  /// Скачать присланный файл.
+  Future<void> downloadFile(FileOffer o) async {
+    if (_api == null) return;
+    await _initDownloadsDir();
+    fileStates[o.tid] = FileState.working(0);
+    notifyListeners();
+    try {
+      await FileTransferService(_api!).download(o, onProgress: (f) {
+        fileStates[o.tid] = FileState.working(f);
+        notifyListeners();
+      });
+      fileStates.remove(o.tid);
+    } catch (e) {
+      fileStates[o.tid] = FileState.failed(e is TransferException ? e.message : 'Не удалось скачать: $e');
+    }
+    notifyListeners();
+  }
+
+  static const MethodChannel _filesChannel = MethodChannel('com.yandi.yandi_mobile/files');
+
+  /// Скопировать полученный файл в общую папку «Загрузки», чтобы он был виден в файловом менеджере.
+  Future<String?> saveToDownloads(String path, String name, String mime) async {
+    try {
+      return await _filesChannel.invokeMethod<String>('saveToDownloads', {'path': path, 'name': name, 'mime': mime});
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<void> sendMessage(String peerId, String text) async {
@@ -356,7 +583,7 @@ class AppState extends ChangeNotifier {
       unawaited(NotificationService.showMessage(
         fromPeerId:  e.fromPeerId,
         displayName: name,
-        text:        e.text,
+        text:        FileOffer.preview(e.text),
       ));
     } else {
       // Чат открыт — убираем старые уведомления от этого пира

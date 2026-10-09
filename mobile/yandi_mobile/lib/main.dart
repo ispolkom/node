@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:cryptography_flutter/cryptography_flutter.dart';
 import 'package:provider/provider.dart';
 import 'services/app_state.dart';
 import 'services/background_worker.dart';
@@ -14,6 +15,7 @@ import 'theme.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  FlutterCryptography.enable();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   runApp(
     ChangeNotifierProvider(

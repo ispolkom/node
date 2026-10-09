@@ -1,10 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
 import 'chat_screen.dart';
-import 'files_screen.dart';
 import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -33,6 +33,50 @@ class _HomeScreenState extends State<HomeScreen> {
         title:  peerId.length > 12 ? peerId.substring(0, 12) : peerId,
       ),
     ));
+  }
+
+  void _openChat(BuildContext context, Contact c) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => ChatScreen(peerId: c.peerId, title: c.displayName)),
+    );
+  }
+
+  /// Нажали на того, кто ещё не в контактах: открыть чат или добавить.
+  void _showContactSheet(BuildContext context, AppState state, Contact c) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 4),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(c.displayName, style: const TextStyle(color: AppTheme.text, fontSize: 17, fontWeight: FontWeight.w600)),
+                  const SizedBox(height: 2),
+                  const Text('Не в ваших контактах', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                ],
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.chat_bubble_outline, color: AppTheme.accent),
+              title: const Text('Открыть чат', style: TextStyle(color: AppTheme.text)),
+              onTap: () { Navigator.pop(ctx); _openChat(context, c); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
+              title: const Text('Добавить в контакты', style: TextStyle(color: AppTheme.text)),
+              onTap: () { Navigator.pop(ctx); showSaveContactDialog(context, c.peerId, c.displayName); },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -122,26 +166,11 @@ class _HomeScreenState extends State<HomeScreen> {
               color: AppTheme.accent,
               backgroundColor: AppTheme.surface,
               onRefresh: () => state.refreshContacts(),
-              child: ListView.builder(
-                itemCount: state.contacts.length,
-                itemBuilder: (ctx, i) {
-                  final c = state.contacts[i];
-                  return _ContactTile(
-                    peerId:      c.peerId,
-                    displayName: c.displayName,
-                    online:      c.online,
-                    isManual:    c.isManual,
-                    onTap: () => Navigator.push(
-                      context,
-                      MaterialPageRoute(
-                        builder: (_) => ChatScreen(peerId: c.peerId, title: c.displayName),
-                      ),
-                    ),
-                    onDelete: c.isManual
-                        ? () => state.removeManualContact(c.peerId)
-                        : null,
-                  );
-                },
+              child: _ContactList(
+                contacts: state.contacts,
+                onOpen: (c) => _openChat(context, c),
+                onTapUnsaved: (c) => _showContactSheet(context, state, c),
+                onDelete: (c) => state.removeManualContact(c.peerId),
               ),
             ),
     );
@@ -217,11 +246,83 @@ class _HomeScreenState extends State<HomeScreen> {
   );
 }
 
+/// Сохранённые контакты сверху, ниже раздел «Другие устройства» (видны, но ещё не в контактах).
+class _ContactList extends StatelessWidget {
+  final List<Contact> contacts;
+  final void Function(Contact) onOpen;
+  final void Function(Contact) onTapUnsaved;
+  final void Function(Contact) onDelete;
+  const _ContactList({required this.contacts, required this.onOpen, required this.onTapUnsaved, required this.onDelete});
+
+  @override
+  Widget build(BuildContext context) {
+    final saved = contacts.where((c) => c.saved).toList();
+    final other = contacts.where((c) => !c.saved).toList();
+    final rows = <Widget>[
+      for (final c in saved)
+        _ContactTile(
+          peerId: c.peerId, displayName: c.displayName, online: c.online, isManual: c.isManual, saved: true,
+          onTap: () => onOpen(c),
+          onDelete: c.isManual ? () => onDelete(c) : null,
+        ),
+      if (other.isNotEmpty)
+        const Padding(
+          padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+          child: Text('ДРУГИЕ УСТРОЙСТВА, НЕ В КОНТАКТАХ',
+              style: TextStyle(color: AppTheme.textSecondary, fontSize: 11, letterSpacing: 1)),
+        ),
+      for (final c in other)
+        _ContactTile(
+          peerId: c.peerId, displayName: c.displayName, online: c.online, isManual: c.isManual, saved: false,
+          onTap: () => onTapUnsaved(c),
+          onAdd: () => showSaveContactDialog(context, c.peerId, c.displayName),
+        ),
+    ];
+    return ListView(physics: const AlwaysScrollableScrollPhysics(), children: rows);
+  }
+}
+
+/// Диалог «Добавить в контакты»: имя можно поправить. Используется и в списке, и в чате.
+void showSaveContactDialog(BuildContext context, String peerId, String currentName) {
+  final ctrl = TextEditingController(text: currentName.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim());
+  showDialog(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: AppTheme.surface,
+      title: const Text('Добавить в контакты', style: TextStyle(color: AppTheme.text)),
+      content: TextField(
+        controller: ctrl,
+        autofocus: true,
+        style: const TextStyle(color: AppTheme.text),
+        decoration: const InputDecoration(
+          hintText: 'Имя контакта',
+          hintStyle: TextStyle(color: AppTheme.textSecondary),
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(ctx),
+          child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary)),
+        ),
+        TextButton(
+          onPressed: () {
+            context.read<AppState>().addManualContact(peerId, ctrl.text.trim());
+            Navigator.pop(ctx);
+          },
+          child: const Text('Добавить', style: TextStyle(color: AppTheme.accent)),
+        ),
+      ],
+    ),
+  );
+}
+
 class _ContactTile extends StatelessWidget {
   final String      peerId;
   final String      displayName;
   final bool        online;
   final bool        isManual;
+  final bool        saved;
+  final VoidCallback? onAdd;
   final VoidCallback onTap;
   final VoidCallback? onDelete;
 
@@ -231,6 +332,8 @@ class _ContactTile extends StatelessWidget {
     required this.online,
     required this.isManual,
     required this.onTap,
+    this.saved = true,
+    this.onAdd,
     this.onDelete,
   });
 
@@ -290,7 +393,7 @@ class _ContactTile extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    online ? 'онлайн' : 'офлайн',
+                    (online ? 'онлайн' : 'офлайн') + (saved ? '' : ' · не в контактах'),
                     style: TextStyle(
                       color: online ? Colors.greenAccent : AppTheme.textSecondary,
                       fontSize: 12,
@@ -299,7 +402,14 @@ class _ContactTile extends StatelessWidget {
                 ],
               ),
             ),
-            const Icon(Icons.chevron_right, color: AppTheme.textSecondary),
+            if (onAdd != null)
+              IconButton(
+                tooltip: 'Добавить в контакты',
+                icon: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
+                onPressed: onAdd,
+              )
+            else
+              const Icon(Icons.chevron_right, color: AppTheme.textSecondary),
           ],
         ),
       ),
