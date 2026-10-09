@@ -146,5 +146,10 @@ class NotificationService {
     await _plugin.cancel(_stableId(fromPeerId));
   }
 
+  /// Снять все уведомления (события просмотрены) — гаснет и красный значок у иконки приложения.
+  static Future<void> cancelAll() async {
+    await _plugin.cancelAll();
+  }
+
   static int _stableId(String key) => key.hashCode.abs() % 0x7FFFFFFF;
 }

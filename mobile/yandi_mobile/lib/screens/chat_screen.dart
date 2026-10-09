@@ -24,8 +24,21 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
   final Set<String> _selected = {};
+  String? _editingId;   // id редактируемого сообщения (null — обычная отправка)
 
   bool get _selecting => _selected.isNotEmpty;
+
+  void _startEdit(ChatMessage m) {
+    setState(() {
+      _editingId = m.id;
+      _inputCtrl.text = m.text;
+      _selected.clear();
+    });
+  }
+
+  void _cancelEdit() {
+    setState(() { _editingId = null; _inputCtrl.clear(); });
+  }
 
   void _toggleSelect(String id) {
     setState(() {
@@ -53,6 +66,14 @@ class _ChatScreenState extends State<ChatScreen> {
     if (ok != true) return;
     await context.read<AppState>().deleteMessages(widget.peerId, Set.of(_selected));
     if (mounted) setState(() => _selected.clear());
+  }
+
+  bool _singleOutgoing(BuildContext context) {
+    if (_selected.length != 1) return false;
+    final id = _selected.first;
+    final msgs = context.read<AppState>().messagesFor(widget.peerId);
+    final m = msgs.where((x) => x.id == id);
+    return m.isNotEmpty && m.first.outgoing && FileOffer.tryParse(m.first.text) == null;
   }
 
   static String _plural(int n) {
@@ -84,7 +105,13 @@ class _ChatScreenState extends State<ChatScreen> {
   void _send() {
     final text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
+    final editing = _editingId;
     _inputCtrl.clear();
+    if (editing != null) {
+      context.read<AppState>().editMessage(widget.peerId, editing, text);
+      setState(() => _editingId = null);
+      return;
+    }
     context.read<AppState>().sendMessage(widget.peerId, text);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
@@ -159,6 +186,16 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               title: Text('Выбрано: ${_selected.length}', style: const TextStyle(color: AppTheme.text, fontSize: 16)),
               actions: [
+                if (_selected.length == 1 && _singleOutgoing(context))
+                  IconButton(
+                    tooltip: 'Изменить',
+                    icon: const Icon(Icons.edit_outlined, color: AppTheme.text),
+                    onPressed: () {
+                      final id = _selected.first;
+                      final m = context.read<AppState>().messagesFor(widget.peerId).firstWhere((x) => x.id == id);
+                      _startEdit(m);
+                    },
+                  ),
                 IconButton(
                   tooltip: 'Удалить',
                   icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
@@ -235,12 +272,23 @@ class _ChatScreenState extends State<ChatScreen> {
                         onTap: _selecting ? () => _toggleSelect(m.id) : null,
                         child: Container(
                           color: _selected.contains(m.id) ? AppTheme.accent.withOpacity(0.18) : null,
-                          child: _MessageBubble(msg: m),
+                          child: _MessageBubble(msg: m, edited: state.isEdited(m.id)),
                         ),
                       );
                     },
                   ),
           ),
+          if (_editingId != null)
+            Container(
+              color: AppTheme.surface,
+              padding: const EdgeInsets.fromLTRB(16, 8, 8, 0),
+              child: Row(children: [
+                const Icon(Icons.edit_outlined, size: 16, color: AppTheme.accent),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('Редактирование сообщения', style: TextStyle(color: AppTheme.accent, fontSize: 13))),
+                IconButton(icon: const Icon(Icons.close, size: 18, color: AppTheme.textSecondary), onPressed: _cancelEdit),
+              ]),
+            ),
           _InputBar(
             controller: _inputCtrl,
             onSend: _send,
@@ -254,7 +302,8 @@ class _ChatScreenState extends State<ChatScreen> {
 
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
-  const _MessageBubble({required this.msg});
+  final bool edited;
+  const _MessageBubble({required this.msg, this.edited = false});
 
   @override
   Widget build(BuildContext context) {
@@ -288,6 +337,11 @@ class _MessageBubble extends StatelessWidget {
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (edited)
+                  const Padding(
+                    padding: EdgeInsets.only(right: 4),
+                    child: Text('изменено', style: TextStyle(color: AppTheme.textSecondary, fontSize: 10, fontStyle: FontStyle.italic)),
+                  ),
                 Text(time, style: const TextStyle(
                     color: AppTheme.textSecondary, fontSize: 10)),
                 if (isOut) ...[

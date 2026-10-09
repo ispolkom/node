@@ -5,6 +5,7 @@ import '../services/app_state.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
 import 'chat_screen.dart';
+import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -19,6 +20,7 @@ class _HomeScreenState extends State<HomeScreen> {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AppState>().refreshContacts();
+      NotificationService.cancelAll();   // события просмотрены — гасим значок у иконки
       _handlePendingNotification();
     });
   }
@@ -40,6 +42,82 @@ class _HomeScreenState extends State<HomeScreen> {
       context,
       MaterialPageRoute(builder: (_) => ChatScreen(peerId: c.peerId, title: c.displayName)),
     );
+  }
+
+  /// Долгое нажатие по контакту: открыть чат, очистить чат, удалить контакт.
+  void _showContactMenu(BuildContext context, AppState state, Contact c) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      shape: const RoundedRectangleBorder(borderRadius: BorderRadius.vertical(top: Radius.circular(16))),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(c.displayName, style: const TextStyle(color: AppTheme.text, fontSize: 17, fontWeight: FontWeight.w600)),
+              ),
+            ),
+            ListTile(
+              leading: const Icon(Icons.chat_bubble_outline, color: AppTheme.accent),
+              title: const Text('Открыть чат', style: TextStyle(color: AppTheme.text)),
+              onTap: () { Navigator.pop(ctx); _openChat(context, c); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.cleaning_services_outlined, color: AppTheme.text),
+              title: const Text('Очистить чат', style: TextStyle(color: AppTheme.text)),
+              subtitle: const Text('Удалится только у вас', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final ok = await _confirm(context, 'Очистить чат?', 'Переписка с «${c.displayName}» удалится только у вас.', 'Очистить');
+                if (ok) await state.clearChat(c.peerId);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.person_remove_outlined, color: Colors.redAccent),
+              title: const Text('Удалить контакт', style: TextStyle(color: Colors.redAccent)),
+              subtitle: const Text('Перейдёт в «не в контактах»', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final ok = await _confirm(context, 'Удалить контакт?', '«${c.displayName}» уйдёт из контактов (переписка останется, собеседник появится в разделе «не в контактах»).', 'Удалить');
+                if (ok) await state.removeManualContact(c.peerId);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.block, color: Colors.redAccent),
+              title: const Text('В чёрный список', style: TextStyle(color: Colors.redAccent)),
+              subtitle: const Text('Не сможет писать и звонить; вы ему тоже', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              onTap: () async {
+                Navigator.pop(ctx);
+                final ok = await _confirm(context, 'В чёрный список?', '«${c.displayName}» пропадёт из списка. Блок двусторонний.', 'Заблокировать');
+                if (ok) await state.blockContact(c.peerId, c.displayName.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim());
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<bool> _confirm(BuildContext context, String title, String body, String action) async {
+    final r = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text(title, style: const TextStyle(color: AppTheme.text)),
+        content: Text(body, style: const TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true),
+              child: Text(action, style: const TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    return r ?? false;
   }
 
   /// Нажали на того, кто ещё не в контактах: открыть чат или добавить.
@@ -133,6 +211,12 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
           ),
           IconButton(
+            tooltip: 'Чёрный список',
+            icon: const Icon(Icons.block, color: AppTheme.textSecondary),
+            onPressed: () => Navigator.push(context,
+                MaterialPageRoute(builder: (_) => const BlacklistScreen())),
+          ),
+          IconButton(
             icon: const Icon(Icons.settings, color: AppTheme.textSecondary),
             onPressed: () => Navigator.push(context,
                 MaterialPageRoute(builder: (_) => const SettingsScreen())),
@@ -171,6 +255,7 @@ class _HomeScreenState extends State<HomeScreen> {
                 onOpen: (c) => _openChat(context, c),
                 onTapUnsaved: (c) => _showContactSheet(context, state, c),
                 onDelete: (c) => state.removeManualContact(c.peerId),
+                onMenu: (c) => _showContactMenu(context, state, c),
               ),
             ),
     );
@@ -252,7 +337,8 @@ class _ContactList extends StatelessWidget {
   final void Function(Contact) onOpen;
   final void Function(Contact) onTapUnsaved;
   final void Function(Contact) onDelete;
-  const _ContactList({required this.contacts, required this.onOpen, required this.onTapUnsaved, required this.onDelete});
+  final void Function(Contact) onMenu;
+  const _ContactList({required this.contacts, required this.onOpen, required this.onTapUnsaved, required this.onDelete, required this.onMenu});
 
   @override
   Widget build(BuildContext context) {
@@ -262,7 +348,9 @@ class _ContactList extends StatelessWidget {
       for (final c in saved)
         _ContactTile(
           peerId: c.peerId, displayName: c.displayName, online: c.online, isManual: c.isManual, saved: true,
+          unread: context.watch<AppState>().unreadFor(c.peerId),
           onTap: () => onOpen(c),
+          onLongPress: () => onMenu(c),
           onDelete: c.isManual ? () => onDelete(c) : null,
         ),
       if (other.isNotEmpty)
@@ -274,6 +362,7 @@ class _ContactList extends StatelessWidget {
       for (final c in other)
         _ContactTile(
           peerId: c.peerId, displayName: c.displayName, online: c.online, isManual: c.isManual, saved: false,
+          unread: context.watch<AppState>().unreadFor(c.peerId),
           onTap: () => onTapUnsaved(c),
           onAdd: () => showSaveContactDialog(context, c.peerId, c.displayName),
         ),
@@ -322,8 +411,10 @@ class _ContactTile extends StatelessWidget {
   final bool        online;
   final bool        isManual;
   final bool        saved;
+  final int         unread;
   final VoidCallback? onAdd;
   final VoidCallback onTap;
+  final VoidCallback? onLongPress;
   final VoidCallback? onDelete;
 
   const _ContactTile({
@@ -333,7 +424,9 @@ class _ContactTile extends StatelessWidget {
     required this.isManual,
     required this.onTap,
     this.saved = true,
+    this.unread = 0,
     this.onAdd,
+    this.onLongPress,
     this.onDelete,
   });
 
@@ -341,6 +434,7 @@ class _ContactTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final tile = InkWell(
       onTap: onTap,
+      onLongPress: onLongPress,
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         decoration: const BoxDecoration(
@@ -402,6 +496,18 @@ class _ContactTile extends StatelessWidget {
                 ],
               ),
             ),
+            if (unread > 0) ...[
+              Container(
+                constraints: const BoxConstraints(minWidth: 22),
+                height: 22,
+                padding: const EdgeInsets.symmetric(horizontal: 7),
+                decoration: const BoxDecoration(color: Colors.redAccent, borderRadius: BorderRadius.all(Radius.circular(11))),
+                alignment: Alignment.center,
+                child: Text(unread > 99 ? '99+' : '$unread',
+                    style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+              ),
+              const SizedBox(width: 8),
+            ],
             if (onAdd != null)
               IconButton(
                 tooltip: 'Добавить в контакты',

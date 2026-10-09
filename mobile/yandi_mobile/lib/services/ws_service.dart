@@ -123,10 +123,15 @@ class WsService {
     final node = _node;
     if (node == null || node.token == null) return;
 
-    final wsUrl = Uri.parse('${node.wsUrl}/mobile/ws?token=${node.token}');
+    // #4 аудита: токен в заголовке Authorization, а не в URL сокета (URL может попасть в логи/дампы)
+    final wsUrl = Uri.parse('${node.wsUrl}/mobile/ws');
     try {
       final httpClient = _buildPinnedClient(node.fingerprint);
-      _channel = IOWebSocketChannel.connect(wsUrl, customClient: httpClient);
+      _channel = IOWebSocketChannel.connect(
+        wsUrl,
+        customClient: httpClient,
+        headers: {'Authorization': 'Bearer ${node.token}'},
+      );
       final ch = _channel!;
       ch.ready.then((_) { if (identical(_channel, ch)) onOpen?.call(); }).catchError((_) {});
       ch.stream.listen(

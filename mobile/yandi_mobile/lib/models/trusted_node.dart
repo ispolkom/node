@@ -29,15 +29,11 @@ class TrustedNode {
     required this.addedAt,
   });
 
-  String get wsUrl {
-    final scheme = fingerprint.isNotEmpty ? 'wss' : 'ws';
-    return '$scheme://$host:$port';
-  }
+  String get wsUrl => 'wss://$host:$port';   // #3/#9: всегда wss, без отката на ws
 
-  String get httpUrl {
-    final scheme = fingerprint.isNotEmpty ? 'https' : 'http';
-    return '$scheme://$host:$port';
-  }
+  // #3/#9 аудита: узел всегда по TLS. Никакого отката на http/ws даже при пустом fingerprint
+  // (пустой fingerprint — ошибка конфигурации, но открытым текстом в сеть не идём).
+  String get httpUrl => 'https://$host:$port';
 
   factory TrustedNode.fromJson(Map<String, dynamic> json) {
     return TrustedNode(

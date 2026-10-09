@@ -94,6 +94,7 @@ class _LifecycleWrapperState extends State<_LifecycleWrapper>
     final appState = context.read<AppState>();
     if (s == AppLifecycleState.resumed) {
       appState.onScreenOn();
+      NotificationService.cancelAll();   // вернулись в приложение — события просмотрены, значок гаснет
       AppLockService.onForeground(context);
     } else if (s == AppLifecycleState.paused) {
       appState.onScreenOff();

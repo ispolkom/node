@@ -21,6 +21,27 @@ class _PairScreenState extends State<PairScreen> {
   bool _processing = false;
   String? _error;
   final TextEditingController _manual = TextEditingController();
+  bool _scanMode = true;   // true — камера; false — ручной ввод текста (камера выключена)
+
+  void _setScanMode(bool on) {
+    if (_scanMode == on) return;
+    setState(() { _scanMode = on; _error = null; });
+    if (on) {
+      _resetScan('Наведите камеру на QR: код должен целиком поместиться в рамку');
+      _scanner.start();
+    } else {
+      _scanner.stop();   // гасим камеру
+    }
+  }
+
+  void _connectManual() {
+    final t = _manual.text.trim();
+    if (t.isEmpty) {
+      setState(() => _error = 'Поле пустое: вставьте текст из-под QR со страницы узла.');
+      return;
+    }
+    _onQr(t);
+  }
 
   // Каждый кадр с кодом доходит до onDetect: решение принимаем сами (код целиком
   // в кадре, крупный, читается несколько кадров подряд), а не по первому попавшемуся.
@@ -129,7 +150,12 @@ class _PairScreenState extends State<PairScreen> {
     setState(() { _processing = true; _error = null; });
 
     try {
-      final data        = jsonDecode(raw) as Map<String, dynamic>;
+      // Новый формат — непрозрачный blob YANDI-PAIR-1:<base64 JSON>; старый — открытый JSON. Понимаем оба.
+      var payload = raw.trim();
+      if (payload.startsWith('YANDI-PAIR-1:')) {
+        payload = utf8.decode(base64.decode(payload.substring('YANDI-PAIR-1:'.length).trim()));
+      }
+      final data        = jsonDecode(payload) as Map<String, dynamic>;
       final host        = data['host']            as String;
       final port        = data['port']            as int;
       final code        = data['pairing_code']    as String;
@@ -210,103 +236,132 @@ class _PairScreenState extends State<PairScreen> {
       ),
       body: Column(
         children: [
-          const SizedBox(height: 24),
-          const Padding(
-            padding: EdgeInsets.symmetric(horizontal: 24),
-            child: Text(
-              'Откройте настройки ноды, карточка\n«Приложение на телефоне», «Показать QR».\nПосканируйте QR-код или вставьте текст под ним.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: AppTheme.textSecondary, fontSize: 14),
-            ),
-          ),
-          const SizedBox(height: 24),
-          Expanded(
-            child: ClipRRect(
-                    borderRadius: BorderRadius.circular(16),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        MobileScanner(
-                          controller: _scanner,
-                          onDetect: _onDetect,
-                        ),
-                        // рамка-прицел: в неё должен целиком поместиться квадрат QR
-                        Center(
-                          child: FractionallySizedBox(
-                            widthFactor: 0.7,
-                            child: AspectRatio(
-                              aspectRatio: 1,
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  border: Border.all(
-                                    color: _recognized ? Colors.greenAccent : AppTheme.accent,
-                                    width: 3,
-                                  ),
-                                  borderRadius: BorderRadius.circular(12),
-                                ),
-                              ),
-                            ),
-                          ),
-                        ),
-                        Positioned(
-                          left: 16, right: 16, bottom: 12,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            decoration: BoxDecoration(
-                              color: Colors.black54,
-                              borderRadius: BorderRadius.circular(10),
-                            ),
-                            child: Text(
-                              _hint,
-                              textAlign: TextAlign.center,
-                              style: const TextStyle(color: Colors.white, fontSize: 14),
-                            ),
-                          ),
-                        ),
-                        if (_processing)
-                          const Positioned.fill(
-                            child: ColoredBox(
-                              color: Colors.black54,
-                              child: Center(child: CircularProgressIndicator(color: AppTheme.accent)),
-                            ),
-                          ),
-                      ],
-                    ),
-                  ),
-          ),
+          const SizedBox(height: 12),
+          // выбор способа: камера или текст
           Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+            padding: const EdgeInsets.symmetric(horizontal: 16),
             child: Row(children: [
-              Expanded(
-                child: TextField(
-                  controller: _manual,
-                  style: const TextStyle(color: AppTheme.text, fontSize: 12),
-                  decoration: const InputDecoration(hintText: 'Текст из QR (если камера не читает)'),
-                ),
-              ),
+              Expanded(child: _modeButton('Сканировать QR', Icons.qr_code_scanner, _scanMode, () => _setScanMode(true))),
               const SizedBox(width: 8),
-              ElevatedButton(
-                onPressed: _processing
-                    ? null
-                    : () {
-                        final t = _manual.text.trim();
-                        if (t.isEmpty) {
-                          setState(() => _error = 'Поле пустое: вставьте текст из-под QR на странице узла или отсканируйте QR камерой.');
-                          return;
-                        }
-                        _onQr(t);
-                      },
-                child: const Text('Подключить'),
-              ),
+              Expanded(child: _modeButton('Ввести текст', Icons.keyboard, !_scanMode, () => _setScanMode(false))),
             ]),
           ),
+          const SizedBox(height: 12),
+          if (_scanMode) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 24),
+              child: Text(
+                'Откройте настройки узла → «Приложение на телефоне» → «Показать QR» и наведите камеру.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Expanded(
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(16),
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    MobileScanner(controller: _scanner, onDetect: _onDetect),
+                    Center(
+                      child: FractionallySizedBox(
+                        widthFactor: 0.7,
+                        child: AspectRatio(
+                          aspectRatio: 1,
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              border: Border.all(color: _recognized ? Colors.greenAccent : AppTheme.accent, width: 3),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                    Positioned(
+                      left: 16, right: 16, bottom: 12,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                        decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
+                        child: Text(_hint, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 14)),
+                      ),
+                    ),
+                    if (_processing)
+                      const Positioned.fill(
+                        child: ColoredBox(color: Colors.black54, child: Center(child: CircularProgressIndicator(color: AppTheme.accent))),
+                      ),
+                  ],
+                ),
+              ),
+            ),
+          ] else ...[
+            // ручной ввод: камера выключена
+            Expanded(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      'Вставьте текст подключения, который вам прислали (из-под QR на странице узла: он действует 5 минут и подходит один раз).',
+                      style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: _manual,
+                      enabled: !_processing,
+                      minLines: 4,
+                      maxLines: 8,
+                      style: const TextStyle(color: AppTheme.text, fontSize: 12),
+                      decoration: InputDecoration(
+                        hintText: 'Текст подключения',
+                        hintStyle: const TextStyle(color: AppTheme.textSecondary),
+                        filled: true,
+                        fillColor: AppTheme.surface,
+                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton(
+                      onPressed: _processing ? null : _connectManual,
+                      child: _processing
+                          ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                          : const Text('Подключить'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
           if (_error != null)
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
             ),
-          const SizedBox(height: 32),
+          const SizedBox(height: 16),
         ],
+      ),
+    );
+  }
+
+  Widget _modeButton(String label, IconData icon, bool active, VoidCallback onTap) {
+    return Material(
+      color: active ? AppTheme.accent : AppTheme.surface,
+      borderRadius: BorderRadius.circular(10),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(10),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 12),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: active ? Colors.black : AppTheme.text),
+              const SizedBox(width: 8),
+              Text(label, style: TextStyle(color: active ? Colors.black : AppTheme.text, fontSize: 14, fontWeight: FontWeight.w600)),
+            ],
+          ),
+        ),
       ),
     );
   }

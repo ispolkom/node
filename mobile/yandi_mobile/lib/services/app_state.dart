@@ -78,6 +78,9 @@ class AppState extends ChangeNotifier {
   Future<void> init() async {
     // 1. SQLite
     await StorageService.init();
+    _unread.addAll(await StorageService.loadUnread());
+    _blocked.addAll(await StorageService.loadBlacklist());
+    _editedIds.addAll(await StorageService.loadEditedIds());
 
     // 2. Ключи пользователя (генерируются один раз и навсегда)
     identity = await Identity.loadOrGenerate();
@@ -185,6 +188,7 @@ class AppState extends ChangeNotifier {
           text = utf8.decode(payloadBytes, allowMalformed: true);
         }
 
+        if (isBlocked(fromPeerId)) { ackIds.add(id); continue; }   // чёрный список
         final res = _classifyIncoming(fromPeerId, text);
         if (res == null) { ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
         final showText = res.$1;
@@ -200,6 +204,7 @@ class AppState extends ChangeNotifier {
         );
         // ConflictAlgorithm.ignore в saveMessage гарантирует идемпотентность
         await StorageService.saveMessage(msg);
+        if (activeChatPeerId != fromPeerId) _bumpUnread(fromPeerId);
         if (remoteId != null) _sendDeliveredReceipt(fromPeerId, remoteId);
         ackIds.add(id);
       }
@@ -320,7 +325,7 @@ class AppState extends ChangeNotifier {
         // знакомый только по Peer ID: «в сети», если узел видит его под тем же полным номером
         merged.add(Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true));
       }
-      contacts = merged;
+      contacts = merged.where((c) => !isBlocked(c.peerId)).toList();
       notifyListeners();
       announceReceiptSupport();
     } catch (_) {}
@@ -390,6 +395,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _onLiveSignal(LiveSignalEvent e) {
+    if (isBlocked(e.fromPeerId)) return;   // чёрный список: звонки/сигналы игнорируем
     if (MsgChannel.isCapPing(e.text)) { _receiptCapable.add(e.fromPeerId); return; }
     final sig = CallSignal.tryParse(e.text);
     if (sig != null) unawaited(calls.onSignal(e.fromPeerId, sig));
@@ -508,6 +514,82 @@ class AppState extends ChangeNotifier {
 
   final Set<String> _receiptCapable = {};   // устройства, умеющие квитанции
   final Set<String> _readAcked = {};         // remoteId, по которым уже отправили «прочитано»
+  final Map<String, int> _unread = {};       // непрочитанные по собеседникам (переживают перезапуск)
+  final Map<String, String> _blocked = {};    // чёрный список: peerId -> имя (двусторонний, app-side)
+
+  bool isBlocked(String peerId) => _blocked.containsKey(peerId);
+  List<MapEntry<String, String>> get blockedContacts => _blocked.entries.toList();
+
+  final Set<String> _editedIds = {};          // id сообщений с меткой «изменено» (persist)
+  bool isEdited(String msgId) => _editedIds.contains(msgId);
+
+  ChatMessage _withText(ChatMessage m, String text) => ChatMessage(
+    id: m.id, peerId: m.peerId, outgoing: m.outgoing, text: text,
+    timestamp: m.timestamp, status: m.status, remoteId: m.remoteId,
+  );
+
+  /// Изменить своё отправленное сообщение. Текст меняется и у вас, и у получателя (у него помечается «изменено»).
+  /// Удалить у получателя нельзя, а изменить можно — осознанно (см. метку).
+  Future<void> editMessage(String peerId, String msgId, String newText) async {
+    final t = newText.trim();
+    if (t.isEmpty) return;
+    final list = _chats[peerId];
+    if (list == null) return;
+    final i = list.indexWhere((m) => m.id == msgId && m.outgoing);
+    if (i < 0) return;
+    list[i] = _withText(list[i], t);
+    _editedIds.add(msgId);
+    await StorageService.updateMessageText(msgId, t);
+    await StorageService.saveEditedIds(_editedIds);
+    // отправляем правку собеседнику (конверт с тем же id); если не умеет — просто не применит
+    unawaited(_ws?.sendMessage(peerId, MsgChannel.editMessage(msgId, t)) ?? Future<void>.value());
+    notifyListeners();
+  }
+
+  /// Пришла правка от собеседника: находим его сообщение по remoteId и заменяем текст + метка «изменено».
+  void _applyEdit(String from, String cmid, String newText) {
+    final list = _chats[from];
+    if (list == null) return;
+    final i = list.indexWhere((m) => !m.outgoing && m.remoteId == cmid);
+    if (i < 0) return;
+    final local = list[i];
+    list[i] = _withText(local, newText);
+    _editedIds.add(local.id);
+    unawaited(StorageService.updateMessageText(local.id, newText));
+    unawaited(StorageService.saveEditedIds(_editedIds));
+    notifyListeners();
+  }
+
+  Future<void> blockContact(String peerId, String name) async {
+    _blocked[peerId] = name;
+    contacts.removeWhere((c) => c.peerId == peerId);   // исчезает из списка
+    _unread.remove(peerId);
+    await StorageService.saveBlacklist(_blocked);
+    await StorageService.saveUnread(_unread);
+    notifyListeners();
+  }
+
+  Future<void> unblockContact(String peerId) async {
+    _blocked.remove(peerId);
+    await StorageService.saveBlacklist(_blocked);
+    unawaited(refreshContacts());
+    notifyListeners();
+  }
+
+  int unreadFor(String peerId) => _unread[peerId] ?? 0;
+
+  void _bumpUnread(String peerId) {
+    _unread[peerId] = (_unread[peerId] ?? 0) + 1;
+    unawaited(StorageService.saveUnread(_unread));
+    notifyListeners();
+  }
+
+  void _clearUnread(String peerId) {
+    if ((_unread[peerId] ?? 0) == 0) return;
+    _unread[peerId] = 0;
+    unawaited(StorageService.saveUnread(_unread));
+    notifyListeners();
+  }
 
   int _statusRank(MessageStatus s) => switch (s) {
     MessageStatus.failed    => -1,
@@ -521,6 +603,8 @@ class AppState extends ChangeNotifier {
   (String, String?)? _classifyIncoming(String from, String rawText) {
     final rcpt = MsgChannel.parseReceipt(rawText);
     if (rcpt != null) { _applyReceipt(from, rcpt.$1, rcpt.$2); return null; }
+    final edit = MsgChannel.parseEdit(rawText);
+    if (edit != null) { _applyEdit(from, edit.$1, edit.$2); return null; }
     if (MsgChannel.isCapPing(rawText)) { _receiptCapable.add(from); return null; }
     final env = MsgChannel.parseMessage(rawText);
     if (env != null) { _receiptCapable.add(from); return (env.$2, env.$1); } // (cmid, text) -> (text, cmid)
@@ -558,6 +642,7 @@ class AppState extends ChangeNotifier {
 
   /// Чат открыт/дошли новые — отправить «прочитано» по входящим этого собеседника.
   void markChatRead(String peerId) {
+    _clearUnread(peerId);
     final list = _chats[peerId];
     if (list == null) return;
     final ids = <String>[];
@@ -589,6 +674,7 @@ class AppState extends ChangeNotifier {
   }
 
   Future<void> sendMessage(String peerId, String text) async {
+    if (isBlocked(peerId)) return;   // двусторонний блок: заблокированному не отправляем
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     // тем, кто умеет квитанции, шлём конверт с id (чтобы получатель мог ответить «доставлено/прочитано»); остальным — обычный текст
     final payload = _receiptCapable.contains(peerId) ? MsgChannel.wrapMessage(id, text) : text;
@@ -665,6 +751,7 @@ class AppState extends ChangeNotifier {
   // ── WebSocket события ─────────────────────────────────────────────────────
 
   void _onIncomingChat(IncomingChatEvent e) async {
+    if (isBlocked(e.fromPeerId)) return;   // чёрный список: не показываем и не подтверждаем
     final res = _classifyIncoming(e.fromPeerId, e.text);
     if (res == null) { notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
     final showText = res.$1;
@@ -680,6 +767,7 @@ class AppState extends ChangeNotifier {
     );
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
+    if (activeChatPeerId != e.fromPeerId) _bumpUnread(e.fromPeerId);
     if (remoteId != null) {
       _sendDeliveredReceipt(e.fromPeerId, remoteId);
       // чат открыт — сразу «прочитано»

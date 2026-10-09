@@ -10,6 +10,7 @@ class MsgChannel {
   static const String msgMarker  = '\u0001yandi-msg:';   // {cmid, text} — обычное сообщение с id для квитанций
   static const String rcptMarker = '\u0001yandi-rcpt:';  // {kind: delivered|read, ids: [...]} — квитанция
   static const String capMarker  = '\u0001yandi-cap:';   // поддержка квитанций этим устройством (пинг)
+  static const String editMarker = '\u0001yandi-edit:';  // {cmid, text} — правка ранее отправленного сообщения
 
   /// Завернуть текст с его локальным id (cmid), чтобы получатель мог сослаться на него в квитанции.
   static String wrapMessage(String cmid, String text) =>
@@ -20,10 +21,27 @@ class MsgChannel {
   static String receipt(String kind, List<String> ids) =>
       rcptMarker + jsonEncode({'kind': kind, 'ids': ids});
 
+  static String editMessage(String cmid, String text) =>
+      editMarker + jsonEncode({'cmid': cmid, 'text': text});
+
   static bool isService(String t) =>
-      t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker);
+      t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker);
 
   static bool isCapPing(String t) => t.startsWith(capMarker);
+
+  /// Разобрать конверт правки: (cmid, новый текст).
+  static (String, String)? parseEdit(String t) {
+    if (!t.startsWith(editMarker)) return null;
+    try {
+      final m = jsonDecode(t.substring(editMarker.length)) as Map<String, dynamic>;
+      final cmid = m['cmid'] as String?;
+      final text = m['text'] as String?;
+      if (cmid == null || text == null || cmid.isEmpty) return null;
+      return (cmid, text);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Разобрать конверт сообщения: (cmid, text). null — это не конверт.
   static (String, String)? parseMessage(String t) {

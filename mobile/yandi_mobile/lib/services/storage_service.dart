@@ -103,17 +103,33 @@ class StorageService {
 
   // ── Ноды ──────────────────────────────────────────────────────────────────
 
+  static const String _nodeTokKey = 'node_token_';
+
   static Future<List<TrustedNode>> loadNodes() async {
     final rows = await db.query('nodes', orderBy: 'added_at ASC');
-    return rows.map(TrustedNode.fromJson).toList();
+    final out = <TrustedNode>[];
+    for (final r in rows) {
+      final node = TrustedNode.fromJson(r);
+      var token = await secureRead('$_nodeTokKey${node.id}');
+      final legacy = r['token'] as String?;
+      if ((token == null || token.isEmpty) && legacy != null && legacy.isNotEmpty) {
+        // #8 аудита: токен раньше лежал в открытой SQLite — переносим в secure storage и чистим колонку
+        token = legacy;
+        await secureWrite('$_nodeTokKey${node.id}', token);
+        await db.update('nodes', {'token': null}, where: 'id = ?', whereArgs: [node.id]);
+      }
+      out.add((token != null && token.isNotEmpty) ? node.copyWith(token: token) : node);
+    }
+    return out;
   }
 
   static Future<void> saveNode(TrustedNode node) async {
-    await db.insert(
-      'nodes',
-      node.toJson(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    final m = node.toJson();
+    m['token'] = null;   // #8: bearer-токен не храним в открытой SQLite
+    await db.insert('nodes', m, conflictAlgorithm: ConflictAlgorithm.replace);
+    if (node.token != null && node.token!.isNotEmpty) {
+      await secureWrite('$_nodeTokKey${node.id}', node.token!);
+    }
   }
 
   static Future<void> updateNodeMetrics(TrustedNode node) async {
@@ -125,17 +141,21 @@ class StorageService {
         'uptime_hours': node.uptimeHours,
         'version':      node.version,
         'last_seen':    node.lastSeen?.millisecondsSinceEpoch,
-        'token':        node.token,
+        'token':        null,   // #8: не в SQLite
         'is_preferred': node.isPreferred ? 1 : 0,
         'name':         node.name,
       },
       where: 'id = ?',
       whereArgs: [node.id],
     );
+    if (node.token != null && node.token!.isNotEmpty) {
+      await secureWrite('$_nodeTokKey${node.id}', node.token!);
+    }
   }
 
   static Future<void> deleteNode(String id) async {
     await db.delete('nodes', where: 'id = ?', whereArgs: [id]);
+    await secureDelete('$_nodeTokKey$id');
   }
 
   // ── Кэш публичных ключей пиров ─────────────────────────────────────────────
@@ -208,6 +228,19 @@ class StorageService {
     );
   }
 
+  static Future<void> updateMessageText(String id, String text) async {
+    await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
+  }
+
+  static Future<Set<String>> loadEditedIds() async {
+    final s = await secureRead('edited_ids');
+    if (s == null || s.isEmpty) return {};
+    try { return (jsonDecode(s) as List).map((e) => e.toString()).toSet(); } catch (_) { return {}; }
+  }
+
+  static Future<void> saveEditedIds(Set<String> ids) =>
+      secureWrite('edited_ids', jsonEncode(ids.toList()));
+
   /// Удалить сообщения по id (только локально у этого пользователя).
   static Future<void> deleteMessages(List<String> ids) async {
     if (ids.isEmpty) return;
@@ -229,6 +262,38 @@ class StorageService {
 
   static Future<void> setLastInboxSyncMs(int ms) =>
       secureWrite('last_inbox_sync_ms', ms.toString());
+
+  // ── Счётчик непрочитанных по собеседникам (переживает перезапуск) ───────────
+
+  static Future<Map<String, int>> loadUnread() async {
+    final s = await secureRead('unread_counts');
+    if (s == null || s.isEmpty) return {};
+    try {
+      final m = jsonDecode(s) as Map<String, dynamic>;
+      return m.map((k, v) => MapEntry(k, (v as num).toInt()));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Future<void> saveUnread(Map<String, int> m) =>
+      secureWrite('unread_counts', jsonEncode(m));
+
+  // ── Чёрный список (peerId -> отображаемое имя) ──────────────────────────────
+
+  static Future<Map<String, String>> loadBlacklist() async {
+    final s = await secureRead('blacklist');
+    if (s == null || s.isEmpty) return {};
+    try {
+      final m = jsonDecode(s) as Map<String, dynamic>;
+      return m.map((k, v) => MapEntry(k, v.toString()));
+    } catch (_) {
+      return {};
+    }
+  }
+
+  static Future<void> saveBlacklist(Map<String, String> m) =>
+      secureWrite('blacklist', jsonEncode(m));
 
   // ── Ручные контакты ───────────────────────────────────────────────────────
 
