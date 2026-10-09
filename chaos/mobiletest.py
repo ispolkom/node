@@ -12,6 +12,13 @@ os.makedirs(out, exist_ok=True)
 os.environ["YANDI_MOBILE_TLS_PORT"] = str(PORT)
 fails = []
 
+def _pair_text(t):
+    # QR/текст приглашения: YANDI-PAIR-1:<base64 JSON> (или старый открытый JSON)
+    t = t.strip()
+    if t.startswith('YANDI-PAIR-1:'):
+        t = base64.b64decode(t[len('YANDI-PAIR-1:'):]).decode()
+    return json.loads(t)
+
 def check(name, cond, extra=""):
     print(("ok   " if cond else "FAIL ") + name + (" " + str(extra) if extra and not cond else ""))
     if not cond:
@@ -99,7 +106,7 @@ st, _ = req("POST", "/mobile/pair", {"pairing_code": "000000"})
 check("pair without an issued code refused", st == 403, st)
 st, q = a.api("GET", "/api/mobile/pairing?host=127.0.0.1")
 check("web issues the QR", st == 200 and q.get("status") == "ok" and "<svg" in q.get("qr_svg", ""), (st, q))
-qr = json.loads(q["qr_text"])
+qr = _pair_text(q["qr_text"])
 check("QR carries host, port, fingerprint, tls", qr["port"] == PORT and qr["tls"] is True and len(qr["tls_fingerprint"]) == 64, qr)
 der = ssl.get_server_certificate(("127.0.0.1", PORT))
 fp = hashlib.sha256(ssl.PEM_cert_to_DER_cert(der)).hexdigest()
@@ -110,7 +117,7 @@ check("wrong code refused", st == 403, st)
 st, r = req("POST", "/mobile/pair", {"pairing_code": qr["pairing_code"], "device_name": "test phone"})
 check("code burnt after 5 wrong tries", st == 403, st)
 st, q = a.api("GET", "/api/mobile/pairing?host=127.0.0.1")
-qr = json.loads(q["qr_text"])
+qr = _pair_text(q["qr_text"])
 st, r = req("POST", "/mobile/pair", {"pairing_code": qr["pairing_code"], "device_name": "test phone"})
 check("pairing gives a token", st == 200 and len(r.get("token", "")) == 64, (st, r))
 tok = r["token"]
@@ -167,7 +174,7 @@ check("Bob received the socket message", any(m["text"] == "sent by socket" for m
 # ---- two phones of the owner through the PC
 def pair_phone(name):
     st, q = a.api("GET", "/api/mobile/pairing?host=127.0.0.1")
-    code = json.loads(q["qr_text"])["pairing_code"]
+    code = _pair_text(q["qr_text"])["pairing_code"]
     st, r = req("POST", "/mobile/pair", {"pairing_code": code, "device_name": name})
     return r["token"]
 tok1 = tok

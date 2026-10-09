@@ -161,8 +161,13 @@ pub fn issue_pairing_code() -> String {
 }
 
 /// Содержимое QR для приложения.
+/// Содержимое QR и текста для приложения: `YANDI-PAIR-1:<base64 JSON>`. Непрозрачный blob (а не открытый JSON) — чтобы фильтры по
+/// шаблону («pairing_code», голый IP) не цепляли приглашение, когда его пересылают в чатах/почте. Безопасность та же: внутри всё тот
+/// же одноразовый код на 5 минут. Приложение понимает и новый blob, и старый открытый JSON.
 pub fn pairing_qr_json(host: &str, port: u16, fingerprint_hex: &str) -> String {
-    json!({"host": host, "port": port, "pairing_code": issue_pairing_code(), "tls_fingerprint": fingerprint_hex, "tls": true}).to_string()
+    use base64::Engine;
+    let json = json!({"host": host, "port": port, "pairing_code": issue_pairing_code(), "tls_fingerprint": fingerprint_hex, "tls": true}).to_string();
+    format!("YANDI-PAIR-1:{}", base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
 }
 
 fn same(a: &str, b: &str) -> bool {
