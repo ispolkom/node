@@ -6,6 +6,8 @@ import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.util.Log
+import hev.htproxy.TProxyService
+import java.io.File
 import java.io.BufferedInputStream
 import java.io.InputStream
 import java.io.OutputStream
@@ -37,6 +39,10 @@ class YandiVpnService : VpnService() {
         const val ACTION_STOP  = "com.yandi.vpn.STOP"
         private const val TAG = "YandiVpn"
         const val LOCAL_PORT = 10808
+        private const val MTU = 1400
+        private const val TUN_V4 = "198.18.0.1"
+        private const val TUN_V6 = "fc00::1"
+        private const val DNS_ADDR = "198.18.0.2"
 
         @Volatile var running = false
         val bytesUp   = AtomicLong(0)
@@ -45,6 +51,7 @@ class YandiVpnService : VpnService() {
     }
 
     private var tun: ParcelFileDescriptor? = null
+    private var tunnelStarted = false
     private var proxy: LocalProxy? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -66,15 +73,63 @@ class YandiVpnService : VpnService() {
         val p = LocalProxy(host, port, fp, token) { s -> protect(s) }
         val local = p.start(LOCAL_PORT)
         proxy = p
-        val b = Builder().setSession("YANDI").addAddress("10.77.77.2", 32).addRoute("10.77.77.0", 24).setMtu(1400)
-        if (Build.VERSION.SDK_INT >= 29) b.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", local))
+
+        val full = TProxyService.available
+        val b = Builder().setSession("YANDI").setMtu(MTU)
+        if (full) {
+            // полный туннель: в TUN уходит весь трафик, свои сокеты (канал до компьютера) защищены protect(); DNS-запросы
+            // принимает сам туннель и отдаёт приложениям временные адреса (mapdns), а имя уходит дальше вместе с запросом на соединение
+            b.addAddress(TUN_V4, 32).addRoute("0.0.0.0", 0)
+            b.addAddress(TUN_V6, 128).addRoute("::", 0)
+            b.addDnsServer(DNS_ADDR)
+            // само приложение (чат, сопряжение) ходит к компьютеру напрямую, мимо туннеля
+            runCatching { b.addDisallowedApplication(packageName) }
+            if (Build.VERSION.SDK_INT >= 29) b.setMetered(false)
+        } else {
+            // запасной режим (нет нативной библиотеки): только объявляем системе прокси на телефоне
+            b.addAddress("10.77.77.2", 32).addRoute("10.77.77.0", 24)
+            if (Build.VERSION.SDK_INT >= 29) b.setHttpProxy(ProxyInfo.buildDirectProxy("127.0.0.1", local))
+        }
         tun = b.establish()
-        running = tun != null
-        Log.i(TAG, "VPN (прокси-режим) running=$running, локальный прокси на $local")
+        var ok = tun != null
+        if (ok && full) {
+            val cfg = File(filesDir, "tproxy.yml")
+            cfg.writeText(tproxyConfig(local))
+            ok = TProxyService.TProxyStartService(cfg.absolutePath, tun!!.fd)
+            tunnelStarted = ok
+            if (!ok) Log.e(TAG, "не запустился hev-socks5-tunnel")
+        }
+        running = ok
+        Log.i(TAG, "VPN ${if (full) "(полный туннель)" else "(прокси-режим)"} running=$running, локальный прокси на $local")
+        if (!ok) teardown()
     }
+
+    private fun tproxyConfig(socksPort: Int): String = """
+        tunnel:
+          mtu: $MTU
+          ipv4: $TUN_V4
+          ipv6: '$TUN_V6'
+        socks5:
+          port: $socksPort
+          address: 127.0.0.1
+          udp: 'udp'
+        mapdns:
+          address: $DNS_ADDR
+          port: 53
+          network: 198.19.0.0
+          netmask: 255.255.0.0
+          cache-size: 10000
+        misc:
+          task-stack-size: 24576
+          connect-timeout: 10000
+          tcp-read-write-timeout: 300000
+          udp-read-write-timeout: 20000
+          log-level: warn
+    """.trimIndent() + "\n"
 
     private fun teardown() {
         running = false
+        if (tunnelStarted) { runCatching { TProxyService.TProxyStopService() }; tunnelStarted = false }
         proxy?.stop(); proxy = null
         runCatching { tun?.close() }; tun = null
     }

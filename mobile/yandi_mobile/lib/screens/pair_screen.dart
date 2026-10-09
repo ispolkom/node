@@ -47,6 +47,21 @@ class _PairScreenState extends State<PairScreen> {
     super.dispose();
   }
 
+  /// Понятное объяснение вместо сырого текста исключения.
+  String _humanError(Object e) {
+    final t = e.toString();
+    if (t.contains('bad or expired pairing code')) {
+      return 'Код устарел или уже использован. На компьютере нажмите «Показать QR» ещё раз и отсканируйте новый (код живёт 5 минут и подходит один раз).';
+    }
+    if (e is FormatException) {
+      return 'Это не QR узла YANDI или текст вставлен не полностью. Вставьте весь текст из-под QR целиком.';
+    }
+    if (t.contains('TimeoutException')) {
+      return 'Узел не ответил за 10 секунд. Проверьте адрес в QR, интернет на телефоне и что порт узла открыт.';
+    }
+    return t;
+  }
+
   void _resetScan([String? hint]) {
     _candidate = null; _hits = 0; _firstHit = null; _lastHit = null;
     if (hint != null && hint != _hint && mounted) setState(() => _hint = hint);
@@ -169,8 +184,7 @@ class _PairScreenState extends State<PairScreen> {
       _recognized = false;
       _resetScan('Не вышло подключиться. Наведите камеру на QR ещё раз');
       if (!mounted) return;
-      setState(() { _processing = false; _error = e.toString(); });
-      _scanner.start();
+      setState(() { _processing = false; _error = _humanError(e); });
     }
   }
 
@@ -207,9 +221,7 @@ class _PairScreenState extends State<PairScreen> {
           ),
           const SizedBox(height: 24),
           Expanded(
-            child: _processing
-                ? const Center(child: CircularProgressIndicator(color: AppTheme.accent))
-                : ClipRRect(
+            child: ClipRRect(
                     borderRadius: BorderRadius.circular(16),
                     child: Stack(
                       fit: StackFit.expand,
@@ -251,6 +263,13 @@ class _PairScreenState extends State<PairScreen> {
                             ),
                           ),
                         ),
+                        if (_processing)
+                          const Positioned.fill(
+                            child: ColoredBox(
+                              color: Colors.black54,
+                              child: Center(child: CircularProgressIndicator(color: AppTheme.accent)),
+                            ),
+                          ),
                       ],
                     ),
                   ),
@@ -267,7 +286,16 @@ class _PairScreenState extends State<PairScreen> {
               ),
               const SizedBox(width: 8),
               ElevatedButton(
-                onPressed: _processing ? null : () => _onQr(_manual.text.trim()),
+                onPressed: _processing
+                    ? null
+                    : () {
+                        final t = _manual.text.trim();
+                        if (t.isEmpty) {
+                          setState(() => _error = 'Поле пустое: вставьте текст из-под QR на странице узла или отсканируйте QR камерой.');
+                          return;
+                        }
+                        _onQr(t);
+                      },
                 child: const Text('Подключить'),
               ),
             ]),

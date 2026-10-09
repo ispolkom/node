@@ -30,6 +30,18 @@ android {
         versionCode 1
         versionName "1.0.0"
         multiDexEnabled true
+        externalNativeBuild {
+            cmake {
+                abiFilters 'arm64-v8a', 'armeabi-v7a'
+            }
+        }
+    }
+
+    // полный туннель: hev-socks5-tunnel (MIT), см. src/main/jni
+    externalNativeBuild {
+        cmake {
+            path file('src/main/jni/CMakeLists.txt')
+        }
     }
 
     buildTypes {
