@@ -473,7 +473,7 @@ async fn inbox_ack(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 
 /// Выход в интернет через этот компьютер всегда доступен устройству с токеном; куда именно он идёт, решает владелец (внешний прокси в настройках).
 async fn proxy_info() -> Json<serde_json::Value> {
-    Json(json!({"running": true, "host": "этот компьютер", "port": crate::mobile_tls::configured_port(), "upstream": crate::upstream_proxy::active().is_some()}))
+    Json(json!({"running": true, "host": "этот компьютер", "port": crate::mobile_tls::configured_port(), "upstream": crate::upstream_proxy::is_active()}))
 }
 
 /// Публичный ключ телефона владельца (чтобы телефон шифровал сообщение для другого телефона сам); у обычных собеседников ключа нет — 404.
@@ -761,9 +761,11 @@ where
     let reply = |code: &str| format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
     let Some((target, token)) = connect_target_and_token(&head) else { return tls.write_all(reply("400 Bad Request").as_bytes()).await };
     let h = token_hash(&token);
-    if token.is_empty() || !with_devices(|d| d.iter().any(|x| same(&x.token_hash, &h))) {
+    // клиент выхода — это само устройство: за ним закрепляется один внешний прокси
+    let client = if token.is_empty() { None } else { device_peer_of(&h) };
+    let Some(client) = client else {
         return tls.write_all(reply("407 Proxy Authentication Required").as_bytes()).await;
-    }
+    };
     if TUNNELS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_TUNNELS {
         TUNNELS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         return tls.write_all(reply("503 Service Unavailable").as_bytes()).await;
@@ -775,7 +777,7 @@ where
         }
     }
     let _g = Guard;
-    let mut out = match crate::exit_policy::connect_public(&target, Duration::from_secs(15)).await {
+    let mut out = match crate::exit_policy::connect_public_for(&client, &target, Duration::from_secs(15)).await {
         Ok(s) => s,
         Err(e) => {
             let code = if e.kind() == std::io::ErrorKind::PermissionDenied { "403 Forbidden" } else { "502 Bad Gateway" };

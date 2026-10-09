@@ -193,51 +193,43 @@
 
                 <div class="card">
                     <div class="card-header">
-                        <h3 class="card-title">Внешний прокси для выхода в интернет</h3>
+                        <h3 class="card-title">Внешние прокси для выхода в интернет</h3>
                     </div>
                     <div class="card-body">
-                        <p class="form-help">Если из вашей страны нельзя выйти в интернет напрямую, пропишите свой прокси (например, купленный). Пока он включён, весь выход в интернет через ваш узел идёт только через него; если прокси перестанет отвечать, выход закроется, напрямую трафик не уйдёт. Переписка, звонки и файлы между людьми идут по нашему транспорту внутри сети и прокси не используют. Выключите прокси, и выход снова пойдёт через сеть.</p>
+                        <p class="form-help">Если из вашей страны нельзя выйти в интернет напрямую, пропишите свои прокси (например, купленные). Пока они включены, весь выход в интернет через ваш узел идёт только через них; если ни один не отвечает, выход закроется, напрямую трафик не уйдёт. Переписка, звонки и файлы между людьми идут по нашему транспорту внутри сети и прокси не используют. Прокси можно добавлять сколько угодно: за каждым устройством закрепляется один прокси (все его соединения выходят с одного адреса), новое устройство получает наименее загруженный. Не отвечающий прокси на время исключается, его устройства переезжают на живые.</p>
                         <div class="form-group">
-                            <label for="upKind">Тип соединения</label>
-                            <select id="upKind" class="form-input">
-                                <option value="socks5">SOCKS5</option>
-                                <option value="http_connect">HTTP (CONNECT)</option>
-                            </select>
+                            <label><input type="checkbox" id="pxMaster"> Использовать внешние прокси для выхода в интернет</label>
                         </div>
-                        <div class="form-group">
-                            <label for="upHost">Адрес сервера</label>
-                            <input type="text" id="upHost" class="form-input" placeholder="например, proxy.example.com или 203.0.113.5" maxlength="253" autocomplete="off">
+                        <div class="form-group" style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+                            <label for="pxCap">Устройств на один прокси</label>
+                            <input type="number" id="pxCap" class="form-input" min="1" max="1000" value="5" style="width:90px">
+                            <label><input type="checkbox" id="pxStrict"> строгий лимит (когда мест нет, новому устройству отказ; иначе оно садится на самый свободный прокси)</label>
+                            <button class="btn" id="pxSettingsBtn" type="button">Применить</button>
                         </div>
-                        <div class="form-group">
-                            <label for="upPort">Порт</label>
-                            <input type="number" id="upPort" class="form-input" min="1" max="65535" value="1080">
+                        <div id="pxList" class="form-help">загрузка…</div>
+                        <div style="margin-top:12px">
+                            <button class="btn btn-primary" id="pxAddToggle" type="button">Добавить прокси</button>
+                            <span id="pxMsg" class="form-help"></span>
                         </div>
-                        <div class="form-group">
-                            <label for="upAuth">Авторизация</label>
-                            <select id="upAuth" class="form-input">
-                                <option value="none">Нет</option>
-                                <option value="password">Логин и пароль</option>
-                            </select>
-                        </div>
-                        <div id="upAuthFields" style="display:none">
+                        <div id="pxAddBox" style="display:none;margin-top:10px">
                             <div class="form-group">
-                                <label for="upUser">Логин</label>
-                                <input type="text" id="upUser" class="form-input" maxlength="255" autocomplete="off">
+                                <label for="pxText">Списком, по прокси в строке</label>
+                                <textarea id="pxText" class="form-input" rows="5" style="width:100%;font-family:monospace" placeholder="хост:порт:логин:пароль&#10;логин:пароль@хост:порт&#10;socks5://логин:пароль@хост:порт&#10;http://логин:пароль@хост:порт&#10;хост:порт" spellcheck="false" autocomplete="off"></textarea>
+                                <span class="form-help">Строки без схемы считаются SOCKS5 (если выбран тип ниже). Пустые строки и строки с # игнорируются.</span>
+                            </div>
+                            <div class="form-group" style="display:flex;gap:14px;flex-wrap:wrap;align-items:center">
+                                <label for="pxKind">Тип для строк без схемы</label>
+                                <select id="pxKind" class="form-input" style="width:auto">
+                                    <option value="socks5">SOCKS5</option>
+                                    <option value="http_connect">HTTP (CONNECT)</option>
+                                </select>
+                                <label for="pxOwnCap">Свой предел устройств (пусто — общий)</label>
+                                <input type="number" id="pxOwnCap" class="form-input" min="1" max="1000" style="width:90px">
                             </div>
                             <div class="form-group">
-                                <label for="upPass">Пароль</label>
-                                <input type="password" id="upPass" class="form-input" maxlength="255" autocomplete="new-password">
-                                <span id="upPassHint" class="form-help"></span>
+                                <button class="btn btn-primary" id="pxAddBtn" type="button">Добавить</button>
+                                <button class="btn" id="pxAddCancel" type="button">Отмена</button>
                             </div>
-                        </div>
-                        <div class="form-group">
-                            <label><input type="checkbox" id="upEnabled"> Использовать этот прокси для выхода в интернет</label>
-                        </div>
-                        <div class="form-group">
-                            <button class="btn btn-primary" id="upSaveBtn" type="button">Сохранить</button>
-                            <button class="btn" id="upTestBtn" type="button">Проверить</button>
-                            <span id="upSaved" class="form-help"></span>
-                            <div id="upStatus" class="form-help" style="margin-top:8px"></div>
                         </div>
                     </div>
                 </div>
@@ -444,39 +436,93 @@
             });
         })();
 
-        // === Внешний прокси для выхода ===
+        // === Внешние прокси для выхода ===
         (function () {
             var el = function (id) { return document.getElementById(id); };
-            var saved = el('upSaved'), status = el('upStatus');
-            function authShow() { el('upAuthFields').style.display = el('upAuth').value === 'password' ? '' : 'none'; }
-            el('upAuth').addEventListener('change', authShow);
-            function show(j) {
-                if (!j.configured) { status.textContent = 'Прокси не настроен.'; authShow(); return; }
-                el('upKind').value = j.kind; el('upHost').value = j.host; el('upPort').value = j.port;
-                el('upAuth').value = j.auth; el('upUser').value = j.user || ''; el('upPass').value = '';
-                el('upPassHint').textContent = j.has_password ? 'Пароль сохранён; оставьте поле пустым, чтобы не менять.' : '';
-                el('upEnabled').checked = !!j.enabled; authShow();
-                var t = j.enabled ? 'Прокси включён.' : 'Прокси выключен: выход идёт через сеть.';
-                if (j.last_error) t += ' Последняя ошибка: ' + j.last_error;
-                else if (j.enabled && j.last_ok_secs_ago !== null) t += ' Последнее успешное соединение: ' + j.last_ok_secs_ago + ' с назад.';
-                status.textContent = t;
+            var list = el('pxList'), msg = el('pxMsg');
+            function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;'); }
+            function api(method, url, body) {
+                return fetch(url, { method: method, headers: { 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) })
+                    .then(function (r) { return r.json(); });
             }
-            function load() { fetch('/api/upstream-proxy').then(function (r) { return r.json(); }).then(show).catch(function () {}); }
+            function stateText(x) {
+                if (x.state === 'disabled') return '<span style="color:#999">выключен</span>';
+                if (x.state === 'cooldown') return '<span style="color:#e74c3c">не отвечает</span>, повтор через ' + x.cooldown_secs + ' с' + (x.last_error ? ' (' + esc(x.last_error) + ')' : '');
+                if (x.state === 'ok') return '<b style="color:#2ecc71">работает</b>, последнее соединение ' + x.last_ok_secs_ago + ' с назад';
+                return 'ещё не использовался' + (x.last_error ? ' (' + esc(x.last_error) + ')' : '');
+            }
+            function render(j) {
+                el('pxMaster').checked = !!j.enabled;
+                if (document.activeElement !== el('pxCap')) el('pxCap').value = j.max_clients;
+                el('pxStrict').checked = !!j.strict;
+                var l = j.proxies || [];
+                if (!l.length) { list.textContent = 'Прокси ещё не добавлены.'; return; }
+                list.innerHTML = l.map(function (x) {
+                    var kind = x.kind === 'socks5' ? 'SOCKS5' : 'HTTP';
+                    var who = x.auth === 'password' ? esc(x.user) + '@' : '';
+                    var full = x.clients >= x.cap ? ' style="color:#e67e22"' : '';
+                    return '<div style="padding:8px 0;border-bottom:1px solid #8884">'
+                        + '<div><b>' + who + esc(x.host) + ':' + x.port + '</b> · ' + kind + ' · <span' + full + '>устройств: ' + x.clients + ' из ' + x.cap + (x.max_clients ? ' (свой предел)' : '') + '</span></div>'
+                        + '<div>' + stateText(x) + '</div>'
+                        + '<div style="margin-top:4px">'
+                        + '<button class="btn" data-act="test" data-id="' + esc(x.id) + '" type="button">Проверить</button> '
+                        + '<button class="btn" data-act="toggle" data-id="' + esc(x.id) + '" data-on="' + (x.enabled ? 1 : 0) + '" type="button">' + (x.enabled ? 'Выключить' : 'Включить') + '</button> '
+                        + '<button class="btn" data-act="cap" data-id="' + esc(x.id) + '" data-cap="' + (x.max_clients || '') + '" type="button">Предел устройств</button> '
+                        + '<button class="btn" data-act="del" data-id="' + esc(x.id) + '" type="button">Удалить</button>'
+                        + '</div></div>';
+                }).join('');
+            }
+            function load() { api('GET', '/api/upstream-proxies').then(render).catch(function () { list.textContent = 'Нет связи с узлом.'; }); }
             load();
-            el('upSaveBtn').addEventListener('click', function () {
-                var body = { enabled: el('upEnabled').checked, kind: el('upKind').value, host: el('upHost').value, port: parseInt(el('upPort').value, 10) || 0,
-                             auth: el('upAuth').value, user: el('upUser').value, password: el('upPass').value };
-                fetch('/api/upstream-proxy', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-                    .then(function (r) { return r.json(); })
-                    .then(function (j) { saved.textContent = j.ok ? 'Сохранено.' : (j.error || 'Не удалось сохранить.'); if (j.ok) load(); })
-                    .catch(function () { saved.textContent = 'Нет связи с узлом.'; });
+            setInterval(load, 5000);
+
+            list.addEventListener('click', function (e) {
+                var b = e.target; var act = b && b.getAttribute && b.getAttribute('data-act');
+                if (!act) return;
+                var id = b.getAttribute('data-id');
+                if (act === 'test') {
+                    msg.textContent = 'Проверяю…';
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id) + '/test')
+                        .then(function (j) { msg.textContent = j.ok ? 'Прокси работает (' + j.ms + ' мс).' : ('Не работает: ' + (j.error || 'нет ответа')); load(); })
+                        .catch(function () { msg.textContent = 'Нет связи с узлом.'; });
+                } else if (act === 'toggle') {
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id), { enabled: b.getAttribute('data-on') !== '1' }).then(load);
+                } else if (act === 'cap') {
+                    var v = prompt('Сколько устройств может сидеть на этом прокси? Пусто или 0 — общий предел.', b.getAttribute('data-cap') || '');
+                    if (v === null) return;
+                    var n = parseInt(v, 10); if (isNaN(n) || n < 0) n = 0;
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id), { max_clients: n }).then(function (j) { msg.textContent = j.ok ? '' : (j.error || 'Не удалось.'); load(); });
+                } else if (act === 'del') {
+                    if (!confirm('Удалить этот прокси? Его устройства переедут на другие.')) return;
+                    api('DELETE', '/api/upstream-proxies/' + encodeURIComponent(id)).then(load);
+                }
             });
-            el('upTestBtn').addEventListener('click', function () {
-                saved.textContent = 'Проверяю…';
-                fetch('/api/upstream-proxy/test', { method: 'POST' })
-                    .then(function (r) { return r.json(); })
-                    .then(function (j) { saved.textContent = j.ok ? 'Прокси работает (' + j.ms + ' мс).' : ('Не работает: ' + (j.error || 'нет ответа')); load(); })
-                    .catch(function () { saved.textContent = 'Нет связи с узлом.'; });
+
+            el('pxSettingsBtn').addEventListener('click', function () {
+                var n = parseInt(el('pxCap').value, 10) || 0;
+                api('POST', '/api/upstream-proxies/settings', { enabled: el('pxMaster').checked, max_clients: n, strict: el('pxStrict').checked })
+                    .then(function (j) { msg.textContent = j.ok ? 'Сохранено.' : (j.error || 'Не удалось сохранить.'); load(); })
+                    .catch(function () { msg.textContent = 'Нет связи с узлом.'; });
+            });
+            el('pxMaster').addEventListener('change', function () {
+                api('POST', '/api/upstream-proxies/settings', { enabled: el('pxMaster').checked }).then(function () { load(); });
+            });
+
+            el('pxAddToggle').addEventListener('click', function () { el('pxAddBox').style.display = el('pxAddBox').style.display === 'none' ? '' : 'none'; });
+            el('pxAddCancel').addEventListener('click', function () { el('pxAddBox').style.display = 'none'; });
+            el('pxAddBtn').addEventListener('click', function () {
+                var text = el('pxText').value;
+                if (!text.trim()) { msg.textContent = 'Вставьте хотя бы одну строку.'; return; }
+                var body = { text: text, kind: el('pxKind').value };
+                var own = parseInt(el('pxOwnCap').value, 10);
+                if (own > 0) body.max_clients = own;
+                api('POST', '/api/upstream-proxies', body).then(function (j) {
+                    var t = 'Добавлено: ' + (j.added || 0) + '.';
+                    if (j.errors && j.errors.length) t += ' Не добавлено: ' + j.errors.join('; ');
+                    msg.textContent = t;
+                    if (j.added) { el('pxText').value = ''; el('pxAddBox').style.display = 'none'; }
+                    load();
+                }).catch(function () { msg.textContent = 'Нет связи с узлом.'; });
             });
         })();
 

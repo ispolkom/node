@@ -430,6 +430,112 @@ exp = int(r["username"].split(":")[0]) if exp_ok else 0
 mac = base64.b64encode(_hmac.new(secret.encode(), r.get("username", "").encode(), hashlib.sha1).digest()).decode() if exp_ok else ""
 check("TURN credentials: expiring name and HMAC-SHA1 password (coturn REST scheme)", exp_ok and r["credential"] == mac and 0 < exp - time.time() <= 6 * 3600 + 5, (st, r))
 check("the secret itself never leaves the node", secret not in json.dumps(r))
+
+# ---- several outside proxies: each phone is pinned to one, new phones go to the least loaded, a dead proxy is skipped
+def make_proxy(tag):
+    srv = socket.socket(); srv.bind(("127.0.0.1", 0)); srv.listen(16)
+    hits = []
+    state = {"alive": True}
+    def loop():
+        while state["alive"]:
+            try:
+                cs, _ = srv.accept()
+            except Exception:
+                return
+            def one(cs=cs):
+                try:
+                    rd(cs, 1); n = rd(cs, 1)[0]; rd(cs, n); cs.sendall(b"\x05\x00")
+                    rd(cs, 3); t = rd(cs, 1)[0]
+                    host = rd(cs, rd(cs, 1)[0]).decode() if t == 3 else ""
+                    rd(cs, 2)
+                    hits.append(host)
+                    up = socket.create_connection(echo_srv.getsockname())
+                    cs.sendall(b"\x05\x00\x00\x01\x00\x00\x00\x00\x00\x00")
+                    def pipe(x, y):
+                        try:
+                            while True:
+                                d = x.recv(4096)
+                                if not d:
+                                    break
+                                y.sendall(d)
+                        except Exception:
+                            pass
+                    threading.Thread(target=pipe, args=(up, cs), daemon=True).start()
+                    pipe(cs, up)
+                except Exception:
+                    pass
+            threading.Thread(target=one, daemon=True).start()
+    threading.Thread(target=loop, daemon=True).start()
+    def kill():
+        state["alive"] = False
+        try:
+            srv.shutdown(socket.SHUT_RDWR)  # wakes the thread blocked in accept(), otherwise it takes one more connection
+        except OSError:
+            pass
+        srv.close()
+    return srv.getsockname()[1], hits, kill
+
+pA, hitsA, killA = make_proxy("A")
+pB, hitsB, killB = make_proxy("B")
+st, r = a.api("POST", "/api/upstream-proxies", {"text": f"127.0.0.1:{pB}\n# a comment\nsocks5://u:p@127.0.0.1:{pA}\nnot a proxy line\n", "kind": "socks5"})
+check("a pasted list is added (the old single proxy stays first), a bad line reported", st == 200 and r.get("added") == 2 and len(r.get("errors", [])) == 1, (st, r))
+st, v = a.api("GET", "/api/upstream-proxies")
+ids = {x["port"]: x["id"] for x in v.get("proxies", [])}
+check("the list shows three proxies, none leaks its password", st == 200 and len(ids) == 3 and "secret" not in json.dumps(v) and all("password" not in x for x in v["proxies"]), v)
+# the old single proxy (px, with the echo) is replaced by two fresh ones so the counts are clean
+old_id = [x["id"] for x in v["proxies"] if x["port"] == px.getsockname()[1]][0]
+st, _r = a.api("DELETE", f"/api/upstream-proxies/{old_id}")
+check("a proxy is deleted", st == 200, (st, _r))
+st, _r = a.api("POST", "/api/upstream-proxies/settings", {"enabled": True, "max_clients": 5, "strict": False})
+tokens = [tok1, tok2, tok3]
+def pinned(tk, n=6):
+    got = set()
+    for i in range(n):
+        before = (len(hitsA), len(hitsB))
+        s_, e_ = connect_via(tk, f"site{i}.example:443", b"x")
+        if b" 200 " not in s_:
+            return None
+        got.add("A" if len(hitsA) > before[0] else "B")
+    return got
+res = [pinned(t) for t in tokens]
+check("every phone's connections all leave through ONE proxy (pinned)", all(r is not None and len(r) == 1 for r in res), res)
+sides = [next(iter(r)) for r in res]
+check("three phones are spread over two proxies (not all on one)", set(sides) == {"A", "B"}, sides)
+st, v = a.api("GET", "/api/upstream-proxies")
+cl = sorted(x["clients"] for x in v["proxies"])
+check("the page shows 2 + 1 devices on the proxies", cl == [1, 2], v)
+# kill the proxy of phone 1: its next connection fails over to the other one and the dead one is marked
+dead_side = sides[0]
+(killA if dead_side == "A" else killB)()
+time.sleep(0.5)
+s_, e_ = connect_via(tokens[0], "after-failure.example:443", b"hello")
+alive_hits = hitsB if dead_side == "A" else hitsA
+check("a connection of a phone whose proxy died still works (failover)", b" 200 " in s_ and e_ == b"hello" and "after-failure.example" in alive_hits, (s_, e_))
+res2 = pinned(tokens[0], 4)
+check("the phone now stays on the live proxy", res2 == ({"B"} if dead_side == "A" else {"A"}), res2)
+st, v = a.api("GET", "/api/upstream-proxies")
+dead_port = pA if dead_side == "A" else pB
+dv = [x for x in v["proxies"] if x["port"] == dead_port][0]
+check("the dead proxy shows as not responding with a pause", dv["state"] == "cooldown" and dv["cooldown_secs"] and dv["last_error"], dv)
+# strict limit of one device per proxy: a second phone has no place on the only live proxy
+live_port = pB if dead_side == "A" else pA
+live_id = ids[live_port]
+st, _r = a.api("POST", f"/api/upstream-proxies/{live_id}", {"max_clients": 1})
+a.api("POST", "/api/upstream-proxies/settings", {"strict": True})
+others = [t for t in tokens[1:]]
+statuses = [connect_via(t, "strict.example:443", b"x")[0] for t in others]
+ok_n = sum(1 for x in statuses if b" 200 " in x)
+check("strict limit: a device without a place is refused, not served", ok_n <= 1 and any(b" 502 " in x or b" 403 " in x for x in statuses), statuses)
+a.api("POST", "/api/upstream-proxies/settings", {"strict": False})
+statuses = [connect_via(t, "soft.example:443", b"x")[0] for t in others]
+check("the soft limit serves them on the live proxy", all(b" 200 " in x for x in statuses), statuses)
+# the master switch and the proxy switch
+st, _r = a.api("POST", "/api/upstream-proxies/settings", {"max_clients": 0})
+check("a bad limit is refused", st == 400, (st, _r))
+st, _r = a.api("POST", f"/api/upstream-proxies/{live_id}", {"enabled": False})
+st, _r = a.api("POST", "/api/upstream-proxies/nope", {"enabled": False})
+check("an unknown proxy id -> 404", st == 404, (st, _r))
+killA(); killB()
 # the proxy still works next to the API, and the decoy still answers a stranger
 h2 = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=10)
 h2.request("GET", "/")

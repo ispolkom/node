@@ -142,11 +142,15 @@ pub async fn resolve_public(target: &str) -> std::io::Result<Vec<SocketAddr>> {
 
 /// Соединиться с целью в интернете — ровно с проверенным адресом (первым, что ответит), не дольше `limit`.
 pub async fn connect_public(target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
+    connect_public_for(crate::upstream_proxy::SHARED_CLIENT, target, limit).await
+}
+
+/// То же от имени клиента (устройства, соседнего узла): пока включены внешние прокси, за клиентом закрепляется один прокси, и все его
+/// соединения выходят с одного внешнего адреса.
+pub async fn connect_public_for(client: &str, target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
     // Пока включён внешний прокси, весь выход идёт ТОЛЬКО через него; прямого соединения не будет, даже если прокси не отвечает.
-    if let Some(p) = crate::upstream_proxy::active() {
-        let r = connect_through_proxy(&p, target, limit).await;
-        crate::upstream_proxy::note(&r);
-        return r;
+    if crate::upstream_proxy::is_active() {
+        return connect_through_proxy(client, target, limit).await;
     }
     let addrs = resolve_public(target).await?;
     let mut last = None;
@@ -168,7 +172,7 @@ fn local_name(host: &str) -> bool {
 }
 
 /// Выход через внешний прокси. Прокси сам находит имя цели; адреса вида «этот компьютер» и «домашняя сеть» отсекаются здесь, как и без прокси.
-async fn connect_through_proxy(p: &crate::upstream_proxy::Settings, target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
+async fn connect_through_proxy(client: &str, target: &str, limit: Duration) -> std::io::Result<tokio::net::TcpStream> {
     let (host, port) = split_host_port(target).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("неверная цель {target}")))?;
     let refuse = |what: &str| std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{target}: {what} — выход туда не пускает"));
     match host.parse::<IpAddr>() {
@@ -177,7 +181,7 @@ async fn connect_through_proxy(p: &crate::upstream_proxy::Settings, target: &str
         Err(_) if local_name(&host) => return Err(refuse("имя внутренней сети")),
         Err(_) => {}
     }
-    crate::upstream_proxy::connect(p, &host, port, limit).await
+    crate::upstream_proxy::connect_for(client, &host, port, limit).await
 }
 
 /// Пароль локального прокси этого узла: создаётся один раз (20 случайных знаков), лежит в папке данных узла с правами 0600.
