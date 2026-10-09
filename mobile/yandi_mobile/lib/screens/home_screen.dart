@@ -14,15 +14,27 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+  late final TabController _tabs;
+  final _searchCtrl = TextEditingController();
+  String _query = '';
+
   @override
   void initState() {
     super.initState();
+    _tabs = TabController(length: 3, vsync: this);
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AppState>().refreshContacts();
       NotificationService.cancelAll();   // события просмотрены — гасим значок у иконки
       _handlePendingNotification();
     });
+  }
+
+  @override
+  void dispose() {
+    _tabs.dispose();
+    _searchCtrl.dispose();
+    super.dispose();
   }
 
   void _handlePendingNotification() {
@@ -222,6 +234,17 @@ class _HomeScreenState extends State<HomeScreen> {
                 MaterialPageRoute(builder: (_) => const SettingsScreen())),
           ),
         ],
+        bottom: TabBar(
+          controller: _tabs,
+          indicatorColor: AppTheme.accent,
+          labelColor: AppTheme.accent,
+          unselectedLabelColor: AppTheme.textSecondary,
+          tabs: const [
+            Tab(text: 'Контакты'),
+            Tab(text: 'Поиск'),
+            Tab(text: 'Группы'),
+          ],
+        ),
       ),
       floatingActionButton: FloatingActionButton(
         backgroundColor: AppTheme.accent,
@@ -229,35 +252,113 @@ class _HomeScreenState extends State<HomeScreen> {
         onPressed: () => _showAddContactDialog(context, state),
         child: const Icon(Icons.person_add),
       ),
-      body: state.contacts.isEmpty
-          ? Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.people_outline, color: AppTheme.textSecondary, size: 64),
-                  const SizedBox(height: 16),
-                  const Text('Нет контактов', style: TextStyle(color: AppTheme.textSecondary)),
-                  const SizedBox(height: 8),
-                  TextButton.icon(
-                    onPressed: () => state.refreshContacts(),
-                    icon: const Icon(Icons.refresh, color: AppTheme.accent),
-                    label: const Text('Обновить', style: TextStyle(color: AppTheme.accent)),
-                  ),
-                ],
-              ),
-            )
-          : RefreshIndicator(
-              color: AppTheme.accent,
-              backgroundColor: AppTheme.surface,
-              onRefresh: () => state.refreshContacts(),
-              child: _ContactList(
-                contacts: state.contacts,
-                onOpen: (c) => _openChat(context, c),
-                onTapUnsaved: (c) => _showContactSheet(context, state, c),
-                onDelete: (c) => state.removeManualContact(c.peerId),
-                onMenu: (c) => _showContactMenu(context, state, c),
-              ),
+      body: TabBarView(
+        controller: _tabs,
+        children: [
+          _contactsBody(context, state),
+          _searchBody(context, state),
+          _groupsBody(context),
+        ],
+      ),
+    );
+  }
+
+  Widget _contactsBody(BuildContext context, AppState state) {
+    if (state.contacts.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.people_outline, color: AppTheme.textSecondary, size: 64),
+            const SizedBox(height: 16),
+            const Text('Нет контактов', style: TextStyle(color: AppTheme.textSecondary)),
+            const SizedBox(height: 8),
+            TextButton.icon(
+              onPressed: () => state.refreshContacts(),
+              icon: const Icon(Icons.refresh, color: AppTheme.accent),
+              label: const Text('Обновить', style: TextStyle(color: AppTheme.accent)),
             ),
+          ],
+        ),
+      );
+    }
+    return RefreshIndicator(
+      color: AppTheme.accent,
+      backgroundColor: AppTheme.surface,
+      onRefresh: () => state.refreshContacts(),
+      child: _ContactList(
+        contacts: state.contacts,
+        onOpen: (c) => _openChat(context, c),
+        onTapUnsaved: (c) => _showContactSheet(context, state, c),
+        onDelete: (c) => state.removeManualContact(c.peerId),
+        onMenu: (c) => _showContactMenu(context, state, c),
+      ),
+    );
+  }
+
+  Widget _searchBody(BuildContext context, AppState state) {
+    final q = _query.trim().toLowerCase();
+    String plain(String n) => n.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim().toLowerCase();
+    final found = q.isEmpty
+        ? <Contact>[]
+        : state.contacts.where((c) => plain(c.displayName).contains(q) || c.peerId.toLowerCase().contains(q)).toList();
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+          child: TextField(
+            controller: _searchCtrl,
+            onChanged: (v) => setState(() => _query = v),
+            style: const TextStyle(color: AppTheme.text),
+            decoration: InputDecoration(
+              hintText: 'Поиск контактов и групп',
+              hintStyle: const TextStyle(color: AppTheme.textSecondary),
+              prefixIcon: const Icon(Icons.search, color: AppTheme.textSecondary),
+              suffixIcon: _query.isEmpty ? null : IconButton(
+                icon: const Icon(Icons.close, color: AppTheme.textSecondary),
+                onPressed: () => setState(() { _query = ''; _searchCtrl.clear(); }),
+              ),
+              filled: true, fillColor: AppTheme.surface,
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
+            ),
+          ),
+        ),
+        Expanded(
+          child: q.isEmpty
+              ? const Center(child: Text('Начните вводить имя', style: TextStyle(color: AppTheme.textSecondary)))
+              : found.isEmpty
+                  ? const Center(child: Text('Ничего не найдено', style: TextStyle(color: AppTheme.textSecondary)))
+                  : _ContactList(
+                      contacts: found,
+                      onOpen: (c) => _openChat(context, c),
+                      onTapUnsaved: (c) => _showContactSheet(context, state, c),
+                      onDelete: (c) => state.removeManualContact(c.peerId),
+                      onMenu: (c) => _showContactMenu(context, state, c),
+                    ),
+        ),
+      ],
+    );
+  }
+
+  Widget _groupsBody(BuildContext context) {
+    return const Center(
+      child: Padding(
+        padding: EdgeInsets.all(32),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.groups_outlined, color: AppTheme.textSecondary, size: 64),
+            SizedBox(height: 16),
+            Text('Групп пока нет',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 15)),
+            SizedBox(height: 8),
+            Text('Группы создаются на странице узла (ПК). Скоро появятся здесь.',
+                textAlign: TextAlign.center,
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          ],
+        ),
+      ),
     );
   }
 

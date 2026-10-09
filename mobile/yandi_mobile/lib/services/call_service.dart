@@ -211,10 +211,12 @@ class CallService extends ChangeNotifier {
       _pc!.onConnectionState = _onConnState;
       _local = await navigator.mediaDevices.getUserMedia({
         'audio': {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true},
-        'video': video ? {'facingMode': 'user', 'width': {'ideal': 640}, 'height': {'ideal': 480}, 'frameRate': {'ideal': 24}} : false,
+        // старт с умеренного 360p: на слабом канале видео деградирует плавно, а не замирает
+        'video': video ? {'facingMode': 'user', 'width': {'ideal': 480}, 'height': {'ideal': 360}, 'frameRate': {'ideal': 20}} : false,
       });
       for (final t in _local!.getTracks()) { await _pc!.addTrack(t, _local!); }
       localRenderer!.srcObject = _local;
+      if (video) await _tuneVideoSender();   // лимит битрейта и поведение при нехватке канала
       await Helper.setSpeakerphoneOn(speaker);
       unawaited(WakelockPlus.enable());
       notifyListeners();
@@ -225,6 +227,31 @@ class CallService extends ChangeNotifier {
       }
     } catch (e) {
       _finish('Не удалось начать звонок: ${_short(e)}', log: false);
+    }
+  }
+
+  /// Настройка видеопотока под слабый канал: потолок битрейта и приоритет частоты кадров (разрешение падает раньше, чем картинка замирает).
+  Future<void> _tuneVideoSender() async {
+    try {
+      final senders = await _pc?.getSenders() ?? [];
+      for (final sender in senders) {
+        if (sender.track?.kind != 'video') continue;
+        final params = sender.parameters;
+        // на слабом канале лучше ронять разрешение, чем фризить
+        params.degradationPreference = RTCDegradationPreference.MAINTAIN_FRAMERATE;
+        final encodings = params.encodings;
+        if (encodings == null || encodings.isEmpty) {
+          params.encodings = [RTCRtpEncoding(maxBitrate: 450000, maxFramerate: 20)];
+        } else {
+          for (final e in encodings) {
+            e.maxBitrate = 450000;   // ~450 кбит/с потолок видео
+            e.maxFramerate = 20;
+          }
+        }
+        await sender.setParameters(params);
+      }
+    } catch (_) {
+      // не критично: без тюнинга звонок всё равно работает
     }
   }
 
