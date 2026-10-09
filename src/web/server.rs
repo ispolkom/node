@@ -497,6 +497,8 @@ impl WebServer {
             .route("/api/media/video/call/end", post(media_api::end_active_video_call))
             // Pairing endpoints
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
+            .route("/api/mobile/devices", get(mobile_devices_handler))
+            .route("/api/mobile/devices/:id", axum::routing::delete(mobile_device_remove_handler))
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
@@ -5199,6 +5201,21 @@ async fn current_pairing_payload(state: &AppState) -> Result<crate::netlayer::pa
         fingerprint_hex,
         anchor_url,
     })
+}
+
+/// Устройства, сопряжённые с этим узлом: кто в сети, сколько соединений, когда был виден.
+async fn mobile_devices_handler() -> impl IntoResponse {
+    let mut resp = Json(serde_json::json!({"devices": crate::mobile_api::devices_overview()})).into_response();
+    resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    resp
+}
+
+async fn mobile_device_remove_handler(axum::extract::Path(id): axum::extract::Path<String>) -> impl IntoResponse {
+    if crate::mobile_api::remove_device(&id) {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"})))
+    }
 }
 
 /// QR для приложения на телефоне: адрес узла, порт TLS-входа, отпечаток сертификата и новый разовый код (живёт 5 минут).

@@ -32,6 +32,8 @@ rand = "0.8"
 aes-gcm = { version = "0.10", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
 argon2 = "0.5"
 
 # Image processing

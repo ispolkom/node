@@ -36,6 +36,19 @@ def req(method, path, body=None, token=None):
     except Exception:
         return r.status, raw
 
+def req_raw(method, path, data=None, token=None):
+    h = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=15)
+    hd = {"Content-Type": "application/octet-stream"}
+    if token:
+        hd["Authorization"] = "Bearer " + token
+    h.request(method, path, data, hd)
+    r = h.getresponse()
+    raw = r.read()
+    try:
+        return r.status, json.loads(raw)
+    except Exception:
+        return r.status, raw
+
 def ws_open(token):
     s = ctx().wrap_socket(socket.create_connection(("127.0.0.1", PORT), timeout=15))
     key = base64.b64encode(os.urandom(16)).decode()
@@ -300,6 +313,123 @@ check("owner's upstream proxy accepted", st == 200, (st, _r))
 st1, echo = connect_via(tok2, "youtube.com:443", b"hello through the pc")
 check("phone 2 reaches the internet through the PC's proxy (echo)", b" 200 " in st1 and echo == b"hello through the pc", (st1, echo))
 check("the proxy got the NAME, not a local lookup", "youtube.com" in seen_targets, seen_targets)
+
+# ---- files between the owner's phones: the node keeps only ciphertext chunks
+tok3 = pair_phone("YANDI Mobile 3")
+st, r = req("POST", "/mobile/files", {"to_peer_id": d1, "file_name": "x", "file_size": 10, "total_chunks": 1}, token=tok1)
+check("file to the sender itself refused", st == 400, (st, r))
+st, r = req("POST", "/mobile/files", {"to_peer_id": b.id, "file_name": "x", "file_size": 10, "total_chunks": 1}, token=tok1)
+check("file to a stranger (not a paired device) refused", st == 400, (st, r))
+st, r = req("POST", "/mobile/files", {"to_peer_id": d2, "file_name": "x", "file_size": 2 << 30, "total_chunks": 4000}, token=tok1)
+check("too big a file refused", st == 413, (st, r))
+st, r = req("POST", "/mobile/files", {"to_peer_id": d2, "file_name": "../../etc/passwd", "file_size": 2500, "total_chunks": 3}, token=tok1)
+check("transfer starts", st == 200 and len(r.get("transfer_id", "")) == 32, (st, r))
+tid = r["transfer_id"]
+parts = [os.urandom(1000), os.urandom(1000), os.urandom(500)]
+st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/1", parts[1], token=tok1)
+check("chunk 1 uploaded out of order", st == 200, (st, _r))
+st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/0", parts[0], token=tok2)
+check("only the sender may upload", st == 403, (st, _r))
+st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/3", b"x", token=tok1)
+check("chunk beyond the declared count refused", st == 400, (st, _r))
+st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/0", os.urandom(400 * 1024), token=tok1)
+check("an oversized chunk refused", st == 400, (st, _r))
+st, _r = req("POST", f"/mobile/files/{tid}/done", token=tok1)
+check("done with missing chunks -> 409 and the list of missing", st == 409 and _r.get("missing") == [0, 2], (st, _r))
+st, _r = req("GET", f"/mobile/files/{tid}/status", token=tok1)
+check("status lets the sender resume", st == 200 and _r["have"] == [1] and not _r["done"], (st, _r))
+st, _r = req("GET", "/mobile/files", token=tok2)
+check("an unfinished file is not offered to the receiver", st == 200 and _r["files"] == [], (st, _r))
+for i in (0, 2, 2):
+    st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/{i}", parts[i], token=tok1)
+check("re-uploading a chunk is harmless", st == 200, (st, _r))
+st, _r = req("POST", f"/mobile/files/{tid}/done", token=tok1)
+check("done once everything is there", st == 200, (st, _r))
+st, _r = req("GET", "/mobile/files", token=tok2)
+check("the receiver sees the file; the label has no path", st == 200 and len(_r["files"]) == 1 and _r["files"][0]["id"] == tid and "/" not in _r["files"][0]["file_name"] and _r["files"][0]["from_peer_id"] == d1, (st, _r))
+check("the sender's own list does not show it as incoming", req("GET", "/mobile/files", token=tok1)[1]["files"] == [])
+ok = True
+for i in range(3):
+    st, got = req_raw("GET", f"/mobile/files/{tid}/chunk/{i}", token=tok2)
+    ok = ok and st == 200 and got == parts[i]
+check("the receiver downloads every chunk byte for byte", ok)
+st, _r = req_raw("GET", f"/mobile/files/{tid}/chunk/0", token=tok3)
+check("a third device may not read it", st == 403, (st, _r))
+st, _r = req_raw("PUT", f"/mobile/files/{tid}/chunk/0", parts[0], token=tok1)
+check("a finished transfer takes no more chunks", st == 409, (st, _r))
+st, _r = req("GET", "/mobile/files/not-an-id/status", token=tok1)
+check("a bad transfer id -> 404 (no path walking)", st == 404, (st, _r))
+st, _r = req("DELETE", f"/mobile/files/{tid}", token=tok3)
+check("a third device may not delete it", st == 403, (st, _r))
+st, _r = req("DELETE", f"/mobile/files/{tid}", token=tok2)
+check("the receiver deletes it after the download", st == 200, (st, _r))
+st, _r = req("GET", f"/mobile/files/{tid}/status", token=tok1)
+check("it is gone", st == 404, (st, _r))
+st, _r = req("GET", "/mobile/files")
+check("files need a token", st == 401, st)
+
+# ---- call signalling: live-only frames between the owner's phones, never stored
+s2, line2 = ws_open(tok2)
+check("phone 2 socket for calls upgrades", b"101" in line2, line2)
+time.sleep(1)
+sig = b"\xe2" + os.urandom(80)  # opaque, as an encrypted signal would be
+def live_frame(to_hex, payload):
+    return bytes([0x31]) + bytes.fromhex(to_hex) + struct.pack("<I", len(payload)) + payload
+s1, line1 = ws_open(tok1)
+time.sleep(1)
+ws_send(s1, live_frame(d2, sig))
+got = None
+try:
+    for _ in range(6):
+        op, dd = ws_recv(s2, 10)
+        if dd[:1] == bytes([0x13]):
+            got = dd
+            break
+except Exception:
+    got = None
+ok = got is not None and got[1:33] == bytes.fromhex(d1) and got[45:45 + struct.unpack("<I", got[41:45])[0]] == sig
+check("a live signal reaches the other phone as frame 0x13, bytes untouched", ok, got)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+check("a live signal is not stored in the inbox", not [x for x in r.get("messages", []) if x["from_peer_id"] == d1 and base64.b64decode(x["payload_b64"]) == sig], r)
+# to a phone that is not connected: the sender is told, nothing is stored
+s2.close()
+time.sleep(2)
+ws_send(s1, live_frame(d2, sig))
+told = None
+try:
+    for _ in range(6):
+        op, dd = ws_recv(s1, 10)
+        if dd[:1] == bytes([0x14]):
+            told = dd
+            break
+except Exception:
+    told = None
+check("an offline phone: the sender gets frame 0x14 with its number", told is not None and told[1:33] == bytes.fromhex(d2), told)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+check("an offline phone gets no stale call signal later", not [x for x in r.get("messages", []) if base64.b64decode(x["payload_b64"]) == sig], r)
+ws_send(s1, live_frame(b.id, sig))   # a normal contact of the node is not a phone: ignored
+ws_send(s1, live_frame(d1, sig))     # to itself: ignored
+ws_send(s1, bytes([0x31]) + bytes.fromhex(d2) + struct.pack("<I", 40000) + b"x" * 40000)  # too big: ignored
+ws_send(s1, bytes([0x01]))
+op, dd = ws_recv(s1, 10)
+check("bad live frames are ignored and the socket stays up", dd[:1] == bytes([0x02]), dd)
+s1.close()
+# temporary TURN credentials
+st, r = req("GET", "/mobile/turn", token=tok1)
+check("no TURN server configured -> 404", st == 404, (st, r))
+st, r = req("GET", "/mobile/turn")
+check("turn credentials need a token", st == 401, st)
+import hmac as _hmac
+secret = "s" * 40
+tdir = os.path.join(a.dir, "home", ".local", "share", "yandi")
+os.makedirs(tdir, exist_ok=True)
+json.dump({"port": 3478, "secret": secret, "host": "turn.example"}, open(os.path.join(tdir, "turn.json"), "w"))
+st, r = req("GET", "/mobile/turn", token=tok1)
+exp_ok = st == 200 and r.get("port") == 3478 and r.get("host") == "turn.example" and ":" in r.get("username", "")
+exp = int(r["username"].split(":")[0]) if exp_ok else 0
+mac = base64.b64encode(_hmac.new(secret.encode(), r.get("username", "").encode(), hashlib.sha1).digest()).decode() if exp_ok else ""
+check("TURN credentials: expiring name and HMAC-SHA1 password (coturn REST scheme)", exp_ok and r["credential"] == mac and 0 < exp - time.time() <= 6 * 3600 + 5, (st, r))
+check("the secret itself never leaves the node", secret not in json.dumps(r))
 # the proxy still works next to the API, and the decoy still answers a stranger
 h2 = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=10)
 h2.request("GET", "/")

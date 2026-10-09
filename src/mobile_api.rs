@@ -38,6 +38,14 @@ const FT_PING: u8 = 0x01;
 const FT_PONG: u8 = 0x02;
 const FT_CHAT_MSG: u8 = 0x10;
 const FT_SEND_MSG: u8 = 0x30;
+/// Сигнал для звонка другому телефону: доставляется только если тот на связи прямо сейчас и нигде не хранится
+/// (устаревший звонок не должен «звонить» через час). Узел передаёт байты как есть: они зашифрованы телефоном для телефона.
+const FT_SEND_LIVE: u8 = 0x31;
+const FT_LIVE_MSG: u8 = 0x13;
+/// Ответ отправителю: адресата нет на связи (кадр: тип и 32 байта номера).
+const FT_PEER_OFFLINE: u8 = 0x14;
+/// Сигнал звонка небольшой (описание сеанса и кандидаты): больше не принимаем.
+const MAX_LIVE: usize = 32 * 1024;
 
 pub struct MobileState {
     chat: Arc<ChatManager>,
@@ -49,6 +57,8 @@ static STATE: OnceLock<Arc<MobileState>> = OnceLock::new();
 static BUS: OnceLock<tokio::sync::broadcast::Sender<Event>> = OnceLock::new();
 static MAIL: Mutex<Option<Vec<Mail>>> = Mutex::new(None);
 static LIVE: Mutex<Option<std::collections::HashMap<String, usize>>> = Mutex::new(None);
+/// Когда устройство последний раз подключалось или отключалось (мс), для списка устройств на странице узла.
+static LAST_SEEN: Mutex<Option<std::collections::HashMap<String, u64>>> = Mutex::new(None);
 static LAST_TS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static TUNNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
@@ -60,6 +70,7 @@ const FT_PEER_STATUS: u8 = 0x12;
 enum Event {
     Node(Arc<ChatMessage>),
     Mail(Arc<Mail>),
+    Live(Arc<Mail>),
     Presence(String, bool),
 }
 
@@ -188,6 +199,38 @@ fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
     r
 }
 
+/// Спаренные устройства и их состояние: для страницы узла (кто в сети, когда был виден).
+pub fn devices_overview() -> Vec<serde_json::Value> {
+    let seen = LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
+    with_devices(|d| d.clone())
+        .into_iter()
+        .map(|x| {
+            let pid = x.peer_id();
+            let n = live_count(&pid);
+            json!({
+                "id": pid[..16].to_string(),
+                "name": x.name,
+                "created_ms": x.created_ms,
+                "online": n > 0,
+                "connections": n,
+                "last_seen_ms": seen.get(&pid),
+                "has_keys": x.x25519_pub.is_some(),
+            })
+        })
+        .collect()
+}
+
+/// Забыть устройство (его токен перестаёт действовать, очередь сообщений для него очищается). `id` — начало номера устройства, не короче 8 знаков.
+pub fn remove_device(id: &str) -> bool {
+    if id.len() < 8 {
+        return false;
+    }
+    let Some(peer) = with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id))) else { return false };
+    with_devices(|d| d.retain(|x| x.peer_id() != peer));
+    with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
+    true
+}
+
 fn device_by_peer(peer: &str) -> Option<Device> {
     with_devices(|d| d.iter().find(|x| x.peer_id() == peer).cloned())
 }
@@ -197,6 +240,7 @@ fn live_count(peer: &str) -> usize {
 }
 
 fn set_live(peer: &str, up: bool) {
+    LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(peer.to_string(), now_ms());
     let mut g = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let m = g.get_or_insert_with(Default::default);
     let c = m.entry(peer.to_string()).or_insert(0);
@@ -280,7 +324,17 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
 }
 
 #[derive(Clone)]
-struct DeviceKey(String);
+pub(crate) struct DeviceKey(pub(crate) String);
+
+/// Номер устройства (как собеседника) по хэшу его токена.
+pub(crate) fn device_peer_of(token_hash: &str) -> Option<String> {
+    with_devices(|d| d.iter().find(|x| same(&x.token_hash, token_hash)).map(|x| x.peer_id()))
+}
+
+/// Это сопряжённое устройство этого узла?
+pub(crate) fn is_device_peer(peer: &str) -> bool {
+    device_by_peer(peer).is_some()
+}
 
 async fn auth(Query(q): Query<std::collections::HashMap<String, String>>, mut req: Request, next: Next) -> Response {
     let bearer = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::to_string);
@@ -453,8 +507,35 @@ async fn accept_pubkeys(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceK
     StatusCode::OK
 }
 
-async fn not_ready() -> (StatusCode, Json<serde_json::Value>) {
-    (StatusCode::NOT_IMPLEMENTED, Json(json!({"error": "files from the phone are not supported yet"})))
+/// Настройка сервера звонков (coturn на этом же компьютере): `turn.json` в папке данных `{"port": 3478, "secret": "...", "host": "необязательно"}`.
+#[derive(Deserialize)]
+struct TurnConfig {
+    port: u16,
+    secret: String,
+    #[serde(default)]
+    host: Option<String>,
+}
+
+fn turn_config() -> Option<TurnConfig> {
+    let s = std::fs::read_to_string(crate::util::data_dir::data_dir().join("turn.json")).ok()?;
+    let c: TurnConfig = serde_json::from_str(&s).ok()?;
+    (c.port > 0 && c.secret.len() >= 16).then_some(c)
+}
+
+/// Временные учётные данные для TURN (схема «REST API» у coturn: имя — срок действия и метка, пароль — HMAC-SHA1 от имени).
+/// Постоянного пароля у телефона нет, а срок действия ограничен.
+async fn turn_credentials(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let Some(c) = turn_config() else {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "сервер звонков не настроен на узле"}))).into_response();
+    };
+    const TTL: u64 = 6 * 3600;
+    let username = format!("{}:{}", now_ms() / 1000 + TTL, &dev[..dev.len().min(16)]);
+    let Ok(mut mac) = Hmac::<sha1::Sha1>::new_from_slice(c.secret.as_bytes()) else { return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
+    mac.update(username.as_bytes());
+    let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    Json(json!({"host": c.host, "port": c.port, "username": username, "credential": credential, "ttl": TTL})).into_response()
 }
 
 async fn ws(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, up: WebSocketUpgrade) -> Response {
@@ -501,6 +582,13 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         }
                     }
                 }
+                Ok(Event::Live(m)) => {
+                    if m.to == me {
+                        if let (Some(from), Ok(p)) = (hex32(&m.from), base64::engine::general_purpose::STANDARD.decode(&m.payload_b64)) {
+                            if sock.send(Message::Binary(frame(FT_LIVE_MSG, &from, m.ts, &p))).await.is_err() { break; }
+                        }
+                    }
+                }
                 Ok(Event::Presence(peer, up)) => {
                     if peer != me {
                         if let Some(id) = hex32(&peer) {
@@ -519,6 +607,22 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                 let Message::Binary(d) = msg else { if matches!(msg, Message::Close(_)) { break } else { continue } };
                 match d.first().copied() {
                     Some(FT_PING) => { if sock.send(Message::Binary(vec![FT_PONG])).await.is_err() { break; } }
+                    Some(FT_SEND_LIVE) if d.len() >= 37 => {
+                        let mut id = [0u8; 32];
+                        id.copy_from_slice(&d[1..33]);
+                        let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
+                        if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
+                        let to = hex::encode(id);
+                        if device_by_peer(&to).is_none() || to == me { continue; }
+                        if live_count(&to) == 0 {
+                            let mut f = vec![FT_PEER_OFFLINE];
+                            f.extend_from_slice(&id);
+                            if sock.send(Message::Binary(f)).await.is_err() { break; }
+                            continue;
+                        }
+                        let m = Mail { ts: next_ts(), from: me.clone(), to, payload_b64: base64::engine::general_purpose::STANDARD.encode(&d[37..37 + len]) };
+                        let _ = bus().send(Event::Live(Arc::new(m)));
+                    }
                     Some(FT_SEND_MSG) if d.len() >= 37 => {
                         let mut id = [0u8; 32];
                         id.copy_from_slice(&d[1..33]);
@@ -552,7 +656,12 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/proxy/info", get(proxy_info))
         .route("/mobile/pubkey/:peer", get(pubkey))
         .route("/mobile/pubkeys", post(accept_pubkeys))
-        .route("/mobile/files", get(not_ready).post(not_ready))
+        .route("/mobile/turn", get(turn_credentials))
+        .route("/mobile/files", get(crate::mobile_files::list).post(crate::mobile_files::start))
+        .route("/mobile/files/:id", axum::routing::delete(crate::mobile_files::remove))
+        .route("/mobile/files/:id/status", get(crate::mobile_files::status))
+        .route("/mobile/files/:id/chunk/:idx", get(crate::mobile_files::get_chunk).put(crate::mobile_files::put_chunk))
+        .route("/mobile/files/:id/done", post(crate::mobile_files::done))
         .route("/mobile/ws", get(ws))
         .layer(middleware::from_fn(auth));
     Router::new().route("/mobile/pair", post(pair)).merge(guarded).with_state(st)

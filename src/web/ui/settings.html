@@ -186,6 +186,8 @@
                             <span id="mobQrMsg" class="form-help"></span>
                         </div>
                         <div id="mobQr" style="max-width:300px;background:#fff;padding:8px"></div>
+                        <h4 style="margin:18px 0 6px">Сопряжённые устройства</h4>
+                        <div id="mobDevices" class="form-help">загрузка…</div>
                     </div>
                 </div>
 
@@ -594,6 +596,38 @@
         });
     </script>
     <script>
+    (function () {
+        var box = document.getElementById('mobDevices');
+        if (!box) return;
+        function ago(ms) {
+            if (!ms) return 'ещё не подключалось';
+            var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+            if (s < 60) return s + ' с назад';
+            if (s < 3600) return Math.round(s / 60) + ' мин назад';
+            if (s < 86400) return Math.round(s / 3600) + ' ч назад';
+            return Math.round(s / 86400) + ' дн назад';
+        }
+        function esc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+        function load() {
+            fetch('/api/mobile/devices', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+                var l = d.devices || [];
+                if (!l.length) { box.textContent = 'Пока нет сопряжённых устройств.'; return; }
+                box.innerHTML = l.map(function (x) {
+                    var st = x.online ? '<b style="color:#2ecc71">в сети</b> (' + x.connections + ' соед.)' : '<span style="color:#e74c3c">не в сети</span>, ' + ago(x.last_seen_ms);
+                    return '<div style="display:flex;gap:10px;align-items:center;padding:4px 0;border-bottom:1px solid #8884">'
+                        + '<span style="flex:1">' + esc(x.name) + ' <code>' + esc(x.id.slice(0, 8)) + '</code><br>' + st + (x.has_keys ? '' : ' · ключи шифрования не получены') + '</span>'
+                        + '<button class="btn" data-del="' + esc(x.id) + '" type="button">Забыть</button></div>';
+                }).join('');
+            }).catch(function () { box.textContent = 'нет ответа от узла'; });
+        }
+        box.addEventListener('click', function (e) {
+            var id = e.target && e.target.getAttribute && e.target.getAttribute('data-del');
+            if (!id || !confirm('Забыть это устройство? Ему придётся сопрягаться заново.')) return;
+            fetch('/api/mobile/devices/' + encodeURIComponent(id), { method: 'DELETE' }).then(load);
+        });
+        load();
+        setInterval(load, 5000);
+    })();
     (function () {
         var btn = document.getElementById('mobQrBtn');
         if (!btn) return;
