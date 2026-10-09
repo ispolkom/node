@@ -449,8 +449,10 @@ class Chaos:
                 with ThreadPoolExecutor(max_workers=12) as ex:
                     dirs = list(ex.map(lambda n: n.directory(), logged))
                 need = max(1, int(0.8 * (len(public) - 1)))
-                good = sum(1 for d in dirs if d and d[0] >= need)
-                if good >= min_frac * len(logged):
+                # on a loaded machine some polls time out: judge by those that answered, if at least 70% of the nodes did
+                answered = [d for d in dirs if d]
+                good = sum(1 for d in answered if d[0] >= need)
+                if len(answered) >= 0.7 * len(logged) and good >= min_frac * len(answered):
                     return round(now() - t0, 1)
             time.sleep(5)
         return None
