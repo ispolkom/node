@@ -62,7 +62,7 @@ class YandiVpnService : VpnService() {
     }
 
     private fun start(host: String, port: Int, fp: String, token: String) {
-        stop()
+        teardown() // старое убираем, но сам сервис не останавливаем: он только что запущен
         val p = LocalProxy(host, port, fp, token) { s -> protect(s) }
         val local = p.start(LOCAL_PORT)
         proxy = p
@@ -73,15 +73,19 @@ class YandiVpnService : VpnService() {
         Log.i(TAG, "VPN (прокси-режим) running=$running, локальный прокси на $local")
     }
 
-    private fun stop() {
+    private fun teardown() {
         running = false
         proxy?.stop(); proxy = null
         runCatching { tun?.close() }; tun = null
+    }
+
+    private fun stop() {
+        teardown()
         stopSelf()
     }
 
-    override fun onRevoke() { stop(); super.onRevoke() }
-    override fun onDestroy() { stop(); super.onDestroy() }
+    override fun onRevoke() { teardown(); super.onRevoke() }
+    override fun onDestroy() { teardown(); super.onDestroy() }
 }
 
 /** Прокси на 127.0.0.1: HTTP CONNECT / обычный HTTP / SOCKS5 -> TLS до компьютера -> `CONNECT цель`. */

@@ -22,16 +22,91 @@ class _PairScreenState extends State<PairScreen> {
   String? _error;
   final TextEditingController _manual = TextEditingController();
 
+  // Каждый кадр с кодом доходит до onDetect: решение принимаем сами (код целиком
+  // в кадре, крупный, читается несколько кадров подряд), а не по первому попавшемуся.
   final MobileScannerController _scanner = MobileScannerController(
-    detectionSpeed: DetectionSpeed.noDuplicates,
+    detectionSpeed: DetectionSpeed.normal,
+    detectionTimeoutMs: 200,
     facing: CameraFacing.back,
   );
+
+  static const int _needHits = 4;                       // подряд одинаковых кадров
+  static const Duration _needStable = Duration(milliseconds: 900);
+  static const Duration _gapReset = Duration(milliseconds: 700);
+  String? _candidate;
+  int _hits = 0;
+  DateTime? _firstHit;
+  DateTime? _lastHit;
+  String _hint = 'Наведите камеру на QR: код должен целиком поместиться в рамку';
+  bool _recognized = false;
 
   @override
   void dispose() {
     _scanner.dispose();
     _manual.dispose();
     super.dispose();
+  }
+
+  void _resetScan([String? hint]) {
+    _candidate = null; _hits = 0; _firstHit = null; _lastHit = null;
+    if (hint != null && hint != _hint && mounted) setState(() => _hint = hint);
+  }
+
+  /// Весь ли квадрат кода внутри кадра и достаточно ли он крупный для чёткого чтения.
+  /// Углы приходят в системе координат кадра камеры (она может быть повёрнута), поэтому
+  /// допускаем оба варианта ориентации.
+  String? _geometryProblem(Barcode b, Size image) {
+    final c = b.corners;
+    if (c.length < 4 || image.isEmpty) return null; // углов нет — полагаемся на стабильность
+    double minX = c.first.dx, maxX = c.first.dx, minY = c.first.dy, maxY = c.first.dy;
+    for (final p in c) {
+      if (p.dx < minX) minX = p.dx;
+      if (p.dx > maxX) maxX = p.dx;
+      if (p.dy < minY) minY = p.dy;
+      if (p.dy > maxY) maxY = p.dy;
+    }
+    bool inside(double w, double h) {
+      final mx = w * 0.03, my = h * 0.03;
+      return minX >= mx && minY >= my && maxX <= w - mx && maxY <= h - my;
+    }
+    if (!inside(image.width, image.height) && !inside(image.height, image.width)) {
+      return 'Код виден не весь: отодвиньте телефон, чтобы весь квадрат был в кадре';
+    }
+    final side = (maxX - minX) < (maxY - minY) ? (maxX - minX) : (maxY - minY);
+    final shortImage = image.width < image.height ? image.width : image.height;
+    if (side < shortImage * 0.22) return 'Код слишком мелкий: подвиньте телефон ближе';
+    return null;
+  }
+
+  Future<void> _onDetect(BarcodeCapture capture) async {
+    if (_processing || _recognized) return;
+    final b = capture.barcodes.firstOrNull;
+    final raw = b?.rawValue;
+    final now = DateTime.now();
+    if (b == null || raw == null || raw.isEmpty) {
+      if (_lastHit != null && now.difference(_lastHit!) > _gapReset) {
+        _resetScan('Наведите камеру на QR: код должен целиком поместиться в рамку');
+      }
+      return;
+    }
+    final problem = _geometryProblem(b, capture.size);
+    if (problem != null) { _resetScan(problem); return; }
+
+    if (raw != _candidate || (_lastHit != null && now.difference(_lastHit!) > _gapReset)) {
+      _candidate = raw; _hits = 0; _firstHit = now;
+    }
+    _hits++;
+    _lastHit = now;
+    if (_hits < _needHits || now.difference(_firstHit!) < _needStable) {
+      if (mounted) setState(() => _hint = 'Держите ровно, распознаю…');
+      return;
+    }
+    // код целиком и стабильно: показываем это, даём секунду увидеть, и только потом подключаемся
+    _recognized = true;
+    if (mounted) setState(() => _hint = 'Код распознан. Подключаюсь…');
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (!mounted) return;
+    await _onQr(raw);
   }
 
   Future<void> _onQr(String raw) async {
@@ -91,6 +166,9 @@ class _PairScreenState extends State<PairScreen> {
       if (!mounted) return;
       Navigator.of(context).pushReplacementNamed('/home');
     } catch (e) {
+      _recognized = false;
+      _resetScan('Не вышло подключиться. Наведите камеру на QR ещё раз');
+      if (!mounted) return;
       setState(() { _processing = false; _error = e.toString(); });
       _scanner.start();
     }
@@ -133,12 +211,47 @@ class _PairScreenState extends State<PairScreen> {
                 ? const Center(child: CircularProgressIndicator(color: AppTheme.accent))
                 : ClipRRect(
                     borderRadius: BorderRadius.circular(16),
-                    child: MobileScanner(
-                      controller: _scanner,
-                      onDetect: (capture) {
-                        final raw = capture.barcodes.firstOrNull?.rawValue;
-                        if (raw != null) _onQr(raw);
-                      },
+                    child: Stack(
+                      fit: StackFit.expand,
+                      children: [
+                        MobileScanner(
+                          controller: _scanner,
+                          onDetect: _onDetect,
+                        ),
+                        // рамка-прицел: в неё должен целиком поместиться квадрат QR
+                        Center(
+                          child: FractionallySizedBox(
+                            widthFactor: 0.7,
+                            child: AspectRatio(
+                              aspectRatio: 1,
+                              child: DecoratedBox(
+                                decoration: BoxDecoration(
+                                  border: Border.all(
+                                    color: _recognized ? Colors.greenAccent : AppTheme.accent,
+                                    width: 3,
+                                  ),
+                                  borderRadius: BorderRadius.circular(12),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                        Positioned(
+                          left: 16, right: 16, bottom: 12,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            decoration: BoxDecoration(
+                              color: Colors.black54,
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                            child: Text(
+                              _hint,
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontSize: 14),
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ),
           ),

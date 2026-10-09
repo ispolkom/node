@@ -311,7 +311,15 @@ class AppState extends ChangeNotifier {
       fingerprint: node.fingerprint,
       token: node.token!,
     );
-    vpnRunning = ok;
+    // сервис стартует асинхронно: проверяем, что он правда поднялся, а не верим первому «да»
+    var up = false;
+    if (ok) {
+      for (var i = 0; i < 10 && !up; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+        up = await vpn.isVpnRunning();
+      }
+    }
+    vpnRunning = up;
     notifyListeners();
   }
 

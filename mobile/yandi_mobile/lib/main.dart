@@ -15,14 +15,28 @@ import 'theme.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
-  await NotificationService.init();
-  await initBackgroundWorker();
   runApp(
     ChangeNotifierProvider(
       create: (_) => AppState(),
       child: const YandiApp(),
     ),
   );
+  // Уведомления и фоновая задача не должны задерживать первый экран: запрос
+  // разрешения может не вернуться, и приложение осталось бы чёрным.
+  _initInBackground();
+}
+
+Future<void> _initInBackground() async {
+  try {
+    await NotificationService.init().timeout(const Duration(seconds: 20));
+  } catch (e) {
+    debugPrint('notifications init: $e');
+  }
+  try {
+    await initBackgroundWorker().timeout(const Duration(seconds: 20));
+  } catch (e) {
+    debugPrint('background worker init: $e');
+  }
 }
 
 class YandiApp extends StatelessWidget {
