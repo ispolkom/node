@@ -18,6 +18,7 @@ class FakeNode {
   final log = <Map<String, dynamic>>[];
   String? ownerAlias;
   final files = <String, Map<int, List<int>>>{};
+  final reqs = <Map<String, dynamic>>[];       // просьбы вступить: {id, dev, name}
   final doneFiles = <String>{};
 
   FakeNode(String ownerDevice) {
@@ -43,7 +44,24 @@ class _Api implements GroupApi {
     ];
   }
   @override
-  Future<List<Map<String, dynamic>>> openGroups() async => [];
+  Future<List<Map<String, dynamic>>> openGroups() async => n.members.containsKey(dev)
+      ? []
+      : [{'id': n.gid, 'name': 'Тест', 'topic': 'тема', 'kind': 'invite', 'members': n.members.length, 'requested': n.reqs.any((r) => r['dev'] == dev)}];
+  @override
+  Future<void> requestJoin(String gid, String name) async {
+    if (n.reqs.any((r) => r['dev'] == dev)) throw const GroupApiError(409, 'просьба уже отправлена');
+    n.reqs.add({'id': 'r${n.reqs.length}', 'dev': dev, 'name': name});
+  }
+  @override
+  Future<List<Map<String, dynamic>>> requests(String gid) async {
+    if (me['role'] == 'member') throw const GroupApiError(403, 'нет прав');
+    return [for (final r in n.reqs) {'id': r['id'], 'peer_id': 'ab' * 32, 'name': r['name'], 'ts': 1}];
+  }
+  @override
+  Future<void> resolveRequest(String gid, String rid) async {
+    if (me['role'] == 'member') throw const GroupApiError(403, 'нет прав');
+    n.reqs.removeWhere((r) => r['id'] == rid);
+  }
   @override
   Future<String> create(String name, String topic, String kind) async => n.gid;
   @override
@@ -298,5 +316,22 @@ void main() {
     expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty, reason: 'ключи группы стёрты');
     await bob.sync();
     expect(bob.gone, isEmpty, reason: 'забытая группа не возвращается');
+  });
+
+  test('просьба о приглашении: гость видит группу, просит, владелец видит и закрывает; рядовой участник не видит', () async {
+    await owner.sync();
+    final list = await eve.discover();
+    expect(list.single.kind, 'invite');
+    expect(list.single.requested, isFalse);
+    await eve.requestInvite(node.gid, 'Ева');
+    expect((await eve.discover()).single.requested, isTrue);
+    await expectLater(eve.requestInvite(node.gid, 'Ева'), throwsA(isA<GroupApiError>()));
+    final r = await owner.joinRequests(node.gid);
+    expect(r.single.name, 'Ева');
+    expect(r.single.peerId.length, 64);
+    await bobJoins();
+    await expectLater(bob.joinRequests(node.gid), throwsA(isA<GroupApiError>()), reason: 'рядовой участник просьб не видит');
+    await owner.closeRequest(node.gid, r.single.id);
+    expect(await owner.joinRequests(node.gid), isEmpty);
   });
 }

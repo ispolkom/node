@@ -4,12 +4,12 @@ import 'dart:convert';
 class GroupInfo {
   final String id, name, topic, kind, myAlias, role;
   final bool muted, rekeyNeeded;
-  final int members, epoch, firstSeq, lastSeq;
+  final int members, epoch, firstSeq, lastSeq, requests;
   final List<String> pendingKeys;
   const GroupInfo({
     required this.id, required this.name, required this.topic, required this.kind, required this.myAlias, required this.role,
     required this.muted, required this.rekeyNeeded, required this.members, required this.epoch, required this.firstSeq,
-    required this.lastSeq, required this.pendingKeys,
+    required this.lastSeq, required this.pendingKeys, this.requests = 0,
   });
 
   factory GroupInfo.fromJson(Map<String, dynamic> j) => GroupInfo(
@@ -25,6 +25,7 @@ class GroupInfo {
         epoch: (j['epoch'] ?? 0) as int,
         firstSeq: (j['first_seq'] ?? 0) as int,
         lastSeq: (j['last_seq'] ?? 0) as int,
+        requests: (j['requests'] ?? 0) as int,
         pendingKeys: [for (final a in (j['pending_keys'] ?? const []) as List) a as String],
       );
 
@@ -71,4 +72,33 @@ class GroupRules {
   static GroupRules fromBody(Map<String, dynamic> b) => GroupRules({
         for (final k in (b['deny'] as List? ?? const [])) if (k is int) k,
       });
+}
+
+/// Группа узла, куда можно вступить или попроситься (из списка «Группы узла»).
+class DiscoverGroup {
+  final String id, name, topic, kind;
+  final int members;
+  final bool requested;
+  const DiscoverGroup({required this.id, required this.name, required this.topic, required this.kind, required this.members, required this.requested});
+
+  factory DiscoverGroup.fromJson(Map<String, dynamic> j) => DiscoverGroup(
+        id: j['id'] as String,
+        name: (j['name'] ?? '') as String,
+        topic: (j['topic'] ?? '') as String,
+        kind: (j['kind'] ?? 'open') as String,
+        members: (j['members'] ?? 0) as int,
+        requested: j['requested'] == true,
+      );
+
+  bool get isOpen => kind == 'open';
+}
+
+/// Просьба вступить: человек просит владельца прислать приглашение.
+class JoinRequest {
+  final String id, peerId, name;
+  final int ts;
+  const JoinRequest({required this.id, required this.peerId, required this.name, required this.ts});
+
+  factory JoinRequest.fromJson(Map<String, dynamic> j) =>
+      JoinRequest(id: j['id'] as String, peerId: j['peer_id'] as String, name: (j['name'] ?? '') as String, ts: (j['ts'] ?? 0) as int);
 }

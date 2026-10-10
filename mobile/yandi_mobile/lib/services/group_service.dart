@@ -286,6 +286,17 @@ class GroupService {
     return gid;
   }
 
+  /// Группы узла, куда можно вступить или попроситься.
+  Future<List<DiscoverGroup>> discover() async => [for (final j in await api.openGroups()) DiscoverGroup.fromJson(j)];
+
+  /// Попросить владельца прислать приглашение в группу «по приглашению».
+  Future<void> requestInvite(String gid, String myName) => api.requestJoin(gid, myName.trim());
+
+  /// Просьбы вступить (владелец и модераторы).
+  Future<List<JoinRequest>> joinRequests(String gid) async => [for (final j in await api.requests(gid)) JoinRequest.fromJson(j)];
+
+  Future<void> closeRequest(String gid, String rid) => api.resolveRequest(gid, rid);
+
   /// Вступить: открытая группа или по коду приглашения. После вступления имя пишется в журнал зашифрованной записью.
   Future<void> join(String gid, {String? inviteCode, required String displayName}) async {
     final (_, pub) = await _memberKeys(gid);

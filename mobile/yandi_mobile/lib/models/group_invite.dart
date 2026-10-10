@@ -30,7 +30,11 @@ class GroupInviteMsg {
     try {
       final j = jsonDecode(text.substring(marker.length));
       if (j is! Map) return null;
-      final inv = GroupInvite.tryParse('${j['g']}:${j['c']}');
+      final code = '${j['c'] ?? ''}';
+      // открытая группа: кода нет, вступают сразу; иначе нужен корректный код
+      final inv = code.isEmpty
+          ? (RegExp(r'^[0-9a-fA-F]{32}$').hasMatch('${j['g']}') ? GroupInvite('${j['g']}'.toLowerCase(), '') : null)
+          : GroupInvite.tryParse('${j['g']}:$code');
       if (inv == null) return null;
       final n = '${j['n'] ?? ''}'.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
       return GroupInviteMsg(inv, n.length > 64 ? n.substring(0, 64) : n);

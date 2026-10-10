@@ -32,4 +32,11 @@ void main() {
     expect(GroupInviteMsg.tryParse('${GroupInviteMsg.marker}{"g":"x","c":"y"}'), isNull);
     expect(GroupInviteMsg.tryParse(GroupInviteMsg.encode(gid, 'ABCD-EF12-3456', 'я' * 200))!.name.length, 64);
   });
+
+  test('приглашение в открытую группу: без кода', () {
+    final m = GroupInviteMsg.tryParse(GroupInviteMsg.encode(gid, '', 'Двор'))!;
+    expect(m.invite.gid, gid);
+    expect(m.invite.code, isEmpty);
+    expect(GroupInviteMsg.tryParse(GroupInviteMsg.encode('плохой', '', 'x')), isNull);
+  });
 }

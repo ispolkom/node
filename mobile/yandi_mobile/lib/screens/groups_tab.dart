@@ -15,6 +15,7 @@ class GroupsTab extends StatefulWidget {
 
 class _GroupsTabState extends State<GroupsTab> {
   bool _loaded = false;
+  List<DiscoverGroup> _node = const [];   // группы узла, куда можно вступить или попроситься
 
   @override
   void initState() {
@@ -23,8 +24,48 @@ class _GroupsTabState extends State<GroupsTab> {
   }
 
   Future<void> _refresh() async {
-    await context.read<AppState>().syncGroups();
-    if (mounted) setState(() => _loaded = true);
+    final state = context.read<AppState>();
+    await state.syncGroups();
+    List<DiscoverGroup> node = _node;
+    try { node = await state.groups?.discover() ?? const []; } catch (_) {}
+    if (mounted) setState(() { _loaded = true; _node = node; });
+  }
+
+  Future<String?> _askName(String title, String hint) {
+    final c = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text(title, style: const TextStyle(color: AppTheme.text)),
+        content: TextField(controller: c, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: 'Ваше имя', helperText: hint)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Продолжить')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _joinOrAsk(DiscoverGroup g) async {
+    final state = context.read<AppState>();
+    final messenger = ScaffoldMessenger.of(context);
+    final name = await _askName(g.isOpen ? 'Вступить в «${g.name}»' : 'Попросить приглашение в «${g.name}»',
+        g.isOpen ? 'Узел его не видит: оно пишется зашифрованно' : 'Владелец группы увидит ваше имя и решит, прислать ли приглашение');
+    if (name == null || name.isEmpty) return;
+    try {
+      if (g.isOpen) {
+        await state.groups!.join(g.id, displayName: name);
+        await state.syncGroups();
+        messenger.showSnackBar(const SnackBar(content: Text('Вы в группе')));
+      } else {
+        await state.groups!.requestInvite(g.id, name);
+        messenger.showSnackBar(const SnackBar(content: Text('Просьба отправлена владельцу группы')));
+      }
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+    await _refresh();
   }
 
   String _roleLabel(String r) => switch (r) { 'owner' => 'владелец', 'moderator' => 'модератор', _ => 'участник' };
@@ -45,7 +86,7 @@ class _GroupsTabState extends State<GroupsTab> {
       ),
       body: RefreshIndicator(
         onRefresh: _refresh,
-        child: list.isEmpty && gone.isEmpty
+        child: list.isEmpty && gone.isEmpty && _node.isEmpty
             ? ListView(children: [
                 SizedBox(
                   height: 420,
@@ -65,9 +106,33 @@ class _GroupsTabState extends State<GroupsTab> {
                 ),
               ])
             : ListView.separated(
-                itemCount: list.length + gone.length,
+                itemCount: list.length + gone.length + (_node.isEmpty ? 0 : 1 + _node.length),
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (_, i) {
+                  if (i >= list.length + gone.length) {
+                    final k = i - list.length - gone.length;
+                    if (k == 0) {
+                      return const Padding(
+                        padding: EdgeInsets.fromLTRB(16, 16, 16, 6),
+                        child: Text('ГРУППЫ УЗЛА', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12, letterSpacing: 1.2)),
+                      );
+                    }
+                    final g = _node[k - 1];
+                    return ListTile(
+                      leading: CircleAvatar(
+                        backgroundColor: AppTheme.surface,
+                        child: Text(g.name.isEmpty ? '?' : g.name.characters.first.toUpperCase(), style: const TextStyle(color: AppTheme.accent)),
+                      ),
+                      title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
+                      subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                        if (g.topic.isNotEmpty) Text(g.topic, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                        Text(g.isOpen ? 'открыта' : 'по приглашению', style: TextStyle(color: g.isOpen ? AppTheme.accent : AppTheme.incoming, fontSize: 12)),
+                      ]),
+                      trailing: g.requested
+                          ? const Text('Запрошено', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))
+                          : TextButton(onPressed: () => _joinOrAsk(g), child: Text(g.isOpen ? 'Вступить' : 'Запросить')),
+                    );
+                  }
                   if (i >= list.length) {
                     final (gid, name) = gone[i - list.length];
                     return ListTile(
@@ -103,7 +168,15 @@ class _GroupsTabState extends State<GroupsTab> {
                     title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
                     subtitle: Text('${g.topic.isEmpty ? '' : '${g.topic} · '}${g.members} уч. · вы: ${_roleLabel(g.role)}${g.muted ? ' · заглушены' : ''}',
                         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                    trailing: state.groups!.hasProblem(g.id) ? const Icon(Icons.warning_amber, color: AppTheme.incoming) : null,
+                    trailing: state.groups!.hasProblem(g.id)
+                        ? const Icon(Icons.warning_amber, color: AppTheme.incoming)
+                        : g.requests > 0
+                            ? Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                                decoration: BoxDecoration(color: AppTheme.incoming, borderRadius: BorderRadius.circular(12)),
+                                child: Text('${g.requests}', style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold)),
+                              )
+                            : null,
                     onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupChatScreen(gid: g.id))),
                   );
                 },
@@ -242,7 +315,7 @@ class _GroupsTabState extends State<GroupsTab> {
               FutureBuilder<List<Map<String, dynamic>>>(
                 future: state.groups!.api.openGroups(),
                 builder: (_, snap) {
-                  final open = snap.data ?? const [];
+                  final open = [for (final g in snap.data ?? const <Map<String, dynamic>>[]) if (g['kind'] == null || g['kind'] == 'open') g];
                   if (open.isEmpty) return const Padding(padding: EdgeInsets.all(8), child: Text('нет', style: TextStyle(color: AppTheme.textSecondary)));
                   return Column(children: [
                     for (final g in open)
@@ -282,7 +355,7 @@ Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
   if (name == null || name.isEmpty || !context.mounted) return;
   final messenger = ScaffoldMessenger.of(context);
   try {
-    await state.groups!.join(m.invite.gid, inviteCode: m.invite.code, displayName: name);
+    await state.groups!.join(m.invite.gid, inviteCode: m.invite.code.isEmpty ? null : m.invite.code, displayName: name);
     await state.syncGroups();
     messenger.showSnackBar(const SnackBar(content: Text('Вы в группе — она во вкладке «Группы»')));
   } catch (e) {

@@ -27,6 +27,7 @@ class GroupInfoScreen extends StatefulWidget {
 class _GroupInfoScreenState extends State<GroupInfoScreen> {
   List<GroupMember> _members = const [];
   List<Map<String, dynamic>> _modlog = const [];
+  List<JoinRequest> _requests = const [];
   String? _error;
 
   GroupService get _svc => context.read<AppState>().groups!;
@@ -41,10 +42,16 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     try {
       final m = await _svc.api.members(widget.gid);
       final log = await _svc.api.modlog(widget.gid);
+      List<JoinRequest> reqs = const [];
+      final gi = _svc.byId(widget.gid);
+      if (gi != null && gi.canModerate && gi.kind == 'invite') {
+        try { reqs = await _svc.joinRequests(widget.gid); } catch (_) {}
+      }
       if (!mounted) return;
       setState(() {
         _members = [for (final x in (m['members'] as List? ?? const [])) GroupMember.fromJson((x as Map).cast<String, dynamic>())];
         _modlog = log.reversed.take(30).toList();
+        _requests = reqs;
         _error = null;
       });
     } catch (e) {
@@ -129,7 +136,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       // отдельный код каждому: так видно, кто вошёл, и один утёкший код не пускает остальных
       var sent = 0;
       for (final id in chosen) {
-        final code = await _svc.newInvite(g.id, uses: 1, ttlHours: 24);
+        // открытая группа: код не нужен, карточка зовёт вступить сразу; «по приглашению»: свой одноразовый код каждому
+        final code = g.kind == 'open' ? '' : await _svc.newInvite(g.id, uses: 1, ttlHours: 24);
         await state.sendMessage(id, GroupInviteMsg.encode(g.id, code, g.name));
         sent++;
       }
@@ -137,6 +145,23 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     }
+  }
+
+  /// Принять просьбу: один код → личное сообщение с приглашением тому, кто просил → просьба закрыта.
+  Future<void> _answerRequest(GroupInfo g, JoinRequest r, bool accept) async {
+    final state = context.read<AppState>();
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (accept) {
+        final code = await _svc.newInvite(g.id, uses: 1, ttlHours: 72);
+        await state.sendMessage(r.peerId, GroupInviteMsg.encode(g.id, code, g.name));
+      }
+      await _svc.closeRequest(g.id, r.id);
+      messenger.showSnackBar(SnackBar(content: Text(accept ? 'Приглашение отправлено' : 'Просьба отклонена')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+    await _load();
   }
 
   Future<void> _invite(GroupInfo g) async {
@@ -176,9 +201,23 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),
           subtitle: const Text('Свой в каждой группе; узел не знает, кто вы', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
         ),
-        if (g.kind == 'invite' && g.canModerate) ...[
-          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить контакты', style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
+        if (g.canModerate && g.kind != 'closed')
+          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить из контактов', style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
+        if (g.canModerate && g.kind == 'invite')
           ListTile(leading: const Icon(Icons.link, color: AppTheme.textSecondary), title: const Text('Код приглашения', style: TextStyle(color: AppTheme.text)), subtitle: const Text('Передать самому', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)), onTap: () => _invite(g)),
+        if (_requests.isNotEmpty) ...[
+          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Просятся в группу (${_requests.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          for (final r in _requests)
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.person_outline, color: AppTheme.incoming),
+              title: Text(r.name.isEmpty ? 'Без имени' : r.name, style: const TextStyle(color: AppTheme.text)),
+              subtitle: const Text('просит прислать приглашение', style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(tooltip: 'Отклонить', icon: const Icon(Icons.close, color: AppTheme.textSecondary), onPressed: () => _answerRequest(g, r, false)),
+                IconButton(tooltip: 'Отправить приглашение', icon: const Icon(Icons.check, color: AppTheme.accent), onPressed: () => _answerRequest(g, r, true)),
+              ]),
+            ),
         ],
         if (g.isOwner) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запретить в группе', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
@@ -211,6 +250,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? ' (вы)' : ''), style: const TextStyle(color: AppTheme.text)),
             subtitle: Text('${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
             onLongPress: () => _memberMenu(g, m),
+            trailing: g.canModerate && m.role != 'owner' && m.alias != g.myAlias && !(m.role == 'moderator' && !g.isOwner)
+                ? IconButton(tooltip: 'Действия', icon: const Icon(Icons.more_vert, color: AppTheme.textSecondary), onPressed: () => _memberMenu(g, m))
+                : null,
           ),
         if (_modlog.isNotEmpty) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Действия модераторов', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
