@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Группы телефонов - YANDI</title>
+    <link rel="stylesheet" href="/style.css">
+    <link rel="stylesheet" href="/chat.css">
+</head>
+<body>
+    <header class="header">
+        <div class="container">
+            <div class="header-content">
+                <h1 class="logo"><img src="/media/logo.png" alt="YANDI" style="height:42px;width:auto;display:block;"></h1>
+                <nav class="nav">
+                    <a href="/" class="nav-link">Главная</a>
+                    <a href="/chat" class="nav-link">Чат</a>
+                    <a href="/groups" class="nav-link">Группы</a>
+                    <a href="/gateways" class="nav-link">Шлюзы</a>
+                    <a href="/relay" class="nav-link">Relay</a>
+                    <a href="/settings" class="nav-link">Настройки</a>
+                </nav>
+                <div style="display: flex; align-items: center; gap: 1rem;">
+                    <button id="langToggle" class="btn btn-sm btn-secondary">🌐 EN / RU</button>
+                    <button id="soundToggle" class="btn btn-sm btn-secondary">🔔</button>
+                    <button class="mobile-menu-btn" id="mobileMenuBtn"><span></span><span></span><span></span></button>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="main">
+        <div class="container">
+            <div class="card" style="margin:12px 0;padding:14px 16px">
+                <h3 style="margin:0 0 6px">Управление группами телефонов</h3>
+                <p class="form-help" style="margin:0 0 8px">Группы создают и ведут телефоны (сквозное шифрование): владелец группы — телефон, он выдаёт ключ, приглашения и роли. Вы, как владелец узла, содержимого не видите и в правах группы не участвуете. Здесь только то, что знает узел: название, тип, псевдонимы участников, размер, журнал действий модераторов. <b>Удалить группу целиком можно только с повторным вводом пароля узла.</b> Старые группы между узлами — на странице <a href="/groups">«Группы»</a>.</p>
+                <button class="btn btn-sm" id="pgReload" type="button">Обновить</button>
+                <span id="pgMsg" class="form-help"></span>
+                <div id="pgList" class="form-help" style="margin-top:10px">загрузка…</div>
+            </div>
+            <div class="card" style="margin:12px 0;padding:14px 16px">
+                <h3 style="margin:0 0 6px">Запасной путь: создать группу здесь</h3>
+                <p class="form-help" style="margin:0 0 8px">Обычно группу создаёт сам телефон (вкладка «Группы» → «Группа»). Здесь владельцем обязательно назначается телефон, а не узел.</p>
+                <div class="form-group"><label for="grpName">Название</label><input id="grpName" class="form-input" maxlength="64" autocomplete="off"></div>
+                <div class="form-group"><label for="grpTopic">Тема (необязательно)</label><input id="grpTopic" class="form-input" maxlength="256" autocomplete="off"></div>
+                <div class="form-group"><label for="grpKind">Тип</label>
+                    <select id="grpKind" class="form-input">
+                        <option value="closed">закрытая (участников добавляет владелец-телефон)</option>
+                        <option value="invite">по приглашению</option>
+                        <option value="open">открытая для ваших телефонов</option>
+                    </select></div>
+                <div class="form-group"><label for="grpOwner">Владелец группы (у этого телефона будет ключ)</label><select id="grpOwner" class="form-input"></select></div>
+                <button class="btn btn-primary" id="grpCreateBtn" type="button">Создать группу</button>
+            </div>
+        </div>
+    </main>
+
+    <div id="delDlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center">
+        <div class="card" style="max-width:420px;width:92%;padding:16px">
+            <h3 style="margin:0 0 8px">Удалить группу «<span id="delName"></span>»?</h3>
+            <p class="form-help">Будут стёрты журнал и файлы группы, телефоны увидят, что её нет. Это нельзя отменить. Введите пароль узла ещё раз.</p>
+            <input id="delPass" type="password" class="form-input" autocomplete="current-password" placeholder="Пароль узла">
+            <div id="delErr" class="form-help" style="color:#e74c3c;min-height:1.2em"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+                <button class="btn" id="delCancel" type="button">Отмена</button>
+                <button class="btn btn-primary" id="delOk" type="button">Удалить</button>
+            </div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="container">
+            <p>YANDI Node | P2P network</p>
+        </div>
+    </footer>
+
+    <script>
+    (function () {
+        var list = document.getElementById('pgList'), msg = document.getElementById('pgMsg');
+        var KIND = { closed: 'закрытая', invite: 'по приглашению', open: 'открытая' };
+        var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+        var delGid = null;
+        function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+        function api(method, url, body) {
+            return fetch(url, { method: method, cache: 'no-store', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); });
+        }
+        function fail(e) { msg.textContent = e && e.message ? e.message : 'Нет связи с узлом.'; }
+        function devOptions(devs) { return devs.map(function (d) { return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' (' + esc(d.id.slice(0, 8)) + ')</option>'; }).join(''); }
+        function render(d) {
+            var devs = d.devices || [];
+            document.getElementById('grpOwner').innerHTML = devs.length ? devOptions(devs) : '<option value="">нет сопряжённых телефонов</option>';
+            var gs = d.groups || [];
+            if (!gs.length) { list.textContent = 'Групп телефонов пока нет. Телефон создаёт группу во вкладке «Группы» приложения.'; return; }
+            list.innerHTML = gs.map(function (g) {
+                var mem = g.members.map(function (m) { return esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : ''); }).join('<br>');
+                return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:8px 0">'
+                    + '<b>' + esc(g.name) + '</b>' + (g.topic ? '<div>' + esc(g.topic) + '</div>' : '') + '<div>' + (KIND[g.kind] || esc(g.kind)) + '</div>'
+                    + '<span>участников: ' + g.members.length + ', записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
+                    + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу стоит сменить ключ</b>' : '') + '</span>'
+                    + '<div style="margin:6px 0">' + mem + '</div>'
+                    + '<button class="btn btn-sm" type="button" data-log="' + esc(g.id) + '">Журнал модерации</button> '
+                    + '<button class="btn btn-sm" type="button" data-del="' + esc(g.id) + '" data-name="' + esc(g.name) + '">Удалить группу…</button>'
+                    + '<div data-out="' + esc(g.id) + '" style="margin-top:6px"></div></div>';
+            }).join('');
+        }
+        function load() { api('GET', '/api/mobile/groups').then(render).catch(function () { list.textContent = 'нет ответа от узла'; }); }
+        document.getElementById('pgReload').addEventListener('click', load);
+        list.addEventListener('click', function (e) {
+            var t = e.target;
+            if (!t || !t.getAttribute) return;
+            if (t.getAttribute('data-log')) {
+                var gid = t.getAttribute('data-log'), out = list.querySelector('[data-out="' + gid + '"]');
+                api('GET', '/api/mobile/groups/' + encodeURIComponent(gid) + '/modlog').then(function (j) {
+                    var l = (j.modlog || []).slice(-50).reverse();
+                    out.innerHTML = l.length ? l.map(function (x) {
+                        return esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + (x.seq ? ' №' + x.seq : '');
+                    }).join('<br>') : 'Пусто.';
+                }).catch(fail);
+            } else if (t.getAttribute('data-del')) {
+                delGid = t.getAttribute('data-del');
+                document.getElementById('delName').textContent = t.getAttribute('data-name');
+                document.getElementById('delPass').value = '';
+                document.getElementById('delErr').textContent = '';
+                document.getElementById('delDlg').style.display = 'flex';
+                document.getElementById('delPass').focus();
+            }
+        });
+        function closeDlg() { document.getElementById('delDlg').style.display = 'none'; document.getElementById('delPass').value = ''; delGid = null; }
+        document.getElementById('delCancel').addEventListener('click', closeDlg);
+        document.getElementById('delOk').addEventListener('click', function () {
+            var pw = document.getElementById('delPass').value;
+            if (!pw) { document.getElementById('delErr').textContent = 'Введите пароль'; return; }
+            api('POST', '/api/mobile/groups/' + encodeURIComponent(delGid) + '/delete', { password: pw })
+                .then(function () { closeDlg(); msg.textContent = 'Группа удалена.'; load(); })
+                .catch(function (er) { document.getElementById('delErr').textContent = er.message; });
+        });
+        document.getElementById('delPass').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('delOk').click(); });
+        document.getElementById('grpCreateBtn').addEventListener('click', function () {
+            api('POST', '/api/mobile/groups', { name: document.getElementById('grpName').value, topic: document.getElementById('grpTopic').value, kind: document.getElementById('grpKind').value, owner_device: document.getElementById('grpOwner').value, members: [] })
+                .then(function () { document.getElementById('grpName').value = ''; document.getElementById('grpTopic').value = ''; msg.textContent = 'Группа создана.'; load(); })
+                .catch(fail);
+        });
+        load();
+        setInterval(load, 15000);
+    })();
+    </script>
+</body>
+</html>

@@ -263,7 +263,20 @@ req("POST", f"/mobile/groups/{gid}/files/{fid2}/done", {}, token=t_bob)
 st, r = req("DELETE", f"/mobile/groups/{gid}", token=t_own)
 check("a phone cannot delete a group", st in (404, 405), st)
 st, _ = a.api("DELETE", f"/api/mobile/groups/{gid}")
-check("the page deletes the group", st == 200, st)
+check("the old password-less delete route is gone", st in (404, 405), st)
+st, _ = a.api("POST", f"/api/mobile/groups/{gid}/delete", {})
+check("deleting without a password is refused", st in (400, 422), st)
+st, _ = a.api("POST", f"/api/mobile/groups/{gid}/delete", {"password": "wrong-password"})
+check("deleting with a wrong password is refused", st == 401, st)
+st, r = req("GET", f"/mobile/groups/{gid}/log?after=0", token=t_own)
+check("the group is still there after refused deletes", st == 200, st)
+time.sleep(4)   # задержка после неверного пароля — как при входе
+for _ in range(10):
+    st, _ = a.api("POST", f"/api/mobile/groups/{gid}/delete", {"password": C.LOGIN})
+    if st != 429:
+        break
+    time.sleep(3)
+check("the page deletes the group with the node password", st == 200, st)
 h = hint(s_bob, gid, kind=4)
 check("bob is told the group is gone", h is not None, h)
 st, r = req("GET", f"/mobile/groups/{gid}/log?after=0", token=t_bob)

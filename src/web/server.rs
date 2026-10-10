@@ -651,10 +651,9 @@ impl WebServer {
                 "/api/mobile/groups",
                 get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create),
             )
-            .route(
-                "/api/mobile/groups/:gid",
-                axum::routing::delete(crate::mobile_groups::pc_delete),
-            )
+            // удаление группы — только с повторным вводом пароля узла (открытая сессия админки не даёт права удалить)
+            .route("/api/mobile/groups/:gid/delete", post(api_mobile_group_delete))
+            .route("/phone-groups", get(phone_groups_handler))
             .route(
                 "/api/mobile/groups/:gid/modlog",
                 get(crate::mobile_groups::pc_modlog),
@@ -864,6 +863,38 @@ async fn auth_middleware(
 }
 
 // === Auth Page Handlers ===
+
+async fn phone_groups_handler() -> Html<&'static str> {
+    Html(include_str!("ui/phone-groups.html"))
+}
+
+#[derive(Deserialize)]
+struct StepUpDelete {
+    password: String,
+}
+
+/// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
+/// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
+async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
+    if let Some(remaining) = state.auth_state.login_backoff_remaining() {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
+        )
+            .into_response();
+    }
+    match crate::web::auth::verify_login(&body.password) {
+        Ok(true) => {
+            state.auth_state.record_login_success();
+            crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
+        }
+        Ok(false) => {
+            state.auth_state.record_login_failure();
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response()
+        }
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
 
 async fn login_page_handler() -> Html<&'static str> {
     Html(include_str!("ui/login.html"))
