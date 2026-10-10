@@ -7,8 +7,12 @@
 # подпись, он создаётся (его надо закоммитить). Если есть — фраза проверяется по нему: другая фраза = другой ключ, сборка остановится.
 #
 # Запуск из корня репозитория:  bash tools/apk_release.sh
+#   --check  только проверить фразу по сертификату (несколько секунд), без сборки — удобно, если не уверен в фразе;
+#   --show   вводить фразу видимо (проверить раскладку/опечатку глазами; делать только когда никто не видит экран).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+SHOW=0; CHECK=0
+for a in "$@"; do case "$a" in --show) SHOW=1;; --check) CHECK=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 
 CERT=${YANDI_CERT:-mobile/yandi_mobile/android/signing/yandi-release-cert.pem}  # YANDI_CERT — только для пробного прогона
 OUT_APK=mobile/yandi_mobile/build/app/outputs/flutter-apk/app-release.apk
@@ -27,8 +31,12 @@ cleanup() { find "$W" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf "$
 trap cleanup EXIT INT TERM
 
 echo "Фраза разработчика: не меньше 12 случайных слов, любой язык и символы, регистр важен (Вода ≠ вода, ё ≠ е). Ввод не отображается."
-read -rs -p "Фраза: " P1; echo
-read -rs -p "Ещё раз: " P2; echo
+if [ "$SHOW" = 1 ]; then
+  read -r -p "Фраза: " P1; read -r -p "Ещё раз: " P2
+else
+  read -rs -p "Фраза: " P1; echo
+  read -rs -p "Ещё раз: " P2; echo
+fi
 # NFC: одна и та же буква (й, ё, буквы с ударением, эмодзи с модификаторами) бывает записана разными байтами — на другой клавиатуре или
 # в другом терминале фраза дала бы другой ключ. Нормализуем стандартной библиотекой Python, ключ выводит apk_signing_key.
 printf '%s\n%s\n' "$P1" "$P2" \
@@ -50,6 +58,7 @@ else
   fi
   echo "Фраза верна: ключ совпадает с сертификатом YANDI."
 fi
+if [ "$CHECK" = 1 ]; then echo "Проверка завершена, сборка не запускалась."; exit 0; fi
 
 PASS=$(openssl rand -hex 24)
 openssl pkcs12 -export -inkey "$W/key.pem" -in "$CERT" -name yandi -out "$W/yandi.p12" -passout "pass:$PASS"
