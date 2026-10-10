@@ -26,6 +26,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 
 const MAX_RAWIP_CONNECTIONS: usize = 64;
 const RAWIP_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+const MAX_RAWIP_PACKET: usize = 8192;
 
 /// Заголовок RawIP пакета (4 байта: [magic, length_high, length_low, reserved])
 #[derive(Debug, Clone)]
@@ -70,6 +71,11 @@ impl RawIpHeader {
         let magic = bytes[0];
         if magic != Self::MAGIC {
             println!("   ⚠️  Invalid magic byte: 0x{:02x}", magic);
+            return None;
+        }
+
+        if bytes[3] != 0 {
+            println!("   ⚠️  Invalid reserved header byte: 0x{:02x}", bytes[3]);
             return None;
         }
 
@@ -235,8 +241,8 @@ impl RawIpTunnel {
 
             // Читаем IP пакет
             let packet_len = header.length as usize;
-            if packet_len > buffer.len() {
-                eprintln!("⚠️  [RAWIP] Packet too large: {} bytes", packet_len);
+            if !(20..=MAX_RAWIP_PACKET).contains(&packet_len) || packet_len > buffer.len() {
+                eprintln!("⚠️  [RAWIP] Invalid packet length: {} bytes", packet_len);
                 break;
             }
 
