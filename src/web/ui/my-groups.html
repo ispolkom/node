@@ -70,6 +70,7 @@
                         <button class="btn btn-primary" id="mgSend" type="button" disabled>Отправить</button>
                     </div>
                     <div id="mgRules" style="margin-top:8px"></div>
+                    <div id="mgInfo" style="margin-top:12px"></div>
                 </div>
             </div>
         </div>
@@ -123,13 +124,14 @@
         }
         function loadList() { return api('GET', '/api/my-groups').then(renderList).catch(function () { $('mgList').textContent = 'нет ответа от узла'; }); }
 
-        function openGroup(gid) {
+        var openGroup;
+        openGroup = function (gid) {
             cur = gid; lastSeq = 0; $('mgFeed').innerHTML = '';
             loadFeed(true);
             loadList();
             if (timer) clearInterval(timer);
             timer = setInterval(function () { loadFeed(false); }, 4000);
-        }
+        };
         function t(ts) { var d = new Date(ts); return ('0' + d.getHours()).slice(-2) + ':' + ('0' + d.getMinutes()).slice(-2); }
         function loadFeed(reset) {
             if (!cur) return;
@@ -159,6 +161,69 @@
                 renderRules(g, d.deny || []);
             }).catch(function (e) { $('mgBanner').textContent = e.message; });
         }
+
+        // ── участники, просьбы, приглашения, журнал ──
+        var ME = null;
+        function loadInfo() {
+            if (!cur) { $('mgInfo').innerHTML = ''; return; }
+            var gid = cur;
+            Promise.all([api('GET', '/api/my-groups/' + encodeURIComponent(gid) + '/info'), api('GET', '/api/my-groups-devices')]).then(function (r) {
+                if (gid !== cur) return;
+                var d = r[0], devs = r[1], g = d.group, staff = g.role !== 'member', owner = g.role === 'owner';
+                var h = '<hr style="opacity:.2">';
+                if ((d.requests || []).length) {
+                    h += '<div style="border:1px solid #ff4001;border-radius:8px;padding:8px;margin-bottom:8px"><b style="color:#ff4001">Просятся в группу (' + d.requests.length + ')</b><div class="mg-sub">служебное: видят владелец и модераторы</div>';
+                    d.requests.forEach(function (q) {
+                        h += '<div style="margin:6px 0">' + esc(q.name || 'Без имени') + ' просит добавить его в группу или прислать приглашение '
+                            + '<button class="btn btn-sm btn-primary" data-ans="' + esc(q.id) + '" data-a="add" type="button">Добавить</button> '
+                            + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="skip" type="button">Игнорировать</button> '
+                            + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="never" type="button">Больше не напоминать</button></div>';
+                    });
+                    h += '</div>';
+                }
+                if (staff && g.kind !== 'closed') {
+                    h += '<div style="margin-bottom:8px"><b>Пригласить</b> ';
+                    if (g.kind === 'invite') h += '<button class="btn btn-sm" id="mgCode" type="button">Код приглашения</button> ';
+                    h += '<select id="mgDev" class="form-input" style="width:auto;display:inline-block">' + devs.map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>'; }).join('') + '</select> '
+                        + '<button class="btn btn-sm btn-primary" id="mgSendInv" type="button"' + (devs.length ? '' : ' disabled') + '>Отправить телефону</button> <span id="mgInvOut" class="mg-sub"></span></div>';
+                }
+                h += '<div><b>Участники (' + d.members.length + ')</b></div>';
+                d.members.forEach(function (m) {
+                    var self = m.alias === g.my_alias, canAct = staff && !self && m.role !== 'owner' && !(m.role === 'moderator' && !owner);
+                    h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0"><span style="flex:1;min-width:180px">' + esc(m.name || m.alias) + (m.name ? ' <span class="mg-sub">' + esc(m.alias) + '</span>' : '') + (self ? ' (вы)' : '')
+                        + ' <span class="mg-tag">' + ROLE[m.role] + '</span>' + (m.muted ? '<span class="mg-tag">заглушён</span>' : '') + (!m.has_key && m.role !== 'owner' ? '<span class="mg-tag">ждёт ключ</span>' : '') + '</span>';
+                    if (canAct) {
+                        h += '<button class="btn btn-sm" data-mod="' + (m.muted ? 'unmute' : 'mute') + '" data-al="' + esc(m.alias) + '" type="button">' + (m.muted ? 'Разрешить писать' : 'Заглушить') + '</button>'
+                            + '<button class="btn btn-sm" data-mod="kick" data-al="' + esc(m.alias) + '" type="button">Выгнать</button>'
+                            + '<button class="btn btn-sm" data-mod="ban" data-al="' + esc(m.alias) + '" type="button">Запретить вход</button>';
+                        if (owner) h += '<button class="btn btn-sm" data-mod="' + (m.role === 'moderator' ? 'demote' : 'promote') + '" data-al="' + esc(m.alias) + '" type="button">' + (m.role === 'moderator' ? 'Снять модератора' : 'Модератор') + '</button>';
+                    }
+                    h += '</div>';
+                });
+                var log = (d.modlog || []).slice(-20).reverse();
+                if (log.length) h += '<details style="margin-top:8px"><summary>Журнал действий модераторов</summary>' + log.map(function (x) {
+                    return '<div class="mg-sub">' + esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + '</div>'; }).join('') + '</details>';
+                $('mgInfo').innerHTML = h;
+            }).catch(function () {});
+        }
+        $('mgInfo').addEventListener('click', function (e) {
+            var el = e.target; if (!el || !el.getAttribute || !cur) return;
+            var gid = encodeURIComponent(cur);
+            var act = el.getAttribute('data-mod'), ans = el.getAttribute('data-ans');
+            if (act) {
+                var al = el.getAttribute('data-al');
+                if ((act === 'kick' || act === 'ban') && !confirm((act === 'ban' ? 'Запретить вход' : 'Выгнать') + ' «' + al + '»?')) return;
+                api('POST', '/api/my-groups/' + gid + '/mod', { action: act, alias: al }).then(function () { say('Готово.'); loadInfo(); loadList(); }).catch(fail);
+            } else if (ans) {
+                var a = el.getAttribute('data-a');
+                api('POST', '/api/my-groups/' + gid + '/answer', { rid: ans, accept: a === 'add', never: a === 'never' })
+                    .then(function () { say(a === 'add' ? 'Приглашение отправлено.' : 'Готово.'); loadInfo(); loadList(); }).catch(fail);
+            } else if (el.id === 'mgCode') {
+                api('POST', '/api/my-groups/' + gid + '/invite-code').then(function (j) { $('mgInvOut').innerHTML = 'Код (один раз, сутки): <code style="user-select:all">' + esc(j.invite) + '</code>'; }).catch(fail);
+            } else if (el.id === 'mgSendInv') {
+                api('POST', '/api/my-groups/' + gid + '/invite-device', { peer: $('mgDev').value }).then(function () { $('mgInvOut').textContent = 'Приглашение отправлено.'; }).catch(fail);
+            }
+        });
         function renderRules(g, deny) {
             if (g.role !== 'owner') { $('mgRules').innerHTML = deny.length ? '<span class="mg-sub">Запрещено в группе: ' + deny.map(function (k) { return KIND_NAMES[k]; }).filter(Boolean).join(', ') + '</span>' : ''; return; }
             $('mgRules').innerHTML = '<div class="mg-sub">Запретить в группе (держат приложения участников):</div>' + Object.keys(KIND_NAMES).map(function (k) {
@@ -208,6 +273,9 @@
             var deny = Array.prototype.map.call($('mgRules').querySelectorAll('input[data-deny]:checked'), function (c) { return +c.getAttribute('data-deny'); });
             api('POST', '/api/my-groups/' + encodeURIComponent(cur) + '/rules', { deny: deny }).then(function () { say('Правила сохранены.'); }).catch(fail);
         });
+        var origOpen = openGroup;
+        openGroup = function (gid) { origOpen(gid); loadInfo(); };
+        setInterval(function () { if (cur) loadInfo(); }, 15000);
         loadList();
         setInterval(loadList, 15000);
     })();

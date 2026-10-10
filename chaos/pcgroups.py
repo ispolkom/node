@@ -135,6 +135,8 @@ def pair_phone(name):
     st, r = req("POST", "/mobile/pair", {"pairing_code": code, "device_name": name})
     return r["token"]
 
+# перед сопряжением: включаем учёт контактов (устройства, уже бывшие на узле, остаются контактами; новые — «не в контактах»)
+a.api("GET", "/api/mobile/other-devices")
 t_ph = pair_phone("phone")
 
 class Phone:
@@ -196,6 +198,31 @@ def wait(cond, secs=40, step=1.0):
     return None
 
 ph = Phone(t_ph)
+
+# 0) devices that are not contacts: new -> add / hide / block
+st, r = a.api("GET", "/api/mobile/other-devices")
+dv = [x for x in r["devices"] if x["name"].startswith("phone")]
+check("a freshly paired phone is listed as 'not in contacts'", st == 200 and dv and dv[0]["status"] == "new", r)
+peer_id = dv[0]["peer_id"]
+def in_contacts():
+    st, c = a.api("GET", "/api/contacts")
+    return any(x.get("short_id") == peer_id for x in c.get("contacts", []))
+check("it is not in the chat contacts yet", not in_contacts())
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "hide"})
+st, r = a.api("GET", "/api/mobile/other-devices")
+check("hide moves it to hidden", [x for x in r["devices"] if x["peer_id"] == peer_id][0]["status"] == "hidden", r)
+a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "unhide"})
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "block"})
+st, r2 = a.api("GET", "/api/mobile/other-devices")
+check("block marks it blocked and it stays out of contacts", [x for x in r2["devices"] if x["peer_id"] == peer_id][0]["status"] == "blocked" and not in_contacts(), r2)
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "unblock"})
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "add"})
+st, r2 = a.api("GET", "/api/mobile/other-devices")
+check("add puts it into the contacts and out of the 'other' list", in_contacts() and not [x for x in r2["devices"] if x["peer_id"] == peer_id], r2)
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": "zz", "action": "add"})
+check("a bad device number is refused", st == 400, (st, r))
+st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "explode"})
+check("an unknown action is refused", st == 400, (st, r))
 
 # 1) the PC creates a group and owns it; the phone sees it and joins
 st, r = a.api("POST", "/api/my-groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "closed"})
@@ -266,6 +293,66 @@ def pc_has_key():
 check("the phone owner seals the key for the PC", wait(lambda: (ph.provision(pg), pc_has_key())[1]) is not None)
 ph.write(pg, groups["groups"][[x["id"] for x in groups["groups"]].index(pg)]["my_alias"], 1, {"t": "добро пожаловать, ПК"})
 check("the PC reads the phone owner's message", wait(lambda: (lambda d: d if d and any(m["body"].get("t") == "добро пожаловать, ПК" for m in d["messages"]) else None)(a.api("GET", f"/api/my-groups/{pg}/messages?after=0")[1])) is not None)
+
+# 4b) the PC moderates its own group; invitations to a phone; requests answered, "never remind"
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+ed = Ed25519PrivateKey.generate()
+ed_pub = ed.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+x_seed, x_pub = new_keys()
+sig = ed.sign(b"YANDI-MOBILE-KEYS-V1\0" + ed_pub + x_pub)
+st, r = ph.call("POST", "/mobile/pubkeys", {"ed25519_pub": b64(ed_pub), "x25519_pub": b64(x_pub), "signature": b64(sig)})
+check("the phone registers its signed key bundle", st in (200, 204), (st, r))
+st, r = a.api("GET", f"/api/my-groups/{gid}/info")
+mem = {m["alias"]: m for m in r["members"]}
+check("the PC lists members with roles and announced names", st == 200 and mem[alias]["name"] == "Телефон-Боб" and mem[alias]["role"] == "member", r)
+st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "mute", "alias": alias})
+check("the PC owner mutes a member", st == 200, (st, r))
+st, r = ph.write(gid, alias, 1, {"t": "я заглушён"})
+check("the muted phone cannot post", st == 403, (st, r))
+a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "unmute", "alias": alias})
+st, r = ph.write(gid, alias, 1, {"t": "снова могу"})
+check("unmuted, it posts again", st == 200, (st, r))
+st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "promote", "alias": alias})
+check("the PC owner makes the phone a moderator", st == 200, (st, r))
+st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "demote", "alias": alias})
+check("and takes it back", st == 200, (st, r))
+st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "kick", "alias": "нет такого"})
+check("moderating a stranger fails cleanly", st == 400, (st, r))
+
+st, r = a.api("POST", "/api/my-groups/create", {"name": "Приватная", "kind": "invite"})
+pgid = r["id"]
+check("the PC creates an invite-only group", st == 200 and pgid, (st, r))
+st, r = a.api("GET", "/api/my-groups-devices")
+check("the PC lists phones it can invite", st == 200 and len(r) >= 1, (st, r))
+st, r = a.api("POST", f"/api/my-groups/{pgid}/invite-code")
+check("the PC issues an invitation code", st == 200 and r["invite"].startswith("YANDI-GROUP-1:" + pgid + ":"), (st, r))
+code = r["code"]
+st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
+before = len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))
+st, r = a.api("POST", f"/api/my-groups/{pgid}/invite-device", {"peer": a.api("GET", "/api/my-groups-devices")[1][0]["id"]})
+check("the PC sends the invitation to the phone as a personal encrypted message", st == 200, (st, r))
+st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
+after = len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))
+check("the message is in the phone's mail queue", after == before + 1, (before, after))
+st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб"})
+check("the phone asks the PC for an invitation", st == 200, (st, r))
+st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
+rq = r["requests"]
+check("the PC sees the request as a service card", len(rq) == 1 and rq[0]["name"] == "Боб", r)
+st, r = a.api("POST", f"/api/my-groups/{pgid}/answer", {"rid": rq[0]["id"], "accept": True})
+check("the PC answers: add (invitation goes to the requester)", st == 200, (st, r))
+st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
+check("a second message reached the phone", (len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))) == after + 1, r)
+st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб"})
+st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
+st, r2 = a.api("POST", f"/api/my-groups/{pgid}/answer", {"rid": r["requests"][0]["id"], "accept": False, "never": True})
+check("the PC answers: never remind", st == 200, (st, r2))
+st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб снова"})
+check("the phone asks again (the node allows it)", st == 200, (st, r))
+st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
+check("the PC does not see it again (quietly closed)", r["requests"] == [], r)
+st, r = ph.call("POST", f"/mobile/groups/{pgid}/join", {"invite_code": code, "member_pub": b64(ph.pub)})
+check("the phone joins with the code the PC issued", st == 200, (st, r))
 
 # 5) the vault on disk is closed
 import glob

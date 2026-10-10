@@ -725,6 +725,115 @@ pub fn forget_local(gid: &str) -> Result<(), String> {
     })
 }
 
+/// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).
+pub fn info(gid: &str) -> Result<Value, String> {
+    let dev = pc_device()?;
+    with_client(|c| {
+        let g = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
+        let m = with_store(|st| st.members(gid, &dev)).map_err(fail)?;
+        let names = c.names.get(gid).cloned().unwrap_or_default();
+        let members: Vec<Value> = m["members"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default()
+            .iter()
+            .map(|x| json!({"alias": s(x, "alias"), "name": names.get(&s(x, "alias")).cloned().unwrap_or_default(), "role": s(x, "role"), "muted": x["muted"], "has_key": x["has_key"]}))
+            .collect();
+        let staff = s(&g, "role") != "member";
+        let requests = if staff && s(&g, "kind") == "invite" {
+            let skip: HashSet<String> = c.state.groups.get(gid).map(|g| g.ignored.iter().cloned().collect()).unwrap_or_default();
+            let all = with_store(|st| st.requests_of(gid, &dev)).map(|v| v["requests"].as_array().cloned().unwrap_or_default()).unwrap_or_default();
+            let mut keep = Vec::new();
+            for r in all {
+                if skip.contains(&s(&r, "peer_id")) {
+                    let rid = s(&r, "id");
+                    let _ = with_store(|st| st.resolve_request(gid, &dev, &rid)); // «больше не напоминать»: тихо закрываем
+                } else {
+                    keep.push(r);
+                }
+            }
+            keep
+        } else {
+            Vec::new()
+        };
+        let modlog = with_store(|st| st.modlog(gid, Some(&dev))).map(|v| v["modlog"].clone()).unwrap_or(Value::Null);
+        Ok(json!({"group": g, "members": members, "requests": requests, "modlog": modlog}))
+    })
+}
+
+/// Действие модератора/владельца (заглушить, выгнать, запретить, назначить…) или стирание записи.
+pub fn moderate(gid: &str, action: &str, alias: Option<&str>, seq: Option<u64>) -> Result<(), String> {
+    let dev = pc_device()?;
+    with_store(|st| st.moderate(gid, &dev, action, alias, seq, None)).map_err(fail)?;
+    if action == "delete_entry" {
+        if let Some(q) = seq {
+            let _ = with_client(|c| {
+                let log = c.load_log(gid);
+                if let Some(x) = log.iter_mut().find(|x| x.seq == q) {
+                    x.deleted = true;
+                    x.body = json!({});
+                }
+                Ok(())
+            });
+            refresh_entry(gid, q);
+        }
+    }
+    Ok(())
+}
+
+/// Одноразовый код приглашения (группа «по приглашению»).
+pub fn invite_code(gid: &str) -> Result<Value, String> {
+    let dev = pc_device()?;
+    with_store(|st| st.invite(gid, &dev, 1, Some(24 * 3_600_000))).map_err(fail)
+}
+
+fn invite_card(gid: &str, code: &str, name: &str) -> String {
+    format!("\u{1}yandi-gi:{}", json!({"g": gid, "c": code, "n": name}))
+}
+
+/// Отправить приглашение телефону (личным зашифрованным сообщением с карточкой). Для открытой группы кода нет.
+pub async fn invite_device(gid: &str, peer: &str) -> Result<(), String> {
+    let dev = pc_device()?;
+    let g = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
+    if s(&g, "role") == "member" {
+        return Err("приглашать могут владелец и модераторы".into());
+    }
+    let kind = s(&g, "kind");
+    let code = match kind.as_str() {
+        "open" => String::new(),
+        "invite" => invite_code(gid)?["code"].as_str().unwrap_or("").to_string(),
+        _ => return Err("в закрытую группу приглашения не рассылаются".into()),
+    };
+    crate::mobile_api::pc_send_to_device(peer, invite_card(gid, &code, &s(&g, "name"))).await.map(|_| ())
+}
+
+/// Ответ на просьбу вступить: accept — приглашение уходит просившему личным сообщением; never — ещё и «больше не напоминать».
+pub async fn answer_request(gid: &str, rid: &str, accept: bool, never: bool) -> Result<(), String> {
+    let dev = pc_device()?;
+    let all = with_store(|st| st.requests_of(gid, &dev)).map_err(fail)?;
+    let r = all["requests"].as_array().and_then(|l| l.iter().find(|x| s(x, "id") == rid).cloned()).ok_or("просьбы уже нет")?;
+    let peer = s(&r, "peer_id");
+    if accept {
+        invite_device(gid, &peer).await?;
+    }
+    if never {
+        with_client(|c| {
+            let g = c.gstate(gid);
+            if !g.ignored.contains(&peer) {
+                g.ignored.push(peer.clone());
+            }
+            c.save();
+            Ok(())
+        })?;
+    }
+    with_store(|st| st.resolve_request(gid, &dev, rid)).map_err(fail)
+}
+
+/// Телефоны этого узла (кому можно отправить приглашение).
+pub fn devices() -> Value {
+    json!(crate::mobile_api::device_list().iter().map(|(p, n)| json!({"id": p, "name": n})).collect::<Vec<_>>())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

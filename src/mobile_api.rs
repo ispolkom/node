@@ -427,6 +427,9 @@ pub(crate) struct DeviceKey(pub(crate) String);
 
 /// Сообщение телефона самому компьютеру (подписанный E4): расшифровать и положить в историю веб-чата.
 fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
+    if crate::mobile_self::is_blocked_phone(from_device) {
+        return; // заблокированное устройство: ни сообщений, ни файлов, ни звонков компьютеру
+    }
     let Ok(ed) = device_ed25519(from_device) else { return };
     let (Some(text), Some(from)) = (crate::mobile_self::open(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return };
     let device = HashId(from);
@@ -637,6 +640,9 @@ pub fn pc_mark_read(peer: &str) {
 /// Правка своего сообщения со страницы: в истории узла и у телефона (конверт правки с тем же номером).
 pub fn pc_edit_for_device(peer: &str, msg_id: &HashId, text: String) -> Result<(), String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if crate::mobile_self::is_blocked_phone(peer) {
+        return Err("устройство заблокировано".into());
+    }
     if text.is_empty() || text.len() > MAX_TEXT {
         return Err("пустое или слишком длинное сообщение".into());
     }

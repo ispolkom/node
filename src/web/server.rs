@@ -637,6 +637,8 @@ impl WebServer {
             // Pairing endpoints
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/api/mobile/devices", get(mobile_devices_handler))
+            .route("/api/mobile/other-devices", get(mobile_other_devices_handler))
+            .route("/api/mobile/phone-action", post(mobile_phone_action_handler))
             .route(
                 "/api/mobile/devices/:id",
                 axum::routing::delete(mobile_device_remove_handler),
@@ -665,6 +667,12 @@ impl WebServer {
             .route("/api/my-groups/:gid/rules", post(api_my_groups_rules))
             .route("/api/my-groups/:gid/leave", post(api_my_groups_leave))
             .route("/api/my-groups/:gid/forget", post(api_my_groups_forget))
+            .route("/api/my-groups/:gid/info", get(api_my_groups_info))
+            .route("/api/my-groups/:gid/mod", post(api_my_groups_mod))
+            .route("/api/my-groups/:gid/invite-code", post(api_my_groups_invite_code))
+            .route("/api/my-groups/:gid/invite-device", post(api_my_groups_invite_device))
+            .route("/api/my-groups/:gid/answer", post(api_my_groups_answer))
+            .route("/api/my-groups-devices", get(api_my_groups_devices))
             .route(
                 "/api/mobile/groups/:gid/modlog",
                 get(crate::mobile_groups::pc_modlog),
@@ -959,6 +967,52 @@ async fn api_my_groups_rules(axum::extract::Path(gid): axum::extract::Path<Strin
 
 async fn api_my_groups_leave(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
     grp_reply(crate::group_client::leave(&gid).map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_info(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+    grp_reply(crate::group_client::info(&gid))
+}
+
+#[derive(Deserialize)]
+struct MyGroupMod {
+    action: String,
+    #[serde(default)]
+    alias: Option<String>,
+    #[serde(default)]
+    seq: Option<u64>,
+}
+
+async fn api_my_groups_mod(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupMod>) -> Response {
+    grp_reply(crate::group_client::moderate(&gid, &b.action, b.alias.as_deref(), b.seq).map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+    grp_reply(crate::group_client::invite_code(&gid).map(|v| serde_json::json!({"code": v["code"], "group_id": gid, "invite": format!("YANDI-GROUP-1:{}:{}", gid, v["code"].as_str().unwrap_or(""))})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupPeer {
+    peer: String,
+}
+
+async fn api_my_groups_invite_device(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupPeer>) -> Response {
+    grp_reply(crate::group_client::invite_device(&gid, &b.peer).await.map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupAnswer {
+    rid: String,
+    accept: bool,
+    #[serde(default)]
+    never: bool,
+}
+
+async fn api_my_groups_answer(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAnswer>) -> Response {
+    grp_reply(crate::group_client::answer_request(&gid, &b.rid, b.accept, b.never).await.map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_devices() -> Response {
+    grp_reply(Ok(crate::group_client::devices()))
 }
 
 async fn api_my_groups_forget(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
@@ -2343,12 +2397,48 @@ async fn api_stop() -> impl IntoResponse {
 
 /// Телефоны владельца, сопряжённые с этим узлом, — собеседники веб-чата (переписка шифруется между узлом и телефоном, см. mobile_self).
 /// `short_id` у них — полный номер устройства (64 знака): по нему работают история и отправка.
+/// Устройства узла, которые не в контактах: новые, скрытые и заблокированные. Для них — «добавить в контакты», «скрыть», «заблокировать».
+async fn mobile_other_devices_handler() -> impl IntoResponse {
+    crate::mobile_self::init_phone_status();
+    let list: Vec<serde_json::Value> = crate::mobile_api::devices_overview()
+        .into_iter()
+        .filter_map(|d| {
+            let full = d["peer_id"].as_str()?.to_string();
+            let status = if crate::mobile_self::is_blocked_phone(&full) {
+                "blocked"
+            } else if crate::mobile_self::is_hidden_phone(&full) {
+                "hidden"
+            } else if crate::mobile_self::is_saved_phone(&full) {
+                return None; // это контакт
+            } else {
+                "new"
+            };
+            Some(serde_json::json!({"peer_id": full, "name": d["name"], "online": d["online"], "status": status}))
+        })
+        .collect();
+    Json(serde_json::json!({"devices": list}))
+}
+
+#[derive(Deserialize)]
+struct PhoneActionReq {
+    peer: String,
+    action: String,
+}
+
+async fn mobile_phone_action_handler(Json(b): Json<PhoneActionReq>) -> Response {
+    match crate::mobile_self::phone_action(&b.peer, &b.action) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
 fn append_phone_contacts(data: &mut serde_json::Value) {
+    crate::mobile_self::init_phone_status();
     if let Some(arr) = data["contacts"].as_array_mut() {
         for d in crate::mobile_api::devices_overview() {
             let Some(full) = d["peer_id"].as_str() else { continue };
-            if crate::mobile_self::is_hidden_phone(full) {
-                continue; // «Удалить» на странице: спрятан из чата, сопряжение не тронуто
+            if crate::mobile_self::is_hidden_phone(full) || crate::mobile_self::is_blocked_phone(full) || !crate::mobile_self::is_saved_phone(full) {
+                continue; // «Удалить» на странице — спрятан; заблокированные и не добавленные в контакты — в списке «Другие устройства узла»
             }
             arr.push(serde_json::json!({
                 "id": format!("phone-{}", &full[..16]),

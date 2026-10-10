@@ -48,6 +48,7 @@
                     <div class="chat-contacts-list" id="contactsList">
                         <p class="text-muted">Загрузка контактов...</p>
                     </div>
+                    <div id="otherDevices" style="padding:8px;border-top:1px solid #8884"></div>
                 </div>
 
                 <!-- ЦЕНТРАЛЬНАЯ КОЛОНКА: Чат -->
@@ -492,6 +493,70 @@
             return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
 
+
+        // ── Другие устройства узла (не в контактах): добавить в контакты, скрыть, заблокировать ──
+        var otherShowAll = false, otherKey = '';
+        function loadOtherDevices() {
+            fetch('/api/mobile/other-devices', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+                if (!d) return;
+                var box = document.getElementById('otherDevices');
+                var key = JSON.stringify(d.devices) + otherShowAll;
+                if (key === otherKey) return;
+                otherKey = key;
+                var fresh = d.devices.filter(function (x) { return x.status === 'new'; });
+                var rest = d.devices.filter(function (x) { return x.status !== 'new'; });
+                if (!d.devices.length) { box.innerHTML = ''; return; }
+                var h = '<div style="font-size:12px;opacity:.7;letter-spacing:1px;margin-bottom:4px">ДРУГИЕ УСТРОЙСТВА УЗЛА (' + fresh.length + ')</div>';
+                function row(x) {
+                    var st = x.status === 'blocked' ? '<span style="color:#e74c3c"> · заблокировано</span>' : (x.status === 'hidden' ? ' · скрыто' : ' · не в контактах');
+                    var btn = function (a, label) { return '<button class="btn btn-sm" type="button" data-pa="' + a + '" data-peer="' + escapeHTML(x.peer_id) + '">' + label + '</button> '; };
+                    var acts = x.status === 'blocked' ? btn('unblock', 'Разблокировать') : (btn('add', 'В контакты') + (x.status === 'hidden' ? btn('unhide', 'Показать') : btn('hide', 'Скрыть')) + btn('block', 'Заблокировать'));
+                    return '<div style="padding:4px 0"><div>' + (x.online ? '🟢 ' : '⚪ ') + '📱 ' + escapeHTML(x.name || 'Телефон') + st + '</div><div>' + acts + '</div></div>';
+                }
+                fresh.forEach(function (x) { h += row(x); });
+                if (rest.length) {
+                    h += '<div><a href="#" id="otherToggle" style="font-size:12px">' + (otherShowAll ? 'Скрыть список скрытых и заблокированных' : 'Скрытые и заблокированные (' + rest.length + ')') + '</a></div>';
+                    if (otherShowAll) rest.forEach(function (x) { h += row(x); });
+                }
+                box.innerHTML = h;
+            }).catch(function () {});
+        }
+        document.addEventListener('click', function (e) {
+            var el = e.target;
+            if (el && el.id === 'otherToggle') { e.preventDefault(); otherShowAll = !otherShowAll; otherKey = ''; loadOtherDevices(); return; }
+            var a = el && el.getAttribute && el.getAttribute('data-pa');
+            if (!a) return;
+            var peer = el.getAttribute('data-peer');
+            if (a === 'block' && !confirm('Заблокировать устройство? Его сообщения, файлы и звонки компьютеру доставляться не будут.')) return;
+            fetch('/api/mobile/phone-action', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ peer: peer, action: a }) })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || 'ошибка'); }); })
+                .then(function () { otherKey = ''; loadOtherDevices(); if (typeof loadContacts === 'function') loadContacts(); })
+                .catch(function (er) { alert('Не удалось: ' + er.message); });
+        });
+        loadOtherDevices();
+        setInterval(loadOtherDevices, 10000);
+
+        // Приглашение в группу, присланное телефоном: карточка с кнопкой «Вступить» (вступает компьютер как участник)
+        function groupInviteOf(text) {
+            if (!text || text.charAt(0) !== '\u0001' || text.indexOf('yandi-gi:') !== 1) return null;
+            try {
+                var j = JSON.parse(text.slice(1 + 'yandi-gi:'.length));
+                if (!/^[0-9a-f]{32}$/i.test(String(j.g))) return null;
+                var c = String(j.c || '');
+                if (c && !/^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/.test(c)) return null;
+                return { g: String(j.g).toLowerCase(), c: c.toUpperCase(), n: String(j.n || '').replace(/[\x00-\x1f]/g, '').slice(0, 64) };
+            } catch (e) { return null; }
+        }
+        document.addEventListener('click', function (e) {
+            var b = e.target && e.target.getAttribute && e.target.getAttribute('data-gi-join');
+            if (!b) return;
+            var name = prompt('Ваше имя в группе (узел его не видит: оно пишется зашифрованно)');
+            if (!name) return;
+            fetch('/api/my-groups/' + b + '/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: e.target.getAttribute('data-gi-code') || '', name: name }) })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); alert('Вы в группе. Она на странице «Мои группы».'); }); })
+                .catch(function (er) { alert('Не удалось вступить: ' + er.message); });
+        });
+
         function renderMessages(messages) {
             var div = document.getElementById('chatMessages');
             var items = Array.isArray(messages) ? messages.slice() : [];
@@ -519,7 +584,10 @@
                 html += '<div class="message ' + (isSent ? 'sent' : 'received') + (sel ? ' msg-selected' : '') + '" data-msg-id="' + escapeHTML(msg.msg_id) + '" data-own="' + (isSent && !msg.attachment ? '1' : '') + '" onclick="toggleMessageSelect(this, event)">';
                 html += '<div class="message-time">' + time + (msg.edited ? ' · изменено' : '') + (isSent ? ' ' + statusTicks(msg.status) : '') + '</div>';
                 if (msg.attachment) html += renderAttachment(msg.attachment);
-                if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
+                var gi = groupInviteOf(msg.text);
+                if (gi) html += '<div class="message-text"><b>Приглашение в группу' + (gi.n ? ' «' + escapeHTML(gi.n) + '»' : '') + '</b><br>'
+                    + (isSent ? '<span style="opacity:.7">Приглашение отправлено</span>' : '<button class="btn btn-sm btn-primary" type="button" data-gi-join="' + escapeHTML(gi.g) + '" data-gi-code="' + escapeHTML(gi.c) + '" data-gi-name="' + escapeHTML(gi.n) + '">Вступить</button>') + '</div>';
+                else if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
                 html += '</div>';
             }
             for (var j = 0; j < pendingForPeer.length; j++) html += renderPendingTransfer(pendingForPeer[j]);

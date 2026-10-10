@@ -492,6 +492,92 @@ fn with_hidden<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
     r
 }
 
+// ── Какие устройства узла — «контакты» ──
+//
+// Телефоны, сопряжённые с узлом, не обязаны быть контактами владельца: в чате компьютера контактами считаются только добавленные.
+// Остальные — в отдельном списке «Другие устройства узла», где их можно добавить в контакты, скрыть или заблокировать. Заблокированное
+// устройство молча не доставляет компьютеру ни сообщений, ни файлов, ни звонков, и компьютер ему не пишет. При первом запуске этой
+// возможности все уже видимые телефоны остаются контактами (чтобы ничего не пропало из привычного списка).
+#[derive(Serialize, Deserialize, Default, Clone, PartialEq)]
+struct PhoneStatus {
+    #[serde(default)]
+    saved: Vec<String>,
+    #[serde(default)]
+    blocked: Vec<String>,
+}
+
+fn status_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("web_phone_status.json")
+}
+
+fn with_status<R>(f: impl FnOnce(&mut PhoneStatus) -> R) -> R {
+    static S: std::sync::Mutex<Option<PhoneStatus>> = std::sync::Mutex::new(None);
+    let mut g = S.lock().unwrap_or_else(|e| e.into_inner());
+    let st = g.get_or_insert_with(|| match std::fs::read_to_string(status_path()).ok().and_then(|s| serde_json::from_str::<PhoneStatus>(&s).ok()) {
+        Some(v) => v,
+        None => {
+            // первый запуск: уже видимые телефоны остаются контактами
+            let saved: Vec<String> = crate::mobile_api::devices_overview().iter().filter_map(|d| d["peer_id"].as_str().map(str::to_string)).filter(|p| !is_hidden_phone(p)).collect();
+            let v = PhoneStatus { saved, blocked: Vec::new() };
+            if let Ok(b) = serde_json::to_vec(&v) {
+                let _ = crate::util::private_file::write_private(&status_path(), &b);
+            }
+            v
+        }
+    });
+    let before = st.clone();
+    let r = f(st);
+    if *st != before {
+        if let Ok(b) = serde_json::to_vec(&*st) {
+            let _ = crate::util::private_file::write_private(&status_path(), &b);
+        }
+    }
+    r
+}
+
+/// Учёт контактов создаётся при первом обращении (уже сопряжённые устройства остаются контактами) — до того, как придут новые.
+pub fn init_phone_status() {
+    with_status(|_| {});
+}
+
+pub fn is_saved_phone(peer: &str) -> bool {
+    with_status(|s| s.saved.iter().any(|x| x == peer))
+}
+
+pub fn is_blocked_phone(peer: &str) -> bool {
+    with_status(|s| s.blocked.iter().any(|x| x == peer))
+}
+
+/// Действие над устройством: add / remove (из контактов), block / unblock. Скрытие — `hide_phone` / `unhide_phone`.
+pub fn phone_action(peer: &str, action: &str) -> Result<(), String> {
+    if peer.len() != 64 {
+        return Err("неверный номер устройства".into());
+    }
+    match action {
+        "add" => with_status(|s| {
+            s.blocked.retain(|x| x != peer);
+            if !s.saved.iter().any(|x| x == peer) {
+                s.saved.push(peer.to_string());
+            }
+        }),
+        "remove" => with_status(|s| s.saved.retain(|x| x != peer)),
+        "block" => with_status(|s| {
+            s.saved.retain(|x| x != peer);
+            if !s.blocked.iter().any(|x| x == peer) {
+                s.blocked.push(peer.to_string());
+            }
+        }),
+        "unblock" => with_status(|s| s.blocked.retain(|x| x != peer)),
+        "hide" => hide_phone(peer),
+        "unhide" => unhide_phone(peer),
+        _ => return Err("неизвестное действие".into()),
+    }
+    if action == "add" {
+        unhide_phone(peer);
+    }
+    Ok(())
+}
+
 /// Спрятать телефон из списка чата (номер устройства полностью или его начало, не короче 16 знаков).
 pub fn hide_phone(id: &str) {
     if id.len() >= 16 {
