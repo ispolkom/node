@@ -26,10 +26,14 @@ chmod 700 "$W"
 cleanup() { find "$W" -type f -exec shred -u {} + 2>/dev/null || true; rm -rf "$W"; }
 trap cleanup EXIT INT TERM
 
-echo "Фраза разработчика (не меньше 12 случайных слов; ввод не отображается)."
+echo "Фраза разработчика: не меньше 12 случайных слов, любой язык и символы, регистр важен (Вода ≠ вода, ё ≠ е). Ввод не отображается."
 read -rs -p "Фраза: " P1; echo
 read -rs -p "Ещё раз: " P2; echo
-printf '%s\n%s\n' "$P1" "$P2" | target/release/apk_signing_key "$W/key.der"
+# NFC: одна и та же буква (й, ё, буквы с ударением, эмодзи с модификаторами) бывает записана разными байтами — на другой клавиатуре или
+# в другом терминале фраза дала бы другой ключ. Нормализуем стандартной библиотекой Python, ключ выводит apk_signing_key.
+printf '%s\n%s\n' "$P1" "$P2" \
+  | python3 -I -c 'import sys, unicodedata; sys.stdout.write("".join(unicodedata.normalize("NFC", l) for l in sys.stdin))' \
+  | target/release/apk_signing_key "$W/key.der"
 unset P1 P2
 
 openssl ec -inform DER -in "$W/key.der" -out "$W/key.pem" 2>/dev/null
