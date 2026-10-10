@@ -290,10 +290,10 @@ struct JournalLine {
 /// Намёк «в группе что-то изменилось» для подключённых телефонов-участников.
 #[derive(Clone)]
 pub struct Hint {
-    gid: String,
-    kind: u8,
-    seq: u64,
-    to: Arc<Vec<String>>,
+    pub(crate) gid: String,
+    pub(crate) kind: u8,
+    pub(crate) seq: u64,
+    pub(crate) to: Arc<Vec<String>>,
 }
 
 impl Hint {
@@ -338,6 +338,11 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// Номер участника в группе для устройства (нужен клиенту групп на узле, чтобы узнавать свои намёки).
+pub(crate) fn member_key_for(gid: &str, device_peer: &str) -> String {
+    member_key(gid, device_peer)
 }
 
 fn member_key(gid: &str, device_peer: &str) -> String {
@@ -1336,7 +1341,7 @@ pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, boo
     with_store(|s| s.get(gid).ok().and_then(|g| g.member(&key).map(|m| (key.clone(), m.role, m.muted))))
 }
 
-fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
+pub(crate) fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
     let mut g = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let s = g.get_or_insert_with(|| Store::open(crate::util::data_dir::data_dir().join("groups")));
     f(s)

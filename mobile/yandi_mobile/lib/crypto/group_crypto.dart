@@ -34,6 +34,12 @@ class GroupCrypto {
     return (Uint8List.fromList(seed), Uint8List.fromList(pub));
   }
 
+  /// Открытый ключ по закрытому seed (нужен для проверок и совместимости с клиентом на узле).
+  static Future<Uint8List> publicFromSeed(List<int> seed) async {
+    final kp = await _x.newKeyPairFromSeed(seed);
+    return Uint8List.fromList((await kp.extractPublicKey()).bytes);
+  }
+
   static Future<SecretKey> _boxKey(List<int> mySeed, List<int> theirPub, String gid, int epoch) async {
     final kp = await _x.newKeyPairFromSeed(mySeed);
     final shared = await _x.sharedSecretKey(keyPair: kp, remotePublicKey: SimplePublicKey(theirPub, type: KeyPairType.x25519));

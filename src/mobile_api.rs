@@ -502,6 +502,11 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
     let _ = st.chat.store_local_incoming(&HashId(from), &msg);
 }
 
+/// Номер самого узла (hex): под ним компьютер участвует в группах как устройство.
+pub(crate) fn node_peer_hex() -> Option<String> {
+    STATE.get().map(|s| hex::encode(s.my_id.0))
+}
+
 /// Это номер самого узла (компьютер как собеседник телефона)?
 pub(crate) fn is_node_peer(peer: &str) -> bool {
     STATE.get().map(|s| hex::encode(s.my_id.0) == peer).unwrap_or(false)

@@ -259,6 +259,12 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(not(unix))]
     let identity = NodeIdentity::load_or_create(discovery_port);
 
+    // Группы на компьютере (узел как участник): данные закрыты мастер-ключом узла, как история чатов.
+    if let Some(mk) = auth_state.get_master_key() {
+        yandi::group_client::init(mk);
+        yandi::group_client::spawn_background();
+    }
+
     let identity_for_transport = identity.clone(); // Клон для транспортов
     let identity_for_web = identity.clone(); // Clone for Web UI/mDNS
     let identity_for_socks5 = identity.clone(); // Clone for SOCKS5 auto-start

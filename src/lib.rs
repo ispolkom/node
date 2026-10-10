@@ -44,6 +44,7 @@ pub mod ip_history;
 pub mod mdns;
 pub mod mobile_api;
 pub mod mobile_files;
+pub mod group_client;
 pub mod mobile_group_files;
 pub mod mobile_groups;
 pub mod mobile_self;
