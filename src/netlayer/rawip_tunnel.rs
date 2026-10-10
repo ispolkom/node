@@ -15,15 +15,14 @@
 
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
+use std::net::{Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{RwLock, Semaphore};
 
 use crate::protocol::Station;
-use crate::util::HashId;
 
 /// Результат операции
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

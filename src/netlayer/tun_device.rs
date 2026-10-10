@@ -18,13 +18,12 @@
 //!   yandi_client: 192.168.100.1/24 + fd00::1/64
 //!   yandi_p2p: fc00:1234:5678:1::1/64
 
-use std::io;
 use anyhow::{Result, anyhow};
 use tokio::sync::mpsc;
-use tun::{Device, TunPacket};
+use tun::Device;
 use std::net::Ipv6Addr;
 use std::sync::Arc;
-use crate::protocol::{Station, Wagon, TrainId};
+use crate::protocol::Station;
 use crate::util::{HashId, mask_hash_id};
 use crate::netlayer::P2PTransport;
 use crate::netlayer::tun_exit::{TunWagon, TunWagonResponse};
@@ -509,8 +508,6 @@ impl YandiTunDevice {
 
     /// Find peer ID by virtual IPv6 address
     fn find_peer_by_ipv6(transport: &P2PTransport, ipv6: Ipv6Addr) -> Option<HashId> {
-        use std::net::Ipv6Addr;
-
         // Get peers from transport (this needs to be async, but we're in sync context)
         // For now, we'll need a different approach
         // This is a limitation we'll solve later
