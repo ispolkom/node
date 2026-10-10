@@ -59,6 +59,7 @@ pub mod reachability;
 pub mod relay_net;
 pub mod mobile_api;
 pub mod mobile_files;
+pub mod mobile_groups;
 pub mod mobile_tls;
 pub mod route_rules;
 pub mod supervisor;

@@ -236,7 +236,21 @@ pub fn remove_device(id: &str) -> bool {
     let Some(peer) = with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id))) else { return false };
     with_devices(|d| d.retain(|x| x.peer_id() != peer));
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
+    crate::mobile_groups::forget_device(&peer);
     true
+}
+
+/// Полный номер устройства по его началу (не короче 8 знаков), как в списке устройств на странице узла.
+pub(crate) fn device_peer_by_prefix(id: &str) -> Option<String> {
+    if id.len() < 8 {
+        return None;
+    }
+    with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id)))
+}
+
+/// Сопряжённые устройства: (номер, имя).
+pub(crate) fn device_list() -> Vec<(String, String)> {
+    with_devices(|d| d.iter().map(|x| (x.peer_id(), x.name.clone())).collect())
 }
 
 fn device_by_peer(peer: &str) -> Option<Device> {
@@ -595,6 +609,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
     use base64::Engine;
     set_live(&me, true);
     let mut rx = bus().subscribe();
+    let mut groups_rx = crate::mobile_groups::subscribe();
     let mut seen: HashSet<HashId> = HashSet::new();
     loop {
         tokio::select! {
@@ -626,6 +641,15 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                             f.push(up as u8);
                             if sock.send(Message::Binary(f)).await.is_err() { break; }
                         }
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(_) => break,
+            },
+            h = groups_rx.recv() => match h {
+                Ok(h) => {
+                    if let Some(f) = h.frame_for(&me) {
+                        if sock.send(Message::Binary(f)).await.is_err() { break; }
                     }
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
@@ -691,6 +715,17 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/files/:id/status", get(crate::mobile_files::status))
         .route("/mobile/files/:id/chunk/:idx", get(crate::mobile_files::get_chunk).put(crate::mobile_files::put_chunk))
         .route("/mobile/files/:id/done", post(crate::mobile_files::done))
+        .route("/mobile/groups", get(crate::mobile_groups::m_list))
+        .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
+        .route("/mobile/groups/:gid/join", post(crate::mobile_groups::m_join))
+        .route("/mobile/groups/:gid/leave", post(crate::mobile_groups::m_leave))
+        .route("/mobile/groups/:gid/members", get(crate::mobile_groups::m_members))
+        .route("/mobile/groups/:gid/pubkey", post(crate::mobile_groups::m_pub))
+        .route("/mobile/groups/:gid/keys", get(crate::mobile_groups::m_keys_get).post(crate::mobile_groups::m_keys_put))
+        .route("/mobile/groups/:gid/log", get(crate::mobile_groups::m_log_get).post(crate::mobile_groups::m_log_post))
+        .route("/mobile/groups/:gid/mod", post(crate::mobile_groups::m_mod))
+        .route("/mobile/groups/:gid/modlog", get(crate::mobile_groups::m_modlog))
+        .route("/mobile/groups/:gid/invite", post(crate::mobile_groups::m_invite))
         .route("/mobile/ws", get(ws))
         .layer(middleware::from_fn(auth));
     Router::new().route("/mobile/pair", post(pair)).merge(guarded).with_state(st)
