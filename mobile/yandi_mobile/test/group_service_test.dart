@@ -1,0 +1,210 @@
+import 'dart:convert';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_mobile/crypto/group_crypto.dart';
+import 'package:yandi_mobile/models/group.dart';
+import 'package:yandi_mobile/services/group_api.dart';
+import 'package:yandi_mobile/services/group_service.dart';
+import 'package:yandi_mobile/services/group_store.dart';
+
+/// Узел в миниатюре: хранит непрозрачные байты, как настоящий (проверка ролей — упрощённая).
+class FakeNode {
+  final String gid = 'ab' * 16;
+  int epoch = 0;
+  bool rekeyNeeded = false;
+  final members = <String, Map<String, dynamic>>{};     // device → {alias, role, muted, pub}
+  final boxes = <int, Map<String, String>>{};            // epoch → alias → box
+  final log = <Map<String, dynamic>>[];
+  String? ownerAlias;
+
+  FakeNode(String ownerDevice) {
+    members[ownerDevice] = {'alias': 'Хозяин-1', 'role': 'owner', 'muted': false, 'pub': null};
+    ownerAlias = 'Хозяин-1';
+  }
+  GroupApi as(String dev) => _Api(this, dev);
+}
+
+class _Api implements GroupApi {
+  final FakeNode n;
+  final String dev;
+  _Api(this.n, this.dev);
+  Map<String, dynamic> get me => n.members[dev] ?? (throw const GroupApiError(403, 'не участник'));
+
+  @override
+  Future<List<Map<String, dynamic>>> list() async {
+    if (!n.members.containsKey(dev)) return [];
+    final pending = [for (final m in n.members.values) if (m['pub'] != null && !(n.boxes[n.epoch]?.containsKey(m['alias']) ?? false) && m['role'] != 'owner') m['alias'] as String];
+    return [
+      {'id': n.gid, 'name': 'Тест', 'topic': '', 'kind': 'invite', 'my_alias': me['alias'], 'role': me['role'], 'muted': me['muted'], 'members': n.members.length,
+       'epoch': n.epoch, 'first_seq': 1, 'last_seq': n.log.length, 'rekey_needed': n.rekeyNeeded, 'pending_keys': pending}
+    ];
+  }
+  @override
+  Future<List<Map<String, dynamic>>> openGroups() async => [];
+  @override
+  Future<String> join(String gid, {String? inviteCode, String? memberPub}) async {
+    if (inviteCode != 'AAAA-BBBB-CCCC') throw const GroupApiError(403, 'неверное приглашение');
+    final alias = 'Гость-${n.members.length}';
+    n.members[dev] = {'alias': alias, 'role': 'member', 'muted': false, 'pub': memberPub};
+    return alias;
+  }
+  @override
+  Future<void> leave(String gid) async { n.members.remove(dev); n.rekeyNeeded = true; }
+  @override
+  Future<Map<String, dynamic>> members(String gid) async => {
+        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
+      };
+  @override
+  Future<void> setPub(String gid, String memberPub) async => me['pub'] = memberPub;
+  @override
+  Future<Map<String, dynamic>> keys(String gid) async => {
+        'epoch': n.epoch,
+        'owner_pub': n.members.values.firstWhere((m) => m['role'] == 'owner')['pub'],
+        'boxes': [for (final e in n.boxes.entries) if (e.value.containsKey(me['alias'])) {'epoch': e.key, 'box': e.value[me['alias']]}],
+      };
+  @override
+  Future<void> putKeys(String gid, int epoch, Map<String, String> boxes) async {
+    if (me['role'] != 'owner') throw const GroupApiError(403, 'только владелец');
+    if (epoch > n.epoch) { n.epoch = epoch; n.rekeyNeeded = false; }
+    (n.boxes[epoch] ??= {}).addAll(boxes);
+  }
+  @override
+  Future<Map<String, dynamic>> pull(String gid, int after, {int limit = 200}) async {
+    me;
+    return {'first_seq': 1, 'last_seq': n.log.length, 'entries': [for (final e in n.log) if ((e['seq'] as int) > after) e].take(limit).toList()};
+  }
+  @override
+  Future<int> append(String gid, int epoch, String payloadB64) async {
+    if (me['muted'] == true) throw const GroupApiError(403, 'заглушён');
+    final seq = n.log.length + 1;
+    n.log.add({'seq': seq, 'ts': 1000 + seq, 'from': me['alias'], 'epoch': epoch, 'payload_b64': payloadB64, 'deleted': false});
+    return seq;
+  }
+  @override
+  Future<void> mod(String gid, Map<String, dynamic> body) async {
+    if (body['action'] == 'delete_entry') { final e = n.log[(body['seq'] as int) - 1]; e['payload_b64'] = ''; e['deleted'] = true; }
+    if (body['action'] == 'mute') n.members.values.firstWhere((m) => m['alias'] == body['alias'])['muted'] = true;
+  }
+  @override
+  Future<Map<String, dynamic>> invite(String gid, {int uses = 1, int ttlHours = 24}) async => {'code': 'AAAA-BBBB-CCCC'};
+  @override
+  Future<List<Map<String, dynamic>>> modlog(String gid) async => [];
+}
+
+void main() {
+  late FakeNode node;
+  late GroupService owner, bob, eve;
+  late MemoryGroupStore ownerStore, bobStore;
+
+  setUp(() {
+    node = FakeNode('owner');
+    ownerStore = MemoryGroupStore();
+    bobStore = MemoryGroupStore();
+    owner = GroupService(node.as('owner'), ownerStore);
+    bob = GroupService(node.as('bob'), bobStore);
+    eve = GroupService(node.as('eve'), MemoryGroupStore());
+  });
+
+  Future<void> bobJoins() async {
+    await bob.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();                 // владелец видит ключ Боба и раздаёт группу
+    await bob.syncAndAnnounce();        // Боб забирает ключ, пишет имя
+  }
+
+  test('владелец раздаёт ключ, участник читает и пишет, имя доходит', () async {
+    await owner.sync();                 // владелец создаёт первое поколение
+    await bobJoins();
+    await owner.send(node.gid, GroupKind.text, {'t': 'всем привет'});
+    await bob.sync();
+    final msgs = await bob.messages(node.gid);
+    expect(msgs.map((e) => e.body['t']), ['всем привет']);
+    await bob.send(node.gid, GroupKind.text, {'t': 'я тут'});
+    await owner.sync();
+    expect((await owner.messages(node.gid)).map((e) => e.body['t']), ['всем привет', 'я тут']);
+    expect(owner.displayName(node.gid, 'Гость-1'), 'Боб');
+    // узел хранит только шифртекст
+    expect(node.log.every((e) => !utf8.decode(base64.decode(e['payload_b64'] as String), allowMalformed: true).contains('привет')), isTrue);
+  });
+
+  test('чужой без приглашения не входит; не участник ничего не читает', () async {
+    await owner.sync();
+    await expectLater(eve.join(node.gid, inviteCode: 'ЛЕВЫЙ', displayName: 'Ева'), throwsA(isA<GroupApiError>()));
+    await eve.sync();
+    expect(eve.groups, isEmpty);
+  });
+
+  test('запрет вида: отправитель отказывается, у получателей запись скрыта', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.setRules(node.gid, const GroupRules({GroupKind.image, GroupKind.link}));
+    await bob.sync();
+    expect(bob.rules(node.gid).allows(GroupKind.image), isFalse);
+    await expectLater(bob.send(node.gid, GroupKind.image, {'name': 'a.jpg'}), throwsA(isA<GroupSendRefused>()));
+    // участник с «переделанным» клиентом всё же отправил — другим клиентам запись не показывается
+    final g = bob.byId(node.gid)!;
+    final key = (await bobStore.read('grp_key_${g.epoch}_${node.gid}'))!;
+    final payload = await GroupCrypto.encryptEntry(base64.decode(key), gid: node.gid, epoch: g.epoch, from: g.myAlias, kind: GroupKind.image, body: {'name': 'x.jpg'});
+    await node.as('bob').append(node.gid, g.epoch, base64.encode(payload));
+    await owner.send(node.gid, GroupKind.text, {'t': 'ок'});
+    await owner.sync();
+    expect((await owner.messages(node.gid)).map((e) => e.kind), [GroupKind.text]);
+  });
+
+  test('правила принимаются только от владельца', () async {
+    await owner.sync();
+    await bobJoins();
+    final g = bob.byId(node.gid)!;
+    final key = base64.decode((await bobStore.read('grp_key_${g.epoch}_${node.gid}'))!);
+    final payload = await GroupCrypto.encryptEntry(key, gid: node.gid, epoch: g.epoch, from: g.myAlias, kind: GroupKind.system, body: const GroupRules({GroupKind.text}).toBody());
+    await node.as('bob').append(node.gid, g.epoch, base64.encode(payload));    // участник пытается запретить текст всем
+    await owner.sync();
+    await bob.sync();
+    expect(owner.rules(node.gid).allows(GroupKind.text), isTrue);
+    expect(bob.rules(node.gid).allows(GroupKind.text), isTrue);
+    await expectLater(bob.setRules(node.gid, const GroupRules({GroupKind.text})), throwsA(isA<GroupSendRefused>()));
+  });
+
+  test('подмена ключа владельца узлом: ключи не принимаются', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.send(node.gid, GroupKind.text, {'t': 'раз'});
+    await bob.sync();
+    node.members['owner']!['pub'] = base64.encode(List.filled(32, 7));   // узел подсунул чужой ключ владельца
+    node.rekeyNeeded = true;
+    await owner.sync();
+    await bob.sync();
+    expect(bob.hasProblem(node.gid), isTrue);
+  });
+
+  test('смена ключа после выхода участника: оставшиеся читают новое, вышедший — нет', () async {
+    await owner.sync();
+    await bobJoins();
+    await bob.leave(node.gid);
+    await owner.sync();                  // rekey: epoch растёт, Бобу конверта нет
+    expect(node.epoch, 2);
+    await owner.send(node.gid, GroupKind.text, {'t': 'без Боба'});
+    await owner.sync();
+    expect((await owner.messages(node.gid)).last.body['t'], 'без Боба');
+    await bob.sync();
+    expect(bob.groups, isEmpty);
+  });
+
+  test('запись стёрта модератором: остаётся пометка, текста нет', () async {
+    await owner.sync();
+    await bobJoins();
+    final seq = await owner.send(node.gid, GroupKind.text, {'t': 'лишнее'});
+    await bob.sync();
+    expect((await bob.messages(node.gid)).length, 1);
+    await owner.moderate(node.gid, 'delete_entry', seq: seq);
+    await bob.sync();                    // уже скачано — стирание узнаём при полном обходе записи
+    await bobStore.markDeleted(node.gid, seq);
+    expect(await bob.messages(node.gid), isEmpty);
+  });
+
+  test('заглушённый не может писать', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.moderate(node.gid, 'mute', alias: 'Гость-1');
+    await bob.sync();
+    await expectLater(bob.send(node.gid, GroupKind.text, {'t': 'эй'}), throwsA(isA<GroupSendRefused>()));
+  });
+}

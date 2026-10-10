@@ -282,6 +282,17 @@ class ApiService {
     }
   }
 
+  /// Общий JSON-запрос (группы и др.): (код ответа, разобранное тело).
+  Future<(int, dynamic)> json(String method, String path, [Object? body]) async {
+    final req = http.Request(method, _url(path));
+    _headers.forEach((k, v) => req.headers[k] = v);
+    if (body != null) req.body = jsonEncode(body);
+    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 20)));
+    dynamic parsed;
+    try { parsed = res.body.isEmpty ? null : jsonDecode(res.body); } catch (_) { parsed = res.body; }
+    return (res.statusCode, parsed);
+  }
+
   void dispose() => _client.close();
 
   static http.Client _buildClient(String expectedFp) {
