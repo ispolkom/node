@@ -412,6 +412,7 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
     }
     let (Some(text), Some(from)) = (crate::mobile_self::open(blob), hex32(from_device)) else { return };
     let device = HashId(from);
+    crate::mobile_self::unhide_phone(from_device);
     let text = match crate::mobile_self::classify(text) {
         crate::mobile_self::Envelope::Receipt { read, ids } => {
             let status = if read { crate::communication::MessageStatus::Read } else { crate::communication::MessageStatus::Delivered };

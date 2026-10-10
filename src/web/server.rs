@@ -2225,6 +2225,9 @@ fn append_phone_contacts(data: &mut serde_json::Value) {
     if let Some(arr) = data["contacts"].as_array_mut() {
         for d in crate::mobile_api::devices_overview() {
             let Some(full) = d["peer_id"].as_str() else { continue };
+            if crate::mobile_self::is_hidden_phone(full) {
+                continue; // «Удалить» на странице: спрятан из чата, сопряжение не тронуто
+            }
             arr.push(serde_json::json!({
                 "id": format!("phone-{}", &full[..16]),
                 "name": format!("📱 {}", d["name"].as_str().unwrap_or("Телефон")),
@@ -2372,8 +2375,18 @@ async fn api_contacts_delete(
         }
     }
 
-    // Удаляем контакт
-    contacts.retain(|c| c.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
+    // телефон владельца: он не в contacts.json (список строит узел из сопряжённых устройств) — прячем из чата
+    if let Some(prefix) = payload.id.strip_prefix("phone-") {
+        crate::mobile_self::hide_phone(prefix);
+        return Json(serde_json::json!({"status": "success", "message": "Contact deleted"}));
+    }
+
+    // Удаляем контакт (id в файле бывает строкой или числом)
+    contacts.retain(|c| match c.get("id") {
+        Some(serde_json::Value::String(s)) => s != &payload.id,
+        Some(v) => v.to_string() != payload.id,
+        None => true,
+    });
 
     // Сохраняем в файл
     let data = serde_json::json!({

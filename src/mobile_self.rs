@@ -417,6 +417,46 @@ pub fn offer_tid(offer_text: &str) -> Option<String> {
     serde_json::from_str::<Offer>(offer_text.strip_prefix(FILE_MARKER)?).ok().map(|o| o.tid)
 }
 
+// ── Телефоны, спрятанные из списка веб-чата («Удалить» у телефона на странице). Сопряжение не трогается. ──
+
+fn hidden_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("web_hidden_phones.json")
+}
+
+fn with_hidden<R>(f: impl FnOnce(&mut Vec<String>) -> R) -> R {
+    static H: std::sync::Mutex<Option<Vec<String>>> = std::sync::Mutex::new(None);
+    let mut g = H.lock().unwrap_or_else(|e| e.into_inner());
+    let list = g.get_or_insert_with(|| std::fs::read_to_string(hidden_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
+    let before = list.clone();
+    let r = f(list);
+    if *list != before {
+        if let Ok(s) = serde_json::to_vec(&*list) {
+            let _ = crate::util::private_file::write_private(&hidden_path(), &s);
+        }
+    }
+    r
+}
+
+/// Спрятать телефон из списка чата (номер устройства полностью или его начало, не короче 16 знаков).
+pub fn hide_phone(id: &str) {
+    if id.len() >= 16 {
+        with_hidden(|l| {
+            if !l.iter().any(|x| x == id) {
+                l.push(id.to_string());
+            }
+        });
+    }
+}
+
+pub fn is_hidden_phone(peer: &str) -> bool {
+    with_hidden(|l| l.iter().any(|x| peer.starts_with(x.as_str())))
+}
+
+/// Спрятанный телефон написал — вернуть его в список, чтобы сообщение не потерялось незаметно.
+pub fn unhide_phone(peer: &str) {
+    with_hidden(|l| l.retain(|x| !peer.starts_with(x.as_str())));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

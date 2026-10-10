@@ -294,9 +294,13 @@
             }).catch(function(e) { console.error(e); });
         }
 
+        var lastContactsKey = '';
         function renderContacts(contacts) {
             var container = document.getElementById('contactsList');
             if (!container) return;
+            var key = JSON.stringify(contacts);
+            if (key === lastContactsKey) return; // опрос раз в 5 с: без изменений не перерисовываем (не мигает, поиск не сбрасывается)
+            lastContactsKey = key;
             if (contacts.length === 0) { container.innerHTML = '<p class="text-muted">Нет контактов. Нажмите "Добавить"</p>'; contactsInitialized = true; return; }
             // Детектор перехода offline→online
             if (contactsInitialized) {
@@ -796,6 +800,7 @@
         function startAutoRefresh() {
             autoRefreshInterval = setInterval(function() {
                 if (currentContactShortId) { loadMessages(currentContactShortId); updateContactStatus(currentContactShortId); }
+                loadContacts(); // новые/удалённые контакты и телефоны появляются без перезагрузки страницы
                 loadMyInfo();
             }, 5000);
         }
