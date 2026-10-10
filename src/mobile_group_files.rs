@@ -1,0 +1,284 @@
+//! Файлы групп (`/mobile/groups/{id}/files...`, договорённость — docs/CLIENT_WIRE.md «Группы»).
+//!
+//! Как и в личных передачах, узел хранит только шифртекст: отправитель шифрует каждый кусок сам (ключ файла уходит участникам внутри
+//! зашифрованной записи журнала группы), поэтому узел не знает ни имени, ни содержимого. Файлы лежат отдельно от журнала, у каждой
+//! группы своя папка и свой потолок объёма, срок хранения ограничен. Забрать файл может только участник группы (не выгнанный и не
+//! запрещённый); стереть — отправитель, модератор или владелец группы. Удалили группу — удалились её файлы.
+use axum::body::Bytes;
+use axum::extract::Path;
+use axum::http::{header, StatusCode};
+use axum::response::{IntoResponse, Response};
+use axum::Json;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::path::PathBuf;
+
+use crate::mobile_api::{device_peer_of, DeviceKey};
+use crate::mobile_files::{MAX_CHUNKS, MAX_CHUNK_BYTES};
+use crate::mobile_groups::{member_state, valid_gid, Role};
+
+/// Самый большой файл в группе (в открытом виде), байт.
+pub const MAX_GROUP_FILE: u64 = 200 << 20;
+/// Потолок файлов одной группы и всех групп узла.
+const MAX_PER_GROUP: u64 = 2 << 30;
+const MAX_ALL_GROUPS: u64 = 8 << 30;
+const MAX_PENDING_PER_SENDER: usize = 5;
+/// Готовый файл хранится месяц, недокачанный — сутки.
+const TTL_DONE_MS: u64 = 30 * 24 * 3600 * 1000;
+const TTL_PARTIAL_MS: u64 = 24 * 3600 * 1000;
+const CHUNK_OVERHEAD: u64 = 28;
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Meta {
+    id: String,
+    /// кто залил (хэш участника в группе, а не номер устройства)
+    by: String,
+    file_size: u64,
+    total_chunks: u32,
+    created_ms: u64,
+    done: bool,
+}
+
+fn root() -> PathBuf {
+    crate::util::data_dir::data_dir().join("groups").join("files")
+}
+
+fn valid_id(id: &str) -> bool {
+    id.len() == 32 && id.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn group_dir(gid: &str) -> PathBuf {
+    root().join(gid)
+}
+
+fn dir_of(gid: &str, id: &str) -> PathBuf {
+    group_dir(gid).join(id)
+}
+
+fn chunk_name(idx: u32) -> String {
+    format!("c{idx:06}")
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn err(code: StatusCode, msg: &str) -> Response {
+    (code, Json(json!({"error": msg}))).into_response()
+}
+
+/// Группа удалена или участник вышел из дел: убираем файлы группы целиком.
+pub(crate) fn drop_group(gid: &str) {
+    if valid_gid(gid) {
+        let _ = std::fs::remove_dir_all(group_dir(gid));
+    }
+}
+
+async fn load_meta(gid: &str, id: &str) -> Option<Meta> {
+    if !valid_gid(gid) || !valid_id(id) {
+        return None;
+    }
+    let s = tokio::fs::read_to_string(dir_of(gid, id).join("meta.json")).await.ok()?;
+    serde_json::from_str(&s).ok()
+}
+
+async fn save_meta(gid: &str, m: &Meta) -> std::io::Result<()> {
+    let d = dir_of(gid, &m.id);
+    let tmp = d.join("meta.json.tmp");
+    tokio::fs::write(&tmp, serde_json::to_vec(m).unwrap_or_default()).await?;
+    tokio::fs::rename(&tmp, d.join("meta.json")).await
+}
+
+async fn metas_of(gid: &str) -> Vec<Meta> {
+    let mut out = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir(group_dir(gid)).await else { return out };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        if let Some(name) = e.file_name().to_str() {
+            if let Some(m) = load_meta(gid, name).await {
+                out.push(m);
+            }
+        }
+    }
+    out
+}
+
+fn used(metas: &[Meta]) -> u64 {
+    metas.iter().map(|m| m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD).sum()
+}
+
+async fn used_everywhere() -> u64 {
+    let mut total = 0;
+    let Ok(mut rd) = tokio::fs::read_dir(root()).await else { return 0 };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        if let Some(g) = e.file_name().to_str() {
+            total += used(&metas_of(g).await);
+        }
+    }
+    total
+}
+
+/// Убирает просроченное и осиротевшее в одной группе.
+async fn cleanup(gid: &str) {
+    let now = now_ms();
+    let Ok(mut rd) = tokio::fs::read_dir(group_dir(gid)).await else { return };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+        let drop_it = match load_meta(gid, &name).await {
+            Some(m) => now.saturating_sub(m.created_ms) > if m.done { TTL_DONE_MS } else { TTL_PARTIAL_MS },
+            None => e.metadata().await.ok().and_then(|m| m.modified().ok()).and_then(|t| t.elapsed().ok()).map(|d| d.as_secs()).unwrap_or(0) > 24 * 3600,
+        };
+        if drop_it {
+            let _ = tokio::fs::remove_dir_all(e.path()).await;
+        }
+    }
+}
+
+/// (устройство → участник группы, его роль и заглушён ли); иначе ответ-отказ.
+fn member(gid: &str, dev: &str) -> Result<(String, Role, bool), Response> {
+    if !valid_gid(gid) {
+        return Err(StatusCode::NOT_FOUND.into_response());
+    }
+    let me = device_peer_of(dev).ok_or_else(|| StatusCode::UNAUTHORIZED.into_response())?;
+    let (key, role, muted) = member_state(gid, &me).ok_or_else(|| err(StatusCode::FORBIDDEN, "вы не участник этой группы"))?;
+    Ok((key, role, muted))
+}
+
+#[derive(Deserialize)]
+pub struct StartReq {
+    file_size: u64,
+    total_chunks: u32,
+}
+
+/// Начать заливку файла в группу.
+pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(gid): Path<String>, Json(req): Json<StartReq>) -> Response {
+    let (key, _, muted) = match member(&gid, &dev) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    if muted {
+        return err(StatusCode::FORBIDDEN, "вы заглушены в этой группе");
+    }
+    if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_GROUP_FILE {
+        return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой (в группе до 200 МБ)");
+    }
+    let per = req.file_size.div_ceil(req.total_chunks as u64);
+    if per > MAX_CHUNK_BYTES as u64 - CHUNK_OVERHEAD {
+        return err(StatusCode::BAD_REQUEST, "куски слишком крупные");
+    }
+    cleanup(&gid).await;
+    let metas = metas_of(&gid).await;
+    let need = req.file_size + req.total_chunks as u64 * CHUNK_OVERHEAD;
+    if used(&metas) + need > MAX_PER_GROUP || used_everywhere().await + need > MAX_ALL_GROUPS {
+        return err(StatusCode::INSUFFICIENT_STORAGE, "в группе нет места для файлов");
+    }
+    if metas.iter().filter(|m| m.by == key && !m.done).count() >= MAX_PENDING_PER_SENDER {
+        return err(StatusCode::TOO_MANY_REQUESTS, "слишком много незавершённых заливок");
+    }
+    let id = {
+        use rand::RngCore;
+        let mut b = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut b);
+        hex::encode(b)
+    };
+    let meta = Meta { id: id.clone(), by: key, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false };
+    if tokio::fs::create_dir_all(dir_of(&gid, &id)).await.is_err() || save_meta(&gid, &meta).await.is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось создать заливку");
+    }
+    Json(json!({"file_id": id, "chunk_max": MAX_CHUNK_BYTES})).into_response()
+}
+
+/// Залить кусок (повтор безопасен — так работает докачка). Только тот, кто начал заливку.
+pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id, idx)): Path<(String, String, u32)>, body: Bytes) -> Response {
+    let (key, _, muted) = match member(&gid, &dev) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    if m.by != key || muted {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    if m.done {
+        return err(StatusCode::CONFLICT, "заливка уже завершена");
+    }
+    if idx >= m.total_chunks || body.is_empty() || body.len() > MAX_CHUNK_BYTES {
+        return err(StatusCode::BAD_REQUEST, "неверный номер или размер куска");
+    }
+    let d = dir_of(&gid, &id);
+    let tmp = d.join(format!("{}.tmp", chunk_name(idx)));
+    if tokio::fs::write(&tmp, &body).await.is_err() || tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить кусок");
+    }
+    StatusCode::OK.into_response()
+}
+
+async fn present(gid: &str, id: &str) -> Vec<u32> {
+    let mut have = Vec::new();
+    let Ok(mut rd) = tokio::fs::read_dir(dir_of(gid, id)).await else { return have };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        if let Some(i) = e.file_name().to_str().and_then(|n| n.strip_prefix('c')).and_then(|r| r.parse::<u32>().ok()) {
+            have.push(i);
+        }
+    }
+    have.sort_unstable();
+    have
+}
+
+/// Все куски залиты — файл становится доступным участникам.
+pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id)): Path<(String, String)>) -> Response {
+    let (key, _, _) = match member(&gid, &dev) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(mut m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    if m.by != key {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let have = present(&gid, &id).await;
+    let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
+    if !missing.is_empty() {
+        return (StatusCode::CONFLICT, Json(json!({"error": "не хватает кусков", "missing": missing}))).into_response();
+    }
+    m.done = true;
+    if save_meta(&gid, &m).await.is_err() {
+        return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось завершить заливку");
+    }
+    Json(json!({"ok": true})).into_response()
+}
+
+/// Состояние файла: для докачки и для проверки перед скачиванием.
+pub async fn status(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id)): Path<(String, String)>) -> Response {
+    if let Err(r) = member(&gid, &dev) {
+        return r;
+    }
+    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    Json(json!({"done": m.done, "total_chunks": m.total_chunks, "file_size": m.file_size, "have": present(&gid, &id).await})).into_response()
+}
+
+/// Скачать кусок (любой участник группы, когда файл готов).
+pub async fn get_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id, idx)): Path<(String, String, u32)>) -> Response {
+    if let Err(r) = member(&gid, &dev) {
+        return r;
+    }
+    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    if !m.done || idx >= m.total_chunks {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::read(dir_of(&gid, &id).join(chunk_name(idx))).await {
+        Ok(b) => ([(header::CONTENT_TYPE, "application/octet-stream")], b).into_response(),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Стереть файл: тот, кто залил, либо владелец/модератор группы.
+pub async fn remove(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id)): Path<(String, String)>) -> Response {
+    let (key, role, _) = match member(&gid, &dev) {
+        Ok(v) => v,
+        Err(r) => return r,
+    };
+    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    if m.by != key && role == Role::Member {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let _ = tokio::fs::remove_dir_all(dir_of(&gid, &id)).await;
+    StatusCode::OK.into_response()
+}

@@ -331,7 +331,7 @@ fn member_key(gid: &str, device_peer: &str) -> String {
     ))
 }
 
-fn valid_gid(id: &str) -> bool {
+pub(crate) fn valid_gid(id: &str) -> bool {
     id.len() == 32
         && id
             .bytes()
@@ -652,6 +652,7 @@ impl Store {
         let g = self.groups.remove(gid).ok_or_else(not_found)?;
         self.offsets.remove(gid);
         let _ = std::fs::remove_file(self.log_path(gid));
+        crate::mobile_group_files::drop_group(gid);
         self.save();
         hint(gid, HINT_DELETED, 0, g.keys());
         Ok(())
@@ -1222,6 +1223,12 @@ fn invite_code() -> String {
 }
 
 static STORE: Mutex<Option<Store>> = Mutex::new(None);
+
+/// Участник группы для хранилища файлов групп: (его номер в группе, роль, заглушён ли).
+pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, bool)> {
+    let key = member_key(gid, device);
+    with_store(|s| s.get(gid).ok().and_then(|g| g.member(&key).map(|m| (key.clone(), m.role, m.muted))))
+}
 
 fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
     let mut g = STORE.lock().unwrap_or_else(|e| e.into_inner());

@@ -282,6 +282,15 @@ class ApiService {
     }
   }
 
+  /// Двоичный запрос (куски файлов групп): (код ответа, тело).
+  Future<(int, List<int>)> bytes(String method, String path, [List<int>? body]) async {
+    final req = http.Request(method, _url(path));
+    req.headers['Authorization'] = 'Bearer ${_node.token ?? ""}';
+    if (body != null) { req.headers['Content-Type'] = 'application/octet-stream'; req.bodyBytes = body; }
+    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 60)));
+    return (res.statusCode, res.bodyBytes);
+  }
+
   /// Общий JSON-запрос (группы и др.): (код ответа, разобранное тело).
   Future<(int, dynamic)> json(String method, String path, [Object? body]) async {
     final req = http.Request(method, _url(path));

@@ -41,4 +41,25 @@ class HttpGroupApi implements GroupApi {
   Future<Map<String, dynamic>> invite(String gid, {int uses = 1, int ttlHours = 24}) => _call('POST', '/mobile/groups/$gid/invite', {'uses': uses, 'ttl_hours': ttlHours});
   @override
   Future<List<Map<String, dynamic>>> modlog(String gid) async => _list(await _call('GET', '/mobile/groups/$gid/modlog'), 'modlog');
+
+  @override
+  Future<({String fileId, int chunkMax})> fileStart(String gid, int size, int chunks) async {
+    final j = await _call('POST', '/mobile/groups/$gid/files', {'file_size': size, 'total_chunks': chunks});
+    return (fileId: j['file_id'] as String, chunkMax: (j['chunk_max'] ?? 0) as int);
+  }
+  @override
+  Future<void> filePut(String gid, String fileId, int idx, List<int> bytes) async {
+    final (code, _) = await _api.bytes('PUT', '/mobile/groups/$gid/files/$fileId/chunk/$idx', bytes);
+    if (code != 200) throw GroupApiError(code, 'кусок $idx не залит');
+  }
+  @override
+  Future<void> fileDone(String gid, String fileId) async => _call('POST', '/mobile/groups/$gid/files/$fileId/done', {});
+  @override
+  Future<List<int>> fileGet(String gid, String fileId, int idx) async {
+    final (code, b) = await _api.bytes('GET', '/mobile/groups/$gid/files/$fileId/chunk/$idx');
+    if (code != 200) throw GroupApiError(code, 'кусок $idx не скачан');
+    return b;
+  }
+  @override
+  Future<void> fileDelete(String gid, String fileId) async => _call('DELETE', '/mobile/groups/$gid/files/$fileId');
 }

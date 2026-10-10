@@ -36,6 +36,12 @@ def req(method, path, body=None, token=None):
     except Exception:
         return r.status, raw
 
+def rawreq(method, path, data=None, token=None):
+    h = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=15)
+    h.request(method, path, data, {"Authorization": "Bearer " + token, "Content-Type": "application/octet-stream"})
+    r = h.getresponse()
+    return r.status, r.read()
+
 def ws_open(token):
     s = ctx().wrap_socket(socket.create_connection(("127.0.0.1", PORT), timeout=15))
     key = base64.b64encode(os.urandom(16)).decode()
@@ -191,6 +197,39 @@ st, r = req("GET", "/mobile/groups", token=t_own)
 g3 = [x for x in r["groups"] if x["id"] == gid3]
 check("the owner is told to change the key after a ban", g3 and g3[0]["rekey_needed"], r)
 
+# files of a group: only members, only ciphertext chunks, expiry/limits, uploader or moderator deletes
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 1000, "total_chunks": 1}, token=t_eve)
+check("an outsider cannot start a group file", st == 403, (st, r))
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 201 << 20, "total_chunks": 1000}, token=t_bob)
+check("a group file over 200 MB is refused", st == 413, (st, r))
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 600 * 1024, "total_chunks": 3}, token=t_bob)
+fid = r.get("file_id")
+check("a member starts a group file", st == 200 and fid and len(fid) == 32, (st, r))
+st, _ = rawreq("PUT", f"/mobile/groups/{gid}/files/{fid}/chunk/0", b"A" * 1000, token=t_own)
+check("only the uploader puts chunks", st == 403, st)
+for i in (0, 1):
+    st, _ = rawreq("PUT", f"/mobile/groups/{gid}/files/{fid}/chunk/{i}", bytes([65 + i]) * 5000, token=t_bob)
+    check(f"chunk {i} stored", st == 200, st)
+st, r = req("POST", f"/mobile/groups/{gid}/files/{fid}/done", {}, token=t_bob)
+check("done is refused while a chunk is missing", st == 409 and r.get("missing") == [2], (st, r))
+st, _ = rawreq("PUT", f"/mobile/groups/{gid}/files/{fid}/chunk/2", b"C" * 5000, token=t_bob)
+st, r = req("POST", f"/mobile/groups/{gid}/files/{fid}/done", {}, token=t_bob)
+check("done after all chunks", st == 200, (st, r))
+st, b = rawreq("GET", f"/mobile/groups/{gid}/files/{fid}/chunk/1", token=t_own)
+check("another member downloads a chunk byte-for-byte", st == 200 and b == b"B" * 5000, st)
+st, _ = rawreq("GET", f"/mobile/groups/{gid}/files/{fid}/chunk/1", token=t_eve)
+check("an outsider cannot download", st == 403, st)
+st, _ = rawreq("DELETE", f"/mobile/groups/{gid}/files/{fid}", token=t_eve)
+check("an outsider cannot delete", st == 403, st)
+st, _ = rawreq("DELETE", f"/mobile/groups/{gid}/files/{fid}", token=t_own)
+check("the owner can delete a member's file", st == 200, st)
+st, _ = rawreq("GET", f"/mobile/groups/{gid}/files/{fid}/chunk/1", token=t_own)
+check("a deleted file is gone", st == 404, st)
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 1000, "total_chunks": 1}, token=t_bob)
+fid2 = r.get("file_id")
+rawreq("PUT", f"/mobile/groups/{gid}/files/{fid2}/chunk/0", b"Z" * 1000, token=t_bob)
+req("POST", f"/mobile/groups/{gid}/files/{fid2}/done", {}, token=t_bob)
+
 # deleting: only on the page, and members are told
 st, r = req("DELETE", f"/mobile/groups/{gid}", token=t_own)
 check("a phone cannot delete a group", st in (404, 405), st)
@@ -200,6 +239,7 @@ h = hint(s_bob, gid, kind=4)
 check("bob is told the group is gone", h is not None, h)
 st, r = req("GET", f"/mobile/groups/{gid}/log?after=0", token=t_bob)
 check("its journal is gone", st == 404, st)
+check("its files are gone from the disk", not os.path.exists(os.path.join(a.dir, "home/.local/share/yandi/groups/files", gid)))
 s_bob.close()
 
 # a device forgotten by the node leaves its groups

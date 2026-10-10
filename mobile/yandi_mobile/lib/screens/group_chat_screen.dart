@@ -1,10 +1,17 @@
+import 'dart:io';
+import 'dart:math';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
 import '../services/app_state.dart';
+import '../services/file_transfer_service.dart';
+import '../services/group_files.dart';
 import '../services/group_service.dart';
+import '../services/vault_files.dart';
+import 'file_viewer_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_keyboard.dart';
 import 'group_info_screen.dart';
@@ -36,6 +43,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   int? _section;
   List<GroupEntry> _entries = const [];
   int _shownCount = -1;
+  final Map<String, String> _paths = {};       // номер файла на узле → где лежит у меня
+  final Map<String, double> _progress = {};    // номер файла (или 'up') → доля
 
   @override
   void initState() {
@@ -69,6 +78,76 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         if (_scroll.hasClients) _scroll.jumpTo(_scroll.position.maxScrollExtent);
       });
     }
+  }
+
+  String _fmtSize(int b) => b >= 1 << 20 ? '${(b / (1 << 20)).toStringAsFixed(1)} МБ' : '${(b / 1024).ceil()} КБ';
+
+  Future<void> _attach() async {
+    final svc = _svc!;
+    final r = await FilePicker.platform.pickFiles(allowMultiple: false);
+    final path = r?.files.single.path;
+    if (path == null) return;
+    final name = r!.files.single.name;
+    final kind = GroupFiles.kindForName(name);
+    if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
+    setState(() => _progress['up'] = 0);
+    try {
+      final d = await GroupFiles(svc.api).upload(widget.gid, File(path), name, onProgress: (done, total) {
+        if (mounted) setState(() => _progress['up'] = done / total);
+      });
+      try {
+        await svc.send(widget.gid, kind, d);
+      } catch (e) {
+        try { await svc.api.fileDelete(widget.gid, d['f'] as String); } catch (_) {}   // запись не ушла — файл на узле не нужен
+        rethrow;
+      }
+      _paths[d['f'] as String] = path;   // свой файл уже у меня
+      await svc.sync(only: widget.gid);
+      await _load();
+    } on GroupSendRefused catch (e) {
+      _toast(e.reason);
+    } catch (e) {
+      _toast('Файл не отправлен: $e');
+    } finally {
+      if (mounted) setState(() => _progress.remove('up'));
+    }
+  }
+
+  Future<String?> _localPath(Map<String, dynamic> d) async {
+    final fid = d['f'] as String;
+    final mem = _paths[fid];
+    if (mem != null && File(mem).existsSync()) return mem;
+    final saved = await _svc!.store.read('grp_dl_$fid');
+    if (saved != null && File(saved).existsSync()) { _paths[fid] = saved; return saved; }
+    return null;
+  }
+
+  Future<void> _openFile(Map<String, dynamic> d) async {
+    final fid = d['f'] as String;
+    var path = await _localPath(d);
+    if (path == null) {
+      final dir = await FileTransferService.downloadsDir();
+      final safe = ((d['n'] as String?) ?? 'file').replaceAll(RegExp(r'[\\/\x00-\x1f]'), '_');
+      final prefix = List.generate(4, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+      final out = File('${dir.path}/${prefix}_$safe');
+      setState(() => _progress[fid] = 0);
+      try {
+        await GroupFiles(_svc!.api).download(widget.gid, d, out, onProgress: (done, total) {
+          if (mounted) setState(() => _progress[fid] = done / total);
+        });
+      } catch (e) {
+        _toast('Не скачано: $e');
+        return;
+      } finally {
+        if (mounted) setState(() => _progress.remove(fid));
+      }
+      await _svc!.store.write('grp_dl_$fid', out.path);
+      _paths[fid] = out.path;
+      path = out.path;
+    }
+    final v = await VaultFiles.describe(path);
+    if (!mounted) return;
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
   }
 
   Future<void> _send() async {
@@ -160,6 +239,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),
+                      sizeLabel: e.body['z'] is int ? _fmtSize(e.body['z'] as int) : null,
+                      progress: e.body['f'] is String ? _progress[e.body['f']] : null,
+                      onOpen: e.body['f'] is String ? () => _openFile(e.body) : null,
                       onLongPress: g.canModerate || mine ? () => _entryMenu(g, e) : null,
                     );
                   },
@@ -179,6 +261,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       child: SafeArea(
         top: false,
         child: Row(children: [
+          IconButton(
+            tooltip: 'Прикрепить файл',
+            icon: Icon(Icons.attach_file, color: _progress.containsKey('up') ? AppTheme.accent : AppTheme.textSecondary),
+            onPressed: denied || _progress.containsKey('up') ? null : _attach,
+          ),
           Expanded(
             child: TextField(
               controller: _ctrl,
@@ -245,7 +332,10 @@ class _GroupBubble extends StatelessWidget {
   final bool mine;
   final String author;
   final VoidCallback? onLongPress;
-  const _GroupBubble({required this.entry, required this.mine, required this.author, this.onLongPress});
+  final VoidCallback? onOpen;
+  final String? sizeLabel;
+  final double? progress;
+  const _GroupBubble({required this.entry, required this.mine, required this.author, this.onLongPress, this.onOpen, this.sizeLabel, this.progress});
 
   @override
   Widget build(BuildContext context) {
@@ -266,7 +356,20 @@ class _GroupBubble extends StatelessWidget {
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             if (!mine) Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold)),
-            Text(text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
+            if (entry.body['f'] is String)
+              InkWell(
+                onTap: progress == null ? onOpen : null,
+                child: Row(mainAxisSize: MainAxisSize.min, children: [
+                  Icon(entry.kind == GroupKind.image ? Icons.image_outlined : entry.kind == GroupKind.audio ? Icons.music_note : entry.kind == GroupKind.video ? Icons.movie_outlined : Icons.insert_drive_file_outlined, color: AppTheme.accent),
+                  const SizedBox(width: 8),
+                  Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                    Text('${entry.body['n'] ?? 'файл'}', style: const TextStyle(color: AppTheme.text, fontSize: 14), overflow: TextOverflow.ellipsis),
+                    Text(progress != null ? 'загрузка ${(progress! * 100).round()}%' : (sizeLabel ?? ''), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                  ])),
+                ]),
+              )
+            else
+              Text(text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             Align(alignment: Alignment.centerRight, child: Text(time, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 10))),
           ]),
         ),

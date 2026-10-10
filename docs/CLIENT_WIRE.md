@@ -119,6 +119,17 @@
 | `GET /mobile/groups/{id}/modlog` | `{modlog:[{ts, by, action, target?, seq?, reason?}]}` |
 | `POST /mobile/groups/{id}/invite` `{uses?, ttl_hours?}` | `{code, group_id, expires_ms}` (только тип `invite`) |
 
+**Файлы групп** (`src/mobile_group_files.rs`): узел хранит только шифртекст кусков (ключ файла лежит внутри зашифрованной записи журнала, поэтому узел не знает ни имени, ни содержимого). До 200 МБ на файл, 2 ГБ на группу, 8 ГБ на все группы узла; готовый файл хранится 30 суток, недокачанный — сутки; не более 5 незавершённых заливок на участника. Скачать — любой участник (не выгнанный); залить — не заглушённый; стереть — залившего, модератор, владелец группы. Удалили группу — удалились и файлы. Кусок в AAD связан с номером файла, индексом и числом кусков (`FileCrypto`), запись журнала несёт `{f, n, z, c, k, h}` (номер на узле, имя, размер, число кусков, ключ, sha256).
+
+| Запрос | Ответ |
+|---|---|
+| `POST /mobile/groups/{id}/files` `{file_size, total_chunks}` | `{file_id, chunk_max}` |
+| `PUT /mobile/groups/{id}/files/{fid}/chunk/{n}` (двоичное тело) | `200` |
+| `POST /mobile/groups/{id}/files/{fid}/done` | `{ok}`; `409 {missing:[…]}` — не хватает кусков |
+| `GET /mobile/groups/{id}/files/{fid}` | `{done, total_chunks, file_size, have:[…]}` |
+| `GET /mobile/groups/{id}/files/{fid}/chunk/{n}` | двоичный кусок (файл готов) |
+| `DELETE /mobile/groups/{id}/files/{fid}` | `200` |
+
 Страница узла (вход по паролю, только этот компьютер): `GET/POST /api/mobile/groups` (список с участниками, `addable` и `devices`; создать `{name, topic, kind, owner_device, members}`), `POST/DELETE /api/mobile/groups/{id}` (`{name?, topic?, kind?}` / удалить), `POST .../members {device}`, `POST .../owner {device}`, `POST .../mod`, `GET .../modlog`, `POST .../invite`. Устройство указывается началом номера из списка устройств.
 
 ## Аватарки

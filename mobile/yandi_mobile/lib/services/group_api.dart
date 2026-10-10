@@ -21,4 +21,11 @@ abstract class GroupApi {
   Future<void> mod(String gid, Map<String, dynamic> body);
   Future<Map<String, dynamic>> invite(String gid, {int uses = 1, int ttlHours = 24});
   Future<List<Map<String, dynamic>>> modlog(String gid);
+
+  // файлы группы (шифртекст кусками)
+  Future<({String fileId, int chunkMax})> fileStart(String gid, int size, int chunks);
+  Future<void> filePut(String gid, String fileId, int idx, List<int> bytes);
+  Future<void> fileDone(String gid, String fileId);
+  Future<List<int>> fileGet(String gid, String fileId, int idx);
+  Future<void> fileDelete(String gid, String fileId);
 }

@@ -2,7 +2,9 @@ import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/group_crypto.dart';
 import 'package:yandi_mobile/models/group.dart';
+import 'dart:io';
 import 'package:yandi_mobile/services/group_api.dart';
+import 'package:yandi_mobile/services/group_files.dart';
 import 'package:yandi_mobile/services/group_service.dart';
 import 'package:yandi_mobile/services/group_store.dart';
 
@@ -15,6 +17,8 @@ class FakeNode {
   final boxes = <int, Map<String, String>>{};            // epoch → alias → box
   final log = <Map<String, dynamic>>[];
   String? ownerAlias;
+  final files = <String, Map<int, List<int>>>{};
+  final doneFiles = <String>{};
 
   FakeNode(String ownerDevice) {
     members[ownerDevice] = {'alias': 'Хозяин-1', 'role': 'owner', 'muted': false, 'pub': null};
@@ -88,6 +92,25 @@ class _Api implements GroupApi {
   Future<Map<String, dynamic>> invite(String gid, {int uses = 1, int ttlHours = 24}) async => {'code': 'AAAA-BBBB-CCCC'};
   @override
   Future<List<Map<String, dynamic>>> modlog(String gid) async => [];
+  @override
+  Future<({String fileId, int chunkMax})> fileStart(String gid, int size, int chunks) async {
+    me;
+    final id = 'f${n.files.length}'.padRight(32, '0');
+    n.files[id] = {};
+    return (fileId: id, chunkMax: 1 << 20);
+  }
+  @override
+  Future<void> filePut(String gid, String fileId, int idx, List<int> bytes) async { me; n.files[fileId]![idx] = bytes; }
+  @override
+  Future<void> fileDone(String gid, String fileId) async { me; n.doneFiles.add(fileId); }
+  @override
+  Future<List<int>> fileGet(String gid, String fileId, int idx) async {
+    me;
+    if (!n.doneFiles.contains(fileId)) throw const GroupApiError(404, 'нет');
+    return n.files[fileId]![idx]!;
+  }
+  @override
+  Future<void> fileDelete(String gid, String fileId) async { me; n.files.remove(fileId); n.doneFiles.remove(fileId); }
 }
 
 void main() {
@@ -206,5 +229,41 @@ void main() {
     await owner.moderate(node.gid, 'mute', alias: 'Гость-1');
     await bob.sync();
     await expectLater(bob.send(node.gid, GroupKind.text, {'t': 'эй'}), throwsA(isA<GroupSendRefused>()));
+  });
+
+  test('файл в группе: заливка, скачивание другим участником, подмена куска и чужой не читает', () async {
+    await owner.sync();
+    await bobJoins();
+    final dir = Directory.systemTemp.createTempSync('grpfile');
+    addTearDown(() => dir.deleteSync(recursive: true));
+    final src = File('${dir.path}/a.bin')..writeAsBytesSync(List.generate(700 * 1024 + 123, (i) => (i * 7 + i ~/ 251) & 255));
+    final up = GroupFiles(node.as('owner'));
+    final d = await up.upload(node.gid, src, 'a.bin');
+    expect(d['c'], 3);
+    // узел видит только шифртекст
+    final stored = node.files[d['f']]!.values.expand((x) => x).toList();
+    expect(stored.length, greaterThan(src.lengthSync()));
+    final out = File('${dir.path}/out.bin');
+    await GroupFiles(node.as('bob')).download(node.gid, d, out);
+    expect(out.readAsBytesSync(), src.readAsBytesSync());
+    // чужой (не участник) не скачивает
+    await expectLater(GroupFiles(node.as('eve')).download(node.gid, d, File('${dir.path}/e.bin')), throwsA(anything));
+    // подмена куска узлом
+    node.files[d['f']]![1] = [...node.files[d['f']]![1]!]..[20] ^= 1;
+    final bad = File('${dir.path}/bad.bin');
+    await expectLater(GroupFiles(node.as('bob')).download(node.gid, d, bad), throwsA(anything));
+    expect(bad.existsSync(), isFalse, reason: 'повреждённый файл не остаётся');
+    // перестановка кусков
+    final f = node.files[d['f']]!;
+    final a = f[0]!; f[0] = f[2]!; f[2] = a;
+    await expectLater(GroupFiles(node.as('bob')).download(node.gid, d, bad), throwsA(anything));
+  });
+
+  test('вид файла по имени', () {
+    expect(GroupFiles.kindForName('Фото.JPG'), GroupKind.image);
+    expect(GroupFiles.kindForName('song.mp3'), GroupKind.audio);
+    expect(GroupFiles.kindForName('clip.mp4'), GroupKind.video);
+    expect(GroupFiles.kindForName('doc.pdf'), GroupKind.file);
+    expect(GroupFiles.kindForName('noext'), GroupKind.file);
   });
 }
