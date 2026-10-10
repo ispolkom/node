@@ -138,6 +138,10 @@ path = "src/lib.rs"
 name = "yandi"
 path = "src/main.rs"
 
+[[bin]]
+name = "apk_signing_key"
+path = "src/bin/apk_signing_key.rs"
+
 [profile.dev]
 opt-level = 0
 # только номера строк (сообщения об ошибках остаются понятными): каждая отладочная программа в разы меньше, папка target не разрастается
