@@ -83,6 +83,62 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     );
   }
 
+  /// Выбор контактов → один код на всех (по числу выбранных) → каждому уходит зашифрованное сообщение с приглашением.
+  Future<void> _inviteContacts(GroupInfo g) async {
+    final state = context.read<AppState>();
+    final people = state.contacts.where((c) => c.saved && !state.isBlocked(c.peerId)).toList();
+    if (people.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет контактов для приглашения')));
+      return;
+    }
+    final chosen = <String>{};
+    final ok = await showModalBottomSheet<bool>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(padding: EdgeInsets.all(16), child: Text('Кого пригласить', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+          Flexible(
+            child: ListView(shrinkWrap: true, children: [
+              for (final c in people)
+                CheckboxListTile(
+                  value: chosen.contains(c.peerId),
+                  activeColor: AppTheme.accent,
+                  title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
+                  onChanged: (v) => setS(() => v == true ? chosen.add(c.peerId) : chosen.remove(c.peerId)),
+                ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: SizedBox(
+              width: double.infinity,
+              child: FilledButton(
+                style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
+                onPressed: chosen.isEmpty ? null : () => Navigator.pop(ctx, true),
+                child: Text('Отправить приглашение (${chosen.length})'),
+              ),
+            ),
+          ),
+        ]),
+      )),
+    );
+    if (ok != true || !mounted) return;
+    try {
+      // отдельный код каждому: так видно, кто вошёл, и один утёкший код не пускает остальных
+      var sent = 0;
+      for (final id in chosen) {
+        final code = await _svc.newInvite(g.id, uses: 1, ttlHours: 24);
+        await state.sendMessage(id, GroupInviteMsg.encode(g.id, code, g.name));
+        sent++;
+      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Приглашений отправлено: $sent')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
   Future<void> _invite(GroupInfo g) async {
     try {
       final code = await _svc.newInvite(g.id);
@@ -120,8 +176,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),
           subtitle: const Text('Свой в каждой группе; узел не знает, кто вы', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
         ),
-        if (g.kind == 'invite' && g.canModerate)
-          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить', style: TextStyle(color: AppTheme.text)), onTap: () => _invite(g)),
+        if (g.kind == 'invite' && g.canModerate) ...[
+          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить контакты', style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
+          ListTile(leading: const Icon(Icons.link, color: AppTheme.textSecondary), title: const Text('Код приглашения', style: TextStyle(color: AppTheme.text)), subtitle: const Text('Передать самому', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)), onTap: () => _invite(g)),
+        ],
         if (g.isOwner) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запретить в группе', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
           const Padding(

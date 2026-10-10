@@ -200,12 +200,14 @@ class GroupService {
     try {
       final list = [for (final j in await api.list()) GroupInfo.fromJson(j)];
       groups = list;
+      var relist = false;
       for (final g in list) {
         if (only != null && g.id != only) continue;
         try {
           await _publishPub(g.id);
           if (g.isOwner) {
             await _provision(g);
+            relist = true;   // номер поколения мог вырасти: список должен показывать актуальный, иначе отправка решит, что ключа нет
           } else {
             await _collectKeys(g);
           }
@@ -216,6 +218,7 @@ class GroupService {
           // одна группа недоступна (например, меня выгнали) — остальные продолжают
         }
       }
+      if (relist) groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
     } finally {
       _syncing = false;
     }
@@ -242,6 +245,15 @@ class GroupService {
   }
 
   // ── действия ─────────────────────────────────────────────────────────────
+
+  /// Создать группу: этот телефон — владелец, ключ и права раздаёт он. kind: `invite` или `open`.
+  Future<String> createGroup(String name, String topic, String kind) async {
+    final gid = await api.create(name.trim(), topic.trim(), kind);
+    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    await sync(only: gid);   // сразу создаёт первое поколение ключа
+    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    return gid;
+  }
 
   /// Вступить: открытая группа или по коду приглашения. После вступления имя пишется в журнал зашифрованной записью.
   Future<void> join(String gid, {String? inviteCode, required String displayName}) async {

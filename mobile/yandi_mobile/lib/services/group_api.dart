@@ -10,6 +10,7 @@ class GroupApiError implements Exception {
 abstract class GroupApi {
   Future<List<Map<String, dynamic>>> list();
   Future<List<Map<String, dynamic>>> openGroups();
+  Future<String> create(String name, String topic, String kind);
   Future<String> join(String gid, {String? inviteCode, String? memberPub});
   Future<void> leave(String gid);
   Future<Map<String, dynamic>> members(String gid);

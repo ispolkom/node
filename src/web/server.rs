@@ -653,27 +653,11 @@ impl WebServer {
             )
             .route(
                 "/api/mobile/groups/:gid",
-                post(crate::mobile_groups::pc_update).delete(crate::mobile_groups::pc_delete),
-            )
-            .route(
-                "/api/mobile/groups/:gid/members",
-                post(crate::mobile_groups::pc_add_member),
-            )
-            .route(
-                "/api/mobile/groups/:gid/owner",
-                post(crate::mobile_groups::pc_set_owner),
-            )
-            .route(
-                "/api/mobile/groups/:gid/mod",
-                post(crate::mobile_groups::pc_mod),
+                axum::routing::delete(crate::mobile_groups::pc_delete),
             )
             .route(
                 "/api/mobile/groups/:gid/modlog",
                 get(crate::mobile_groups::pc_modlog),
-            )
-            .route(
-                "/api/mobile/groups/:gid/invite",
-                post(crate::mobile_groups::pc_invite),
             )
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))

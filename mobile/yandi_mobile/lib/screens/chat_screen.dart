@@ -5,7 +5,9 @@ import 'package:flutter/material.dart';
 import '../services/vault_files.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
+import '../models/group_invite.dart';
 import '../widgets/secure_keyboard.dart';
+import 'groups_tab.dart' show joinInvited;
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -370,6 +372,8 @@ class _MessageBubble extends StatelessWidget {
           children: [
             if (offer != null)
               _FileCard(offer: offer, outgoing: isOut, failed: msg.status == MessageStatus.failed)
+            else if (GroupInviteMsg.tryParse(msg.text) case final inv?)
+              _InviteCard(invite: inv, outgoing: isOut)
             else
               Text(msg.text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             const SizedBox(height: 2),
@@ -609,4 +613,31 @@ class _Action extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Приглашение в группу в чате: у получателя — кнопка «Вступить», у отправителя — пометка.
+class _InviteCard extends StatelessWidget {
+  final GroupInviteMsg invite;
+  final bool outgoing;
+  const _InviteCard({required this.invite, required this.outgoing});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.group_add_outlined, color: AppTheme.accent),
+        const SizedBox(width: 8),
+        Flexible(child: Text('Приглашение в группу${invite.name.isEmpty ? '' : ' «${invite.name}»'}', style: const TextStyle(color: AppTheme.text, fontSize: 15))),
+      ]),
+      const SizedBox(height: 6),
+      if (outgoing)
+        const Text('Приглашение отправлено (действует сутки, один раз)', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))
+      else
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
+          onPressed: () => joinInvited(context, invite),
+          child: const Text('Вступить'),
+        ),
+    ]);
+  }
 }

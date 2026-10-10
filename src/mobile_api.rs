@@ -1244,7 +1244,7 @@ fn router(st: Arc<MobileState>) -> Router {
             get(crate::mobile_files::get_chunk).put(crate::mobile_files::put_chunk),
         )
         .route("/mobile/files/:id/done", post(crate::mobile_files::done))
-        .route("/mobile/groups", get(crate::mobile_groups::m_list))
+        .route("/mobile/groups", get(crate::mobile_groups::m_list).post(crate::mobile_groups::m_create))
         .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
         .route("/mobile/groups/:gid/files", post(crate::mobile_group_files::start))
         .route("/mobile/groups/:gid/files/:id", axum::routing::delete(crate::mobile_group_files::remove).get(crate::mobile_group_files::status))

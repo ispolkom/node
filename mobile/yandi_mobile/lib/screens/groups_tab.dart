@@ -38,9 +38,9 @@ class _GroupsTabState extends State<GroupsTab> {
       floatingActionButton: FloatingActionButton.extended(
         backgroundColor: AppTheme.accent,
         foregroundColor: Colors.black,
-        onPressed: () => _joinSheet(context),
-        icon: const Icon(Icons.login),
-        label: const Text('Вступить'),
+        onPressed: () => _menu(context),
+        icon: const Icon(Icons.add),
+        label: const Text('Группа'),
       ),
       body: RefreshIndicator(
         onRefresh: _refresh,
@@ -82,6 +82,85 @@ class _GroupsTabState extends State<GroupsTab> {
                 },
               ),
       ),
+    );
+  }
+
+  void _menu(BuildContext context) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(
+            leading: const Icon(Icons.group_add_outlined, color: AppTheme.accent),
+            title: const Text('Создать группу', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Вы станете владельцем: ключ, приглашения и модерация у вас', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () { Navigator.pop(ctx); _createSheet(context); },
+          ),
+          ListTile(
+            leading: const Icon(Icons.login, color: AppTheme.accent),
+            title: const Text('Вступить', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('По приглашению или в открытую группу узла', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () { Navigator.pop(ctx); _joinSheet(context); },
+          ),
+        ]),
+      ),
+    );
+  }
+
+  void _createSheet(BuildContext context) {
+    final state = context.read<AppState>();
+    final nameCtrl = TextEditingController();
+    final topicCtrl = TextEditingController();
+    String kind = 'invite';
+    String? error;
+    bool busy = false;
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => Padding(
+        padding: EdgeInsets.fromLTRB(16, 16, 16, 16 + MediaQuery.of(ctx).viewInsets.bottom),
+        child: SingleChildScrollView(
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            const Text('Новая группа', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
+            const SizedBox(height: 12),
+            TextField(controller: nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
+            TextField(controller: topicCtrl, maxLength: 256, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тема (необязательно)')),
+            const SizedBox(height: 8),
+            RadioListTile<String>(
+              value: 'invite', groupValue: kind, activeColor: AppTheme.accent, dense: true,
+              title: const Text('По приглашению', style: TextStyle(color: AppTheme.text)),
+              subtitle: const Text('Войти можно только по вашему приглашению', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              onChanged: (v) => setS(() => kind = v!),
+            ),
+            RadioListTile<String>(
+              value: 'open', groupValue: kind, activeColor: AppTheme.accent, dense: true,
+              title: const Text('Открытая для телефонов узла', style: TextStyle(color: AppTheme.text)),
+              subtitle: const Text('Любой телефон этого узла видит её и вступает сам', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              onChanged: (v) => setS(() => kind = v!),
+            ),
+            if (error != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(error!, style: const TextStyle(color: AppTheme.incoming))),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
+              onPressed: busy ? null : () async {
+                if (nameCtrl.text.trim().isEmpty) { setS(() => error = 'Введите название'); return; }
+                setS(() { busy = true; error = null; });
+                try {
+                  final gid = await state.groups!.createGroup(nameCtrl.text, topicCtrl.text, kind);
+                  await state.syncGroups();
+                  if (!ctx.mounted) return;
+                  Navigator.pop(ctx);
+                  if (context.mounted) Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupChatScreen(gid: gid)));
+                } catch (e) {
+                  setS(() { busy = false; error = '$e'; });
+                }
+              },
+              child: const Text('Создать'),
+            ),
+          ]),
+        ),
+      )),
     );
   }
 
@@ -154,5 +233,32 @@ class _GroupsTabState extends State<GroupsTab> {
         );
       }),
     );
+  }
+}
+
+/// Вступление по приглашению, пришедшему сообщением: спрашивает имя в группе и вступает.
+Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
+  final state = context.read<AppState>();
+  final nameCtrl = TextEditingController();
+  final name = await showDialog<String>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      backgroundColor: AppTheme.surface,
+      title: Text('Вступить в «${m.name.isEmpty ? 'группу' : m.name}»?', style: const TextStyle(color: AppTheme.text)),
+      content: TextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
+        TextButton(onPressed: () => Navigator.pop(ctx, nameCtrl.text.trim()), child: const Text('Вступить')),
+      ],
+    ),
+  );
+  if (name == null || name.isEmpty || !context.mounted) return;
+  final messenger = ScaffoldMessenger.of(context);
+  try {
+    await state.groups!.join(m.invite.gid, inviteCode: m.invite.code, displayName: name);
+    await state.syncGroups();
+    messenger.showSnackBar(const SnackBar(content: Text('Вы в группе — она во вкладке «Группы»')));
+  } catch (e) {
+    messenger.showSnackBar(SnackBar(content: Text('Не удалось вступить: $e')));
   }
 }

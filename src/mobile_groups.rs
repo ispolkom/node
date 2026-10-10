@@ -494,6 +494,27 @@ impl Store {
         owner_device: &str,
         members: &[String],
     ) -> R<String> {
+        self.create_as(name, topic, kind, owner_device, members, false)
+    }
+
+    /// Сколько групп создал и ведёт это устройство.
+    pub fn owned_count(&self, device: &str) -> usize {
+        self.groups
+            .values()
+            .filter(|g| g.owner().is_some_and(|o| o.key == member_key(&g.id, device)))
+            .count()
+    }
+
+    /// `by_phone`: группу создал телефон-владелец (в журнале модерации это записано его псевдонимом, а не страницей узла).
+    pub fn create_as(
+        &mut self,
+        name: &str,
+        topic: &str,
+        kind: Kind,
+        owner_device: &str,
+        members: &[String],
+        by_phone: bool,
+    ) -> R<String> {
         let name = clean(name, MAX_NAME);
         if name.is_empty() {
             return Err(bad("нужно название группы"));
@@ -545,7 +566,8 @@ impl Store {
             }
         }
         g.members.truncate(MAX_MEMBERS);
-        g.log(PC, "create", None, None, None);
+        let actor = if by_phone { g.members[0].alias.clone() } else { PC.to_string() };
+        g.log(&actor, "create", None, None, None);
         let to = g.keys();
         self.groups.insert(id.clone(), g);
         self.save();
@@ -1408,6 +1430,38 @@ pub(crate) async fn m_log_post(
     })())
 }
 
+/// Больше групп одно устройство вести не может (защита узла от захламления).
+const MAX_OWNED_PER_DEVICE: usize = 10;
+
+#[derive(Deserialize)]
+pub struct MobileCreateReq {
+    name: String,
+    #[serde(default)]
+    topic: String,
+    kind: Kind,
+}
+
+/// Телефон создаёт группу и становится её владельцем: ключ группы и права раздаёт он, а не владелец узла.
+/// Закрытые (`closed`, участников добавляет страница узла) так не создаются: только по приглашению или открытая.
+pub(crate) async fn m_create(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Json(req): Json<MobileCreateReq>,
+) -> Response {
+    reply((|| {
+        let me = device(&dev)?;
+        if req.kind == Kind::Closed {
+            return Err(bad("с телефона создаются группы «по приглашению» и «открытые»"));
+        }
+        let id = with_store(|s| {
+            if s.owned_count(&me) >= MAX_OWNED_PER_DEVICE {
+                return Err(Fail(StatusCode::TOO_MANY_REQUESTS, "вы уже ведёте максимум групп"));
+            }
+            s.create_as(&req.name, &req.topic, req.kind, &me, &[], true)
+        })?;
+        Ok(json!({"id": id}))
+    })())
+}
+
 #[derive(Deserialize)]
 pub struct ModReq {
     action: String,
@@ -1518,25 +1572,6 @@ pub async fn pc_create(Json(req): Json<CreateReq>) -> Response {
     })())
 }
 
-#[derive(Deserialize)]
-pub struct UpdateReq {
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    topic: Option<String>,
-    #[serde(default)]
-    kind: Option<Kind>,
-}
-
-pub async fn pc_update(Path(gid): Path<String>, Json(req): Json<UpdateReq>) -> Response {
-    reply((|| {
-        checked(&gid)?;
-        ok_json(with_store(|s| {
-            s.update(&gid, req.name.as_deref(), req.topic.as_deref(), req.kind)
-        }))
-    })())
-}
-
 pub async fn pc_delete(Path(gid): Path<String>) -> Response {
     reply((|| {
         checked(&gid)?;
@@ -1544,62 +1579,10 @@ pub async fn pc_delete(Path(gid): Path<String>) -> Response {
     })())
 }
 
-#[derive(Deserialize)]
-pub struct DeviceReq {
-    device: String,
-}
-
-pub async fn pc_add_member(Path(gid): Path<String>, Json(req): Json<DeviceReq>) -> Response {
-    reply((|| {
-        checked(&gid)?;
-        let d = device_by_prefix(&req.device)?;
-        let alias = with_store(|s| s.add_member(&gid, &d))?;
-        Ok(json!({"alias": alias}))
-    })())
-}
-
-pub async fn pc_set_owner(Path(gid): Path<String>, Json(req): Json<DeviceReq>) -> Response {
-    reply((|| {
-        checked(&gid)?;
-        let d = device_by_prefix(&req.device)?;
-        let alias = with_store(|s| s.set_owner(&gid, &d))?;
-        Ok(json!({"alias": alias}))
-    })())
-}
-
-pub async fn pc_mod(Path(gid): Path<String>, Json(req): Json<ModReq>) -> Response {
-    reply((|| {
-        checked(&gid)?;
-        ok_json(with_store(|s| {
-            s.moderate_pc(
-                &gid,
-                &req.action,
-                req.alias.as_deref(),
-                req.seq,
-                req.reason.as_deref(),
-            )
-        }))
-    })())
-}
-
 pub async fn pc_modlog(Path(gid): Path<String>) -> Response {
     reply((|| {
         checked(&gid)?;
         with_store(|s| s.modlog(&gid, None))
-    })())
-}
-
-pub async fn pc_invite(Path(gid): Path<String>, body: Option<Json<InviteReq>>) -> Response {
-    let req = body.map(|b| b.0).unwrap_or_default();
-    reply((|| {
-        checked(&gid)?;
-        with_store(|s| {
-            s.invite_pc(
-                &gid,
-                req.uses.unwrap_or(1),
-                req.ttl_hours.map(|h| h.saturating_mul(3_600_000)),
-            )
-        })
     })())
 }
 

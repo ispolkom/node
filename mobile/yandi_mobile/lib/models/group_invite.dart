@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 /// Приглашение в группу: номер группы + код. Формат для передачи: `YANDI-GROUP-1:<номер группы>:<КОД>`; принимается и «номер:КОД».
 class GroupInvite {
   final String gid, code;
@@ -12,4 +14,28 @@ class GroupInvite {
   }
 
   String encode() => 'YANDI-GROUP-1:$gid:$code';
+}
+
+/// Приглашение, отправленное контакту обычным зашифрованным сообщением: `\u0001yandi-gi:{"g":номер,"c":код,"n":название}`.
+class GroupInviteMsg {
+  static const marker = '\u0001yandi-gi:';
+  final GroupInvite invite;
+  final String name;
+  const GroupInviteMsg(this.invite, this.name);
+
+  static String encode(String gid, String code, String name) => '$marker${jsonEncode({'g': gid, 'c': code, 'n': name})}';
+
+  static GroupInviteMsg? tryParse(String text) {
+    if (!text.startsWith(marker)) return null;
+    try {
+      final j = jsonDecode(text.substring(marker.length));
+      if (j is! Map) return null;
+      final inv = GroupInvite.tryParse('${j['g']}:${j['c']}');
+      if (inv == null) return null;
+      final n = '${j['n'] ?? ''}'.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+      return GroupInviteMsg(inv, n.length > 64 ? n.substring(0, 64) : n);
+    } catch (_) {
+      return null;
+    }
+  }
 }

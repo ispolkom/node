@@ -20,4 +20,16 @@ void main() {
     expect(kindOfText('смотри https://example.org/x'), GroupKind.link);
     expect(kindOfText('WWW.example.org'), GroupKind.link);
   });
+
+  test('приглашение сообщением: туда-обратно, мусор и подделка отвергаются', () {
+    final t = GroupInviteMsg.encode(gid, 'ABCD-EF12-3456', 'Семья\nлишнее');
+    final m = GroupInviteMsg.tryParse(t)!;
+    expect(m.invite.gid, gid);
+    expect(m.invite.code, 'ABCD-EF12-3456');
+    expect(m.name.contains('\n'), isFalse);
+    expect(GroupInviteMsg.tryParse('обычный текст'), isNull);
+    expect(GroupInviteMsg.tryParse('${GroupInviteMsg.marker}не json'), isNull);
+    expect(GroupInviteMsg.tryParse('${GroupInviteMsg.marker}{"g":"x","c":"y"}'), isNull);
+    expect(GroupInviteMsg.tryParse(GroupInviteMsg.encode(gid, 'ABCD-EF12-3456', 'я' * 200))!.name.length, 64);
+  });
 }
