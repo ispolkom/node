@@ -2,22 +2,20 @@
 //! Chat manager for P2P text messaging
 
 use crate::communication::{
-    ChatStorage, ChatMessage, MessageStatus, CommControlPacket, CommPacket,
-    E2EEncryption,
+    ChatMessage, ChatStorage, CommControlPacket, CommPacket, MessageStatus,
 };
+use crate::p2p::{P2PPacket, P2PPacketType, P2PTransport};
 use crate::util::HashId;
-use crate::p2p::{P2PTransport, P2PPacket, P2PPacketType};
+use anyhow::Result;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use anyhow::Result;
-use tracing::{info, error, debug};
+use tracing::{debug, error, info};
 
 /// Менеджер чата
 pub struct ChatManager {
     my_node_id: HashId,
     storage: ChatStorage,
     transport: Arc<P2PTransport>,
-    e2e_encryption: Arc<E2EEncryption>,
     /// Очередь входящих сообщений (для Web UI)
     incoming_tx: mpsc::UnboundedSender<ChatMessage>,
     /// File Transfer Manager (опционально)
@@ -26,26 +24,24 @@ pub struct ChatManager {
 
 impl ChatManager {
     /// Создать новый ChatManager
-    pub fn new(
-        my_node_id: HashId,
-        transport: Arc<P2PTransport>,
-    ) -> Result<Self> {
+    pub fn new(my_node_id: HashId, transport: Arc<P2PTransport>) -> Result<Self> {
         let storage = ChatStorage::new(my_node_id)?;
-        let e2e_encryption = Arc::new(E2EEncryption::new());
         let (incoming_tx, _incoming_rx) = mpsc::unbounded_channel();
 
         Ok(Self {
             my_node_id,
             storage,
             transport,
-            e2e_encryption,
             incoming_tx,
             file_transfer_manager: None,
         })
     }
 
     /// Установить File Transfer Manager
-    pub fn set_file_transfer_manager(&mut self, manager: std::sync::Arc<super::FileTransferManager>) {
+    pub fn set_file_transfer_manager(
+        &mut self,
+        manager: std::sync::Arc<super::FileTransferManager>,
+    ) {
         self.file_transfer_manager = Some(manager);
     }
 
@@ -79,21 +75,18 @@ impl ChatManager {
         // 3. Подготовить данные для отправки
         let msg_data = serde_json::to_vec(&msg)?;
 
-        // 4. Зашифровать (E2E)
-        let encrypted = self.e2e_encryption.encrypt_for_peer(to, &msg_data).await?;
-
-        // 5. Упаковать в P2PPacket (с sender ID!)
+        // P2PTransport applies the authenticated PFS session envelope.
         let p2p_packet = P2PPacket::new(
             P2PPacketType::ChatMessage,
-            self.my_node_id,  // sender = полный CID
-            false,  // encrypted = false (E2E уже зашифрован)
-            encrypted,  // payload = зашифрованные данные
+            self.my_node_id, // sender = полный CID
+            false,
+            msg_data,
         );
 
         // 6. Отправить через P2P transport (Dual-Path!)
         match self.transport.send_packet_dual_path(to, p2p_packet).await {
             Ok(_) => {
-                msg.status = MessageStatus::Shipping;  // В процессе доставки
+                msg.status = MessageStatus::Shipping; // В процессе доставки
                 info!("✅ Message sent to {}", hex::encode(&to.0[..8]));
             }
             Err(e) => {
@@ -105,24 +98,31 @@ impl ChatManager {
         }
 
         // 7. Обновить статус в файле
-        self.storage.update_message_status(&to, &msg.msg_id, msg.status.clone())?;
+        self.storage
+            .update_message_status(&to, &msg.msg_id, msg.status.clone())?;
 
         Ok(msg)
     }
 
     /// Обработать входящее сообщение
-    pub async fn handle_incoming_message(&self, from: HashId, data: Vec<u8>) -> Result<ChatMessage> {
-        debug!("📨 Received chat message from {}", hex::encode(&from.0[..8]));
+    pub async fn handle_incoming_message(
+        &self,
+        from: HashId,
+        data: Vec<u8>,
+    ) -> Result<ChatMessage> {
+        debug!(
+            "📨 Received chat message from {}",
+            hex::encode(&from.0[..8])
+        );
 
-        // 1. Расшифровать
-        let decrypted = self.e2e_encryption.decrypt_from_peer(from, &data).await?;
-
-        // 2. Десериализовать
-        let mut msg: ChatMessage = serde_json::from_slice(&decrypted)?;
+        let mut msg: ChatMessage = serde_json::from_slice(&data)?;
 
         // 3. Проверить: нам ли?
         if msg.to != self.my_node_id {
-            error!("❌ Message not for us! to={:?}, we={:?}", msg.to, self.my_node_id);
+            error!(
+                "❌ Message not for us! to={:?}, we={:?}",
+                msg.to, self.my_node_id
+            );
             return Err(anyhow::anyhow!("Message not for us"));
         }
 
@@ -150,13 +150,13 @@ impl ChatManager {
         // Упаковать в P2PPacket
         let p2p_packet = P2PPacket::new(
             P2PPacketType::ChatAck,
-            self.my_node_id,  // sender
+            self.my_node_id, // sender
             false,
             ack_data,
         );
 
         match self.transport.send_packet_dual_path(to, p2p_packet).await {
-            Ok(_) => {},
+            Ok(_) => {}
             Err(e) => {
                 error!("❌ Failed to send ACK: {}", e);
                 return Err(anyhow::anyhow!("Failed to send ACK: {}", e));
@@ -170,13 +170,15 @@ impl ChatManager {
     pub async fn handle_ack(&self, from: HashId, data: Vec<u8>) -> Result<()> {
         let msg_id: HashId = serde_json::from_slice(&data)?;
 
-        debug!("📬 Received ACK for message {} from {}",
+        debug!(
+            "📬 Received ACK for message {} from {}",
             hex::encode(&msg_id.0[..8]),
             hex::encode(&from.0[..8])
         );
 
         // Обновить статус: Read
-        self.storage.update_message_status(&from, &msg_id, MessageStatus::Read)?;
+        self.storage
+            .update_message_status(&from, &msg_id, MessageStatus::Read)?;
 
         Ok(())
     }
@@ -196,12 +198,13 @@ impl ChatManager {
                         let ack_data = serde_json::to_vec(&msg.msg_id)?;
                         let ack_packet = P2PPacket::new(
                             P2PPacketType::ChatAck,
-                            self.my_node_id,  // sender
+                            self.my_node_id, // sender
                             false,
                             ack_data,
                         );
 
-                        if let Err(e) = self.transport.send_packet_dual_path(from, ack_packet).await {
+                        if let Err(e) = self.transport.send_packet_dual_path(from, ack_packet).await
+                        {
                             error!("❌ Failed to send ACK: {}", e);
                         }
                     }
@@ -228,7 +231,9 @@ impl ChatManager {
             CommControlPacket::FileTransferStart => {
                 info!("🚀 FileTransferStart from {}", hex::encode(&from.0[..8]));
                 if let Some(ref ftm) = self.file_transfer_manager {
-                    if let Ok(start_msg) = serde_json::from_slice::<super::FileChunkStart>(&packet.data) {
+                    if let Ok(start_msg) =
+                        serde_json::from_slice::<super::FileChunkStart>(&packet.data)
+                    {
                         if let Err(e) = ftm.start_receiving(from, start_msg).await {
                             error!("❌ Failed to start receiving file: {}", e);
                         }
@@ -257,7 +262,11 @@ impl ChatManager {
                 info!("✅ FileComplete from {}", hex::encode(&from.0[..8]));
             }
             _ => {
-                debug!("📨 Unknown CommPacket: {:?} from {}", packet.packet_type, hex::encode(&from.0[..8]));
+                debug!(
+                    "📨 Unknown CommPacket: {:?} from {}",
+                    packet.packet_type,
+                    hex::encode(&from.0[..8])
+                );
             }
         }
 
@@ -281,25 +290,41 @@ impl ChatManager {
 
     /// Редактировать сообщение
     pub fn edit_message(&self, peer_id: &HashId, msg_id: &HashId, new_text: String) -> Result<()> {
-        info!("✏️ Editing message {} for peer {}", hex::encode(&msg_id.0[..8]), hex::encode(&peer_id.0[..8]));
+        info!(
+            "✏️ Editing message {} for peer {}",
+            hex::encode(&msg_id.0[..8]),
+            hex::encode(&peer_id.0[..8])
+        );
         self.storage.update_message_text(peer_id, msg_id, new_text)
     }
 
     /// Удалить сообщение локально (только у себя)
     pub fn delete_message_local(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
-        info!("🗑️ Deleting message {} locally for peer {}", hex::encode(&msg_id.0[..8]), hex::encode(&peer_id.0[..8]));
+        info!(
+            "🗑️ Deleting message {} locally for peer {}",
+            hex::encode(&msg_id.0[..8]),
+            hex::encode(&peer_id.0[..8])
+        );
         self.storage.delete_message(peer_id, msg_id)
     }
 
     /// Удалить сообщение для всех (отправить запрос на удаление)
-    pub async fn delete_message_for_everyone(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
-        info!("🗑️ Deleting message {} for everyone with peer {}", hex::encode(&msg_id.0[..8]), hex::encode(&peer_id.0[..8]));
+    pub async fn delete_message_for_everyone(
+        &self,
+        peer_id: &HashId,
+        msg_id: &HashId,
+    ) -> Result<()> {
+        info!(
+            "🗑️ Deleting message {} for everyone with peer {}",
+            hex::encode(&msg_id.0[..8]),
+            hex::encode(&peer_id.0[..8])
+        );
 
         // 1. Удалить локально
         self.storage.delete_message(peer_id, msg_id)?;
 
         // 2. Отправить запрос на удаление пиру
-        use crate::communication::{CommPacket, CommControlPacket};
+        use crate::communication::{CommControlPacket, CommPacket};
 
         let delete_data = serde_json::json!({
             "msg_id": hex::encode(&msg_id.0),
@@ -311,16 +336,21 @@ impl ChatManager {
         // Упаковать в P2PPacket
         let p2p_packet = P2PPacket::new(
             P2PPacketType::ChatDeleteMessage,
-            self.my_node_id,  // sender
+            self.my_node_id, // sender
             false,
             data_bytes,
         );
 
         // Отправить через P2P transport (Dual-Path!)
-        self.transport.send_packet_dual_path(*peer_id, p2p_packet).await
+        self.transport
+            .send_packet_dual_path(*peer_id, p2p_packet)
+            .await
             .map_err(|e| anyhow::anyhow!("Failed to send delete request: {}", e))?;
 
-        info!("✅ Delete request sent to peer {}", hex::encode(&peer_id.0[..8]));
+        info!(
+            "✅ Delete request sent to peer {}",
+            hex::encode(&peer_id.0[..8])
+        );
         Ok(())
     }
 
