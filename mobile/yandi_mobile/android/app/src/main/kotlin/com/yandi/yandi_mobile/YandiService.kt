@@ -426,18 +426,7 @@ class RawWsClient(
     }
 
     private fun buildTlsSocket(): SSLSocket {
-        val tm = object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, t: String) {}
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-            override fun checkServerTrusted(chain: Array<X509Certificate>, t: String) {
-                if (fingerprint.isEmpty()) return
-                val fp = MessageDigest.getInstance("SHA-256")
-                    .digest(chain[0].encoded)
-                    .joinToString("") { "%02x".format(it) }
-                if (fp != fingerprint.lowercase())
-                    throw CertificateException("TLS fingerprint mismatch: $fp != $fingerprint")
-            }
-        }
+        val tm = PinnedTrustManager(fingerprint)
         val ctx = SSLContext.getInstance("TLS")
         ctx.init(null, arrayOf(tm), null)
         val sock = ctx.socketFactory.createSocket() as SSLSocket
