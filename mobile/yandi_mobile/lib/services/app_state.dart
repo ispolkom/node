@@ -181,6 +181,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Группы узла (ключи, журнал, правила). Пересоздаётся вместе с подключением к узлу.
   GroupService? groups;
 
+  /// Для экранов: перерисоваться после действия над группами.
+  void notifyListenersPublic() => notifyListeners();
+
   Future<void> syncGroups({String? only}) async {
     final g = groups;
     if (g == null) return;

@@ -31,6 +31,9 @@ class GroupService {
   final Set<String> _problems = {};                         // группы, где ключ владельца не совпал с закреплённым
   bool _syncing = false;
 
+  /// Группы, которых узел больше не показывает (удалены на узле или меня выгнали): (номер, название). История у меня ещё лежит.
+  List<(String, String)> gone = const [];
+
   GroupRules rules(String gid) => _rules[gid] ?? const GroupRules();
   String displayName(String gid, String alias) => _names[gid]?[alias] ?? alias;
   bool hasProblem(String gid) => _problems.contains(gid);
@@ -200,6 +203,7 @@ class GroupService {
     try {
       final list = [for (final j in await api.list()) GroupInfo.fromJson(j)];
       groups = list;
+      await _trackGone(list);
       var relist = false;
       for (final g in list) {
         if (only != null && g.id != only) continue;
@@ -222,6 +226,33 @@ class GroupService {
     } finally {
       _syncing = false;
     }
+  }
+
+  /// Запоминает, какие группы я видел и как они назывались; те, что пропали из списка узла, попадают в `gone`.
+  Future<void> _trackGone(List<GroupInfo> list) async {
+    final known = <String, String>{};
+    try {
+      final raw = await store.read('grp_known');
+      if (raw != null) { (jsonDecode(raw) as Map).forEach((k, v) => known['$k'] = '$v'); }
+    } catch (_) {}
+    final listed = {for (final g in list) g.id: g.name};
+    var changed = false;
+    listed.forEach((id, name) { if (known[id] != name) { known[id] = name; changed = true; } });
+    if (changed) await store.write('grp_known', jsonEncode(known));
+    gone = [for (final e in known.entries) if (!listed.containsKey(e.key)) (e.key, e.value)];
+  }
+
+  /// Убрать с телефона всё о группе, которой на узле уже нет.
+  Future<void> forgetLocal(String gid) async {
+    await store.forgetGroup(gid);
+    try {
+      final raw = await store.read('grp_known');
+      if (raw != null) {
+        final m = (jsonDecode(raw) as Map)..remove(gid);
+        await store.write('grp_known', jsonEncode(m));
+      }
+    } catch (_) {}
+    gone = [for (final g in gone) if (g.$1 != gid) g];
   }
 
   /// Намёк узла «запись №seq изменена» (например, стёрта модератором): перечитать именно её.

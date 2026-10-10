@@ -31,9 +31,11 @@
 
     <main class="main">
         <div class="container">
-            <div class="card" style="margin:12px 0;padding:12px 16px;border:1px solid var(--accent,#00d4aa)">
-                Эта страница — <b>старые группы между узлами</b>. Закрытые группы телефонов (со сквозным шифрованием: создание, участники, приглашения, модерация)
-                находятся в <a href="/settings#phoneGroups"><b>Настройки → Группы для телефонов</b></a>.
+            <div class="card" id="phoneGroups" style="margin:12px 0;padding:12px 16px;border:1px solid var(--accent,#00d4aa)">
+                <h3 style="margin:0 0 6px">Группы телефонов <button class="btn btn-sm" id="pgReload" type="button">Обновить</button></h3>
+                <p class="form-help" style="margin:0 0 8px">Это группы, которые создают и ведут телефоны (сквозное шифрование). Здесь видно только то, что знает узел: название, тип, псевдонимы участников и размер. Содержимого и прав в группе у владельца узла нет; можно посмотреть журнал действий модераторов и удалить группу целиком. Создание запасным путём — в «Настройки → Группы для телефонов». Ниже — старые группы между узлами.</p>
+                <div id="pgList" class="form-help">загрузка…</div>
+                <div id="pgMsg" class="form-help"></div>
             </div>
             <div class="chat-three-columns">
                 <!-- ЛЕВАЯ КОЛОНКА: Список групп -->
@@ -659,5 +661,56 @@
         window.attachGroupFile = () => document.getElementById('groupFileInput').click();
         window.handleGroupFileAttachment = (e) => { console.log('File:', e.target.files[0]); };
     </script>
+<script>
+(function () {
+    var list = document.getElementById('pgList'), msg = document.getElementById('pgMsg');
+    if (!list) return;
+    var KIND = { closed: 'закрытая', invite: 'по приглашению', open: 'открытая' };
+    var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+    function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+    function api(method, url) {
+        return fetch(url, { method: method, cache: 'no-store' }).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; });
+        });
+    }
+    function render(d) {
+        var gs = d.groups || [];
+        if (!gs.length) { list.textContent = 'Групп телефонов пока нет. Телефон создаёт группу во вкладке «Группы» приложения.'; return; }
+        list.innerHTML = gs.map(function (g) {
+            var mem = g.members.map(function (m) { return esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : ''); }).join('<br>');
+            return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:8px 0">'
+                + '<b>' + esc(g.name) + '</b> · ' + (KIND[g.kind] || esc(g.kind)) + (g.topic ? ' · ' + esc(g.topic) : '')
+                + '<br><span>участников: ' + g.members.length + ', записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
+                + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу стоит сменить ключ</b>' : '') + '</span>'
+                + '<div style="margin:6px 0">' + mem + '</div>'
+                + '<button class="btn btn-sm" type="button" data-log="' + esc(g.id) + '">Журнал модерации</button> '
+                + '<button class="btn btn-sm" type="button" data-del="' + esc(g.id) + '" data-name="' + esc(g.name) + '">Удалить группу</button>'
+                + '<div data-out="' + esc(g.id) + '" style="margin-top:6px"></div></div>';
+        }).join('');
+    }
+    function load() { api('GET', '/api/mobile/groups').then(render).catch(function () { list.textContent = 'нет ответа от узла'; }); }
+    document.getElementById('pgReload').addEventListener('click', load);
+    list.addEventListener('click', function (e) {
+        var t = e.target;
+        if (!t || !t.getAttribute) return;
+        var gid = t.getAttribute('data-log') || t.getAttribute('data-del');
+        if (!gid) return;
+        var base = '/api/mobile/groups/' + encodeURIComponent(gid);
+        if (t.getAttribute('data-log')) {
+            var out = list.querySelector('[data-out="' + gid + '"]');
+            api('GET', base + '/modlog').then(function (j) {
+                var l = (j.modlog || []).slice(-50).reverse();
+                out.innerHTML = l.length ? l.map(function (x) {
+                    return esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + (x.seq ? ' №' + x.seq : '');
+                }).join('<br>') : 'Пусто.';
+            }).catch(function (er) { msg.textContent = er.message; });
+        } else if (confirm('Удалить группу «' + t.getAttribute('data-name') + '» вместе с журналом и файлами? Телефоны увидят, что её нет. Это нельзя отменить.')) {
+            api('DELETE', base).then(function () { msg.textContent = 'Группа удалена.'; load(); }).catch(function (er) { msg.textContent = er.message; });
+        }
+    });
+    load();
+    setInterval(load, 15000);
+})();
+</script>
 </body>
 </html>

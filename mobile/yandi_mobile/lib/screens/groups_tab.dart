@@ -33,6 +33,7 @@ class _GroupsTabState extends State<GroupsTab> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final list = state.groups?.groups ?? const <GroupInfo>[];
+    final gone = state.groups?.gone ?? const <(String, String)>[];
     return Scaffold(
       backgroundColor: Colors.transparent,
       floatingActionButton: FloatingActionButton.extended(
@@ -44,7 +45,7 @@ class _GroupsTabState extends State<GroupsTab> {
       ),
       body: RefreshIndicator(
         onRefresh: _refresh,
-        child: list.isEmpty
+        child: list.isEmpty && gone.isEmpty
             ? ListView(children: [
                 SizedBox(
                   height: 420,
@@ -64,9 +65,35 @@ class _GroupsTabState extends State<GroupsTab> {
                 ),
               ])
             : ListView.separated(
-                itemCount: list.length,
+                itemCount: list.length + gone.length,
                 separatorBuilder: (_, __) => const Divider(height: 1),
                 itemBuilder: (_, i) {
+                  if (i >= list.length) {
+                    final (gid, name) = gone[i - list.length];
+                    return ListTile(
+                      leading: const CircleAvatar(backgroundColor: AppTheme.surface, child: Icon(Icons.link_off, color: AppTheme.incoming)),
+                      title: Text(name.isEmpty ? 'Группа' : name, style: const TextStyle(color: AppTheme.textSecondary)),
+                      subtitle: const Text('Удалена на узле или вас выгнали · нажмите, чтобы убрать с телефона', style: TextStyle(color: AppTheme.incoming, fontSize: 12)),
+                      onTap: () async {
+                        final ok = await showDialog<bool>(
+                          context: context,
+                          builder: (ctx) => AlertDialog(
+                            backgroundColor: AppTheme.surface,
+                            title: const Text('Убрать группу с телефона?', style: TextStyle(color: AppTheme.text)),
+                            content: const Text('На узле её больше нет. Будут стёрты история и ключи группы на этом телефоне.', style: TextStyle(color: AppTheme.textSecondary)),
+                            actions: [
+                              TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+                              TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Убрать', style: TextStyle(color: AppTheme.incoming))),
+                            ],
+                          ),
+                        );
+                        if (ok == true) {
+                          await state.groups!.forgetLocal(gid);
+                          state.notifyListenersPublic();
+                        }
+                      },
+                    );
+                  }
                   final g = list[i];
                   return ListTile(
                     leading: CircleAvatar(
