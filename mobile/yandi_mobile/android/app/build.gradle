@@ -83,3 +83,15 @@ flutter {
 dependencies {
     coreLibraryDesugaring 'com.android.tools:desugar_jdk_libs:2.1.4'
 }
+
+// CI/local guard: release must remain tied to the dedicated release config.
+// Whether that config has real credentials is checked separately by signingReport.
+tasks.register("verifyReleaseSigning") {
+    doLast {
+        def releaseConfig = android.buildTypes.release.signingConfig
+        if (releaseConfig == null || releaseConfig.name != "release") {
+            throw new GradleException("Release must use signingConfigs.release, never the debug keystore")
+        }
+        println("Release signing config guard passed: ${releaseConfig.name}")
+    }
+}
