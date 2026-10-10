@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/file_crypto.dart';
 import 'package:yandi_mobile/models/file_offer.dart';
+import 'package:yandi_mobile/models/receipt.dart';
 import 'package:yandi_mobile/services/file_transfer_service.dart';
 
 void main() {
@@ -56,6 +57,29 @@ void main() {
     expect(FileOffer.tryParse('${FileOffer.marker}{не json'), isNull);
     expect(FileOffer.tryParse('${FileOffer.marker}{"tid":"short","key":"AAAA"}'), isNull);
     expect(FileOffer.preview('привет'), 'привет');
+  });
+
+  test('PC file envelope keeps the receipt id and a downloadable offer', () async {
+    final o = FileOffer(tid: tid, name: 'pc.txt', size: plain.length, chunks: 1,
+        mime: 'text/plain', key: base64.encode(key));
+    final cmid = 'ab' * 32;
+    // AppState._classifyIncoming unwraps before chat_screen calls FileOffer.tryParse.
+    final envelope = MsgChannel.parseMessage(MsgChannel.wrapMessage(cmid, o.encode()))!;
+    expect(envelope.$1, cmid);
+    final visibleOffer = FileOffer.tryParse(envelope.$2)!;
+    expect(visibleOffer.tid, tid);
+    final wire = await FileCrypto.encryptChunk(key, tid, 0, 1, plain);
+    expect(await FileCrypto.decryptChunk(base64.decode(visibleOffer.key),
+        visibleOffer.tid, 0, visibleOffer.chunks, wire), plain);
+    for (final kind in ['delivered', 'read']) {
+      final pcReceipt = MsgChannel.parseReceipt(MsgChannel.receipt(kind, [cmid]))!;
+      expect(pcReceipt.$1, kind);
+      expect(pcReceipt.$2, [cmid]);
+      final phoneId = 'file_$tid';
+      final phoneReceipt = MsgChannel.parseReceipt(MsgChannel.receipt(kind, [phoneId]))!;
+      expect(phoneReceipt.$1, kind);
+      expect(phoneReceipt.$2, [phoneId]);
+    }
   });
 
   test('names are made safe', () {

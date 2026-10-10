@@ -450,9 +450,12 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
         let chat = st.chat.clone();
         let (node, dev, me) = (hex::encode(st.my_id.0), from_device.to_string(), st.my_id);
         tokio::spawn(async move {
+            let mut receipt_id = None;
             let mut msg = match crate::mobile_self::receive_file(&node, &dev, &text).await {
                 Ok(f) => {
                     let mut m = ChatMessage::new(HashId(from), me, String::new());
+                    m.msg_id = crate::mobile_self::incoming_id(&dev, &f.receipt_id);
+                    receipt_id = Some(f.receipt_id);
                     m.attachment = Some(f.attachment);
                     m
                 }
@@ -460,7 +463,15 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
             };
             msg.encrypted = true;
             msg.mark_delivered();
-            let _ = chat.store_local_incoming(&HashId(from), &msg);
+            if chat.store_local_incoming(&HashId(from), &msg).is_ok() {
+                if let Some(id) = receipt_id {
+                    crate::mobile_self::remember_unread(&msg.msg_id, &dev, &id);
+                    if let Ok(x) = device_x25519(&dev) {
+                        let receipt = crate::mobile_self::receipt(false, &[id]);
+                        deliver_mail(&node, &dev, &crate::mobile_self::seal(&receipt, &x));
+                    }
+                }
+            }
         });
         return;
     }
@@ -496,13 +507,14 @@ pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachme
     let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
     let node = hex::encode(st.my_id.0);
     let offer = crate::mobile_self::send_file(&node, peer, path, &attachment.filename, &attachment.mime_type).await?;
-    if !deliver_mail(&node, peer, &crate::mobile_self::seal(&offer, &x)) {
+    let mut msg = ChatMessage::new(st.my_id, to, String::new());
+    let envelope = crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &offer);
+    if !deliver_mail(&node, peer, &crate::mobile_self::seal(&envelope, &x)) {
         return Err("не удалось положить предложение файла в очередь телефона".into());
     }
     if !text.trim().is_empty() {
         let _ = pc_send_to_device(peer, text.clone()).await;
     }
-    let mut msg = ChatMessage::new(st.my_id, to, String::new());
     msg.attachment = Some(attachment);
     msg.encrypted = true;
     // «доставлено» — когда телефон скачал файл и удалил передачу с узла (mobile_files::remove)

@@ -184,6 +184,8 @@ fn open_chunk(key: &[u8], tid: &str, idx: u32, total: u32, wire: &[u8]) -> Optio
 /// Принятый от телефона файл: куда он лёг и как показать его на странице чата.
 pub struct ReceivedFile {
     pub attachment: crate::communication::FileAttachment,
+    /// Номер файлового сообщения у отправившего телефона.
+    pub receipt_id: String,
 }
 
 /// Телефон прислал предложение файла компьютеру: забрать куски из `mobile_files`, расшифровать, сверить размер и sha256, положить в
@@ -232,6 +234,7 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
     crate::mobile_files::drop_transfer(&o.tid).await;
     let mime = if o.mime.is_empty() { "application/octet-stream".to_string() } else { o.mime };
     Ok(ReceivedFile {
+        receipt_id: format!("file_{}", o.tid),
         attachment: crate::communication::FileAttachment {
             filename: o.name,
             size: o.size,
@@ -565,5 +568,55 @@ mod tests {
         let blob = seal("x", &make_keys([7; 32], [8; 32]).x_pub);
         assert!(first_time(&blob));
         assert!(!first_time(&blob));
+    }
+
+    #[tokio::test]
+    async fn file_receipts_use_phone_ids_and_pc_envelopes_keep_the_offer() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("receipt-test.txt");
+        let data = b"file receipt round trip";
+        tokio::fs::write(&path, data).await.unwrap();
+        let device = format!("receipt-test-{}", rand::random::<u64>());
+        let offer = send_file(&device, "receipt-test-pc", &path, "receipt-test.txt", "text/plain").await.unwrap();
+        let tid = offer_tid(&offer).unwrap();
+        let pc_id = crate::util::HashId([21; 32]);
+        let cmid = hex::encode(pc_id.0);
+        let phone = make_keys([22; 32], [23; 32]);
+        let wire = seal(&wrap_message(&cmid, &offer), &phone.x_pub);
+        assert!(matches!(classify(open_with(&phone.x_secret, &wire).unwrap()),
+            Envelope::Message { cmid: id, text } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
+
+        let received = receive_file("receipt-test-pc", &device, &offer).await.unwrap();
+        assert_eq!(received.receipt_id, format!("file_{tid}"));
+        let saved = crate::communication::files_dir("downloads")
+            .join(received.attachment.file_ref.unwrap().local_name.unwrap());
+        assert_eq!(tokio::fs::read(&saved).await.unwrap(), data);
+        assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_none());
+        let id = received.receipt_id;
+        assert!(matches!(classify(receipt(false, &[id.clone()])), Envelope::Receipt { read: false, ids } if ids == [id.clone()]));
+        let local = incoming_id(&device, &id);
+        remember_unread(&local, &device, &id);
+        assert!(take_unread("another-device").is_empty());
+        let unread = take_unread(&device);
+        assert_eq!(unread, [id]);
+        assert!(matches!(classify(receipt(true, &unread)), Envelope::Receipt { read: true, ids } if ids == unread));
+        assert!(take_unread(&device).is_empty());
+        tokio::fs::remove_file(saved).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_corrupt_file_has_no_success_receipt() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bad.txt");
+        tokio::fs::write(&path, b"must not acknowledge corruption").await.unwrap();
+        let from = format!("receipt-bad-{}", rand::random::<u64>());
+        let offer = send_file(&from, "receipt-bad-pc", &path, "bad.txt", "text/plain").await.unwrap();
+        let mut parsed: Offer = serde_json::from_str(offer.strip_prefix(FILE_MARKER).unwrap()).unwrap();
+        parsed.sha = "00".repeat(32);
+        let bad = format!("{FILE_MARKER}{}", serde_json::to_string(&parsed).unwrap());
+        assert!(receive_file("receipt-bad-pc", &from, &bad).await.is_err());
+        assert!(take_unread(&from).is_empty());
+        assert!(crate::mobile_files::ready_for(&parsed.tid, &from, "receipt-bad-pc").await.is_some());
+        crate::mobile_files::drop_transfer(&parsed.tid).await;
     }
 }
