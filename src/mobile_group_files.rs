@@ -102,6 +102,36 @@ async fn metas_of(gid: &str) -> Vec<Meta> {
     out
 }
 
+/// Самый большой кусок этой заливки на проводе. Приложения режут файл на куски одного размера C (последний короче), значит
+/// C < размер / (кусков − 1): больше быть не может. Плюс служебное шифрования. Сумма сохранённого дополнительно проверяется при завершении,
+/// так что фактические байты не превысят заявленный размер, по которому считаются квоты.
+fn chunk_limit(m: &Meta) -> usize {
+    let per = if m.total_chunks <= 1 { m.file_size } else { m.file_size.div_ceil(m.total_chunks as u64 - 1) };
+    (per + CHUNK_OVERHEAD).min(MAX_CHUNK_BYTES as u64) as usize
+}
+
+/// Временное имя куска — своё у каждой заливки куска (одинаковые параллельные заливки одного куска не мешают друг другу).
+fn tmp_name(idx: u32) -> String {
+    use rand::RngCore;
+    let mut b = [0u8; 6];
+    rand::thread_rng().fill_bytes(&mut b);
+    format!("{}.{}.tmp", chunk_name(idx), hex::encode(b))
+}
+
+/// Суммарный объём сохранённых кусков (на диске).
+async fn stored_bytes(gid: &str, id: &str) -> u64 {
+    let mut total = 0;
+    let Ok(mut rd) = tokio::fs::read_dir(dir_of(gid, id)).await else { return 0 };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        let n = e.file_name();
+        let n = n.to_string_lossy();
+        if n.starts_with('c') && !n.ends_with(".tmp") {
+            total += e.metadata().await.map(|m| m.len()).unwrap_or(0);
+        }
+    }
+    total
+}
+
 fn used(metas: &[Meta]) -> u64 {
     metas.iter().map(|m| m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD).sum()
 }
@@ -161,6 +191,12 @@ async fn begin(gid: &str, key: &str, muted: bool, file_size: u64, total_chunks: 
     if per > MAX_CHUNK_BYTES as u64 - CHUNK_OVERHEAD {
         return Err((StatusCode::BAD_REQUEST, "куски слишком крупные"));
     }
+    if total_chunks as u64 > file_size {
+        return Err((StatusCode::BAD_REQUEST, "кусков больше, чем байт в файле"));
+    }
+    // проверка квот и создание заливки — под одним замком: параллельные начала не превысят лимит вместе
+    static BEGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    let _guard = BEGIN.lock().await;
     cleanup(gid).await;
     let metas = metas_of(gid).await;
     let need = file_size + total_chunks as u64 * CHUNK_OVERHEAD;
@@ -208,11 +244,11 @@ pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
     if m.done {
         return err(StatusCode::CONFLICT, "заливка уже завершена");
     }
-    if idx >= m.total_chunks || body.is_empty() || body.len() > MAX_CHUNK_BYTES {
+    if idx >= m.total_chunks || body.is_empty() || body.len() > chunk_limit(&m) {
         return err(StatusCode::BAD_REQUEST, "неверный номер или размер куска");
     }
     let d = dir_of(&gid, &id);
-    let tmp = d.join(format!("{}.tmp", chunk_name(idx)));
+    let tmp = d.join(tmp_name(idx));
     if tokio::fs::write(&tmp, &body).await.is_err() || tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить кусок");
     }
@@ -245,6 +281,9 @@ pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, P
     let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
     if !missing.is_empty() {
         return (StatusCode::CONFLICT, Json(json!({"error": "не хватает кусков", "missing": missing}))).into_response();
+    }
+    if stored_bytes(&gid, &id).await > m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD {
+        return err(StatusCode::BAD_REQUEST, "залито больше, чем заявлено");
     }
     m.done = true;
     if save_meta(&gid, &m).await.is_err() {
@@ -308,11 +347,11 @@ pub(crate) async fn pc_begin(gid: &str, device: &str, file_size: u64, total_chun
 pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &[u8]) -> Result<(), String> {
     let (key, _, muted) = pc_member(gid, device)?;
     let m = load_meta(gid, id).await.ok_or("нет такой заливки")?;
-    if m.by != key || muted || m.done || idx >= m.total_chunks || bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
+    if m.by != key || muted || m.done || idx >= m.total_chunks || bytes.is_empty() || bytes.len() > chunk_limit(&m) {
         return Err("кусок не принят".into());
     }
     let d = dir_of(gid, id);
-    let tmp = d.join(format!("{}.tmp", chunk_name(idx)));
+    let tmp = d.join(tmp_name(idx));
     tokio::fs::write(&tmp, bytes).await.map_err(|e| e.to_string())?;
     tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.map_err(|e| e.to_string())
 }
@@ -326,6 +365,9 @@ pub(crate) async fn pc_done(gid: &str, device: &str, id: &str) -> Result<(), Str
     let have = present(gid, id).await;
     if (0..m.total_chunks).any(|i| have.binary_search(&i).is_err()) {
         return Err("не хватает кусков".into());
+    }
+    if stored_bytes(gid, id).await > m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD {
+        return Err("залито больше, чем заявлено".into());
     }
     m.done = true;
     save_meta(gid, &m).await.map_err(|e| e.to_string())

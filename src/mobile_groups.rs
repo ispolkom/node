@@ -383,6 +383,15 @@ fn b64_ok(s: &str, max: usize) -> Option<Vec<u8>> {
         .filter(|b| !b.is_empty() && b.len() <= max)
 }
 
+/// Открытый ключ участника годится для обмена ключом группы: 32 байта и не «слабая» точка X25519 (нулевая или малого порядка — с ней общий
+/// секрет всегда нулевой, и раздача ключа владельцем срывалась бы).
+fn valid_member_pub(b64: &str) -> bool {
+    let Some(b) = b64_ok(b64, 32) else { return false };
+    let Ok(arr) = <[u8; 32]>::try_from(b.as_slice()) else { return false };
+    let probe = x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng());
+    !probe.diffie_hellman(&x25519_dalek::PublicKey::from(arr)).as_bytes().iter().all(|x| *x == 0)
+}
+
 fn random_hex(n: usize) -> String {
     use rand::RngCore;
     let mut b = vec![0u8; n];
@@ -696,12 +705,12 @@ impl Store {
         member_pub: Option<&str>,
     ) -> R<String> {
         let member_pub = match member_pub {
-            Some(p) if !p.is_empty() => Some(
-                b64_ok(p, 32)
-                    .filter(|b| b.len() == 32)
-                    .ok_or_else(|| bad("неверный ключ"))?,
-            )
-            .map(|_| p.to_string()),
+            Some(p) if !p.is_empty() => {
+                if !valid_member_pub(p) {
+                    return Err(bad("неверный ключ"));
+                }
+                Some(p.to_string())
+            }
             _ => None,
         };
         let g = self.get_mut(gid)?;
@@ -774,7 +783,7 @@ impl Store {
     }
 
     pub fn set_pub(&mut self, gid: &str, device: &str, member_pub: &str) -> R<()> {
-        if b64_ok(member_pub, 32).map(|b| b.len()) != Some(32) {
+        if !valid_member_pub(member_pub) {
             return Err(bad("неверный ключ"));
         }
         let key = self.me(gid, device)?.1.key.clone();
@@ -1729,6 +1738,20 @@ mod tests {
     const OWNER: &str = "aa";
     const BOB: &str = "bb";
     const EVE: &str = "ee";
+
+    #[test]
+    fn weak_member_keys_are_refused() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        assert!(s.join(&gid, BOB, None, Some(&b64(&[0u8; 32]))).is_err(), "нулевой ключ");
+        let mut order8 = [0u8; 32];
+        order8[0] = 1; // точка порядка 1 (u = 1)
+        assert!(s.join(&gid, BOB, None, Some(&b64(&order8))).is_err(), "точка малого порядка");
+        s.join(&gid, BOB, None, None).unwrap();
+        assert!(s.set_pub(&gid, BOB, &b64(&[0u8; 32])).is_err());
+        let good = x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes();
+        s.set_pub(&gid, BOB, &b64(&good)).unwrap();
+    }
 
     #[test]
     fn owner_hands_the_group_over() {

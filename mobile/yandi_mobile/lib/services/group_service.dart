@@ -89,7 +89,10 @@ class GroupService {
     }
     final boxes = <String, String>{};
     for (final t in targets) {
-      boxes[t.alias] = _b64(await GroupCrypto.sealKey(key, gid: g.id, epoch: epoch, ownerSeed: ownerSeed, memberPub: _unb64(t.memberPub!)));
+      // негодный ключ одного участника не должен останавливать раздачу остальным
+      try {
+        boxes[t.alias] = _b64(await GroupCrypto.sealKey(key, gid: g.id, epoch: epoch, ownerSeed: ownerSeed, memberPub: _unb64(t.memberPub!)));
+      } catch (_) {}
     }
     await _saveGroupKey(g.id, epoch, key);
     await api.putKeys(g.id, epoch, boxes);

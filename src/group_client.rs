@@ -386,7 +386,10 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
     let mut boxes: HashMap<String, String> = HashMap::new();
     for m in targets {
         let Some(mp) = m["member_pub"].as_str().and_then(unb64).and_then(|p| arr32(&p)) else { continue };
-        boxes.insert(s(m, "alias"), b64(&seal_key(&key, gid, new_epoch, &owner_seed, &mp)?));
+        // негодный ключ одного участника не должен останавливать раздачу остальным
+        if let Ok(b) = seal_key(&key, gid, new_epoch, &owner_seed, &mp) {
+            boxes.insert(s(m, "alias"), b64(&b));
+        }
     }
     c.gstate(gid).keys.insert(new_epoch, b64(&key));
     c.save();

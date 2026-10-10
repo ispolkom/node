@@ -301,6 +301,15 @@ fid2 = r.get("file_id")
 rawreq("PUT", f"/mobile/groups/{gid}/files/{fid2}/chunk/0", b"Z" * 1000, token=t_bob)
 req("POST", f"/mobile/groups/{gid}/files/{fid2}/done", {}, token=t_bob)
 
+# real bytes are bounded by the declared size (quota cannot be bypassed with a tiny declaration)
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 100, "total_chunks": 1}, token=t_bob)
+fq = r.get("file_id")
+st, _ = rawreq("PUT", f"/mobile/groups/{gid}/files/{fq}/chunk/0", b"Q" * 5000, token=t_bob)
+check("a chunk larger than the declared file is refused", st == 400, st)
+st, r = req("POST", f"/mobile/groups/{gid}/files", {"file_size": 3, "total_chunks": 4}, token=t_bob)
+check("more chunks than bytes is refused", st == 400, (st, r))
+rawreq("DELETE", f"/mobile/groups/{gid}/files/{fq}", token=t_bob)
+
 # deleting: only on the page, and members are told
 st, r = req("DELETE", f"/mobile/groups/{gid}", token=t_own)
 check("a phone cannot delete a group", st in (404, 405), st)
