@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="/chat.css">
 <script src="/app.js"></script>
     <script src="/ui/voice-call.js"></script>
+    <script src="/ui/phone-call.js"></script>
     <script src="/ui/video-call.js"></script>
 </head>
 <body>
@@ -57,7 +58,7 @@
                             <span class="chat-peer-status" id="chatPeerStatus"></span>
                         </div>
                         <div class="chat-header-buttons">
-                            <button class="btn btn-sm btn-success" id="headerCallBtn" title="Голосовой звонок" onclick="if(window.voiceCallManager&&currentContactShortId)window.voiceCallManager.startCall(currentContactShortId)">📞</button>
+                            <button class="btn btn-sm btn-success" id="headerCallBtn" title="Голосовой звонок" onclick="startAnyCall(false)">📞</button>
                             <button class="btn btn-sm btn-danger" onclick="clearChatHistory()">🗑️ Очистить</button>
                             <button class="btn btn-sm" onclick="closeChat()">✖ Закрыть</button>
                         </div>
@@ -744,6 +745,13 @@
                 fetch('/api/chat/clear/' + currentContactShortId, { method: 'POST' }).then(function() { clearSelection(); lastRenderKey = ''; loadMessages(currentContactShortId); showAlert('✅ Успешно', 'История очищена'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка очистки'); });
             });
         }
+        // телефону владельца — звонок через phone-call.js (сигналы через узел, разговор прямо в странице); другим узлам — как раньше
+        function startAnyCall(video) {
+            if (!currentContactShortId) return;
+            if (phonePeers.has(currentContactShortId) && window.phoneCall) { window.phoneCall.start(currentContactShortId, currentContactName, video); return; }
+            if (video) { if (window.videoCallManager) window.videoCallManager.startVideoCall(currentContactShortId); else if (window.startVideoCall) window.startVideoCall(currentContactShortId); }
+            else { if (window.voiceCallManager) window.voiceCallManager.startCall(currentContactShortId); else if (window.startCall) window.startCall(currentContactShortId); }
+        }
         // function startCall() moved to voice-call.js
         // function startVideoCall() moved to voice-call.js
         function openFileTransfer() { showAlert('📁 Отправка файлов', 'Отправка файлов через кнопку "Файлы" будет доступна в следующей версии'); }
@@ -786,8 +794,8 @@
             if (addForm) addForm.onsubmit = function(e) { e.preventDefault(); var name = document.getElementById('contactName').value, shortId = document.getElementById('contactShortId').value; fetch('/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: name, short_id: shortId }) }).then(function(res) { if (res.ok) { addModal.classList.remove('active'); addForm.reset(); loadContacts(); showAlert('✅ Успешно', 'Контакт добавлен'); } else showAlert('❌ Ошибка', 'Ошибка добавления'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка'); }); };
             if (editForm) editForm.onsubmit = function(e) { e.preventDefault(); var id = document.getElementById('editContactId').value, name = document.getElementById('editContactName').value, shortId = document.getElementById('editContactShortId').value; fetch('/api/contacts', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ id: id, name: name, short_id: shortId }) }).then(function(res) { if (res.ok) { editModal.classList.remove('active'); editForm.reset(); loadContacts(); if (currentContactId === id) { currentContactName = name; currentContactShortId = shortId; document.getElementById('infoContactName').textContent = name; document.getElementById('infoContactCid').textContent = shortId; document.getElementById('chatPeerName').textContent = name; } showAlert('✅ Успешно', 'Контакт обновлён'); } else showAlert('❌ Ошибка', 'Ошибка обновления'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка'); }); };
             if (searchInput) searchInput.addEventListener('input', function(e) { var term = e.target.value.toLowerCase(); document.querySelectorAll('.contact-item').forEach(function(el) { var name = el.getAttribute('data-name')?.toLowerCase() || '', shortId = el.getAttribute('data-short-id')?.toLowerCase() || ''; el.style.display = (name.includes(term) || shortId.includes(term)) ? '' : 'none'; }); });
-            document.getElementById('callBtn').onclick = function() { if (window.voiceCallManager && currentContactShortId) window.voiceCallManager.startCall(currentContactShortId); else if (window.startCall) window.startCall(currentContactShortId); };
-            document.getElementById('videoCallBtn').onclick = function() { if (window.videoCallManager && currentContactShortId) window.videoCallManager.startVideoCall(currentContactShortId); else if (window.startVideoCall) window.startVideoCall(currentContactShortId); };
+            document.getElementById('callBtn').onclick = function() { startAnyCall(false); };
+            document.getElementById('videoCallBtn').onclick = function() { startAnyCall(true); };
             document.getElementById('filesBtn').onclick = openFileTransfer;
             document.getElementById('p2pTunnelBtn').onclick = startP2PTunnel;
             document.getElementById('editContactInfoBtn').onclick = openEditContactModal;

@@ -457,6 +457,45 @@ pub fn unhide_phone(peer: &str) {
     with_hidden(|l| l.retain(|x| !peer.starts_with(x.as_str())));
 }
 
+// ── Звонки телефон ↔ страница узла ──
+//
+// Сигналы звонка (`\u0001yandi-call:` — invite/accept/offer/answer/ice/reject/busy/hangup, как в call_signal.dart) телефон шифрует для
+// узла; узел их расшифровывает и отдаёт странице чата (она опрашивает очередь раз в секунду), а ответы страницы шифрует телефону. Звук и
+// видео идут напрямую браузер ↔ телефон (WebRTC, DTLS-SRTP) — узел их не видит. Пока страница не открыта, звонок на компьютер получает
+// «не на связи».
+
+pub const CALL_MARKER: &str = "\u{1}yandi-call:";
+
+struct CallQueue {
+    seq: u64,
+    events: std::collections::VecDeque<(u64, String, String)>,
+    last_poll: Option<std::time::Instant>,
+}
+
+static CALLS: std::sync::Mutex<CallQueue> = std::sync::Mutex::new(CallQueue { seq: 0, events: std::collections::VecDeque::new(), last_poll: None });
+
+/// Страница чата открыта (опрашивала очередь звонков последние несколько секунд)?
+pub fn call_page_alive() -> bool {
+    CALLS.lock().unwrap_or_else(|e| e.into_inner()).last_poll.map(|t| t.elapsed() < std::time::Duration::from_secs(6)).unwrap_or(false)
+}
+
+pub fn push_call(from_device: &str, text: &str) {
+    let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+    q.seq += 1;
+    let seq = q.seq;
+    q.events.push_back((seq, from_device.to_string(), text.to_string()));
+    while q.events.len() > 500 {
+        q.events.pop_front();
+    }
+}
+
+/// События после `after` для страницы: (номер, от кого, текст сигнала); и последний номер.
+pub fn poll_calls(after: u64) -> (Vec<(u64, String, String)>, u64) {
+    let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+    q.last_poll = Some(std::time::Instant::now());
+    (q.events.iter().filter(|(s, _, _)| *s > after).cloned().collect(), q.seq)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -479,6 +479,7 @@ impl WebServer {
             .route("/app.js", get(script_handler))
             .route("/speed.js", get(speed_script_handler))
             .route("/ui/voice-call.js", get(voice_call_handler))
+            .route("/ui/phone-call.js", get(phone_call_js_handler))
             .route("/ui/video-call.js", get(video_call_handler))
             .route("/media/*path", get(media_handler))
             // API endpoints (protected)
@@ -641,6 +642,10 @@ impl WebServer {
                 axum::routing::delete(mobile_device_remove_handler),
             )
             // Groups: created and deleted only here (this computer); content is encrypted by the phones
+            // Calls phone ↔ this page (signals relayed by the node, media browser ↔ phone directly)
+            .route("/api/mobile/call/events", get(mobile_call_events))
+            .route("/api/mobile/call/signal", post(mobile_call_signal))
+            .route("/api/mobile/call/turn", get(mobile_call_turn))
             .route(
                 "/api/mobile/groups",
                 get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create),
@@ -5806,6 +5811,15 @@ async fn api_groups_leave(
     }
 }
 
+/// Звонки телефон ↔ страница (сигналы через узел, звук и видео напрямую браузер ↔ телефон)
+async fn phone_call_js_handler() -> impl IntoResponse {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header("Content-Type", "application/javascript; charset=utf-8")
+        .body(include_str!("ui/phone-call.js").to_owned())
+        .unwrap()
+}
+
 /// Voice call script handler
 async fn voice_call_handler() -> impl IntoResponse {
     let js = include_str!("ui/voice-call.js");
@@ -5869,6 +5883,40 @@ async fn current_pairing_payload(
         fingerprint_hex,
         anchor_url,
     })
+}
+
+/// Сигналы звонков от телефонов для страницы чата (страница опрашивает раз в секунду; пока опрашивает — узел не отвечает «не на связи»).
+async fn mobile_call_events(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+    let after = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
+    let (events, last) = crate::mobile_self::poll_calls(after);
+    let names: std::collections::HashMap<String, String> = crate::mobile_api::devices_overview()
+        .into_iter()
+        .filter_map(|d| Some((d["peer_id"].as_str()?.to_string(), d["name"].as_str().unwrap_or("Телефон").to_string())))
+        .collect();
+    let list: Vec<serde_json::Value> = events
+        .into_iter()
+        .map(|(seq, from, text)| serde_json::json!({"seq": seq, "from": from, "name": names.get(&from).cloned().unwrap_or_else(|| "Телефон".into()), "text": text}))
+        .collect();
+    let mut resp = Json(serde_json::json!({"events": list, "last": last})).into_response();
+    resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    resp
+}
+
+#[derive(Deserialize)]
+struct CallSignalReq {
+    peer: String,
+    text: String,
+}
+
+async fn mobile_call_signal(Json(req): Json<CallSignalReq>) -> impl IntoResponse {
+    match crate::mobile_api::pc_call_signal(&req.peer, &req.text) {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+    }
+}
+
+async fn mobile_call_turn() -> impl IntoResponse {
+    Json(serde_json::json!({"turn": crate::mobile_api::pc_turn()}))
 }
 
 /// Устройства, сопряжённые с этим узлом: кто в сети, сколько соединений, когда был виден.

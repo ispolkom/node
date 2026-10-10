@@ -528,6 +528,33 @@ fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
     }
 }
 
+/// Сигнал звонка со страницы телефону (живой, не хранится): только при подписанных ключах телефона и если он на связи.
+pub fn pc_call_signal(peer: &str, text: &str) -> Result<(), String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if !text.starts_with(crate::mobile_self::CALL_MARKER) || text.len() > MAX_LIVE {
+        return Err("это не сигнал звонка".into());
+    }
+    device_x25519(peer)?;
+    if live_count(peer) == 0 {
+        return Err("телефон не в сети".into());
+    }
+    node_live_to_device(&st, peer, text);
+    Ok(())
+}
+
+/// Учётные данные сервера звонков (TURN) для страницы узла: та же схема, что у телефонов; адрес для браузера — этот же компьютер.
+pub fn pc_turn() -> Option<serde_json::Value> {
+    use base64::Engine;
+    use hmac::{Hmac, Mac};
+    let c = turn_config()?;
+    const TTL: u64 = 6 * 3600;
+    let username = format!("{}:pc", now_ms() / 1000 + TTL);
+    let mut mac = Hmac::<sha1::Sha1>::new_from_slice(c.secret.as_bytes()).ok()?;
+    mac.update(username.as_bytes());
+    let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
+    Some(json!({"host": "127.0.0.1", "port": c.port, "username": username, "credential": credential}))
+}
+
 /// Владелец открыл переписку с телефоном на странице: отправить «прочитано» по входящим, по которым ещё не отправляли.
 pub fn pc_mark_read(peer: &str) {
     let Some(st) = STATE.get().cloned() else { return };
@@ -1041,14 +1068,21 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         if HashId(id) == st.my_id {
                             // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
                             let blob = &d[37..37 + len];
-                            let is_cap = crate::mobile_self::first_time(blob)
-                                && crate::mobile_self::open(blob).map(|t| matches!(crate::mobile_self::classify(t), crate::mobile_self::Envelope::CapPing)).unwrap_or(false);
-                            if is_cap {
-                                node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
-                            } else {
-                                let mut f = vec![FT_PEER_OFFLINE];
-                                f.extend_from_slice(&id);
-                                if sock.send(Message::Binary(f)).await.is_err() { break; }
+                            let text = if crate::mobile_self::first_time(blob) { crate::mobile_self::open(blob) } else { None };
+                            match text {
+                                Some(t) if t.starts_with(crate::mobile_self::CALL_MARKER) && crate::mobile_self::call_page_alive() => {
+                                    // сигнал звонка: страница чата открыта — отдаём ей (она и отвечает)
+                                    crate::mobile_self::push_call(&me, &t);
+                                }
+                                Some(t) if matches!(crate::mobile_self::classify(t.clone()), crate::mobile_self::Envelope::CapPing) => {
+                                    node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
+                                }
+                                _ => {
+                                    // страница не открыта (или не сигнал) — «не на связи», чтобы телефон не висел в вызове
+                                    let mut f = vec![FT_PEER_OFFLINE];
+                                    f.extend_from_slice(&id);
+                                    if sock.send(Message::Binary(f)).await.is_err() { break; }
+                                }
                             }
                             continue;
                         }
