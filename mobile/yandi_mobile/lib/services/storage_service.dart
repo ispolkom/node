@@ -26,13 +26,17 @@ class StorageService {
     final path = p.join(dir.path, 'yandi.db');
     _db = await openDatabase(
       path,
-      version: 3,
+      version: 4,
       onCreate: _createTables,
       onUpgrade: _onUpgrade,
     );
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 4) {
+      // Ключи собеседников, закэшированные до подписанных связок, ничем не проверены: стираем, их перезапросят с проверкой подписи.
+      try { await db.delete('peer_pubkeys'); } catch (_) {}
+    }
     if (oldVersion < 2) {
       try { await db.execute('ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT ""'); } catch (_) {}
     }
