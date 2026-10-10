@@ -559,6 +559,12 @@ killA(); killB()
 h2 = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=10)
 h2.request("GET", "/")
 check("a stranger still gets the decoy page", h2.getresponse().status == 200)
+if os.environ.get("YANDI_TEST_FILE_RECEIPTS") == "1":
+    import mobile_file_receipts
+    mobile_file_receipts.run(a, req, req_raw, pair_phone, ws_open, ws_send, check)
+else:
+    print("SKIP PC/phone file receipts: set YANDI_TEST_FILE_RECEIPTS=1 (requires Python cryptography)")
+
 for x in (a, b):
     x.kill()
 print("FAILED:" if fails else "ALL OK", fails or "")
