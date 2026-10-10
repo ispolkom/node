@@ -432,8 +432,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   );
 }
 
-/// Сохранённые контакты сверху, ниже раздел «Другие устройства» (видны, но ещё не в контактах).
-class _ContactList extends StatelessWidget {
+/// Сохранённые контакты сверху, ниже раздел «Другие устройства» (видны, но ещё не в контактах). Устройства, которых нет в сети дольше суток
+/// и которых нет в контактах, на главном экране не показываются: они в «Скрытых» и возвращаются сами, когда появятся в сети.
+class _ContactList extends StatefulWidget {
   final List<Contact> contacts;
   final void Function(Contact) onOpen;
   final void Function(Contact) onTapUnsaved;
@@ -442,9 +443,27 @@ class _ContactList extends StatelessWidget {
   const _ContactList({required this.contacts, required this.onOpen, required this.onTapUnsaved, required this.onDelete, required this.onMenu});
 
   @override
+  State<_ContactList> createState() => _ContactListState();
+}
+
+class _ContactListState extends State<_ContactList> {
+  bool _showHidden = false;
+
+  List<Contact> get contacts => widget.contacts;
+  void Function(Contact) get onOpen => widget.onOpen;
+  void Function(Contact) get onTapUnsaved => widget.onTapUnsaved;
+  void Function(Contact) get onDelete => widget.onDelete;
+  void Function(Contact) get onMenu => widget.onMenu;
+
+  @override
   Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final now = DateTime.now().millisecondsSinceEpoch;
     final saved = contacts.where((c) => c.saved).toList();
-    final other = contacts.where((c) => !c.saved).toList();
+    final unsaved = contacts.where((c) => !c.saved).toList();
+    // устройство со входящими непрочитанными не прячем, чтобы не потерять сообщение
+    final hidden = unsaved.where((c) => c.isStale(now) && state.unreadFor(c.peerId) == 0).toList();
+    final other = _showHidden ? unsaved : unsaved.where((c) => !hidden.contains(c)).toList();
     final rows = <Widget>[
       for (final c in saved)
         _ContactTile(
@@ -466,6 +485,16 @@ class _ContactList extends StatelessWidget {
           unread: context.watch<AppState>().unreadFor(c.peerId),
           onTap: () => onTapUnsaved(c),
           onAdd: () => showSaveContactDialog(context, c.peerId, c.displayName),
+        ),
+      if (hidden.isNotEmpty)
+        Padding(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: TextButton.icon(
+            onPressed: () => setState(() => _showHidden = !_showHidden),
+            icon: Icon(_showHidden ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: AppTheme.textSecondary, size: 18),
+            label: Text(_showHidden ? 'Скрыть неактивные устройства' : 'Скрытые устройства (${hidden.length}) — давно не в сети',
+                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          ),
         ),
     ];
     return ListView(physics: const AlwaysScrollableScrollPhysics(), children: rows);

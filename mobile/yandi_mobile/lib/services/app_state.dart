@@ -343,7 +343,7 @@ class AppState extends ChangeNotifier {
         final name = saved[c.peerId];
         merged.add(name == null || name.isEmpty
             ? c
-            : Contact(peerId: c.peerId, displayName: c.isManual ? c.displayName : name, online: c.online, isManual: c.isManual, saved: true));
+            : Contact(peerId: c.peerId, displayName: c.isManual ? c.displayName : name, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs));
       }
       for (final e in saved.entries) {
         if (seen.contains(e.key)) continue;

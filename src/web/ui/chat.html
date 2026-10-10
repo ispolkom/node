@@ -424,7 +424,7 @@
 
         // Галочки как в приложении: одна серая — отправлено, две серые — доставлено, две оранжевые — прочитано
         function statusTicks(status) {
-            if (status === 'Read') return '<span class="msg-ticks" style="color:#ff9800" title="Прочитано">✓✓</span>';
+            if (status === 'Read') return '<span class="msg-ticks" style="color:#ff4001" title="Прочитано">✓✓</span>';
             if (status === 'Delivered') return '<span class="msg-ticks" style="color:#9e9e9e" title="Доставлено">✓✓</span>';
             if (status === 'Failed') return '<span class="msg-ticks" style="color:#e74c3c" title="Не доставлено">⚠</span>';
             return '<span class="msg-ticks" style="color:#9e9e9e" title="Отправлено">✓</span>';

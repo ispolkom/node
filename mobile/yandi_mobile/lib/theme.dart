@@ -5,6 +5,8 @@ class AppTheme {
   static const Color bg          = Color(0xFF0D1117);
   static const Color surface     = Color(0xFF161B22);
   static const Color accent      = Color(0xFF00D4AA);
+  /// Чужие сообщения: рамка этого цвета на фоне чата; им же — двойные галочки «прочитано» у своих (собеседник увидел).
+  static const Color incoming    = Color(0xFFFF4001);
   static const Color text        = Color(0xFFE6EDF3);
   static const Color textSecondary = Color(0xFF7D8590);
   static const Color divider     = Color(0xFF21262D);

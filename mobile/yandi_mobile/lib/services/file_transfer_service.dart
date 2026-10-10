@@ -8,9 +8,18 @@ import 'package:path_provider/path_provider.dart';
 import '../crypto/file_crypto.dart';
 import '../models/file_offer.dart';
 import 'api_service.dart';
+import 'pool.dart';
 
 /// Размер куска в открытом виде. На проводе он на 28 байт больше (случайное число и метка шифрования).
 const int chunkSize = 256 * 1024;
+/// Файлы от 5 МБ идут быстрее: куски по 1 МБ и несколько запросов одновременно (узел принимает куски независимо). Раньше каждый кусок
+/// ждал ответа предыдущего — скорость упиралась в задержку сети, а не в её ширину. Мелкие файлы — как прежде: по одному куску, 256 КБ.
+const int bigFileSize = 5 * 1024 * 1024;
+const int bigChunkSize = 1024 * 1024;
+const int bigParallel = 4;
+
+int chunkSizeFor(int fileSize) => fileSize >= bigFileSize ? bigChunkSize : chunkSize;
+int parallelFor(int fileSize) => fileSize >= bigFileSize ? bigParallel : 1;
 /// Самый большой файл (так же, как на узле).
 const int maxFileSize = 1 << 30;
 const int _tries = 4;
@@ -81,7 +90,7 @@ class FileTransferService {
     if (size == 0) throw TransferException('Файл пустой');
     if (size > maxFileSize) throw TransferException('Файл больше 1 ГБ');
     final fileName = safeName(name ?? file.path.split(Platform.pathSeparator).last);
-    final chunks = max(1, (size / chunkSize).ceil());
+    final chunks = max(1, (size / chunkSizeFor(size)).ceil());
     // узлу уходит безликая подпись: настоящее имя только внутри зашифрованного предложения
     final tid = await _api.startFileTransfer(toPeerId: toPeerId, fileName: 'file', fileSize: size, totalChunks: chunks);
     if (tid == null) throw TransferException('Узел не принял передачу (нет места, лимит или это не ваше устройство)');
@@ -97,21 +106,37 @@ class FileTransferService {
     final out = _DigestSink();
     final hash = crypto.sha256.startChunkedConversion(out);
     final raf = await File(path).open();
-    try {
-      for (var i = 0; i < offer.chunks; i++) {
-        final want = min(chunkSize, offer.size - i * chunkSize);
-        final buf = Uint8List(want);
-        var got = 0;
-        while (got < want) {
-          final n = await raf.readInto(buf, got, want);
-          if (n <= 0) throw TransferException('Файл изменился во время отправки');
-          got += n;
+    final cs = chunkSizeFor(offer.size);
+    var finished = 0;
+    // чтение и контрольная сумма — строго по порядку (очередь), шифрование и заливка — параллельно (parallelFor)
+    Future<void> readLock = Future.value();
+    Future<Uint8List> readChunk(int i) {
+      final result = Completer<Uint8List>();
+      readLock = readLock.then((_) async {
+        try {
+          final want = min(cs, offer.size - i * cs);
+          final buf = Uint8List(want);
+          var got = 0;
+          while (got < want) {
+            final n = await raf.readInto(buf, got, want);
+            if (n <= 0) throw TransferException('Файл изменился во время отправки');
+            got += n;
+          }
+          hash.add(buf);
+          result.complete(buf);
+        } catch (e, st) {
+          result.completeError(e, st);
         }
-        hash.add(buf);
+      });
+      return result.future;
+    }
+    try {
+      await runPool(offer.chunks, parallelFor(offer.size), (i) async {
+        final buf = await readChunk(i);
         final wire = await FileCrypto.encryptChunk(key, offer.tid, i, offer.chunks, buf);
         await _retry<bool>(() async => await _api.uploadChunk(offer.tid, i, wire) ? true : null, 'кусок ${i + 1}');
-        onProgress?.call((i + 1) / offer.chunks);
-      }
+        onProgress?.call(++finished / offer.chunks);
+      });
     } finally {
       await raf.close();
     }
@@ -131,8 +156,11 @@ class FileTransferService {
     final sink = part.openWrite();
     var total = 0;
     try {
-      for (var i = 0; i < offer.chunks; i++) {
-        final wire = await _retry<List<int>>(() => _api.downloadChunk(offer.tid, i), 'кусок ${i + 1}');
+      var i = -1;
+      // куски скачиваются с опережением (для больших файлов — по несколько сразу), а расшифровка, сумма и запись — строго по порядку
+      await for (final wire in orderedPrefetch<List<int>>(
+          offer.chunks, parallelFor(offer.size), (k) => _retry<List<int>>(() => _api.downloadChunk(offer.tid, k), 'кусок ${k + 1}'))) {
+        i++;
         final Uint8List plain;
         try {
           plain = await FileCrypto.decryptChunk(key, offer.tid, i, offer.chunks, wire);

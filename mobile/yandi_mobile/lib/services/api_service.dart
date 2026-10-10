@@ -76,6 +76,7 @@ class ApiService {
         displayName: m['display_name'] as String? ?? '',
         online:      m['online']       as bool?   ?? false,
         isManual:    m['is_manual']    as bool?   ?? false,
+        lastActivityMs: (m['last_activity_ms'] as num?)?.toInt() ?? 0,
       );
     }).toList();
   }
