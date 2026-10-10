@@ -183,7 +183,14 @@ fn claim_replay(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, S
 // загрузок страницы (`files/downloads`), отдаёт файл со страницы телефону через хранилище кусков `mobile_files`.
 
 pub const FILE_MARKER: &str = "\u{1}yandi-file:";
-const FILE_CHUNK: usize = 256 * 1024;
+/// Размер куска: файлы от 5 МБ — по 1 МБ (быстрее), остальные — по 256 КБ, как раньше.
+const FILE_CHUNK_SMALL: usize = 256 * 1024;
+const FILE_CHUNK_BIG: usize = 1 << 20;
+const BIG_FILE: u64 = 5 << 20;
+
+fn file_chunk_for(size: u64) -> usize {
+    if size >= BIG_FILE { FILE_CHUNK_BIG } else { FILE_CHUNK_SMALL }
+}
 
 #[derive(Serialize, Deserialize)]
 struct Offer {
@@ -290,16 +297,17 @@ pub async fn send_file(node_hex: &str, device: &str, path: &std::path::Path, nam
     use sha2::{Digest, Sha256};
     use tokio::io::AsyncReadExt;
     let size = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?.len();
-    let chunks = (size.div_ceil(FILE_CHUNK as u64)).max(1) as u32;
+    let chunk = file_chunk_for(size);
+    let chunks = (size.div_ceil(chunk as u64)).max(1) as u32;
     let tid = crate::mobile_files::node_begin(node_hex, device, size, chunks).await?;
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
     let mut f = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
-    let mut buf = vec![0u8; FILE_CHUNK];
+    let mut buf = vec![0u8; chunk];
     let res: Result<(), String> = async {
         for i in 0..chunks {
-            let want = (size - i as u64 * FILE_CHUNK as u64).min(FILE_CHUNK as u64) as usize;
+            let want = (size - i as u64 * chunk as u64).min(chunk as u64) as usize;
             f.read_exact(&mut buf[..want]).await.map_err(|e| e.to_string())?;
             hash.update(&buf[..want]);
             crate::mobile_files::node_put(&tid, i, &seal_chunk(&key, &tid, i, chunks, &buf[..want])).await?;
@@ -611,6 +619,16 @@ mod tests {
         let b = load_or_create(&p);
         assert_eq!(a.x_pub, b.x_pub);
         assert_eq!(a.ed_pub, b.ed_pub);
+    }
+
+    #[test]
+    fn big_files_use_big_chunks_and_stay_within_the_node_limits() {
+        assert_eq!(file_chunk_for(5 * 1024 * 1024 - 1), 256 * 1024);
+        assert_eq!(file_chunk_for(5 * 1024 * 1024), 1 << 20);
+        // самый большой файл (1 ГБ) крупными кусками укладывается в предел числа кусков, а кусок с накладными — в предел на проводе
+        let chunks = (crate::mobile_files::MAX_FILE).div_ceil(file_chunk_for(crate::mobile_files::MAX_FILE) as u64);
+        assert!(chunks <= crate::mobile_files::MAX_CHUNKS as u64);
+        assert!(((1usize << 20) + 28) <= crate::mobile_files::MAX_CHUNK_BYTES);
     }
 
     #[test]

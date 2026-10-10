@@ -225,6 +225,21 @@ print("INFO head-of-line: /mobile/inbox returned", len(r["messages"]), "mails; t
 check("[finding] the oldest 200 unACKed mails hide newer ones (valid mail beyond 200 is not in the first page)",
       not any(base64.b64decode(m["payload_b64"])[:2] == bytes([0xE4, 1]) for m in r["messages"]))
 
+# last activity in the contact list and big file chunks
+st, r = req("GET", "/mobile/contacts", token=p1.token)
+devs = [c for c in r["contacts"] if c["peer_id"] in (p2.id, p3.id)]
+check("every paired device carries last_activity_ms in /mobile/contacts", len(devs) == 2 and all(isinstance(c.get("last_activity_ms"), int) and c["last_activity_ms"] > 0 for c in devs), devs)
+size = 6 * 1024 * 1024
+st, r = req("POST", "/mobile/files", {"to_peer_id": p2.id, "file_name": "x", "file_size": size, "total_chunks": 6}, token=p1.token)
+tid = r.get("transfer_id")
+def put(idx, n):
+    h = http.client.HTTPSConnection("127.0.0.1", PORT, context=ctx(), timeout=30)
+    h.request("PUT", f"/mobile/files/{tid}/chunk/{idx}", os.urandom(n), {"Authorization": "Bearer " + p1.token, "Content-Type": "application/octet-stream"})
+    r = h.getresponse(); r.read(); return r.status
+check("a 1 MiB chunk (big-file mode) is accepted", st == 200 and put(0, (1 << 20) + 28) == 200, (st, r))
+check("a chunk above the new limit is refused", put(1, (1 << 20) + 2048) in (400, 413))
+req("DELETE", f"/mobile/files/{tid}", token=p1.token)
+
 a.kill()
 print("FAILED:" if fails else "ALL OK", fails or "")
 sys.exit(1 if fails else 0)

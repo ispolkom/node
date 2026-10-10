@@ -107,9 +107,17 @@ struct Device {
     ed25519_pub: Option<String>,
     #[serde(default)]
     key_sig: Option<String>,
+    /// последний раз, когда устройство было на связи (мс); хранится на диске, чтобы переживать перезапуск узла
+    #[serde(default)]
+    last_seen_ms: u64,
 }
 
 impl Device {
+    /// Когда устройство в последний раз проявляло активность: на связи / отключилось, иначе — когда сопрягли.
+    fn last_activity_ms(&self) -> u64 {
+        self.last_seen_ms.max(self.created_ms)
+    }
+
     /// Номер телефона как собеседника: 32 байта от хэша токена (токен не раскрывается).
     fn peer_id(&self) -> String {
         hex::encode(Sha256::digest(
@@ -247,7 +255,7 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
                 "created_ms": x.created_ms,
                 "online": n > 0,
                 "connections": n,
-                "last_seen_ms": seen.get(&pid),
+                "last_seen_ms": seen.get(&pid).copied().unwrap_or(0).max(x.last_seen_ms),
                 "has_keys": x.x25519_pub.is_some() && x.key_sig.is_some(),
                 "peer_id": pid,
             })
@@ -314,7 +322,15 @@ fn set_live(peer: &str, up: bool) {
     if !now {
         m.remove(peer);
     }
+    drop(g);
     if was != now {
+        // подключился или отключился: запоминаем на диске (раз в смену состояния, не на каждый кадр)
+        let t = now_ms();
+        with_devices(|d| {
+            if let Some(x) = d.iter_mut().find(|x| x.peer_id() == peer) {
+                x.last_seen_ms = t;
+            }
+        });
         let _ = bus().send(Event::Presence(peer.to_string(), now));
     }
 }
@@ -381,7 +397,10 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     }
     with_devices(|d| {
         if d.len() >= MAX_DEVICES {
-            d.remove(0);
+            // вытесняем того, кто дольше всех молчит, а не самого давно сопряжённого: давнее, но живое устройство не должно вылетать
+            if let Some(i) = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
+                d.remove(i);
+            }
         }
         let th = token_hash(&token);
         if d.iter()
@@ -397,6 +416,7 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             x25519_pub: None,
             ed25519_pub: None,
             key_sig: None,
+            last_seen_ms: 0,
         });
     });
     Json(json!({"token": token})).into_response()
@@ -728,7 +748,8 @@ async fn contacts(
         if Some(&pid) == me.as_ref() {
             continue;
         }
-        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", d.name), "online": live_count(&pid) > 0, "is_manual": false}));
+        // last_activity_ms — для приложения: устройство, не бывшее на связи и не в контактах дольше суток, уходит с главного экрана
+        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", d.name), "online": live_count(&pid) > 0, "is_manual": false, "last_activity_ms": d.last_activity_ms()}));
     }
     out.push(json!({"peer_id": hex::encode(st.my_id.0), "display_name": "💻 Компьютер", "online": true, "is_manual": false}));
     Json(json!({"contacts": out}))
@@ -1481,6 +1502,19 @@ where
 #[cfg(test)]
 mod tests {
     #[test]
+    fn the_longest_silent_device_is_evicted_not_the_oldest_paired() {
+        let mk = |name: &str, created: u64, seen: u64| Device { token_hash: name.into(), name: name.into(), created_ms: created, acked_ts: 0,
+            x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: seen };
+        let d = vec![mk("old-but-active", 1_000, 9_000), mk("newer-but-silent", 2_000, 0), mk("recent", 8_000, 8_500)];
+        let i = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i).unwrap();
+        assert_eq!(d[i].name, "newer-but-silent");
+        assert_eq!(mk("never-seen", 5_000, 0).last_activity_ms(), 5_000, "без визитов считается дата сопряжения");
+        // старая запись devices.json без поля last_seen_ms читается (serde default)
+        let old: Device = serde_json::from_str(r#"{"token_hash":"t","name":"n","created_ms":7,"acked_ts":0}"#).unwrap();
+        assert_eq!(old.last_seen_ms, 0);
+    }
+
+    #[test]
     fn mobile_device_signing_pin_persists_and_cannot_be_replaced() {
         use super::*;
         use base64::Engine;
@@ -1489,7 +1523,7 @@ mod tests {
             x25519_pub: b64(&[x;32]), ed25519_pub: b64(&[ed;32]), signature:b64(&[0;64]),
         };
         let mut devices = vec![Device { token_hash:"test-token".into(), name:"test".into(), created_ms:0, acked_ts:0,
-            x25519_pub:None, ed25519_pub:None, key_sig:None }];
+            x25519_pub:None, ed25519_pub:None, key_sig:None, last_seen_ms:0 }];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         assert_eq!(store_device_bundle(&mut devices,"test-token",request(1,2),&[1;32],&path),StatusCode::OK);
