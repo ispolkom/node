@@ -82,6 +82,15 @@ class SettingsScreen extends StatelessWidget {
                 style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => _avatarSheet(context),
           ),
+          SwitchListTile(
+            secondary: const Icon(Icons.keyboard_outlined, color: AppTheme.textSecondary),
+            title: const Text('Своя клавиатура в чате', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Системная клавиатура видит каждое нажатие и может учиться на нём. Своя работает только внутри приложения; '
+                'без автозамены и голосового ввода.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            value: state.secureKeyboard,
+            activeColor: AppTheme.accent,
+            onChanged: (v) => state.setSecureKeyboard(v),
+          ),
           // Нода
           _Section(title: 'Нода'),
           _InfoTile(label: 'Хост', value: pair?.host ?? '—'),

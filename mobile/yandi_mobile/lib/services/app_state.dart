@@ -46,6 +46,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   bool         nodeOnline  = false;
   /// Почему не подключились к узлу (показать пользователю); null — всё в порядке.
   String?      nodeError;
+  /// Своя клавиатура внутри приложения (системная видит каждое нажатие). По умолчанию включена; можно выключить в настройках
+  /// (например, нужен голосовой ввод или экранный диктор).
+  bool         secureKeyboard = true;
   bool         vpnRunning  = false;
   String?      proxyHost;
   int?         proxyPort;
@@ -89,6 +92,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _unread.addAll(await StorageService.loadUnread());
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
+    secureKeyboard = (await StorageService.secureRead('pref_secure_keyboard')) != '0';
 
     // аватарки: изолированная папка приложения + соответствие «контакт → хэш» в защищённом хранилище
     final docs = await pp.getApplicationDocumentsDirectory();
@@ -619,6 +623,12 @@ class AppState extends ChangeNotifier implements FilesHost {
     _editedIds.add(local.id);
     unawaited(StorageService.updateMessageText(local.id, newText));
     unawaited(StorageService.saveEditedIds(_editedIds));
+    notifyListeners();
+  }
+
+  Future<void> setSecureKeyboard(bool on) async {
+    secureKeyboard = on;
+    await StorageService.secureWrite('pref_secure_keyboard', on ? '1' : '0');
     notifyListeners();
   }
 

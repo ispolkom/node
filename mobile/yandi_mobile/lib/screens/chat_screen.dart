@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import '../services/vault_files.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
+import '../widgets/secure_keyboard.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -26,6 +27,7 @@ class ChatScreen extends StatefulWidget {
 class _ChatScreenState extends State<ChatScreen> {
   final _inputCtrl = TextEditingController();
   final _scrollCtrl = ScrollController();
+  final _inputFocus = FocusNode();
   final Set<String> _selected = {};
   String? _editingId;   // id редактируемого сообщения (null — обычная отправка)
 
@@ -108,6 +110,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    _inputFocus.addListener(() { if (mounted) setState(() {}); });   // панель своей клавиатуры показывается, пока в поле фокус
     WidgetsBinding.instance.addPostFrameCallback((_) {
       final state = context.read<AppState>();
       state.activeChatPeerId = widget.peerId;
@@ -119,6 +122,7 @@ class _ChatScreenState extends State<ChatScreen> {
   void dispose() {
     context.read<AppState>().activeChatPeerId = null;
     _inputCtrl.dispose();
+    _inputFocus.dispose();
     _scrollCtrl.dispose();
     super.dispose();
   }
@@ -319,9 +323,13 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           _InputBar(
             controller: _inputCtrl,
+            focusNode: _inputFocus,
+            ownKeyboard: context.watch<AppState>().secureKeyboard,
             onSend: _send,
             onAttach: _pickAndSend,
           ),
+          if (context.watch<AppState>().secureKeyboard && _inputFocus.hasFocus)
+            SecureKeyboard(controller: _inputCtrl),
         ],
       ),
     );
@@ -403,9 +411,11 @@ class _MessageBubble extends StatelessWidget {
 
 class _InputBar extends StatelessWidget {
   final TextEditingController controller;
+  final FocusNode focusNode;
+  final bool ownKeyboard;
   final VoidCallback onSend;
   final VoidCallback onAttach;
-  const _InputBar({required this.controller, required this.onSend, required this.onAttach});
+  const _InputBar({required this.controller, required this.focusNode, required this.ownKeyboard, required this.onSend, required this.onAttach});
 
   @override
   Widget build(BuildContext context) {
@@ -424,8 +434,14 @@ class _InputBar extends StatelessWidget {
             Expanded(
               child: TextField(
                 controller: controller,
+                focusNode: focusNode,
                 style: const TextStyle(color: AppTheme.text),
                 maxLines: null,
+                // со своей клавиатурой система к вводу не подключается вовсе: ни подсказок, ни обучения на нажатиях, ни облака
+                keyboardType: ownKeyboard ? SecureKeyboard.inputType : null,
+                enableSuggestions: !ownKeyboard,
+                autocorrect: !ownKeyboard,
+                enableIMEPersonalizedLearning: !ownKeyboard,
                 textCapitalization: TextCapitalization.sentences,
                 decoration: InputDecoration(
                   hintText: 'Сообщение...',
