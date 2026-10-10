@@ -10,10 +10,14 @@
 //!   - Sends raw IP packets (header + payload)
 //!   - Exit node masquerades and forwards to internet
 //!   - Responses sent back via same TCP connection
+//!   - If `YANDI_RAWIP_AUTH_TOKEN` is configured, the client must first send
+//!     `YANDI-RAWIP-AUTH-V1` followed by SHA-256(token), before packet frames.
 
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::{RwLock, Semaphore};
@@ -27,6 +31,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>
 const MAX_RAWIP_CONNECTIONS: usize = 64;
 const RAWIP_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_RAWIP_PACKET: usize = 8192;
+const RAWIP_AUTH_MAGIC: &[u8] = b"YANDI-RAWIP-AUTH-V1";
 
 /// Заголовок RawIP пакета (4 байта: [magic, length_high, length_low, reserved])
 #[derive(Debug, Clone)]
@@ -139,9 +144,14 @@ impl RawIpTunnel {
 
     /// Запустить туннель
     pub async fn run(&self) -> Result<()> {
-        if std::env::var("YANDI_ENABLE_UNAUTHENTICATED_RAWIP").as_deref() != Ok("1") {
+        let auth_token = std::env::var("YANDI_RAWIP_AUTH_TOKEN")
+            .ok()
+            .filter(|token| !token.is_empty());
+        if auth_token.is_none()
+            && std::env::var("YANDI_ENABLE_UNAUTHENTICATED_RAWIP").as_deref() != Ok("1")
+        {
             return Err(
-                "RawIP disabled: unauthenticated listener requires YANDI_ENABLE_UNAUTHENTICATED_RAWIP=1"
+                "RawIP disabled: configure YANDI_RAWIP_AUTH_TOKEN or explicitly set YANDI_ENABLE_UNAUTHENTICATED_RAWIP=1"
                     .into(),
             );
         }
@@ -168,11 +178,13 @@ impl RawIpTunnel {
 
                     // Обрабатываем соединение в отдельном task
                     let connections = self.connections.clone();
+                    let auth_token = auth_token.clone();
 
                     tokio::spawn(async move {
                         let _permit = permit;
                         if let Err(e) =
-                            Self::handle_connection(socket, peer_addr, connections).await
+                            Self::handle_connection(socket, peer_addr, connections, auth_token)
+                                .await
                         {
                             eprintln!("❌ [RAWIP] Connection error: {}", e);
                         }
@@ -190,7 +202,25 @@ impl RawIpTunnel {
         mut socket: TcpStream,
         peer_addr: SocketAddr,
         connections: Arc<RwLock<HashMap<SocketAddr, RawIpConnection>>>,
+        auth_token: Option<String>,
     ) -> Result<()> {
+        if let Some(token) = auth_token {
+            let mut preamble = vec![0u8; RAWIP_AUTH_MAGIC.len() + 32];
+            tokio::time::timeout(RAWIP_IDLE_TIMEOUT, socket.read_exact(&mut preamble))
+                .await
+                .map_err(|_| "RawIP authentication timeout")??;
+
+            let mut expected = Sha256::new();
+            expected.update(token.as_bytes());
+            let expected = expected.finalize();
+            let provided = &preamble[RAWIP_AUTH_MAGIC.len()..];
+            if &preamble[..RAWIP_AUTH_MAGIC.len()] != RAWIP_AUTH_MAGIC
+                || bool::from(provided.ct_eq(expected.as_slice())) == false
+            {
+                return Err("RawIP authentication failed".into());
+            }
+        }
+
         // Создаём соединение
         let mut conn = RawIpConnection::new(peer_addr);
 
