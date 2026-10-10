@@ -193,6 +193,45 @@
 
                 <div class="card">
                     <div class="card-header">
+                        <h3 class="card-title">Группы для телефонов</h3>
+                    </div>
+                    <div class="card-body">
+                        <p class="form-help">Группы создаются и удаляются только здесь. Переписку шифруют телефоны: ключ группы у телефона-владельца группы, этот компьютер содержимого не видит, только псевдонимы участников, кто когда писал и журнал модерации. Тип: закрытая — участников добавляете вы; по приглашению — по коду от владельца группы или модератора; открытая — любой ваш телефон вступает сам.</p>
+                        <div class="form-group">
+                            <label for="grpName">Название</label>
+                            <input id="grpName" class="form-input" maxlength="64" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="grpTopic">Тема (необязательно)</label>
+                            <input id="grpTopic" class="form-input" maxlength="256" autocomplete="off">
+                        </div>
+                        <div class="form-group">
+                            <label for="grpKind">Тип</label>
+                            <select id="grpKind" class="form-input">
+                                <option value="closed">закрытая</option>
+                                <option value="invite">по приглашению</option>
+                                <option value="open">открытая для ваших телефонов</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="grpOwner">Владелец группы (у этого телефона будет ключ)</label>
+                            <select id="grpOwner" class="form-input"></select>
+                        </div>
+                        <div class="form-group">
+                            <label>Сразу добавить</label>
+                            <div id="grpMembers" class="form-help"></div>
+                        </div>
+                        <div class="form-group">
+                            <button class="btn btn-primary" id="grpCreateBtn" type="button">Создать группу</button>
+                            <button class="btn" id="grpReloadBtn" type="button">Обновить</button>
+                            <span id="grpMsg" class="form-help"></span>
+                        </div>
+                        <div id="grpList" class="form-help">загрузка…</div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
                         <h3 class="card-title">Внешние прокси для выхода в интернет</h3>
                     </div>
                     <div class="card-body">
@@ -690,6 +729,109 @@
                 })
                 .catch(function () { msg.textContent = 'Нет ответа от узла'; });
         });
+    })();
+    (function () {
+        var list = document.getElementById('grpList');
+        if (!list) return;
+        var msg = document.getElementById('grpMsg');
+        var KIND = { closed: 'закрытая', invite: 'по приглашению', open: 'открытая' };
+        var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+        function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+        function api(method, url, body) {
+            return fetch(url, { method: method, cache: 'no-store', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); });
+        }
+        function fail(e) { msg.textContent = e && e.message ? e.message : 'Нет связи с узлом.'; }
+        function btn(label, attrs) { return '<button class="btn" type="button" ' + attrs + '>' + label + '</button>'; }
+        function devOptions(devs) { return devs.map(function (d) { return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' (' + esc(d.id.slice(0, 8)) + ')</option>'; }).join(''); }
+        function render(d) {
+            var devs = d.devices || [];
+            document.getElementById('grpOwner').innerHTML = devs.length ? devOptions(devs) : '<option value="">нет сопряжённых телефонов</option>';
+            document.getElementById('grpMembers').innerHTML = devs.map(function (x) {
+                return '<label style="display:inline-block;margin-right:12px"><input type="checkbox" data-mem="' + esc(x.id) + '"> ' + esc(x.name) + '</label>';
+            }).join('') || '—';
+            var gs = d.groups || [];
+            if (!gs.length) { list.textContent = 'Групп пока нет.'; return; }
+            list.innerHTML = gs.map(function (g) {
+                var g_ = ' data-g="' + esc(g.id) + '"';
+                var mem = g.members.map(function (m) {
+                    var a = ' data-a="' + esc(m.alias) + '"' + g_;
+                    var acts = m.role === 'owner' ? '' :
+                        btn(m.role === 'moderator' ? 'Снять модератора' : 'Модератор', 'data-act="' + (m.role === 'moderator' ? 'demote' : 'promote') + '"' + a)
+                        + btn(m.muted ? 'Разрешить писать' : 'Заглушить', 'data-act="' + (m.muted ? 'unmute' : 'mute') + '"' + a)
+                        + btn('Выгнать', 'data-act="kick"' + a) + btn('Запретить', 'data-act="ban"' + a);
+                    return '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0">'
+                        + '<span style="flex:1;min-width:160px">' + esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : '') + '</span>' + acts + '</div>';
+                }).join('');
+                var ban = (g.banned || []).map(function (b) { return esc(b) + ' ' + btn('Снять запрет', 'data-act="unban" data-a="' + esc(b) + '"' + g_); }).join(' ');
+                return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:10px 0">'
+                    + '<b>' + esc(g.name) + '</b> · ' + KIND[g.kind] + (g.topic ? ' · ' + esc(g.topic) : '')
+                    + '<br><span>записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
+                    + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу группы стоит сменить ключ</b>' : '') + '</span>'
+                    + '<div style="margin:8px 0">' + mem + '</div>'
+                    + (ban ? '<div>Запрещены: ' + ban + '</div>' : '')
+                    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">'
+                    + (g.addable.length ? '<select class="form-input" style="width:auto" data-addsel="' + esc(g.id) + '">' + devOptions(g.addable) + '</select>' + btn('Добавить', 'data-add="1"' + g_) : '')
+                    + (g.kind === 'invite' ? btn('Код приглашения', 'data-inv="1"' + g_) : '')
+                    + btn('Изменить', 'data-edit="1"' + g_ + ' data-name="' + esc(g.name) + '" data-topic="' + esc(g.topic) + '" data-kind="' + g.kind + '"')
+                    + btn('Сменить владельца', 'data-own="1"' + g_)
+                    + btn('Журнал модерации', 'data-log="1"' + g_)
+                    + btn('Удалить группу', 'data-delg="1"' + g_ + ' data-name="' + esc(g.name) + '"')
+                    + '</div><div data-out="' + esc(g.id) + '" style="margin-top:6px"></div></div>';
+            }).join('');
+            list._devs = devs;
+        }
+        function load() { api('GET', '/api/mobile/groups').then(render).catch(function () { list.textContent = 'нет ответа от узла'; }); }
+        function done(text) { return function () { msg.textContent = text; load(); }; }
+        document.getElementById('grpReloadBtn').addEventListener('click', load);
+        document.getElementById('grpCreateBtn').addEventListener('click', function () {
+            var owner = document.getElementById('grpOwner').value;
+            var members = Array.prototype.map.call(document.querySelectorAll('#grpMembers input[data-mem]:checked'), function (c) { return c.getAttribute('data-mem'); });
+            api('POST', '/api/mobile/groups', { name: document.getElementById('grpName').value, topic: document.getElementById('grpTopic').value, kind: document.getElementById('grpKind').value, owner_device: owner, members: members })
+                .then(function () { document.getElementById('grpName').value = ''; document.getElementById('grpTopic').value = ''; done('Группа создана.')(); })
+                .catch(fail);
+        });
+        list.addEventListener('click', function (e) {
+            var t = e.target, gid = t && t.getAttribute && t.getAttribute('data-g');
+            if (!gid) return;
+            var base = '/api/mobile/groups/' + encodeURIComponent(gid);
+            var out = list.querySelector('[data-out="' + gid + '"]');
+            var act = t.getAttribute('data-act');
+            if (act) {
+                var alias = t.getAttribute('data-a');
+                if ((act === 'kick' || act === 'ban') && !confirm((act === 'ban' ? 'Запретить' : 'Выгнать') + ' «' + alias + '»?')) return;
+                api('POST', base + '/mod', { action: act, alias: alias }).then(done('Готово.')).catch(fail);
+            } else if (t.getAttribute('data-add')) {
+                var sel = list.querySelector('[data-addsel="' + gid + '"]');
+                api('POST', base + '/members', { device: sel.value }).then(function (j) { done('Добавлен как «' + j.alias + '».')(); }).catch(fail);
+            } else if (t.getAttribute('data-inv')) {
+                api('POST', base + '/invite', { uses: 1 }).then(function (j) {
+                    out.innerHTML = 'Код (один раз, до ' + new Date(j.expires_ms).toLocaleString() + '): <code style="user-select:all">' + esc(j.code) + '</code>';
+                }).catch(fail);
+            } else if (t.getAttribute('data-edit')) {
+                var name = prompt('Название', t.getAttribute('data-name')); if (name === null) return;
+                var topic = prompt('Тема', t.getAttribute('data-topic')); if (topic === null) return;
+                var kind = prompt('Тип: closed — закрытая, invite — по приглашению, open — открытая', t.getAttribute('data-kind')); if (kind === null) return;
+                api('POST', base, { name: name, topic: topic, kind: kind.trim() }).then(done('Сохранено.')).catch(fail);
+            } else if (t.getAttribute('data-own')) {
+                var devs = list._devs || [];
+                out.innerHTML = '<select class="form-input" style="width:auto" data-ownsel="1">' + devOptions(devs) + '</select> ' + btn('Назначить', 'data-ownok="1" data-g="' + esc(gid) + '"')
+                    + ' <span>Новому владельцу придётся создать новый ключ: старые записи он прочтёт, только если прежний телефон ещё жив.</span>';
+            } else if (t.getAttribute('data-ownok')) {
+                api('POST', base + '/owner', { device: out.querySelector('[data-ownsel]').value }).then(done('Владелец группы сменён.')).catch(fail);
+            } else if (t.getAttribute('data-log')) {
+                api('GET', base + '/modlog').then(function (j) {
+                    var l = (j.modlog || []).slice(-50).reverse();
+                    out.innerHTML = l.length ? l.map(function (x) {
+                        return esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + (x.seq ? ' №' + x.seq : '') + (x.reason ? ' (' + esc(x.reason) + ')' : '');
+                    }).join('<br>') : 'Пусто.';
+                }).catch(fail);
+            } else if (t.getAttribute('data-delg')) {
+                if (!confirm('Удалить группу «' + t.getAttribute('data-name') + '» вместе с журналом? Это нельзя отменить.')) return;
+                api('DELETE', base).then(done('Группа удалена.')).catch(fail);
+            }
+        });
+        load();
     })();
     </script>
 </body>
