@@ -173,6 +173,14 @@ ws_send(s1, frame(0x31, node_id, k2)); time.sleep(0.7)
 st, ev = a.api("GET", "/api/mobile/call/events?after=0")
 check("the call signal is not delivered twice", len(ev.get("events", [])) == 1, ev)
 
+# the page records the outcome of a call in the chat history (like the app does)
+st, r = a.api("POST", "/api/mobile/call/log", {"peer": p1.id, "outgoing": False, "text": "📞 Звонок · 01:23"})
+check("a finished call is logged into the chat history", st == 200 and r.get("status") == "ok" and "📞 Звонок · 01:23" in history_texts(p1), (st, r))
+st, r = a.api("POST", "/api/mobile/call/log", {"peer": p1.id, "outgoing": True, "text": "обычный текст, не звонок"})
+check("only call records are accepted by the log endpoint", r.get("status") == "error", r)
+st, r = a.api("POST", "/api/mobile/call/log", {"peer": "ab" * 32, "outgoing": True, "text": "📞 Звонок · 00:01"})
+check("a call cannot be logged for an unknown device", r.get("status") == "error", r)
+
 # signing-key pinning on the node
 check("a new signing key under the same token is refused (409)", p1.register(ed25519.Ed25519PrivateKey.generate()) == 409)
 p1.x = x25519.X25519PrivateKey.generate()

@@ -646,6 +646,7 @@ impl WebServer {
             .route("/api/mobile/call/events", get(mobile_call_events))
             .route("/api/mobile/call/signal", post(mobile_call_signal))
             .route("/api/mobile/call/turn", get(mobile_call_turn))
+            .route("/api/mobile/call/log", post(mobile_call_log))
             .route(
                 "/api/mobile/groups",
                 get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create),
@@ -5941,6 +5942,21 @@ struct CallSignalReq {
 
 async fn mobile_call_signal(Json(req): Json<CallSignalReq>) -> impl IntoResponse {
     match crate::mobile_api::pc_call_signal(&req.peer, &req.text) {
+        Ok(()) => Json(serde_json::json!({"status": "ok"})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+    }
+}
+
+#[derive(Deserialize)]
+struct CallLogReq {
+    peer: String,
+    #[serde(default)]
+    outgoing: bool,
+    text: String,
+}
+
+async fn mobile_call_log(Json(req): Json<CallLogReq>) -> impl IntoResponse {
+    match crate::mobile_api::pc_log_call(&req.peer, req.outgoing, &req.text) {
         Ok(()) => Json(serde_json::json!({"status": "ok"})),
         Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
     }

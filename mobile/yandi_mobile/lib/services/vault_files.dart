@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'dart:math';
-import 'dart:typed_data';
 import 'file_transfer_service.dart';
 
 /// Файл в изолированном хранилище приложения (папка внутри песочницы Android, недоступная другим приложениям).

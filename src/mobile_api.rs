@@ -574,6 +574,25 @@ fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
     }
 }
 
+/// Итог звонка в историю чата на странице узла (как в приложении: «📞 Звонок · 01:23», «📞 Видеозвонок: Нет ответа»). Пишет страница, когда звонок
+/// закончился; `outgoing` — звонила страница.
+pub fn pc_log_call(peer: &str, outgoing: bool, text: &str) -> Result<(), String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if !is_device_peer(peer) {
+        return Err("нет такого устройства".into());
+    }
+    let text: String = text.chars().filter(|c| !c.is_control()).take(200).collect();
+    if !text.starts_with('📞') {
+        return Err("это не запись звонка".into());
+    }
+    let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
+    let (from, dest) = if outgoing { (st.my_id, to) } else { (to, st.my_id) };
+    let mut msg = ChatMessage::new(from, dest, text);
+    msg.encrypted = true;
+    msg.mark_delivered();
+    if outgoing { st.chat.store_local_outgoing(&to, &msg) } else { st.chat.store_local_incoming(&to, &msg) }.map_err(|e| e.to_string())
+}
+
 /// Сигнал звонка со страницы телефону (живой, не хранится): только при подписанных ключах телефона и если он на связи.
 pub fn pc_call_signal(peer: &str, text: &str) -> Result<(), String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;

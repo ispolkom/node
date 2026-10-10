@@ -169,9 +169,22 @@
         call.local.getAudioTracks().forEach(function (t) { t.enabled = !call.muted; });
         render();
     }
+    function mmss(ms) {
+        var s = Math.max(0, Math.floor(ms / 1000));
+        return ('0' + Math.floor(s / 60)).slice(-2) + ':' + ('0' + s % 60).slice(-2);
+    }
+    // итог звонка — в историю чата на узле, в том же виде, что в приложении (там он уже пишется)
+    function logCall(c, reason, wasActive) {
+        var what = c.video ? 'Видеозвонок' : 'Звонок';
+        var text = wasActive ? '📞 ' + what + ' · ' + mmss(Date.now() - (c.started || Date.now()))
+            : (c.incoming ? '📞 ' + reason : '📞 ' + what + ': ' + reason);
+        fetch('/api/mobile/call/log', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ peer: c.peer, outgoing: !c.incoming, text: text }) }).catch(function () {});
+    }
     function finish(reason) {
         var c = call;
         if (!c || c.phase === 'ended') return;
+        logCall(c, reason, c.phase === 'active');
         ringStop(); clearTimeout(c.ringTimeout); clearTimeout(c.lost);
         try { if (c.local) c.local.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
         try { if (c.pc) c.pc.close(); } catch (e) {}
