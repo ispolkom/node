@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import '../services/storage_service.dart';
 
 /// Криптографическая идентичность пользователя.
 ///
@@ -43,22 +43,20 @@ class Identity {
 
   // ── Хранение ───────────────────────────────────────────────────────────────
 
-  static const _store = FlutterSecureStorage(
-    aOptions: AndroidOptions(encryptedSharedPreferences: true),
-  );
+  // ключи лежат в том же защищённом хранилище, что и остальное (StorageService: одно чтение при старте)
   static const _kEd = 'id_ed25519_seed';
   static const _kX  = 'id_x25519_seed';
 
   /// true — seed уже сохранён (пользователь создал аккаунт ранее)
   static Future<bool> hasStoredIdentity() async {
-    final s = await _store.read(key: _kEd);
+    final s = await StorageService.secureRead(_kEd);
     return s != null;
   }
 
   /// Загрузить сохранённый seed. Возвращает null если аккаунта нет.
   static Future<Identity?> loadExisting() async {
-    final edB64 = await _store.read(key: _kEd);
-    final xB64  = await _store.read(key: _kX);
+    final edB64 = await StorageService.secureRead(_kEd);
+    final xB64  = await StorageService.secureRead(_kX);
     if (edB64 == null || xB64 == null) return null;
     return _fromSeeds(base64.decode(edB64), base64.decode(xB64));
   }
@@ -113,8 +111,8 @@ class Identity {
     final xSeed  = seed64.sublist(32, 64);
 
     // Сохраняем seed в Keystore
-    await _store.write(key: _kEd, value: base64.encode(edSeed));
-    await _store.write(key: _kX,  value: base64.encode(xSeed));
+    await StorageService.secureWrite(_kEd, base64.encode(edSeed));
+    await StorageService.secureWrite(_kX,  base64.encode(xSeed));
 
     return _fromSeeds(edSeed, xSeed);
   }
@@ -132,8 +130,8 @@ class Identity {
 
   /// Удалить сохранённый аккаунт (сброс).
   static Future<void> clear() async {
-    await _store.delete(key: _kEd);
-    await _store.delete(key: _kX);
+    await StorageService.secureDelete(_kEd);
+    await StorageService.secureDelete(_kX);
   }
 
   // ── Внутренние методы ──────────────────────────────────────────────────────
@@ -145,8 +143,8 @@ class Identity {
     final edSeed = await edKP.extractPrivateKeyBytes();
     final xSeed  = await xKP.extractPrivateKeyBytes();
 
-    await _store.write(key: _kEd, value: base64.encode(edSeed));
-    await _store.write(key: _kX,  value: base64.encode(xSeed));
+    await StorageService.secureWrite(_kEd, base64.encode(edSeed));
+    await StorageService.secureWrite(_kX,  base64.encode(xSeed));
 
     return _build(edKP, xKP);
   }

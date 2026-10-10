@@ -113,10 +113,33 @@ class StorageService {
 
   // ── Secure storage helpers ─────────────────────────────────────────────────
 
-  static Future<String?> secureRead(String key) => _secure.read(key: key);
-  static Future<void> secureWrite(String key, String value) =>
-      _secure.write(key: key, value: value);
-  static Future<void> secureDelete(String key) => _secure.delete(key: key);
+  // flutter_secure_storage на слабых телефонах читает ~1 с за ключ, а при запуске их читается с десяток (запуск тянулся 10+ с).
+  // Поэтому при старте всё читается одним readAll(), дальше — из памяти; запись идёт и в память, и в хранилище.
+  static Map<String, String>? _secureCache;
+
+  static Future<void> warmSecureCache() async {
+    try {
+      _secureCache = await _secure.readAll();
+    } catch (_) {
+      _secureCache = null; // не вышло — читаем по одному, как раньше
+    }
+  }
+
+  static Future<String?> secureRead(String key) async {
+    final c = _secureCache;
+    if (c != null) return c[key];
+    return _secure.read(key: key);
+  }
+
+  static Future<void> secureWrite(String key, String value) async {
+    _secureCache?[key] = value;
+    await _secure.write(key: key, value: value);
+  }
+
+  static Future<void> secureDelete(String key) async {
+    _secureCache?.remove(key);
+    await _secure.delete(key: key);
+  }
 
   // ── Ноды ──────────────────────────────────────────────────────────────────
 

@@ -79,6 +79,7 @@ class AppState extends ChangeNotifier {
   Future<void> init() async {
     // 1. SQLite
     await StorageService.init();
+    await StorageService.warmSecureCache();
     _unread.addAll(await StorageService.loadUnread());
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
@@ -89,11 +90,11 @@ class AppState extends ChangeNotifier {
     // 3. Список нод
     await nodeManager.load();
 
-    // 4. Discovery (только если нет кэша или нод)
-    await NodeDiscovery.discoverOnStartup(nodeManager);
-
-    // 5. Выбор лучшей ноды и запуск
-    final best = await nodeManager.selectBest();
+    // 4. Узлов нет — пробуем bootstrap. Есть — подключаемся сразу к выбранному по сохранённым метрикам, а опрос всех узлов идёт
+    // в фоне: раньше он шёл дважды подряд до первого экрана (около 2 с, а с недоступным узлом — до 20 с).
+    if (nodeManager.nodes.isEmpty) await NodeDiscovery.discoverOnStartup(nodeManager);
+    final best = nodeManager.activeNode;
+    unawaited(nodeManager.pingAll());
     if (best != null) {
       await _startServices(best);
     }
@@ -467,12 +468,13 @@ class AppState extends ChangeNotifier {
       fileStates.remove(offer.tid);
       final delivered = msg.copyWith(status: MessageStatus.delivered);
       _replaceMessage(peerId, msg.id, delivered);
-      await StorageService.saveMessage(delivered);
+      // saveMessage вставляет с ignore и уже существующую строку не обновит: статус меняем явно
+      await StorageService.updateMessageStatus(msg.id, MessageStatus.delivered);
     } catch (e) {
       fileStates[offer.tid] = FileState.failed(e is TransferException ? e.message : '$e');
       final failed = msg.copyWith(status: MessageStatus.failed);
       _replaceMessage(peerId, msg.id, failed);
-      await StorageService.saveMessage(failed);
+      await StorageService.updateMessageStatus(msg.id, MessageStatus.failed);
     }
     notifyListeners();
     return null;
