@@ -516,6 +516,267 @@
             setInterval(load, 5000);
 
             list.addEventListener('click', function (e) {
+                var b = e.target; var act = b && b.getAttribute && b.getAttribute('data-act');
+                if (!act) return;
+                var id = b.getAttribute('data-id');
+                if (act === 'test') {
+                    msg.textContent = 'Проверяю…';
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id) + '/test')
+                        .then(function (j) { msg.textContent = j.ok ? 'Прокси работает (' + j.ms + ' мс).' : ('Не работает: ' + (j.error || 'нет ответа')); load(); })
+                        .catch(function () { msg.textContent = 'Нет связи с узлом.'; });
+                } else if (act === 'toggle') {
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id), { enabled: b.getAttribute('data-on') !== '1' }).then(load);
+                } else if (act === 'cap') {
+                    var v = prompt('Сколько устройств может сидеть на этом прокси? Пусто или 0 — общий предел.', b.getAttribute('data-cap') || '');
+                    if (v === null) return;
+                    var n = parseInt(v, 10); if (isNaN(n) || n < 0) n = 0;
+                    api('POST', '/api/upstream-proxies/' + encodeURIComponent(id), { max_clients: n }).then(function (j) { msg.textContent = j.ok ? '' : (j.error || 'Не удалось.'); load(); });
+                } else if (act === 'del') {
+                    if (!confirm('Удалить этот прокси? Его устройства переедут на другие.')) return;
+                    api('DELETE', '/api/upstream-proxies/' + encodeURIComponent(id)).then(load);
+                }
+            });
+
+            el('pxSettingsBtn').addEventListener('click', function () {
+                var n = parseInt(el('pxCap').value, 10) || 0;
+                api('POST', '/api/upstream-proxies/settings', { enabled: el('pxMaster').checked, max_clients: n, strict: el('pxStrict').checked })
+                    .then(function (j) { msg.textContent = j.ok ? 'Сохранено.' : (j.error || 'Не удалось сохранить.'); load(); })
+                    .catch(function () { msg.textContent = 'Нет связи с узлом.'; });
+            });
+            el('pxMaster').addEventListener('change', function () {
+                api('POST', '/api/upstream-proxies/settings', { enabled: el('pxMaster').checked }).then(function () { load(); });
+            });
+
+            el('pxAddToggle').addEventListener('click', function () { el('pxAddBox').style.display = el('pxAddBox').style.display === 'none' ? '' : 'none'; });
+            el('pxAddCancel').addEventListener('click', function () { el('pxAddBox').style.display = 'none'; });
+            el('pxAddBtn').addEventListener('click', function () {
+                var text = el('pxText').value;
+                if (!text.trim()) { msg.textContent = 'Вставьте хотя бы одну строку.'; return; }
+                var body = { text: text, kind: el('pxKind').value };
+                var own = parseInt(el('pxOwnCap').value, 10);
+                if (own > 0) body.max_clients = own;
+                api('POST', '/api/upstream-proxies', body).then(function (j) {
+                    var t = 'Добавлено: ' + (j.added || 0) + '.';
+                    if (j.errors && j.errors.length) t += ' Не добавлено: ' + j.errors.join('; ');
+                    msg.textContent = t;
+                    if (j.added) { el('pxText').value = ''; el('pxAddBox').style.display = 'none'; }
+                    load();
+                }).catch(function () { msg.textContent = 'Нет связи с узлом.'; });
+            });
+        })();
+
+        // === Мой выход в интернет через сеть: быстро / анонимно + страна ===
+        (function () {
+            var mode = document.getElementById('routeMode');
+            var country = document.getElementById('routeCountry');
+            var out = document.getElementById('routeResult');
+            document.getElementById('routeStartBtn').addEventListener('click', function () {
+                var c = (country.value || '').trim().toUpperCase();
+                if (c && !/^[A-Z]{2}$/.test(c)) { out.textContent = 'Страна — две латинские буквы, например NL.'; return; }
+                var path = mode.value + (c ? '-' + c : '');
+                fetch('/api/socks5/start/' + path, { method: 'POST' })
+                    .then(function (r) { return r.json(); })
+                    .then(function (j) {
+                        out.textContent = j.status === 'success'
+                            ? 'Запущено: SOCKS5 ' + j.listen_addr + ', имя ' + j.username + ', пароль ' + j.password + '. Укажите это в браузере или приложении.'
+                            : (j.message || 'Не удалось запустить.');
+                    })
+                    .catch(function () { out.textContent = 'Нет связи с узлом.'; });
+            });
+        })();
+
+    </script>
+    
+    <script>
+        // === Логика настроек ===
+        async function loadSettings() {
+            try {
+                const response = await fetch('/api/settings');
+                if (response.ok) {
+                    const settings = await response.json();
+                    document.getElementById('p2pEnabled').checked = settings.node_mode?.p2p_enabled ?? true;
+                    document.getElementById('gatewayEnabled').checked = settings.node_mode?.gateway_enabled ?? true;
+                    document.getElementById('autoStartGateway').checked = settings.gateway?.auto_start ?? true;
+                    document.getElementById('multiPortEnabled').checked = settings.gateway?.multi_port ?? false;
+                    document.getElementById('maxClients').value = settings.gateway?.max_clients ?? 11;
+                    document.getElementById('discoveryPort').value = settings.network?.discovery_port ?? 9000;
+                    document.getElementById('dataPort').value = settings.network?.data_port ?? 10000;
+                    document.getElementById('mobileGatewayPort').value = settings.network?.mobile_gateway ?? 9111;
+                    document.getElementById('mobileP2PPort').value = settings.network?.mobile_p2p ?? 9112;
+                    document.getElementById('httpProxyPort').value = settings.network?.http_proxy ?? 8080;
+                    document.getElementById('webUIPort').value = settings.network?.web_ui ?? 9999;
+                }
+            } catch(e) { console.error(e); }
+        }
+
+        async function saveSettings() {
+            const settings = {
+                node_mode: {
+                    p2p_enabled: document.getElementById('p2pEnabled').checked,
+                    gateway_enabled: document.getElementById('gatewayEnabled').checked
+                },
+                gateway: {
+                    auto_start: document.getElementById('autoStartGateway').checked,
+                    multi_port: document.getElementById('multiPortEnabled').checked,
+                    max_clients: parseInt(document.getElementById('maxClients').value)
+                },
+                network: {
+                    discovery_port: parseInt(document.getElementById('discoveryPort').value),
+                    data_port: parseInt(document.getElementById('dataPort').value),
+                    mobile_gateway: parseInt(document.getElementById('mobileGatewayPort').value),
+                    mobile_p2p: parseInt(document.getElementById('mobileP2PPort').value),
+                    http_proxy: parseInt(document.getElementById('httpProxyPort').value),
+                    web_ui: parseInt(document.getElementById('webUIPort').value)
+                }
+            };
+            
+            try {
+                const response = await fetch('/api/settings', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(settings)
+                });
+                if (response.ok) {
+                    const result = await response.json();
+                    showAlert('✅ Успешно', result.requires_restart ? 'Настройки сохранены. Перезапустите ноду для применения портов.' : 'Настройки сохранены');
+                } else {
+                    showAlert('❌ Ошибка', 'Не удалось сохранить настройки');
+                }
+            } catch(e) {
+                showAlert('❌ Ошибка', e.message);
+            }
+        }
+
+        function resetSettings() {
+            showConfirm('🔄 Сброс настроек', 'Сбросить настройки к значениям по умолчанию?', () => {
+                document.getElementById('p2pEnabled').checked = true;
+                document.getElementById('gatewayEnabled').checked = true;
+                document.getElementById('autoStartGateway').checked = true;
+                document.getElementById('multiPortEnabled').checked = false;
+                document.getElementById('maxClients').value = 11;
+                document.getElementById('discoveryPort').value = 9000;
+                document.getElementById('dataPort').value = 10000;
+                document.getElementById('mobileGatewayPort').value = 9111;
+                document.getElementById('mobileP2PPort').value = 9112;
+                document.getElementById('httpProxyPort').value = 8080;
+                document.getElementById('webUIPort').value = 9999;
+                showAlert('✅ Успешно', 'Настройки сброшены');
+            });
+        }
+
+        document.getElementById('saveSettingsBtn')?.addEventListener('click', saveSettings);
+        document.getElementById('resetBtn')?.addEventListener('click', resetSettings);
+
+        document.addEventListener('DOMContentLoaded', () => {
+            loadSettings();
+            
+            const langToggle = document.getElementById('langToggle');
+            if (langToggle) {
+                langToggle.onclick = () => {
+                    const newLang = currentLang === 'ru' ? 'en' : 'ru';
+                    if (window.setLanguage) window.setLanguage(newLang);
+                    else location.reload();
+                };
+            }
+        });
+    </script>
+    <script>
+    (function () {
+        var box = document.getElementById('mobDevices');
+        if (!box) return;
+        function ago(ms) {
+            if (!ms) return 'ещё не подключалось';
+            var s = Math.max(0, Math.round((Date.now() - ms) / 1000));
+            if (s < 60) return s + ' с назад';
+            if (s < 3600) return Math.round(s / 60) + ' мин назад';
+            if (s < 86400) return Math.round(s / 3600) + ' ч назад';
+            return Math.round(s / 86400) + ' дн назад';
+        }
+        function esc(t) { return String(t).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
+        function load() {
+            fetch('/api/mobile/devices', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+                var l = d.devices || [];
+                if (!l.length) { box.textContent = 'Пока нет сопряжённых устройств.'; return; }
+                box.innerHTML = l.map(function (x) {
+                    var st = x.online ? '<b style="color:#2ecc71">в сети</b> (' + x.connections + ' соед.)' : '<span style="color:#e74c3c">не в сети</span>, ' + ago(x.last_seen_ms);
+                    return '<div style="display:flex;gap:10px;align-items:center;padding:4px 0;border-bottom:1px solid #8884">'
+                        + '<span style="flex:1">' + esc(x.name) + ' <code>' + esc(x.id.slice(0, 8)) + '</code><br>' + st + (x.has_keys ? '' : ' · ключи шифрования не получены') + '</span>'
+                        + '<button class="btn" data-del="' + esc(x.id) + '" type="button">Забыть</button></div>';
+                }).join('');
+            }).catch(function () { box.textContent = 'нет ответа от узла'; });
+        }
+        box.addEventListener('click', function (e) {
+            var id = e.target && e.target.getAttribute && e.target.getAttribute('data-del');
+            if (!id || !confirm('Забыть это устройство? Ему придётся сопрягаться заново.')) return;
+            fetch('/api/mobile/devices/' + encodeURIComponent(id), { method: 'DELETE' }).then(load);
+        });
+        load();
+        setInterval(load, 5000);
+    })();
+    (function () {
+        var btn = document.getElementById('mobQrBtn');
+        if (!btn) return;
+        btn.addEventListener('click', function () {
+            var msg = document.getElementById('mobQrMsg'), box = document.getElementById('mobQr');
+            var h = document.getElementById('mobHost').value.trim();
+            msg.textContent = '…'; box.innerHTML = '';
+            fetch('/api/mobile/pairing' + (h ? '?host=' + encodeURIComponent(h) : ''), { cache: 'no-store' })
+                .then(function (r) { return r.json(); })
+                .then(function (d) {
+                    if (d.status !== 'ok') { msg.textContent = d.message || 'Ошибка'; return; }
+                    box.innerHTML = d.qr_svg + '<p class="form-help" style="word-break:break-all;color:#000;font-size:11px;user-select:all">' + d.qr_text.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</p>';
+                    msg.textContent = 'Адрес ' + d.host + ':' + d.port + ', действует 5 минут';
+                })
+                .catch(function () { msg.textContent = 'Нет ответа от узла'; });
+        });
+    })();
+    (function () {
+        var list = document.getElementById('grpList');
+        if (!list) return;
+        var msg = document.getElementById('grpMsg');
+        var KIND = { closed: 'закрытая', invite: 'по приглашению', open: 'открытая' };
+        var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+        function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+        function api(method, url, body) {
+            return fetch(url, { method: method, cache: 'no-store', headers: body ? { 'Content-Type': 'application/json' } : {}, body: body ? JSON.stringify(body) : undefined })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); });
+        }
+        function fail(e) { msg.textContent = e && e.message ? e.message : 'Нет связи с узлом.'; }
+        function btn(label, attrs) { return '<button class="btn" type="button" ' + attrs + '>' + label + '</button>'; }
+        function devOptions(devs) { return devs.map(function (d) { return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' (' + esc(d.id.slice(0, 8)) + ')</option>'; }).join(''); }
+        function render(d) {
+            var devs = d.devices || [];
+            document.getElementById('grpOwner').innerHTML = devs.length ? devOptions(devs) : '<option value="">нет сопряжённых телефонов</option>';
+            document.getElementById('grpMembers').innerHTML = devs.map(function (x) {
+                return '<label style="display:inline-block;margin-right:12px"><input type="checkbox" data-mem="' + esc(x.id) + '"> ' + esc(x.name) + '</label>';
+            }).join('') || '—';
+            var gs = d.groups || [];
+            if (!gs.length) { list.textContent = 'Групп пока нет.'; return; }
+            list.innerHTML = gs.map(function (g) {
+                var g_ = ' data-g="' + esc(g.id) + '"';
+                var mem = g.members.map(function (m) { return esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : ''); }).join('<br>');
+                return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:10px 0">'
+                    + '<b>' + esc(g.name) + '</b> · ' + KIND[g.kind] + (g.topic ? ' · ' + esc(g.topic) : '')
+                    + '<br><span>участников: ' + g.members.length + ', записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
+                    + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу группы стоит сменить ключ</b>' : '') + '</span>'
+                    + '<div style="margin:8px 0">' + mem + '</div>'
+                    + '<div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center;margin-top:8px">'
+                    + btn('Журнал модерации', 'data-log="1"' + g_)
+                    + btn('Удалить группу', 'data-delg="1"' + g_ + ' data-name="' + esc(g.name) + '"')
+                    + '</div><div data-out="' + esc(g.id) + '" style="margin-top:6px"></div></div>';
+            }).join('');
+        }
+        function load() { api('GET', '/api/mobile/groups').then(render).catch(function () { list.textContent = 'нет ответа от узла'; }); }
+        function done(text) { return function () { msg.textContent = text; load(); }; }
+        document.getElementById('grpReloadBtn').addEventListener('click', load);
+        document.getElementById('grpCreateBtn').addEventListener('click', function () {
+            var owner = document.getElementById('grpOwner').value;
+            var members = Array.prototype.map.call(document.querySelectorAll('#grpMembers input[data-mem]:checked'), function (c) { return c.getAttribute('data-mem'); });
+            api('POST', '/api/mobile/groups', { name: document.getElementById('grpName').value, topic: document.getElementById('grpTopic').value, kind: document.getElementById('grpKind').value, owner_device: owner, members: members })
+                .then(function () { document.getElementById('grpName').value = ''; document.getElementById('grpTopic').value = ''; done('Группа создана.')(); })
+                .catch(fail);
+        });
+        list.addEventListener('click', function (e) {
             var t = e.target, gid = t && t.getAttribute && t.getAttribute('data-g');
             if (!gid) return;
             var base = '/api/mobile/groups/' + encodeURIComponent(gid);
