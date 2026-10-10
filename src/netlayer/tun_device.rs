@@ -585,11 +585,10 @@ impl YandiTunDevice {
 
     /// Write packet to TUN device (from YTP)
     pub async fn write_packet(&self, packet: Vec<u8>) -> Result<()> {
-        println!("📤 Writing packet to TUN: {} bytes", packet.len());
-
-        // TODO: Write to TUN device
-
-        Ok(())
+        Err(anyhow!(
+            "TUN packet injection is unavailable: {} bytes were not written",
+            packet.len()
+        ))
     }
 
     /// Setup system routing for YANDI network
