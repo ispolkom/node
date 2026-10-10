@@ -470,6 +470,7 @@ impl P2PTransport {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::p2p::P2P_PACKET_HEADER_LEN;
 
     fn id(b: u8) -> HashId {
         HashId([b; 32])
