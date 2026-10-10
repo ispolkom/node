@@ -16,13 +16,16 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
 
 use crate::protocol::Station;
 use crate::util::HashId;
 
 /// Результат операции
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+
+const MAX_RAWIP_CONNECTIONS: usize = 64;
+const RAWIP_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Заголовок RawIP пакета (4 байта: [magic, length_high, length_low, reserved])
 #[derive(Debug, Clone)]
@@ -109,6 +112,7 @@ pub struct RawIpTunnel {
     connections: Arc<RwLock<HashMap<SocketAddr, RawIpConnection>>>,
     /// Порт для прослушивания
     listen_port: u16,
+    connection_slots: Arc<Semaphore>,
 }
 
 impl RawIpTunnel {
@@ -123,6 +127,7 @@ impl RawIpTunnel {
             _station: station,
             connections: Arc::new(RwLock::new(HashMap::new())),
             listen_port,
+            connection_slots: Arc::new(Semaphore::new(MAX_RAWIP_CONNECTIONS)),
         }
     }
 
@@ -140,13 +145,26 @@ impl RawIpTunnel {
 
         loop {
             match listener.accept().await {
-                Ok((socket, peer_addr)) => {
+                Ok((mut socket, peer_addr)) => {
                     println!("📡 [RAWIP] New connection from {}", peer_addr);
+
+                    let permit = match self.connection_slots.clone().try_acquire_owned() {
+                        Ok(permit) => permit,
+                        Err(_) => {
+                            eprintln!(
+                                "⚠️ [RAWIP] Connection limit reached; refusing {}",
+                                peer_addr
+                            );
+                            let _ = socket.shutdown().await;
+                            continue;
+                        }
+                    };
 
                     // Обрабатываем соединение в отдельном task
                     let connections = self.connections.clone();
 
                     tokio::spawn(async move {
+                        let _permit = permit;
                         if let Err(e) =
                             Self::handle_connection(socket, peer_addr, connections).await
                         {
@@ -185,14 +203,23 @@ impl RawIpTunnel {
 
         loop {
             // Читаем заголовок (4 байта)
-            match socket.read_exact(&mut buffer[..RawIpHeader::SIZE]).await {
-                Ok(_) => {}
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
+            match tokio::time::timeout(
+                RAWIP_IDLE_TIMEOUT,
+                socket.read_exact(&mut buffer[..RawIpHeader::SIZE]),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
                     println!("🔚 [RAWIP] Connection closed by {}", peer_addr);
                     break;
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     eprintln!("❌ [RAWIP] Read header error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    eprintln!("⏱️ [RAWIP] Idle timeout for {}", peer_addr);
                     break;
                 }
             }
@@ -213,10 +240,19 @@ impl RawIpTunnel {
                 break;
             }
 
-            match socket.read_exact(&mut buffer[..packet_len]).await {
-                Ok(_) => {}
-                Err(e) => {
+            match tokio::time::timeout(
+                RAWIP_IDLE_TIMEOUT,
+                socket.read_exact(&mut buffer[..packet_len]),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(e)) => {
                     eprintln!("❌ [RAWIP] Read packet error: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    eprintln!("⏱️ [RAWIP] Idle timeout for {}", peer_addr);
                     break;
                 }
             }
