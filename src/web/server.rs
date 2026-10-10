@@ -158,9 +158,6 @@ pub struct AppState {
         Arc<Mutex<Option<std::sync::Arc<crate::communication::FileTransferManager>>>>,
     /// P2P Tunnel Manager для чистых P2P тоннелей
     pub p2p_tunnel_manager: Arc<Mutex<Option<crate::p2p_tunnel::P2PTunnelManager>>>,
-    /// Group Manager для групп
-    pub group_manager:
-        Arc<Mutex<Option<std::sync::Arc<crate::communication::groups::GroupManager>>>>,
     /// Media session manager for voice/video calls
     pub media_manager: Arc<tokio::sync::Mutex<Option<crate::media::session::MediaSessionManager>>>,
     /// Media signaling bus for forwarding P2P signaling into WebSocket sessions
@@ -216,7 +213,6 @@ impl WebServer {
                 chat_manager: Arc::new(Mutex::new(None)),
                 file_transfer_manager: Arc::new(Mutex::new(None)),
                 p2p_tunnel_manager: Arc::new(Mutex::new(None)),
-                group_manager: Arc::new(Mutex::new(None)),
                 media_manager: Arc::new(tokio::sync::Mutex::new(None)),
                 media_signal_bus,
                 incoming_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -248,7 +244,6 @@ impl WebServer {
                 chat_manager: Arc::new(Mutex::new(None)),
                 file_transfer_manager: Arc::new(Mutex::new(None)),
                 p2p_tunnel_manager: Arc::new(Mutex::new(None)),
-                group_manager: Arc::new(Mutex::new(None)),
                 media_manager: Arc::new(tokio::sync::Mutex::new(None)),
                 media_signal_bus,
                 incoming_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
@@ -394,14 +389,6 @@ impl WebServer {
         self
     }
 
-    /// Set Group Manager for groups
-    pub fn with_group_manager(
-        mut self,
-        group_manager: std::sync::Arc<crate::communication::groups::GroupManager>,
-    ) -> Self {
-        self.state.group_manager = Arc::new(Mutex::new(Some(group_manager)));
-        self
-    }
 
     /// Установить pre-loaded AuthState (вместо авто-загрузки в конструкторе)
     pub fn with_auth_state(mut self, auth_state: crate::web::auth::AuthState) -> Self {
@@ -472,7 +459,6 @@ impl WebServer {
             .route("/chat", get(chat_handler))
             .route("/relay", get(relay_handler))
             .route("/groups", get(groups_handler))
-            .route("/group-chat", get(group_chat_handler))
             // Static files (protected — served only to logged-in users)
             .route("/style.css", get(style_handler))
             .route("/chat.css", get(chat_css_handler))
@@ -530,32 +516,6 @@ impl WebServer {
                 axum::routing::delete(api_chat_delete),
             )
             .route("/api/chats", get(api_chats_list))
-            // Groups API endpoints
-            .route("/api/groups", get(api_groups_get).post(api_groups_post))
-            .route("/api/groups/sync", post(api_groups_sync))
-            .route("/api/groups/dht/status", get(api_groups_dht_status))
-            .route(
-                "/api/groups/:group_id",
-                get(api_groups_get_one)
-                    .delete(api_groups_delete)
-                    .put(api_groups_put),
-            )
-            .route("/api/groups/:group_id/publish", post(api_groups_publish))
-            .route("/api/groups/:group_id/leave", post(api_groups_leave))
-            .route(
-                "/api/groups/:group_id/members",
-                post(api_groups_add_member).delete(api_groups_remove_member),
-            )
-            // Group Chat API endpoints
-            .route("/api/group-chat/send/:group_id", post(api_group_chat_send))
-            .route(
-                "/api/group-chat/history/:group_id",
-                get(api_group_chat_history),
-            )
-            .route(
-                "/api/group-chat/clear/:group_id",
-                post(api_group_chat_clear),
-            )
             // File Transfer API endpoints
             .route("/api/files/upload", post(api_files_upload))
             .route("/api/files/send-chunk/:peer_id", post(api_files_send_chunk))
@@ -655,24 +615,22 @@ impl WebServer {
             )
             // удаление группы — только с повторным вводом пароля узла (открытая сессия админки не даёт права удалить)
             .route("/api/mobile/groups/:gid/delete", post(api_mobile_group_delete))
-            .route("/phone-groups", get(phone_groups_handler))
             // группы на компьютере: узел как участник (свой ключ, своя лента); видно только то, куда узел вошёл сам
-            .route("/my-groups", get(my_groups_handler))
-            .route("/api/my-groups", get(api_my_groups))
-            .route("/api/my-groups/create", post(api_my_groups_create))
-            .route("/api/my-groups/:gid/join", post(api_my_groups_join))
-            .route("/api/my-groups/:gid/request", post(api_my_groups_request))
-            .route("/api/my-groups/:gid/messages", get(api_my_groups_messages))
-            .route("/api/my-groups/:gid/send", post(api_my_groups_send))
-            .route("/api/my-groups/:gid/rules", post(api_my_groups_rules))
-            .route("/api/my-groups/:gid/leave", post(api_my_groups_leave))
-            .route("/api/my-groups/:gid/forget", post(api_my_groups_forget))
-            .route("/api/my-groups/:gid/info", get(api_my_groups_info))
-            .route("/api/my-groups/:gid/mod", post(api_my_groups_mod))
-            .route("/api/my-groups/:gid/invite-code", post(api_my_groups_invite_code))
-            .route("/api/my-groups/:gid/invite-device", post(api_my_groups_invite_device))
-            .route("/api/my-groups/:gid/answer", post(api_my_groups_answer))
-            .route("/api/my-groups-devices", get(api_my_groups_devices))
+                        .route("/api/groups", get(api_groups))
+            .route("/api/groups/create", post(api_groups_create))
+            .route("/api/groups/:gid/join", post(api_groups_join))
+            .route("/api/groups/:gid/request", post(api_groups_request))
+            .route("/api/groups/:gid/messages", get(api_groups_messages))
+            .route("/api/groups/:gid/send", post(api_groups_send))
+            .route("/api/groups/:gid/rules", post(api_groups_rules))
+            .route("/api/groups/:gid/leave", post(api_groups_leave))
+            .route("/api/groups/:gid/forget", post(api_groups_forget))
+            .route("/api/groups/:gid/info", get(api_groups_info))
+            .route("/api/groups/:gid/mod", post(api_groups_mod))
+            .route("/api/groups/:gid/invite-code", post(api_groups_invite_code))
+            .route("/api/groups/:gid/invite-device", post(api_groups_invite_device))
+            .route("/api/groups/:gid/answer", post(api_groups_answer))
+            .route("/api/groups/devices", get(api_groups_devices))
             .route(
                 "/api/mobile/groups/:gid/modlog",
                 get(crate::mobile_groups::pc_modlog),
@@ -883,10 +841,6 @@ async fn auth_middleware(
 
 // === Auth Page Handlers ===
 
-async fn my_groups_handler() -> Html<&'static str> {
-    Html(include_str!("ui/my-groups.html"))
-}
-
 fn grp_reply(r: Result<serde_json::Value, String>) -> Response {
     match r {
         Ok(v) => Json(v).into_response(),
@@ -894,7 +848,7 @@ fn grp_reply(r: Result<serde_json::Value, String>) -> Response {
     }
 }
 
-async fn api_my_groups() -> Response {
+async fn api_groups() -> Response {
     grp_reply(crate::group_client::list())
 }
 
@@ -906,7 +860,7 @@ struct MyGroupCreate {
     kind: String,
 }
 
-async fn api_my_groups_create(Json(b): Json<MyGroupCreate>) -> Response {
+async fn api_groups_create(Json(b): Json<MyGroupCreate>) -> Response {
     grp_reply(crate::group_client::create(&b.name, &b.topic, &b.kind).map(|id| serde_json::json!({"id": id})))
 }
 
@@ -918,12 +872,12 @@ struct MyGroupJoin {
     name: String,
 }
 
-async fn api_my_groups_join(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
+async fn api_groups_join(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
     let code = if b.code.trim().is_empty() { None } else { Some(b.code.trim().to_string()) };
     grp_reply(crate::group_client::join(&gid, code.as_deref(), &b.name).map(|_| serde_json::json!({"ok": true})))
 }
 
-async fn api_my_groups_request(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
+async fn api_groups_request(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
     grp_reply(crate::group_client::request_invite(&gid, &b.name).map(|_| serde_json::json!({"ok": true})))
 }
 
@@ -933,7 +887,7 @@ struct MyGroupAfter {
     after: u64,
 }
 
-async fn api_my_groups_messages(axum::extract::Path(gid): axum::extract::Path<String>, axum::extract::Query(q): axum::extract::Query<MyGroupAfter>) -> Response {
+async fn api_groups_messages(axum::extract::Path(gid): axum::extract::Path<String>, axum::extract::Query(q): axum::extract::Query<MyGroupAfter>) -> Response {
     grp_reply(crate::group_client::messages(&gid, q.after))
 }
 
@@ -942,7 +896,7 @@ struct MyGroupSend {
     text: String,
 }
 
-async fn api_my_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSend>) -> Response {
+async fn api_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSend>) -> Response {
     let text = b.text.trim().to_string();
     if text.is_empty() || text.len() > 8000 {
         return grp_reply(Err("пустое или слишком длинное сообщение".into()));
@@ -961,15 +915,15 @@ struct MyGroupRules {
     deny: Vec<u8>,
 }
 
-async fn api_my_groups_rules(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupRules>) -> Response {
+async fn api_groups_rules(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupRules>) -> Response {
     grp_reply(crate::group_client::set_rules(&gid, &b.deny).map(|_| serde_json::json!({"ok": true})))
 }
 
-async fn api_my_groups_leave(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+async fn api_groups_leave(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
     grp_reply(crate::group_client::leave(&gid).map(|_| serde_json::json!({"ok": true})))
 }
 
-async fn api_my_groups_info(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+async fn api_groups_info(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
     grp_reply(crate::group_client::info(&gid))
 }
 
@@ -982,11 +936,11 @@ struct MyGroupMod {
     seq: Option<u64>,
 }
 
-async fn api_my_groups_mod(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupMod>) -> Response {
+async fn api_groups_mod(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupMod>) -> Response {
     grp_reply(crate::group_client::moderate(&gid, &b.action, b.alias.as_deref(), b.seq).map(|_| serde_json::json!({"ok": true})))
 }
 
-async fn api_my_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+async fn api_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
     grp_reply(crate::group_client::invite_code(&gid).map(|v| serde_json::json!({"code": v["code"], "group_id": gid, "invite": format!("YANDI-GROUP-1:{}:{}", gid, v["code"].as_str().unwrap_or(""))})))
 }
 
@@ -995,7 +949,7 @@ struct MyGroupPeer {
     peer: String,
 }
 
-async fn api_my_groups_invite_device(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupPeer>) -> Response {
+async fn api_groups_invite_device(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupPeer>) -> Response {
     grp_reply(crate::group_client::invite_device(&gid, &b.peer).await.map(|_| serde_json::json!({"ok": true})))
 }
 
@@ -1007,20 +961,16 @@ struct MyGroupAnswer {
     never: bool,
 }
 
-async fn api_my_groups_answer(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAnswer>) -> Response {
+async fn api_groups_answer(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAnswer>) -> Response {
     grp_reply(crate::group_client::answer_request(&gid, &b.rid, b.accept, b.never).await.map(|_| serde_json::json!({"ok": true})))
 }
 
-async fn api_my_groups_devices() -> Response {
+async fn api_groups_devices() -> Response {
     grp_reply(Ok(crate::group_client::devices()))
 }
 
-async fn api_my_groups_forget(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+async fn api_groups_forget(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
     grp_reply(crate::group_client::forget_local(&gid).map(|_| serde_json::json!({"ok": true})))
-}
-
-async fn phone_groups_handler() -> Html<&'static str> {
-    Html(include_str!("ui/phone-groups.html"))
 }
 
 #[derive(Deserialize)]
@@ -1313,9 +1263,6 @@ async fn groups_handler() -> Html<&'static str> {
     Html(include_str!("ui/groups.html"))
 }
 
-async fn group_chat_handler() -> Html<&'static str> {
-    Html(include_str!("ui/group-chat.html"))
-}
 
 // === Static File Handlers ===
 
@@ -4924,585 +4871,23 @@ async fn media_handler(PathExtractor(path): PathExtractor<String>) -> impl IntoR
 }
 // === Groups API Handlers ===
 
-/// Получить список всех групп пользователя
-async fn api_groups_get(State(state): State<AppState>) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let groups = group_manager.get_my_groups().await;
 
-    let groups_json: Vec<serde_json::Value> = groups
-        .into_iter()
-        .map(|g| {
-            let members: Vec<serde_json::Value> = g
-                .members
-                .values()
-                .map(|m| {
-                    serde_json::json!({
-                        "node_id": hex::encode(&m.node_id.0),
-                        "short_id": m.short_id,
-                        "nickname": m.nickname,
-                        "role": format!("{:?}", m.role),
-                        "joined_at": m.joined_at
-                    })
-                })
-                .collect();
 
-            serde_json::json!({
-                "id": g.id.to_hex(),
-                "name": g.name,
-                "description": g.description,
-                "member_count": g.members.len(),
-                "members": members,
-                "settings": {
-                    "is_private": g.settings.is_private,
-                    "is_encrypted": g.settings.is_encrypted,
-                    "max_members": g.settings.max_members,
-                    "allow_files": g.settings.allow_files,
-                    "allow_voice": g.settings.allow_voice
-                },
-                "created_at": g.created_at,
-                "version": g.version
-            })
-        })
-        .collect();
 
-    Json(serde_json::json!({
-        "status": "success",
-        "groups": groups_json
-    }))
-}
 
-/// Создать новую группу
-async fn api_groups_post(
-    State(state): State<AppState>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let name = payload
-        .get("name")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let description = payload
-        .get("description")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let is_private = payload
-        .get("is_private")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
-    let is_encrypted = payload
-        .get("is_encrypted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(true);
 
-    if name.is_empty() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Group name is required"
-        }));
-    }
 
-    // Получаем ID текущей ноды
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
 
-    let settings = crate::communication::groups::GroupSettings {
-        is_private,
-        is_encrypted,
-        ..Default::default()
-    };
-
-    let group = group_manager
-        .create_group(name, description, my_node_id, settings)
-        .await;
-    let group_hash = group.id.to_hex();
-
-    if let Some(transport) = &state.transport {
-        if let Err(e) = group_manager
-            .store_group_in_dht_signed(&group, transport, &transport.identity())
-            .await
-        {
-            tracing::warn!("Failed to store group in DHT: {}", e);
-        }
-    }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Group created",
-        "group_hash": group_hash,
-        "group": {
-            "id": group_hash,
-            "name": group.name,
-            "description": group.description,
-            "member_count": group.members.len()
-        }
-    }))
-}
-
-/// Получить информацию о конкретной группе
-async fn api_groups_get_one(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let group = match group_manager.get_group(&group_id).await {
-        Some(g) => g,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group not found"
-            }));
-        }
-    };
-
-    let members: Vec<serde_json::Value> = group
-        .members
-        .values()
-        .map(|m| {
-            serde_json::json!({
-                "node_id": hex::encode(&m.node_id.0),
-                "short_id": m.short_id,
-                "nickname": m.nickname,
-                "role": format!("{:?}", m.role),
-                "joined_at": m.joined_at,
-                "last_seen": m.last_seen
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "id": group.id.to_hex(),
-        "name": group.name,
-        "description": group.description,
-        "members": members,
-        "member_count": members.len(),
-        "settings": {
-            "is_private": group.settings.is_private,
-            "is_encrypted": group.settings.is_encrypted,
-            "max_members": group.settings.max_members,
-            "allow_files": group.settings.allow_files,
-            "allow_voice": group.settings.allow_voice
-        },
-        "created_by": hex::encode(&group.created_by.0),
-        "created_at": group.created_at,
-        "version": group.version
-    }))
-}
-
-/// Добавить участника в группу
-async fn api_groups_add_member(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let short_id = payload
-        .get("short_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-    let role_str = payload
-        .get("role")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Member");
-
-    if short_id.is_empty() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Short ID is required"
-        }));
-    }
-
-    // Находим пира по short_id
-    let peer_id = if let Some(transport) = &state.transport {
-        match transport.find_peer_by_short_id(short_id) {
-            Some(id) => id,
-            None => {
-                return Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Peer with short ID {} not found", short_id)
-                }));
-            }
-        }
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    let role = match role_str {
-        "Admin" => crate::communication::groups::GroupRole::Admin,
-        "Moderator" => crate::communication::groups::GroupRole::Moderator,
-        "Member" => crate::communication::groups::GroupRole::Member,
-        _ => crate::communication::groups::GroupRole::Member,
-    };
-
-    // Получаем ID текущей ноды (кто добавляет)
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    let member =
-        crate::communication::groups::GroupMember::new(peer_id, short_id.to_string(), role);
-
-    match group_manager
-        .add_member(&group_id, member, &my_node_id)
-        .await
-    {
-        Ok(()) => {
-            // Если есть DHT transport, обновляем группу в DHT
-            if let Some(transport) = &state.transport {
-                if let Some(group) = group_manager.get_group(&group_id).await {
-                    let _ = group_manager
-                        .store_group_in_dht_signed(&group, transport, &transport.identity())
-                        .await;
-                }
-            }
-
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Member added"
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": e
-        })),
-    }
-}
-
-/// Удалить участника из группы
-async fn api_groups_remove_member(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let short_id = payload
-        .get("short_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
-
-    if short_id.is_empty() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Short ID is required"
-        }));
-    }
-
-    // Находим пира по short_id
-    let peer_id = if let Some(transport) = &state.transport {
-        match transport.find_peer_by_short_id(short_id) {
-            Some(id) => id,
-            None => {
-                return Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Peer with short ID {} not found", short_id)
-                }));
-            }
-        }
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    // Получаем ID текущей ноды (кто удаляет)
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    match group_manager
-        .remove_member(&group_id, &peer_id, &my_node_id)
-        .await
-    {
-        Ok(()) => {
-            // Если есть DHT transport, обновляем группу в DHT
-            if let Some(transport) = &state.transport {
-                if let Some(group) = group_manager.get_group(&group_id).await {
-                    let _ = group_manager
-                        .store_group_in_dht_signed(&group, transport, &transport.identity())
-                        .await;
-                }
-            }
-
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Member removed"
-            }))
-        }
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": e
-        })),
-    }
-}
 
 // === Group Chat API Handlers ===
 
-/// Отправить сообщение в группу
-async fn api_group_chat_send(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
 
-    let text = payload
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
 
-    if text.is_empty() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Message text is required"
-        }));
-    }
 
-    // Получаем ID текущей ноды (отправитель)
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
 
-    match group_manager
-        .send_message(
-            &group_id,
-            my_node_id,
-            crate::communication::groups::GroupMessageType::Text(text),
-        )
-        .await
-    {
-        Ok(msg) => Json(serde_json::json!({
-            "status": "success",
-            "message": "Message sent",
-            "msg_id": hex::encode(&msg.msg_id.0[..8]),
-            "timestamp": msg.timestamp
-        })),
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": e
-        })),
-    }
-}
-
-/// Получить историю сообщений группы
-async fn api_group_chat_history(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let limit = 100; // TODO: из query параметра
-    let messages = group_manager.get_messages(&group_id, limit).await;
-
-    let messages_json: Vec<serde_json::Value> = messages
-        .into_iter()
-        .map(|msg| {
-            serde_json::json!({
-                "msg_id": hex::encode(&msg.msg_id.0),
-                "from": hex::encode(&msg.from.0),
-                "from_short": hex::encode(&msg.from.0[..8]),
-                "timestamp": msg.timestamp,
-                "text": match &msg.msg_type {
-                    crate::communication::groups::GroupMessageType::Text(t) => t,
-                    _ => "",
-                },
-                "msg_type": format!("{:?}", msg.msg_type),
-                "edited_at": msg.edited_at,
-                "deleted": msg.deleted
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "group_id": group_id_hex,
-        "messages": messages_json,
-        "count": messages_json.len()
-    }))
-}
-
-/// Очистить историю сообщений группы
-async fn api_group_chat_clear(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    match group_manager.clear_history(&group_id).await {
-        Ok(()) => Json(serde_json::json!({
-            "status": "success",
-            "message": "Chat history cleared"
-        })),
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": e
-        })),
-    }
-}
 
 // === Profile API Handlers ===
 
@@ -5774,280 +5159,17 @@ async fn api_avatar_get(PathExtractor(short_id): PathExtractor<String>) -> impl 
         .into_response()
 }
 
-/// Synchronize groups with DHT
-async fn api_groups_sync(State(state): State<AppState>) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let transport = match &state.transport {
-        Some(t) => t,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "P2P transport not available for DHT sync"
-            }));
-        }
-    };
 
-    let local_groups = group_manager.get_my_groups().await;
-    let mut synced_count = 0;
 
-    for group in &local_groups {
-        if let Err(e) = group_manager
-            .store_group_in_dht_signed(group, transport, &transport.identity())
-            .await
-        {
-            tracing::warn!("Failed to sync group {} to DHT: {}", group.id.to_hex(), e);
-        } else {
-            synced_count += 1;
-        }
-    }
 
-    Json(serde_json::json!({
-        "status": "success",
-        "found_groups": 0,
-        "new_groups": 0,
-        "updated_groups": synced_count,
-        "message": format!("Synced {} groups to DHT", synced_count)
-    }))
-}
 
-/// Get DHT status for groups
-async fn api_groups_dht_status(State(state): State<AppState>) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let local_groups = group_manager.get_my_groups().await;
-    let local_count = local_groups.len();
 
-    Json(serde_json::json!({
-        "status": "success",
-        "groups_in_dht": 0,
-        "local_groups": local_count,
-        "last_sync": chrono::Utc::now().to_rfc3339(),
-        "active_peers": 0
-    }))
-}
 
-/// Publish group to DHT
-async fn api_groups_publish(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
 
-    let transport = match &state.transport {
-        Some(t) => t,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "P2P transport not available"
-            }));
-        }
-    };
 
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
 
-    let group = match group_manager.get_group(&group_id).await {
-        Some(g) => g,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group not found"
-            }));
-        }
-    };
-
-    match group_manager
-        .store_group_in_dht_signed(&group, transport, &transport.identity())
-        .await
-    {
-        Ok(()) => Json(serde_json::json!({
-            "status": "success",
-            "message": format!("Group {} published to DHT", group_id_hex)
-        })),
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to publish group: {}", e)
-        })),
-    }
-}
-
-/// Delete group
-async fn api_groups_delete(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let groups_dir = dirs::home_dir()
-        .expect("No home directory")
-        .join(".yandi/data/groups");
-
-    let group_dir = groups_dir.join(&group_id_hex);
-    if group_dir.exists() {
-        let _ = tokio::fs::remove_dir_all(group_dir).await;
-    }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": format!("Group {} deleted", group_id_hex)
-    }))
-}
-
-/// Update group (PUT)
-async fn api_groups_put(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-    Json(payload): Json<serde_json::Value>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let is_private = payload.get("is_private").and_then(|v| v.as_bool());
-
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    if let Some(is_private_val) = is_private {
-        let _ = group_manager
-            .update_settings(&group_id, &my_node_id, |s| {
-                s.is_private = is_private_val;
-            })
-            .await;
-    }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Group updated"
-    }))
-}
-
-/// Leave group
-async fn api_groups_leave(
-    State(state): State<AppState>,
-    PathExtractor(group_id_hex): PathExtractor<String>,
-) -> impl IntoResponse {
-    let group_manager = state.group_manager.lock().await;
-    let group_manager = match group_manager.as_ref() {
-        Some(gm) => gm,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": "Group manager not available"
-            }));
-        }
-    };
-
-    let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
-        Ok(id) => id,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid group ID: {}", e)
-            }));
-        }
-    };
-
-    let my_node_id = if let Some(transport) = &state.transport {
-        transport.identity().node_id()
-    } else {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    };
-
-    match group_manager
-        .remove_member(&group_id, &my_node_id, &my_node_id)
-        .await
-    {
-        Ok(()) => Json(serde_json::json!({
-            "status": "success",
-            "message": "Left group successfully"
-        })),
-        Err(e) => Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to leave group: {}", e)
-        })),
-    }
-}
 
 /// Звонки телефон ↔ страница (сигналы через узел, звук и видео напрямую браузер ↔ телефон)
 async fn phone_call_js_handler() -> impl IntoResponse {

@@ -19,6 +19,5 @@ pub use messages::{DhtQuery, DhtResponse, DhtQueryType};
 pub use kademlia::Kademlia;
 pub use record::{NodeRecord, NODE_RECORD_TTL_SOFT, NODE_RECORD_TTL_HARD};
 pub mod hot_cache;
-pub mod group_record;
 
 pub use jurisdiction_index::{JurisdictionIndex, JurisdictionEntry};

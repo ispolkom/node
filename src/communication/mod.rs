@@ -20,7 +20,6 @@
 
 pub mod types;
 pub mod storage;
-pub mod groups;
 pub mod protocol;
 pub mod chat;
 pub mod encryption;

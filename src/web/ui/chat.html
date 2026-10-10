@@ -552,8 +552,8 @@
             if (!b) return;
             var name = prompt('Ваше имя в группе (узел его не видит: оно пишется зашифрованно)');
             if (!name) return;
-            fetch('/api/my-groups/' + b + '/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: e.target.getAttribute('data-gi-code') || '', name: name }) })
-                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); alert('Вы в группе. Она на странице «Мои группы».'); }); })
+            fetch('/api/groups/' + b + '/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: e.target.getAttribute('data-gi-code') || '', name: name }) })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); alert('Вы в группе. Она на странице «Группы».'); }); })
                 .catch(function (er) { alert('Не удалось вступить: ' + er.message); });
         });
 

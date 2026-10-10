@@ -591,10 +591,6 @@ async fn main() -> anyhow::Result<()> {
 
     println!("📤 File Transfer Manager initialized");
 
-    // Create GroupManager
-    let group_manager = std::sync::Arc::new(
-        yandi::communication::groups::GroupManager::new()
-    );
 
     println!("👥 Group Manager initialized");
 
@@ -784,7 +780,6 @@ async fn main() -> anyhow::Result<()> {
             .with_media_signal_bus(media_signal_bus)
             .with_incoming_calls(incoming_calls)
             .with_incoming_video_calls(incoming_video_calls)
-            .with_group_manager(group_manager.clone())
             .with_mdns(mdns_for_web).await;
 
         if let Err(e) = web_server.run().await {

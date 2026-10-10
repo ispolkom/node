@@ -199,6 +199,16 @@ def wait(cond, secs=40, step=1.0):
 
 ph = Phone(t_ph)
 
+# -1) one page for groups; the old inter-node groups and the extra pages are gone
+st, body = a.api("GET", "/groups")
+text = body.decode() if isinstance(body, (bytes, bytearray)) else str(body)
+check("/groups serves the unified page (my groups + node management)", st == 200 and "tabMineBtn" in text and "tabAdminBtn" in text and "mgFeed" in text and "delDlg" in text, st)
+for gone in ["/my-groups", "/phone-groups", "/group-chat", "/api/groups/sync", "/api/groups/dht/status", "/api/group-chat/history/aa"]:
+    st, _ = a.api("GET", gone)
+    check(f"{gone} no longer exists", st in (404, 405), st)
+st, r = a.api("GET", "/api/groups")
+check("GET /api/groups is the new participant list", st == 200 and "groups" in r and "discover" in r, (st, r))
+
 # 0) devices that are not contacts: new -> add / hide / block
 st, r = a.api("GET", "/api/mobile/other-devices")
 dv = [x for x in r["devices"] if x["name"].startswith("phone")]
@@ -225,12 +235,12 @@ st, r = a.api("POST", "/api/mobile/phone-action", {"peer": peer_id, "action": "e
 check("an unknown action is refused", st == 400, (st, r))
 
 # 1) the PC creates a group and owns it; the phone sees it and joins
-st, r = a.api("POST", "/api/my-groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "closed"})
+st, r = a.api("POST", "/api/groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "closed"})
 check("the PC cannot create a closed group", st == 400, (st, r))
-st, r = a.api("POST", "/api/my-groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "open"})
+st, r = a.api("POST", "/api/groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "open"})
 gid = r.get("id")
 check("the PC creates an open group", st == 200 and gid and len(gid) == 32, (st, r))
-st, r = a.api("GET", "/api/my-groups")
+st, r = a.api("GET", "/api/groups")
 mine = [x for x in r["groups"] if x["id"] == gid]
 check("the PC is the owner and has the first key", mine and mine[0]["role"] == "owner" and mine[0]["has_key"] is True and mine[0]["epoch"] == 1, r)
 st, r = ph.call("GET", "/mobile/groups/open")
@@ -242,14 +252,14 @@ got = wait(lambda: (ph.collect(gid), ph.keys)[1])
 check("the PC hands the phone a sealed key (phone opens it with its own crypto)", bool(got) and len(ph.keys[1]) == 32, ph.keys)
 
 # 2) messages both ways
-st, r = a.api("POST", f"/api/my-groups/{gid}/send", {"text": "привет с компьютера 😀"})
+st, r = a.api("POST", f"/api/groups/{gid}/send", {"text": "привет с компьютера 😀"})
 check("the PC posts to the group", st == 200 and r.get("seq"), (st, r))
 rd = ph.read(gid)
 check("the phone reads the PC's message (shared format)", any(b.get("t") == "привет с компьютера 😀" for _, _, b in rd), rd)
 st, r = ph.write(gid, alias, 1, {"t": "ответ с телефона"})
 check("the phone posts", st == 200, (st, r))
 def pc_sees():
-    st, d = a.api("GET", f"/api/my-groups/{gid}/messages?after=0")
+    st, d = a.api("GET", f"/api/groups/{gid}/messages?after=0")
     return d if any(m["body"].get("t") == "ответ с телефона" for m in d.get("messages", [])) else None
 d = wait(pc_sees)
 check("the PC reads the phone's message", d is not None, d)
@@ -257,16 +267,16 @@ check("the author is shown by pseudonym", d and [m for m in d["messages"] if m["
 
 # 3) name announce, rules
 st, r = ph.write(gid, alias, 7, {"op": "name", "n": "Телефон-Боб"})
-d = wait(lambda: (lambda x: x if any(m["author"] == "Телефон-Боб" for m in x["messages"]) else None)(a.api("GET", f"/api/my-groups/{gid}/messages?after=0")[1]))
+d = wait(lambda: (lambda x: x if any(m["author"] == "Телефон-Боб" for m in x["messages"]) else None)(a.api("GET", f"/api/groups/{gid}/messages?after=0")[1]))
 check("the name the phone announced replaces the pseudonym on the PC", d is not None, d)
-st, r = a.api("POST", f"/api/my-groups/{gid}/rules", {"deny": [2, 6]})
+st, r = a.api("POST", f"/api/groups/{gid}/rules", {"deny": [2, 6]})
 check("the owner PC sets rules", st == 200, (st, r))
-st, r = a.api("POST", f"/api/my-groups/{gid}/send", {"text": "смотри https://example.org"})
+st, r = a.api("POST", f"/api/groups/{gid}/send", {"text": "смотри https://example.org"})
 check("the PC itself refuses a banned kind (link)", st == 400, (st, r))
 rd = ph.read(gid)
 check("the phone sees the rules entry (system, from the owner)", any(k == 7 and b.get("op") == "rules" and sorted(b["deny"]) == [2, 6] for _, k, b in rd), rd)
 st, r = ph.call("POST", f"/mobile/groups/{gid}/log", {"epoch": 1, "payload_b64": b64(enc_entry(ph.keys[1], gid, 1, alias, 2, {"n": "x.jpg"}))})
-d = a.api("GET", f"/api/my-groups/{gid}/messages?after=0")[1]
+d = a.api("GET", f"/api/groups/{gid}/messages?after=0")[1]
 check("an image that sneaks in is hidden on the PC", all(m["kind"] != 2 for m in d["messages"]), d)
 
 # 4) a phone owns a group, the PC asks for an invitation, gets it by code, then reads the feed
@@ -274,25 +284,25 @@ st, r = ph.call("POST", "/mobile/groups", {"name": "Клуб телефона", 
 pg = r["id"]
 ph.publish(pg); st, groups = ph.call("GET", "/mobile/groups")
 ph.provision(pg)
-st, r = a.api("GET", "/api/my-groups")
+st, r = a.api("GET", "/api/groups")
 disc = [x for x in r["discover"] if x["id"] == pg]
 check("the PC sees the phone's invite-only group among the node's groups", disc and disc[0]["kind"] == "invite", r)
-st, r = a.api("POST", f"/api/my-groups/{pg}/request", {"name": "Хозяин ПК"})
+st, r = a.api("POST", f"/api/groups/{pg}/request", {"name": "Хозяин ПК"})
 check("the PC asks for an invitation", st == 200, (st, r))
 st, r = ph.call("GET", f"/mobile/groups/{pg}/requests")
 check("the phone owner sees the request from the PC", st == 200 and r["requests"] and r["requests"][0]["name"] == "Хозяин ПК", (st, r))
 rid = r["requests"][0]["id"]
 st, inv = ph.call("POST", f"/mobile/groups/{pg}/invite", {"uses": 1})
 ph.call("DELETE", f"/mobile/groups/{pg}/requests/{rid}")
-st, r = a.api("POST", f"/api/my-groups/{pg}/join", {"code": inv["code"], "name": "Хозяин ПК"})
+st, r = a.api("POST", f"/api/groups/{pg}/join", {"code": inv["code"], "name": "Хозяин ПК"})
 check("the PC joins with the invitation code", st == 200, (st, r))
 ph.provision(pg)
 def pc_has_key():
-    st, d = a.api("GET", f"/api/my-groups/{pg}/messages?after=0")
+    st, d = a.api("GET", f"/api/groups/{pg}/messages?after=0")
     return d if st == 200 and d.get("has_key") else None
 check("the phone owner seals the key for the PC", wait(lambda: (ph.provision(pg), pc_has_key())[1]) is not None)
 ph.write(pg, groups["groups"][[x["id"] for x in groups["groups"]].index(pg)]["my_alias"], 1, {"t": "добро пожаловать, ПК"})
-check("the PC reads the phone owner's message", wait(lambda: (lambda d: d if d and any(m["body"].get("t") == "добро пожаловать, ПК" for m in d["messages"]) else None)(a.api("GET", f"/api/my-groups/{pg}/messages?after=0")[1])) is not None)
+check("the PC reads the phone owner's message", wait(lambda: (lambda d: d if d and any(m["body"].get("t") == "добро пожаловать, ПК" for m in d["messages"]) else None)(a.api("GET", f"/api/groups/{pg}/messages?after=0")[1])) is not None)
 
 # 4b) the PC moderates its own group; invitations to a phone; requests answered, "never remind"
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
@@ -302,54 +312,54 @@ x_seed, x_pub = new_keys()
 sig = ed.sign(b"YANDI-MOBILE-KEYS-V1\0" + ed_pub + x_pub)
 st, r = ph.call("POST", "/mobile/pubkeys", {"ed25519_pub": b64(ed_pub), "x25519_pub": b64(x_pub), "signature": b64(sig)})
 check("the phone registers its signed key bundle", st in (200, 204), (st, r))
-st, r = a.api("GET", f"/api/my-groups/{gid}/info")
+st, r = a.api("GET", f"/api/groups/{gid}/info")
 mem = {m["alias"]: m for m in r["members"]}
 check("the PC lists members with roles and announced names", st == 200 and mem[alias]["name"] == "Телефон-Боб" and mem[alias]["role"] == "member", r)
-st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "mute", "alias": alias})
+st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "mute", "alias": alias})
 check("the PC owner mutes a member", st == 200, (st, r))
 st, r = ph.write(gid, alias, 1, {"t": "я заглушён"})
 check("the muted phone cannot post", st == 403, (st, r))
-a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "unmute", "alias": alias})
+a.api("POST", f"/api/groups/{gid}/mod", {"action": "unmute", "alias": alias})
 st, r = ph.write(gid, alias, 1, {"t": "снова могу"})
 check("unmuted, it posts again", st == 200, (st, r))
-st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "promote", "alias": alias})
+st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "promote", "alias": alias})
 check("the PC owner makes the phone a moderator", st == 200, (st, r))
-st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "demote", "alias": alias})
+st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "demote", "alias": alias})
 check("and takes it back", st == 200, (st, r))
-st, r = a.api("POST", f"/api/my-groups/{gid}/mod", {"action": "kick", "alias": "нет такого"})
+st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "kick", "alias": "нет такого"})
 check("moderating a stranger fails cleanly", st == 400, (st, r))
 
-st, r = a.api("POST", "/api/my-groups/create", {"name": "Приватная", "kind": "invite"})
+st, r = a.api("POST", "/api/groups/create", {"name": "Приватная", "kind": "invite"})
 pgid = r["id"]
 check("the PC creates an invite-only group", st == 200 and pgid, (st, r))
-st, r = a.api("GET", "/api/my-groups-devices")
+st, r = a.api("GET", "/api/groups/devices")
 check("the PC lists phones it can invite", st == 200 and len(r) >= 1, (st, r))
-st, r = a.api("POST", f"/api/my-groups/{pgid}/invite-code")
+st, r = a.api("POST", f"/api/groups/{pgid}/invite-code")
 check("the PC issues an invitation code", st == 200 and r["invite"].startswith("YANDI-GROUP-1:" + pgid + ":"), (st, r))
 code = r["code"]
 st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
 before = len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))
-st, r = a.api("POST", f"/api/my-groups/{pgid}/invite-device", {"peer": a.api("GET", "/api/my-groups-devices")[1][0]["id"]})
+st, r = a.api("POST", f"/api/groups/{pgid}/invite-device", {"peer": a.api("GET", "/api/groups/devices")[1][0]["id"]})
 check("the PC sends the invitation to the phone as a personal encrypted message", st == 200, (st, r))
 st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
 after = len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))
 check("the message is in the phone's mail queue", after == before + 1, (before, after))
 st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб"})
 check("the phone asks the PC for an invitation", st == 200, (st, r))
-st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
+st, r = a.api("GET", f"/api/groups/{pgid}/info")
 rq = r["requests"]
 check("the PC sees the request as a service card", len(rq) == 1 and rq[0]["name"] == "Боб", r)
-st, r = a.api("POST", f"/api/my-groups/{pgid}/answer", {"rid": rq[0]["id"], "accept": True})
+st, r = a.api("POST", f"/api/groups/{pgid}/answer", {"rid": rq[0]["id"], "accept": True})
 check("the PC answers: add (invitation goes to the requester)", st == 200, (st, r))
 st, r = ph.call("GET", "/mobile/inbox?since=0&limit=200")
 check("a second message reached the phone", (len(r) if isinstance(r, list) else len(r.get("items", r.get("messages", [])))) == after + 1, r)
 st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб"})
-st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
-st, r2 = a.api("POST", f"/api/my-groups/{pgid}/answer", {"rid": r["requests"][0]["id"], "accept": False, "never": True})
+st, r = a.api("GET", f"/api/groups/{pgid}/info")
+st, r2 = a.api("POST", f"/api/groups/{pgid}/answer", {"rid": r["requests"][0]["id"], "accept": False, "never": True})
 check("the PC answers: never remind", st == 200, (st, r2))
 st, r = ph.call("POST", f"/mobile/groups/{pgid}/request", {"name": "Боб снова"})
 check("the phone asks again (the node allows it)", st == 200, (st, r))
-st, r = a.api("GET", f"/api/my-groups/{pgid}/info")
+st, r = a.api("GET", f"/api/groups/{pgid}/info")
 check("the PC does not see it again (quietly closed)", r["requests"] == [], r)
 st, r = ph.call("POST", f"/mobile/groups/{pgid}/join", {"invite_code": code, "member_pub": b64(ph.pub)})
 check("the phone joins with the code the PC issued", st == 200, (st, r))
@@ -362,7 +372,7 @@ blob = b"".join(open(f, "rb").read() for f in files)
 check("no plaintext of the messages in the vault", "привет".encode() not in blob and "ответ".encode() not in blob and b"example.org" not in blob)
 node_groups = open(os.path.join(a.dir, "home/.local/share/yandi/groups/index.json")).read()
 check("the node's shared group store never holds message text", "привет" not in node_groups and "ответ" not in node_groups)
-st, r = a.api("POST", f"/api/my-groups/{pg}/leave")
+st, r = a.api("POST", f"/api/groups/{pg}/leave")
 check("the PC leaves a group and its data is dropped", st == 200 and not os.path.exists(os.path.join(a.dir, f"home/.local/share/yandi/groups_pc/{pg}.log")), (st, r))
 
 a.kill()
