@@ -24,6 +24,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::communication::{ChatManager, ChatMessage};
@@ -104,6 +105,8 @@ struct Device {
     x25519_pub: Option<String>,
     #[serde(default)]
     ed25519_pub: Option<String>,
+    #[serde(default)]
+    key_sig: Option<String>,
 }
 
 impl Device {
@@ -323,7 +326,7 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
         if d.iter().any(|x| x.name == name || x.name.starts_with(&format!("{name} ("))) {
             name = format!("{name} ({})", &th[..4]);
         }
-        d.push(Device { token_hash: th, name, created_ms: now_ms(), acked_ts: now_ms(), x25519_pub: None, ed25519_pub: None });
+        d.push(Device { token_hash: th, name, created_ms: now_ms(), acked_ts: now_ms(), x25519_pub: None, ed25519_pub: None, key_sig: None });
     });
     Json(json!({"token": token})).into_response()
 }
@@ -458,6 +461,10 @@ fn base64_of(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }
 
+fn key_bundle_message(ed25519_pub: &[u8], x25519_pub: &[u8]) -> Vec<u8> {
+    [b"YANDI-MOBILE-KEYS-V1\0".as_slice(), ed25519_pub, x25519_pub].concat()
+}
+
 #[derive(Deserialize)]
 struct AckReq {
     ids: Vec<u64>,
@@ -483,8 +490,11 @@ async fn proxy_info() -> Json<serde_json::Value> {
 
 /// Публичный ключ телефона владельца (чтобы телефон шифровал сообщение для другого телефона сам); у обычных собеседников ключа нет — 404.
 async fn pubkey(Path(peer): Path<String>) -> Response {
-    match device_by_peer(&peer).and_then(|d| d.x25519_pub) {
-        Some(k) => Json(json!({"x25519_pub": k})).into_response(),
+    match device_by_peer(&peer).and_then(|d| match (d.x25519_pub, d.ed25519_pub, d.key_sig) {
+        (Some(x), Some(e), Some(s)) => Some(json!({"x25519_pub": x, "ed25519_pub": e, "signature": s})),
+        _ => None,
+    }) {
+        Some(bundle) => Json(bundle).into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
@@ -493,20 +503,34 @@ async fn pubkey(Path(peer): Path<String>) -> Response {
 struct KeysReq {
     ed25519_pub: String,
     x25519_pub: String,
+    signature: String,
 }
 
 async fn accept_pubkeys(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<KeysReq>) -> StatusCode {
-    let ok = |k: &str| {
+    let decode = |k: &str| {
         use base64::Engine;
-        base64::engine::general_purpose::STANDARD.decode(k).map(|b| b.len() == 32).unwrap_or(false)
+        base64::engine::general_purpose::STANDARD.decode(k).ok()
     };
-    if !ok(&req.x25519_pub) || !ok(&req.ed25519_pub) {
+    let (Some(x25519), Some(ed25519), Some(signature)) =
+        (decode(&req.x25519_pub), decode(&req.ed25519_pub), decode(&req.signature))
+    else {
+        return StatusCode::BAD_REQUEST;
+    };
+    if x25519.len() != 32 || ed25519.len() != 32 || signature.len() != 64 {
+        return StatusCode::BAD_REQUEST;
+    }
+    let Ok(verifying_key) = VerifyingKey::from_bytes(ed25519.as_slice().try_into().unwrap()) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let signature = Signature::from_bytes(signature.as_slice().try_into().unwrap());
+    if verifying_key.verify(&key_bundle_message(&ed25519, &x25519), &signature).is_err() {
         return StatusCode::BAD_REQUEST;
     }
     with_devices(|d| {
         if let Some(x) = d.iter_mut().find(|x| same(&x.token_hash, &dev)) {
             x.x25519_pub = Some(req.x25519_pub);
             x.ed25519_pub = Some(req.ed25519_pub);
+            x.key_sig = Some(req.signature);
         }
     });
     StatusCode::OK

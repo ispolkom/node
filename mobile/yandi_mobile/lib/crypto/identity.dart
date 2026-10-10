@@ -34,6 +34,13 @@ class Identity {
   String get x25519PubBase64  => base64.encode(x25519PublicBytes);
   String get ed25519PubBase64 => base64.encode(ed25519PublicBytes);
 
+  /// Подпись связывает identity key с X25519 key в едином key bundle.
+  Future<String> keyBundleSignatureBase64() async {
+    final domain = utf8.encode('YANDI-MOBILE-KEYS-V1\u0000');
+    final signature = await sign([...domain, ...ed25519PublicBytes, ...x25519PublicBytes]);
+    return base64.encode(signature);
+  }
+
   // ── Хранение ───────────────────────────────────────────────────────────────
 
   static const _store = FlutterSecureStorage(

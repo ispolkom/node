@@ -145,6 +145,7 @@ class AppState extends ChangeNotifier {
         await _api!.registerPublicKeys(
           ed25519PubBase64: identity!.ed25519PubBase64,
           x25519PubBase64:  identity!.x25519PubBase64,
+          signatureBase64:   await identity!.keyBundleSignatureBase64(),
         );
       }
 

@@ -121,12 +121,17 @@ class ApiService {
   Future<void> registerPublicKeys({
     required String ed25519PubBase64,
     required String x25519PubBase64,
+    required String signatureBase64,
   }) async {
     try {
       await _client.post(
         _url('/mobile/pubkeys'),
         headers: _headers,
-        body: jsonEncode({'ed25519_pub': ed25519PubBase64, 'x25519_pub': x25519PubBase64}),
+        body: jsonEncode({
+          'ed25519_pub': ed25519PubBase64,
+          'x25519_pub': x25519PubBase64,
+          'signature': signatureBase64,
+        }),
       ).timeout(const Duration(seconds: 10));
     } catch (_) {}
   }
