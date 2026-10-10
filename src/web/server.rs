@@ -2413,49 +2413,14 @@ async fn api_relay_connect(
 }
 
 /// Запустить Gateway mode (на этой ноде)
-async fn api_gateway_start(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available in standalone mode"
-        }));
-    }
-
-    // TODO: Запустить HttpProxyGateway
-    info!("Request to start Gateway mode");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway mode started",
-        "port": 8080
-    }))
+async fn api_gateway_start() -> impl IntoResponse {
+    // честно: включение режима шлюза из страницы не реализовано (раньше отвечали «успех» и ничего не делали)
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"status": "error", "message": "Режим шлюза со страницы пока не включается (не реализовано)"})))
 }
 
 /// Остановить Gateway mode
-async fn api_gateway_stop(State(state): State<AppState>) -> impl IntoResponse {
-    // TODO: Остановить HttpProxyGateway
-    info!("Request to stop Gateway mode");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway mode stopped"
-    }))
-}
-
-async fn api_start() -> impl IntoResponse {
-    // TODO: Реально запустить ноду
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Node started"
-    }))
-}
-
-async fn api_stop() -> impl IntoResponse {
-    // TODO: Реально остановить ноду
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Node stopped"
-    }))
+async fn api_gateway_stop() -> impl IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"status": "error", "message": "Режим шлюза со страницы пока не выключается (не реализовано)"})))
 }
 
 /// Телефоны владельца, сопряжённые с этим узлом, — собеседники веб-чата (переписка шифруется между узлом и телефоном, см. mobile_self).
@@ -2994,51 +2959,14 @@ async fn api_settings_put(
 }
 
 /// Остановить P2P ноду
-async fn api_node_stop(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available in standalone mode"
-        }));
-    }
-
-    // Устанавливаем статус offline
-    state
-        .node_running
-        .store(false, std::sync::atomic::Ordering::Relaxed);
-
-    // TODO: Вызвать transport.shutdown() для закрытия сокетов
-    // Пока меняем только статус
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Node stopped",
-        "node_status": "offline"
-    }))
+async fn api_node_stop() -> impl IntoResponse {
+    // честно: остановить транспорт из страницы узел пока не умеет (раньше кнопка лишь меняла флаг и показывала «офлайн», а соединения жили)
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"status": "error", "message": "Остановить узел со страницы пока нельзя: соединения не закрываются. Узел останавливается службой: sudo systemctl stop yandi-node"})))
 }
 
 /// Запустить P2P ноду
-async fn api_node_start(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available in standalone mode"
-        }));
-    }
-
-    // Устанавливаем статус online
-    state
-        .node_running
-        .store(true, std::sync::atomic::Ordering::Relaxed);
-
-    // TODO: Вызвать transport.restart() для переоткрытия сокетов
-    // Пока меняем только статус
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Node started",
-        "node_status": "online"
-    }))
+async fn api_node_start() -> impl IntoResponse {
+    (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"status": "error", "message": "Запуск со страницы не поддерживается: узел запускается службой: sudo systemctl start yandi-node"})))
 }
 
 // === Chat API Endpoints ===

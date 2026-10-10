@@ -388,7 +388,8 @@
                                     showAlert('✅ Успешно', 'Нода остановлена');
                                     await loadStatus();
                                 } else {
-                                    showAlert('❌ Ошибка', 'Не удалось остановить ноду');
+                                    const j = await res.json().catch(() => ({}));
+                                    showAlert('❌ Ошибка', j.message || j.error || 'Не удалось остановить ноду');
                                 }
                             } catch(e) { showAlert('❌ Ошибка', e.message); }
                         });
@@ -400,7 +401,8 @@
                                     showAlert('✅ Успешно', 'Нода запущена');
                                     await loadStatus();
                                 } else {
-                                    showAlert('❌ Ошибка', 'Не удалось запустить ноду');
+                                    const j = await res.json().catch(() => ({}));
+                                    showAlert('❌ Ошибка', j.message || j.error || 'Не удалось запустить ноду');
                                 }
                             } catch(e) { showAlert('❌ Ошибка', e.message); }
                         });
@@ -437,7 +439,8 @@
                                 stopGatewayBtn.style.display = 'inline-block';
                                 showAlert('✅ Успешно', 'Gateway режим запущен');
                             } else {
-                                showAlert('❌ Ошибка', 'Не удалось запустить Gateway');
+                                const j = await res.json().catch(() => ({}));
+                                showAlert('❌ Ошибка', j.message || j.error || 'Не удалось запустить Gateway');
                             }
                         } catch(e) { showAlert('❌ Ошибка', e.message); }
                     });
@@ -454,7 +457,8 @@
                                 startGatewayBtn.style.display = 'inline-block';
                                 showAlert('✅ Успешно', 'Gateway режим остановлен');
                             } else {
-                                showAlert('❌ Ошибка', 'Не удалось остановить Gateway');
+                                const j = await res.json().catch(() => ({}));
+                                showAlert('❌ Ошибка', j.message || j.error || 'Не удалось остановить Gateway');
                             }
                         } catch(e) { showAlert('❌ Ошибка', e.message); }
                     });

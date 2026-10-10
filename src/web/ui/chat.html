@@ -915,7 +915,19 @@
             document.getElementById('deleteContactInfoBtn').onclick = deleteContact;
             document.getElementById('shareContactBtn').onclick = function() { fetch('/api/status').then(function(res) { return res.json(); }).then(function(data) { var info = '📇 Контакта YANDI ноды:\nShort ID: ' + data.short_id + '\nРоль: ' + data.role + '\nNAT статус: ' + (data.nat_status || 'Unknown'); navigator.clipboard.writeText(info); showAlert('✅ Успешно', 'Контакт скопирован в буфер обмена!'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка копирования'); }); };
             var nodeRunning = true;
-            document.getElementById('startStopNodeBtn').onclick = function() { var btn = document.getElementById('startStopNodeBtn'); if (nodeRunning) { btn.textContent = '⏳ Остановка...'; fetch('/api/node/stop', { method: 'POST' }).then(function() { nodeRunning = false; btn.textContent = '▶️ Запустить ноду'; btn.classList.remove('btn-danger'); btn.classList.add('btn-success'); document.getElementById('myStatusBadge').innerHTML = '🔴 Офлайн'; }); } else { btn.textContent = '⏳ Запуск...'; fetch('/api/node/start', { method: 'POST' }).then(function() { nodeRunning = true; btn.textContent = '⏹️ Остановить ноду'; btn.classList.remove('btn-success'); btn.classList.add('btn-danger'); document.getElementById('myStatusBadge').innerHTML = '🟢 Онлайн'; }); } };
+            document.getElementById('startStopNodeBtn').onclick = function() {
+                // честно: если узел не может выполнить команду, кнопка не притворяется, что узел остановлен
+                var btn = document.getElementById('startStopNodeBtn'), was = btn.textContent;
+                btn.textContent = nodeRunning ? '⏳ Остановка...' : '⏳ Запуск...';
+                fetch(nodeRunning ? '/api/node/stop' : '/api/node/start', { method: 'POST' }).then(function(res) {
+                    return res.json().catch(function() { return {}; }).then(function(j) {
+                        if (!res.ok) { btn.textContent = was; showAlert('ℹ️ Не выполнено', j.message || j.error || 'Команда не поддерживается'); return; }
+                        nodeRunning = !nodeRunning;
+                        btn.textContent = nodeRunning ? '⏹️ Остановить ноду' : '▶️ Запустить ноду';
+                        document.getElementById('myStatusBadge').innerHTML = nodeRunning ? '🟢 Онлайн' : '🔴 Офлайн';
+                    });
+                }).catch(function() { btn.textContent = was; showAlert('❌ Ошибка', 'Нет связи с узлом'); });
+            };
         }
 
         function startAutoRefresh() {

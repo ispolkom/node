@@ -261,6 +261,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Группы на компьютере (узел как участник): данные закрыты мастер-ключом узла, как история чатов.
     if let Some(mk) = auth_state.get_master_key() {
+        yandi::mobile_self::set_master(mk); // ключи «компьютера как собеседника» — в шифрованном файле
         yandi::group_client::init(mk);
         yandi::group_client::spawn_background();
     }

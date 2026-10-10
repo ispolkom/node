@@ -46,7 +46,84 @@ fn unb64(s: &str) -> Option<Vec<u8>> {
 
 fn keys() -> &'static Keys {
     static K: OnceLock<Keys> = OnceLock::new();
-    K.get_or_init(|| load_or_create(&crate::util::data_dir::data_dir().join("mobile_self.json")))
+    K.get_or_init(|| load_protected(&crate::util::data_dir::data_dir(), MASTER.get()))
+}
+
+/// Мастер-ключ узла: им закрыт файл ключей «компьютера как собеседника» на диске (как история чатов и группы ПК).
+static MASTER: OnceLock<[u8; 32]> = OnceLock::new();
+
+/// Задаётся при запуске, до первого обращения к ключам.
+pub fn set_master(mk: [u8; 32]) {
+    let _ = MASTER.set(mk);
+}
+
+fn protect_key(master: &[u8; 32]) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    hkdf::Hkdf::<sha2::Sha256>::new(Some(b"yandi-mobile-self-file:v1"), master).expand(b"identity", &mut k).expect("hkdf");
+    k
+}
+
+/// Ключи компьютера: при наличии мастер-ключа — в `mobile_self.enc` (AES-256-GCM); старый открытый `mobile_self.json` переносится
+/// в шифрованный и затирается. Повреждённый или не открывающийся файл не трогаем (временная пара, как и раньше).
+fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
+    let plain = dir.join("mobile_self.json");
+    let Some(master) = master else { return load_or_create(&plain) };
+    let key = protect_key(master);
+    let enc = dir.join("mobile_self.enc");
+    let seal = |x: &[u8; 32], e: &[u8; 32]| -> Option<Vec<u8>> {
+        let body = serde_json::to_vec(&Stored { x25519_secret: b64(x), ed25519_secret: b64(e) }).ok()?;
+        let mut nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ct = Aes256Gcm::new_from_slice(&key).ok()?.encrypt(Nonce::from_slice(&nonce), Payload { msg: &body, aad: b"mobile_self" }).ok()?;
+        Some([nonce.as_slice(), &ct].concat())
+    };
+    let open = |raw: &[u8]| -> Option<([u8; 32], [u8; 32])> {
+        if raw.len() < 28 {
+            return None;
+        }
+        let body = Aes256Gcm::new_from_slice(&key).ok()?.decrypt(Nonce::from_slice(&raw[..12]), Payload { msg: &raw[12..], aad: b"mobile_self" }).ok()?;
+        let st: Stored = serde_json::from_slice(&body).ok()?;
+        Some((unb64(&st.x25519_secret)?.try_into().ok()?, unb64(&st.ed25519_secret)?.try_into().ok()?))
+    };
+    match std::fs::read(&enc) {
+        Ok(raw) => match open(&raw) {
+            Some((x, e)) => return make_keys(x, e),
+            None => {
+                eprintln!("[mobile-self] ⚠️  файл ключей {} не открывается (повреждён или другой мастер-ключ); он не тронут, используется временная пара", enc.display());
+                let mut x = [0u8; 32];
+                let mut e = [0u8; 32];
+                rand::thread_rng().fill_bytes(&mut x);
+                rand::thread_rng().fill_bytes(&mut e);
+                return make_keys(x, e);
+            }
+        },
+        Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
+            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); используется временная пара", enc.display());
+        }
+        Err(_) => {}
+    }
+    // шифрованного файла нет: берём (или создаём) прежний открытый и переносим
+    let had_plain = plain.exists();
+    let k = load_or_create(&plain);
+    let pair = std::fs::read_to_string(&plain)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Stored>(&t).ok())
+        .and_then(|s| Some((<[u8; 32]>::try_from(unb64(&s.x25519_secret)?).ok()?, <[u8; 32]>::try_from(unb64(&s.ed25519_secret)?).ok()?)));
+    if let Some((x, e)) = pair {
+        if let Some(blob) = seal(&x, &e) {
+            if crate::util::private_file::write_private(&enc, &blob).is_ok() && std::fs::read(&enc).ok().and_then(|r| open(&r)) == Some((x, e)) {
+                // перенесено и проверено: старый открытый файл затираем и удаляем
+                if let Ok(meta) = std::fs::metadata(&plain) {
+                    let _ = std::fs::write(&plain, vec![0u8; meta.len() as usize]);
+                }
+                let _ = std::fs::remove_file(&plain);
+                if had_plain {
+                    eprintln!("[mobile-self] ключи компьютера перенесены в шифрованный файл {}", enc.display());
+                }
+            }
+        }
+    }
+    k
 }
 
 fn load_or_create(path: &std::path::Path) -> Keys {
@@ -874,5 +951,26 @@ mod tests {
         let b = load_or_create(&path);
         assert_eq!(a.x_pub, b.x_pub, "после создания та же пара читается снова");
         assert_eq!(a.ed_pub, b.ed_pub);
+    }
+
+    #[test]
+    fn pc_identity_moves_into_an_encrypted_file_and_stays_the_same() {
+        let dir = tempfile::tempdir().unwrap();
+        let master = [9u8; 32];
+        let old = load_or_create(&dir.path().join("mobile_self.json")); // как было: открытый файл
+        let moved = load_protected(dir.path(), Some(&master));
+        assert_eq!((moved.x_pub, moved.ed_pub), (old.x_pub, old.ed_pub), "личность та же");
+        assert!(!dir.path().join("mobile_self.json").exists(), "открытый файл убран");
+        let raw = std::fs::read(dir.path().join("mobile_self.enc")).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("x25519_secret"), "на диске нет открытых ключей");
+        let again = load_protected(dir.path(), Some(&master));
+        assert_eq!(again.x_pub, old.x_pub, "после перезапуска читается та же пара");
+        let foreign = load_protected(dir.path(), Some(&[1u8; 32]));
+        assert_ne!(foreign.x_pub, old.x_pub, "чужой мастер-ключ — временная пара");
+        assert_eq!(std::fs::read(dir.path().join("mobile_self.enc")).unwrap(), raw, "и файл не тронут");
+        // без мастер-ключа — прежнее поведение (открытый файл)
+        let d2 = tempfile::tempdir().unwrap();
+        let _ = load_protected(d2.path(), None);
+        assert!(d2.path().join("mobile_self.json").exists());
     }
 }
