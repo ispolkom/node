@@ -7,9 +7,7 @@
 
 use crate::util::HashId;
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::Mutex;
 
 /// Stream message types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -3,12 +3,11 @@
 
 use crate::util::HashId;
 use crate::p2p::{P2PTransport, P2PPacket, P2PPacketType};
-use crate::communication::{CommPacket, CommControlPacket};
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use anyhow::Result;
 use tokio::sync::{Mutex, watch};
-use tracing::{info, error, debug, warn};
+use tracing::{info, debug, warn};
 use aes_gcm::{Aes256Gcm, KeyInit, Nonce, aead::{Aead, AeadCore, OsRng}};
 
 fn encrypt_chunk(key: &[u8; 32], plaintext: &[u8]) -> Vec<u8> {

@@ -6,7 +6,7 @@
 
 use std::net::IpAddr;
 use std::fs;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 /// Node capabilities (FACTS only, not roles!)
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

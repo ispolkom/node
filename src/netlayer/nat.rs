@@ -4,7 +4,6 @@
 //!
 //! NAT detection and relay functionality for P2P communication
 
-use crate::util::HashId;
 use crate::netlayer::packet::HelloPacket;
 use std::net::SocketAddr;
 

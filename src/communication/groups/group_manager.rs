@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, debug, warn};
+use tracing::{info, warn};
 
 use crate::util::HashId;
 use super::group::{Group, GroupId, GroupMember, GroupRole, GroupSettings};

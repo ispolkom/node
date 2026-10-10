@@ -7,7 +7,6 @@
 //! - Balanced: moderate protection  
 //! - Stealth: maximum DPI resistance
 
-use crate::util::HashId;
 use std::time::{Duration, Instant};
 
 /// Transport mode based on network conditions

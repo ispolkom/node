@@ -4,7 +4,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 use tokio::sync::Mutex;
 use crate::util::HashId;
 

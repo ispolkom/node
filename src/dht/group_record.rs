@@ -1,7 +1,6 @@
 //! Signed group records for DHT
 
 use serde::{Serialize, Deserialize};
-use crate::util::HashId;
 use crate::core::NodeIdentity;
 use crate::communication::groups::group::{Group, GroupId};
 

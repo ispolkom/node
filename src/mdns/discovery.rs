@@ -9,7 +9,7 @@ use mdns_sd::{ServiceDaemon, ServiceEvent, ServiceInfo};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{info, warn, error, debug};
+use tracing::{info, debug};
 
 /// mDNS service type for YANDI nodes
 pub const YANDI_SERVICE_TYPE: &str = "_yandi._tcp.local.";
