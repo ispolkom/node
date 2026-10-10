@@ -293,23 +293,6 @@ impl YandiTunDevice {
         Ok(())
     }
 
-    /// Read packets from TUN device and forward to YTP
-    async fn read_packets(&mut self) -> Result<()> {
-        use tokio::time::{sleep, Duration};
-
-        println!("📥 Reading packets from TUN device...");
-
-        loop {
-            // Simulate receiving packets
-            sleep(Duration::from_secs(1)).await;
-
-            // TODO: Real implementation:
-            // let mut buf = [0u8; 1500];
-            // let n = tun.read(&mut buf).await?;
-            // self.handle_ipv6_packet(&buf[..n])?;
-        }
-    }
-
     /// Read REAL packets from TUN device
     async fn read_packets_real(&mut self) -> Result<()> {
         println!("📥 Reading REAL packets from TUN device...");

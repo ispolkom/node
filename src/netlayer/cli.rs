@@ -905,7 +905,6 @@ impl P2PCli {
 
             "quit" | "q" => {
                 println!("🛑 Остановка ноды...");
-                transport.hello_sender().clone(); // Keep alive for shutdown
                 std::process::exit(0);
             }
 
