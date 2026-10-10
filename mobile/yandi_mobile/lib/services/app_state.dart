@@ -107,7 +107,10 @@ class AppState extends ChangeNotifier {
     _ws?.dispose();
 
     try {
-      _api = api_svc.ApiService(node);
+      _api = api_svc.ApiService(node, onSecurityError: (error) {
+        nodeError = error;
+        notifyListeners();
+      });
     } on StateError catch (e) {
       // узел без отпечатка TLS (запись старой сборки): без закрепления сертификата не подключаемся
       _api = null;
@@ -127,7 +130,8 @@ class AppState extends ChangeNotifier {
         unawaited(_syncInbox());
         announceReceiptSupport();
       },
-      getPeerPub: (peerId) => _api!.getPeerX25519Pub(peerId),
+      getPeerBundle: (peerId) => _api!.getPeerBundle(peerId),
+      ownPeerId: () => _api!.devicePeerId(),
     );
     _ws!.connect(node);
     _ws!.chatStream.listen(_onIncomingChat);
@@ -191,11 +195,23 @@ class AppState extends ChangeNotifier {
         if (payloadB64.isEmpty || fromPeerId.isEmpty) continue;
 
         final payloadBytes = base64.decode(payloadB64);
+        if (payloadBytes.isNotEmpty && (payloadBytes[0] == 0xE2 || payloadBytes[0] == 0xE3)) {
+          // Preserve legacy unread mail: never ACK/delete it as an E4 failure.
+          nodeError = 'В очереди есть старые неподписанные E2/E3 сообщения. Они сохранены на узле; нужен согласованный перенос.';
+          notifyListeners();
+          continue;
+        }
 
         // Как и в сокете: только E2E-конверт, общее окно повторов. Открытый текст, старый формат, подделку или повтор (то же
         // сообщение уже пришло вживую) не показываем, но подтверждаем, чтобы узел не присылал его снова.
-        final text = await ws.decryptIncoming(payloadBytes);
-        if (text == null) { ackIds.add(id); continue; }
+        var duplicate = false;
+        final text = await ws.decryptIncoming(payloadBytes,fromPeerId:fromPeerId,onDuplicate:()=>duplicate=true);
+        if (text == null) {
+          // Only a verified persisted replay may be ACKed. Missing keys, offline
+          // info or disk errors must not silently delete valid queued mail.
+          if (duplicate) ackIds.add(id);
+          continue;
+        }
 
         if (isBlocked(fromPeerId)) { ackIds.add(id); continue; }   // чёрный список
         final res = _classifyIncoming(fromPeerId, text);

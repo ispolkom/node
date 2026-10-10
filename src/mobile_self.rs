@@ -2,7 +2,7 @@
 //!
 //! У узла своя пара ключей для телефонов (x25519 для шифрования, ed25519 для подписи связки), она лежит в `mobile_self.json` в папке данных
 //! (права 0600). Телефон видит компьютер в контактах под номером узла, берёт его подписанную связку из `/mobile/pubkey/<номер узла>` и
-//! шифрует, как для другого телефона (конверт E3, `e2e_crypto.dart`). Узел здесь — конечная точка переписки: он расшифровывает
+//! шифрует, как для другого телефона (подписанный конверт E4, `e2e_crypto.dart`). Узел здесь — конечная точка переписки: он расшифровывает
 //! сообщение и кладёт его в историю чата, которую показывает страница. Ответ со страницы узел шифрует открытым ключом телефона
 //! (из подписанной связки, которую телефон зарегистрировал) и кладёт в очередь телефона. Открытым текстом между телефоном и узлом
 //! ничего не ходит, кроме TLS.
@@ -14,9 +14,12 @@ use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
 use x25519_dalek::{PublicKey, StaticSecret};
 
-/// Формат конверта, общий с приложением: `[0xE3][32 одноразовый x25519][12 nonce][шифртекст + 16 метка]`, AAD = "YANDI-E2E-V2\0" ‖ одноразовый ключ.
-const MAGIC: u8 = 0xE3;
-const AAD_PREFIX: &[u8] = b"YANDI-E2E-V2\0";
+/// E4 header + AES-GCM ciphertext/tag + Ed25519 signature; see docs/CLIENT_WIRE.md.
+const MAGIC: u8 = 0xE4;
+const AAD_PREFIX: &[u8] = b"YANDI-E2E-E4\0";
+const SIGN_DOMAIN: &[u8] = b"YANDI-E2E-E4-SIGN\0";
+const HEADER: usize = 134;
+const REPLAY_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 const BUNDLE_DOMAIN: &[u8] = b"YANDI-MOBILE-KEYS-V1\0";
 
 #[derive(Serialize, Deserialize)]
@@ -30,6 +33,7 @@ struct Keys {
     x_pub: [u8; 32],
     ed_pub: [u8; 32],
     sig: [u8; 64],
+    signing: ed25519_dalek::SigningKey,
 }
 
 fn b64(b: &[u8]) -> String {
@@ -70,7 +74,7 @@ fn make_keys(x: [u8; 32], e: [u8; 32]) -> Keys {
     let signing = SigningKey::from_bytes(&e);
     let ed_pub = signing.verifying_key().to_bytes();
     let sig = signing.sign(&[BUNDLE_DOMAIN, &ed_pub, &x_pub].concat()).to_bytes();
-    Keys { x_secret, x_pub, ed_pub, sig }
+    Keys { x_secret, x_pub, ed_pub, sig, signing }
 }
 
 /// Подписанная связка ключей узла для `/mobile/pubkey/<номер узла>` (тот же вид, что у телефонов).
@@ -79,12 +83,33 @@ pub fn bundle_json() -> serde_json::Value {
     serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)})
 }
 
-fn aad(eph: &[u8]) -> Vec<u8> {
-    [AAD_PREFIX, eph].concat()
+fn aad(header: &[u8]) -> Vec<u8> {
+    [AAD_PREFIX, header].concat()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_millis() as u64
+}
+
+fn derived_key(shared: &[u8], header: &[u8]) -> Option<[u8; 32]> {
+    use sha2::{Digest, Sha256};
+    if shared.iter().all(|b| *b == 0) { return None; }
+    let mut key = [0; 32];
+    hkdf::Hkdf::<Sha256>::new(Some(&Sha256::digest(aad(header))), shared)
+        .expand(b"YANDI-E2E-E4-KEY", &mut key).ok()?;
+    Some(key)
 }
 
 /// Зашифровать текст для телефона (его открытый x25519 из подписанной связки).
-pub fn seal(text: &str, recipient_x25519: &[u8; 32]) -> Vec<u8> {
+pub fn seal(text: &str, recipient_x25519: &[u8; 32], from: &str, to: &str, kind: u8) -> Result<Vec<u8>, String> {
+    seal_with(keys(), text, recipient_x25519, from, to, kind, now_ms())
+}
+
+fn seal_with(sender: &Keys, text: &str, recipient_x25519: &[u8; 32], from: &str, to: &str, kind: u8, ts: u64) -> Result<Vec<u8>, String> {
+    use ed25519_dalek::Signer;
+    let from = hex::decode(from).ok().filter(|v| v.len() == 32).ok_or("invalid sender")?;
+    let to = hex::decode(to).ok().filter(|v| v.len() == 32).ok_or("invalid recipient")?;
+    if kind != 1 && kind != 2 { return Err("invalid E4 kind".into()); }
     let mut eph_bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut eph_bytes);
     let eph = StaticSecret::from(eph_bytes);
@@ -92,48 +117,62 @@ pub fn seal(text: &str, recipient_x25519: &[u8; 32]) -> Vec<u8> {
     let shared = eph.diffie_hellman(&PublicKey::from(*recipient_x25519));
     let mut nonce = [0u8; 12];
     rand::thread_rng().fill_bytes(&mut nonce);
-    let cipher = Aes256Gcm::new_from_slice(shared.as_bytes()).expect("32-byte key");
-    let ct = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: text.as_bytes(), aad: &aad(&eph_pub) }).expect("aes-gcm encrypt");
-    [&[MAGIC][..], &eph_pub, &nonce, &ct].concat()
+    let mut id = [0u8; 16];
+    rand::thread_rng().fill_bytes(&mut id);
+    let header = [&[MAGIC, kind][..], &from, &to, &id, &ts.to_be_bytes(), &eph_pub, &nonce].concat();
+    let key = derived_key(shared.as_bytes(), &header).ok_or("invalid X25519 key")?;
+    let cipher = Aes256Gcm::new_from_slice(&key).expect("32-byte key");
+    let ct = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: text.as_bytes(), aad: &aad(&header) }).map_err(|_| "encrypt failed")?;
+    let wire = [header, ct].concat();
+    let sig = sender.signing.sign(&[SIGN_DOMAIN, &wire].concat()).to_bytes();
+    Ok([wire, sig.to_vec()].concat())
 }
 
-/// Расшифровать конверт телефона, адресованный узлу. None — не конверт E3, чужой ключ, подделка.
-pub fn open(blob: &[u8]) -> Option<String> {
-    open_with(&keys().x_secret, blob)
+/// Authenticated E4 only; context mismatch, tampering, replay or persistence error -> None.
+pub fn open(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -> Option<String> {
+    let text = open_with(&keys().x_secret, blob, from, to, kind, sender_ed, now_ms())?;
+    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
+    claim_replay(&path, blob, now_ms()).ok().filter(|v| *v)?;
+    Some(text)
 }
 
-fn open_with(secret: &StaticSecret, blob: &[u8]) -> Option<String> {
-    if blob.len() <= 45 + 16 || blob[0] != MAGIC {
+fn open_with(secret: &StaticSecret, blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32], now: u64) -> Option<String> {
+    use ed25519_dalek::{Signature, VerifyingKey};
+    if blob.len() < HEADER + 16 + 64 || blob[0] != MAGIC || blob[1] != kind || !matches!(kind, 1 | 2) {
         return None;
     }
-    let eph: [u8; 32] = blob[1..33].try_into().ok()?;
+    if hex::decode(from).ok()?.as_slice() != &blob[2..34] || hex::decode(to).ok()?.as_slice() != &blob[34..66] { return None; }
+    let ts = u64::from_be_bytes(blob[82..90].try_into().ok()?);
+    if ts > now.saturating_add(300_000) || now > ts.saturating_add(REPLAY_TTL_MS) { return None; }
+    let end = blob.len() - 64;
+    let sig = Signature::from_bytes(blob[end..].try_into().ok()?);
+    VerifyingKey::from_bytes(sender_ed).ok()?.verify_strict(&[SIGN_DOMAIN, &blob[..end]].concat(), &sig).ok()?;
+    let eph: [u8; 32] = blob[90..122].try_into().ok()?;
     let shared = secret.diffie_hellman(&PublicKey::from(eph));
-    if shared.as_bytes().iter().all(|b| *b == 0) {
-        return None;
-    }
-    let cipher = Aes256Gcm::new_from_slice(shared.as_bytes()).ok()?;
-    let plain = cipher.decrypt(Nonce::from_slice(&blob[33..45]), Payload { msg: &blob[45..], aad: &aad(&eph) }).ok()?;
+    let key = derived_key(shared.as_bytes(), &blob[..HEADER])?;
+    let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
+    let plain = cipher.decrypt(Nonce::from_slice(&blob[122..134]), Payload { msg: &blob[HEADER..end], aad: &aad(&blob[..HEADER]) }).ok()?;
     String::from_utf8(plain).ok()
 }
 
-/// Окно повторов для конвертов от телефонов (тот же конверт второй раз не принимаем): хэши последних конвертов в памяти.
-pub fn first_time(blob: &[u8]) -> bool {
-    use sha2::{Digest, Sha256};
-    use std::collections::VecDeque;
-    static SEEN: std::sync::Mutex<Option<(std::collections::HashSet<[u8; 32]>, VecDeque<[u8; 32]>)>> = std::sync::Mutex::new(None);
-    let h: [u8; 32] = Sha256::digest(blob).into();
-    let mut g = SEEN.lock().unwrap_or_else(|e| e.into_inner());
-    let (set, order) = g.get_or_insert_with(Default::default);
-    if !set.insert(h) {
-        return false;
-    }
-    order.push_back(h);
-    if order.len() > 4096 {
-        if let Some(old) = order.pop_front() {
-            set.remove(&old);
-        }
-    }
-    true
+/// Called only after successful signature and AEAD checks. Never evict unexpired IDs.
+fn claim_replay(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _lock = LOCK.lock().map_err(|_| "replay lock poisoned")?;
+    let mut seen: std::collections::BTreeMap<String, u64> = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt replay ledger")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e.to_string()),
+    };
+    seen.retain(|_, expires| *expires >= now);
+    let id = hex::encode(&blob[2..82]); // sender + recipient + random signed id
+    if seen.contains_key(&id) { return Ok(false); }
+    if seen.len() >= 100_000 { return Err("replay ledger full".into()); }
+    let ts = u64::from_be_bytes(blob[82..90].try_into().map_err(|_| "invalid timestamp")?);
+    seen.insert(id, ts.saturating_add(REPLAY_TTL_MS));
+    let bytes = serde_json::to_vec(&seen).map_err(|e| e.to_string())?;
+    crate::util::private_file::write_private(path, &bytes).map_err(|e| e.to_string())?;
+    Ok(true)
 }
 
 // ── Файлы между телефоном и компьютером ──
@@ -504,21 +543,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn mobile_e4_independent_python_vector() {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../tests/mobile_e4_vector.json")).unwrap();
+        let wire = hex::decode(v["wire"].as_str().unwrap()).unwrap();
+        let secret = StaticSecret::from(<[u8;32]>::try_from(hex::decode(v["x_secret"].as_str().unwrap()).unwrap()).unwrap());
+        let ed = <[u8;32]>::try_from(hex::decode(v["ed_public"].as_str().unwrap()).unwrap()).unwrap();
+        let from = v["sender"].as_str().unwrap();
+        let to = v["recipient"].as_str().unwrap();
+        let now = v["timestamp"].as_u64().unwrap();
+        assert_eq!(open_with(&secret,&wire,from,to,1,&ed,now).as_deref(),v["text"].as_str());
+        // Every header byte, ciphertext/tag and signature byte is authenticated.
+        for i in 0..wire.len() {
+            let mut bad = wire.clone(); bad[i] ^= 1;
+            assert!(open_with(&secret,&bad,from,to,1,&ed,now).is_none(),"byte {i}");
+        }
+    }
+
+    #[test]
     fn sealed_for_a_key_opens_only_with_it_and_tampering_is_refused() {
         let me = make_keys([1; 32], [2; 32]);
         let other = make_keys([3; 32], [4; 32]);
-        let blob = seal("привет", &me.x_pub);
+        let from = hex::encode([10; 32]);
+        let to = hex::encode([11; 32]);
+        let blob = seal_with(&other, "привет", &me.x_pub, &from, &to, 1, now_ms()).unwrap();
         assert_eq!(blob[0], MAGIC);
-        assert_eq!(open_with(&me.x_secret, &blob).as_deref(), Some("привет"));
-        assert!(open_with(&other.x_secret, &blob).is_none(), "чужой ключ");
+        let check = |wire: &[u8]| open_with(&me.x_secret, wire, &from, &to, 1, &other.ed_pub, now_ms());
+        assert_eq!(check(&blob).as_deref(), Some("привет"));
+        assert!(open_with(&other.x_secret, &blob, &from, &to, 1, &other.ed_pub, now_ms()).is_none(), "чужой ключ");
+        assert!(open_with(&me.x_secret, &blob, &to, &from, 1, &other.ed_pub, now_ms()).is_none(), "адреса");
+        assert!(open_with(&me.x_secret, &blob, &from, &to, 2, &other.ed_pub, now_ms()).is_none(), "тип");
+        assert!(open_with(&me.x_secret, &blob, &from, &to, 1, &me.ed_pub, now_ms()).is_none(), "подмена отправителя");
         let mut bad = blob.clone();
         let n = bad.len();
         bad[n - 1] ^= 1;
-        assert!(open_with(&me.x_secret, &bad).is_none(), "метка не сходится");
+        assert!(check(&bad).is_none(), "подпись не сходится");
         let mut bad_eph = blob.clone();
         bad_eph[5] ^= 1;
-        assert!(open_with(&me.x_secret, &bad_eph).is_none(), "одноразовый ключ входит в AAD/DH");
-        assert!(open_with(&me.x_secret, b"plain text that is long enough to pass the length check........").is_none());
+        assert!(check(&bad_eph).is_none(), "контекст подписан");
+        // Even a re-signed header cannot transplant existing ciphertext to a
+        // new message id: AAD/HKDF independently bind the entire header.
+        let mut rebound = blob.clone();
+        rebound[66] ^= 1;
+        let end = rebound.len() - 64;
+        use ed25519_dalek::Signer;
+        let sig = other.signing.sign(&[SIGN_DOMAIN, &rebound[..end]].concat()).to_bytes();
+        rebound[end..].copy_from_slice(&sig);
+        assert!(check(&rebound).is_none(), "новый контекст с корректной подписью не проходит AEAD");
+        assert!(check(b"plain text that is long enough to pass the length check........").is_none());
+        let expired = seal_with(&other, "old", &me.x_pub, &from, &to, 1, 1).unwrap();
+        assert!(check(&expired).is_none());
+        assert!(seal_with(&other, "bad", &[0; 32], &from, &to, 1, now_ms()).is_err());
     }
 
     #[test]
@@ -565,9 +639,30 @@ mod tests {
 
     #[test]
     fn a_replayed_envelope_is_refused() {
-        let blob = seal("x", &make_keys([7; 32], [8; 32]).x_pub);
-        assert!(first_time(&blob));
-        assert!(!first_time(&blob));
+        let phone = make_keys([7; 32], [8; 32]);
+        let blob = seal_with(&phone, "x", &phone.x_pub, &hex::encode([1;32]), &hex::encode([2;32]), 1, now_ms()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replays.json");
+        assert!(claim_replay(&path, &blob, now_ms()).unwrap());
+        assert!(!claim_replay(&path, &blob, now_ms()).unwrap(), "fresh disk read after restart");
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(claim_replay(&path, &blob, now_ms()).is_err(), "never reset corrupt ledger");
+    }
+
+    #[test]
+    fn mobile_replay_never_evicts_fresh_entries_and_writes_fail_closed() {
+        let sender = make_keys([7;32],[8;32]);
+        let wire = seal_with(&sender,"test",&sender.x_pub,&hex::encode([1;32]),&hex::encode([2;32]),1,100).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replays.json");
+        let full: std::collections::BTreeMap<String,u64> = (0..100_000).map(|i|(i.to_string(),100+REPLAY_TTL_MS)).collect();
+        std::fs::write(&path,serde_json::to_vec(&full).unwrap()).unwrap();
+        assert!(claim_replay(&path,&wire,100).is_err());
+        assert_eq!(serde_json::from_slice::<std::collections::BTreeMap<String,u64>>(&std::fs::read(&path).unwrap()).unwrap().len(),100_000);
+        assert!(claim_replay(dir.path(),&wire,100).is_err());
+        // Pruning is allowed only when signed freshness checks reject old envelopes.
+        let new = seal_with(&sender,"new",&sender.x_pub,&hex::encode([1;32]),&hex::encode([2;32]),1,101+REPLAY_TTL_MS).unwrap();
+        assert!(claim_replay(&path,&new,101+REPLAY_TTL_MS).unwrap());
     }
 
     #[tokio::test]
@@ -582,8 +677,10 @@ mod tests {
         let pc_id = crate::util::HashId([21; 32]);
         let cmid = hex::encode(pc_id.0);
         let phone = make_keys([22; 32], [23; 32]);
-        let wire = seal(&wrap_message(&cmid, &offer), &phone.x_pub);
-        assert!(matches!(classify(open_with(&phone.x_secret, &wire).unwrap()),
+        let from = hex::encode([24;32]);
+        let to = hex::encode([25;32]);
+        let wire = seal_with(&phone, &wrap_message(&cmid, &offer), &phone.x_pub, &from, &to, 1, now_ms()).unwrap();
+        assert!(matches!(classify(open_with(&phone.x_secret, &wire, &from, &to, 1, &phone.ed_pub, now_ms()).unwrap()),
             Envelope::Message { cmid: id, text } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
 
         let received = receive_file("receipt-test-pc", &device, &offer).await.unwrap();

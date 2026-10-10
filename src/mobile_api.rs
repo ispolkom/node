@@ -405,12 +405,10 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
 #[derive(Clone)]
 pub(crate) struct DeviceKey(pub(crate) String);
 
-/// Сообщение телефона самому компьютеру (конверт E3 для ключа узла): расшифровать и положить в историю веб-чата.
+/// Сообщение телефона самому компьютеру (подписанный E4): расшифровать и положить в историю веб-чата.
 fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
-    if !crate::mobile_self::first_time(blob) {
-        return;
-    }
-    let (Some(text), Some(from)) = (crate::mobile_self::open(blob), hex32(from_device)) else { return };
+    let Ok(ed) = device_ed25519(from_device) else { return };
+    let (Some(text), Some(from)) = (crate::mobile_self::open(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return };
     let device = HashId(from);
     crate::mobile_self::unhide_phone(from_device);
     let text = match crate::mobile_self::classify(text) {
@@ -468,7 +466,9 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
                     crate::mobile_self::remember_unread(&msg.msg_id, &dev, &id);
                     if let Ok(x) = device_x25519(&dev) {
                         let receipt = crate::mobile_self::receipt(false, &[id]);
-                        deliver_mail(&node, &dev, &crate::mobile_self::seal(&receipt, &x));
+                        if let Ok(blob) = crate::mobile_self::seal(&receipt, &x, &node, &dev, 1) {
+                            deliver_mail(&node, &dev, &blob);
+                        }
                     }
                 }
             }
@@ -500,6 +500,14 @@ fn device_x25519(peer: &str) -> Result<[u8; 32], String> {
         .ok_or_else(|| "телефон ещё не прислал подписанные ключи — откройте на нём приложение".to_string())
 }
 
+fn device_ed25519(peer: &str) -> Result<[u8; 32], String> {
+    use base64::Engine;
+    let dev = device_by_peer(peer).ok_or("нет такого устройства")?;
+    dev.key_sig.as_ref().and(dev.ed25519_pub.as_deref())
+        .and_then(|k| base64::engine::general_purpose::STANDARD.decode(k).ok())
+        .and_then(|b| b.try_into().ok()).ok_or_else(|| "нет закреплённого ключа подписи".into())
+}
+
 /// Файл со страницы узла телефону: куски шифруются своим ключом и ложатся в хранилище файлов, предложение — зашифрованной почтой.
 pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachment: crate::communication::FileAttachment, text: String) -> Result<ChatMessage, String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
@@ -509,7 +517,7 @@ pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachme
     let offer = crate::mobile_self::send_file(&node, peer, path, &attachment.filename, &attachment.mime_type).await?;
     let mut msg = ChatMessage::new(st.my_id, to, String::new());
     let envelope = crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &offer);
-    if !deliver_mail(&node, peer, &crate::mobile_self::seal(&envelope, &x)) {
+    if !deliver_mail(&node, peer, &crate::mobile_self::seal(&envelope, &x, &node, peer, 1)?) {
         return Err("не удалось положить предложение файла в очередь телефона".into());
     }
     if !text.trim().is_empty() {
@@ -528,14 +536,19 @@ pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachme
 /// Положить телефону служебный конверт от узла (зашифрован его ключом) в очередь.
 fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
     if let Ok(x) = device_x25519(device) {
-        deliver_mail(&hex::encode(st.my_id.0), device, &crate::mobile_self::seal(text, &x));
+        let node = hex::encode(st.my_id.0);
+        if let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 1) {
+            deliver_mail(&node, device, &blob);
+        }
     }
 }
 
 /// «Живой» сигнал телефону от узла (не хранится): ответ на пинг поддержки квитанций.
 fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
     if let Ok(x) = device_x25519(device) {
-        let m = Mail { ts: next_ts(), from: hex::encode(st.my_id.0), to: device.to_string(), payload_b64: base64_of(&crate::mobile_self::seal(text, &x)) };
+        let node = hex::encode(st.my_id.0);
+        let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 2) else { return };
+        let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob) };
         let _ = bus().send(Event::Live(Arc::new(m)));
     }
 }
@@ -614,7 +627,7 @@ pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, 
     let mut msg = ChatMessage::new(st.my_id, to, text);
     msg.encrypted = true;
     // конверт с номером (cmid = msg_id): телефон пришлёт «доставлено» и «прочитано»; до того — одна серая галка
-    let blob = crate::mobile_self::seal(&crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &msg.text), &x);
+    let blob = crate::mobile_self::seal(&crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &msg.text), &x, &hex::encode(st.my_id.0), peer, 1)?;
     if !deliver_mail(&hex::encode(st.my_id.0), peer, &blob) {
         return Err("не удалось положить сообщение в очередь телефона".into());
     }
@@ -935,13 +948,42 @@ async fn accept_pubkeys(
     {
         return StatusCode::BAD_REQUEST;
     }
-    with_devices(|d| {
-        if let Some(x) = d.iter_mut().find(|x| same(&x.token_hash, &dev)) {
-            x.x25519_pub = Some(req.x25519_pub);
-            x.ed25519_pub = Some(req.ed25519_pub);
-            x.key_sig = Some(req.signature);
+    let mut guard = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
+    if guard.is_none() {
+        let loaded = match std::fs::read(devices_path()) {
+            Ok(bytes) => match serde_json::from_slice::<Vec<Device>>(&bytes) {
+                Ok(v) => v,
+                Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        *guard = Some(loaded);
+    }
+    store_device_bundle(guard.as_mut().unwrap(), &dev, req, &ed25519, &devices_path())
+}
+
+fn store_device_bundle(devices: &mut Vec<Device>, token_hash: &str, req: KeysReq, ed: &[u8], path: &std::path::Path) -> StatusCode {
+    use base64::Engine;
+    let mut updated = devices.clone();
+    if let Some(x) = updated.iter_mut().find(|x| same(&x.token_hash, token_hash)) {
+        if let Some(old) = x.ed25519_pub.as_deref() {
+            let Ok(old) = base64::engine::general_purpose::STANDARD.decode(old) else {
+                return StatusCode::INTERNAL_SERVER_ERROR;
+            };
+            if old != ed { return StatusCode::CONFLICT; }
         }
-    });
+        x.x25519_pub = Some(req.x25519_pub);
+        x.ed25519_pub = Some(req.ed25519_pub);
+        x.key_sig = Some(req.signature);
+    } else {
+        return StatusCode::UNAUTHORIZED;
+    }
+    let Ok(bytes) = serde_json::to_vec(&updated) else { return StatusCode::INTERNAL_SERVER_ERROR };
+    if crate::util::private_file::write_private(path, &bytes).is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR;
+    }
+    *devices = updated;
     StatusCode::OK
 }
 
@@ -1080,7 +1122,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         if HashId(id) == st.my_id {
                             // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
                             let blob = &d[37..37 + len];
-                            let text = if crate::mobile_self::first_time(blob) { crate::mobile_self::open(blob) } else { None };
+                            let text = device_ed25519(&me).ok().and_then(|ed| crate::mobile_self::open(blob, &me, &to, 2, &ed));
                             match text {
                                 Some(t) if t.starts_with(crate::mobile_self::CALL_MARKER) && crate::mobile_self::call_page_alive() => {
                                     // сигнал звонка: страница чата открыта — отдаём ей (она и отвечает)
@@ -1438,6 +1480,27 @@ where
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn mobile_device_signing_pin_persists_and_cannot_be_replaced() {
+        use super::*;
+        use base64::Engine;
+        let b64 = |b: &[u8]| base64::engine::general_purpose::STANDARD.encode(b);
+        let request = |ed: u8, x: u8| KeysReq {
+            x25519_pub: b64(&[x;32]), ed25519_pub: b64(&[ed;32]), signature:b64(&[0;64]),
+        };
+        let mut devices = vec![Device { token_hash:"test-token".into(), name:"test".into(), created_ms:0, acked_ts:0,
+            x25519_pub:None, ed25519_pub:None, key_sig:None }];
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        assert_eq!(store_device_bundle(&mut devices,"test-token",request(1,2),&[1;32],&path),StatusCode::OK);
+        let mut restart: Vec<Device> = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(store_device_bundle(&mut restart,"test-token",request(3,4),&[3;32],&path),StatusCode::CONFLICT);
+        assert_eq!(store_device_bundle(&mut restart,"test-token",request(1,5),&[1;32],&path),StatusCode::OK);
+        // Failed write must not mutate memory or existing disk state.
+        assert_eq!(store_device_bundle(&mut restart,"test-token",request(1,6),&[1;32],dir.path()),StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(restart[0].x25519_pub,Some(b64(&[5;32])));
+        assert_eq!(serde_json::from_slice::<Vec<Device>>(&std::fs::read(&path).unwrap()).unwrap()[0].x25519_pub,restart[0].x25519_pub);
+    }
     use super::*;
 
     #[test]

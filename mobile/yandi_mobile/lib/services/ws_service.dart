@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
@@ -8,6 +7,7 @@ import 'package:web_socket_channel/io.dart';
 import '../models/trusted_node.dart';
 import '../crypto/identity.dart';
 import '../crypto/e2e_crypto.dart';
+import '../crypto/peer_trust.dart';
 import 'storage_service.dart';
 
 const int ftPing       = 0x01;
@@ -61,7 +61,6 @@ class FileOfferEvent {
 /// Расшифровка происходит на мобилке приватным X25519 ключом Identity.
 class WsService {
   final Identity _identity;
-  final ReplayGuard _replayGuard = ReplayGuard();
 
   /// Вызывается когда переподключение к текущей ноде не удалось
   /// (задержка достигла максимума). AppState использует это для failover.
@@ -97,10 +96,13 @@ class WsService {
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
   final void Function()? onOpen;
 
-  WsService(this._identity, {this.onPermanentLoss, this.onOpen, Future<List<int>?> Function(String)? getPeerPub})
-      : _getPeerPub = getPeerPub;
+  WsService(this._identity, {this.onPermanentLoss, this.onOpen,
+    Future<PeerKeyBundle?> Function(String)? getPeerBundle,
+    Future<String?> Function()? ownPeerId})
+      : _getPeerBundle = getPeerBundle, _ownPeerId = ownPeerId;
 
-  final Future<List<int>?> Function(String)? _getPeerPub;
+  final Future<PeerKeyBundle?> Function(String)? _getPeerBundle;
+  final Future<String?> Function()? _ownPeerId;
 
   // ── Управление подключением ────────────────────────────────────────────────
 
@@ -207,7 +209,7 @@ class WsService {
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
 
-    final text = await decryptIncoming(payload);
+    final text = await decryptIncoming(payload, fromPeerId: from);
     if (text == null) return;
 
     _chatCtrl.add(IncomingChatEvent(
@@ -225,7 +227,7 @@ class WsService {
     final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
-    final text = await decryptIncoming(payload);
+    final text = await decryptIncoming(payload, fromPeerId: from, kind: 2);
     if (text == null) return;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
   }
@@ -247,7 +249,8 @@ class WsService {
     final recipientPub = await _getRecipientPub(toPeerIdHex);
     if (recipientPub == null) return false;
 
-    final payload = await E2ECrypto.encrypt(text, recipientPub);
+    final payload = await _encrypt(text,recipientPub,toPeerIdHex,1);
+    if (payload == null) return false;
 
     final peerBytes = _hexToBytes(toPeerIdHex);
     final buf = BytesBuilder();
@@ -265,7 +268,8 @@ class WsService {
     if (_channel == null) return false;
     final recipientPub = await _getRecipientPub(toPeerIdHex);
     if (recipientPub == null) return false;
-    final payload = await E2ECrypto.encrypt(text, recipientPub);
+    final payload = await _encrypt(text,recipientPub,toPeerIdHex,1);
+    if (payload == null) return false;
     final buf = BytesBuilder();
     buf.addByte(ftSendMsg);
     buf.add(_hexToBytes(toPeerIdHex));
@@ -281,7 +285,8 @@ class WsService {
     if (_channel == null) return false;
     final recipientPub = await _getRecipientPub(toPeerIdHex);
     if (recipientPub == null) return false;
-    final payload = await E2ECrypto.encrypt(text, recipientPub);
+    final payload = await _encrypt(text,recipientPub,toPeerIdHex,2);
+    if (payload == null) return false;
     final buf = BytesBuilder();
     buf.addByte(ftSendLive);
     buf.add(_hexToBytes(toPeerIdHex));
@@ -296,23 +301,34 @@ class WsService {
 
   /// Единственный вход для входящих блобов (сокет и почтовый ящик): только E2E-конверт текущего формата, с общим окном повторов.
   /// null — не E2E (открытый текст, старый формат 0xE2), не расшифровалось или повтор: такое пользователю не показываем.
-  Future<String?> decryptIncoming(List<int> payload) async {
+  Future<String?> decryptIncoming(List<int> payload, {required String fromPeerId, int kind = 1, void Function()? onDuplicate}) async {
+    try {
     if (!E2ECrypto.isEncrypted(payload)) return null;
+    final bundle = await _getPeerBundle?.call(fromPeerId);
+    final self = await _ownPeerId?.call();
+    final ledger = StorageService.replayLedger;
+    if (bundle == null || self == null || ledger == null) return null;
     return E2ECrypto.decrypt(
       Uint8List.fromList(payload),
       (theirPub) => _identity.ecdh(theirPub),
-      replayGuard: _replayGuard,
+      from: fromPeerId, to: self, kind: kind, senderEd: bundle.ed25519,
+      claimReplay: ledger.claim,
+      onDuplicate: onDuplicate,
     );
+    } catch (_) { return null; }
   }
 
   Future<List<int>?> _getRecipientPub(String peerId) async {
-    // Кэш SQLite (TTL 24ч) содержит только ключи из связок с проверенной подписью: пишет его лишь ApiService.getPeerX25519Pub после
-    // проверки, а непроверенные записи старых сборок стёрты при обновлении базы (версия 4).
-    final cached = await StorageService.getPeerX25519Pub(peerId);
-    if (cached != null) return base64.decode(cached);
+    // Never bypass the pinned signing identity through the old X-only cache.
+    return (await _getPeerBundle?.call(peerId))?.x25519;
+  }
 
-    // ключ есть только у других телефонов владельца; у обычных собеседников нода отвечает 404 — тогда текст идёт внутри TLS
-    return _getPeerPub == null ? null : await _getPeerPub!(peerId);
+  Future<List<int>?> _encrypt(String text,List<int> pub,String to,int kind) async {
+    try {
+      final self = await _ownPeerId?.call();
+      if (self == null) return null;
+      return await E2ECrypto.encrypt(text,pub,from:self,to:to,kind:kind,sign:_identity.sign);
+    } catch (_) { return null; }
   }
 
   void _sendRaw(Uint8List bytes) => _channel?.sink.add(bytes);

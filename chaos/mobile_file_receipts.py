@@ -1,7 +1,7 @@
 """PC/phone file receipt checks for mobiletest; requires Python cryptography.
 
 Run through chaos/mobiletest.py on Claude's socket-enabled test stand.
-Uses existing E3, file v1 and MsgChannel formats; no new wire format.
+Uses authenticated E4, file v1 and MsgChannel formats.
 """
 import base64
 import hashlib
@@ -9,6 +9,11 @@ import json
 import os
 import struct
 import time
+import sys
+from pathlib import Path
+
+sys.path.insert(0,str(Path(__file__).resolve().parents[1]/'tests'))
+from mobile_e4_reference import seal as seal_e4, open_blob as open_e4
 
 
 def run(node, req, req_raw, pair_phone, ws_open, ws_send, check):
@@ -31,18 +36,15 @@ def run(node, req, req_raw, pair_phone, ws_open, ws_send, check):
     check("receipt phone registers signed keys", st == 200)
     _, bundle = req("GET", f"/mobile/pubkey/{node.id}", token=token)
     pc_pub = x25519.X25519PublicKey.from_public_bytes(base64.b64decode(bundle["x25519_pub"]))
+    pc_ed = ed25519.Ed25519PublicKey.from_public_bytes(base64.b64decode(bundle["ed25519_pub"]))
+    pc_ed.verify(base64.b64decode(bundle["signature"]), b"YANDI-MOBILE-KEYS-V1\0" +
+        base64.b64decode(bundle["ed25519_pub"]) + base64.b64decode(bundle["x25519_pub"]))
 
     def seal(text):
-        eph = x25519.X25519PrivateKey.generate()
-        pub, nonce = raw_pub(eph), os.urandom(12)
-        return b"\xe3" + pub + nonce + AESGCM(eph.exchange(pc_pub)).encrypt(
-            nonce, text.encode(), b"YANDI-E2E-V2\0" + pub)
+        return seal_e4(text,pc_pub,ed,peer,node.id)
 
     def open_blob(wire):
-        assert wire[0] == 0xE3
-        pub = wire[1:33]
-        key = x.exchange(x25519.X25519PublicKey.from_public_bytes(pub))
-        return AESGCM(key).decrypt(wire[33:45], wire[45:], b"YANDI-E2E-V2\0" + pub).decode()
+        return open_e4(wire,x,pc_ed,node.id,peer)
 
     sock, _ = ws_open(token)
     def send(text):

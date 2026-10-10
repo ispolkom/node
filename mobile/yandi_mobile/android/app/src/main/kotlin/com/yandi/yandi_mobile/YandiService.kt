@@ -23,14 +23,10 @@ import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
 import java.net.InetSocketAddress
-import java.security.MessageDigest
-import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
-import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -245,6 +241,8 @@ class YandiChatService : Service() {
 
             // FT_CHAT_MSG: [1B type][32B from][8B ts_ms_LE][4B text_len_LE][text]
             0x10.toByte() -> {
+                // Payload is authenticated E4. Never decrypt or parse its
+                // signed header here: Dart owns key pins and durable replay state.
                 if (data.size < 45) return
                 val from    = data.slice(1..32).toByteArray().toHex()
                 val textLen = data.slice(41..44).toByteArray().toInt32LE()
