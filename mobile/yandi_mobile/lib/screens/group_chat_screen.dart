@@ -6,6 +6,7 @@ import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
+import '../models/group_invite.dart';
 import '../services/app_state.dart';
 import '../services/file_transfer_service.dart';
 import '../services/group_files.dart';
@@ -44,6 +45,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   List<GroupEntry> _entries = const [];
   int _shownCount = -1;
   final Map<String, String> _paths = {};       // номер файла на узле → где лежит у меня
+  List<JoinRequest> _requests = const [];     // просьбы вступить (видят владелец и модераторы)
   final Map<String, double> _progress = {};    // номер файла (или 'up') → доля
 
   @override
@@ -70,8 +72,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final svc = _svc;
     if (svc == null) return;
     final list = await svc.messages(widget.gid, kind: _section);
+    List<JoinRequest> reqs = const [];
+    final gi = svc.byId(widget.gid);
+    if (gi != null && gi.canModerate && gi.kind == 'invite' && _section == null) {
+      try { reqs = await svc.joinRequests(widget.gid); } catch (_) {}
+    }
     if (!mounted) return;
-    setState(() => _entries = list);
+    setState(() { _entries = list; _requests = reqs; });
     if (list.length != _shownCount) {
       _shownCount = list.length;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -226,13 +233,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             child: const Text('Ключ группы ещё не создан владельцем. Сообщения появятся, когда он откроет приложение.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
         Expanded(
-          child: _entries.isEmpty
+          child: _entries.isEmpty && _requests.isEmpty
               ? Center(child: Text(_section == null ? 'Сообщений пока нет' : 'В этом разделе пусто', style: const TextStyle(color: AppTheme.textSecondary)))
               : ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
-                  itemCount: _entries.length,
+                  itemCount: _entries.length + _requests.length,
                   itemBuilder: (_, i) {
+                    if (i >= _entries.length) return _RequestCard(request: _requests[i - _entries.length], onTap: () => _requestMenu(g, _requests[i - _entries.length]));
                     final e = _entries[i];
                     final mine = e.from == g.myAlias;
                     return _GroupBubble(
@@ -288,6 +296,45 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             ),
           ),
           IconButton(icon: const Icon(Icons.send, color: AppTheme.accent), onPressed: denied ? null : _send),
+        ]),
+      ),
+    );
+  }
+
+  /// Просьба вступить, показанная карточкой в чате: добавить (приглашение личным сообщением), игнорировать, больше не напоминать.
+  void _requestMenu(GroupInfo g, JoinRequest r) {
+    final state = context.read<AppState>();
+    Future<void> run(Future<void> Function() act, String done) async {
+      try { await act(); _toast(done); } catch (e) { _toast('$e'); }
+      await _load();
+    }
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Padding(padding: const EdgeInsets.all(16), child: Text('${r.name.isEmpty ? 'Кто-то' : r.name} просит приглашение в группу', style: const TextStyle(color: AppTheme.text, fontSize: 16))),
+          ListTile(
+            leading: const Icon(Icons.person_add_alt, color: AppTheme.accent),
+            title: const Text('Добавить', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Ему уйдёт приглашение личным сообщением', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () { Navigator.pop(ctx); run(() async {
+              final code = await _svc!.newInvite(g.id, uses: 1, ttlHours: 72);
+              await state.sendMessage(r.peerId, GroupInviteMsg.encode(g.id, code, g.name));
+              await _svc!.closeRequest(g.id, r.id);
+            }, 'Приглашение отправлено'); },
+          ),
+          ListTile(
+            leading: const Icon(Icons.close, color: AppTheme.textSecondary),
+            title: const Text('Игнорировать', style: TextStyle(color: AppTheme.text)),
+            onTap: () { Navigator.pop(ctx); run(() => _svc!.closeRequest(g.id, r.id), 'Просьба закрыта'); },
+          ),
+          ListTile(
+            leading: const Icon(Icons.notifications_off_outlined, color: AppTheme.incoming),
+            title: const Text('Больше не напоминать', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Его просьбы в эту группу вы больше не увидите', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () { Navigator.pop(ctx); run(() => _svc!.ignoreRequester(g.id, r), 'Готово, напоминаний не будет'); },
+          ),
         ]),
       ),
     );
@@ -371,6 +418,44 @@ class _GroupBubble extends StatelessWidget {
             else
               Text(text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             Align(alignment: Alignment.centerRight, child: Text(time, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 10))),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
+/// Просьба вступить как служебное сообщение в чате: видят только владелец и модераторы, обычным участникам её не показывают.
+class _RequestCard extends StatelessWidget {
+  final JoinRequest request;
+  final VoidCallback onTap;
+  const _RequestCard({required this.request, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return Align(
+      alignment: Alignment.centerLeft,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 3),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
+          decoration: BoxDecoration(
+            color: AppTheme.incoming.withOpacity(0.10),
+            border: Border.all(color: AppTheme.incoming.withOpacity(0.7), style: BorderStyle.solid, width: 1.2),
+            borderRadius: BorderRadius.circular(16),
+          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.how_to_reg_outlined, color: AppTheme.incoming, size: 18),
+              const SizedBox(width: 6),
+              Flexible(child: Text(request.name.isEmpty ? 'Новая просьба' : request.name, style: const TextStyle(color: AppTheme.incoming, fontSize: 13, fontWeight: FontWeight.bold))),
+            ]),
+            const SizedBox(height: 4),
+            const Text('просит добавить его в группу или прислать приглашение', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+            const SizedBox(height: 4),
+            const Text('служебное: видят владелец и модераторы · нажмите, чтобы ответить', style: TextStyle(color: AppTheme.textSecondary, fontSize: 10)),
           ]),
         ),
       ),

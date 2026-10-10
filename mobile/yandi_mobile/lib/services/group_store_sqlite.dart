@@ -60,7 +60,7 @@ class SqliteGroupStore implements GroupStore {
   @override
   Future<void> forgetGroup(String gid) async {
     await _db.delete('group_entries', where: 'gid = ?', whereArgs: [gid]);
-    for (final k in ['grp_mine_$gid', 'grp_pubsent_$gid', 'grp_owner_$gid', 'grp_owneralias_$gid', 'grp_wantname_$gid']) {
+    for (final k in ['grp_mine_$gid', 'grp_pubsent_$gid', 'grp_owner_$gid', 'grp_owneralias_$gid', 'grp_wantname_$gid', 'grp_ignore_$gid']) {
       await StorageService.secureDelete(k);
     }
     for (var e = 0; e < 64; e++) { await StorageService.secureDelete('grp_key_${e}_$gid'); }

@@ -334,4 +334,17 @@ void main() {
     await owner.closeRequest(node.gid, r.single.id);
     expect(await owner.joinRequests(node.gid), isEmpty);
   });
+
+  test('«больше не напоминать»: просьба закрывается, повторные просьбы этого человека не показываются', () async {
+    await owner.sync();
+    await eve.requestInvite(node.gid, 'Ева');
+    final r = (await owner.joinRequests(node.gid)).single;
+    await owner.ignoreRequester(node.gid, r);
+    expect(await owner.joinRequests(node.gid), isEmpty);
+    node.reqs.add({'id': 'again', 'dev': 'eve2', 'name': 'Ева снова'});     // просьба с тем же устройством приходит заново
+    final same = {'id': 'x1', 'dev': 'eve', 'name': 'Ева'};
+    node.reqs..clear()..add(same);
+    expect(await owner.joinRequests(node.gid), isEmpty, reason: 'тихо закрыта');
+    expect(node.reqs, isEmpty, reason: 'и убрана с узла');
+  });
 }

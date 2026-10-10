@@ -292,8 +292,37 @@ class GroupService {
   /// Попросить владельца прислать приглашение в группу «по приглашению».
   Future<void> requestInvite(String gid, String myName) => api.requestJoin(gid, myName.trim());
 
-  /// Просьбы вступить (владелец и модераторы).
-  Future<List<JoinRequest>> joinRequests(String gid) async => [for (final j in await api.requests(gid)) JoinRequest.fromJson(j)];
+  /// Те, чьи просьбы я попросил больше не показывать (хранится только на этом телефоне).
+  Future<Set<String>> _ignored(String gid) async {
+    try {
+      final raw = await store.read('grp_ignore_$gid');
+      if (raw != null) return {for (final x in jsonDecode(raw) as List) '$x'};
+    } catch (_) {}
+    return {};
+  }
+
+  /// Просьбы вступить (владелец и модераторы). Просьбы тех, кого я попросил «больше не напоминать», тихо закрываются и не показываются.
+  Future<List<JoinRequest>> joinRequests(String gid) async {
+    final all = [for (final j in await api.requests(gid)) JoinRequest.fromJson(j)];
+    final skip = await _ignored(gid);
+    if (skip.isEmpty) return all;
+    final out = <JoinRequest>[];
+    for (final r in all) {
+      if (skip.contains(r.peerId)) {
+        try { await api.resolveRequest(gid, r.id); } catch (_) {}
+      } else {
+        out.add(r);
+      }
+    }
+    return out;
+  }
+
+  /// «Больше не напоминать»: просьба закрывается, а последующие просьбы этого человека не показываются.
+  Future<void> ignoreRequester(String gid, JoinRequest r) async {
+    final skip = await _ignored(gid)..add(r.peerId);
+    await store.write('grp_ignore_$gid', jsonEncode(skip.toList()));
+    await api.resolveRequest(gid, r.id);
+  }
 
   Future<void> closeRequest(String gid, String rid) => api.resolveRequest(gid, rid);
 
