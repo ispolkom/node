@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
@@ -27,6 +28,24 @@ class _ChatScreenState extends State<ChatScreen> {
   String? _editingId;   // id редактируемого сообщения (null — обычная отправка)
 
   bool get _selecting => _selected.isNotEmpty;
+
+  Future<void> _showFingerprints() async {
+    final state = context.read<AppState>();
+    final bundle = await state.apiService.getPeerBundle(widget.peerId);
+    if (!mounted) return;
+    if (bundle == null || state.identity == null) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(state.nodeError ?? 'Проверенная связка ключей недоступна')));
+      return;
+    }
+    await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
+      title: const Text('Проверка ключей'),
+      content: SingleChildScrollView(child: SelectableText(
+        'Сравните отпечатки лично или по независимому каналу. Первое получение (TOFU) не подтверждает личность. При смене ключа отправка блокируется.\n\n'
+        'Мой Ed25519 SHA-256:\n${crypto.sha256.convert(state.identity!.ed25519PublicBytes)}\n\n'
+        'Собеседник Ed25519 SHA-256:\n${crypto.sha256.convert(bundle.ed25519)}')),
+      actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Закрыть'))],
+    ));
+  }
 
   void _startEdit(ChatMessage m) {
     setState(() {
@@ -216,6 +235,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
               iconTheme: const IconThemeData(color: AppTheme.text),
               actions: [
+                IconButton(tooltip:'Проверить ключи',icon:const Icon(Icons.security),onPressed:_showFingerprints),
                 IconButton(
                   tooltip: 'Позвонить',
                   icon: const Icon(Icons.call, color: AppTheme.accent),

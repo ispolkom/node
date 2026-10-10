@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:math';
+import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
@@ -7,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite/sqflite.dart';
 import '../models/trusted_node.dart';
 import '../models/message.dart';
+import '../crypto/replay_ledger.dart';
 
 /// Единое хранилище приложения.
 ///
@@ -14,6 +16,7 @@ import '../models/message.dart';
 /// SQLite                  — ноды, история сообщений, кэш публичных ключей
 class StorageService {
   static Database? _db;
+  static ReplayLedger? replayLedger;
 
   static const _secure = FlutterSecureStorage(
     aOptions: AndroidOptions(encryptedSharedPreferences: true),
@@ -23,6 +26,7 @@ class StorageService {
 
   static Future<void> init() async {
     final dir  = await getApplicationDocumentsDirectory();
+    replayLedger = ReplayLedger(File(p.join(dir.path,'e2e_replay_e4.json')));
     final path = p.join(dir.path, 'yandi.db');
     _db = await openDatabase(
       path,
@@ -132,13 +136,13 @@ class StorageService {
   }
 
   static Future<void> secureWrite(String key, String value) async {
-    _secureCache?[key] = value;
     await _secure.write(key: key, value: value);
+    _secureCache?[key] = value;
   }
 
   static Future<void> secureDelete(String key) async {
-    _secureCache?.remove(key);
     await _secure.delete(key: key);
+    _secureCache?.remove(key);
   }
 
   // ── Ноды ──────────────────────────────────────────────────────────────────

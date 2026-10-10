@@ -7,19 +7,24 @@ import '../models/trusted_node.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
 import '../crypto/identity.dart';
+import '../crypto/peer_trust.dart';
 import 'storage_service.dart';
 
 class ApiService {
   TrustedNode _node;
   late http.Client _client;
+  String? _deviceId;
+  final void Function(String)? onSecurityError;
+  final _trust = PeerTrust(read: StorageService.secureRead,write: StorageService.secureWrite);
 
-  ApiService(this._node) {
+  ApiService(this._node, {this.onSecurityError}) {
     _client = _buildClient(_node.fingerprint);
   }
 
   void switchNode(TrustedNode node) {
     _client.close();
     _node   = node;
+    _deviceId = null;
     _client = _buildClient(node.fingerprint);
   }
 
@@ -34,7 +39,15 @@ class ApiService {
     final res = await _client
         .get(_url('/mobile/info'), headers: _headers)
         .timeout(const Duration(seconds: 10));
-    return jsonDecode(res.body) as Map<String, dynamic>;
+    if (res.statusCode != 200) throw StateError('Node info unavailable');
+    final info = jsonDecode(res.body) as Map<String, dynamic>;
+    _deviceId = info['device_id'] as String?;
+    return info;
+  }
+
+  Future<String?> devicePeerId() async {
+    if (_deviceId == null) await getInfo();
+    return _deviceId;
   }
 
   /// Временные учётные данные сервера звонков (TURN) или null, если он на узле не настроен.
@@ -103,6 +116,10 @@ class ApiService {
   }
 
   Future<List<int>?> getPeerX25519Pub(String peerId) async {
+    return (await getPeerBundle(peerId))?.x25519;
+  }
+
+  Future<PeerKeyBundle?> getPeerBundle(String peerId) async {
     try {
       final res = await _client
           .get(_url('/mobile/pubkey/$peerId'), headers: _headers)
@@ -122,8 +139,12 @@ class ApiService {
         x25519PublicKey: pub,
         signature: sig,
       )) return null;
+      await _trust.accept(peerId,ed);
       await StorageService.cachePeerX25519Pub(peerId, pubB64);
-      return pub;
+      return PeerKeyBundle(pub,ed);
+    } on StateError catch (e) {
+      onSecurityError?.call(e.toString());
+      return null;
     } catch (_) {
       return null;
     }
@@ -135,7 +156,7 @@ class ApiService {
     required String signatureBase64,
   }) async {
     try {
-      await _client.post(
+      final res = await _client.post(
         _url('/mobile/pubkeys'),
         headers: _headers,
         body: jsonEncode({
@@ -144,7 +165,15 @@ class ApiService {
           'signature': signatureBase64,
         }),
       ).timeout(const Duration(seconds: 10));
-    } catch (_) {}
+      if (res.statusCode != 200) {
+        throw StateError(res.statusCode == 409
+          ? 'Ключ этого устройства изменился: нужно новое сопряжение после проверки владельцем.'
+          : 'Узел не сохранил связку ключей (${res.statusCode}).');
+      }
+    } on StateError catch (e) {
+      onSecurityError?.call(e.toString());
+      rethrow;
+    }
   }
 
   Future<List<Map<String, dynamic>>> fetchInbox(int sinceMs) async {
