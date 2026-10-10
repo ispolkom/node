@@ -59,7 +59,7 @@ def req_raw(method, path, data=None, token=None):
 def ws_open(token):
     s = ctx().wrap_socket(socket.create_connection(("127.0.0.1", PORT), timeout=15))
     key = base64.b64encode(os.urandom(16)).decode()
-    s.sendall((f"GET /mobile/ws?token={token} HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
+    s.sendall((f"GET /mobile/ws HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {token}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n").encode())
     buf = b""
     while b"\r\n\r\n" not in buf:
         buf += s.recv(1)
