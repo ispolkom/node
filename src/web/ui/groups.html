@@ -52,6 +52,7 @@
                 <span id="mgMsg" class="form-help" style="margin-left:8px"></span>
                 <div style="margin-top:8px;display:flex;gap:6px">
                     <button class="btn btn-sm btn-primary" id="tabMineBtn" type="button">Мои группы</button>
+                    <button class="btn btn-sm" id="tabListBtn" type="button">Список групп</button>
                     <button class="btn btn-sm" id="tabAdminBtn" type="button">Управление узла</button>
                 </div>
             </div>
@@ -79,34 +80,47 @@
             </div>
 
             </div>
+            <div id="tabList" style="display:none">
+                <div class="card" style="margin:12px 0;padding:14px 16px">
+                    <h3 style="margin:0 0 6px">Группы узла</h3>
+                    <p class="form-help" style="margin:0 0 8px">Группы, в которые вы ещё не вступили. «Открытая» — вступить сразу, «По приглашению» — попросить приглашение (владелец увидит вашу просьбу и решит).</p>
+                    <div id="mgCatalog" class="form-help">загрузка…</div>
+                </div>
+            </div>
             <div id="tabAdmin" style="display:none">
             
         
             <div class="card" style="margin:12px 0;padding:14px 16px">
                 <h3 style="margin:0 0 6px">Управление группами телефонов</h3>
-                <p class="form-help" style="margin:0 0 8px">Группы создают и ведут телефоны (сквозное шифрование): владелец группы — телефон, он выдаёт ключ, приглашения и роли. Вы, как владелец узла, содержимого не видите и в правах группы не участвуете. Здесь только то, что знает узел: название, тип, псевдонимы участников, размер, журнал действий модераторов. <b>Удалить группу целиком можно только с повторным вводом пароля узла.</b> </p>
+                <p class="form-help" style="margin:0 0 8px">Список всех групп узла: то, что знает узел (название, тип, псевдонимы участников, размер). Содержимого и прав в группах у владельца узла нет. <b>Удалить группу целиком можно только с повторным вводом пароля узла.</b></p>
                 <button class="btn btn-sm" id="pgReload" type="button">Обновить</button>
                 <span id="pgMsg" class="form-help"></span>
                 <div id="pgList" class="form-help" style="margin-top:10px">загрузка…</div>
-            </div>
-            <div class="card" style="margin:12px 0;padding:14px 16px">
-                <h3 style="margin:0 0 6px">Запасной путь: создать группу здесь</h3>
-                <p class="form-help" style="margin:0 0 8px">Обычно группу создаёт сам телефон (вкладка «Группы» → «Группа»). Здесь владельцем обязательно назначается телефон, а не узел.</p>
-                <div class="form-group"><label for="grpName">Название</label><input id="grpName" class="form-input" maxlength="64" autocomplete="off"></div>
-                <div class="form-group"><label for="grpTopic">Тема (необязательно)</label><input id="grpTopic" class="form-input" maxlength="256" autocomplete="off"></div>
-                <div class="form-group"><label for="grpKind">Тип</label>
-                    <select id="grpKind" class="form-input">
-                        <option value="closed">закрытая (участников добавляет владелец-телефон)</option>
-                        <option value="invite">по приглашению</option>
-                        <option value="open">открытая для ваших телефонов</option>
-                    </select></div>
-                <div class="form-group"><label for="grpOwner">Владелец группы (у этого телефона будет ключ)</label><select id="grpOwner" class="form-input"></select></div>
-                <button class="btn btn-primary" id="grpCreateBtn" type="button">Создать группу</button>
             </div>
         
             </div>
         </div>
     </main>
+
+    <div id="newDlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center">
+        <div class="card" style="max-width:420px;width:92%;padding:16px">
+            <h3 style="margin:0 0 8px">Новая группа</h3>
+            <div class="form-group"><label for="newName">Название</label><input id="newName" class="form-input" maxlength="64" autocomplete="off"></div>
+            <div class="form-group"><label for="newTopic">Тематика (обязательно)</label><input id="newTopic" class="form-input" maxlength="40" autocomplete="off" placeholder="например: Садоводство">
+                <div id="topicChips" style="margin-top:4px"></div></div>
+            <div class="form-group"><label for="newAbout">Описание (необязательно)</label><textarea id="newAbout" class="form-input" rows="2" maxlength="300"></textarea></div>
+            <div class="form-group"><label for="newKind">Тип</label>
+                <select id="newKind" class="form-input">
+                    <option value="invite">По приглашению — вступают, когда владелец пришлёт приглашение (можно попросить)</option>
+                    <option value="open">Открытая — вступают сразу</option>
+                </select></div>
+            <div id="newErr" class="form-help" style="color:#e74c3c;min-height:1.2em"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+                <button class="btn" id="newCancel" type="button">Отмена</button>
+                <button class="btn btn-primary" id="newOk" type="button">Создать</button>
+            </div>
+        </div>
+    </div>
 
     <div id="delDlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center">
         <div class="card" style="max-width:420px;width:92%;padding:16px">
@@ -129,7 +143,7 @@
 
     <script>
     (function () {
-        var KIND = { open: 'открыта', invite: 'по приглашению', closed: 'закрыта' };
+        var KIND = { open: 'открытая', invite: 'по приглашению' };
         var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
         var KIND_NAMES = { 2: 'Картинки', 3: 'Файлы', 4: 'Аудио', 5: 'Видео', 6: 'Ссылки' };
         var cur = null, lastSeq = 0, timer = null, groupsCache = [];
@@ -142,12 +156,24 @@
         function say(t) { $('mgMsg').textContent = t || ''; }
         function fail(e) { say(e && e.message ? e.message : 'Нет связи с узлом.'); }
 
+
+        // ── Список групп узла (куда я не вступил): название, описание, статус и действие прямо в карточке ──
+        function renderCatalog(list) {
+            var h = list.map(function (g) {
+                var st = g.kind === 'open' ? '<span style="color:var(--accent,#00d4aa)">Открытая</span>' : 'По приглашению';
+                var act = g.kind === 'open' ? '<button class="btn btn-sm btn-primary" type="button" data-jn="' + esc(g.id) + '">Вступить</button>'
+                    : (g.requested ? '<span class="mg-sub">Запрошено</span>' : '<button class="btn btn-sm" type="button" data-rq="' + esc(g.id) + '">Запросить приглашение</button>');
+                return '<div class="mg-item" style="cursor:default;margin-bottom:8px"><b>' + esc(g.name) + '</b>' + (g.topic ? '<div class="mg-sub">Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div class="mg-sub">' + esc(g.about) + '</div>' : '')
+                    + '<div style="margin-top:4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>' + st + '</span>' + act + '<span class="mg-sub">' + g.members + ' уч.</span></div></div>';
+            }).join('');
+            $('mgCatalog').innerHTML = h || '<div class="form-help">Других групп на узле пока нет.</div>';
+        }
         function renderList(d) {
             groupsCache = d.groups || [];
             var h = groupsCache.map(function (g) {
                 var badge = g.requests > 0 ? '<span class="mg-tag" style="color:#ff4001">просятся: ' + g.requests + '</span>' : '';
                 return '<div class="mg-item' + (cur === g.id ? ' sel' : '') + '" data-open="' + esc(g.id) + '"><b>' + esc(g.name) + '</b>' + badge
-                    + (g.topic ? '<div class="mg-sub">' + esc(g.topic) + '</div>' : '')
+                    + (g.topic ? '<div class="mg-sub">Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div class="mg-sub">' + esc(g.about) + '</div>' : '')
                     + '<div class="mg-sub">' + (KIND[g.kind] || '') + ' · ' + g.members + ' уч. · ' + ROLE[g.role] + (g.muted ? ' · заглушены' : '') + (!g.has_key && g.role !== 'owner' ? ' · ждёт ключ' : '') + '</div></div>';
             }).join('');
             if (!h) h = '<div class="form-help">Групп пока нет. Создайте свою или вступите.</div>';
@@ -155,16 +181,7 @@
                 h += '<div class="mg-item" style="opacity:.75"><b>' + esc(g.name) + '</b><div class="mg-sub" style="color:#ff4001">Удалена на узле или вас выгнали</div>'
                     + '<button class="btn btn-sm" data-forget="' + esc(g.id) + '" type="button">Убрать с компьютера</button></div>';
             });
-            var disc = d.discover || [];
-            if (disc.length) {
-                h += '<div class="mg-sub" style="margin:12px 0 4px;letter-spacing:1px">ГРУППЫ УЗЛА</div>';
-                disc.forEach(function (g) {
-                    var open = g.kind === 'open';
-                    h += '<div class="mg-item"><b>' + esc(g.name) + '</b>' + (g.topic ? '<div class="mg-sub">' + esc(g.topic) + '</div>' : '')
-                        + '<div class="mg-sub" style="color:' + (open ? 'var(--accent,#00d4aa)' : '#ff4001') + '">' + (open ? 'открыта' : 'по приглашению') + '</div>'
-                        + (g.requested ? '<span class="mg-sub">Запрошено</span>' : '<button class="btn btn-sm" type="button" data-' + (open ? 'jn' : 'rq') + '="' + esc(g.id) + '">' + (open ? 'Вступить' : 'Запросить приглашение') + '</button>') + '</div>';
-                });
-            }
+            renderCatalog(d.catalog || []);
             $('mgList').innerHTML = h;
         }
         function loadList() { return api('GET', '/api/groups').then(renderList).catch(function () { $('mgList').textContent = 'нет ответа от узла'; }); }
@@ -226,7 +243,7 @@
                     });
                     h += '</div>';
                 }
-                if (staff && g.kind !== 'closed') {
+                if (staff) {
                     h += '<div style="margin-bottom:8px"><b>Пригласить</b> ';
                     if (g.kind === 'invite') h += '<button class="btn btn-sm" id="mgCode" type="button">Код приглашения</button> ';
                     h += '<select id="mgDev" class="form-input" style="width:auto;display:inline-block">' + devs.map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>'; }).join('') + '</select> '
@@ -284,11 +301,23 @@
         $('mgSend').addEventListener('click', send);
         $('mgText').addEventListener('keydown', function (e) { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); send(); } });
         $('mgReload').addEventListener('click', function () { loadList(); loadFeed(false); });
-        $('mgNew').addEventListener('click', function () {
-            var name = prompt('Название группы'); if (!name) return;
-            var topic = prompt('Тема (необязательно)') || '';
-            var open = confirm('Сделать группу ОТКРЫТОЙ для телефонов этого узла?\n\nОК — открытая (вступают сами)\nОтмена — по приглашению');
-            api('POST', '/api/groups/create', { name: name, topic: topic, kind: open ? 'open' : 'invite' }).then(function (j) { say('Группа создана.'); return loadList().then(function () { openGroup(j.id); }); }).catch(fail);
+        $('mgNew').addEventListener('click', function () { $('newName').value = ''; $('newTopic').value = ''; $('newAbout').value = ''; $('newErr').textContent = ''; $('newDlg').style.display = 'flex'; $('newName').focus(); });
+
+        // подсказки тематики: частые темы одним нажатием
+        (function () {
+            var topics = ['Семья', 'Друзья', 'Работа', 'Новости', 'Политика', 'Юмор', 'Садоводство', 'Технологии', 'Музыка', 'Игры', 'Авто', 'Спорт'];
+            $('topicChips').innerHTML = topics.map(function (t) { return '<button class="btn btn-sm" type="button" data-topic-chip="' + t + '" style="margin:0 4px 4px 0">' + t + '</button>'; }).join('');
+            $('topicChips').addEventListener('click', function (e) { var t = e.target && e.target.getAttribute && e.target.getAttribute('data-topic-chip'); if (t) $('newTopic').value = t; });
+        })();
+        $('newCancel').addEventListener('click', function () { $('newDlg').style.display = 'none'; });
+        $('newOk').addEventListener('click', function () {
+            var name = $('newName').value.trim();
+            var topic = $('newTopic').value.trim();
+            if (!name) { $('newErr').textContent = 'Введите название'; return; }
+            if (!topic) { $('newErr').textContent = 'Укажите тематику группы'; return; }
+            api('POST', '/api/groups/create', { name: name, topic: topic, about: $('newAbout').value.trim(), kind: $('newKind').value })
+                .then(function (j) { $('newDlg').style.display = 'none'; say('Группа создана.'); showTab('mine'); return loadList().then(function () { openGroup(j.id); }); })
+                .catch(function (er) { $('newErr').textContent = er.message; });
         });
         $('mgJoinCode').addEventListener('click', function () {
             var raw = prompt('Приглашение (YANDI-GROUP-1:… из сообщения телефона)'); if (!raw) return;
@@ -297,7 +326,7 @@
             var name = prompt('Ваше имя в группе'); if (!name) return;
             api('POST', '/api/groups/' + m[1].toLowerCase() + '/join', { code: m[2].toUpperCase(), name: name }).then(function () { say('Вы в группе.'); loadList(); }).catch(fail);
         });
-        $('mgList').addEventListener('click', function (e) {
+        document.addEventListener('click', function (e) {
             var el = e.target; if (!el || !el.getAttribute) return;
             var fg = el.getAttribute('data-forget'), jn = el.getAttribute('data-jn'), rq = el.getAttribute('data-rq');
             if (fg) { api('POST', '/api/groups/' + fg + '/forget').then(function () { say('Убрано.'); loadList(); }).catch(fail); return; }
@@ -328,7 +357,7 @@
     <script>
     (function () {
         var list = document.getElementById('pgList'), msg = document.getElementById('pgMsg');
-        var KIND = { closed: 'закрытая', invite: 'по приглашению', open: 'открытая' };
+        var KIND = { invite: 'по приглашению', open: 'открытая' };
         var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
         var delGid = null;
         function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
@@ -337,22 +366,18 @@
                 .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); });
         }
         function fail(e) { msg.textContent = e && e.message ? e.message : 'Нет связи с узлом.'; }
-        function devOptions(devs) { return devs.map(function (d) { return '<option value="' + esc(d.id) + '">' + esc(d.name) + ' (' + esc(d.id.slice(0, 8)) + ')</option>'; }).join(''); }
         function render(d) {
-            var devs = d.devices || [];
-            document.getElementById('grpOwner').innerHTML = devs.length ? devOptions(devs) : '<option value="">нет сопряжённых телефонов</option>';
             var gs = d.groups || [];
-            if (!gs.length) { list.textContent = 'Групп телефонов пока нет. Телефон создаёт группу во вкладке «Группы» приложения.'; return; }
+            if (!gs.length) { list.textContent = 'Групп на узле пока нет.'; return; }
             list.innerHTML = gs.map(function (g) {
                 var mem = g.members.map(function (m) { return esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : ''); }).join('<br>');
                 return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:8px 0">'
-                    + '<b>' + esc(g.name) + '</b>' + (g.topic ? '<div>' + esc(g.topic) + '</div>' : '') + '<div>' + (KIND[g.kind] || esc(g.kind)) + '</div>'
+                    + '<b>' + esc(g.name) + '</b>' + (g.topic ? '<div>Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div>' + esc(g.about) + '</div>' : '') + '<div>' + (KIND[g.kind] || esc(g.kind)) + '</div>'
                     + '<span>участников: ' + g.members.length + ', записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
                     + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу стоит сменить ключ</b>' : '') + '</span>'
                     + '<div style="margin:6px 0">' + mem + '</div>'
-                    + '<button class="btn btn-sm" type="button" data-log="' + esc(g.id) + '">Журнал модерации</button> '
                     + '<button class="btn btn-sm" type="button" data-del="' + esc(g.id) + '" data-name="' + esc(g.name) + '">Удалить группу…</button>'
-                    + '<div data-out="' + esc(g.id) + '" style="margin-top:6px"></div></div>';
+                    + '</div>';
             }).join('');
         }
         function load() { api('GET', '/api/mobile/groups').then(render).catch(function () { list.textContent = 'нет ответа от узла'; }); }
@@ -360,15 +385,7 @@
         list.addEventListener('click', function (e) {
             var t = e.target;
             if (!t || !t.getAttribute) return;
-            if (t.getAttribute('data-log')) {
-                var gid = t.getAttribute('data-log'), out = list.querySelector('[data-out="' + gid + '"]');
-                api('GET', '/api/mobile/groups/' + encodeURIComponent(gid) + '/modlog').then(function (j) {
-                    var l = (j.modlog || []).slice(-50).reverse();
-                    out.innerHTML = l.length ? l.map(function (x) {
-                        return esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + (x.seq ? ' №' + x.seq : '');
-                    }).join('<br>') : 'Пусто.';
-                }).catch(fail);
-            } else if (t.getAttribute('data-del')) {
+            if (t.getAttribute('data-del')) {
                 delGid = t.getAttribute('data-del');
                 document.getElementById('delName').textContent = t.getAttribute('data-name');
                 document.getElementById('delPass').value = '';
@@ -387,25 +404,22 @@
                 .catch(function (er) { document.getElementById('delErr').textContent = er.message; });
         });
         document.getElementById('delPass').addEventListener('keydown', function (e) { if (e.key === 'Enter') document.getElementById('delOk').click(); });
-        document.getElementById('grpCreateBtn').addEventListener('click', function () {
-            api('POST', '/api/mobile/groups', { name: document.getElementById('grpName').value, topic: document.getElementById('grpTopic').value, kind: document.getElementById('grpKind').value, owner_device: document.getElementById('grpOwner').value, members: [] })
-                .then(function () { document.getElementById('grpName').value = ''; document.getElementById('grpTopic').value = ''; msg.textContent = 'Группа создана.'; load(); })
-                .catch(fail);
-        });
         load();
         setInterval(load, 15000);
     })();
     
+    var showTab;
     (function () {
-        var m = document.getElementById('tabMine'), a = document.getElementById('tabAdmin'), bm = document.getElementById('tabMineBtn'), ba = document.getElementById('tabAdminBtn');
-        function show(admin) {
-            m.style.display = admin ? 'none' : ''; a.style.display = admin ? '' : 'none';
-            bm.className = 'btn btn-sm' + (admin ? '' : ' btn-primary'); ba.className = 'btn btn-sm' + (admin ? ' btn-primary' : '');
-            if (admin) { try { history.replaceState(null, '', '#admin'); } catch (e) {} } else { try { history.replaceState(null, '', '#'); } catch (e) {} }
-        }
-        bm.addEventListener('click', function () { show(false); });
-        ba.addEventListener('click', function () { show(true); });
-        if (location.hash === '#admin') show(true);
+        var names = ['mine', 'list', 'admin'];
+        var pane = { mine: document.getElementById('tabMine'), list: document.getElementById('tabList'), admin: document.getElementById('tabAdmin') };
+        var btn = { mine: document.getElementById('tabMineBtn'), list: document.getElementById('tabListBtn'), admin: document.getElementById('tabAdminBtn') };
+        showTab = function (n) {
+            names.forEach(function (k) { pane[k].style.display = k === n ? '' : 'none'; btn[k].className = 'btn btn-sm' + (k === n ? ' btn-primary' : ''); });
+            try { history.replaceState(null, '', n === 'mine' ? '#' : '#' + n); } catch (e) {}
+        };
+        names.forEach(function (k) { btn[k].addEventListener('click', function () { showTab(k); }); });
+        var h = location.hash.replace('#', '');
+        if (names.indexOf(h) >= 0) showTab(h);
     })();
     </script>
 </body>

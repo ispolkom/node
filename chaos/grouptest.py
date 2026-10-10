@@ -103,11 +103,27 @@ st, g = a.api("GET", "/api/mobile/groups")
 devs = {d["name"]: d["id"] for d in g.get("devices", [])}
 check("the page lists paired devices for groups", st == 200 and {"owner", "bob", "eve"} <= set(devs), (st, g))
 
-st, r = a.api("POST", "/api/mobile/groups", {"name": "", "kind": "closed", "owner_device": devs["owner"]})
+st, r = a.api("POST", "/api/mobile/groups", {"name": "x", "kind": "invite", "owner_device": devs["owner"]})
+check("the node page can no longer create groups", st in (404, 405), st)
+st, r = req("POST", "/mobile/groups", {"name": "", "topic": "тест", "kind": "invite"}, token=t_own)
 check("a group needs a name", st == 400, (st, r))
-st, r = a.api("POST", "/api/mobile/groups", {"name": "Семья", "topic": "домашнее", "kind": "closed", "owner_device": devs["owner"], "members": [devs["bob"]]})
-check("the page creates a group", st == 200 and len(r.get("id", "")) == 32, (st, r))
+st, r = req("POST", "/mobile/groups", {"name": "Семья", "topic": "домашнее", "about": "для своих", "kind": "invite"}, token=t_own)
+check("a phone creates a group with topic and description", st == 200 and len(r.get("id", "")) == 32, (st, r))
 gid = r["id"]
+st, r = req("GET", "/mobile/groups/open", token=t_bob)
+check("an invite-only group is listed for other phones with topic and description", [x for x in r["groups"] if x["id"] == gid][0]["about"] == "для своих", r)
+st, r = req("POST", "/mobile/groups", {"name": "Без темы", "kind": "invite"}, token=t_own)
+check("a group without a topic is refused", st == 400, (st, r))
+st, r = req("POST", "/mobile/groups", {"name": "Тип", "topic": "x", "kind": "closed"}, token=t_own)
+check("the removed 'closed' type is refused on create", st == 400, (st, r))
+st, r = req("GET", "/mobile/groups", token=t_own)
+check("the list carries topic and description", [x for x in r["groups"] if x["id"] == gid][0]["topic"] == "домашнее" and [x for x in r["groups"] if x["id"] == gid][0]["about"] == "для своих", r)
+st, r = req("POST", f"/mobile/groups/{gid}/join", {}, token=t_bob)
+check("an invite group cannot be joined without an invitation", st == 403, (st, r))
+st, r = req("POST", f"/mobile/groups/{gid}/invite", {"uses": 1}, token=t_own)
+check("the owner issues a code for the group", st == 200 and len(r.get("code", "")) == 14, (st, r))
+st, r = req("POST", f"/mobile/groups/{gid}/join", {"invite_code": r["code"]}, token=t_bob)
+check("bob joins the group with the code", st == 200 and r.get("alias"), (st, r))
 
 st, r = req("GET", "/mobile/groups", token=t_own)
 mine = r["groups"][0] if st == 200 and r["groups"] else {}
@@ -167,7 +183,7 @@ acts = [x["action"] for x in r.get("modlog", [])]
 check("the moderation log is kept on the node", acts[-3:] == ["mute", "unmute", "delete_entry"], acts)
 
 # invite group: invite code from the owner phone, eve joins
-st, r = a.api("POST", "/api/mobile/groups", {"name": "Клуб", "kind": "invite", "owner_device": devs["owner"]})
+st, r = req("POST", "/mobile/groups", {"name": "Клуб", "topic": "клуб", "kind": "invite"}, token=t_own)
 gid2 = r["id"]
 st, r = req("POST", f"/mobile/groups/{gid2}/invite", {"uses": 1}, token=t_own)
 code = r.get("code") if st == 200 else None
@@ -180,10 +196,10 @@ st, r = req("POST", f"/mobile/groups/{gid2}/join", {"invite_code": code}, token=
 check("the code works once", st == 403, st)
 
 # open group: seen and joined by any phone of the node
-st, r = a.api("POST", "/api/mobile/groups", {"name": "Двор", "kind": "open", "owner_device": devs["owner"]})
+st, r = req("POST", "/mobile/groups", {"name": "Двор", "topic": "двор", "kind": "open"}, token=t_own)
 gid3 = r["id"]
 st, r = req("GET", "/mobile/groups/open", token=t_eve)
-check("eve sees the open group", st == 200 and [x["id"] for x in r["groups"]] == [gid3], r)
+check("eve sees the open group in the node's list (with the invite-only ones)", st == 200 and [x for x in r["groups"] if x["id"] == gid3] and [x for x in r["groups"] if x["id"] == gid3][0]["kind"] == "open", r)
 st, r = req("POST", f"/mobile/groups/{gid3}/join", {}, token=t_eve)
 eve_alias = r.get("alias")
 check("eve joins the open group", st == 200 and eve_alias, (st, r))
@@ -204,7 +220,7 @@ g3 = [x for x in r["groups"] if x["id"] == gid3]
 check("the owner is told to change the key after a ban", g3 and g3[0]["rekey_needed"], r)
 
 # a phone creates its own group and owns it
-st, r = req("POST", "/mobile/groups", {"name": "Свои", "topic": "", "kind": "closed"}, token=t_bob)
+st, r = req("POST", "/mobile/groups", {"name": "Свои", "topic": "x", "kind": "closed"}, token=t_bob)
 check("a phone cannot create a closed group", st == 400, (st, r))
 st, r = req("POST", "/mobile/groups", {"name": "", "kind": "invite"}, token=t_bob)
 check("a phone group needs a name", st == 400, (st, r))
@@ -219,7 +235,7 @@ check("it can issue invites itself", st == 200 and len(r.get("code", "")) == 14,
 code4 = r.get("code")
 st, r = req("POST", f"/mobile/groups/{gid4}/join", {"invite_code": code4}, token=t_own)
 check("another phone joins by that invite", st == 200, (st, r))
-st, r = a.api("GET", f"/api/mobile/groups/{gid4}/modlog")
+st, r = req("GET", f"/mobile/groups/{gid4}/modlog", token=t_bob)
 check("the log names the phone, not the node page", st == 200 and r["modlog"][0]["by"] != "компьютер" and r["modlog"][0]["action"] == "create", r)
 # asking for an invitation: eve asks, only the owner/moderators see it and answer
 st, r = req("GET", "/mobile/groups/open", token=t_eve)
@@ -248,8 +264,8 @@ st, r = req("POST", f"/mobile/groups/{gid3}/request", {"name": "x"}, token=t_eve
 check("a request to an open or closed group is refused", st in (400, 409), (st, r))
 
 for i in range(9):
-    st, r = req("POST", "/mobile/groups", {"name": f"g{i}", "kind": "open"}, token=t_bob)
-st, r = req("POST", "/mobile/groups", {"name": "лишняя", "kind": "open"}, token=t_bob)
+    st, r = req("POST", "/mobile/groups", {"name": f"g{i}", "topic": "t", "kind": "open"}, token=t_bob)
+st, r = req("POST", "/mobile/groups", {"name": "лишняя", "topic": "t", "kind": "open"}, token=t_bob)
 check("a phone cannot lead more than ten groups", st == 429, (st, r))
 
 # files of a group: only members, only ciphertext chunks, expiry/limits, uploader or moderator deletes

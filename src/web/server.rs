@@ -611,7 +611,7 @@ impl WebServer {
             .route("/api/mobile/call/log", post(mobile_call_log))
             .route(
                 "/api/mobile/groups",
-                get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create),
+                get(crate::mobile_groups::pc_list),
             )
             // удаление группы — только с повторным вводом пароля узла (открытая сессия админки не даёт права удалить)
             .route("/api/mobile/groups/:gid/delete", post(api_mobile_group_delete))
@@ -631,10 +631,6 @@ impl WebServer {
             .route("/api/groups/:gid/invite-device", post(api_groups_invite_device))
             .route("/api/groups/:gid/answer", post(api_groups_answer))
             .route("/api/groups/devices", get(api_groups_devices))
-            .route(
-                "/api/mobile/groups/:gid/modlog",
-                get(crate::mobile_groups::pc_modlog),
-            )
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
@@ -857,11 +853,13 @@ struct MyGroupCreate {
     name: String,
     #[serde(default)]
     topic: String,
+    #[serde(default)]
+    about: String,
     kind: String,
 }
 
 async fn api_groups_create(Json(b): Json<MyGroupCreate>) -> Response {
-    grp_reply(crate::group_client::create(&b.name, &b.topic, &b.kind).map(|id| serde_json::json!({"id": id})))
+    grp_reply(crate::group_client::create(&b.name, &b.topic, &b.about, &b.kind).map(|id| serde_json::json!({"id": id})))
 }
 
 #[derive(Deserialize)]

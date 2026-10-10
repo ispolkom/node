@@ -2,12 +2,12 @@ import 'dart:convert';
 
 /// Группа в списке (ответ узла `GET /mobile/groups`).
 class GroupInfo {
-  final String id, name, topic, kind, myAlias, role;
+  final String id, name, topic, about, kind, myAlias, role;
   final bool muted, rekeyNeeded;
   final int members, epoch, firstSeq, lastSeq, requests;
   final List<String> pendingKeys;
   const GroupInfo({
-    required this.id, required this.name, required this.topic, required this.kind, required this.myAlias, required this.role,
+    required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.myAlias, required this.role,
     required this.muted, required this.rekeyNeeded, required this.members, required this.epoch, required this.firstSeq,
     required this.lastSeq, required this.pendingKeys, this.requests = 0,
   });
@@ -16,7 +16,8 @@ class GroupInfo {
         id: j['id'] as String,
         name: (j['name'] ?? '') as String,
         topic: (j['topic'] ?? '') as String,
-        kind: (j['kind'] ?? 'closed') as String,
+        about: (j['about'] ?? '') as String,
+        kind: (j['kind'] ?? 'invite') as String,
         myAlias: (j['my_alias'] ?? '') as String,
         role: (j['role'] ?? 'member') as String,
         muted: j['muted'] == true,
@@ -76,15 +77,16 @@ class GroupRules {
 
 /// Группа узла, куда можно вступить или попроситься (из списка «Группы узла»).
 class DiscoverGroup {
-  final String id, name, topic, kind;
+  final String id, name, topic, about, kind;
   final int members;
   final bool requested;
-  const DiscoverGroup({required this.id, required this.name, required this.topic, required this.kind, required this.members, required this.requested});
+  const DiscoverGroup({required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.members, required this.requested});
 
   factory DiscoverGroup.fromJson(Map<String, dynamic> j) => DiscoverGroup(
         id: j['id'] as String,
         name: (j['name'] ?? '') as String,
         topic: (j['topic'] ?? '') as String,
+        about: (j['about'] ?? '') as String,
         kind: (j['kind'] ?? 'open') as String,
         members: (j['members'] ?? 0) as int,
         requested: j['requested'] == true,

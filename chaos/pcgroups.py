@@ -207,7 +207,7 @@ for gone in ["/my-groups", "/phone-groups", "/group-chat", "/api/groups/sync", "
     st, _ = a.api("GET", gone)
     check(f"{gone} no longer exists", st in (404, 405), st)
 st, r = a.api("GET", "/api/groups")
-check("GET /api/groups is the new participant list", st == 200 and "groups" in r and "discover" in r, (st, r))
+check("GET /api/groups is the participant list with the node catalog", st == 200 and "groups" in r and "catalog" in r, (st, r))
 
 # 0) devices that are not contacts: new -> add / hide / block
 st, r = a.api("GET", "/api/mobile/other-devices")
@@ -236,12 +236,15 @@ check("an unknown action is refused", st == 400, (st, r))
 
 # 1) the PC creates a group and owns it; the phone sees it and joins
 st, r = a.api("POST", "/api/groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "closed"})
-check("the PC cannot create a closed group", st == 400, (st, r))
-st, r = a.api("POST", "/api/groups/create", {"name": "Домашняя", "topic": "с ПК", "kind": "open"})
+check("the PC cannot create the removed closed type", st == 400, (st, r))
+st, r = a.api("POST", "/api/groups/create", {"name": "Без темы", "kind": "open"})
+check("the PC cannot create a group without a topic", st == 400, (st, r))
+st, r = a.api("POST", "/api/groups/create", {"name": "Домашняя", "topic": "с ПК", "about": "общая лента", "kind": "open"})
 gid = r.get("id")
 check("the PC creates an open group", st == 200 and gid and len(gid) == 32, (st, r))
 st, r = a.api("GET", "/api/groups")
 mine = [x for x in r["groups"] if x["id"] == gid]
+check("topic and description are in the list", mine and mine[0]["topic"] == "с ПК" and mine[0]["about"] == "общая лента", r)
 check("the PC is the owner and has the first key", mine and mine[0]["role"] == "owner" and mine[0]["has_key"] is True and mine[0]["epoch"] == 1, r)
 st, r = ph.call("GET", "/mobile/groups/open")
 check("the phone sees the PC's group in the node's list", [x["name"] for x in r["groups"]] == ["Домашняя"], r)
@@ -280,12 +283,12 @@ d = a.api("GET", f"/api/groups/{gid}/messages?after=0")[1]
 check("an image that sneaks in is hidden on the PC", all(m["kind"] != 2 for m in d["messages"]), d)
 
 # 4) a phone owns a group, the PC asks for an invitation, gets it by code, then reads the feed
-st, r = ph.call("POST", "/mobile/groups", {"name": "Клуб телефона", "kind": "invite"})
+st, r = ph.call("POST", "/mobile/groups", {"name": "Клуб телефона", "topic": "клуб", "kind": "invite"})
 pg = r["id"]
 ph.publish(pg); st, groups = ph.call("GET", "/mobile/groups")
 ph.provision(pg)
 st, r = a.api("GET", "/api/groups")
-disc = [x for x in r["discover"] if x["id"] == pg]
+disc = [x for x in r["catalog"] if x["id"] == pg]
 check("the PC sees the phone's invite-only group among the node's groups", disc and disc[0]["kind"] == "invite", r)
 st, r = a.api("POST", f"/api/groups/{pg}/request", {"name": "Хозяин ПК"})
 check("the PC asks for an invitation", st == 200, (st, r))
@@ -329,7 +332,7 @@ check("and takes it back", st == 200, (st, r))
 st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "kick", "alias": "нет такого"})
 check("moderating a stranger fails cleanly", st == 400, (st, r))
 
-st, r = a.api("POST", "/api/groups/create", {"name": "Приватная", "kind": "invite"})
+st, r = a.api("POST", "/api/groups/create", {"name": "Приватная", "topic": "личное", "about": "для проверки", "kind": "invite"})
 pgid = r["id"]
 check("the PC creates an invite-only group", st == 200 and pgid, (st, r))
 st, r = a.api("GET", "/api/groups/devices")

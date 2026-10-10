@@ -195,15 +195,16 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     return Scaffold(
       appBar: AppBar(title: Text(g.name)),
       body: ListView(children: [
-        if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.all(16), child: Text(g.topic, style: const TextStyle(color: AppTheme.textSecondary))),
+        if (g.about.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 0), child: Text(g.about, style: const TextStyle(color: AppTheme.text))),
+        if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.all(16), child: Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary))),
         ListTile(
           leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
           title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),
           subtitle: const Text('Свой в каждой группе; узел не знает, кто вы', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
         ),
-        if (g.canModerate && g.kind != 'closed')
+        if (g.canModerate)
           ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить из контактов', style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
-        if (g.canModerate && g.kind == 'invite')
+        if (g.canModerate && g.kind != 'open')
           ListTile(leading: const Icon(Icons.link, color: AppTheme.textSecondary), title: const Text('Код приглашения', style: TextStyle(color: AppTheme.text)), subtitle: const Text('Передать самому', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)), onTap: () => _invite(g)),
         if (_requests.isNotEmpty) ...[
           Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Просятся в группу (${_requests.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),

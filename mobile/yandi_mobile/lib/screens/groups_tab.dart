@@ -125,7 +125,8 @@ class _GroupsTabState extends State<GroupsTab> {
                       ),
                       title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
                       subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                        if (g.topic.isNotEmpty) Text(g.topic, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                        if (g.about.isNotEmpty) Text(g.about, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                        if (g.topic.isNotEmpty) Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                         Text(g.isOpen ? 'открыта' : 'по приглашению', style: TextStyle(color: g.isOpen ? AppTheme.accent : AppTheme.incoming, fontSize: 12)),
                       ]),
                       trailing: g.requested
@@ -166,7 +167,7 @@ class _GroupsTabState extends State<GroupsTab> {
                       child: Text(g.name.isEmpty ? '?' : g.name.characters.first.toUpperCase(), style: const TextStyle(color: AppTheme.accent)),
                     ),
                     title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
-                    subtitle: Text('${g.topic.isEmpty ? '' : '${g.topic} · '}${g.members} уч. · вы: ${_roleLabel(g.role)}${g.muted ? ' · заглушены' : ''}',
+                    subtitle: Text('${g.topic.isEmpty ? '' : 'Тематика: ${g.topic} · '}${g.members} уч. · вы: ${_roleLabel(g.role)}${g.muted ? ' · заглушены' : ''}${g.about.isEmpty ? '' : '\n${g.about}'}',
                         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                     trailing: state.groups!.hasProblem(g.id)
                         ? const Icon(Icons.warning_amber, color: AppTheme.incoming)
@@ -212,6 +213,7 @@ class _GroupsTabState extends State<GroupsTab> {
     final state = context.read<AppState>();
     final nameCtrl = TextEditingController();
     final topicCtrl = TextEditingController();
+    final aboutCtrl = TextEditingController();
     String kind = 'invite';
     String? error;
     bool busy = false;
@@ -226,7 +228,12 @@ class _GroupsTabState extends State<GroupsTab> {
             const Text('Новая группа', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
             TextField(controller: nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
-            TextField(controller: topicCtrl, maxLength: 256, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тема (необязательно)')),
+            TextField(controller: topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика (обязательно)', hintText: 'например: Садоводство')),
+            Wrap(spacing: 6, runSpacing: 0, children: [
+              for (final t in const ['Семья', 'Друзья', 'Работа', 'Новости', 'Политика', 'Юмор', 'Садоводство', 'Технологии', 'Музыка', 'Игры', 'Авто', 'Спорт'])
+                ActionChip(label: Text(t, style: const TextStyle(fontSize: 12)), visualDensity: VisualDensity.compact, onPressed: () => setS(() => topicCtrl.text = t)),
+            ]),
+            TextField(controller: aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Описание (необязательно)')),
             const SizedBox(height: 8),
             RadioListTile<String>(
               value: 'invite', groupValue: kind, activeColor: AppTheme.accent, dense: true,
@@ -245,9 +252,10 @@ class _GroupsTabState extends State<GroupsTab> {
               style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
               onPressed: busy ? null : () async {
                 if (nameCtrl.text.trim().isEmpty) { setS(() => error = 'Введите название'); return; }
+                if (topicCtrl.text.trim().isEmpty) { setS(() => error = 'Укажите тематику группы'); return; }
                 setS(() { busy = true; error = null; });
                 try {
-                  final gid = await state.groups!.createGroup(nameCtrl.text, topicCtrl.text, kind);
+                  final gid = await state.groups!.createGroup(nameCtrl.text, topicCtrl.text, aboutCtrl.text, kind);
                   await state.syncGroups();
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx);

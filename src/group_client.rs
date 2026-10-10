@@ -592,8 +592,8 @@ fn list_value(c: &mut Client, dev: &str) -> Value {
         })
         .collect();
     let gone: Vec<Value> = c.state.known.iter().filter(|(id, _)| !listed.contains(*id)).map(|(id, n)| json!({"id": id, "name": n})).collect();
-    let discover: Vec<Value> = with_store(|st| st.open_for(dev));
-    json!({"groups": groups, "gone": gone, "discover": discover})
+    let catalog: Vec<Value> = with_store(|st| st.open_for(dev));
+    json!({"groups": groups, "gone": gone, "catalog": catalog})
 }
 
 pub fn list() -> Result<Value, String> {
@@ -602,17 +602,20 @@ pub fn list() -> Result<Value, String> {
 }
 
 /// Создать группу: владельцем становится компьютер. kind: `invite` | `open`.
-pub fn create(name: &str, topic: &str, kind: &str) -> Result<String, String> {
+pub fn create(name: &str, topic: &str, about: &str, kind: &str) -> Result<String, String> {
     let dev = pc_device()?;
-    let kind: crate::mobile_groups::Kind = serde_json::from_value(json!(kind)).map_err(|_| "неверный тип группы".to_string())?;
-    if kind == crate::mobile_groups::Kind::Closed {
-        return Err("с компьютера создаются группы «по приглашению» и «открытые»".into());
-    }
+    let kind = match kind {
+        "open" => crate::mobile_groups::Kind::Open,
+        "invite" => crate::mobile_groups::Kind::Invite,
+        _ => return Err("тип группы: открытая или по приглашению".into()),
+    };
     let gid = with_store(|st| {
         if st.owned_count(&dev) >= 10 {
             return Err(crate::mobile_groups::Fail(axum::http::StatusCode::TOO_MANY_REQUESTS, "вы уже ведёте максимум групп"));
         }
-        st.create_as(name, topic, kind, &dev, &[], true)
+        let id = st.create_as(name, topic, kind, &dev, &[], true)?;
+        st.set_about(&id, about);
+        Ok(id)
     })
     .map_err(fail)?;
     sync_all(); // создаёт первое поколение ключа
@@ -801,8 +804,7 @@ pub async fn invite_device(gid: &str, peer: &str) -> Result<(), String> {
     let kind = s(&g, "kind");
     let code = match kind.as_str() {
         "open" => String::new(),
-        "invite" => invite_code(gid)?["code"].as_str().unwrap_or("").to_string(),
-        _ => return Err("в закрытую группу приглашения не рассылаются".into()),
+        _ => invite_code(gid)?["code"].as_str().unwrap_or("").to_string(),
     };
     crate::mobile_api::pc_send_to_device(peer, invite_card(gid, &code, &s(&g, "name"))).await.map(|_| ())
 }

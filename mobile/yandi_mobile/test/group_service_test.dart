@@ -63,7 +63,7 @@ class _Api implements GroupApi {
     n.reqs.removeWhere((r) => r['id'] == rid);
   }
   @override
-  Future<String> create(String name, String topic, String kind) async => n.gid;
+  Future<String> create(String name, String topic, String about, String kind) async => n.gid;
   @override
   Future<String> join(String gid, {String? inviteCode, String? memberPub}) async {
     if (inviteCode != 'AAAA-BBBB-CCCC') throw const GroupApiError(403, 'неверное приглашение');
@@ -294,7 +294,7 @@ void main() {
   });
 
   test('создание группы телефоном: владелец сразу получает ключ', () async {
-    final gid = await owner.createGroup('Новая', 'тема', 'invite');
+    final gid = await owner.createGroup('Новая', 'тема', '', 'invite');
     expect(gid, node.gid);
     expect(owner.byId(gid)!.epoch, 1);
   });

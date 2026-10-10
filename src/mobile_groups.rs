@@ -56,12 +56,10 @@ pub const HINT_DELETED: u8 = 4;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
-    /// вступить можно по коду приглашения (его выдают владелец и модераторы)
-    Invite,
-    /// участников добавляет только владелец узла на компьютере
-    Closed,
-    /// любой телефон этого узла видит группу в списке и может вступить сам
     Open,
+    /// «По приглашению». Старые группы с типом «закрытая» читаются как эта (отдельного закрытого типа больше нет).
+    #[serde(alias = "closed")]
+    Invite,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -111,6 +109,9 @@ struct JoinRequest {
     ts: u64,
 }
 
+/// Тематика новой группы (короткая метка для каталога) и описание.
+const MAX_NEW_TOPIC: usize = 40;
+const MAX_ABOUT: usize = 300;
 const MAX_REQUESTS: usize = 20;
 const REQUEST_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
 
@@ -134,6 +135,9 @@ struct Group {
     name: String,
     #[serde(default)]
     topic: String,
+    /// необязательное описание (до 300 знаков); пусто — в карточке не показывается
+    #[serde(default)]
+    about: String,
     kind: Kind,
     created_ms: u64,
     members: Vec<Member>,
@@ -539,6 +543,9 @@ impl Store {
         if name.is_empty() {
             return Err(bad("нужно название группы"));
         }
+        if by_phone && clean(topic, MAX_NEW_TOPIC).is_empty() {
+            return Err(bad("нужна тематика группы"));
+        }
         if self.groups.len() >= MAX_GROUPS {
             return Err(Fail(
                 StatusCode::INSUFFICIENT_STORAGE,
@@ -549,7 +556,8 @@ impl Store {
         let mut g = Group {
             id: id.clone(),
             name,
-            topic: clean(topic, MAX_TOPIC),
+            topic: clean(topic, if by_phone { MAX_NEW_TOPIC } else { MAX_TOPIC }),
+            about: String::new(),
             kind,
             created_ms: now_ms(),
             members: Vec::new(),
@@ -733,11 +741,6 @@ impl Store {
         let mut via = None;
         match g.kind {
             Kind::Open => {}
-            Kind::Closed => {
-                return Err(forbidden(
-                    "в закрытую группу добавляет только владелец узла",
-                ))
-            }
             Kind::Invite => {
                 let h = hex::encode(Sha256::digest(
                     code.unwrap_or("").trim().to_uppercase().as_bytes(),
@@ -1109,8 +1112,8 @@ impl Store {
     /// Код приглашения (для групп «по приглашению»): выдают владелец и модераторы. Узел хранит только хэш кода.
     pub fn invite(&mut self, gid: &str, device: &str, uses: u32, ttl_ms: Option<u64>) -> R<Value> {
         let (g, me) = self.me(gid, device)?;
-        if g.kind != Kind::Invite {
-            return Err(forbidden("в эту группу не вступают по приглашению"));
+        if g.kind == Kind::Open {
+            return Err(forbidden("в открытую группу вступают без приглашения"));
         }
         if me.role == Role::Member {
             return Err(forbidden("приглашает владелец группы или модератор"));
@@ -1163,7 +1166,7 @@ impl Store {
                     Vec::new()
                 };
                 Some(json!({
-                    "id": g.id, "name": g.name, "topic": g.topic, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
+                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
                     "members": g.members.len(), "epoch": g.epoch, "first_seq": g.first_seq, "last_seq": g.next_seq - 1,
                     "rekey_needed": owner && g.rekey_needed, "pending_keys": pending,
                     "requests": if m.role != Role::Member { g.requests.len() } else { 0 },
@@ -1172,17 +1175,22 @@ impl Store {
             .collect()
     }
 
-    /// Группы этого узла, которые телефон может увидеть и куда ещё не вступил: открытые (вступить сразу) и «по приглашению»
-    /// (можно попросить приглашение). Закрытые не показываются.
+    pub fn set_about(&mut self, gid: &str, about: &str) {
+        if let Some(g) = self.groups.get_mut(gid) {
+            g.about = clean(about, MAX_ABOUT);
+            self.save();
+        }
+    }
+
+    /// Группы этого узла, куда устройство ещё не вступило: открытые (вступить сразу) и «по приглашению» (можно попросить приглашение).
     pub fn open_for(&self, device: &str) -> Vec<Value> {
         self.groups
             .values()
-            .filter(|g| g.kind == Kind::Open || g.kind == Kind::Invite)
             .filter(|g| {
                 let k = member_key(&g.id, device);
                 g.member(&k).is_none() && !g.banned.iter().any(|b| b.key == k)
             })
-            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device)}))
+            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device)}))
             .collect()
     }
 
@@ -1279,7 +1287,7 @@ impl Store {
                     .collect();
                 let bytes = std::fs::metadata(self.log_path(&g.id)).map(|m| m.len()).unwrap_or(0);
                 json!({
-                    "id": g.id, "name": g.name, "topic": g.topic, "kind": g.kind, "created_ms": g.created_ms, "epoch": g.epoch,
+                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "created_ms": g.created_ms, "epoch": g.epoch,
                     "entries": g.next_seq - g.first_seq, "last_seq": g.next_seq - 1, "journal_bytes": bytes, "rekey_needed": g.rekey_needed,
                     "members": g.members.iter().map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms})).collect::<Vec<_>>(),
                     "banned": g.banned.iter().map(|b| b.alias.clone()).collect::<Vec<_>>(),
@@ -1527,25 +1535,30 @@ pub struct MobileCreateReq {
     name: String,
     #[serde(default)]
     topic: String,
-    kind: Kind,
+    #[serde(default)]
+    about: String,
+    kind: String,
 }
 
 /// Телефон создаёт группу и становится её владельцем: ключ группы и права раздаёт он, а не владелец узла.
-/// Закрытые (`closed`, участников добавляет страница узла) так не создаются: только по приглашению или открытая.
 pub(crate) async fn m_create(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
     Json(req): Json<MobileCreateReq>,
 ) -> Response {
     reply((|| {
         let me = device(&dev)?;
-        if req.kind == Kind::Closed {
-            return Err(bad("с телефона создаются группы «по приглашению» и «открытые»"));
-        }
+        let kind = match req.kind.as_str() {
+            "open" => Kind::Open,
+            "invite" => Kind::Invite,
+            _ => return Err(bad("тип группы: «open» (открытая) или «invite» (по приглашению)")),
+        };
         let id = with_store(|s| {
             if s.owned_count(&me) >= MAX_OWNED_PER_DEVICE {
                 return Err(Fail(StatusCode::TOO_MANY_REQUESTS, "вы уже ведёте максимум групп"));
             }
-            s.create_as(&req.name, &req.topic, req.kind, &me, &[], true)
+            let id = s.create_as(&req.name, &req.topic, kind, &me, &[], true)?;
+            s.set_about(&id, &req.about);
+            Ok(id)
         })?;
         Ok(json!({"id": id}))
     })())
@@ -1678,31 +1691,6 @@ pub async fn pc_list() -> Response {
     ))
 }
 
-#[derive(Deserialize)]
-pub struct CreateReq {
-    name: String,
-    #[serde(default)]
-    topic: String,
-    kind: Kind,
-    /// устройство-владелец группы (начало номера из списка устройств): у него будет ключ группы
-    owner_device: String,
-    #[serde(default)]
-    members: Vec<String>,
-}
-
-pub async fn pc_create(Json(req): Json<CreateReq>) -> Response {
-    reply((|| {
-        let owner = device_by_prefix(&req.owner_device)?;
-        let members = req
-            .members
-            .iter()
-            .map(|m| device_by_prefix(m))
-            .collect::<R<Vec<_>>>()?;
-        let id = with_store(|s| s.create(&req.name, &req.topic, req.kind, &owner, &members))?;
-        Ok(json!({"id": id}))
-    })())
-}
-
 pub async fn pc_delete(Path(gid): Path<String>) -> Response {
     reply((|| {
         checked(&gid)?;
@@ -1710,12 +1698,6 @@ pub async fn pc_delete(Path(gid): Path<String>) -> Response {
     })())
 }
 
-pub async fn pc_modlog(Path(gid): Path<String>) -> Response {
-    reply((|| {
-        checked(&gid)?;
-        with_store(|s| s.modlog(&gid, None))
-    })())
-}
 
 #[cfg(test)]
 mod tests {
@@ -1741,11 +1723,9 @@ mod tests {
         let (_d, mut s) = store();
         let open = s.create("Двор", "", Kind::Open, OWNER, &[]).unwrap();
         let inv = s.create("Клуб", "", Kind::Invite, OWNER, &[]).unwrap();
-        let closed = s.create("Семья", "", Kind::Closed, OWNER, &[]).unwrap();
         let seen: Vec<String> = s.open_for(EVE).iter().map(|g| g["name"].as_str().unwrap().to_string()).collect();
-        assert!(seen.contains(&"Двор".to_string()) && seen.contains(&"Клуб".to_string()) && !seen.contains(&"Семья".to_string()));
+        assert!(seen.contains(&"Двор".to_string()) && seen.contains(&"Клуб".to_string()), "в списке и открытая, и «по приглашению»");
         assert!(s.request_join(&open, EVE, "Ева").is_err(), "в открытую просто вступают");
-        assert!(s.request_join(&closed, EVE, "Ева").is_err(), "в закрытую не просятся");
         s.request_join(&inv, EVE, "Ева").unwrap();
         assert!(s.request_join(&inv, EVE, "Ева").is_err(), "повторная просьба");
         assert_eq!(s.open_for(EVE).iter().find(|g| g["id"] == inv.as_str()).unwrap()["requested"], true);
@@ -1768,7 +1748,7 @@ mod tests {
     fn create_post_pull_and_survive_reopen() {
         let (d, mut s) = store();
         let gid = s
-            .create("Семья", "", Kind::Closed, OWNER, &[BOB.into()])
+            .create("Семья", "", Kind::Invite, OWNER, &[BOB.into()])
             .unwrap();
         assert_eq!(s.list_for(OWNER)[0]["role"], "owner");
         assert_eq!(s.list_for(BOB)[0]["role"], "member");
@@ -1803,13 +1783,13 @@ mod tests {
     #[test]
     fn joining_depends_on_group_kind() {
         let (_d, mut s) = store();
-        let closed = s.create("A", "", Kind::Closed, OWNER, &[]).unwrap();
+        let other = s.create("A", "", Kind::Invite, OWNER, &[]).unwrap();
         let open = s.create("B", "", Kind::Open, OWNER, &[]).unwrap();
         let inv = s.create("C", "", Kind::Invite, OWNER, &[]).unwrap();
-        assert!(s.join(&closed, BOB, None, None).is_err());
-        assert_eq!(s.open_for(BOB).len(), 2, "видны открытая и «по приглашению» (в неё можно попросить приглашение), закрытая — нет");
+        assert!(s.join(&other, BOB, None, None).is_err(), "в группу «по приглашению» без кода не войти");
+        assert_eq!(s.open_for(BOB).len(), 3, "в списке все три: открытая (вступить) и две «по приглашению» (попросить)");
         s.join(&open, BOB, None, None).unwrap();
-        assert_eq!(s.open_for(BOB).len(), 1);
+        assert_eq!(s.open_for(BOB).len(), 2);
         assert!(s.join(&inv, BOB, Some("WRONG"), None).is_err());
         assert!(
             s.invite(&inv, BOB, 1, None).is_err(),
@@ -1932,7 +1912,7 @@ mod tests {
     #[test]
     fn journal_is_trimmed_but_numbers_keep_going() {
         let (_d, mut s) = store();
-        let gid = s.create("G", "", Kind::Closed, OWNER, &[]).unwrap();
+        let gid = s.create("G", "", Kind::Invite, OWNER, &[]).unwrap();
         let big = b64(&vec![7u8; MAX_ENTRY - 256]);
         let n = (MAX_JOURNAL_BYTES / big.len() as u64) + 5;
         for _ in 0..n {
@@ -1956,7 +1936,7 @@ mod tests {
     fn deleting_and_forgetting() {
         let (d, mut s) = store();
         let gid = s
-            .create("G", "", Kind::Closed, OWNER, &[BOB.into()])
+            .create("G", "", Kind::Invite, OWNER, &[BOB.into()])
             .unwrap();
         s.append(&gid, BOB, 0, &b64(b"x")).unwrap();
         s.forget_device(BOB);
