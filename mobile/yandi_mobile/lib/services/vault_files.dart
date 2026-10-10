@@ -22,8 +22,15 @@ class VaultFile {
 /// Список, импорт и удаление файлов хранилища. Принятые файлы лежат здесь же (`yandi_downloads`), так что это тот же общий список.
 class VaultFiles {
   final Directory dir;
-  VaultFiles(this.dir);
+  /// Затирание поверх байтов и удаление (на телефоне — нативное, `FileWipe`). Без него файл просто удаляется.
+  final Future<bool> Function(String path)? wipe;
+  VaultFiles(this.dir, {this.wipe});
 
+  /// Фоновые затирания (чтобы тест и интерфейс могли дождаться конца).
+  Future<void> _idle = Future.value();
+  Future<void> get idle => _idle;
+
+  static const _doomed = '.wipe';
   static final _prefix = RegExp(r'^[0-9a-f]{8}_');
 
   /// Имя без служебного префикса номера передачи.
@@ -40,7 +47,7 @@ class VaultFiles {
     await for (final e in dir.list(followLinks: false)) {
       if (e is! File) continue;
       final fileName = e.uri.pathSegments.last;
-      if (fileName.endsWith('.part')) continue;    // недокачанное не показываем
+      if (fileName.endsWith('.part') || fileName.endsWith(_doomed)) continue;    // недокачанное и уже удаляемое не показываем
       final st = await e.stat();
       out.add(VaultFile(
         path: e.path, fileName: fileName, name: displayName(fileName), size: st.size, modified: st.modified,
@@ -69,36 +76,42 @@ class VaultFiles {
     return VaultFile(path: target.path, fileName: target.uri.pathSegments.last, name: base, size: st.size, modified: st.modified, mime: FileTransferService.guessMime(base));
   }
 
-  /// Удаление сразу и насовсем, без корзины: сначала содержимое затирается случайными байтами, потом файл удаляется.
-  /// Честная оговорка: во флеш-памяти телефона затирание поверх файла не гарантирует, что старые блоки физически исчезли
-  /// (выравнивание износа). Настоящее стирание даст шифрование файлов собственным ключом (защищённое хранилище): тогда достаточно удалить ключ.
+  /// Удаление сразу и насовсем, без корзины. Файл мгновенно пропадает из списка (переименование), а затирание поверх его байтов и
+  /// удаление идут в фоне: на большом файле оно занимает время, и ждать его интерфейсу незачем. Недоделанное (закрыли приложение)
+  /// дочищается при следующем открытии вкладки ([finishPendingWipes]).
+  /// Честная оговорка: на флеш-памяти телефона затирание не гарантирует, что старые блоки физически исчезли (выравнивание износа).
+  /// Настоящее стирание даст шифрование файлов собственным ключом (защищённое хранилище): тогда достаточно удалить ключ.
   Future<void> deleteForever(String path) async {
     final f = File(path);
     if (!await f.exists()) return;
+    final doomed = '$path$_doomed';
     try {
-      final len = await f.length();
-      final raf = await f.open(mode: FileMode.writeOnly);
-      try {
-        final r = Random.secure();
-        final block = Uint8List(64 * 1024);
-        var left = len;
-        while (left > 0) {
-          final n = min(left, block.length);
-          for (var i = 0; i < n; i++) { block[i] = r.nextInt(256); }
-          await raf.writeFrom(block, 0, n);
-          left -= n;
-        }
-        await raf.flush();
-      } finally {
-        await raf.close();
-      }
+      await f.rename(doomed);
     } catch (_) {
-      // не вышло затереть (например, файл только для чтения) — всё равно удаляем
+      try { await f.delete(); } catch (_) {}
+      return;
     }
-    await f.delete();
+    _idle = _idle.then((_) => _wipeAndDelete(doomed));
+  }
+
+  Future<void> _wipeAndDelete(String path) async {
+    var done = false;
+    try { done = await (wipe?.call(path) ?? Future.value(false)); } catch (_) {}
+    if (!done) {
+      try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
+    }
   }
 
   Future<void> deleteAll(Iterable<String> paths) async {
     for (final p in paths) { await deleteForever(p); }
+  }
+
+  /// Дочистка: файлы, которые начали удалять, но приложение закрыли раньше конца.
+  Future<void> finishPendingWipes() async {
+    if (!await dir.exists()) return;
+    await for (final e in dir.list(followLinks: false)) {
+      if (e is File && e.path.endsWith(_doomed)) _idle = _idle.then((_) => _wipeAndDelete(e.path));
+    }
+    await _idle;
   }
 }

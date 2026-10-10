@@ -41,6 +41,15 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { r.fold({ result.success(it) }, { result.error("save", it.message, null) }) }
                     }.start()
                 }
+                // затирание файла поверх его байтов и удаление (FileWipe); вызывается из Dart уже после мгновенного скрытия файла из списка
+                "wipe" -> {
+                    val path = call.argument<String>("path")
+                    if (path == null) { result.error("arg", "нет пути", null); return@setMethodCallHandler }
+                    Thread {
+                        val ok = runCatching { FileWipe.wipe(File(path)) }.getOrDefault(false)
+                        runOnUiThread { result.success(ok) }
+                    }.start()
+                }
                 else -> result.notImplemented()
             }
         }

@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -37,9 +38,10 @@ class FilesTabState extends State<FilesTab> {
   Future<void> reload() async {
     var v = _vault ?? widget.vault;
     if (v == null) {
-      v = VaultFiles(await FileTransferService.downloadsDir());
+      v = VaultFiles(await FileTransferService.downloadsDir(), wipe: AppState.wipeFile);
     }
     _vault = v;
+    unawaited(v.finishPendingWipes());   // доделать затирание, прерванное закрытием приложения
     final list = await v.list();
     if (!mounted) return;
     setState(() {
@@ -96,7 +98,10 @@ class FilesTabState extends State<FilesTab> {
   /// Выбор контакта YANDI и отправка: ход виден в чате с ним.
   Future<void> _share(List<VaultFile> files) async {
     final FilesHost state = widget.host ?? context.read<AppState>();
-    final contacts = state.contacts;
+    // предлагаем сохранённые контакты и устройства, которые на главном экране (давно молчащие скрыты), контакты — первыми, в сети — выше
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final contacts = state.contacts.where((c) => c.saved || !c.isStale(now)).toList()
+      ..sort((a, b) => a.saved != b.saved ? (a.saved ? -1 : 1) : a.online != b.online ? (a.online ? -1 : 1) : a.displayName.compareTo(b.displayName));
     if (contacts.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Некому отправлять: в списке нет контактов')));
       return;

@@ -36,20 +36,42 @@ void main() {
     expect((await vault.list()).length, 1);
   });
 
-  test('удаление: файл исчезает сразу, а перед этим его содержимое затёрто', () async {
+  test('удаление: файл мгновенно пропадает из списка, затирание и удаление идут в фоне', () async {
     final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    final secret = Uint8List.fromList(List<int>.filled(200000, 0x41));
-    final f = File('${d.path}/dddddddd_secret.bin')..writeAsBytesSync(secret);
-    // держим открытый дескриптор, чтобы увидеть, что осталось в файле ПЕРЕД удалением (на Linux он читаем после unlink)
-    final raf = f.openSync();
-    await vault.deleteForever(f.path);
+    final f = File('${d.path}/dddddddd_secret.bin')..writeAsBytesSync(Uint8List.fromList(List<int>.filled(1000, 0x41)));
+    final wiped = <String>[];
+    final v = VaultFiles(d, wipe: (p) async { wiped.add(p); await File(p).delete(); return true; });
+    await v.deleteForever(f.path);
     expect(f.existsSync(), isFalse);
-    raf.setPositionSync(0);
-    final left = raf.readSync(200000);
-    raf.closeSync();
-    expect(left.where((b) => b == 0x41).length, lessThan(2000), reason: 'содержимое должно быть затёрто случайными байтами');
-    expect(await vault.list(), isEmpty);
-    await vault.deleteForever('${d.path}/нет_такого'); // отсутствующий файл — не ошибка
+    expect(await v.list(), isEmpty, reason: 'из списка ушёл сразу');
+    await v.idle;
+    expect(wiped, ['${f.path}.wipe'], reason: 'нативному затиранию отдан переименованный файл');
+    expect(d.listSync(), isEmpty);
+    await v.deleteForever('${d.path}/нет_такого'); // отсутствующий файл — не ошибка
+  });
+
+  test('если затирание не вышло, файл всё равно удаляется', () async {
+    final d = Directory('${dir.path}/yandi_downloads')..createSync();
+    final f = File('${d.path}/eeeeeeee_x.bin')..writeAsStringSync('x');
+    final v = VaultFiles(d, wipe: (p) async => false);
+    await v.deleteForever(f.path);
+    await v.idle;
+    expect(d.listSync(), isEmpty);
+    final v2 = VaultFiles(d);   // без нативного затирания вовсе
+    final g = File('${d.path}/ffffffff_y.bin')..writeAsStringSync('y');
+    await v2.deleteForever(g.path);
+    await v2.idle;
+    expect(d.listSync(), isEmpty);
+  });
+
+  test('недоделанное удаление дочищается, а в списке не видно', () async {
+    final d = Directory('${dir.path}/yandi_downloads')..createSync();
+    File('${d.path}/aaaaaaaa_half.bin.wipe').writeAsStringSync('остаток');
+    File('${d.path}/bbbbbbbb_ok.txt').writeAsStringSync('ok');
+    final v = VaultFiles(d, wipe: (p) async { await File(p).delete(); return true; });
+    expect((await v.list()).map((f) => f.name), ['ok.txt']);
+    await v.finishPendingWipes();
+    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['bbbbbbbb_ok.txt']);
   });
 
   test('deleteAll удаляет всё выбранное', () async {

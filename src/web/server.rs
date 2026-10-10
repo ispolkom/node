@@ -3763,12 +3763,12 @@ async fn api_files_send_chunk(
     }
 
     // limits before anything is allocated: the numbers come from the browser request
-    let max_chunks = (crate::communication::MAX_FILE_TRANSFER_SIZE as usize
-        / chunk_limit
-        + 1) as u32;
+    // телефону владельца — до 1 ГБ (предел хранилища файлов телефонов), другим узлам — 200 МБ (сетевой предел передачи между узлами)
+    let max_size = if crate::mobile_api::is_device_peer(&peer_id) { crate::mobile_files::MAX_FILE } else { crate::communication::MAX_FILE_TRANSFER_SIZE };
+    let max_chunks = (max_size as usize / chunk_limit + 1) as u32;
     if total_chunks == 0
         || total_chunks > max_chunks
-        || file_size > crate::communication::MAX_FILE_TRANSFER_SIZE
+        || file_size > max_size
     {
         return Json(
             serde_json::json!({"status": "error", "message": "File is larger than the allowed size"}),

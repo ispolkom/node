@@ -550,6 +550,15 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   static const MethodChannel _filesChannel = MethodChannel('com.yandi.yandi_mobile/files');
 
+  /// Нативное затирание файла поверх его байтов и удаление (см. FileWipe.java); false — не вышло, вызывающий удалит обычным способом.
+  static Future<bool> wipeFile(String path) async {
+    try {
+      return await _filesChannel.invokeMethod<bool>('wipe', {'path': path}) ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// Скопировать полученный файл в общую папку «Загрузки», чтобы он был виден в файловом менеджере.
   Future<String?> saveToDownloads(String path, String name, String mime) async {
     try {

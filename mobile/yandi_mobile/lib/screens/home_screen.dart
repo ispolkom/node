@@ -244,6 +244,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         ],
         bottom: TabBar(
           controller: _tabs,
+          labelPadding: EdgeInsets.zero,   // четыре вкладки в ряд: иначе «Контакты» обрезается
+          labelStyle: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
+          unselectedLabelStyle: const TextStyle(fontSize: 13),
           indicatorColor: AppTheme.accent,
           labelColor: AppTheme.accent,
           unselectedLabelColor: AppTheme.textSecondary,

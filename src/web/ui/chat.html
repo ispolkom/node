@@ -652,7 +652,10 @@
         function handleFileAttachment(e) {
             var file = e.target.files[0];
             if (!file) return;
-            if (file.size > 200 * 1024 * 1024) { showAlert('❌ Ошибка', 'Файл слишком большой! Максимум 200 MB.'); return; }
+            // телефону владельца можно до 1 ГБ (файл идёт через узел, зашифрованный на странице узла), другим узлам — до 200 МБ
+            var toPhone = phonePeers.has(currentContactShortId);
+            var maxMb = toPhone ? 1024 : 200;
+            if (file.size > maxMb * 1024 * 1024) { showAlert('❌ Ошибка', 'Файл слишком большой! Максимум ' + (toPhone ? '1 ГБ' : '200 МБ') + '.'); return; }
             pendingAttachment = file;
             document.getElementById('messageInput').placeholder = '📎 ' + file.name + ' - введите сообщение или отправьте';
         }
