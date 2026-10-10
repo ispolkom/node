@@ -8,7 +8,6 @@
 //! - Session timeout detection
 
 use crate::util::HashId;
-use crate::netlayer::peer::PeerInfo;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;

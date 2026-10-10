@@ -13,7 +13,7 @@ use crate::netlayer::{
     port_manager::{PortManager, DEFAULT_DATA_PORT, DEFAULT_DISCOVERY_PORT},
     adaptive::AdaptiveController,
     peer::PeerInfo,
-    packet::{HelloPacket, HelloType, NetPacket, PacketType},
+    packet::{HelloPacket, HelloType, NetPacket},
     encryption::EncryptionManager,
     tunnel::TunnelManager,
     nat::{NatStatus, MappingBehavior},
@@ -23,7 +23,6 @@ use crate::netlayer::{
 };
 use crate::dht::Kademlia;
 use crate::dataplane::{StreamRegistry, StreamFrame, SharedStreamRegistry};
-use rand::Rng;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;

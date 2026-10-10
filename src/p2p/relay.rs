@@ -15,7 +15,6 @@
 //! never larger than what came in (no amplification); no queues (a datagram is forwarded at once or dropped), so a slow receiver costs nothing.
 use super::*;
 use std::net::IpAddr;
-use std::sync::atomic::AtomicU64;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, Instant};
 

@@ -5,9 +5,6 @@
 //! Relay mechanism for nodes behind NAT to communicate via public relay nodes
 
 use crate::util::HashId;
-use crate::netlayer::packet::{
-    RelayConnectRequest, RelayConnectResponse, RelayDataPacket, RelayClosePacket,
-};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};

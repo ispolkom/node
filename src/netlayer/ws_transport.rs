@@ -26,7 +26,7 @@ use tokio::sync::mpsc;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use tokio_tungstenite::{
     accept_async_with_config, client_async,
-    tungstenite::{protocol::{Message, WebSocketConfig}, Result as WsResult},
+    tungstenite::{protocol::{Message, WebSocketConfig}},
     WebSocketStream,
 };
 

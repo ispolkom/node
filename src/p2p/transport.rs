@@ -14,7 +14,7 @@
 
 use crate::util::HashId;
 use crate::core::NodeIdentity;
-use crate::p2p::{P2PNatStatus, P2PPacket, P2PPacketType, P2PPeer, P2P_PACKET_HEADER_LEN};
+use crate::p2p::{P2PNatStatus, P2PPacket, P2PPacketType, P2PPeer};
 use crate::communication::{CommPacket, CommControlPacket};
 use crate::p2p::hello::{P2PHelloPacket, P2PHelloType};
 use crate::p2p::encryption_manager::EncryptionManager as P2PEncryptionManager;
@@ -23,7 +23,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::net::UdpSocket;
-use tokio::sync::{Mutex, mpsc, broadcast};
+use tokio::sync::{Mutex, mpsc};
 use tracing::debug;
 
 #[path = "punch.rs"]

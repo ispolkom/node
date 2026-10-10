@@ -15,7 +15,6 @@ use crate::proxy::ProxyResponse;
 use crate::socks5::{Socks5ProxyResponse, Socks5ProxyRequest, Socks5TunnelData};
 use crate::netlayer::YandiTunManager;
 use crate::netlayer::tun_exit::TunExitHandler;
-use crate::netlayer::relay::{RelayManager, RelaySession, RelaySessionStatus};
 use crate::netlayer::nat::NatStatus;
 
 /// CLI менеджер для управления нодой
@@ -1128,7 +1127,6 @@ impl P2PCli {
         gateway: crate::proxy::HttpProxyGateway,
         mut nack_rx: tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>,
     ) {
-        use crate::protocol::WagonNack;
 
         println!("🔄 NACK Handler started - listening for retransmission requests");
 
