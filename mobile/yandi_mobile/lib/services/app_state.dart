@@ -11,7 +11,6 @@ import '../models/file_offer.dart';
 import '../models/file_state.dart';
 import '../models/receipt.dart';
 import '../crypto/identity.dart';
-import '../crypto/e2e_crypto.dart';
 import 'storage_service.dart';
 import 'api_service.dart' as api_svc;
 import 'ws_service.dart';
@@ -39,6 +38,8 @@ class AppState extends ChangeNotifier {
   // ── Публичные поля ─────────────────────────────────────────────────────────
   Identity?    identity;           // криптографическая личность пользователя
   bool         nodeOnline  = false;
+  /// Почему не подключились к узлу (показать пользователю); null — всё в порядке.
+  String?      nodeError;
   bool         vpnRunning  = false;
   String?      proxyHost;
   int?         proxyPort;
@@ -104,7 +105,18 @@ class AppState extends ChangeNotifier {
     _api?.dispose();
     _ws?.dispose();
 
-    _api = api_svc.ApiService(node);
+    try {
+      _api = api_svc.ApiService(node);
+    } on StateError catch (e) {
+      // узел без отпечатка TLS (запись старой сборки): без закрепления сертификата не подключаемся
+      _api = null;
+      _ws = null;
+      nodeOnline = false;
+      nodeError = 'Узел ${node.name}: нет отпечатка сертификата. Сопрягите телефон с узлом заново (QR). ($e)';
+      notifyListeners();
+      return;
+    }
+    nodeError = null;
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
@@ -160,7 +172,8 @@ class AppState extends ChangeNotifier {
   /// в локальный SQLite. Нода фильтрует по токену — каждое устройство видит
   /// только неподтверждённые именно им сообщения (мультиустройство).
   Future<void> _syncInbox() async {
-    if (_api == null || myPeerId == null || identity == null) return;
+    final ws = _ws;
+    if (_api == null || ws == null || myPeerId == null || identity == null) return;
     try {
       // since=0 — нода сама знает что уже видело это устройство (per-token ACK)
       final msgs = await _api!.fetchInbox(0);
@@ -178,16 +191,10 @@ class AppState extends ChangeNotifier {
 
         final payloadBytes = base64.decode(payloadB64);
 
-        String text;
-        if (E2ECrypto.isEncrypted(payloadBytes)) {
-          final decrypted = await E2ECrypto.decrypt(
-            payloadBytes,
-            (theirPub) => identity!.ecdh(theirPub),
-          );
-          text = decrypted ?? '[не удалось расшифровать]';
-        } else {
-          text = utf8.decode(payloadBytes, allowMalformed: true);
-        }
+        // Как и в сокете: только E2E-конверт, общее окно повторов. Открытый текст, старый формат, подделку или повтор (то же
+        // сообщение уже пришло вживую) не показываем, но подтверждаем, чтобы узел не присылал его снова.
+        final text = await ws.decryptIncoming(payloadBytes);
+        if (text == null) { ackIds.add(id); continue; }
 
         if (isBlocked(fromPeerId)) { ackIds.add(id); continue; }   // чёрный список
         final res = _classifyIncoming(fromPeerId, text);

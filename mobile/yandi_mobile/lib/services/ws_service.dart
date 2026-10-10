@@ -207,14 +207,7 @@ class WsService {
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
 
-    // Обычный чат принимает только E2E-конверт. Транспортный plaintext и
-    // старый legacy-пакет не должны превращаться в сообщение пользователя.
-    if (!E2ECrypto.isEncrypted(payload)) return;
-    final text = await E2ECrypto.decrypt(
-      Uint8List.fromList(payload),
-      (theirPub) => _identity.ecdh(theirPub),
-      replayGuard: _replayGuard,
-    );
+    final text = await decryptIncoming(payload);
     if (text == null) return;
 
     _chatCtrl.add(IncomingChatEvent(
@@ -231,13 +224,8 @@ class WsService {
     final tsMs = ByteData.sublistView(data, 33, 41).getInt64(0, Endian.little);
     final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
     if (data.length < 45 + pLen) return;
-    final payload = Uint8List.fromList(data.sublist(45, 45 + pLen));
-    if (!E2ECrypto.isEncrypted(payload)) return;
-    final text = await E2ECrypto.decrypt(
-      payload,
-      (theirPub) => _identity.ecdh(theirPub),
-      replayGuard: _replayGuard,
-    );
+    final payload = data.sublist(45, 45 + pLen);
+    final text = await decryptIncoming(payload);
     if (text == null) return;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
   }
@@ -306,8 +294,20 @@ class WsService {
   /// Есть ли ключ получателя (то есть это своё устройство и E2E возможен).
   Future<bool> canEncryptTo(String peerId) async => (await _getRecipientPub(peerId)) != null;
 
+  /// Единственный вход для входящих блобов (сокет и почтовый ящик): только E2E-конверт текущего формата, с общим окном повторов.
+  /// null — не E2E (открытый текст, старый формат 0xE2), не расшифровалось или повтор: такое пользователю не показываем.
+  Future<String?> decryptIncoming(List<int> payload) async {
+    if (!E2ECrypto.isEncrypted(payload)) return null;
+    return E2ECrypto.decrypt(
+      Uint8List.fromList(payload),
+      (theirPub) => _identity.ecdh(theirPub),
+      replayGuard: _replayGuard,
+    );
+  }
+
   Future<List<int>?> _getRecipientPub(String peerId) async {
-    // Проверяем SQLite кэш (TTL 24ч)
+    // Кэш SQLite (TTL 24ч) содержит только ключи из связок с проверенной подписью: пишет его лишь ApiService.getPeerX25519Pub после
+    // проверки, а непроверенные записи старых сборок стёрты при обновлении базы (версия 4).
     final cached = await StorageService.getPeerX25519Pub(peerId);
     if (cached != null) return base64.decode(cached);
 

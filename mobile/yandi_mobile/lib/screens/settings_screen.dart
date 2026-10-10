@@ -30,6 +30,8 @@ class SettingsScreen extends StatelessWidget {
             value: state.nodeOnline ? 'Онлайн' : 'Офлайн',
             valueColor: state.nodeOnline ? Colors.greenAccent : Colors.redAccent,
           ),
+          if (state.nodeError != null)
+            _InfoTile(label: 'Ошибка', value: state.nodeError!, valueColor: Colors.redAccent),
 
           // Прокси
           _Section(title: 'Прокси'),
