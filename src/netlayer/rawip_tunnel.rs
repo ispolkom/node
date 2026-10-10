@@ -11,15 +11,15 @@
 //!   - Exit node masquerades and forwards to internet
 //!   - Responses sent back via same TCP connection
 
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, SocketAddrV4};
 use std::sync::Arc;
-use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::sync::RwLock;
 
-use crate::util::HashId;
 use crate::protocol::Station;
+use crate::util::HashId;
 
 /// Результат операции
 type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
@@ -36,7 +36,7 @@ struct RawIpHeader {
 }
 
 impl RawIpHeader {
-    const MAGIC: u8 = 0x59;  // 'Y' for YANDI
+    const MAGIC: u8 = 0x59; // 'Y' for YANDI
     const SIZE: usize = 4;
 
     /// Создать заголовок
@@ -114,7 +114,10 @@ pub struct RawIpTunnel {
 impl RawIpTunnel {
     /// Создать новый RawIP туннель
     pub fn new(station: Arc<Station>, listen_port: u16) -> Self {
-        println!("🌐 [RAWIP] Creating RawIP Tunnel on port {}...", listen_port);
+        println!(
+            "🌐 [RAWIP] Creating RawIP Tunnel on port {}...",
+            listen_port
+        );
 
         Self {
             _station: station,
@@ -125,6 +128,12 @@ impl RawIpTunnel {
 
     /// Запустить туннель
     pub async fn run(&self) -> Result<()> {
+        if std::env::var("YANDI_ENABLE_UNAUTHENTICATED_RAWIP").as_deref() != Ok("1") {
+            return Err(
+                "RawIP disabled: unauthenticated listener requires YANDI_ENABLE_UNAUTHENTICATED_RAWIP=1"
+                    .into(),
+            );
+        }
         let addr = format!("0.0.0.0:{}", self.listen_port);
         let listener = TcpListener::bind(&addr).await?;
         println!("🌐 [RAWIP] Listening on {} for RawIP packets", addr);
@@ -138,7 +147,9 @@ impl RawIpTunnel {
                     let connections = self.connections.clone();
 
                     tokio::spawn(async move {
-                        if let Err(e) = Self::handle_connection(socket, peer_addr, connections).await {
+                        if let Err(e) =
+                            Self::handle_connection(socket, peer_addr, connections).await
+                        {
                             eprintln!("❌ [RAWIP] Connection error: {}", e);
                         }
                     });
@@ -163,10 +174,14 @@ impl RawIpTunnel {
         {
             let mut conns = connections.write().await;
             conns.insert(peer_addr, conn.clone());
-            println!("💾 [RAWIP] Connection saved: {} (total: {})", peer_addr, conns.len());
+            println!(
+                "💾 [RAWIP] Connection saved: {} (total: {})",
+                peer_addr,
+                conns.len()
+            );
         }
 
-        let mut buffer = [0u8; 8192];  // Буфер для чтения
+        let mut buffer = [0u8; 8192]; // Буфер для чтения
 
         loop {
             // Читаем заголовок (4 байта)
@@ -209,7 +224,10 @@ impl RawIpTunnel {
             let packet = &buffer[..packet_len];
             conn.seq_num += 1;
 
-            println!("📦 [RAWIP] Packet #{} from {} ({} bytes)", conn.seq_num, peer_addr, packet_len);
+            println!(
+                "📦 [RAWIP] Packet #{} from {} ({} bytes)",
+                conn.seq_num, peer_addr, packet_len
+            );
 
             // Обрабатываем IP пакет
             if let Err(e) = Self::handle_ip_packet(packet, &mut socket, peer_addr).await {
@@ -221,7 +239,11 @@ impl RawIpTunnel {
         {
             let mut conns = connections.write().await;
             conns.remove(&peer_addr);
-            println!("🧹 [RAWIP] Connection removed: {} (total: {})", peer_addr, conns.len());
+            println!(
+                "🧹 [RAWIP] Connection removed: {} (total: {})",
+                peer_addr,
+                conns.len()
+            );
         }
 
         Ok(())
@@ -263,7 +285,7 @@ impl RawIpTunnel {
             return Ok(());
         }
 
-        let protocol = packet[9];  // Protocol (6 = TCP, 17 = UDP)
+        let protocol = packet[9]; // Protocol (6 = TCP, 17 = UDP)
 
         let src_addr = Ipv4Addr::new(packet[12], packet[13], packet[14], packet[15]);
         let dst_addr = Ipv4Addr::new(packet[16], packet[17], packet[18], packet[19]);
@@ -271,7 +293,10 @@ impl RawIpTunnel {
         match protocol {
             6 => println!("   📡 IPv4/TCP: {} -> {}", src_addr, dst_addr),
             17 => println!("   📡 IPv4/UDP: {} -> {}", src_addr, dst_addr),
-            _ => println!("   📡 IPv4/proto={}: {} -> {}", protocol, src_addr, dst_addr),
+            _ => println!(
+                "   📡 IPv4/proto={}: {} -> {}",
+                protocol, src_addr, dst_addr
+            ),
         }
 
         // TODO: Реальное перенаправление в интернет через NAT
@@ -287,22 +312,23 @@ impl RawIpTunnel {
             return Ok(());
         }
 
-        let protocol = packet[6];  // Next header (6 = TCP, 17 = UDP)
+        let protocol = packet[6]; // Next header (6 = TCP, 17 = UDP)
 
         // Src IPv6 (bytes 8-23)
-        let src_bytes: [u8; 16] = packet[8..24].try_into()
-            .map_err(|_| "Invalid src IPv6")?;
+        let src_bytes: [u8; 16] = packet[8..24].try_into().map_err(|_| "Invalid src IPv6")?;
         let src_addr = std::net::Ipv6Addr::from(src_bytes);
 
         // Dst IPv6 (bytes 24-39)
-        let dst_bytes: [u8; 16] = packet[24..40].try_into()
-            .map_err(|_| "Invalid dst IPv6")?;
+        let dst_bytes: [u8; 16] = packet[24..40].try_into().map_err(|_| "Invalid dst IPv6")?;
         let dst_addr = std::net::Ipv6Addr::from(dst_bytes);
 
         match protocol {
             6 => println!("   📡 IPv6/TCP: {} -> {}", src_addr, dst_addr),
             17 => println!("   📡 IPv6/UDP: {} -> {}", src_addr, dst_addr),
-            _ => println!("   📡 IPv6/proto={}: {} -> {}", protocol, src_addr, dst_addr),
+            _ => println!(
+                "   📡 IPv6/proto={}: {} -> {}",
+                protocol, src_addr, dst_addr
+            ),
         }
 
         // TODO: Реальное перенаправление в интернет через NAT
