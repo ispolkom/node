@@ -107,8 +107,11 @@
 |---|---|
 | `GET /mobile/groups` | `{groups:[{id, name, topic, kind, my_alias, role, muted, members, epoch, first_seq, last_seq, rekey_needed, pending_keys:[псевдонимы без конверта]}]}` |
 | `POST /mobile/groups` `{name, topic?, kind}` | `{id}`; `400` — закрытую так не создать; `429` — владеете максимумом |
-| `GET /mobile/groups/open` | открытые группы, где меня нет: `{groups:[{id, name, topic, members}]}` |
-| `POST /mobile/groups/{id}/join` `{invite_code?, member_pub?}` | `{alias}`; `403` — закрытая, неверный код или запрет |
+| `GET /mobile/groups/open` | группы узла, где меня нет и куда можно вступить или попроситься (открытые и «по приглашению»; закрытые не показываются): `{groups:[{id, name, topic, kind, members, requested}]}` |
+| `POST /mobile/groups/{id}/request` `{name?}` | просьба прислать приглашение (только «по приглашению»); владелец и модераторы получают намёк `0x15` (3); `409` — уже просили |
+| `GET /mobile/groups/{id}/requests` | владелец/модератор: `{requests:[{id, peer_id, name, ts}]}`; запись живёт неделю |
+| `DELETE /mobile/groups/{id}/requests/{rid}` | владелец/модератор разобрал просьбу (приглашение отправлено или отказано): запись и номер устройства стираются |
+| `POST /mobile/groups/{id}/join` `{invite_code?, member_pub?}` | `{alias}`; `403` — закрытая, неверный код или запрет; вступивший теряет свою просьбу о приглашении |
 | `POST /mobile/groups/{id}/leave` | `{ok}` |
 | `GET /mobile/groups/{id}/members` | `{members:[{alias, role, muted, joined_ms, member_pub, has_key}], banned:[...] (модераторам)}` |
 | `POST /mobile/groups/{id}/pubkey` `{member_pub}` | свой ключ для группы (32 байта base64) |

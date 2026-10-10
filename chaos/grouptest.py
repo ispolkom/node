@@ -221,6 +221,32 @@ st, r = req("POST", f"/mobile/groups/{gid4}/join", {"invite_code": code4}, token
 check("another phone joins by that invite", st == 200, (st, r))
 st, r = a.api("GET", f"/api/mobile/groups/{gid4}/modlog")
 check("the log names the phone, not the node page", st == 200 and r["modlog"][0]["by"] != "компьютер" and r["modlog"][0]["action"] == "create", r)
+# asking for an invitation: eve asks, only the owner/moderators see it and answer
+st, r = req("GET", "/mobile/groups/open", token=t_eve)
+g4 = [x for x in r["groups"] if x["id"] == gid4]
+check("an invite-only group is listed for others with its kind", g4 and g4[0]["kind"] == "invite" and g4[0]["requested"] is False, r)
+st, r = req("POST", f"/mobile/groups/{gid4}/request", {"name": "Ева"}, token=t_eve)
+check("eve asks for an invitation", st == 200, (st, r))
+st, r = req("POST", f"/mobile/groups/{gid4}/request", {"name": "Ева"}, token=t_eve)
+check("a second request is refused", st == 409, (st, r))
+st, r = req("GET", "/mobile/groups/open", token=t_eve)
+check("the list says the request was sent", [x for x in r["groups"] if x["id"] == gid4][0]["requested"] is True, r)
+st, r = req("GET", f"/mobile/groups/{gid4}/requests", token=t_eve)
+check("the requester cannot read requests", st == 403, st)
+st, r = req("GET", f"/mobile/groups/{gid4}/requests", token=t_bob)
+rq = r.get("requests", []) if st == 200 else []
+check("the owner sees the request with the name", len(rq) == 1 and rq[0]["name"] == "Ева" and len(rq[0]["peer_id"]) == 64, (st, r))
+st, r = req("GET", "/mobile/groups", token=t_bob)
+check("the owner's list counts pending requests", [x for x in r["groups"] if x["id"] == gid4][0]["requests"] == 1, r)
+st, _ = req("DELETE", f"/mobile/groups/{gid4}/requests/{rq[0]['id']}", token=t_eve)
+check("the requester cannot clear the request", st == 403, st)
+st, _ = req("DELETE", f"/mobile/groups/{gid4}/requests/{rq[0]['id']}", token=t_bob)
+check("the owner clears it after answering", st == 200, st)
+st, r = req("GET", f"/mobile/groups/{gid4}/requests", token=t_bob)
+check("no requests left, no device id kept", st == 200 and r["requests"] == [], r)
+st, r = req("POST", f"/mobile/groups/{gid3}/request", {"name": "x"}, token=t_eve)
+check("a request to an open or closed group is refused", st in (400, 409), (st, r))
+
 for i in range(9):
     st, r = req("POST", "/mobile/groups", {"name": f"g{i}", "kind": "open"}, token=t_bob)
 st, r = req("POST", "/mobile/groups", {"name": "лишняя", "kind": "open"}, token=t_bob)

@@ -101,6 +101,19 @@ struct Invite {
     by: String,
 }
 
+/// Просьба вступить в группу «по приглашению»: человек просит владельца прислать приглашение. Номер устройства лежит тут, чтобы
+/// владелец мог ответить ему личным сообщением; запись живёт неделю и стирается, когда владелец ответил.
+#[derive(Clone, Serialize, Deserialize)]
+struct JoinRequest {
+    id: String,
+    peer: String,
+    name: String,
+    ts: u64,
+}
+
+const MAX_REQUESTS: usize = 20;
+const REQUEST_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
+
 #[derive(Clone, Serialize, Deserialize)]
 struct ModEntry {
     ts: u64,
@@ -144,6 +157,8 @@ struct Group {
     next_seq: u64,
     #[serde(default)]
     modlog: Vec<ModEntry>,
+    #[serde(default)]
+    requests: Vec<JoinRequest>,
 }
 
 fn one() -> u64 {
@@ -541,6 +556,7 @@ impl Store {
             first_seq: 1,
             next_seq: 1,
             modlog: Vec::new(),
+            requests: Vec::new(),
         };
         let owner = Member {
             key: member_key(&id, owner_device),
@@ -732,6 +748,7 @@ impl Store {
             }
         }
         let alias = g.new_alias();
+        g.requests.retain(|r| r.peer != device);   // вступил — просьба о приглашении больше не нужна
         g.members.push(Member {
             key,
             alias: alias.clone(),
@@ -1144,21 +1161,81 @@ impl Store {
                     "id": g.id, "name": g.name, "topic": g.topic, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
                     "members": g.members.len(), "epoch": g.epoch, "first_seq": g.first_seq, "last_seq": g.next_seq - 1,
                     "rekey_needed": owner && g.rekey_needed, "pending_keys": pending,
+                    "requests": if m.role != Role::Member { g.requests.len() } else { 0 },
                 }))
             })
             .collect()
     }
 
+    /// Группы этого узла, которые телефон может увидеть и куда ещё не вступил: открытые (вступить сразу) и «по приглашению»
+    /// (можно попросить приглашение). Закрытые не показываются.
     pub fn open_for(&self, device: &str) -> Vec<Value> {
         self.groups
             .values()
-            .filter(|g| g.kind == Kind::Open)
+            .filter(|g| g.kind == Kind::Open || g.kind == Kind::Invite)
             .filter(|g| {
                 let k = member_key(&g.id, device);
                 g.member(&k).is_none() && !g.banned.iter().any(|b| b.key == k)
             })
-            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "members": g.members.len()}))
+            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device)}))
             .collect()
+    }
+
+    /// Просьба о приглашении: владелец и модераторы получат намёк и увидят её в списке запросов.
+    pub fn request_join(&mut self, gid: &str, device: &str, name: &str) -> R<()> {
+        let g = self.get_mut(gid)?;
+        if g.kind != Kind::Invite {
+            return Err(bad("запросить приглашение можно только в группу «по приглашению»"));
+        }
+        let k = member_key(gid, device);
+        if g.member(&k).is_some() {
+            return Err(Fail(StatusCode::CONFLICT, "уже участник"));
+        }
+        if g.banned.iter().any(|b| b.key == k) {
+            return Err(forbidden("вход в группу запрещён"));
+        }
+        let now = now_ms();
+        g.requests.retain(|r| now.saturating_sub(r.ts) < REQUEST_TTL_MS);
+        if g.requests.iter().any(|r| r.peer == device) {
+            return Err(Fail(StatusCode::CONFLICT, "просьба уже отправлена"));
+        }
+        if g.requests.len() >= MAX_REQUESTS {
+            return Err(Fail(StatusCode::TOO_MANY_REQUESTS, "у группы слишком много неразобранных просьб"));
+        }
+        g.requests.push(JoinRequest { id: random_hex(8), peer: device.to_string(), name: clean(name, 64), ts: now });
+        let to: Vec<String> = g.members.iter().filter(|m| m.role != Role::Member).map(|m| m.key.clone()).collect();
+        self.save();
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
+    /// Неразобранные просьбы: видят владелец и модераторы.
+    pub fn requests_of(&mut self, gid: &str, device: &str) -> R<Value> {
+        let role = self.me(gid, device)?.1.role;
+        if role == Role::Member {
+            return Err(forbidden("просьбы видят владелец и модераторы"));
+        }
+        let now = now_ms();
+        let g = self.get_mut(gid)?;
+        g.requests.retain(|r| now.saturating_sub(r.ts) < REQUEST_TTL_MS);
+        let list: Vec<Value> = g.requests.iter().map(|r| json!({"id": r.id, "peer_id": r.peer, "name": r.name, "ts": r.ts})).collect();
+        Ok(json!({"requests": list}))
+    }
+
+    /// Просьба разобрана (приглашение отправлено или отказано): запись и номер устройства стираются.
+    pub fn resolve_request(&mut self, gid: &str, device: &str, rid: &str) -> R<()> {
+        let role = self.me(gid, device)?.1.role;
+        if role == Role::Member {
+            return Err(forbidden("просьбы разбирают владелец и модераторы"));
+        }
+        let g = self.get_mut(gid)?;
+        let before = g.requests.len();
+        g.requests.retain(|r| r.id != rid);
+        if g.requests.len() == before {
+            return Err(not_found());
+        }
+        self.save();
+        Ok(())
     }
 
     pub fn members(&self, gid: &str, device: &str) -> R<Value> {
@@ -1210,12 +1287,19 @@ impl Store {
     /// Устройство забыто узлом: убираем его из всех групп (хэш у каждой группы свой, поэтому пересчитываем).
     pub fn forget_device(&mut self, device: &str) {
         let mut changed = Vec::new();
+        let mut had_request = false;
         for g in self.groups.values_mut() {
+            let n = g.requests.len();
+            g.requests.retain(|r| r.peer != device);
+            had_request |= g.requests.len() != n;
             let k = member_key(&g.id, device);
             if let Some(m) = g.drop_member(&k) {
                 g.log(PC, "removed_device", Some(&m.alias), None, None);
                 changed.push((g.id.clone(), g.keys()));
             }
+        }
+        if had_request && changed.is_empty() {
+            self.save();
         }
         if !changed.is_empty() {
             self.save();
@@ -1533,6 +1617,48 @@ pub(crate) async fn m_invite(
     })())
 }
 
+#[derive(Deserialize, Default)]
+pub struct RequestReq {
+    #[serde(default)]
+    name: String,
+}
+
+/// Просьба прислать приглашение в группу «по приглашению».
+pub(crate) async fn m_request(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    body: Option<Json<RequestReq>>,
+) -> Response {
+    let req = body.map(|b| b.0).unwrap_or_default();
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.request_join(&gid, &me, &req.name)))
+    })())
+}
+
+pub(crate) async fn m_requests(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        with_store(|s| s.requests_of(&gid, &me))
+    })())
+}
+
+pub(crate) async fn m_request_done(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path((gid, rid)): Path<(String, String)>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.resolve_request(&gid, &me, &rid)))
+    })())
+}
+
 // ── /api/mobile/groups (страница узла на этом компьютере) ──
 
 fn device_by_prefix(id: &str) -> R<String> {
@@ -1606,6 +1732,34 @@ mod tests {
     const EVE: &str = "ee";
 
     #[test]
+    fn join_requests_for_invite_groups() {
+        let (_d, mut s) = store();
+        let open = s.create("Двор", "", Kind::Open, OWNER, &[]).unwrap();
+        let inv = s.create("Клуб", "", Kind::Invite, OWNER, &[]).unwrap();
+        let closed = s.create("Семья", "", Kind::Closed, OWNER, &[]).unwrap();
+        let seen: Vec<String> = s.open_for(EVE).iter().map(|g| g["name"].as_str().unwrap().to_string()).collect();
+        assert!(seen.contains(&"Двор".to_string()) && seen.contains(&"Клуб".to_string()) && !seen.contains(&"Семья".to_string()));
+        assert!(s.request_join(&open, EVE, "Ева").is_err(), "в открытую просто вступают");
+        assert!(s.request_join(&closed, EVE, "Ева").is_err(), "в закрытую не просятся");
+        s.request_join(&inv, EVE, "Ева").unwrap();
+        assert!(s.request_join(&inv, EVE, "Ева").is_err(), "повторная просьба");
+        assert_eq!(s.open_for(EVE).iter().find(|g| g["id"] == inv.as_str()).unwrap()["requested"], true);
+        assert!(s.requests_of(&inv, EVE).is_err(), "посторонний не видит просьб");
+        s.join(&inv, BOB, None, None).ok();
+        let r = s.requests_of(&inv, OWNER).unwrap();
+        assert_eq!(r["requests"][0]["name"], "Ева");
+        assert_eq!(s.list_for(OWNER).iter().find(|g| g["id"] == inv.as_str()).unwrap()["requests"], 1);
+        let rid = r["requests"][0]["id"].as_str().unwrap().to_string();
+        assert!(s.resolve_request(&inv, EVE, &rid).is_err());
+        s.resolve_request(&inv, OWNER, &rid).unwrap();
+        assert_eq!(s.requests_of(&inv, OWNER).unwrap()["requests"].as_array().unwrap().len(), 0);
+        // забытое устройство уносит и свою просьбу
+        s.request_join(&inv, EVE, "Ева").unwrap();
+        s.forget_device(EVE);
+        assert_eq!(s.requests_of(&inv, OWNER).unwrap()["requests"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
     fn create_post_pull_and_survive_reopen() {
         let (d, mut s) = store();
         let gid = s
@@ -1648,9 +1802,9 @@ mod tests {
         let open = s.create("B", "", Kind::Open, OWNER, &[]).unwrap();
         let inv = s.create("C", "", Kind::Invite, OWNER, &[]).unwrap();
         assert!(s.join(&closed, BOB, None, None).is_err());
-        assert_eq!(s.open_for(BOB).len(), 1);
+        assert_eq!(s.open_for(BOB).len(), 2, "видны открытая и «по приглашению» (в неё можно попросить приглашение), закрытая — нет");
         s.join(&open, BOB, None, None).unwrap();
-        assert!(s.open_for(BOB).is_empty());
+        assert_eq!(s.open_for(BOB).len(), 1);
         assert!(s.join(&inv, BOB, Some("WRONG"), None).is_err());
         assert!(
             s.invite(&inv, BOB, 1, None).is_err(),
