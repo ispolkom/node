@@ -1,7 +1,7 @@
 //! Media transport over P2P network
 
-use crate::media::session::MediaStream;
 use crate::media::codecs::OpusEncoder;
+use crate::media::session::MediaStream;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
@@ -37,7 +37,7 @@ impl MediaSender {
             tx,
         }
     }
-    
+
     pub async fn send_audio(&mut self, encoded: Vec<u8>) -> Result<(), String> {
         let packet = MediaPacket {
             stream_id: self.stream_id,
@@ -46,9 +46,11 @@ impl MediaSender {
             payload: encoded,
             media_type: MediaPacketType::Audio,
         };
-        
+
         self.sequence = self.sequence.wrapping_add(1);
-        self.tx.send(packet).map_err(|e| format!("Failed to send: {}", e))?;
+        self.tx
+            .send(packet)
+            .map_err(|e| format!("Failed to send: {}", e))?;
         Ok(())
     }
 }
@@ -57,15 +59,33 @@ impl MediaSender {
 pub struct MediaReceiver {
     stream_id: u64,
     rx: mpsc::UnboundedReceiver<MediaPacket>,
+    last_sequence: Option<u32>,
 }
 
 impl MediaReceiver {
     pub fn new(stream_id: u64, rx: mpsc::UnboundedReceiver<MediaPacket>) -> Self {
-        Self { stream_id, rx }
+        Self {
+            stream_id,
+            rx,
+            last_sequence: None,
+        }
     }
-    
+
     pub async fn receive(&mut self) -> Option<MediaPacket> {
-        self.rx.recv().await
+        while let Some(packet) = self.rx.recv().await {
+            if packet.stream_id != self.stream_id {
+                continue;
+            }
+            if let Some(last) = self.last_sequence {
+                let delta = packet.sequence.wrapping_sub(last);
+                if delta == 0 || delta >= (1 << 31) {
+                    continue;
+                }
+            }
+            self.last_sequence = Some(packet.sequence);
+            return Some(packet);
+        }
+        None
     }
 }
 
