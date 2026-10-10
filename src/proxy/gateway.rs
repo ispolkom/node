@@ -7,12 +7,12 @@
 use crate::netlayer::P2PTransport;
 use crate::proxy::{ProxyRequest, ProxyResponse, ProxyTunnelData};
 use crate::util::HashId;
-use crate::protocol::{Station, Wagon, WagonNack};
+use crate::protocol::Station;
 use std::sync::Arc;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use anyhow::{Result, Context};
 use tracing::{info, error, debug, warn};
 use reqwest::Client as HttpClient;
@@ -240,9 +240,7 @@ impl HttpProxyGateway {
 
     /// Handle CONNECT request - establish TCP tunnel
     async fn handle_connect(&self, source_node: HashId, request: ProxyRequest) -> Result<()> {
-        use tokio::net::TcpStream;
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        use tokio::time::timeout;
+        use tokio::io::AsyncReadExt;
 
         // Parse host:port from URL (format: "goodwin.su:443" or "example.com:443")
         let addr_str = request.url.clone();
