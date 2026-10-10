@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace "com.yandi.yandi_mobile"
-    compileSdk 35
+    compileSdk 36
     ndkVersion "27.0.12077973"
 
     compileOptions {
@@ -37,6 +37,27 @@ android {
         }
     }
 
+    // Release must never silently fall back to the debug keystore. CI should
+    // provide these through environment variables or Gradle properties:
+    // YANDI_RELEASE_STORE_FILE, YANDI_RELEASE_STORE_PASSWORD,
+    // YANDI_RELEASE_KEY_ALIAS and YANDI_RELEASE_KEY_PASSWORD.
+    def releaseStoreFile = System.getenv('YANDI_RELEASE_STORE_FILE') ?: project.findProperty('yandiReleaseStoreFile')
+    def releaseStorePassword = System.getenv('YANDI_RELEASE_STORE_PASSWORD') ?: project.findProperty('yandiReleaseStorePassword')
+    def releaseKeyAlias = System.getenv('YANDI_RELEASE_KEY_ALIAS') ?: project.findProperty('yandiReleaseKeyAlias')
+    def releaseKeyPassword = System.getenv('YANDI_RELEASE_KEY_PASSWORD') ?: project.findProperty('yandiReleaseKeyPassword')
+    def releaseSigningConfigured = [releaseStoreFile, releaseStorePassword, releaseKeyAlias, releaseKeyPassword].every { it }
+
+    signingConfigs {
+        release {
+            if (releaseSigningConfigured) {
+                storeFile file(releaseStoreFile)
+                storePassword releaseStorePassword
+                keyAlias releaseKeyAlias
+                keyPassword releaseKeyPassword
+            }
+        }
+    }
+
     // полный туннель: hev-socks5-tunnel (MIT), см. src/main/jni
     externalNativeBuild {
         cmake {
@@ -46,9 +67,11 @@ android {
 
     buildTypes {
         release {
-            signingConfig signingConfigs.debug
-            minifyEnabled false
-            shrinkResources false
+            // An unconfigured release is intentionally unsigned instead of
+            // accidentally using the public debug key.
+            signingConfig signingConfigs.release
+            minifyEnabled true
+            shrinkResources true
         }
     }
 }
