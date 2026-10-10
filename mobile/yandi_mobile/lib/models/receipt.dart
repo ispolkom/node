@@ -25,7 +25,7 @@ class MsgChannel {
       editMarker + jsonEncode({'cmid': cmid, 'text': text});
 
   static bool isService(String t) =>
-      t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker);
+      t.startsWith('\u0001yandi-av') || t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker);
 
   static bool isCapPing(String t) => t.startsWith(capMarker);
 

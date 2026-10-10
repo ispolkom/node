@@ -8,6 +8,7 @@ import 'chat_screen.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 import 'files_tab.dart';
+import '../widgets/avatar_circle.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -591,17 +592,7 @@ class _ContactTile extends StatelessWidget {
           children: [
             Stack(
               children: [
-                CircleAvatar(
-                  radius: 24,
-                  backgroundColor: AppTheme.surface,
-                  child: Text(
-                    displayName.isNotEmpty ? displayName[0].toUpperCase() : '?',
-                    style: const TextStyle(
-                        color: AppTheme.accent,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18),
-                  ),
-                ),
+                AvatarCircle(peerId: peerId, label: displayName, showImage: saved),
                 Positioned(
                   right: 0, bottom: 0,
                   child: Container(

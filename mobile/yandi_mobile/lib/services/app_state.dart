@@ -2,7 +2,9 @@ import 'files_host.dart';
 import 'dart:async' as async_lib;
 import 'dart:convert';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart' as pp;
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
 import '../models/trusted_node.dart';
@@ -11,6 +13,9 @@ import '../models/message.dart';
 import '../models/file_offer.dart';
 import '../models/file_state.dart';
 import '../models/receipt.dart';
+import '../models/avatar_msg.dart';
+import 'avatar_service.dart';
+import 'avatar_processor.dart';
 import '../crypto/identity.dart';
 import 'storage_service.dart';
 import 'api_service.dart' as api_svc;
@@ -85,6 +90,17 @@ class AppState extends ChangeNotifier implements FilesHost {
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
 
+    // аватарки: изолированная папка приложения + соответствие «контакт → хэш» в защищённом хранилище
+    final docs = await pp.getApplicationDocumentsDirectory();
+    final av = AvatarService(
+      dir: Directory('${docs.path}/avatars'),
+      read: () => StorageService.secureRead('avatars_v1'),
+      write: (s) => StorageService.secureWrite('avatars_v1', s),
+    );
+    await av.load();
+    av.addListener(notifyListeners);
+    avatars = av;
+
     // 2. Ключи пользователя (генерируются один раз и навсегда)
     identity = await Identity.loadOrGenerate();
 
@@ -157,6 +173,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     try {
       final info = await _api!.getInfo();
       nodeOnline = info['online'] as bool? ?? false;
+      _nodePeerId = info['node_id'] as String?;   // сам компьютер — не «человек»: аватарки ему не шлём
 
       // Регистрируем свои публичные ключи на ноде (для E2E входящих)
       if (identity != null) {
@@ -276,17 +293,20 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (existing != null) {
       contacts[contacts.indexOf(existing)] = Contact(
         peerId: peerId, displayName: finalName, online: existing.online,
-        isManual: existing.isManual, saved: true,
+        isManual: existing.isManual, saved: true, lastActivityMs: existing.lastActivityMs,
       );
     } else {
       contacts.add(Contact(peerId: peerId, displayName: finalName, online: false, isManual: true));
     }
     notifyListeners();
+    _announceAvatar(only: [peerId]);   // добавили в контакты — сообщаем свою картинку
   }
 
   /// Убрать из контактов. Контакты, заведённые на самом узле, остаются (их удаляют там).
   Future<void> removeManualContact(String peerId) async {
     await StorageService.deleteManualContact(peerId);
+    unawaited(avatars?.forgetPeer(peerId) ?? Future<void>.value());   // не в контактах — картинку не показываем и не храним
+    _avatarAnnounced.remove(peerId);
     final c = contactFor(peerId);
     if (c != null && !c.isManual) {
       contacts[contacts.indexOf(c)] = c.copyWith(saved: false);
@@ -354,6 +374,8 @@ class AppState extends ChangeNotifier implements FilesHost {
       contacts = merged.where((c) => !isBlocked(c.peerId)).toList();
       notifyListeners();
       announceReceiptSupport();
+      _resyncAvatarsIfDue();
+      _announceAvatar();
     } catch (_) {}
   }
 
@@ -591,7 +613,107 @@ class AppState extends ChangeNotifier implements FilesHost {
     notifyListeners();
   }
 
+  // ── Аватарки ───────────────────────────────────────────────────────────────
+  // Картинку получают и показывают только сохранённые контакты (не заблокированные, не сам узел). Раз в сеанс на контакта и раз в 6 часов
+  // сообщается только хэш (70 байт); картинка едет, лишь если у собеседника такой ещё нет. Всё — служебные E2E-конверты.
+
+  AvatarService? avatars;
+  String? _nodePeerId;
+  final Set<String> _avatarAnnounced = {};
+  DateTime _lastAvatarSync = DateTime.now();
+
+  File? avatarFile(String peerId) => avatars?.fileForPeer(peerId);
+  File? get myAvatarFile => avatars?.myFile;
+
+  bool _avatarEligible(String peerId) {
+    final c = contactFor(peerId);
+    return c != null && c.saved && !isBlocked(peerId) && peerId != _nodePeerId;
+  }
+
+  Future<void> _sendAvatarText(String peerId, String text) async {
+    await _ws?.sendMessage(peerId, text);
+  }
+
+  /// Сообщить свой хэш: [only] — этим контактам, иначе всем сохранённым, кто сейчас в сети и кому ещё не сообщали в этом сеансе.
+  /// Пустой хэш (картинку убрали) шлётся только с [force].
+  void _announceAvatar({Iterable<String>? only, bool force = false}) {
+    final a = avatars;
+    if (a == null || _ws == null) return;
+    final hash = a.myHash;
+    if (hash == null && !force) return;
+    final targets = (only ?? contacts.where((c) => c.online).map((c) => c.peerId)).toList();
+    for (final p in targets) {
+      if (!_avatarEligible(p)) continue;
+      if (!force && _avatarAnnounced.contains(p)) continue;
+      _avatarAnnounced.add(p);
+      unawaited(_sendAvatarText(p, AvatarMsg.announce(hash ?? '')));
+    }
+  }
+
+  /// Раз в 6 часов заново сверяем хэши со всеми, кто в сети (картинка могла смениться, пока мы не виделись).
+  void _resyncAvatarsIfDue() {
+    if (DateTime.now().difference(_lastAvatarSync) > const Duration(hours: 6)) {
+      _avatarAnnounced.clear();
+      _lastAvatarSync = DateTime.now();
+    }
+  }
+
+  Future<void> _onAvatarMsg(String from, AvatarMsg m) async {
+    final a = avatars;
+    if (a == null || !_avatarEligible(from)) return;   // только от сохранённых контактов
+    switch (m.kind) {
+      case 'h':
+        await a.onAnnounce(from, m.hash, (t) => _sendAvatarText(from, t));
+      case 'q':
+        await a.onRequest(from, m.hash, (t) => _sendAvatarText(from, t));
+      case 'a':
+        await a.onImage(from, m.hash, m.png!, decodes: _decodesAsImage);
+    }
+  }
+
+  static Future<bool> _decodesAsImage(Uint8List png) async {
+    try {
+      final codec = await ui.instantiateImageCodec(png, targetWidth: 64);
+      final frame = await codec.getNextFrame();
+      frame.image.dispose();
+      codec.dispose();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Своя картинка из фото (метаданные не переносятся: картинка собирается заново) или из эмодзи. null — готово, иначе текст ошибки.
+  Future<String?> setMyAvatarFromImage(Uint8List bytes) async {
+    try {
+      await avatars!.setMine(await AvatarProcessor.fromImageBytes(bytes));
+      _avatarAnnounced.clear();
+      _announceAvatar();
+      return null;
+    } catch (e) {
+      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+    }
+  }
+
+  Future<String?> setMyAvatarEmoji(String emoji) async {
+    try {
+      await avatars!.setMine(await AvatarProcessor.fromEmoji(emoji));
+      _avatarAnnounced.clear();
+      _announceAvatar();
+      return null;
+    } catch (e) {
+      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+    }
+  }
+
+  Future<void> clearMyAvatar() async {
+    await avatars?.clearMine();
+    _avatarAnnounced.clear();
+    _announceAvatar(force: true);   // сообщить контактам, что картинки больше нет
+  }
+
   Future<void> blockContact(String peerId, String name) async {
+    unawaited(avatars?.forgetPeer(peerId) ?? Future<void>.value());
     _blocked[peerId] = name;
     contacts.removeWhere((c) => c.peerId == peerId);   // исчезает из списка
     _unread.remove(peerId);
@@ -632,6 +754,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Разобрать входящий текст. Служебное (квитанция/пинг) обрабатываем здесь и возвращаем null; обычное сообщение —
   /// (текст для показа, remoteId|null). remoteId не null, если пришёл конверт с id (значит собеседник ждёт квитанций).
   (String, String?)? _classifyIncoming(String from, String rawText) {
+    final av = AvatarMsg.tryParse(rawText);
+    if (av != null) { unawaited(_onAvatarMsg(from, av)); return null; }
+    if (AvatarMsg.isAvatar(rawText)) return null;   // повреждённый служебный конверт аватарки — не показываем как текст
     final rcpt = MsgChannel.parseReceipt(rawText);
     if (rcpt != null) { _applyReceipt(from, rcpt.$1, rcpt.$2); return null; }
     final edit = MsgChannel.parseEdit(rawText);
@@ -832,6 +957,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
     }
     notifyListeners();
+    if (e.online) _announceAvatar(only: [e.peerId]);   // контакт появился — сверяем картинки (хэши)
   }
 
   void _onFileOffer(FileOfferEvent e) {

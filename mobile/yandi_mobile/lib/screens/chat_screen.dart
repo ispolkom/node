@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../services/vault_files.dart';
 import 'file_viewer_screen.dart';
+import '../widgets/avatar_circle.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -226,14 +227,20 @@ class _ChatScreenState extends State<ChatScreen> {
           : AppBar(
               backgroundColor: AppTheme.surface,
               elevation: 0,
-              title: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(title, style: const TextStyle(color: AppTheme.text, fontSize: 16)),
-                  Text(widget.peerId.substring(0, 16) + '...',
-                      style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
-                ],
-              ),
+              title: Row(children: [
+                AvatarCircle(peerId: widget.peerId, label: title, radius: 18),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(title, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+                      Text(widget.peerId.substring(0, 16) + '...',
+                          style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                    ],
+                  ),
+                ),
+              ]),
               iconTheme: const IconThemeData(color: AppTheme.text),
               actions: [
                 IconButton(tooltip:'Проверить ключи',icon:const Icon(Icons.security),onPressed:_showFingerprints),

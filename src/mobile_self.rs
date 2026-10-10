@@ -352,6 +352,9 @@ pub enum Envelope {
     Edit { cmid: String, text: String },
     /// устройство умеет квитанции
     CapPing,
+    /// служебный конверт, которого этот узел не знает (например, аватарки `yandi-avh/avq/ava` между телефонами): молча отбрасывается,
+    /// чтобы не показываться на странице чата как мусорное сообщение
+    Ignored,
     /// обычный текст (старая сборка)
     Plain(String),
 }
@@ -387,6 +390,8 @@ pub fn classify(text: String) -> Envelope {
         }
     } else if text.starts_with(CAP_MARKER) {
         return Envelope::CapPing;
+    } else if text.starts_with("\u{1}yandi-") && !text.starts_with(FILE_MARKER) {
+        return Envelope::Ignored;
     }
     Envelope::Plain(text)
 }
@@ -649,6 +654,9 @@ mod tests {
         assert!(matches!(classify(edit("7", "new")), Envelope::Edit { cmid, text } if cmid == "7" && text == "new"));
         assert!(matches!(classify(cap_ping()), Envelope::CapPing));
         assert!(matches!(classify("просто текст".into()), Envelope::Plain(_)));
+        assert!(matches!(classify("\u{1}yandi-avh:{\"h\":\"ab\"}".into()), Envelope::Ignored), "аватарка не должна стать сообщением на странице");
+        assert!(matches!(classify("\u{1}yandi-somethingnew:{}".into()), Envelope::Ignored));
+        assert!(matches!(classify(format!("{FILE_MARKER}{{}}")), Envelope::Plain(_)), "предложение файла разбирает приёмник файлов");
         // как пишет Dart: '\u0001yandi-rcpt:{"kind":"delivered","ids":["1791"]}'
         assert!(matches!(classify("\u{1}yandi-rcpt:{\"kind\":\"delivered\",\"ids\":[\"1791\"]}".into()), Envelope::Receipt { read: false, .. }));
         assert_eq!(incoming_id("d", "1"), incoming_id("d", "1"));

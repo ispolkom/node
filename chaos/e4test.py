@@ -153,6 +153,11 @@ check("flipping any byte (kind/sender/time/ephemeral/nonce/ciphertext/tag/signat
 ws_send(s1, frame(0x30, node_id, good)); time.sleep(0.5)
 check("the untouched blob is still accepted afterwards (refusals do not burn ids)", "tamper-me" in history_texts(p1))
 
+# service envelopes the node does not know (avatars between phones) must not show up as chat messages
+for svc_text in ['\x01yandi-avh:{"h":"' + "ab" * 32 + '"}', '\x01yandi-avq:{"h":"' + "cd" * 32 + '"}', '\x01yandi-newthing:{}']:
+    send_to_node(p1, svc_text, ws=s1)
+check("unknown service envelopes (avatars) are dropped, not shown as messages", not any("yandi-" in t for t in history_texts(p1)), history_texts(p1))
+
 # kind separation on the live channel: an ordinary kind=1 blob sent as a live signal is refused (the node answers "peer offline" to the sender)
 call = '\x01yandi-call:' + json.dumps({"v": 1, "t": "invite", "cid": "abcdef0123456789", "video": False, "ts": int(time.time() * 1000)})
 a.api("GET", "/api/mobile/call/events?after=0")   # the page is "open" from now on

@@ -1,10 +1,63 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
+import 'package:file_picker/file_picker.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
+import '../widgets/avatar_circle.dart';
+
+const _emojis = ['😀','😎','🤓','🥳','😇','🤠','😺','🐱','🐶','🦊','🐼','🦁','🐯','🐸','🐵','🦉','🐧','🐢','🦄','🐙',
+  '🌞','🌙','⭐','🔥','🌈','🍀','🌸','🌵','🍉','🍕','🎸','⚽','🚀','🛡️','🔑','💎','🎯','🧩','🪐','⚓'];
 
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
+
+  /// Выбор картинки: фото из памяти, эмодзи или убрать. Системные «Поделиться/галерея» не используются для отправки — файл читается один раз
+  /// и сразу пересобирается в маленький PNG, исходник нигде не сохраняется.
+  Future<void> _avatarSheet(BuildContext context) async {
+    final state = context.read<AppState>();
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(leading: const Icon(Icons.photo_outlined), title: const Text('Выбрать фото'), onTap: () => Navigator.pop(ctx, 'photo')),
+          ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text('Выбрать эмодзи'), onTap: () => Navigator.pop(ctx, 'emoji')),
+          if (state.myAvatarFile != null)
+            ListTile(leading: const Icon(Icons.delete_outline, color: Colors.redAccent), title: const Text('Убрать картинку', style: TextStyle(color: Colors.redAccent)), onTap: () => Navigator.pop(ctx, 'clear')),
+        ]),
+      ),
+    );
+    if (choice == null || !context.mounted) return;
+    String? err;
+    if (choice == 'clear') {
+      await state.clearMyAvatar();
+    } else if (choice == 'photo') {
+      final res = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+      final bytes = res?.files.single.bytes;
+      if (bytes == null) return;
+      err = await state.setMyAvatarFromImage(bytes);
+      try { await FilePicker.platform.clearTemporaryFiles(); } catch (_) {}
+    } else {
+      final emoji = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.surface,
+          title: const Text('Эмодзи', style: TextStyle(color: AppTheme.text)),
+          content: SizedBox(
+            width: 300,
+            child: GridView.count(
+              shrinkWrap: true,
+              crossAxisCount: 5,
+              children: [for (final e in _emojis) InkWell(onTap: () => Navigator.pop(ctx, e), child: Center(child: Text(e, style: const TextStyle(fontSize: 28))))],
+            ),
+          ),
+        ),
+      );
+      if (emoji == null) return;
+      err = await state.setMyAvatarEmoji(emoji);
+    }
+    if (err != null && context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -20,6 +73,15 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: ListView(
         children: [
+          // Профиль
+          _Section(title: 'Профиль'),
+          ListTile(
+            leading: const AvatarCircle.mine(label: 'Я', radius: 28),
+            title: const Text('Моя картинка', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Её видят только ваши контакты. Метаданные фото не передаются: картинка собирается заново.',
+                style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () => _avatarSheet(context),
+          ),
           // Нода
           _Section(title: 'Нода'),
           _InfoTile(label: 'Хост', value: pair?.host ?? '—'),

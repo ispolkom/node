@@ -449,6 +449,7 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
             node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
             return;
         }
+        crate::mobile_self::Envelope::Ignored => return,
         crate::mobile_self::Envelope::Message { cmid, text } => {
             // сообщение с номером: в историю под выведенным номером, телефону сразу «доставлено», «прочитано» — когда откроют страницу
             let local = crate::mobile_self::incoming_id(from_device, &cmid);
