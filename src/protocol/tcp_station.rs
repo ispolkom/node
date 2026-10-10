@@ -16,17 +16,17 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock, Semaphore};
+use tokio::sync::Mutex;
 use tokio::net::TcpStream;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use serde::{Serialize, Deserialize};
 use anyhow::{Result, anyhow};
 
-use crate::protocol::{Train, TrainId, TrainState, Wagon, WagonFlags};
+use crate::protocol::{Train, TrainId, TrainState, Wagon};
 use crate::protocol::train::TrainError;
 use crate::util::HashId;
 use crate::netlayer::encryption::EncryptionManager;
-use tracing::{info, error, debug, warn};
+use tracing::{info, debug, warn};
 
 /// ID TCP соединения
 type TcpConnId = u64;

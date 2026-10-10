@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use anyhow::Result;
-use tracing::{info, error, debug, warn};
+use tracing::{info, debug, warn};
 
 /// Most P2P tunnels open at once.
 const MAX_TUNNELS: usize = 256;

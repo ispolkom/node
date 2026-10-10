@@ -6,12 +6,12 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering as AtomicOrdering};
+use std::sync::atomic::AtomicU8;
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex, RwLock};
+use tokio::sync::Mutex;
 
 use super::{Train, TrainId, Wagon, WagonFlags};
-use super::express::{ExpressTrain, ExpressStrategy, TrainAckMessage, TrainPriority};
+use super::express::{ExpressTrain, TrainAckMessage};
 use super::rate_controller::{RateController, RateAction, Pacer};
 use crate::util::HashId;
 use crate::netlayer::{P2PTransport, transport::get_wagon_stats};

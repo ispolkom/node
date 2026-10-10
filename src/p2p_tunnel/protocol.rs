@@ -2,7 +2,6 @@
 //! P2P Tunnel control protocol
 
 use crate::p2p_tunnel::{TunnelRequest, TunnelResponse};
-use serde::{Serialize, Deserialize};
 
 /// Контрольные пакеты для P2P тоннеля (по аналогии с 0x20, 0x30, 0x40)
 #[repr(u8)]

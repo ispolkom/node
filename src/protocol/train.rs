@@ -4,7 +4,6 @@
 //!
 //! Логическая передача данных. Один поезд = много вагонов.
 
-use serde::{Serialize, Deserialize};
 use std::collections::{HashMap, BTreeMap};  // ⚡ Добавляем BTreeMap для QUIC-style
 use std::time::{Duration, Instant};
 

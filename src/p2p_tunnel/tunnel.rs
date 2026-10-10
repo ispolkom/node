@@ -7,7 +7,7 @@ use crate::p2p::P2PTransport;  // Используем P2P transport (порт 9
 use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use anyhow::Result;
-use tracing::{info, error, debug};
+use tracing::debug;
 
 /// Most bytes of incoming tunnel data kept waiting for a reader.
 const MAX_QUEUED_TUNNEL_BYTES: usize = 1024 * 1024;
