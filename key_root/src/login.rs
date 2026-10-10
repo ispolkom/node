@@ -175,17 +175,16 @@ pub fn reset_login(
     // Text shaped like a recovery code that fails the code's own check may be a typo in a code — or a password that merely looks like
     // one (a pass-phrase of words joined by hyphens has the same shape). It is therefore tried as typed FIRST; only if that does not
     // open the keys is it reported as a typo (rather than as "wrong").
-    let maybe_typo = crate::recovery_code::looks_like_code(code_input) && RecoveryCode::parse(code_input).is_err();
+    let maybe_typo = crate::recovery_code::looks_like_code(code_input)
+        && RecoveryCode::parse(code_input).is_err();
     let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей повреждён".to_string())?;
     let secret = recovery_secret(code_input);
     let root = match doc.unlock_with_password(&secret, policy) {
         Ok(r) => r,
-        Err(KeyRootError::RecoveryFailed) if maybe_typo => {
-            return Err(
-                "В коде опечатка: он не проходит проверку. Проверьте, что записано, и введите ещё раз"
-                    .to_string(),
-            )
-        }
+        Err(KeyRootError::RecoveryFailed) if maybe_typo => return Err(
+            "В коде опечатка: он не проходит проверку. Проверьте, что записано, и введите ещё раз"
+                .to_string(),
+        ),
         Err(KeyRootError::RecoveryFailed) => {
             return Err("Код восстановления не подошёл".to_string())
         }

@@ -212,8 +212,23 @@ fn a_wrong_or_mistyped_secret_or_a_short_new_password_changes_nothing() {
 fn a_master_password_that_looks_like_a_recovery_code_still_resets_the_login() {
     let d = dir();
     let master = "correct-horse-battery-staple";
-    create_keys(&d.dir, &machine(), &device(&d), LOGIN, master, FAST, &KdfPolicy::for_tests()).unwrap();
-    reset_login(&d.dir, master, "brand new login pw", &KdfPolicy::for_tests()).expect("the right secret must be accepted whatever it looks like");
+    create_keys(
+        &d.dir,
+        &machine(),
+        &device(&d),
+        LOGIN,
+        master,
+        FAST,
+        &KdfPolicy::for_tests(),
+    )
+    .unwrap();
+    reset_login(
+        &d.dir,
+        master,
+        "brand new login pw",
+        &KdfPolicy::for_tests(),
+    )
+    .expect("the right secret must be accepted whatever it looks like");
     assert_eq!(verify_login_in(&d.dir, "brand new login pw"), Ok(true));
 }
 

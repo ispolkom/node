@@ -10,8 +10,11 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use aes_gcm::{aead::{Aead, KeyInit}, Aes256Gcm, Nonce};
-use argon2::{Argon2, Params, Algorithm, Version};
+use aes_gcm::{
+    aead::{Aead, KeyInit},
+    Aes256Gcm, Nonce,
+};
+use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 
@@ -143,13 +146,21 @@ impl AuthState {
         rand::rngs::OsRng.fill_bytes(&mut token_bytes);
         let token = hex::encode(token_bytes);
 
-        let ttl = if remember_me { SESSION_REMEMBER_SECS } else { 3600 * 24 };
+        let ttl = if remember_me {
+            SESSION_REMEMBER_SECS
+        } else {
+            3600 * 24
+        };
         let expires_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs() + ttl;
+            .as_secs()
+            + ttl;
 
-        let session = Session { token: token.clone(), expires_at };
+        let session = Session {
+            token: token.clone(),
+            expires_at,
+        };
         if let Ok(mut store) = self.sessions.lock() {
             // Evict expired sessions
             store.retain(|_, s| !s.is_expired());
@@ -199,7 +210,10 @@ impl AuthState {
     pub fn record_login_failure(&self) {
         if let Ok(mut attempts) = self.login_attempts.lock() {
             let failures = attempts.map(|a| a.consecutive_failures).unwrap_or(0) + 1;
-            *attempts = Some(LoginAttempts { consecutive_failures: failures, last_failure: Instant::now() });
+            *attempts = Some(LoginAttempts {
+                consecutive_failures: failures,
+                last_failure: Instant::now(),
+            });
         }
     }
 
@@ -218,7 +232,8 @@ pub fn derive_key(passphrase: &[u8], salt: &[u8; 32]) -> Result<[u8; 32], String
         .map_err(|e| format!("Argon2 params: {}", e))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];
-    argon2.hash_password_into(passphrase, salt, &mut key)
+    argon2
+        .hash_password_into(passphrase, salt, &mut key)
         .map_err(|e| format!("Argon2 KDF failed: {}", e))?;
     Ok(key)
 }
@@ -242,7 +257,8 @@ pub fn hash_login_password(password: &str) -> Result<String, String> {
     use argon2::password_hash::{PasswordHasher, SaltString};
     let salt = SaltString::generate(&mut rand::rngs::OsRng);
     let argon2 = Argon2::default();
-    argon2.hash_password(password.as_bytes(), &salt)
+    argon2
+        .hash_password(password.as_bytes(), &salt)
         .map(|h| h.to_string())
         .map_err(|e| format!("Password hash failed: {}", e))
 }
@@ -255,9 +271,13 @@ pub fn verify_login_password(password: &str, stored_hash: &str) -> bool {
 
 #[cfg(not(unix))]
 pub fn verify_login_password(password: &str, stored_hash: &str) -> bool {
-    use argon2::password_hash::{PasswordVerifier, PasswordHash};
-    let Ok(hash) = PasswordHash::new(stored_hash) else { return false };
-    Argon2::default().verify_password(password.as_bytes(), &hash).is_ok()
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let Ok(hash) = PasswordHash::new(stored_hash) else {
+        return false;
+    };
+    Argon2::default()
+        .verify_password(password.as_bytes(), &hash)
+        .is_ok()
 }
 
 /// Encrypt master_key with a machine-derived key.
@@ -268,10 +288,10 @@ fn encrypt_master_key(master_key: &[u8; 32]) -> Result<EncryptedMasterKey, Strin
     rand::rngs::OsRng.fill_bytes(&mut nonce_bytes);
 
     let machine_key = derive_key(&machine_passphrase(), &salt)?;
-    let cipher = Aes256Gcm::new_from_slice(&machine_key)
-        .map_err(|e| format!("AES init: {}", e))?;
+    let cipher = Aes256Gcm::new_from_slice(&machine_key).map_err(|e| format!("AES init: {}", e))?;
     let nonce = Nonce::from_slice(&nonce_bytes);
-    let ciphertext = cipher.encrypt(nonce, master_key.as_slice())
+    let ciphertext = cipher
+        .encrypt(nonce, master_key.as_slice())
         .map_err(|e| format!("AES encrypt: {}", e))?;
 
     Ok(EncryptedMasterKey {
@@ -289,7 +309,9 @@ fn decrypt_master_key(enc: &EncryptedMasterKey) -> Option<[u8; 32]> {
 
     let mut salt = [0u8; 32];
     let mut nonce_arr = [0u8; 12];
-    if salt_bytes.len() != 32 || nonce_bytes.len() != 12 { return None; }
+    if salt_bytes.len() != 32 || nonce_bytes.len() != 12 {
+        return None;
+    }
     salt.copy_from_slice(&salt_bytes);
     nonce_arr.copy_from_slice(&nonce_bytes);
 
@@ -297,7 +319,9 @@ fn decrypt_master_key(enc: &EncryptedMasterKey) -> Option<[u8; 32]> {
     let cipher = Aes256Gcm::new_from_slice(&machine_key).ok()?;
     let nonce = Nonce::from_slice(&nonce_arr);
     let plaintext = cipher.decrypt(nonce, ciphertext.as_slice()).ok()?;
-    if plaintext.len() != 32 { return None; }
+    if plaintext.len() != 32 {
+        return None;
+    }
     let mut key = [0u8; 32];
     key.copy_from_slice(&plaintext);
     Some(key)
@@ -328,13 +352,20 @@ pub fn load_auth_state() -> AuthState {
     }
     // An auth.json exists: from here on, "cannot open it" is never treated as "first run" (that would let setup overwrite it).
     let locked = |state: &AuthState| {
-        state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
-        state.needs_rebind.store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .is_setup
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        state
+            .needs_rebind
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     };
     let dir = match path.parent().map(KeyDir::open) {
         Some(Ok(d)) => d,
         Some(Err(e)) => {
-            println!("[auth] ❌ key directory is not safe to use ({}); nothing was changed", e.category());
+            println!(
+                "[auth] ❌ key directory is not safe to use ({}); nothing was changed",
+                e.category()
+            );
             locked(&state);
             return state;
         }
@@ -353,7 +384,9 @@ pub fn load_auth_state() -> AuthState {
                 }
                 RootSource::Device => println!("[auth] ✅ Master key loaded (device key)"),
             }
-            state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .is_setup
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Ok(mut mk) = state.master_key.lock() {
                 *mk = Some(*root);
             }
@@ -363,7 +396,10 @@ pub fn load_auth_state() -> AuthState {
             locked(&state);
         }
         Err(e) => {
-            println!("[auth] ❌ the key file cannot be used ({}); nothing was changed", e.category());
+            println!(
+                "[auth] ❌ the key file cannot be used ({}); nothing was changed",
+                e.category()
+            );
             locked(&state);
         }
     }
@@ -399,15 +435,21 @@ pub fn load_auth_state() -> AuthState {
     match decrypt_master_key(&stored.master_key_encrypted) {
         Some(master_key) => {
             println!("[auth] ✅ Master key loaded (machine verified)");
-            state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .is_setup
+                .store(true, std::sync::atomic::Ordering::Relaxed);
             if let Ok(mut mk) = state.master_key.lock() {
                 *mk = Some(master_key);
             }
         }
         None => {
             println!("[auth] ⚠️ Machine-id mismatch — rebind required");
-            state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
-            state.needs_rebind.store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .is_setup
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            state
+                .needs_rebind
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -418,15 +460,22 @@ pub fn load_auth_state() -> AuthState {
 #[cfg_attr(unix, allow(dead_code))] // on Unix the shared `key_root::login` does this; the tests and the Windows path still use it
 fn ensure_no_existing_auth(path: &std::path::Path) -> Result<(), String> {
     if std::fs::symlink_metadata(path).is_ok() {
-        return Err("Auth is already set up; refusing to overwrite the existing key file".to_string());
+        return Err(
+            "Auth is already set up; refusing to overwrite the existing key file".to_string(),
+        );
     }
     Ok(())
 }
 
 /// The web login hash of either auth.json format (1: machine-wrapped key, 2: device + recovery wrappers).
 fn login_hash_of(json: &str) -> Result<String, String> {
-    let value: serde_json::Value = serde_json::from_str(json).map_err(|e| format!("Failed to parse auth.json: {}", e))?;
-    value.get("login_hash").and_then(|v| v.as_str()).map(str::to_owned).ok_or_else(|| "auth.json has no login hash".to_string())
+    let value: serde_json::Value =
+        serde_json::from_str(json).map_err(|e| format!("Failed to parse auth.json: {}", e))?;
+    value
+        .get("login_hash")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned)
+        .ok_or_else(|| "auth.json has no login hash".to_string())
 }
 
 /// First-time setup, exactly as the person entered it in the web page: a login password and a master password, each typed twice.
@@ -440,13 +489,32 @@ pub fn setup_auth(
     master_password: &str,
     master_password_repeat: &str,
 ) -> Result<[u8; 32], String> {
-    check_setup_inputs(login_password, login_password_repeat, master_password, master_password_repeat)?;
+    check_setup_inputs(
+        login_password,
+        login_password_repeat,
+        master_password,
+        master_password_repeat,
+    )?;
     #[cfg(unix)]
     {
         let path = auth_file_path();
-        let dir = key_root::KeyDir::open(path.parent().ok_or("Каталог ключей недоступен")?.to_path_buf()).map_err(|_| "Каталог ключей недоступен".to_string())?;
+        let dir = key_root::KeyDir::open(
+            path.parent()
+                .ok_or("Каталог ключей недоступен")?
+                .to_path_buf(),
+        )
+        .map_err(|_| "Каталог ключей недоступен".to_string())?;
         let device = key_root::FileDeviceKey::new(dir.file("device.key"));
-        setup_auth_in(state, &dir, &key_root::SystemMachine, &device, login_password, master_password, key_root::KdfParams::RECOMMENDED, &key_root::KdfPolicy::production())
+        setup_auth_in(
+            state,
+            &dir,
+            &key_root::SystemMachine,
+            &device,
+            login_password,
+            master_password,
+            key_root::KdfParams::RECOMMENDED,
+            &key_root::KdfPolicy::production(),
+        )
     }
     #[cfg(not(unix))]
     {
@@ -456,12 +524,22 @@ pub fn setup_auth(
 
 /// The rules for what the person typed, in words that are safe to show (the shared rules of `key_root::login` on Unix).
 #[cfg(unix)]
-pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, master_repeat: &str) -> Result<(), String> {
+pub(crate) fn check_setup_inputs(
+    login: &str,
+    login_repeat: &str,
+    master: &str,
+    master_repeat: &str,
+) -> Result<(), String> {
     key_root::login::check_setup_inputs(login, login_repeat, master, master_repeat)
 }
 
 #[cfg(not(unix))]
-pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, master_repeat: &str) -> Result<(), String> {
+pub(crate) fn check_setup_inputs(
+    login: &str,
+    login_repeat: &str,
+    master: &str,
+    master_repeat: &str,
+) -> Result<(), String> {
     if login.chars().count() < 8 {
         return Err("Пароль входа: минимум 8 символов".to_string());
     }
@@ -469,7 +547,9 @@ pub(crate) fn check_setup_inputs(login: &str, login_repeat: &str, master: &str, 
         return Err("Пароли входа не совпадают".to_string());
     }
     if master.chars().count() < 12 {
-        return Err("Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)".to_string());
+        return Err(
+            "Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)".to_string(),
+        );
     }
     if master != master_repeat {
         return Err("Мастер-пароли не совпадают".to_string());
@@ -491,9 +571,21 @@ pub(crate) fn setup_auth_in(
     params: key_root::KdfParams,
     policy: &key_root::KdfPolicy,
 ) -> Result<[u8; 32], String> {
-    let root = key_root::login::create_keys(dir, machine, device, login_password, master_password, params, policy)?;
-    state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
-    state.needs_rebind.store(false, std::sync::atomic::Ordering::Relaxed);
+    let root = key_root::login::create_keys(
+        dir,
+        machine,
+        device,
+        login_password,
+        master_password,
+        params,
+        policy,
+    )?;
+    state
+        .is_setup
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .needs_rebind
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut mk) = state.master_key.lock() {
         *mk = Some(*root);
     }
@@ -536,8 +628,7 @@ fn setup_auth_legacy(
     // Write to disk
     let path = auth_file_path();
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create keys dir: {}", e))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("Failed to create keys dir: {}", e))?;
     }
     let json = serde_json::to_string_pretty(&stored)
         .map_err(|e| format!("Serialization failed: {}", e))?;
@@ -545,8 +636,12 @@ fn setup_auth_legacy(
         .map_err(|e| format!("Failed to write auth.json: {}", e))?;
 
     // Update in-memory state
-    state.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
-    state.needs_rebind.store(false, std::sync::atomic::Ordering::Relaxed);
+    state
+        .is_setup
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .needs_rebind
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut mk) = state.master_key.lock() {
         *mk = Some(master_key);
     }
@@ -561,18 +656,15 @@ pub fn verify_login(login_password: &str) -> Result<bool, String> {
     if !path.exists() {
         return Err("Auth not set up".to_string());
     }
-    let json = std::fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read auth.json: {}", e))?;
+    let json =
+        std::fs::read_to_string(&path).map_err(|e| format!("Failed to read auth.json: {}", e))?;
     let login_hash = login_hash_of(&json)?;
     Ok(verify_login_password(login_password, &login_hash))
 }
 
 /// Re-bind master_key to a new machine (hardware migration).
 /// User must provide master_password to prove ownership.
-pub fn rebind_to_machine(
-    _state: &AuthState,
-    _master_password: &str,
-) -> Result<(), String> {
+pub fn rebind_to_machine(_state: &AuthState, _master_password: &str) -> Result<(), String> {
     // The former implementation derived a NEW random master key from the password (its salt was never stored), which is not the old
     // key: everything encrypted under the old one became unreadable, and the password proved nothing. Recovery is now done by
     // `yandi-keys recover` with the recovery password of a migrated key directory (docs/KEY_RECOVERY.md); nothing is changed here.
@@ -583,10 +675,21 @@ pub fn rebind_to_machine(
 /// second per attempt, and the caller throttles attempts); only then is `auth.json` rewritten, atomically, with the same wrappers and the
 /// new login hash. Every existing session is ended. Errors are short messages that are safe to show.
 #[cfg(unix)]
-pub fn recover_login(state: &AuthState, code_input: &str, new_login_password: &str) -> Result<(), String> {
+pub fn recover_login(
+    state: &AuthState,
+    code_input: &str,
+    new_login_password: &str,
+) -> Result<(), String> {
     let path = auth_file_path();
-    let dir = key_root::KeyDir::open(path.parent().ok_or("Файл ключей недоступен")?.to_path_buf()).map_err(|_| "Каталог ключей недоступен".to_string())?;
-    recover_login_in(state, &dir, code_input, new_login_password, &key_root::KdfPolicy::production())
+    let dir = key_root::KeyDir::open(path.parent().ok_or("Файл ключей недоступен")?.to_path_buf())
+        .map_err(|_| "Каталог ключей недоступен".to_string())?;
+    recover_login_in(
+        state,
+        &dir,
+        code_input,
+        new_login_password,
+        &key_root::KdfPolicy::production(),
+    )
 }
 
 #[cfg(unix)]
@@ -605,7 +708,11 @@ pub(crate) fn recover_login_in(
 }
 
 #[cfg(not(unix))]
-pub fn recover_login(_state: &AuthState, _code_input: &str, _new_login_password: &str) -> Result<(), String> {
+pub fn recover_login(
+    _state: &AuthState,
+    _code_input: &str,
+    _new_login_password: &str,
+) -> Result<(), String> {
     Err("Восстановление по коду пока поддерживается только на Linux и macOS".to_string())
 }
 
@@ -624,12 +731,12 @@ pub fn extract_session_token(cookie_header: &str) -> Option<String> {
 pub fn make_session_cookie(token: &str, remember_me: bool) -> String {
     if remember_me {
         format!(
-            "{}={}; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
+            "{}={}; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age={}",
             SESSION_COOKIE, token, SESSION_REMEMBER_SECS
         )
     } else {
         format!(
-            "{}={}; HttpOnly; SameSite=Strict; Path=/",
+            "{}={}; Secure; HttpOnly; SameSite=Strict; Path=/",
             SESSION_COOKIE, token
         )
     }
@@ -638,7 +745,7 @@ pub fn make_session_cookie(token: &str, remember_me: bool) -> String {
 /// Build a Set-Cookie header that clears the session.
 pub fn clear_session_cookie() -> String {
     format!(
-        "{}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
+        "{}=; Secure; HttpOnly; SameSite=Strict; Path=/; Max-Age=0",
         SESSION_COOKIE
     )
 }
@@ -657,12 +764,28 @@ mod login_throttle_tests {
     #[test]
     fn backoff_schedule_is_free_then_grows_then_caps() {
         assert_eq!(LoginAttempts::backoff_after(0), Duration::ZERO);
-        assert_eq!(LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS), Duration::ZERO, "free attempts must not be throttled");
-        assert_eq!(LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 1), Duration::from_secs(2));
-        assert_eq!(LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 2), Duration::from_secs(4));
-        assert_eq!(LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 3), Duration::from_secs(8));
+        assert_eq!(
+            LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS),
+            Duration::ZERO,
+            "free attempts must not be throttled"
+        );
+        assert_eq!(
+            LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 1),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 2),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 3),
+            Duration::from_secs(8)
+        );
         // Must cap, not overflow or grow unbounded, under a very long attack.
-        assert_eq!(LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 30), Duration::from_secs(LOGIN_BACKOFF_MAX_SECS));
+        assert_eq!(
+            LoginAttempts::backoff_after(LOGIN_FREE_ATTEMPTS + 30),
+            Duration::from_secs(LOGIN_BACKOFF_MAX_SECS)
+        );
     }
 
     #[test]
@@ -673,13 +796,19 @@ mod login_throttle_tests {
         assert!(state.login_backoff_remaining().is_none());
         for _ in 0..LOGIN_FREE_ATTEMPTS {
             state.record_login_failure();
-            assert!(state.login_backoff_remaining().is_none(), "free attempts must not be throttled");
+            assert!(
+                state.login_backoff_remaining().is_none(),
+                "free attempts must not be throttled"
+            );
         }
 
         // The next failure (an attacker guessing fast) must now be throttled.
         state.record_login_failure();
         let remaining = state.login_backoff_remaining();
-        assert!(remaining.is_some(), "REPLAY/BRUTE-FORCE SUCCEEDED: no throttle after repeated failures");
+        assert!(
+            remaining.is_some(),
+            "REPLAY/BRUTE-FORCE SUCCEEDED: no throttle after repeated failures"
+        );
         assert!(remaining.unwrap() <= Duration::from_secs(2));
 
         // A real, correct password must be accepted immediately by the
@@ -688,7 +817,10 @@ mod login_throttle_tests {
         // only proves record_login_success() fully clears the throttle
         // once that real success happens).
         state.record_login_success();
-        assert!(state.login_backoff_remaining().is_none(), "a real success must fully clear the throttle, not just pause it");
+        assert!(
+            state.login_backoff_remaining().is_none(),
+            "a real success must fully clear the throttle, not just pause it"
+        );
 
         // Attacking again afterward must still work from a clean slate —
         // success must not have disabled throttling for future abuse.
@@ -696,7 +828,10 @@ mod login_throttle_tests {
             state.record_login_failure();
         }
         state.record_login_failure();
-        assert!(state.login_backoff_remaining().is_some(), "throttle must re-arm after a fresh run of failures post-success");
+        assert!(
+            state.login_backoff_remaining().is_some(),
+            "throttle must re-arm after a fresh run of failures post-success"
+        );
     }
 
     #[test]
@@ -707,7 +842,10 @@ mod login_throttle_tests {
         }
         assert!(state.login_backoff_remaining().is_some());
         std::thread::sleep(Duration::from_secs(2) + Duration::from_millis(100));
-        assert!(state.login_backoff_remaining().is_none(), "backoff must actually expire, not block forever");
+        assert!(
+            state.login_backoff_remaining().is_none(),
+            "backoff must actually expire, not block forever"
+        );
     }
 }
 
@@ -728,7 +866,10 @@ mod key_root_integration_tests {
         #[cfg(unix)]
         {
             std::os::unix::fs::symlink(tmp.join("nowhere"), &link).unwrap();
-            assert!(ensure_no_existing_auth(&link).is_err(), "a dangling link is not 'absent'");
+            assert!(
+                ensure_no_existing_auth(&link).is_err(),
+                "a dangling link is not 'absent'"
+            );
         }
         let _ = std::fs::remove_dir_all(&tmp);
     }
@@ -737,14 +878,23 @@ mod key_root_integration_tests {
     fn rebind_no_longer_makes_a_different_master_key() {
         let state = AuthState::default();
         assert!(rebind_to_machine(&state, "any password at all").is_err());
-        assert!(state.get_master_key().is_none(), "rebind must not install a key");
+        assert!(
+            state.get_master_key().is_none(),
+            "rebind must not install a key"
+        );
         assert!(!state.is_setup.load(std::sync::atomic::Ordering::Relaxed));
     }
 
     #[test]
     fn the_login_hash_is_read_from_both_auth_formats() {
-        assert_eq!(login_hash_of(r#"{"version":1,"login_hash":"h1","master_key_encrypted":{}}"#).unwrap(), "h1");
-        assert_eq!(login_hash_of(r#"{"version":2,"login_hash":"h2","root_id":"x"}"#).unwrap(), "h2");
+        assert_eq!(
+            login_hash_of(r#"{"version":1,"login_hash":"h1","master_key_encrypted":{}}"#).unwrap(),
+            "h1"
+        );
+        assert_eq!(
+            login_hash_of(r#"{"version":2,"login_hash":"h2","root_id":"x"}"#).unwrap(),
+            "h2"
+        );
         assert!(login_hash_of(r#"{"version":2}"#).is_err());
         assert!(login_hash_of("not json").is_err());
     }
@@ -754,13 +904,31 @@ mod key_root_integration_tests {
         use super::*;
         use key_root::{FixedMachine, KdfParams, KdfPolicy, KeyDir, RecoveryCode, RootDocument};
 
-        const FAST: KdfParams = KdfParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+        const FAST: KdfParams = KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
+        };
 
         fn store(code: &RecoveryCode) -> (std::path::PathBuf, KeyDir) {
-            let base = std::env::temp_dir().join(format!("yandi-recover-test-{}-{}", std::process::id(), rand::random::<u32>()));
+            let base = std::env::temp_dir().join(format!(
+                "yandi-recover-test-{}-{}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
             let dir = KeyDir::open(base.join("keys")).unwrap();
             let old_hash = hash_login_password("the old login password").unwrap();
-            let doc = RootDocument::create(&[7u8; 32], &old_hash, &[9u8; 32], "file-v1", &FixedMachine("m".into()), code.secret(), FAST, &KdfPolicy::for_tests()).unwrap();
+            let doc = RootDocument::create(
+                &[7u8; 32],
+                &old_hash,
+                &[9u8; 32],
+                "file-v1",
+                &FixedMachine("m".into()),
+                code.secret(),
+                FAST,
+                &KdfPolicy::for_tests(),
+            )
+            .unwrap();
             key_root::atomic::create_new_file(&dir.auth_file(), &doc.to_json()).unwrap();
             (base, dir)
         }
@@ -777,14 +945,38 @@ mod key_root_integration_tests {
             let (base, dir) = store(&code);
             let (st, token) = state_with_a_session();
             assert!(st.verify_session(&token));
-            recover_login_in(&st, &dir, &code.display().to_lowercase().replace('-', " "), "a brand new password", &KdfPolicy::for_tests()).unwrap();
+            recover_login_in(
+                &st,
+                &dir,
+                &code.display().to_lowercase().replace('-', " "),
+                "a brand new password",
+                &KdfPolicy::for_tests(),
+            )
+            .unwrap();
             let doc = RootDocument::parse(&std::fs::read(dir.auth_file()).unwrap()).unwrap();
-            assert!(verify_login_password("a brand new password", &doc.login_hash));
-            assert!(!verify_login_password("the old login password", &doc.login_hash));
-            assert!(!st.verify_session(&token), "an old session survived a password reset");
+            assert!(verify_login_password(
+                "a brand new password",
+                &doc.login_hash
+            ));
+            assert!(!verify_login_password(
+                "the old login password",
+                &doc.login_hash
+            ));
+            assert!(
+                !st.verify_session(&token),
+                "an old session survived a password reset"
+            );
             // the keys themselves are untouched: the same code still opens the same root, the device still opens it too
-            assert_eq!(*doc.unlock_with_password(code.secret(), &KdfPolicy::for_tests()).unwrap(), [7u8; 32]);
-            assert_eq!(*doc.unlock_with_device(&[9u8; 32], &FixedMachine("m".into())).unwrap(), [7u8; 32]);
+            assert_eq!(
+                *doc.unlock_with_password(code.secret(), &KdfPolicy::for_tests())
+                    .unwrap(),
+                [7u8; 32]
+            );
+            assert_eq!(
+                *doc.unlock_with_device(&[9u8; 32], &FixedMachine("m".into()))
+                    .unwrap(),
+                [7u8; 32]
+            );
             let _ = std::fs::remove_dir_all(base);
         }
 
@@ -796,20 +988,41 @@ mod key_root_integration_tests {
             let (st, token) = state_with_a_session();
             let pol = KdfPolicy::for_tests();
             let other = RecoveryCode::generate().display();
-            assert_eq!(recover_login_in(&st, &dir, &other, "a brand new password", &pol).unwrap_err(), "Код восстановления не подошёл");
+            assert_eq!(
+                recover_login_in(&st, &dir, &other, "a brand new password", &pol).unwrap_err(),
+                "Код восстановления не подошёл"
+            );
             let mut typo = code.display();
             typo.replace_range(0..1, if typo.starts_with('A') { "B" } else { "A" });
-            assert!(recover_login_in(&st, &dir, &typo, "a brand new password", &pol).unwrap_err().contains("опечатка"));
+            assert!(
+                recover_login_in(&st, &dir, &typo, "a brand new password", &pol)
+                    .unwrap_err()
+                    .contains("опечатка")
+            );
             assert!(recover_login_in(&st, &dir, &code.display(), "short", &pol).is_err());
             assert!(recover_login_in(&st, &dir, "", "a brand new password", &pol).is_err());
-            assert_eq!(std::fs::read(dir.auth_file()).unwrap(), before, "a refused reset changed auth.json");
+            assert_eq!(
+                std::fs::read(dir.auth_file()).unwrap(),
+                before,
+                "a refused reset changed auth.json"
+            );
             assert!(st.verify_session(&token), "a refused reset ended a session");
             // a legacy (v1) directory has no recovery wrapper
-            let legacy = std::env::temp_dir().join(format!("yandi-recover-legacy-{}-{}", std::process::id(), rand::random::<u32>()));
+            let legacy = std::env::temp_dir().join(format!(
+                "yandi-recover-legacy-{}-{}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
             let ldir = KeyDir::open(legacy.join("keys")).unwrap();
-            let v1 = key_root::legacy::seal_legacy_auth(&[7u8; 32], "$h", &FixedMachine("m".into())).unwrap();
+            let v1 =
+                key_root::legacy::seal_legacy_auth(&[7u8; 32], "$h", &FixedMachine("m".into()))
+                    .unwrap();
             key_root::atomic::create_new_file(&ldir.auth_file(), &v1).unwrap();
-            assert!(recover_login_in(&st, &ldir, &code.display(), "a brand new password", &pol).unwrap_err().contains("migrate"));
+            assert!(
+                recover_login_in(&st, &ldir, &code.display(), "a brand new password", &pol)
+                    .unwrap_err()
+                    .contains("migrate")
+            );
             assert_eq!(std::fs::read(ldir.auth_file()).unwrap(), v1);
             let _ = std::fs::remove_dir_all(base);
             let _ = std::fs::remove_dir_all(legacy);
@@ -821,23 +1034,45 @@ mod key_root_integration_tests {
         use super::*;
         use crate::core::identity::NodeIdentity;
         use key_root::{
-            unlock_root, FileDeviceKey, FixedMachine, IdentityFormat, KdfParams, KdfPolicy, KeyDir, KeyRootError, OpenContext, Recovery, RootDocument, RootSource,
+            unlock_root, FileDeviceKey, FixedMachine, IdentityFormat, KdfParams, KdfPolicy, KeyDir,
+            KeyRootError, OpenContext, Recovery, RootDocument, RootSource,
         };
         use std::os::unix::fs::PermissionsExt;
 
-        const FAST: KdfParams = KdfParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+        const FAST: KdfParams = KdfParams {
+            memory_kib: 64,
+            iterations: 1,
+            parallelism: 1,
+        };
         const LOGIN: &str = "my login password";
         const MASTER: &str = "my own master phrase, written on paper";
 
         fn fresh() -> (std::path::PathBuf, KeyDir) {
-            let base = std::env::temp_dir().join(format!("yandi-setup-test-{}-{}", std::process::id(), rand::random::<u32>()));
+            let base = std::env::temp_dir().join(format!(
+                "yandi-setup-test-{}-{}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
             let dir = KeyDir::open(base.join("keys")).unwrap();
             (base, dir)
         }
 
-        fn setup(dir: &KeyDir, machine: &FixedMachine, state: &AuthState) -> Result<[u8; 32], String> {
+        fn setup(
+            dir: &KeyDir,
+            machine: &FixedMachine,
+            state: &AuthState,
+        ) -> Result<[u8; 32], String> {
             let device = FileDeviceKey::new(dir.file("device.key"));
-            setup_auth_in(state, dir, machine, &device, LOGIN, MASTER, FAST, &KdfPolicy::for_tests())
+            setup_auth_in(
+                state,
+                dir,
+                machine,
+                &device,
+                LOGIN,
+                MASTER,
+                FAST,
+                &KdfPolicy::for_tests(),
+            )
         }
 
         #[test]
@@ -854,20 +1089,54 @@ mod key_root_integration_tests {
             let (by_device, source) = unlock_root(&dir, &m, &device).unwrap();
             assert_eq!((*by_device, source), (root, RootSource::Device));
             // the master password exactly as typed opens it; a near miss does not
-            assert_eq!(*doc.unlock_with_password(MASTER, &KdfPolicy::for_tests()).unwrap(), root);
-            assert_eq!(doc.unlock_with_password("my own master phrase, written on paper.", &KdfPolicy::for_tests()).unwrap_err(), KeyRootError::RecoveryFailed);
-            assert!(verify_login_password(LOGIN, &doc.login_hash) && !verify_login_password(MASTER, &doc.login_hash));
+            assert_eq!(
+                *doc.unlock_with_password(MASTER, &KdfPolicy::for_tests())
+                    .unwrap(),
+                root
+            );
+            assert_eq!(
+                doc.unlock_with_password(
+                    "my own master phrase, written on paper.",
+                    &KdfPolicy::for_tests()
+                )
+                .unwrap_err(),
+                KeyRootError::RecoveryFailed
+            );
+            assert!(
+                verify_login_password(LOGIN, &doc.login_hash)
+                    && !verify_login_password(MASTER, &doc.login_hash)
+            );
             // nothing readable: neither password, nor the root, nor the device key is in any file
             let device_key = std::fs::read(dir.file("device.key")).unwrap();
             for name in ["auth.json", "device.key"] {
                 let content = std::fs::read(dir.file(name)).unwrap();
-                for secret in [MASTER.as_bytes().to_vec(), LOGIN.as_bytes().to_vec(), root.to_vec(), hex::encode(root).into_bytes()] {
-                    assert!(!content.windows(secret.len()).any(|w| w == secret.as_slice()), "{name} contains a secret");
+                for secret in [
+                    MASTER.as_bytes().to_vec(),
+                    LOGIN.as_bytes().to_vec(),
+                    root.to_vec(),
+                    hex::encode(root).into_bytes(),
+                ] {
+                    assert!(
+                        !content
+                            .windows(secret.len())
+                            .any(|w| w == secret.as_slice()),
+                        "{name} contains a secret"
+                    );
                 }
             }
-            assert!(!std::fs::read(dir.auth_file()).unwrap().windows(32).any(|w| w == device_key.as_slice()));
+            assert!(!std::fs::read(dir.auth_file())
+                .unwrap()
+                .windows(32)
+                .any(|w| w == device_key.as_slice()));
             for name in ["auth.json", "device.key"] {
-                assert_eq!(std::fs::metadata(dir.file(name)).unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    std::fs::metadata(dir.file(name))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o600
+                );
             }
             let _ = std::fs::remove_dir_all(base);
         }
@@ -878,20 +1147,50 @@ mod key_root_integration_tests {
             let m = FixedMachine("machine-A".into());
             let state = AuthState::default();
             setup(&dir, &m, &state).unwrap();
-            let before = (std::fs::read(dir.auth_file()).unwrap(), std::fs::read(dir.file("device.key")).unwrap());
-            assert!(setup(&dir, &m, &AuthState::default()).is_err(), "a second setup must not overwrite the keys");
-            assert_eq!((std::fs::read(dir.auth_file()).unwrap(), std::fs::read(dir.file("device.key")).unwrap()), before);
+            let before = (
+                std::fs::read(dir.auth_file()).unwrap(),
+                std::fs::read(dir.file("device.key")).unwrap(),
+            );
+            assert!(
+                setup(&dir, &m, &AuthState::default()).is_err(),
+                "a second setup must not overwrite the keys"
+            );
+            assert_eq!(
+                (
+                    std::fs::read(dir.auth_file()).unwrap(),
+                    std::fs::read(dir.file("device.key")).unwrap()
+                ),
+                before
+            );
             // the rules on the typed text
-            assert!(check_setup_inputs("short", "short", MASTER, MASTER).unwrap_err().contains("минимум 8"));
-            assert!(check_setup_inputs(LOGIN, "another", MASTER, MASTER).unwrap_err().contains("Пароли входа не совпадают"));
-            assert!(check_setup_inputs(LOGIN, LOGIN, "eleven char", "eleven char").unwrap_err().contains("минимум 12"));
-            assert!(check_setup_inputs(LOGIN, LOGIN, MASTER, "another master phrase").unwrap_err().contains("Мастер-пароли не совпадают"));
-            assert!(check_setup_inputs(LOGIN, LOGIN, LOGIN, LOGIN).unwrap_err().contains("отличаться"));
+            assert!(check_setup_inputs("short", "short", MASTER, MASTER)
+                .unwrap_err()
+                .contains("минимум 8"));
+            assert!(check_setup_inputs(LOGIN, "another", MASTER, MASTER)
+                .unwrap_err()
+                .contains("Пароли входа не совпадают"));
+            assert!(
+                check_setup_inputs(LOGIN, LOGIN, "eleven char", "eleven char")
+                    .unwrap_err()
+                    .contains("минимум 12")
+            );
+            assert!(
+                check_setup_inputs(LOGIN, LOGIN, MASTER, "another master phrase")
+                    .unwrap_err()
+                    .contains("Мастер-пароли не совпадают")
+            );
+            assert!(check_setup_inputs(LOGIN, LOGIN, LOGIN, LOGIN)
+                .unwrap_err()
+                .contains("отличаться"));
             assert!(check_setup_inputs(LOGIN, LOGIN, MASTER, MASTER).is_ok());
             // a fresh directory where a stray device key already lies: refused, nothing is written
             let (base2, dir2) = fresh();
             std::fs::write(dir2.file("device.key"), [1u8; 32]).unwrap();
-            std::fs::set_permissions(dir2.file("device.key"), std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(
+                dir2.file("device.key"),
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .unwrap();
             assert!(setup(&dir2, &m, &AuthState::default()).is_err());
             assert!(!dir2.auth_file().exists());
             let _ = std::fs::remove_dir_all(base);
@@ -899,7 +1198,8 @@ mod key_root_integration_tests {
         }
 
         #[test]
-        fn a_fresh_install_gets_a_recoverable_identity_and_the_typed_master_password_brings_it_back() {
+        fn a_fresh_install_gets_a_recoverable_identity_and_the_typed_master_password_brings_it_back(
+        ) {
             let (base, dir) = fresh();
             let m = FixedMachine("machine-A".into());
             let state = AuthState::default();
@@ -907,33 +1207,84 @@ mod key_root_integration_tests {
             // the identity is created UNDER the new keys (format v3), at first start
             let id = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root)).unwrap();
             let file = std::fs::read(dir.identity_file(9000)).unwrap();
-            assert_eq!(key_root::identity_store::identity_format(&file).unwrap(), IdentityFormat::RootV3);
+            assert_eq!(
+                key_root::identity_store::identity_format(&file).unwrap(),
+                IdentityFormat::RootV3
+            );
             // every later start: the device opens the key, the same identity loads, no password
             let device = FileDeviceKey::new(dir.file("device.key"));
             let (root2, _) = unlock_root(&dir, &m, &device).unwrap();
-            let again = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root2)).unwrap();
+            let again =
+                NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root2)).unwrap();
             assert_eq!(again.node_id().0, id.node_id().0);
             // ANOTHER MACHINE, the device key gone: only the two files and the master password the person typed
-            let other = std::env::temp_dir().join(format!("yandi-setup-other-{}-{}", std::process::id(), rand::random::<u32>()));
+            let other = std::env::temp_dir().join(format!(
+                "yandi-setup-other-{}-{}",
+                std::process::id(),
+                rand::random::<u32>()
+            ));
             let odir = KeyDir::open(other.join("keys")).unwrap();
             for name in ["auth.json", "node_identity_9000.json"] {
-                key_root::atomic::create_new_file(&odir.file(name), &std::fs::read(dir.file(name)).unwrap()).unwrap();
+                key_root::atomic::create_new_file(
+                    &odir.file(name),
+                    &std::fs::read(dir.file(name)).unwrap(),
+                )
+                .unwrap();
             }
             let mb = FixedMachine("machine-B".into());
             let device_b = FileDeviceKey::new(odir.file("device.key"));
-            assert_eq!(unlock_root(&odir, &mb, &device_b).err().unwrap(), KeyRootError::RecoveryRequired);
+            assert_eq!(
+                unlock_root(&odir, &mb, &device_b).err().unwrap(),
+                KeyRootError::RecoveryRequired
+            );
             let pol = KdfPolicy::for_tests();
-            let wrong = Recovery { dir: &odir, port: 9000, machine: &mb, device: &device_b, password: "not the master password", policy: &pol }.run();
+            let wrong = Recovery {
+                dir: &odir,
+                port: 9000,
+                machine: &mb,
+                device: &device_b,
+                password: "not the master password",
+                policy: &pol,
+            }
+            .run();
             assert_eq!(wrong.err().unwrap(), KeyRootError::RecoveryFailed);
-            Recovery { dir: &odir, port: 9000, machine: &mb, device: &device_b, password: MASTER, policy: &pol }.run().unwrap();
+            Recovery {
+                dir: &odir,
+                port: 9000,
+                machine: &mb,
+                device: &device_b,
+                password: MASTER,
+                policy: &pol,
+            }
+            .run()
+            .unwrap();
             let (root3, _) = unlock_root(&odir, &mb, &device_b).unwrap();
-            let back = NodeIdentity::load_or_create_in(&odir, &mb, None, 9000, Some(&root3)).unwrap();
-            assert_eq!(back.node_id().0, id.node_id().0, "the recovered node id is not the same");
+            let back =
+                NodeIdentity::load_or_create_in(&odir, &mb, None, 9000, Some(&root3)).unwrap();
+            assert_eq!(
+                back.node_id().0,
+                id.node_id().0,
+                "the recovered node id is not the same"
+            );
             // and the login page: forgot the login password → the master password (as typed) sets a new one
-            recover_login_in(&AuthState::default(), &odir, MASTER, "a new login password", &pol).unwrap();
+            recover_login_in(
+                &AuthState::default(),
+                &odir,
+                MASTER,
+                "a new login password",
+                &pol,
+            )
+            .unwrap();
             let doc = RootDocument::parse(&std::fs::read(odir.auth_file()).unwrap()).unwrap();
-            assert!(verify_login_password("a new login password", &doc.login_hash));
-            let _ = OpenContext { machine: &mb, env_password: None, root: None };
+            assert!(verify_login_password(
+                "a new login password",
+                &doc.login_hash
+            ));
+            let _ = OpenContext {
+                machine: &mb,
+                env_password: None,
+                root: None,
+            };
             let _ = std::fs::remove_dir_all(base);
             let _ = std::fs::remove_dir_all(other);
         }
