@@ -189,6 +189,23 @@ class Identity {
     }
   }
 
+  static Future<bool> verifyKeyBundle({
+    required List<int> ed25519PublicKey,
+    required List<int> x25519PublicKey,
+    required List<int> signature,
+  }) {
+    final message = [
+      ...utf8.encode('YANDI-MOBILE-KEYS-V1\u0000'),
+      ...ed25519PublicKey,
+      ...x25519PublicKey,
+    ];
+    return verify(
+      message: message,
+      signature: signature,
+      publicKey: ed25519PublicKey,
+    );
+  }
+
   // ── ECDH ───────────────────────────────────────────────────────────────────
 
   Future<Uint8List> ecdh(List<int> theirX25519Pub) async {

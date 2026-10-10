@@ -6,6 +6,7 @@ import 'package:http/io_client.dart';
 import '../models/trusted_node.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
+import '../crypto/identity.dart';
 import 'storage_service.dart';
 
 class ApiService {
@@ -102,17 +103,27 @@ class ApiService {
   }
 
   Future<List<int>?> getPeerX25519Pub(String peerId) async {
-    final cached = await StorageService.getPeerX25519Pub(peerId);
-    if (cached != null) return base64.decode(cached);
     try {
       final res = await _client
           .get(_url('/mobile/pubkey/$peerId'), headers: _headers)
           .timeout(const Duration(seconds: 8));
       if (res.statusCode != 200) return null;
-      final pubB64 = (jsonDecode(res.body) as Map<String, dynamic>)['x25519_pub'] as String?;
-      if (pubB64 == null) return null;
+      final bundle = jsonDecode(res.body) as Map<String, dynamic>;
+      final pubB64 = bundle['x25519_pub'] as String?;
+      final edB64 = bundle['ed25519_pub'] as String?;
+      final sigB64 = bundle['signature'] as String?;
+      if (pubB64 == null || edB64 == null || sigB64 == null) return null;
+      final pub = base64.decode(pubB64);
+      final ed = base64.decode(edB64);
+      final sig = base64.decode(sigB64);
+      if (pub.length != 32 || ed.length != 32 || sig.length != 64) return null;
+      if (!await Identity.verifyKeyBundle(
+        ed25519PublicKey: ed,
+        x25519PublicKey: pub,
+        signature: sig,
+      )) return null;
       await StorageService.cachePeerX25519Pub(peerId, pubB64);
-      return base64.decode(pubB64);
+      return pub;
     } catch (_) {
       return null;
     }
