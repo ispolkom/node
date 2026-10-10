@@ -236,10 +236,12 @@
         // === Escape HTML ===
         function escapeHTML(str) {
             if (!str) return '';
-            return str.replace(/[&<>]/g, function(m) {
+            return String(str).replace(/[&<>"']/g, function(m) {
                 if (m === '&') return '&amp;';
                 if (m === '<') return '&lt;';
                 if (m === '>') return '&gt;';
+                if (m === '"') return '&quot;';
+                if (m === "'") return '&#39;';
                 return m;
             });
         }
@@ -319,8 +321,8 @@
             for (var i = 0; i < contacts.length; i++) {
                 var c = contacts[i];
                 var activeClass = (currentContactShortId === c.short_id) ? 'active' : '';
-                html += '<div class="contact-item ' + activeClass + '" data-contact-id="' + c.id + '" data-short-id="' + c.short_id + '" data-name="' + escapeHTML(c.name) + '" onclick="selectContact(\'' + c.id + '\', \'' + c.short_id + '\', \'' + escapeHTML(c.name) + '\')">';
-                html += '<div class="contact-avatar" id="avatar-' + c.short_id + '"></div>';
+                html += '<div class="contact-item ' + activeClass + '" data-contact-id="' + escapeHTML(c.id) + '" data-short-id="' + escapeHTML(c.short_id) + '" data-name="' + escapeHTML(c.name) + '">';
+                html += '<div class="contact-avatar" id="avatar-' + escapeHTML(c.short_id) + '"></div>';
                 html += '<div class="contact-info">';
                 html += '<div class="contact-name">' + escapeHTML(c.name) + '</div>';
                 html += '<div class="contact-id">' + escapeHTML(c.short_id) + '</div>';
@@ -328,6 +330,11 @@
                 html += '</div></div>';
             }
             container.innerHTML = html;
+            container.querySelectorAll('.contact-item').forEach(function(item) {
+                item.addEventListener('click', function() {
+                    selectContact(item.dataset.contactId, item.dataset.shortId, item.dataset.name);
+                });
+            });
             for (var j = 0; j < contacts.length; j++) {
                 var contact = contacts[j];
                 var avatarDiv = document.getElementById('avatar-' + contact.short_id);
@@ -336,7 +343,14 @@
                     img.src = '/api/avatar/' + contact.short_id;
                     img.style.cssText = 'width: 40px; height: 40px; border-radius: 4px; object-fit: cover;';
                     img.onerror = function(shortId, name) {
-                        return function() { document.getElementById('avatar-' + shortId).innerHTML = '<span class="avatar-initial">' + name.charAt(0).toUpperCase() + '</span>'; };
+                        return function() {
+                            var target = document.getElementById('avatar-' + shortId);
+                            if (!target) return;
+                            var initial = document.createElement('span');
+                            initial.className = 'avatar-initial';
+                            initial.textContent = String(name || '').charAt(0).toUpperCase();
+                            target.replaceChildren(initial);
+                        };
                     }(contact.short_id, contact.name);
                     avatarDiv.appendChild(img);
                 }
@@ -561,7 +575,7 @@
             if (mime.startsWith('image/')) {
                 var imageSrc = contentUrl || attachment.data || '';
                 html += '<div class="attachment-meta" style="max-width:260px;">';
-                if (imageSrc) html += '<img src="' + imageSrc + '" alt="' + escapeHTML(attachment.filename) + '" style="max-width:260px;max-height:220px;border:1px solid #808080;background:#fff;object-fit:contain;">';
+                if (imageSrc) html += '<img src="' + escapeHTML(imageSrc) + '" alt="' + escapeHTML(attachment.filename) + '" style="max-width:260px;max-height:220px;border:1px solid #808080;background:#fff;object-fit:contain;">';
                 html += '<div class="attachment-filename">' + escapeHTML(attachment.filename) + '</div>';
                 html += '<div class="file-size">' + formatFileSize(attachment.size) + '</div>';
                 if (contentUrl) html += '<div class="attachment-actions"><a class="attachment-play-card" href="' + contentUrl + '" target="_blank" rel="noopener"><span class="attachment-play-icon">▶</span><span class="attachment-play-label"><span class="attachment-play-title">Открыть</span><span class="attachment-play-subtitle">Во встроенном просмотре браузера</span></span></a><a class="attachment-download-link" href="' + contentUrl + '" download="' + escapeHTML(attachment.filename) + '">Скачать</a></div>';
@@ -824,7 +838,7 @@
                     var myNameEl = document.getElementById('myShortId');
                     if (myNameEl && myProfile.display_name) myNameEl.textContent = myProfile.display_name;
                     var myAvatar = document.getElementById('myAvatar');
-                    if (myAvatar && myProfile.avatar) myAvatar.innerHTML = '<img src="' + myProfile.avatar + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+                    if (myAvatar && myProfile.avatar) myAvatar.innerHTML = '<img src="' + escapeHTML(myProfile.avatar) + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
                     else if (myAvatar) myAvatar.innerHTML = '<div class="avatar-placeholder">👤</div>';
                 }
             }).catch(function(e) { console.error(e); });
@@ -835,7 +849,7 @@
             if (!modal) return;
             document.getElementById('profileName').value = myProfile?.display_name || '';
             var preview = document.getElementById('avatarPreview');
-            if (preview && myProfile?.avatar) preview.innerHTML = '<img src="' + myProfile.avatar + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+            if (preview && myProfile?.avatar) preview.innerHTML = '<img src="' + escapeHTML(myProfile.avatar) + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
             else if (preview) preview.innerHTML = '<div class="avatar-placeholder" style="width: 80px; height: 80px; margin: 0 auto;">👤</div>';
             document.getElementById('removeAvatarBtn').style.display = myProfile?.avatar ? 'inline-block' : 'none';
             selectedAvatarFile = null;
@@ -850,7 +864,7 @@
                 if (data.status === 'success') {
                     myProfile.avatar = data.avatar_url;
                     var preview = document.getElementById('avatarPreview');
-                    if (preview) preview.innerHTML = '<img src="' + data.avatar_url + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
+                    if (preview) preview.innerHTML = '<img src="' + escapeHTML(data.avatar_url) + '" style="width: 80px; height: 80px; border-radius: 50%; object-fit: cover;">';
                     document.getElementById('removeAvatarBtn').style.display = 'inline-block';
                     showAlert('✅', 'Аватар загружен');
                     return true;
