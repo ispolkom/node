@@ -1257,6 +1257,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/files/:id/done", post(crate::mobile_files::done))
         .route("/mobile/groups", get(crate::mobile_groups::m_list).post(crate::mobile_groups::m_create))
         .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
+        .route("/mobile/groups/:gid/settings", post(crate::mobile_groups::m_settings))
         .route("/mobile/groups/:gid/request", post(crate::mobile_groups::m_request))
         .route("/mobile/groups/:gid/requests", get(crate::mobile_groups::m_requests))
         .route("/mobile/groups/:gid/requests/:rid", axum::routing::delete(crate::mobile_groups::m_request_done))

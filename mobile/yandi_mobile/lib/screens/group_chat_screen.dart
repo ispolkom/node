@@ -199,7 +199,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             Text('${g.members} уч. · вы: ${g.myAlias}', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
           ]),
         ),
-        actions: [IconButton(icon: const Icon(Icons.info_outline), tooltip: 'О группе', onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))))],
+        actions: [IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Настройки группы', onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))))],
       ),
       body: Column(children: [
         SizedBox(

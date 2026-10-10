@@ -169,29 +169,23 @@ class GroupService {
     final sys = await store.entries(g.id, kind: GroupKind.system, limit: 2000);
     final names = <String, String>{};
     GroupRules? rules;
-    final owner = await _ownerAlias(g);
+    // правила группы принимаются от владельца и админов (по их псевдонимам в текущем составе)
+    final managers = <String>{if (g.canManage) g.myAlias};
+    try {
+      final m = await api.members(g.id);
+      for (final x in (m['members'] as List? ?? const [])) {
+        final r = (x as Map)['role'];
+        if (r == 'owner' || r == 'admin') managers.add(x['alias'] as String);
+      }
+    } catch (_) {}
     for (final e in sys) {
       if (e.deleted) continue;
       final op = e.body['op'];
       if (op == 'name' && e.body['n'] is String) names[e.from] = (e.body['n'] as String).trim();
-      if (op == 'rules' && owner != null && e.from == owner) rules = GroupRules.fromBody(e.body);
+      if (op == 'rules' && managers.contains(e.from)) rules = GroupRules.fromBody(e.body);
     }
     _names[g.id] = names;
     if (rules != null) _rules[g.id] = rules;
-  }
-
-  Future<String?> _ownerAlias(GroupInfo g) async {
-    if (g.isOwner) return g.myAlias;
-    final c = await store.read('grp_owneralias_${g.id}');
-    if (c != null) return c;
-    final m = await api.members(g.id);
-    for (final x in (m['members'] as List? ?? const [])) {
-      if ((x as Map)['role'] == 'owner') {
-        await store.write('grp_owneralias_${g.id}', x['alias'] as String);
-        return x['alias'] as String;
-      }
-    }
-    return null;
   }
 
   // ── общий обход ──────────────────────────────────────────────────────────
@@ -296,6 +290,13 @@ class GroupService {
   /// Группы узла, куда можно вступить или попроситься.
   Future<List<DiscoverGroup>> discover() async => [for (final j in await api.openGroups()) DiscoverGroup.fromJson(j)];
 
+  /// Владелец меняет название, тематику и описание группы.
+  Future<void> updateSettings(String gid, {String? name, String? topic, String? about}) async {
+    await api.settings(gid, name: name, topic: topic, about: about);
+    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    onChanged?.call(gid);
+  }
+
   /// Попросить владельца прислать приглашение в группу «по приглашению».
   Future<void> requestInvite(String gid, String myName) => api.requestJoin(gid, myName.trim());
 
@@ -378,7 +379,7 @@ class GroupService {
   /// Владелец: запретить виды записей в группе (служебная запись, видна только участникам).
   Future<void> setRules(String gid, GroupRules r) async {
     final g = byId(gid);
-    if (g == null || !g.isOwner) throw const GroupSendRefused('Правила задаёт только владелец группы');
+    if (g == null || !g.canManage) throw const GroupSendRefused('Правила задают владелец и админ группы');
     final key = await _groupKey(gid, g.epoch);
     if (key == null) throw const GroupSendRefused('Ключ группы не создан');
     await _append(g, GroupKind.system, r.toBody(), key);

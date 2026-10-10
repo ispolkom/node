@@ -31,7 +31,10 @@ class GroupInfo {
       );
 
   bool get isOwner => role == 'owner';
-  bool get canModerate => role == 'owner' || role == 'moderator';
+  bool get isAdmin => role == 'admin';
+  /// Владелец и админ: настройки группы, правила, роли «модератор/участник».
+  bool get canManage => role == 'owner' || role == 'admin';
+  bool get canModerate => role == 'owner' || role == 'admin' || role == 'moderator';
 }
 
 class GroupMember {

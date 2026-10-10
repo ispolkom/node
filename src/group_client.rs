@@ -472,11 +472,15 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
 }
 
 fn rebuild_meta(c: &mut Client, dev: &str, gid: &str, role: &str, my_alias: &str) {
-    let owner = if role == "owner" {
-        Some(my_alias.to_string())
-    } else {
-        with_store(|st| st.members(gid, dev)).ok().and_then(|m| m["members"].as_array().and_then(|l| l.iter().find(|x| s(x, "role") == "owner").map(|x| s(x, "alias"))))
-    };
+    // правила группы принимаются от владельца и админов (по их псевдонимам в текущем составе)
+    let managers: HashSet<String> = with_store(|st| st.members(gid, dev))
+        .ok()
+        .and_then(|m| m["members"].as_array().map(|l| l.iter().filter(|x| matches!(s(x, "role").as_str(), "owner" | "admin")).map(|x| s(x, "alias")).collect()))
+        .unwrap_or_default();
+    let mut managers = managers;
+    if role == "owner" || role == "admin" {
+        managers.insert(my_alias.to_string());
+    }
     let log = c.load_log(gid).clone();
     let mut names: HashMap<String, String> = HashMap::new();
     let mut rules: Option<Vec<u8>> = None;
@@ -487,7 +491,7 @@ fn rebuild_meta(c: &mut Client, dev: &str, gid: &str, role: &str, my_alias: &str
                     names.insert(e.from.clone(), n.trim().to_string());
                 }
             }
-            Some("rules") if owner.as_deref() == Some(e.from.as_str()) => {
+            Some("rules") if managers.contains(&e.from) => {
                 rules = Some(e.body["deny"].as_array().map(|a| a.iter().filter_map(|k| k.as_u64()).map(|k| k as u8).collect()).unwrap_or_default());
             }
             _ => {}
@@ -688,8 +692,8 @@ pub fn set_rules(gid: &str, deny: &[u8]) -> Result<(), String> {
     let dev = pc_device()?;
     with_client(|c| {
         let info = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
-        if s(&info, "role") != "owner" {
-            return Err("правила задаёт только владелец группы".into());
+        if !matches!(s(&info, "role").as_str(), "owner" | "admin") {
+            return Err("правила задают владелец и админ группы".into());
         }
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
         let key = c.group_key(gid, epoch).ok_or("ключ группы не создан")?;
@@ -728,6 +732,12 @@ pub fn forget_local(gid: &str) -> Result<(), String> {
     })
 }
 
+/// Владелец меняет название, тематику и описание своей группы.
+pub fn update_settings(gid: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> Result<(), String> {
+    let dev = pc_device()?;
+    with_store(|st| st.update_settings(gid, &dev, name, topic, about)).map_err(fail)
+}
+
 /// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).
 pub fn info(gid: &str) -> Result<Value, String> {
     let dev = pc_device()?;
@@ -760,7 +770,9 @@ pub fn info(gid: &str) -> Result<Value, String> {
             Vec::new()
         };
         let modlog = with_store(|st| st.modlog(gid, Some(&dev))).map(|v| v["modlog"].clone()).unwrap_or(Value::Null);
-        Ok(json!({"group": g, "members": members, "requests": requests, "modlog": modlog}))
+        let banned = if staff { m["banned"].clone() } else { Value::Null };
+        let deny = c.rules.get(gid).cloned().unwrap_or_default();
+        Ok(json!({"group": g, "members": members, "requests": requests, "modlog": modlog, "banned": banned, "deny": deny}))
     })
 }
 

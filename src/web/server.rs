@@ -627,6 +627,7 @@ impl WebServer {
             .route("/api/groups/:gid/forget", post(api_groups_forget))
             .route("/api/groups/:gid/info", get(api_groups_info))
             .route("/api/groups/:gid/mod", post(api_groups_mod))
+            .route("/api/groups/:gid/settings", post(api_groups_settings))
             .route("/api/groups/:gid/invite-code", post(api_groups_invite_code))
             .route("/api/groups/:gid/invite-device", post(api_groups_invite_device))
             .route("/api/groups/:gid/answer", post(api_groups_answer))
@@ -936,6 +937,20 @@ struct MyGroupMod {
 
 async fn api_groups_mod(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupMod>) -> Response {
     grp_reply(crate::group_client::moderate(&gid, &b.action, b.alias.as_deref(), b.seq).map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupSettings {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    about: Option<String>,
+}
+
+async fn api_groups_settings(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSettings>) -> Response {
+    grp_reply(crate::group_client::update_settings(&gid, b.name.as_deref(), b.topic.as_deref(), b.about.as_deref()).map(|_| serde_json::json!({"ok": true})))
 }
 
 async fn api_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {

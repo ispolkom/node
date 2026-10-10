@@ -66,6 +66,8 @@ pub enum Kind {
 #[serde(rename_all = "lowercase")]
 pub enum Role {
     Owner,
+    /// Админ: настройки группы, правила, роли «модератор/участник», действия модератора; владельца и других админов не трогает.
+    Admin,
     Moderator,
     Member,
 }
@@ -635,6 +637,38 @@ impl Store {
         Ok(())
     }
 
+    /// Настройки группы меняют владелец и админ: название, тематика, описание. Название и тематика не бывают пустыми.
+    pub fn update_settings(&mut self, gid: &str, device: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> R<()> {
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner && me.role != Role::Admin {
+            return Err(forbidden("настройки группы меняют владелец и админ"));
+        }
+        let by = me.alias.clone();
+        let g = self.get_mut(gid)?;
+        if let Some(n) = name {
+            let n = clean(n, MAX_NAME);
+            if n.is_empty() {
+                return Err(bad("нужно название группы"));
+            }
+            g.name = n;
+        }
+        if let Some(t) = topic {
+            let t = clean(t, MAX_NEW_TOPIC);
+            if t.is_empty() {
+                return Err(bad("нужна тематика группы"));
+            }
+            g.topic = t;
+        }
+        if let Some(a) = about {
+            g.about = clean(a, MAX_ABOUT);
+        }
+        g.log(&by, "settings", None, None, None);
+        let to = g.keys();
+        self.save();
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
     pub fn add_member(&mut self, gid: &str, device: &str) -> R<String> {
         let g = self.get_mut(gid)?;
         let key = member_key(gid, device);
@@ -1065,8 +1099,11 @@ impl Store {
         if target.role == Role::Owner {
             return Err(forbidden("владельца группы нельзя"));
         }
-        if target.role == Role::Moderator && by_role != Role::Owner {
-            return Err(forbidden("модератора может трогать только владелец группы"));
+        if target.role == Role::Admin && by_role != Role::Owner {
+            return Err(forbidden("админа может трогать только владелец группы"));
+        }
+        if target.role == Role::Moderator && by_role != Role::Owner && by_role != Role::Admin {
+            return Err(forbidden("модератора могут трогать владелец и админ"));
         }
         let mut notify = g.keys();
         match action {
@@ -1075,9 +1112,17 @@ impl Store {
                     m.muted = action == "mute";
                 }
             }
-            "promote" | "demote" => {
+            "make_admin" => {
                 if by_role != Role::Owner {
-                    return Err(forbidden("назначает модераторов только владелец группы"));
+                    return Err(forbidden("админов назначает только владелец группы"));
+                }
+                if let Some(m) = g.members.iter_mut().find(|m| m.key == target.key) {
+                    m.role = Role::Admin;
+                }
+            }
+            "promote" | "demote" => {
+                if by_role != Role::Owner && by_role != Role::Admin {
+                    return Err(forbidden("роли назначают владелец и админ"));
                 }
                 if let Some(m) = g.members.iter_mut().find(|m| m.key == target.key) {
                     m.role = if action == "promote" {
@@ -1635,6 +1680,29 @@ pub(crate) async fn m_invite(
     })())
 }
 
+#[derive(Deserialize)]
+pub struct SettingsReq {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    topic: Option<String>,
+    #[serde(default)]
+    about: Option<String>,
+}
+
+/// Владелец меняет название, тематику и описание группы.
+pub(crate) async fn m_settings(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<SettingsReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())))
+    })())
+}
+
 #[derive(Deserialize, Default)]
 pub struct RequestReq {
     #[serde(default)]
@@ -1717,6 +1785,57 @@ mod tests {
     const OWNER: &str = "aa";
     const BOB: &str = "bb";
     const EVE: &str = "ee";
+
+    #[test]
+    fn admin_tier_follows_the_matrix() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        for d in [BOB, EVE, "cc", "dd"] {
+            s.join(&gid, d, None, None).unwrap();
+        }
+        let alias = |s: &Store, d: &str| s.list_for(d)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, eve, cc, dd) = (alias(&s, BOB), alias(&s, EVE), alias(&s, "cc"), alias(&s, "dd"));
+        // владелец назначает админа и модератора
+        s.moderate(&gid, OWNER, "make_admin", Some(&bob), None, None).unwrap();
+        s.moderate(&gid, OWNER, "promote", Some(&eve), None, None).unwrap();
+        assert_eq!(s.list_for(BOB)[0]["role"], "admin");
+        // админ: действия модератора, роли «модератор/участник», настройки — но не админов и не владельца
+        s.moderate(&gid, BOB, "mute", Some(&cc), None, None).unwrap();
+        s.moderate(&gid, BOB, "demote", Some(&eve), None, None).unwrap();
+        s.moderate(&gid, BOB, "promote", Some(&eve), None, None).unwrap();
+        assert!(s.moderate(&gid, BOB, "make_admin", Some(&cc), None, None).is_err(), "админов назначает только владелец");
+        let owner_alias = alias(&s, OWNER);
+        assert!(s.moderate(&gid, BOB, "kick", Some(&owner_alias), None, None).is_err(), "владельца нельзя");
+        s.update_settings(&gid, BOB, Some("Новое"), None, None).unwrap();
+        // модератор: рядовых — да; админа, другого модератора и роли — нет
+        assert!(s.moderate(&gid, EVE, "mute", Some(&dd), None, None).is_ok());
+        assert!(s.moderate(&gid, EVE, "kick", Some(&bob), None, None).is_err(), "админа модератор не трогает");
+        assert!(s.moderate(&gid, EVE, "promote", Some(&dd), None, None).is_err(), "роли модератор не назначает");
+        assert!(s.update_settings(&gid, EVE, Some("Взлом"), None, None).is_err());
+        // рядовой ничего
+        assert!(s.moderate(&gid, "dd", "mute", Some(&cc), None, None).is_err());
+        // админ не трогает другого админа; владелец — может
+        s.moderate(&gid, OWNER, "make_admin", Some(&eve), None, None).unwrap();
+        assert!(s.moderate(&gid, BOB, "kick", Some(&eve), None, None).is_err(), "админа трогает только владелец");
+        s.moderate(&gid, OWNER, "demote", Some(&eve), None, None).unwrap();
+        assert_eq!(s.list_for(EVE)[0]["role"], "member");
+    }
+
+    #[test]
+    fn owner_changes_group_settings() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Старое", "Тема", Kind::Invite, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, None).ok();
+        assert!(s.update_settings(&gid, BOB, Some("Взлом"), None, None).is_err(), "не владелец не меняет");
+        assert!(s.update_settings(&gid, OWNER, Some("  "), None, None).is_err(), "название не бывает пустым");
+        assert!(s.update_settings(&gid, OWNER, None, Some(""), None).is_err(), "тематика не бывает пустой");
+        s.update_settings(&gid, OWNER, Some("Новое"), Some("Садоводство"), Some("про грядки")).unwrap();
+        let g = &s.list_for(OWNER)[0];
+        assert_eq!((g["name"].as_str(), g["topic"].as_str(), g["about"].as_str()), (Some("Новое"), Some("Садоводство"), Some("про грядки")));
+        s.update_settings(&gid, OWNER, None, None, Some("")).unwrap();
+        assert_eq!(s.list_for(OWNER)[0]["about"], "", "описание можно очистить");
+        assert_eq!(s.modlog(&gid, Some(OWNER)).unwrap()["modlog"].as_array().unwrap().last().unwrap()["action"], "settings");
+    }
 
     #[test]
     fn join_requests_for_invite_groups() {

@@ -22,6 +22,9 @@ class HttpGroupApi implements GroupApi {
   Future<String> create(String name, String topic, String about, String kind) async =>
       (await _call('POST', '/mobile/groups', {'name': name, 'topic': topic, 'about': about, 'kind': kind}))['id'] as String;
   @override
+  Future<void> settings(String gid, {String? name, String? topic, String? about}) async =>
+      _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about});
+  @override
   Future<void> requestJoin(String gid, String name) async => _call('POST', '/mobile/groups/$gid/request', {'name': name});
   @override
   Future<List<Map<String, dynamic>>> requests(String gid) async => _list(await _call('GET', '/mobile/groups/$gid/requests'), 'requests');

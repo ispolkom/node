@@ -74,8 +74,7 @@
                         <textarea id="mgText" class="form-input" rows="2" style="flex:1" placeholder="Сообщение… (Ctrl+Enter — отправить)" disabled></textarea>
                         <button class="btn btn-primary" id="mgSend" type="button" disabled>Отправить</button>
                     </div>
-                    <div id="mgRules" style="margin-top:8px"></div>
-                    <div id="mgInfo" style="margin-top:12px"></div>
+                    <div id="mgRequests" style="margin-top:8px"></div>
                 </div>
             </div>
 
@@ -101,6 +100,22 @@
             </div>
         </div>
     </main>
+
+    <div id="setDlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center">
+        <div class="card" style="max-width:560px;width:94%;max-height:90vh;overflow:auto;padding:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center"><h3 style="margin:0">Настройки группы</h3><button class="btn btn-sm" id="setClose" type="button">Закрыть</button></div>
+            <div id="setBody" style="margin-top:10px"></div>
+        </div>
+    </div>
+
+    <div id="memDlg" style="display:none;position:fixed;inset:0;background:#000b;z-index:60;align-items:center;justify-content:center">
+        <div class="card" style="max-width:380px;width:92%;padding:16px">
+            <h3 style="margin:0 0 4px" id="memTitle"></h3>
+            <div class="mg-sub" id="memSub" style="margin-bottom:10px"></div>
+            <div id="memBody"></div>
+            <div style="text-align:right;margin-top:10px"><button class="btn btn-sm" id="memClose" type="button">Закрыть</button></div>
+        </div>
+    </div>
 
     <div id="newDlg" style="display:none;position:fixed;inset:0;background:#000a;z-index:50;align-items:center;justify-content:center">
         <div class="card" style="max-width:420px;width:92%;padding:16px">
@@ -144,7 +159,7 @@
     <script>
     (function () {
         var KIND = { open: 'открытая', invite: 'по приглашению' };
-        var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+        var ROLE = { owner: 'владелец', admin: 'админ', moderator: 'модератор', member: 'участник' };
         var KIND_NAMES = { 2: 'Картинки', 3: 'Файлы', 4: 'Аудио', 5: 'Видео', 6: 'Ссылки' };
         var cur = null, lastSeq = 0, timer = null, groupsCache = [];
         var $ = function (id) { return document.getElementById(id); };
@@ -202,8 +217,7 @@
                 if (gid !== cur) return;
                 var g = d.group || {};
                 $('mgHead').innerHTML = '<b>' + esc(g.name) + '</b> <span class="mg-tag">' + (KIND[g.kind] || '') + '</span> <span class="mg-sub">вы: ' + esc(g.my_alias) + ' · ' + ROLE[g.role] + '</span> '
-                    + '<button class="btn btn-sm" data-leave="' + esc(gid) + '" type="button">' + (g.role === 'owner' ? '' : 'Выйти') + '</button>';
-                if (g.role === 'owner') $('mgHead').lastChild.style.display = 'none';
+                    + '<button class="btn btn-sm" id="mgGear" type="button" title="Настройки группы">⚙ Настройки</button>';
                 $('mgBanner').innerHTML = d.problem ? '<span style="color:#ff4001">Ключ владельца группы изменился. Не доверяйте новым ключам, пока не проверите владельца лично.</span>'
                     : (!d.has_key && g.role !== 'owner' ? 'Ключ группы ещё не получен: сообщения появятся, когда владелец раздаст ключи.' : '');
                 var can = !g.muted && (d.has_key || g.role === 'owner');
@@ -220,78 +234,167 @@
                     if (m.seq > lastSeq) lastSeq = m.seq;
                 });
                 if (reset || atEnd) feed.scrollTop = feed.scrollHeight;
-                renderRules(g, d.deny || []);
+                loadRequests();
             }).catch(function (e) { $('mgBanner').textContent = e.message; });
         }
 
-        // ── участники, просьбы, приглашения, журнал ──
-        var ME = null;
-        function loadInfo() {
-            if (!cur) { $('mgInfo').innerHTML = ''; return; }
+        // ── Просьбы вступить: служебные карточки в чате (видят владелец и модераторы) ──
+        function loadRequests() {
+            if (!cur) { $('mgRequests').innerHTML = ''; return; }
             var gid = cur;
-            Promise.all([api('GET', '/api/groups/' + encodeURIComponent(gid) + '/info'), api('GET', '/api/groups/devices')]).then(function (r) {
+            api('GET', '/api/groups/' + encodeURIComponent(gid) + '/info').then(function (d) {
                 if (gid !== cur) return;
-                var d = r[0], devs = r[1], g = d.group, staff = g.role !== 'member', owner = g.role === 'owner';
-                var h = '<hr style="opacity:.2">';
-                if ((d.requests || []).length) {
-                    h += '<div style="border:1px solid #ff4001;border-radius:8px;padding:8px;margin-bottom:8px"><b style="color:#ff4001">Просятся в группу (' + d.requests.length + ')</b><div class="mg-sub">служебное: видят владелец и модераторы</div>';
-                    d.requests.forEach(function (q) {
-                        h += '<div style="margin:6px 0">' + esc(q.name || 'Без имени') + ' просит добавить его в группу или прислать приглашение '
-                            + '<button class="btn btn-sm btn-primary" data-ans="' + esc(q.id) + '" data-a="add" type="button">Добавить</button> '
-                            + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="skip" type="button">Игнорировать</button> '
-                            + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="never" type="button">Больше не напоминать</button></div>';
-                    });
-                    h += '</div>';
-                }
-                if (staff) {
-                    h += '<div style="margin-bottom:8px"><b>Пригласить</b> ';
-                    if (g.kind === 'invite') h += '<button class="btn btn-sm" id="mgCode" type="button">Код приглашения</button> ';
-                    h += '<select id="mgDev" class="form-input" style="width:auto;display:inline-block">' + devs.map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>'; }).join('') + '</select> '
-                        + '<button class="btn btn-sm btn-primary" id="mgSendInv" type="button"' + (devs.length ? '' : ' disabled') + '>Отправить телефону</button> <span id="mgInvOut" class="mg-sub"></span></div>';
-                }
-                h += '<div><b>Участники (' + d.members.length + ')</b></div>';
-                d.members.forEach(function (m) {
-                    var self = m.alias === g.my_alias, canAct = staff && !self && m.role !== 'owner' && !(m.role === 'moderator' && !owner);
-                    h += '<div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0"><span style="flex:1;min-width:180px">' + esc(m.name || m.alias) + (m.name ? ' <span class="mg-sub">' + esc(m.alias) + '</span>' : '') + (self ? ' (вы)' : '')
-                        + ' <span class="mg-tag">' + ROLE[m.role] + '</span>' + (m.muted ? '<span class="mg-tag">заглушён</span>' : '') + (!m.has_key && m.role !== 'owner' ? '<span class="mg-tag">ждёт ключ</span>' : '') + '</span>';
-                    if (canAct) {
-                        h += '<button class="btn btn-sm" data-mod="' + (m.muted ? 'unmute' : 'mute') + '" data-al="' + esc(m.alias) + '" type="button">' + (m.muted ? 'Разрешить писать' : 'Заглушить') + '</button>'
-                            + '<button class="btn btn-sm" data-mod="kick" data-al="' + esc(m.alias) + '" type="button">Выгнать</button>'
-                            + '<button class="btn btn-sm" data-mod="ban" data-al="' + esc(m.alias) + '" type="button">Запретить вход</button>';
-                        if (owner) h += '<button class="btn btn-sm" data-mod="' + (m.role === 'moderator' ? 'demote' : 'promote') + '" data-al="' + esc(m.alias) + '" type="button">' + (m.role === 'moderator' ? 'Снять модератора' : 'Модератор') + '</button>';
-                    }
-                    h += '</div>';
+                var h = '';
+                (d.requests || []).forEach(function (q) {
+                    h += '<div style="border:1px solid #ff4001;border-radius:10px;padding:8px;margin-bottom:6px"><b style="color:#ff4001">' + esc(q.name || 'Новая просьба') + '</b> просит добавить его в группу или прислать приглашение'
+                        + '<div class="mg-sub">служебное: видят владелец и модераторы</div>'
+                        + '<button class="btn btn-sm btn-primary" data-ans="' + esc(q.id) + '" data-a="add" type="button">Добавить</button> '
+                        + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="skip" type="button">Игнорировать</button> '
+                        + '<button class="btn btn-sm" data-ans="' + esc(q.id) + '" data-a="never" type="button">Больше не напоминать</button></div>';
                 });
-                var log = (d.modlog || []).slice(-20).reverse();
-                if (log.length) h += '<details style="margin-top:8px"><summary>Журнал действий модераторов</summary>' + log.map(function (x) {
-                    return '<div class="mg-sub">' + esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + '</div>'; }).join('') + '</details>';
-                $('mgInfo').innerHTML = h;
+                $('mgRequests').innerHTML = h;
             }).catch(function () {});
         }
-        $('mgInfo').addEventListener('click', function (e) {
-            var el = e.target; if (!el || !el.getAttribute || !cur) return;
+        $('mgRequests').addEventListener('click', function (e) {
+            var el = e.target, ans = el && el.getAttribute && el.getAttribute('data-ans');
+            if (!ans || !cur) return;
+            var a = el.getAttribute('data-a');
+            api('POST', '/api/groups/' + encodeURIComponent(cur) + '/answer', { rid: ans, accept: a === 'add', never: a === 'never' })
+                .then(function () { say(a === 'add' ? 'Приглашение отправлено.' : 'Готово.'); loadRequests(); loadList(); }).catch(fail);
+        });
+
+        // ── Настройки группы (шестерёнка): название/тематика/описание, правила, приглашения, участники, запрещённые, журнал ──
+        var setInfo = null, setDevs = [];
+        function assignable() { var a = [['member', 'Участник'], ['moderator', 'Модератор']]; if (iAm() === 'owner') a.push(['admin', 'Админ']); return a; }   // передача владения — отдельным блоком
+        var DENY_NAMES = { 2: 'Картинки', 3: 'Файлы', 4: 'Аудио', 5: 'Видео', 6: 'Ссылки' };
+        function iAm() { return setInfo ? setInfo.group.role : 'member'; }
+        // кого я могу трогать: владелец — всех кроме владельца; админ — рядовых и модераторов; модератор — только рядовых; себя — никого
+        function canActOn(m) {
+            var me = iAm(), g = setInfo.group;
+            if (m.alias === g.my_alias || m.role === 'owner') return false;
+            if (me === 'owner') return true;
+            if (me === 'admin') return m.role === 'member' || m.role === 'moderator';
+            if (me === 'moderator') return m.role === 'member';
+            return false;
+        }
+        function canManage() { var r = iAm(); return r === 'owner' || r === 'admin'; }
+        function openSettings() {
+            if (!cur) return;
+            Promise.all([api('GET', '/api/groups/' + encodeURIComponent(cur) + '/info'), api('GET', '/api/groups/devices')]).then(function (r) {
+                setInfo = r[0]; setDevs = r[1]; renderSettings(); $('setDlg').style.display = 'flex';
+            }).catch(fail);
+        }
+        function refreshSettings() {
+            if (!cur || $('setDlg').style.display === 'none') return;
+            api('GET', '/api/groups/' + encodeURIComponent(cur) + '/info').then(function (d) { setInfo = d; renderSettings(); }).catch(fail);
+        }
+        function renderSettings() {
+            var d = setInfo, g = d.group, owner = g.role === 'owner', manage = g.role === 'owner' || g.role === 'admin', staff = g.role !== 'member', body = $('setBody');
+            var keepScroll = body.scrollTop;
+            var h = '<div style="margin-bottom:10px"><span class="mg-tag">' + (KIND[g.kind] || '') + '</span> <span class="mg-sub">вы: ' + esc(g.my_alias) + ' · ' + ROLE[g.role] + '</span></div>';
+            h += '<div class="form-group"><label for="setName">Название</label><input id="setName" class="form-input" maxlength="64" value="' + esc(g.name) + '"' + (manage ? '' : ' disabled') + '></div>'
+              + '<div class="form-group"><label for="setTopic">Тематика</label><input id="setTopic" class="form-input" maxlength="40" value="' + esc(g.topic || '') + '"' + (manage ? '' : ' disabled') + '></div>'
+              + '<div class="form-group"><label for="setAbout">Описание</label><textarea id="setAbout" class="form-input" rows="2" maxlength="300"' + (manage ? '' : ' disabled') + '>' + esc(g.about || '') + '</textarea></div>';
+            if (manage) h += '<button class="btn btn-sm btn-primary" id="setSave" type="button">Сохранить</button> <span id="setMsg" class="mg-sub"></span>';
+            // правила
+            if (manage) {
+                h += '<hr style="opacity:.2"><div class="mg-sub">Запретить в группе (держат приложения участников):</div>' + Object.keys(DENY_NAMES).map(function (k) {
+                    return '<label style="margin-right:12px"><input type="checkbox" data-deny="' + k + '"' + ((d.deny || []).indexOf(+k) >= 0 ? ' checked' : '') + '> ' + DENY_NAMES[k] + '</label>'; }).join('');
+            } else if ((d.deny || []).length) {
+                h += '<hr style="opacity:.2"><div class="mg-sub">Запрещено в группе: ' + d.deny.map(function (k) { return DENY_NAMES[k]; }).filter(Boolean).join(', ') + '</div>';
+            }
+            // приглашения
+            if (staff) {
+                h += '<hr style="opacity:.2"><b>Пригласить</b> ';
+                if (g.kind === 'invite') h += '<button class="btn btn-sm" id="setCode" type="button">Код приглашения</button> ';
+                h += '<select id="setDev" class="form-input" style="width:auto;display:inline-block">' + setDevs.map(function (x) { return '<option value="' + esc(x.id) + '">' + esc(x.name) + '</option>'; }).join('') + '</select> '
+                  + '<button class="btn btn-sm btn-primary" id="setSendInv" type="button"' + (setDevs.length ? '' : ' disabled') + '>Отправить телефону</button> <span id="setInvOut" class="mg-sub"></span>';
+            }
+            // участники: список с прокруткой, нажатие — окно действий
+            h += '<hr style="opacity:.2"><b>Участники (' + d.members.length + ')</b><div class="mg-sub">' + (staff ? 'Нажмите на участника, чтобы увидеть действия.' : '') + '</div>'
+              + '<div id="setMembers" style="max-height:34vh;overflow:auto;border:1px solid #8884;border-radius:8px;margin-top:6px">';
+            d.members.forEach(function (m) {
+                var act = staff && canActOn(m);
+                h += '<div class="mg-item" style="' + (act ? '' : 'cursor:default;') + 'display:flex;justify-content:space-between;gap:8px" ' + (act ? 'data-mem="' + esc(m.alias) + '"' : '') + '><span>' + esc(m.name || m.alias) + (m.name ? ' <span class="mg-sub">' + esc(m.alias) + '</span>' : '') + (m.alias === g.my_alias ? ' (вы)' : '') + '</span>'
+                  + '<span><span class="mg-tag">' + ROLE[m.role] + '</span>' + (m.muted ? '<span class="mg-tag">заглушён</span>' : '') + (!m.has_key && m.role !== 'owner' ? '<span class="mg-tag">ждёт ключ</span>' : '') + '</span></div>';
+            });
+            h += '</div>';
+            // запрещённые
+            if (staff && (d.banned || []).length) {
+                h += '<hr style="opacity:.2"><b>Запрещён вход (' + d.banned.length + ')</b>' + d.banned.map(function (al) {
+                    return '<div style="padding:3px 0">' + esc(al) + ' <button class="btn btn-sm" data-unban="' + esc(al) + '" type="button">Разрешить вход</button></div>'; }).join('');
+            }
+            // журнал
+            var log = (d.modlog || []).slice(-20).reverse();
+            if (log.length) h += '<hr style="opacity:.2"><details><summary>Журнал действий модераторов</summary>' + log.map(function (x) {
+                return '<div class="mg-sub">' + esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + '</div>'; }).join('') + '</details>';
+            // выход
+            if (!owner) h += '<hr style="opacity:.2"><button class="btn btn-sm" id="setLeave" type="button" style="color:#e74c3c">Выйти из группы</button>';
+            body.innerHTML = h;
+            body.scrollTop = keepScroll;
+        }
+        $('mgHead').addEventListener('click', function (e) { if (e.target && e.target.id === 'mgGear') openSettings(); });
+        $('setClose').addEventListener('click', function () { $('setDlg').style.display = 'none'; });
+        $('setBody').addEventListener('click', function (e) {
+            var el = e.target; if (!el || !cur) return;
             var gid = encodeURIComponent(cur);
-            var act = el.getAttribute('data-mod'), ans = el.getAttribute('data-ans');
-            if (act) {
-                var al = el.getAttribute('data-al');
-                if ((act === 'kick' || act === 'ban') && !confirm((act === 'ban' ? 'Запретить вход' : 'Выгнать') + ' «' + al + '»?')) return;
-                api('POST', '/api/groups/' + gid + '/mod', { action: act, alias: al }).then(function () { say('Готово.'); loadInfo(); loadList(); }).catch(fail);
-            } else if (ans) {
-                var a = el.getAttribute('data-a');
-                api('POST', '/api/groups/' + gid + '/answer', { rid: ans, accept: a === 'add', never: a === 'never' })
-                    .then(function () { say(a === 'add' ? 'Приглашение отправлено.' : 'Готово.'); loadInfo(); loadList(); }).catch(fail);
-            } else if (el.id === 'mgCode') {
-                api('POST', '/api/groups/' + gid + '/invite-code').then(function (j) { $('mgInvOut').innerHTML = 'Код (один раз, сутки): <code style="user-select:all">' + esc(j.invite) + '</code>'; }).catch(fail);
-            } else if (el.id === 'mgSendInv') {
-                api('POST', '/api/groups/' + gid + '/invite-device', { peer: $('mgDev').value }).then(function () { $('mgInvOut').textContent = 'Приглашение отправлено.'; }).catch(fail);
+            var mem = el.closest ? el.closest('[data-mem]') : null;
+            if (mem) { openMember(mem.getAttribute('data-mem')); return; }
+            if (el.getAttribute && el.getAttribute('data-unban')) {
+                api('POST', '/api/groups/' + gid + '/mod', { action: 'unban', alias: el.getAttribute('data-unban') }).then(function () { say('Вход снова разрешён.'); refreshSettings(); }).catch(fail); return;
+            }
+            if (el.id === 'setSave') {
+                api('POST', '/api/groups/' + gid + '/settings', { name: $('setName').value, topic: $('setTopic').value, about: $('setAbout').value })
+                    .then(function () { $('setMsg').textContent = 'Сохранено.'; loadList(); loadFeed(true); }).catch(function (er) { $('setMsg').textContent = er.message; });
+            } else if (el.id === 'setCode') {
+                api('POST', '/api/groups/' + gid + '/invite-code').then(function (j) { $('setInvOut').innerHTML = 'Код (один раз, сутки): <code style="user-select:all">' + esc(j.invite) + '</code>'; }).catch(fail);
+            } else if (el.id === 'setSendInv') {
+                api('POST', '/api/groups/' + gid + '/invite-device', { peer: $('setDev').value }).then(function () { $('setInvOut').textContent = 'Приглашение отправлено.'; }).catch(fail);
+            } else if (el.id === 'setLeave') {
+                if (!confirm('Выйти из группы? Ключ и лента на компьютере будут стёрты.')) return;
+                api('POST', '/api/groups/' + gid + '/leave').then(function () { $('setDlg').style.display = 'none'; cur = null; $('mgFeed').innerHTML = ''; $('mgRequests').innerHTML = ''; $('mgHead').innerHTML = '<span class="form-help">Выберите группу слева.</span>'; loadList(); }).catch(fail);
             }
         });
-        function renderRules(g, deny) {
-            if (g.role !== 'owner') { $('mgRules').innerHTML = deny.length ? '<span class="mg-sub">Запрещено в группе: ' + deny.map(function (k) { return KIND_NAMES[k]; }).filter(Boolean).join(', ') + '</span>' : ''; return; }
-            $('mgRules').innerHTML = '<div class="mg-sub">Запретить в группе (держат приложения участников):</div>' + Object.keys(KIND_NAMES).map(function (k) {
-                return '<label style="margin-right:12px"><input type="checkbox" data-deny="' + k + '"' + (deny.indexOf(+k) >= 0 ? ' checked' : '') + '> ' + KIND_NAMES[k] + '</label>';
-            }).join('');
+        $('setBody').addEventListener('change', function (e) {
+            if (!e.target || !e.target.getAttribute || e.target.getAttribute('data-deny') == null) return;
+            var deny = Array.prototype.map.call($('setBody').querySelectorAll('input[data-deny]:checked'), function (c) { return +c.getAttribute('data-deny'); });
+            api('POST', '/api/groups/' + encodeURIComponent(cur) + '/rules', { deny: deny }).then(function () { say('Правила сохранены.'); }).catch(fail);
+        });
+
+        // ── Окно действий над участником ──
+        var memAlias = null;
+        function openMember(alias) {
+            var m = setInfo.members.filter(function (x) { return x.alias === alias; })[0];
+            if (!m || !canActOn(m)) return;
+            memAlias = alias;
+            $('memTitle').textContent = m.name || m.alias;
+            $('memSub').textContent = (m.name ? m.alias + ' · ' : '') + ROLE[m.role] + (m.muted ? ' · заглушён' : '');
+            var h = '<div style="display:flex;flex-direction:column;gap:6px">'
+              + '<button class="btn" data-ma="' + (m.muted ? 'unmute' : 'mute') + '" type="button">' + (m.muted ? 'Разрешить писать' : 'Заглушить') + '</button>'
+              + '<button class="btn" data-ma="kick" type="button">Выгнать</button>'
+              + '<button class="btn" data-ma="ban" type="button" style="color:#e74c3c">Запретить вход</button></div>';
+            if (canManage()) {
+                h += '<hr style="opacity:.2"><b>Администрирование</b><div style="display:flex;gap:6px;margin-top:6px"><select id="memRole" class="form-input">' + assignable().map(function (r) {
+                    return '<option value="' + r[0] + '"' + (m.role === r[0] ? ' selected' : '') + '>Назначить: ' + r[1] + '</option>'; }).join('') + '</select><button class="btn btn-primary" id="memRoleOk" type="button">ОК</button></div>';
+            }
+            $('memBody').innerHTML = h;
+            $('memDlg').style.display = 'flex';
         }
+        $('memClose').addEventListener('click', function () { $('memDlg').style.display = 'none'; });
+        $('memBody').addEventListener('click', function (e) {
+            var el = e.target; if (!el || !cur || !memAlias) return;
+            var gid = encodeURIComponent(cur), act = el.getAttribute && el.getAttribute('data-ma');
+            function done(msg) { $('memDlg').style.display = 'none'; say(msg); refreshSettings(); loadList(); }
+            if (act) {
+                if ((act === 'kick' || act === 'ban') && !confirm((act === 'ban' ? 'Запретить вход' : 'Выгнать') + ' «' + memAlias + '»?')) return;
+                api('POST', '/api/groups/' + gid + '/mod', { action: act, alias: memAlias }).then(function () { done('Готово.'); }).catch(function (er) { say(er.message); });
+            } else if (el.id === 'memRoleOk') {
+                var m = setInfo.members.filter(function (x) { return x.alias === memAlias; })[0], want = $('memRole').value;
+                if (m.role === want) { $('memDlg').style.display = 'none'; return; }
+                var action = want === 'admin' ? 'make_admin' : (want === 'moderator' ? 'promote' : 'demote');
+                api('POST', '/api/groups/' + gid + '/mod', { action: action, alias: memAlias }).then(function () { done('Роль изменена.'); }).catch(function (er) { say(er.message); });
+            }
+        });
         function send() {
             var text = $('mgText').value.trim();
             if (!text || !cur) return;
@@ -337,19 +440,7 @@
             var it = el.closest ? el.closest('[data-open]') : null;
             if (it) openGroup(it.getAttribute('data-open'));
         });
-        $('mgHead').addEventListener('click', function (e) {
-            var gid = e.target && e.target.getAttribute && e.target.getAttribute('data-leave');
-            if (gid && confirm('Выйти из группы? Ключ и лента на компьютере будут стёрты.')) {
-                api('POST', '/api/groups/' + gid + '/leave').then(function () { cur = null; $('mgFeed').innerHTML = ''; $('mgHead').innerHTML = '<span class="form-help">Выберите группу слева.</span>'; loadList(); }).catch(fail);
-            }
-        });
-        $('mgRules').addEventListener('change', function () {
-            var deny = Array.prototype.map.call($('mgRules').querySelectorAll('input[data-deny]:checked'), function (c) { return +c.getAttribute('data-deny'); });
-            api('POST', '/api/groups/' + encodeURIComponent(cur) + '/rules', { deny: deny }).then(function () { say('Правила сохранены.'); }).catch(fail);
-        });
-        var origOpen = openGroup;
-        openGroup = function (gid) { origOpen(gid); loadInfo(); };
-        setInterval(function () { if (cur) loadInfo(); }, 15000);
+        setInterval(function () { if (cur) { loadRequests(); refreshSettings(); } }, 15000);
         loadList();
         setInterval(loadList, 15000);
     })();
@@ -358,7 +449,7 @@
     (function () {
         var list = document.getElementById('pgList'), msg = document.getElementById('pgMsg');
         var KIND = { invite: 'по приглашению', open: 'открытая' };
-        var ROLE = { owner: 'владелец', moderator: 'модератор', member: 'участник' };
+        var ROLE = { owner: 'владелец', admin: 'админ', moderator: 'модератор', member: 'участник' };
         var delGid = null;
         function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
         function api(method, url, body) {

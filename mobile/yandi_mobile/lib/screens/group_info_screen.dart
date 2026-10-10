@@ -28,9 +28,42 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   List<GroupMember> _members = const [];
   List<Map<String, dynamic>> _modlog = const [];
   List<JoinRequest> _requests = const [];
+  List<String> _banned = const [];
+  final _nameCtrl = TextEditingController();
+  final _topicCtrl = TextEditingController();
+  final _aboutCtrl = TextEditingController();
+  bool _fieldsLoaded = false;
   String? _error;
 
   GroupService get _svc => context.read<AppState>().groups!;
+
+  @override
+  void dispose() {
+    _nameCtrl.dispose();
+    _topicCtrl.dispose();
+    _aboutCtrl.dispose();
+    super.dispose();
+  }
+
+  void _fillFields(GroupInfo g) {
+    if (_fieldsLoaded) return;
+    _nameCtrl.text = g.name;
+    _topicCtrl.text = g.topic;
+    _aboutCtrl.text = g.about;
+    _fieldsLoaded = true;
+  }
+
+  Future<void> _saveSettings(GroupInfo g) async {
+    final messenger = ScaffoldMessenger.of(context);
+    if (_nameCtrl.text.trim().isEmpty) { messenger.showSnackBar(const SnackBar(content: Text('Название не может быть пустым'))); return; }
+    if (_topicCtrl.text.trim().isEmpty) { messenger.showSnackBar(const SnackBar(content: Text('Укажите тематику группы'))); return; }
+    try {
+      await _svc.updateSettings(g.id, name: _nameCtrl.text.trim(), topic: _topicCtrl.text.trim(), about: _aboutCtrl.text.trim());
+      messenger.showSnackBar(const SnackBar(content: Text('Сохранено')));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
 
   @override
   void initState() {
@@ -52,6 +85,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         _members = [for (final x in (m['members'] as List? ?? const [])) GroupMember.fromJson((x as Map).cast<String, dynamic>())];
         _modlog = log.reversed.take(30).toList();
         _requests = reqs;
+        _banned = [for (final b in (m['banned'] as List? ?? const [])) '$b'];
         _error = null;
       });
     } catch (e) {
@@ -69,25 +103,97 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     }
   }
 
+  /// Окно действий над участником: заглушить, выгнать, запретить вход; ниже «Администрирование» (только владелец): назначить роль.
   void _memberMenu(GroupInfo g, GroupMember m) {
-    if (!g.canModerate || m.role == 'owner' || m.alias == g.myAlias) return;
-    if (m.role == 'moderator' && !g.isOwner) return;
-    final items = <(String, String, String)>[
-      m.muted ? ('unmute', 'Снять заглушку', '') : ('mute', 'Заглушить', ''),
-      ('kick', 'Выгнать', ''),
-      ('ban', 'Запретить вход', ''),
-      if (g.isOwner) (m.role == 'moderator' ? 'demote' : 'promote', m.role == 'moderator' ? 'Снять с модераторов' : 'Назначить модератором', ''),
-    ];
+    if (!_canActOn(g, m)) return;
+    final name = _svc.displayName(g.id, m.alias);
+    String role = m.role == 'admin' ? 'admin' : (m.role == 'moderator' ? 'moderator' : 'member');
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: AppTheme.surface,
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          for (final (a, label, _) in items)
-            ListTile(title: Text(label, style: TextStyle(color: a == 'ban' || a == 'kick' ? AppTheme.incoming : AppTheme.text)), onTap: () { Navigator.pop(ctx); _act(a, m.alias); }),
-        ]),
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(
+        child: Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
+          child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(name, style: const TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+            Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text('${m.alias} · ${_roleName(m.role)}${m.muted ? ' · заглушён' : ''}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+            ListTile(
+              leading: Icon(m.muted ? Icons.volume_up_outlined : Icons.volume_off_outlined, color: AppTheme.textSecondary),
+              title: Text(m.muted ? 'Разрешить писать' : 'Заглушить', style: const TextStyle(color: AppTheme.text)),
+              onTap: () { Navigator.pop(ctx); _act(m.muted ? 'unmute' : 'mute', m.alias); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.person_remove_outlined, color: AppTheme.incoming),
+              title: const Text('Выгнать', style: TextStyle(color: AppTheme.incoming)),
+              onTap: () async { Navigator.pop(ctx); if (await _confirm('Выгнать «$name»?')) _act('kick', m.alias); },
+            ),
+            ListTile(
+              leading: const Icon(Icons.block, color: AppTheme.incoming),
+              title: const Text('Запретить вход', style: TextStyle(color: AppTheme.incoming)),
+              onTap: () async { Navigator.pop(ctx); if (await _confirm('Запретить «$name» вход в группу?')) _act('ban', m.alias); },
+            ),
+            if (g.canManage) ...[
+              const Divider(),
+              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 4), child: Text('Администрирование', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                child: Row(children: [
+                  Expanded(
+                    child: DropdownButtonFormField<String>(
+                      value: role,
+                      dropdownColor: AppTheme.surface,
+                      decoration: const InputDecoration(labelText: 'Назначить'),
+                      items: [
+                        const DropdownMenuItem(value: 'member', child: Text('Участник')),
+                        const DropdownMenuItem(value: 'moderator', child: Text('Модератор')),
+                        if (g.isOwner) const DropdownMenuItem(value: 'admin', child: Text('Админ')),
+                      ],
+                      onChanged: (v) => setS(() => role = v ?? role),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  FilledButton(
+                    style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
+                    onPressed: () {
+                      Navigator.pop(ctx);
+                      if (role != m.role) _act(switch (role) { 'admin' => 'make_admin', 'moderator' => 'promote', _ => 'demote' }, m.alias);
+                    },
+                    child: const Text('ОК'),
+                  ),
+                ]),
+              ),
+            ],
+          ]),
+        ),
+      )),
+    );
+  }
+
+  /// Кого я могу трогать: владелец — всех кроме владельца; админ — рядовых и модераторов; модератор — рядовых; себя — никого.
+  bool _canActOn(GroupInfo g, GroupMember m) {
+    if (m.alias == g.myAlias || m.role == 'owner') return false;
+    if (g.isOwner) return true;
+    if (g.isAdmin) return m.role == 'member' || m.role == 'moderator';
+    if (g.role == 'moderator') return m.role == 'member';
+    return false;
+  }
+
+  String _roleName(String r) => switch (r) { 'owner' => 'владелец', 'admin' => 'админ', 'moderator' => 'модератор', _ => 'участник' };
+
+  Future<bool> _confirm(String text) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        content: Text(text, style: const TextStyle(color: AppTheme.text)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Нет')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Да', style: TextStyle(color: AppTheme.incoming))),
+        ],
       ),
     );
+    return ok == true;
   }
 
   /// Выбор контактов → один код на всех (по числу выбранных) → каждому уходит зашифрованное сообщение с приглашением.
@@ -193,10 +299,24 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     if (g == null) return Scaffold(appBar: AppBar(title: const Text('Группа')), body: const SizedBox());
     final rules = state.groups!.rules(g.id);
     return Scaffold(
-      appBar: AppBar(title: Text(g.name)),
+      appBar: AppBar(title: const Text('Настройки группы')),
       body: ListView(children: [
-        if (g.about.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 0), child: Text(g.about, style: const TextStyle(color: AppTheme.text))),
-        if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.all(16), child: Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary))),
+        if (g.canManage) ...[
+          Builder(builder: (_) { _fillFields(g); return const SizedBox.shrink(); }),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 0),
+            child: Column(children: [
+              TextField(controller: _nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
+              TextField(controller: _topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика')),
+              TextField(controller: _aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Описание (необязательно)')),
+              Align(alignment: Alignment.centerRight, child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: () => _saveSettings(g), child: const Text('Сохранить'))),
+            ]),
+          ),
+        ] else ...[
+          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 0), child: Text(g.name, style: const TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+          if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary))),
+          if (g.about.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text(g.about, style: const TextStyle(color: AppTheme.text))),
+        ],
         ListTile(
           leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
           title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),
@@ -220,7 +340,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
               ]),
             ),
         ],
-        if (g.isOwner) ...[
+        if (g.canManage) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запретить в группе', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
           const Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
@@ -244,17 +364,25 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           ),
         const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Участники', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
         if (_error != null) Padding(padding: const EdgeInsets.all(16), child: Text(_error!, style: const TextStyle(color: AppTheme.incoming))),
-        for (final m in _members)
-          ListTile(
-            dense: true,
-            leading: Icon(m.role == 'owner' ? Icons.star : m.role == 'moderator' ? Icons.shield_outlined : Icons.person_outline, color: m.role == 'member' ? AppTheme.textSecondary : AppTheme.accent),
-            title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? ' (вы)' : ''), style: const TextStyle(color: AppTheme.text)),
-            subtitle: Text('${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
-            onLongPress: () => _memberMenu(g, m),
-            trailing: g.canModerate && m.role != 'owner' && m.alias != g.myAlias && !(m.role == 'moderator' && !g.isOwner)
-                ? IconButton(tooltip: 'Действия', icon: const Icon(Icons.more_vert, color: AppTheme.textSecondary), onPressed: () => _memberMenu(g, m))
-                : null,
-          ),
+        // участники: список с прокруткой; нажатие на участника открывает окно действий
+        ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.42),
+          child: ListView(shrinkWrap: true, children: [
+            for (final m in _members)
+              ListTile(
+                dense: true,
+                leading: Icon(m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.admin_panel_settings_outlined : m.role == 'moderator' ? Icons.shield_outlined : Icons.person_outline, color: m.role == 'member' ? AppTheme.textSecondary : AppTheme.accent),
+                title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? ' (вы)' : ''), style: const TextStyle(color: AppTheme.text)),
+                subtitle: Text('${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                onTap: g.canModerate && _canActOn(g, m) ? () => _memberMenu(g, m) : null,
+              ),
+          ]),
+        ),
+        if (g.canModerate && _banned.isNotEmpty) ...[
+          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запрещён вход (${_banned.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          for (final al in _banned)
+            ListTile(dense: true, title: Text(al, style: const TextStyle(color: AppTheme.text)), trailing: TextButton(onPressed: () => _act('unban', al), child: const Text('Разрешить вход'))),
+        ],
         if (_modlog.isNotEmpty) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Действия модераторов', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
           for (final l in _modlog)

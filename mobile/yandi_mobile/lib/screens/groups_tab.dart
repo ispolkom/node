@@ -69,7 +69,7 @@ class _GroupsTabState extends State<GroupsTab> {
     await _refresh();
   }
 
-  String _roleLabel(String r) => switch (r) { 'owner' => 'владелец', 'moderator' => 'модератор', _ => 'участник' };
+  String _roleLabel(String r) => switch (r) { 'owner' => 'владелец', 'admin' => 'админ', 'moderator' => 'модератор', _ => 'участник' };
 
   @override
   Widget build(BuildContext context) {

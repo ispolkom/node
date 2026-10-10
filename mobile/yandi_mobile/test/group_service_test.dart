@@ -19,6 +19,7 @@ class FakeNode {
   String? ownerAlias;
   final files = <String, Map<int, List<int>>>{};
   final reqs = <Map<String, dynamic>>[];       // просьбы вступить: {id, dev, name}
+  String name = 'Тест', topic = '', about = '';
   final doneFiles = <String>{};
 
   FakeNode(String ownerDevice) {
@@ -39,7 +40,7 @@ class _Api implements GroupApi {
     if (!n.members.containsKey(dev)) return [];
     final pending = [for (final m in n.members.values) if (m['pub'] != null && !(n.boxes[n.epoch]?.containsKey(m['alias']) ?? false) && m['role'] != 'owner') m['alias'] as String];
     return [
-      {'id': n.gid, 'name': 'Тест', 'topic': '', 'kind': 'invite', 'my_alias': me['alias'], 'role': me['role'], 'muted': me['muted'], 'members': n.members.length,
+      {'id': n.gid, 'name': n.name, 'topic': n.topic, 'about': n.about, 'kind': 'invite', 'my_alias': me['alias'], 'role': me['role'], 'muted': me['muted'], 'members': n.members.length,
        'epoch': n.epoch, 'first_seq': 1, 'last_seq': n.log.length, 'rekey_needed': n.rekeyNeeded, 'pending_keys': pending}
     ];
   }
@@ -47,6 +48,14 @@ class _Api implements GroupApi {
   Future<List<Map<String, dynamic>>> openGroups() async => n.members.containsKey(dev)
       ? []
       : [{'id': n.gid, 'name': 'Тест', 'topic': 'тема', 'kind': 'invite', 'members': n.members.length, 'requested': n.reqs.any((r) => r['dev'] == dev)}];
+  @override
+  Future<void> settings(String gid, {String? name, String? topic, String? about}) async {
+    if (me['role'] != 'owner' && me['role'] != 'admin') throw const GroupApiError(403, 'настройки группы меняют владелец и админ');
+    if (name != null && name.trim().isEmpty) throw const GroupApiError(400, 'нужно название группы');
+    if (name != null) n.name = name;
+    if (topic != null) n.topic = topic;
+    if (about != null) n.about = about;
+  }
   @override
   Future<void> requestJoin(String gid, String name) async {
     if (n.reqs.any((r) => r['dev'] == dev)) throw const GroupApiError(409, 'просьба уже отправлена');
@@ -107,6 +116,9 @@ class _Api implements GroupApi {
   Future<void> mod(String gid, Map<String, dynamic> body) async {
     if (body['action'] == 'delete_entry') { final e = n.log[(body['seq'] as int) - 1]; e['payload_b64'] = ''; e['deleted'] = true; }
     if (body['action'] == 'mute') n.members.values.firstWhere((m) => m['alias'] == body['alias'])['muted'] = true;
+    if (const {'make_admin', 'promote', 'demote'}.contains(body['action'])) {
+      n.members.values.firstWhere((m) => m['alias'] == body['alias'])['role'] = switch (body['action']) { 'make_admin' => 'admin', 'promote' => 'moderator', _ => 'member' };
+    }
   }
   @override
   Future<Map<String, dynamic>> invite(String gid, {int uses = 1, int ttlHours = 24}) async => {'code': 'AAAA-BBBB-CCCC'};
@@ -355,5 +367,33 @@ void main() {
     expect(await bob.inviteSpent(node.gid, 'DDDD-EEEE-FFFF'), isFalse, reason: 'другой код');
     await bob.markInviteSpent(node.gid, '');
     expect(await bob.inviteSpent(node.gid, ''), isFalse, reason: 'открытая группа: можно вступить снова после выхода');
+  });
+
+  test('настройки группы: владелец меняет название/тематику/описание, остальные нет, пустое название отвергается', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.updateSettings(node.gid, name: 'Новое имя', topic: 'Садоводство', about: 'про грядки');
+    expect(owner.byId(node.gid)!.name, 'Новое имя');
+    expect(owner.byId(node.gid)!.topic, 'Садоводство');
+    expect(owner.byId(node.gid)!.about, 'про грядки');
+    await bob.sync();
+    expect(bob.byId(node.gid)!.name, 'Новое имя', reason: 'у участников обновляется после синхронизации');
+    await expectLater(bob.updateSettings(node.gid, name: 'Взлом'), throwsA(isA<GroupApiError>()));
+    await expectLater(owner.updateSettings(node.gid, name: '  '), throwsA(isA<GroupApiError>()));
+  });
+
+  test('админ: владелец назначает, админ меняет настройки и задаёт правила, остальные клиенты принимают правила от админа', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.moderate(node.gid, 'make_admin', alias: 'Гость-1');
+    await bob.sync();
+    expect(bob.byId(node.gid)!.isAdmin, isTrue);
+    expect(bob.byId(node.gid)!.canManage, isTrue);
+    await bob.updateSettings(node.gid, name: 'Имя от админа');
+    await bob.setRules(node.gid, const GroupRules({GroupKind.video}));
+    await owner.sync();
+    expect(owner.rules(node.gid).allows(GroupKind.video), isFalse, reason: 'владелец принял правила от админа');
+    expect(owner.byId(node.gid)!.name, 'Имя от админа');
+    await eve.sync();
   });
 }
