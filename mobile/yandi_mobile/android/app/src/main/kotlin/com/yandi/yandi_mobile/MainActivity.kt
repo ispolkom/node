@@ -50,6 +50,13 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
+                // экран настроек этого приложения (разрешения: камера и др.), если запрос разрешения не показывается
+                "appSettings" -> {
+                    runCatching {
+                        startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    result.success(true)
+                }
                 else -> result.notImplemented()
             }
         }

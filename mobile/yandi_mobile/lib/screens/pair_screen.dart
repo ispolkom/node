@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
@@ -66,6 +67,50 @@ class _PairScreenState extends State<PairScreen> {
     _scanner.dispose();
     _manual.dispose();
     super.dispose();
+  }
+
+  static const _platform = MethodChannel('com.yandi.yandi_mobile/files');
+
+  /// Камера не запустилась: объясняем причину и даём два шага — повторить запрос разрешения или открыть настройки приложения.
+  Widget _cameraError(BuildContext context, MobileScannerException e, Widget? child) {
+    final denied = e.errorCode == MobileScannerErrorCode.permissionDenied;
+    return ColoredBox(
+      color: Colors.black,
+      child: Center(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            const Icon(Icons.no_photography_outlined, color: Colors.white70, size: 48),
+            const SizedBox(height: 12),
+            Text(
+              denied
+                  ? 'Нет доступа к камере. Нажмите «Разрешить камеру» или включите её в настройках телефона: Приложения → YANDI → Разрешения → Камера.'
+                  : 'Камера не запустилась. Можно ввести текст приглашения вручную.',
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: Colors.white, fontSize: 14),
+            ),
+            const SizedBox(height: 16),
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
+              onPressed: () async {
+                try { await _scanner.stop(); } catch (_) {}
+                try { await _scanner.start(); } catch (_) {}
+              },
+              child: Text(denied ? 'Разрешить камеру' : 'Повторить'),
+            ),
+            if (denied)
+              TextButton(
+                onPressed: () => _platform.invokeMethod('appSettings'),
+                child: const Text('Настройки приложения', style: TextStyle(color: AppTheme.accent)),
+              ),
+            TextButton(
+              onPressed: () => _setScanMode(false),
+              child: const Text('Ввести текст', style: TextStyle(color: Colors.white70)),
+            ),
+          ]),
+        ),
+      ),
+    );
   }
 
   /// Понятное объяснение вместо сырого текста исключения.
@@ -266,7 +311,7 @@ class _PairScreenState extends State<PairScreen> {
                 child: Stack(
                   fit: StackFit.expand,
                   children: [
-                    MobileScanner(controller: _scanner, onDetect: _onDetect),
+                    MobileScanner(controller: _scanner, onDetect: _onDetect, errorBuilder: _cameraError),
                     Center(
                       child: FractionallySizedBox(
                         widthFactor: 0.7,
