@@ -4142,6 +4142,33 @@ pub(crate) fn sanitize_storage_filename(filename: &str) -> String {
     }
 }
 
+/// Тип, с которым файл из чата отдаётся браузеру. Имя файла присылает собеседник, а отдаём мы его с того же адреса, что и страницу узла:
+/// `x.html`/`x.svg` как text/html или image/svg+xml выполнили бы чужой скрипт с правами владельца (выпустить QR сопряжения, читать и
+/// слать сообщения). Поэтому показывать «на месте» можно только картинки растровых форматов, звук и видео; всё остальное — как
+/// application/octet-stream (браузер скачает, а не откроет).
+pub(crate) fn safe_served_type(filename: &str) -> String {
+    let guessed = mime_guess::from_path(filename).first_or_octet_stream().to_string();
+    let inline_ok = matches!(guessed.as_str(), "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp")
+        || guessed.starts_with("audio/")
+        || guessed.starts_with("video/");
+    if inline_ok {
+        guessed
+    } else {
+        "application/octet-stream".to_string()
+    }
+}
+
+/// inline — только для безопасных типов из `safe_served_type`; остальное скачивается (имя — только безопасные символы).
+pub(crate) fn served_disposition(content_type: &str, filename: &str) -> String {
+    let inline_ok = content_type.starts_with("image/") || content_type.starts_with("audio/") || content_type.starts_with("video/");
+    if inline_ok {
+        "inline".to_string()
+    } else {
+        let name: String = filename.chars().map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_' { c } else { '_' }).collect();
+        format!("attachment; filename=\"{}\"", name)
+    }
+}
+
 pub(crate) fn resolve_local_file_path(file_id: &str, filename: &str) -> Option<std::path::PathBuf> {
     // SEC-07: validate file_id — only alphanumeric, underscores, and hyphens
     if file_id.is_empty()
@@ -4216,9 +4243,7 @@ async fn api_files_content(
 
     match std::fs::read(&file_path) {
         Ok(data) => {
-            let content_type = mime_guess::from_path(&filename)
-                .first_or_octet_stream()
-                .to_string();
+            let content_type = safe_served_type(&filename);
             let data_len = data.len();
             let is_streaming_media =
                 content_type.starts_with("audio/") || content_type.starts_with("video/");
@@ -4253,6 +4278,9 @@ async fn api_files_content(
                             let chunk = data[start..=end].to_vec();
                             return Response::builder()
                                 .status(StatusCode::PARTIAL_CONTENT)
+                                .header("X-Content-Type-Options", "nosniff")
+                                .header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'")
+                                .header("Content-Disposition", served_disposition(&content_type, &filename))
                                 .header(axum::http::header::CONTENT_TYPE, content_type.clone())
                                 .header(axum::http::header::ACCEPT_RANGES, "bytes")
                                 .header(axum::http::header::CONTENT_LENGTH, chunk.len().to_string())
@@ -4275,6 +4303,9 @@ async fn api_files_content(
 
             Response::builder()
                 .status(StatusCode::OK)
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'")
+                .header("Content-Disposition", served_disposition(&content_type, &filename))
                 .header(axum::http::header::CONTENT_TYPE, content_type)
                 .header(axum::http::header::CONTENT_LENGTH, data_len.to_string())
                 .header("Cache-Control", "no-store")
@@ -6207,4 +6238,32 @@ async fn pair_issue_handler(
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod served_file_tests {
+    use super::{safe_served_type, served_disposition};
+
+    #[test]
+    fn a_file_from_a_contact_is_never_served_as_active_content() {
+        for name in ["evil.html", "evil.htm", "evil.svg", "evil.xhtml", "evil.xml", "evil.js", "evil.mjs", "evil.pdf", "x.html.txt.html"] {
+            let t = safe_served_type(name);
+            assert_eq!(t, "application/octet-stream", "{name} -> {t}");
+            assert!(served_disposition(&t, name).starts_with("attachment;"), "{name}");
+        }
+    }
+
+    #[test]
+    fn pictures_sound_and_video_still_open_in_place() {
+        for (name, ty) in [("a.png", "image/png"), ("a.jpg", "image/jpeg"), ("a.mp3", "audio/mpeg"), ("a.mp4", "video/mp4")] {
+            assert_eq!(safe_served_type(name), ty);
+            assert_eq!(served_disposition(ty, name), "inline");
+        }
+    }
+
+    #[test]
+    fn the_download_name_cannot_inject_header_syntax() {
+        let d = served_disposition("application/octet-stream", "a\"; b=\r\nX: y.zip");
+        assert!(!d.contains('\r') && !d.contains('\n') && d.matches('"').count() == 2, "{d}");
+    }
 }
