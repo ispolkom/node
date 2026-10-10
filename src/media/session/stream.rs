@@ -1,15 +1,15 @@
 //! Media stream handling with encryption
 
-use std::sync::Arc;
+use crate::media::codecs::opus::{OpusDecoder, OpusEncoder};
+use aes_gcm::aead::{Aead, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
+use rand::RngCore;
+use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
+use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
-use crate::media::codecs::opus::{OpusEncoder, OpusDecoder};
-use x25519_dalek::{EphemeralSecret, PublicKey};
-use aes_gcm::{Aes256Gcm, Key, Nonce};
-use aes_gcm::aead::{Aead, KeyInit};
-use rand::RngCore;
-use sha2::{Sha256, Digest};
+use x25519_dalek::{PublicKey, StaticSecret};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum MediaType {
@@ -78,6 +78,7 @@ pub struct MediaStream {
     bytes_received: AtomicU64,
     media_encryption_key: RwLock<Option<[u8; 32]>>,
     media_decryption_key: RwLock<Option<[u8; 32]>>,
+    ephemeral_secret: RwLock<Option<StaticSecret>>,
     ratchet_counter: AtomicU64,
 }
 
@@ -98,6 +99,7 @@ impl MediaStream {
             bytes_received: AtomicU64::new(0),
             media_encryption_key: RwLock::new(None),
             media_decryption_key: RwLock::new(None),
+            ephemeral_secret: RwLock::new(None),
             ratchet_counter: AtomicU64::new(0),
         }
     }
@@ -115,14 +117,28 @@ impl MediaStream {
     }
 
     pub fn generate_ephemeral_key(&self) -> Result<[u8; 32], String> {
-        let ephemeral = EphemeralSecret::random_from_rng(rand::thread_rng());
+        let ephemeral = StaticSecret::random_from_rng(rand::thread_rng());
         let public_key = PublicKey::from(&ephemeral);
+        *self.ephemeral_secret.write().unwrap() = Some(ephemeral);
         Ok(*public_key.as_bytes())
     }
 
     pub fn establish_shared_secret(&self, remote_public: &[u8; 32]) -> Result<[u8; 32], String> {
+        let local_secret = self
+            .ephemeral_secret
+            .write()
+            .unwrap()
+            .take()
+            .ok_or("Ephemeral media key was not generated")?;
+        let remote_public = PublicKey::from(*remote_public);
+        let shared = local_secret.diffie_hellman(&remote_public);
+        if shared.as_bytes().iter().all(|byte| *byte == 0) {
+            return Err("Invalid low-order X25519 public key".to_string());
+        }
+
         let mut hasher = Sha256::new();
-        hasher.update(remote_public);
+        hasher.update(b"YANDI-MEDIA-ECDH-V1");
+        hasher.update(shared.as_bytes());
         let mut key = [0u8; 32];
         key.copy_from_slice(&hasher.finalize());
         *self.media_encryption_key.write().unwrap() = Some(key);
@@ -132,12 +148,16 @@ impl MediaStream {
 
     pub fn encrypt_media(&self, plaintext: &[u8]) -> Result<Vec<u8>, String> {
         let key_opt = self.media_encryption_key.read().unwrap();
-        let key = key_opt.as_ref().ok_or("Media encryption key not established")?;
+        let key = key_opt
+            .as_ref()
+            .ok_or("Media encryption key not established")?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
         let mut nonce_bytes = [0u8; 12];
         rand::thread_rng().fill_bytes(&mut nonce_bytes);
         let nonce = Nonce::from_slice(&nonce_bytes);
-        let ciphertext = cipher.encrypt(nonce, plaintext).map_err(|e| format!("Encryption failed: {}", e))?;
+        let ciphertext = cipher
+            .encrypt(nonce, plaintext)
+            .map_err(|e| format!("Encryption failed: {}", e))?;
         let mut result = nonce_bytes.to_vec();
         result.extend_from_slice(&ciphertext);
         let counter = self.ratchet_counter.fetch_add(1, Ordering::Relaxed);
@@ -152,11 +172,15 @@ impl MediaStream {
             return Err("Encrypted data too short".to_string());
         }
         let key_opt = self.media_decryption_key.read().unwrap();
-        let key = key_opt.as_ref().ok_or("Media decryption key not established")?;
+        let key = key_opt
+            .as_ref()
+            .ok_or("Media decryption key not established")?;
         let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key));
         let nonce = Nonce::from_slice(&encrypted[0..12]);
         let ciphertext = &encrypted[12..];
-        let plaintext = cipher.decrypt(nonce, ciphertext).map_err(|e| format!("Decryption failed: {}", e))?;
+        let plaintext = cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|e| format!("Decryption failed: {}", e))?;
         Ok(plaintext)
     }
 
@@ -180,34 +204,58 @@ impl MediaStream {
         let encoder_opt = self.audio_encoder.read().unwrap();
         let encoder = encoder_opt.as_ref().ok_or("Audio encoder not configured")?;
         let encoded = encoder.encode(pcm)?;
-        let encrypted = if self.is_encrypted() { self.encrypt_media(&encoded)? } else { encoded };
+        let encrypted = if self.is_encrypted() {
+            self.encrypt_media(&encoded)?
+        } else {
+            encoded
+        };
         self.packets_sent.fetch_add(1, Ordering::Relaxed);
-        self.bytes_sent.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
+        self.bytes_sent
+            .fetch_add(encrypted.len() as u64, Ordering::Relaxed);
         Ok(encrypted)
     }
 
     pub fn receive_audio(&self, packet: &[u8]) -> Result<Vec<i16>, String> {
         let decoder_opt = self.audio_decoder.read().unwrap();
         let decoder = decoder_opt.as_ref().ok_or("Audio decoder not configured")?;
-        let decrypted = if self.is_encrypted() { self.decrypt_media(packet)? } else { packet.to_vec() };
+        let decrypted = if self.is_encrypted() {
+            self.decrypt_media(packet)?
+        } else {
+            packet.to_vec()
+        };
         let pcm = decoder.decode(&decrypted)?;
         self.packets_received.fetch_add(1, Ordering::Relaxed);
-        self.bytes_received.fetch_add(packet.len() as u64, Ordering::Relaxed);
+        self.bytes_received
+            .fetch_add(packet.len() as u64, Ordering::Relaxed);
         Ok(pcm)
     }
 
     pub fn frame_size_samples(&self) -> Option<usize> {
         let config = self.audio_config.read().unwrap();
-        config.as_ref().map(|c| (c.sample_rate * c.frame_duration_ms / 1000) as usize * c.channels as usize)
+        config
+            .as_ref()
+            .map(|c| (c.sample_rate * c.frame_duration_ms / 1000) as usize * c.channels as usize)
     }
 
-    pub fn id(&self) -> u64 { self.id }
-    pub fn stream_type(&self) -> MediaType { self.stream_type }
-    pub fn remote_peer(&self) -> &str { &self.remote_peer_id }
-    pub fn state(&self) -> StreamState { StreamState::from(self.state.load(Ordering::Relaxed) as u64) }
-    pub fn set_state(&self, state: StreamState) { self.state.store(state as u8, Ordering::Relaxed); }
-    pub fn is_active(&self) -> bool { self.state() == StreamState::Active }
-    
+    pub fn id(&self) -> u64 {
+        self.id
+    }
+    pub fn stream_type(&self) -> MediaType {
+        self.stream_type
+    }
+    pub fn remote_peer(&self) -> &str {
+        &self.remote_peer_id
+    }
+    pub fn state(&self) -> StreamState {
+        StreamState::from(self.state.load(Ordering::Relaxed) as u64)
+    }
+    pub fn set_state(&self, state: StreamState) {
+        self.state.store(state as u8, Ordering::Relaxed);
+    }
+    pub fn is_active(&self) -> bool {
+        self.state() == StreamState::Active
+    }
+
     pub fn stats(&self) -> StreamStats {
         StreamStats {
             packets_sent: self.packets_sent.load(Ordering::Relaxed),
@@ -218,7 +266,7 @@ impl MediaStream {
             is_encrypted: self.is_encrypted(),
         }
     }
-    
+
     pub fn audio_config(&self) -> Option<AudioConfig> {
         self.audio_config.read().unwrap().clone()
     }
@@ -232,4 +280,28 @@ pub struct StreamStats {
     pub bytes_received: u64,
     pub duration: Duration,
     pub is_encrypted: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MediaStream, MediaType};
+
+    #[test]
+    fn media_ecdh_derives_the_same_key() {
+        let alice = MediaStream::new(1, MediaType::Audio, "bob".to_string());
+        let bob = MediaStream::new(2, MediaType::Audio, "alice".to_string());
+        let alice_public = alice.generate_ephemeral_key().unwrap();
+        let bob_public = bob.generate_ephemeral_key().unwrap();
+
+        let alice_key = alice.establish_shared_secret(&bob_public).unwrap();
+        let bob_key = bob.establish_shared_secret(&alice_public).unwrap();
+        assert_eq!(alice_key, bob_key);
+    }
+
+    #[test]
+    fn media_ecdh_rejects_low_order_public_key() {
+        let stream = MediaStream::new(1, MediaType::Audio, "peer".to_string());
+        stream.generate_ephemeral_key().unwrap();
+        assert!(stream.establish_shared_secret(&[0; 32]).is_err());
+    }
 }
