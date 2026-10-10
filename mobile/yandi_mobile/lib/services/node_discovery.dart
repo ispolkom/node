@@ -88,12 +88,15 @@ class NodeDiscovery {
   }
 
   static http.Client _buildClient(String fingerprint) {
-    if (fingerprint.isEmpty) return http.Client();
+    final normalizedFp = fingerprint.trim().toLowerCase();
+    if (normalizedFp.isEmpty) {
+      throw StateError('TLS certificate fingerprint is required');
+    }
     final ctx = SecurityContext(withTrustedRoots: false);
     final inner = HttpClient(context: ctx)
       ..badCertificateCallback = (cert, host, port) {
           final fp = crypto.sha256.convert(cert.der).toString();
-          return fp.toLowerCase() == fingerprint.toLowerCase();
+          return fp.toLowerCase() == normalizedFp;
         };
     return IOClient(inner);
   }

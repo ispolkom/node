@@ -215,12 +215,15 @@ class _PairScreenState extends State<PairScreen> {
   }
 
   static http.Client _buildPinnedClient(String expectedFp) {
+    final normalizedFp = expectedFp.trim().toLowerCase();
+    if (normalizedFp.isEmpty) {
+      throw StateError('TLS certificate fingerprint is required');
+    }
     final ctx = SecurityContext(withTrustedRoots: false);
     final ioClient = HttpClient(context: ctx)
       ..badCertificateCallback = (X509Certificate cert, String host, int port) {
-          if (expectedFp.isEmpty) return true;
           final fp = crypto.sha256.convert(cert.der).toString();
-          return fp.toLowerCase() == expectedFp.toLowerCase();
+          return fp.toLowerCase() == normalizedFp;
         };
     return IOClient(ioClient);
   }

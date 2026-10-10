@@ -543,7 +543,7 @@ class AppState extends ChangeNotifier {
     await StorageService.updateMessageText(msgId, t);
     await StorageService.saveEditedIds(_editedIds);
     // отправляем правку собеседнику (конверт с тем же id); если не умеет — просто не применит
-    unawaited(_ws?.sendMessage(peerId, MsgChannel.editMessage(msgId, t)) ?? Future<void>.value());
+    unawaited(_ws?.sendMessage(peerId, MsgChannel.editMessage(msgId, t)) ?? Future<bool>.value(false));
     notifyListeners();
   }
 
@@ -629,7 +629,7 @@ class AppState extends ChangeNotifier {
   }
 
   void _sendDeliveredReceipt(String to, String cmid) {
-    unawaited(_ws?.sendMessage(to, MsgChannel.receipt('delivered', [cmid])) ?? Future<void>.value());
+    unawaited(_ws?.sendMessage(to, MsgChannel.receipt('delivered', [cmid])) ?? Future<bool>.value(false));
   }
 
   /// Объявить своим устройствам, что эта сборка умеет квитанции (пинг «вживую», старые сборки его игнорируют).
@@ -655,7 +655,7 @@ class AppState extends ChangeNotifier {
       }
     }
     if (ids.isNotEmpty) {
-      unawaited(_ws?.sendMessage(peerId, MsgChannel.receipt('read', ids)) ?? Future<void>.value());
+      unawaited(_ws?.sendMessage(peerId, MsgChannel.receipt('read', ids)) ?? Future<bool>.value(false));
     }
   }
 
@@ -679,7 +679,7 @@ class AppState extends ChangeNotifier {
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     // тем, кто умеет квитанции, шлём конверт с id (чтобы получатель мог ответить «доставлено/прочитано»); остальным — обычный текст
     final payload = _receiptCapable.contains(peerId) ? MsgChannel.wrapMessage(id, text) : text;
-    _ws?.sendMessage(peerId, payload);
+    final sent = await (_ws?.sendMessage(peerId, payload) ?? Future<bool>.value(false));
 
     final msg = ChatMessage(
       id:        id,
@@ -687,7 +687,7 @@ class AppState extends ChangeNotifier {
       outgoing:  true,
       text:      text,
       timestamp: DateTime.now(),
-      status:    MessageStatus.pending,
+      status:    sent ? MessageStatus.pending : MessageStatus.failed,
     );
     _chats.putIfAbsent(peerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
@@ -774,7 +774,7 @@ class AppState extends ChangeNotifier {
       // чат открыт — сразу «прочитано»
       if (activeChatPeerId == e.fromPeerId && !_readAcked.contains(remoteId)) {
         _readAcked.add(remoteId);
-        unawaited(_ws?.sendMessage(e.fromPeerId, MsgChannel.receipt('read', [remoteId])) ?? Future<void>.value());
+        unawaited(_ws?.sendMessage(e.fromPeerId, MsgChannel.receipt('read', [remoteId])) ?? Future<bool>.value(false));
       }
     }
 
