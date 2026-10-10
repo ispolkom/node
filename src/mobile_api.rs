@@ -555,6 +555,9 @@ fn device_ed25519(peer: &str) -> Result<[u8; 32], String> {
 /// Файл со страницы узла телефону: куски шифруются своим ключом и ложатся в хранилище файлов, предложение — зашифрованной почтой.
 pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachment: crate::communication::FileAttachment, text: String) -> Result<ChatMessage, String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if crate::mobile_self::is_blocked_phone(peer) {
+        return Err("устройство заблокировано".into());
+    }
     let x = device_x25519(peer)?;
     let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
     let node = hex::encode(st.my_id.0);
@@ -579,6 +582,9 @@ pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachme
 
 /// Положить телефону служебный конверт от узла (зашифрован его ключом) в очередь.
 fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
+    if crate::mobile_self::is_blocked_phone(device) {
+        return;
+    }
     if let Ok(x) = device_x25519(device) {
         let node = hex::encode(st.my_id.0);
         if let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 1) {
@@ -589,6 +595,9 @@ fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
 
 /// «Живой» сигнал телефону от узла (не хранится): ответ на пинг поддержки квитанций.
 fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
+    if crate::mobile_self::is_blocked_phone(device) {
+        return;
+    }
     if let Ok(x) = device_x25519(device) {
         let node = hex::encode(st.my_id.0);
         let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 2) else { return };
@@ -619,6 +628,9 @@ pub fn pc_log_call(peer: &str, outgoing: bool, text: &str) -> Result<(), String>
 /// Сигнал звонка со страницы телефону (живой, не хранится): только при подписанных ключах телефона и если он на связи.
 pub fn pc_call_signal(peer: &str, text: &str) -> Result<(), String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if crate::mobile_self::is_blocked_phone(peer) {
+        return Err("устройство заблокировано".into());
+    }
     if !text.starts_with(crate::mobile_self::CALL_MARKER) || text.len() > MAX_LIVE {
         return Err("это не сигнал звонка".into());
     }
@@ -684,6 +696,9 @@ pub fn file_taken(tid: &str) {
 /// Ответ со страницы узла телефону владельца: шифруется ключом телефона из его подписанной связки и ложится в его очередь.
 pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if crate::mobile_self::is_blocked_phone(peer) {
+        return Err("устройство заблокировано".into());
+    }
     if text.is_empty() || text.len() > MAX_TEXT {
         return Err("пустое или слишком длинное сообщение".into());
     }

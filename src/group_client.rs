@@ -549,14 +549,26 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
     Ok(())
 }
 
+/// Номера стёртых записей во всём журнале узла. Узел отдаёт журнал страницами (не больше 500 записей), поэтому проходим его до конца.
+fn deleted_in_log(mut page_after: impl FnMut(u64) -> Result<Value, String>) -> Result<Vec<u64>, String> {
+    let (mut out, mut after) = (Vec::new(), 0);
+    loop {
+        let p = page_after(after)?;
+        let page = p["entries"].as_array().cloned().unwrap_or_default();
+        let Some(last) = page.iter().filter_map(|e| e["seq"].as_u64()).max().filter(|&l| l > after) else { break };
+        out.extend(page.iter().filter(|e| e["deleted"].as_bool().unwrap_or(false)).filter_map(|e| e["seq"].as_u64()));
+        after = last;
+    }
+    Ok(out)
+}
+
 /// Догнать стирания модераторов, пропущенные без намёка (по курсору событий стирания на узле).
 fn sync_deletions(c: &mut Client, dev: &str, gid: &str) -> Result<bool, String> {
     let cur = c.gstate(gid).del_cursor;
     let r = with_store(|st| st.deletions_after(gid, dev, cur)).map_err(fail)?;
     let mut seqs: Vec<u64> = r["deleted"].as_array().map(|l| l.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
     if r["resync"].as_bool().unwrap_or(false) {
-        let p = with_store(|st| st.pull(gid, dev, 0, 100_000)).map_err(fail)?;
-        seqs.extend(p["entries"].as_array().map(|l| l.iter().filter(|e| e["deleted"].as_bool().unwrap_or(false)).filter_map(|e| e["seq"].as_u64()).collect::<Vec<_>>()).unwrap_or_default());
+        seqs.extend(deleted_in_log(|after| with_store(|st| st.pull(gid, dev, after, 500)).map_err(fail))?);
     }
     let mut changed = false;
     {
@@ -1248,6 +1260,20 @@ mod tests {
         assert_eq!(load_state(&v).unwrap().known.get("g").map(String::as_str), Some("Группа"));
         let other = Vault::new(dir.path().join("v"), &[2u8; 32]);
         assert!(load_state(&other).is_err(), "чужой мастер-ключ — ошибка, а не пустое состояние");
+    }
+
+    #[test]
+    fn deletions_are_found_on_every_page_of_the_log() {
+        // журнал из 1300 записей, стёрты 3, 777 и 1299; узел отдаёт не больше 500 за раз
+        let log: Vec<Value> = (1..=1300u64).map(|n| json!({"seq": n, "deleted": ([3, 777, 1299].contains(&n))})).collect();
+        let mut calls = 0;
+        let found = deleted_in_log(|after| {
+            calls += 1;
+            Ok(json!({"entries": log.iter().filter(|e| e["seq"].as_u64().unwrap() > after).take(500).cloned().collect::<Vec<_>>()}))
+        })
+        .unwrap();
+        assert_eq!(found, vec![3, 777, 1299]);
+        assert_eq!(calls, 4, "три страницы и пустая");
     }
 
     #[test]

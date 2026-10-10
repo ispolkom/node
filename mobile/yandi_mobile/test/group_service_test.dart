@@ -389,6 +389,13 @@ void main() {
     expect(await bob.inviteSpent(node.gid, ''), isTrue, reason: 'группы нет (404) или вход запрещён: карточка гаснет и для открытой');
   });
 
+  test('использованный код приглашения остаётся использованным и после выхода из группы', () async {
+    await bob.markInviteSpent(node.gid, 'AAAA-BBBB-CCCC');
+    await bob.store.forgetGroup(node.gid); // то же, что делает leave после ответа узла
+    expect(await bob.inviteSpent(node.gid, 'AAAA-BBBB-CCCC'), isTrue);
+    expect(secureKeyOfGroup('inv_spent_${node.gid}_AAAA-BBBB-CCCC', node.gid), isFalse, reason: 'отметка не среди записей группы');
+  });
+
   test('настройки группы: владелец меняет название/тематику/описание, остальные нет, пустое название отвергается', () async {
     await owner.sync();
     await bobJoins();

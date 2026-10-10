@@ -74,6 +74,3 @@ class SqliteGroupStore implements GroupStore {
   }
 }
 
-/// Ключ защищённого хранилища относится к группе gid: `grp_…_<gid>` или `grp_…_<gid>_…`. Номер группы — 32 hex-знака, так что
-/// чужие группы не задеваются.
-bool secureKeyOfGroup(String key, String gid) => key.startsWith('grp_') && (key.endsWith('_$gid') || key.contains('_${gid}_'));

@@ -353,14 +353,18 @@ class GroupService {
   /// Одноразовый код приглашения уже использован (мной) или признан узлом недействительным: карточка в чате больше не срабатывает.
   /// Для открытой группы (кода нет) карточка гаснет только если узел ответил, что группы нет или вход запрещён (`gone`): после выхода из
   /// открытой группы в неё можно вступить снова.
-  Future<bool> inviteSpent(String gid, String code) async =>
-      await store.read('grp_invspent_${gid}_${code.isEmpty ? 'open' : code}') == '1';
+  /// Отметка хранится вне записей группы (`inv_spent_…`, не `grp_…`): выход из группы стирает её ключи и ленту, но использованный
+  /// одноразовый код так и остаётся использованным.
+  Future<bool> inviteSpent(String gid, String code) async {
+    final tail = '${gid}_${code.isEmpty ? 'open' : code}';
+    return await store.read('inv_spent_$tail') == '1' || await store.read('grp_invspent_$tail') == '1';
+  }
 
   Future<void> markInviteSpent(String gid, String code, {bool gone = false}) async {
     if (code.isNotEmpty) {
-      await store.write('grp_invspent_${gid}_$code', '1');
+      await store.write('inv_spent_${gid}_$code', '1');
     } else if (gone) {
-      await store.write('grp_invspent_${gid}_open', '1');
+      await store.write('inv_spent_${gid}_open', '1');
     }
   }
 
