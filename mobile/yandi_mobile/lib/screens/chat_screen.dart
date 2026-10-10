@@ -318,7 +318,9 @@ class _MessageBubble extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
         constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.72),
         decoration: BoxDecoration(
-          color: isOut ? AppTheme.accent.withOpacity(0.85) : AppTheme.surface,
+          // свои — контуром цвета акцента на фоне чата (на заливке серые и оранжевые галочки плохо видны), чужие — заливкой
+          color: isOut ? AppTheme.bg : AppTheme.surface,
+          border: isOut ? Border.all(color: AppTheme.accent.withOpacity(0.85), width: 1.5) : null,
           borderRadius: BorderRadius.only(
             topLeft:     const Radius.circular(16),
             topRight:    const Radius.circular(16),
@@ -359,12 +361,12 @@ class _MessageBubble extends StatelessWidget {
   IconData _statusIcon(MessageStatus s) => switch (s) {
     MessageStatus.pending   => Icons.check,        // 1 серая — отправлено
     MessageStatus.delivered => Icons.done_all,     // 2 серые — доставлено
-    MessageStatus.read      => Icons.done_all,     // 2 жёлтые — прочитано
+    MessageStatus.read      => Icons.done_all,     // 2 оранжевые — прочитано
     MessageStatus.failed    => Icons.error_outline,
   };
 
   Color _statusColor(MessageStatus s) => switch (s) {
-    MessageStatus.read   => const Color(0xFFFFC107),  // жёлтый
+    MessageStatus.read   => const Color(0xFFFF9800),  // оранжевый (как на странице узла)
     MessageStatus.failed => Colors.redAccent,
     _                    => AppTheme.textSecondary,   // серый: отправлено / доставлено
   };

@@ -1,5 +1,6 @@
 package com.yandi.yandi_mobile
 
+import android.app.ActivityManager
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -172,7 +173,7 @@ class YandiChatService : Service() {
                     val client = RawWsClient(host, port, fingerprint)
                     ws = client
                     lastPongMs.set(System.currentTimeMillis())
-                    client.connect("/mobile/ws?token=$token")
+                    client.connect("/mobile/ws", token)
                     delay = 5_000L
                     readLoop(client)
                 } catch (e: InterruptedException) {
@@ -248,8 +249,10 @@ class YandiChatService : Service() {
                 val from    = data.slice(1..32).toByteArray().toHex()
                 val textLen = data.slice(41..44).toByteArray().toInt32LE()
                 if (data.size < 45 + textLen) return
-                val text    = String(data, 45, textLen, Charsets.UTF_8)
-                showMessageNotif(from.take(8) + "…", text)
+                // Содержимое зашифровано для приложения (E2E), ключей у фонового сервиса нет: текст не показываем никогда — только
+                // «есть новое». Пока приложение открыто, уведомления показывает оно само (оно же расшифровывает и отличает квитанции).
+                if (appInForeground()) return
+                showMessageNotif(from)
             }
         }
     }
@@ -293,7 +296,14 @@ class YandiChatService : Service() {
             .notify(NOTIF_ID_STATUS, buildStatusNotif(text))
     }
 
-    private fun showMessageNotif(fromShort: String, text: String) {
+    private fun appInForeground(): Boolean {
+        val info = ActivityManager.RunningAppProcessInfo()
+        ActivityManager.getMyMemoryState(info)
+        return info.importance <= ActivityManager.RunningAppProcessInfo.IMPORTANCE_FOREGROUND
+    }
+
+    /** Одно уведомление на собеседника; повтор (например, квитанция, которую сервис не может отличить) — без звука. */
+    private fun showMessageNotif(from: String) {
         val intent = PendingIntent.getActivity(
             this, System.currentTimeMillis().toInt(),
             Intent(this, MainActivity::class.java).apply {
@@ -303,14 +313,15 @@ class YandiChatService : Service() {
         )
         val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
-            .setContentTitle("Сообщение от $fromShort")
-            .setContentText(text.take(200))
+            .setContentTitle("YANDI")
+            .setContentText("🔒 Новое сообщение — откройте YANDI")
+            .setOnlyAlertOnce(true)
             .setAutoCancel(true)
             .setContentIntent(intent)
             .setPriority(NotificationCompat.PRIORITY_HIGH)
             .build()
         getSystemService(NotificationManager::class.java)
-            .notify(System.currentTimeMillis().toInt(), notif)
+            .notify(from.hashCode(), notif)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -341,7 +352,8 @@ class RawWsClient(
     private lateinit var output: OutputStream
     private val writeLock = Any()
 
-    fun connect(path: String) {
+    /** Токен устройства — только в заголовке Authorization (#4 аудита): узел больше не принимает его в адресе. */
+    fun connect(path: String, token: String) {
         ssl    = buildTlsSocket()
         input  = ssl.inputStream
         output = ssl.outputStream
@@ -352,6 +364,7 @@ class RawWsClient(
             append("Host: $host:$port\r\n")
             append("Upgrade: websocket\r\n")
             append("Connection: Upgrade\r\n")
+            append("Authorization: Bearer $token\r\n")
             append("Sec-WebSocket-Key: $key\r\n")
             append("Sec-WebSocket-Version: 13\r\n")
             append("\r\n")
