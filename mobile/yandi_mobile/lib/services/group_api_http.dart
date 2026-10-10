@@ -25,6 +25,8 @@ class HttpGroupApi implements GroupApi {
   Future<void> settings(String gid, {String? name, String? topic, String? about}) async =>
       _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about});
   @override
+  Future<Map<String, dynamic>> deleted(String gid, int after) => _call('GET', '/mobile/groups/$gid/deleted?after=$after');
+  @override
   Future<void> transferOwner(String gid, String alias) async => _call('POST', '/mobile/groups/$gid/owner', {'alias': alias});
   @override
   Future<void> requestJoin(String gid, String name) async => _call('POST', '/mobile/groups/$gid/request', {'name': name});

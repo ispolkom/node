@@ -99,6 +99,13 @@ pub fn encrypt_entry(key: &[u8; 32], gid: &str, epoch: u32, from: &str, kind: u8
     if !KINDS.contains(&kind) {
         return Err("неверный вид записи".into());
     }
+    // случайный номер записи внутри шифртекста: повтор того же шифртекста получатель узнаёт и отбрасывает (как в приложении)
+    let mut body = body.clone();
+    if body.get("i").is_none() {
+        let mut id = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut id);
+        body["i"] = json!(hex::encode(id));
+    }
     let sealed = aead_seal(key, &entry_aad(gid, epoch, from, kind), body.to_string().as_bytes());
     let mut out = vec![VERSION, kind];
     out.extend_from_slice(&sealed);
@@ -168,6 +175,9 @@ struct GState {
     want_name: Option<String>,
     #[serde(default)]
     ignored: Vec<String>,
+    /// курсор событий стирания на узле (до какого стирания догнал)
+    #[serde(default)]
+    del_cursor: u64,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -391,8 +401,9 @@ fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str) -> Result<(), Str
     } else {
         collect_keys(c, dev, gid, false)?;
     }
-    // 3) журнал
+    // 3) журнал и стирания, пропущенные без сети
     pull(c, dev, gid, g)?;
+    let _ = sync_deletions(c, dev, gid);
     // 4) правила и имена
     rebuild_meta(c, dev, gid, &role, &alias);
     // 5) моё имя в группе — первой записью, когда появится ключ
@@ -439,83 +450,133 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
     Ok(())
 }
 
-/// Передача владения подтверждена изнутри группы? Закреплённый ключ владельца меняется только если: новый владелец (по списку узла) называет
-/// именно этот ключ, а в ленте есть служебная запись `handover` на его псевдоним с этим ключом от владельца или админа.
-/// Запись рядового участника ничего не меняет, а подмена ключа самим узлом остаётся нераспознанной (тот же уровень доверия, что при вступлении).
-fn handover_endorsed(log: &[Entry], members: &[(String, String, String)], owner_pub: &str) -> bool {
-    let Some((owner_alias, _, _)) = members.iter().find(|(_, role, p)| role == "owner" && p == owner_pub) else { return false };
-    log.iter().any(|e| {
-        !e.deleted
-            && e.kind == KIND_SYSTEM
-            && e.body["op"] == "handover"
-            && e.body["to"].as_str() == Some(owner_alias.as_str())
-            && e.body["pub"].as_str() == Some(owner_pub)
-            && &e.from != owner_alias // сам новый владелец себя подтвердить не может
-            && members.iter().any(|(alias, role, _)| alias == &e.from && (role == "owner" || role == "admin"))
+/// Следующий ключ владельца по цепочке передач: служебная запись `handover` с ключом из `wanted`, написанная тем, чей ключ закреплён
+/// (его member_pub по списку узла совпадает с закреплённым). Сам новый владелец и рядовой участник такую запись не подтвердят.
+/// Граница: узел в сговоре с участником может выдать чужую запись за запись прежнего владельца (личных подписей нет) — см. аудит №5.
+fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &str, wanted: &HashSet<String>) -> Option<String> {
+    log.iter().find_map(|e| {
+        if e.deleted || e.kind != KIND_SYSTEM || e.body["op"] != "handover" {
+            return None;
+        }
+        let p = e.body["pub"].as_str()?;
+        if !wanted.contains(p) || p == pinned {
+            return None;
+        }
+        let author_pub = members.iter().find(|(alias, _, _)| alias == &e.from).map(|(_, _, p)| p.as_str())?;
+        (author_pub == pinned).then(|| p.to_string())
     })
 }
 
+/// Забрать свои конверты ключа группы. Каждый запечатан ключом того, кто был владельцем в его поколении (узел отдаёт это для каждого
+/// конверта). Если запечатавший — не закреплённый владелец, иду по цепочке записей «владение передано» от закреплённого (даже если
+/// пропустил несколько передач). Без такой записи ключи не принимаю. `as_owner` — я сам теперь владелец и добираю старые поколения.
 fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<(), String> {
     let my_seed = c.seed(gid).ok_or("нет ключа")?;
     let k = with_store(|st| st.my_keys(gid, dev)).map_err(fail)?;
-    // владелец тоже забирает недостающие старые поколения: их запечатал прежний владелец, берём его закреплённый ключ
-    let owner_pub_s = if as_owner {
-        match c.state.groups.get(gid).and_then(|g| g.owner_pub.clone()) {
-            Some(p) => p,
-            None => return Ok(()),
-        }
-    } else {
-        let Some(p) = k["owner_pub"].as_str().map(|x| x.to_string()) else { return Ok(()) };
-        p
-    };
-    let Some(owner_pub) = unb64(&owner_pub_s).and_then(|p| arr32(&p)) else { return Ok(()) };
-    // ключ владельца закрепляется при первом получении: потом узел не подсунет другой
-    if !as_owner { match c.gstate(gid).owner_pub.clone() {
+    let top_owner = k["owner_pub"].as_str().map(str::to_string);
+    let mut pinned = match c.gstate(gid).owner_pub.clone() {
+        Some(p) => p,
         None => {
-            c.gstate(gid).owner_pub = Some(owner_pub_s);
-            let _ = c.save();
-        }
-        Some(pinned) if pinned != owner_pub_s => {
-            // возможно, владение передали: сначала дочитываем ленту (старые ключи у нас есть) и ищем подтверждение изнутри группы
-            if let Some(g) = with_store(|st| st.list_for(dev)).into_iter().find(|g| s(g, "id") == gid) {
-                let _ = pull(c, dev, gid, &g);
-            }
-            let members: Vec<(String, String, String)> = with_store(|st| st.members(gid, dev))
-                .ok()
-                .and_then(|m| m["members"].as_array().map(|l| l.iter().map(|x| (s(x, "alias"), s(x, "role"), s(x, "member_pub"))).collect()))
-                .unwrap_or_default();
-            let log = c.load_log(gid).clone();
-            if handover_endorsed(&log, &members, &owner_pub_s) {
-                c.gstate(gid).owner_pub = Some(owner_pub_s.clone());
-                let _ = c.save();
-            } else {
-                c.problems.insert(gid.to_string());
+            if as_owner {
                 return Ok(());
             }
+            let Some(p) = top_owner.clone() else { return Ok(()) };
+            c.gstate(gid).owner_pub = Some(p.clone()); // закрепляю при первом получении
+            let _ = c.save();
+            p
         }
-        _ => {}
-    } }
-    if !as_owner {
-        c.problems.remove(gid);
-    }
-    for b in k["boxes"].as_array().cloned().unwrap_or_default() {
-        let epoch = u(&b, "epoch") as u32;
-        if c.group_key(gid, epoch).is_some() {
-            continue;
+    };
+    let mut boxes: Vec<Value> = k["boxes"].as_array().cloned().unwrap_or_default();
+    boxes.sort_by_key(|b| u(b, "epoch"));
+    let mut problem = false;
+    for _round in 0..8 {
+        let missing: Vec<&Value> = boxes.iter().filter(|b| c.group_key(gid, u(b, "epoch") as u32).is_none()).collect();
+        if missing.is_empty() {
+            break;
         }
-        match b["box"].as_str().and_then(unb64).map(|w| open_key(&w, gid, epoch, &my_seed, &owner_pub)) {
-            Some(Ok(key)) => {
-                c.gstate(gid).keys.insert(epoch, b64(&key));
+        let mut opened = false;
+        let mut wanted: HashSet<String> = HashSet::new();
+        for b in missing {
+            let Some(sealer) = b["owner_pub"].as_str().map(str::to_string).or_else(|| top_owner.clone()) else { continue };
+            if sealer != pinned {
+                wanted.insert(sealer);
+                continue;
+            }
+            let epoch = u(b, "epoch") as u32;
+            let opened_key = b["box"].as_str().and_then(unb64).zip(unb64(&pinned).and_then(|p| arr32(&p))).map(|(w, op)| open_key(&w, gid, epoch, &my_seed, &op));
+            match opened_key {
+                Some(Ok(key)) => {
+                    c.gstate(gid).keys.insert(epoch, b64(&key));
+                    let _ = c.save();
+                    opened = true;
+                }
+                _ => problem = true, // конверт не от закреплённого владельца или повреждён — не принимаем
+            }
+        }
+        if opened {
+            continue; // новые ключи — можно дочитать ленту и найти следующую передачу
+        }
+        if wanted.is_empty() {
+            break;
+        }
+        if let Some(g) = with_store(|st| st.list_for(dev)).into_iter().find(|g| s(g, "id") == gid) {
+            let _ = pull(c, dev, gid, &g);
+        }
+        let members: Vec<(String, String, String)> = with_store(|st| st.members(gid, dev))
+            .ok()
+            .and_then(|m| m["members"].as_array().map(|l| l.iter().map(|x| (s(x, "alias"), s(x, "role"), s(x, "member_pub"))).collect()))
+            .unwrap_or_default();
+        let log = c.load_log(gid).clone();
+        match handover_next(&log, &members, &pinned, &wanted) {
+            Some(next) => {
+                pinned = next.clone();
+                c.gstate(gid).owner_pub = Some(next);
                 let _ = c.save();
             }
-            _ => {
-                if !as_owner {
-                    c.problems.insert(gid.to_string());
-                }
+            None => {
+                problem = true;
+                break;
             }
+        }
+    }
+    if !as_owner {
+        if problem {
+            c.problems.insert(gid.to_string());
+        } else {
+            c.problems.remove(gid);
         }
     }
     Ok(())
+}
+
+/// Догнать стирания модераторов, пропущенные без намёка (по курсору событий стирания на узле).
+fn sync_deletions(c: &mut Client, dev: &str, gid: &str) -> Result<bool, String> {
+    let cur = c.gstate(gid).del_cursor;
+    let r = with_store(|st| st.deletions_after(gid, dev, cur)).map_err(fail)?;
+    let mut seqs: Vec<u64> = r["deleted"].as_array().map(|l| l.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
+    if r["resync"].as_bool().unwrap_or(false) {
+        let p = with_store(|st| st.pull(gid, dev, 0, 100_000)).map_err(fail)?;
+        seqs.extend(p["entries"].as_array().map(|l| l.iter().filter(|e| e["deleted"].as_bool().unwrap_or(false)).filter_map(|e| e["seq"].as_u64()).collect::<Vec<_>>()).unwrap_or_default());
+    }
+    let mut changed = false;
+    {
+        let log = c.load_log(gid);
+        for e in log.iter_mut() {
+            if seqs.contains(&e.seq) && !e.deleted {
+                e.deleted = true;
+                e.body = json!({});
+                changed = true;
+            }
+        }
+    }
+    if changed {
+        let snapshot = c.load_log(gid).clone();
+        let text: String = snapshot.iter().filter_map(|e| serde_json::to_vec(e).ok()).map(|j| c.vault.seal(gid, &j) + "\n").collect();
+        c.vault.write_private(&Client::log_name(gid), text.as_bytes()).map_err(|e| format!("пометки стираний не сохранены: {e}"))?;
+    }
+    c.gstate(gid).del_cursor = r["cursor"].as_u64().unwrap_or(cur);
+    let _ = c.save();
+    Ok(changed)
 }
 
 fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
@@ -543,10 +604,19 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
                     break;
                 };
                 let decoded = unb64(payload).ok_or("плохой base64").and_then(|raw| decrypt_entry(&key, &raw, gid, epoch, &from).map_err(|_| "не прошла проверка"));
-                batch.push(match decoded {
+                let mut entry = match decoded {
                     Ok((kind, body)) => Entry { seq, ts, epoch, kind, from, body, deleted: false },
                     Err(_) => Entry { seq, ts, epoch, kind: KIND_SYSTEM, from, body: json!({"op": "bad"}), deleted: false },
-                });
+                };
+                // повтор уже полученной записи (тот же шифртекст под новым номером) — не показываем и не обрабатываем
+                if let Some(id) = entry.body.get("i").and_then(|v| v.as_str()).map(str::to_string) {
+                    let seen = batch.iter().any(|x: &Entry| x.body.get("i").and_then(|v| v.as_str()) == Some(id.as_str()))
+                        || c.load_log(gid).iter().any(|x| x.body.get("i").and_then(|v| v.as_str()) == Some(id.as_str()));
+                    if seen {
+                        entry = Entry { kind: KIND_SYSTEM, body: json!({"op": "dup"}), ..entry };
+                    }
+                }
+                batch.push(entry);
             }
             after = seq;
         }
@@ -1118,24 +1188,26 @@ mod tests {
     }
 
     #[test]
-    fn handover_is_trusted_only_when_endorsed_from_inside_by_a_manager() {
-        let new_pub = b64(&[9u8; 32]);
-        let members = |new_role: &str| vec![
-            ("Старый".to_string(), "admin".to_string(), b64(&[1u8; 32])),
-            ("Новый".to_string(), new_role.to_string(), new_pub.clone()),
-            ("Рядовой".to_string(), "member".to_string(), b64(&[3u8; 32])),
+    fn handover_chain_is_followed_only_from_the_pinned_owner() {
+        let members = vec![
+            ("Старый".to_string(), "admin".to_string(), "OLD".to_string()),
+            ("Новый".to_string(), "owner".to_string(), "NEW".to_string()),
+            ("Рядовой".to_string(), "member".to_string(), "MEM".to_string()),
         ];
-        let entry = |from: &str, to: &str, pubk: &str| Entry { seq: 1, ts: 0, epoch: 1, kind: KIND_SYSTEM, from: from.to_string(), body: json!({"op": "handover", "to": to, "pub": pubk}), deleted: false };
-        assert!(handover_endorsed(&[entry("Старый", "Новый", &new_pub)], &members("owner"), &new_pub), "от прежнего владельца (теперь админ)");
-        assert!(!handover_endorsed(&[entry("Рядовой", "Новый", &new_pub)], &members("owner"), &new_pub), "запись рядового не считается");
-        assert!(!handover_endorsed(&[], &members("owner"), &new_pub), "без записи нельзя");
-        assert!(!handover_endorsed(&[entry("Старый", "Новый", &new_pub)], &members("member"), &new_pub), "новый не владелец по списку узла");
-        assert!(!handover_endorsed(&[entry("Новый", "Новый", &new_pub)], &members("owner"), &new_pub), "сам новый владелец себя не подтверждает");
-        assert!(!handover_endorsed(&[entry("Старый", "Рядовой", &new_pub)], &members("owner"), &new_pub), "запись про другого");
-        assert!(!handover_endorsed(&[entry("Старый", "Новый", &b64(&[5u8; 32]))], &members("owner"), &new_pub), "запись с другим ключом");
-        let mut gone = entry("Старый", "Новый", &new_pub);
+        let h = |from: &str, pubk: &str| Entry { seq: 1, ts: 0, epoch: 1, kind: KIND_SYSTEM, from: from.to_string(), body: json!({"op": "handover", "to": "Новый", "pub": pubk}), deleted: false };
+        let want: HashSet<String> = ["NEW".to_string()].into_iter().collect();
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &want).as_deref(), Some("NEW"), "от закреплённого (прежнего) владельца");
+        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &members, "OLD", &want), None, "рядовой не подтверждает");
+        assert_eq!(handover_next(&[h("Новый", "NEW")], &members, "OLD", &want), None, "сам новый себя не подтверждает");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &HashSet::new()), None, "этот ключ не нужен");
+        let mut gone = h("Старый", "NEW");
         gone.deleted = true;
-        assert!(!handover_endorsed(&[gone], &members("owner"), &new_pub), "стёртая запись не считается");
+        assert_eq!(handover_next(&[gone], &members, "OLD", &want), None, "стёртая запись не считается");
+        // каждая запись несёт свой случайный номер (защита от повторов)
+        let key = [7u8; 32];
+        let a = decrypt_entry(&key, &encrypt_entry(&key, "g", 1, "x", KIND_TEXT, &json!({"t": "a"})).unwrap(), "g", 1, "x").unwrap().1;
+        let b = decrypt_entry(&key, &encrypt_entry(&key, "g", 1, "x", KIND_TEXT, &json!({"t": "a"})).unwrap(), "g", 1, "x").unwrap().1;
+        assert!(a["i"].as_str().is_some() && a["i"] != b["i"]);
     }
 
     #[test]

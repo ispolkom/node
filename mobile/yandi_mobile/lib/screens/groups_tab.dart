@@ -371,7 +371,7 @@ Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
   } on GroupApiError catch (e) {
     // код использован, просрочен или группа удалена: карточка больше не срабатывает
     if (e.status == 403 || e.status == 404) {
-      await state.groups!.markInviteSpent(m.invite.gid, m.invite.code);
+      await state.groups!.markInviteSpent(m.invite.gid, m.invite.code, gone: true);
       messenger.showSnackBar(const SnackBar(content: Text('Приглашение уже недействительно: оно использовано, просрочено или группы больше нет')));
     } else if (e.status == 409) {
       await state.groups!.markInviteSpent(m.invite.gid, m.invite.code);

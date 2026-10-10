@@ -20,6 +20,8 @@ class FakeNode {
   String? ownerAlias;
   final files = <String, Map<int, List<int>>>{};
   final reqs = <Map<String, dynamic>>[];       // просьбы вступить: {id, dev, name}
+  final boxOwner = <int, String?>{};            // поколение → ключ владельца, запечатавшего конверты
+  final deletions = <int>[];                    // номера стёртых записей по порядку
   String name = 'Тест', topic = '', about = '';
   final doneFiles = <String>{};
 
@@ -56,6 +58,11 @@ class _Api implements GroupApi {
     if (name != null) n.name = name;
     if (topic != null) n.topic = topic;
     if (about != null) n.about = about;
+  }
+  @override
+  Future<Map<String, dynamic>> deleted(String gid, int after) async {
+    me;
+    return {'deleted': n.deletions.skip(after).toList(), 'cursor': n.deletions.length, 'resync': false};
   }
   @override
   Future<void> transferOwner(String gid, String alias) async {
@@ -102,12 +109,13 @@ class _Api implements GroupApi {
   Future<Map<String, dynamic>> keys(String gid) async => {
         'epoch': n.epoch,
         'owner_pub': n.members.values.firstWhere((m) => m['role'] == 'owner')['pub'],
-        'boxes': [for (final e in n.boxes.entries) if (e.value.containsKey(me['alias'])) {'epoch': e.key, 'box': e.value[me['alias']]}],
+        'boxes': [for (final e in n.boxes.entries) if (e.value.containsKey(me['alias'])) {'epoch': e.key, 'box': e.value[me['alias']], 'owner_pub': n.boxOwner[e.key]}],
       };
   @override
   Future<void> putKeys(String gid, int epoch, Map<String, String> boxes) async {
     if (me['role'] != 'owner') throw const GroupApiError(403, 'только владелец');
     if (epoch > n.epoch) { n.epoch = epoch; n.rekeyNeeded = false; }
+    n.boxOwner[epoch] = me['pub'] as String?;
     (n.boxes[epoch] ??= {}).addAll(boxes);
   }
   @override
@@ -124,7 +132,7 @@ class _Api implements GroupApi {
   }
   @override
   Future<void> mod(String gid, Map<String, dynamic> body) async {
-    if (body['action'] == 'delete_entry') { final e = n.log[(body['seq'] as int) - 1]; e['payload_b64'] = ''; e['deleted'] = true; }
+    if (body['action'] == 'delete_entry') { final e = n.log[(body['seq'] as int) - 1]; e['payload_b64'] = ''; e['deleted'] = true; n.deletions.add(body['seq'] as int); }
     if (body['action'] == 'mute') n.members.values.firstWhere((m) => m['alias'] == body['alias'])['muted'] = true;
     if (const {'make_admin', 'promote', 'demote'}.contains(body['action'])) {
       n.members.values.firstWhere((m) => m['alias'] == body['alias'])['role'] = switch (body['action']) { 'make_admin' => 'admin', 'promote' => 'moderator', _ => 'member' };
@@ -377,6 +385,8 @@ void main() {
     expect(await bob.inviteSpent(node.gid, 'DDDD-EEEE-FFFF'), isFalse, reason: 'другой код');
     await bob.markInviteSpent(node.gid, '');
     expect(await bob.inviteSpent(node.gid, ''), isFalse, reason: 'открытая группа: можно вступить снова после выхода');
+    await bob.markInviteSpent(node.gid, '', gone: true);
+    expect(await bob.inviteSpent(node.gid, ''), isTrue, reason: 'группы нет (404) или вход запрещён: карточка гаснет и для открытой');
   });
 
   test('настройки группы: владелец меняет название/тематику/описание, остальные нет, пустое название отвергается', () async {
@@ -428,27 +438,23 @@ void main() {
     expect((await owner.messages(node.gid)).map((e) => e.body['t']), contains('я теперь владелец'));
   });
 
-  test('передача владения: нельзя не владельцу, без ключа у участника, и подделка записи рядовым ничего не меняет', () async {
+  test('передача владения: нельзя не владельцу; цепочку подтверждает только тот, чей ключ закреплён', () async {
     await owner.sync();
     await bobJoins();
     await expectLater(bob.transferOwner(node.gid, 'Хозяин-1'), throwsA(isA<GroupSendRefused>()));
-    final log = [
-      GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: 'Гость-1', body: const {'op': 'handover', 'to': 'Гость-1', 'pub': 'AAAA'}),
-    ];
+    GroupEntry h(String from, String to, String pub) => GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: from, body: {'op': 'handover', 'to': to, 'pub': pub});
     final members = [
-      {'alias': 'Хозяин-1', 'role': 'owner', 'member_pub': 'BBBB'},
-      {'alias': 'Гость-1', 'role': 'member', 'member_pub': 'AAAA'},
+      {'alias': 'Старый', 'role': 'admin', 'member_pub': 'OLD'},
+      {'alias': 'Новый', 'role': 'owner', 'member_pub': 'NEW'},
+      {'alias': 'Рядовой', 'role': 'member', 'member_pub': 'MEM'},
     ];
-    expect(GroupService.handoverEndorsed(log, members, 'AAAA'), isFalse, reason: 'новый не владелец по списку узла');
-    final members2 = [
-      {'alias': 'Хозяин-1', 'role': 'admin', 'member_pub': 'BBBB'},
-      {'alias': 'Гость-1', 'role': 'owner', 'member_pub': 'AAAA'},
-    ];
-    expect(GroupService.handoverEndorsed(log, members2, 'AAAA'), isFalse, reason: 'запись написал сам новый владелец, подтвердить должен прежний');
-    final logOk = [GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: 'Хозяин-1', body: const {'op': 'handover', 'to': 'Гость-1', 'pub': 'AAAA'})];
-    expect(GroupService.handoverEndorsed(logOk, members2, 'AAAA'), isTrue);
-    expect(GroupService.handoverEndorsed(logOk, members2, 'CCCC'), isFalse, reason: 'ключ не тот');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), 'NEW', reason: 'от закреплённого (прежнего) владельца');
+    expect(GroupService.handoverNext([h('Рядовой', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'рядовой не подтверждает');
+    expect(GroupService.handoverNext([h('Новый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'сам новый себя не подтверждает');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'OTHER'}), isNull, reason: 'ключ не тот, что нужен');
+    expect(GroupService.handoverNext([], members, 'OLD', {'NEW'}), isNull);
   });
+;
 
   test('забыть группу: удаляются ключи любых поколений (в т.ч. ≥ 64) и только этой группы', () {
     final g = 'ab' * 16, other = 'cd' * 16;
@@ -458,5 +464,48 @@ void main() {
     for (final k in ['grp_key_64_$other', 'grp_known', 'node_token_x', 'grp_dl_$other', 'pref_secure_keyboard']) {
       expect(secureKeyOfGroup(k, g), isFalse, reason: k);
     }
+  });
+
+  test('участник был не в сети две передачи владения подряд: догоняет ключи по цепочке и читает новое', () async {
+    final carol = GroupService(node.as('carol'), MemoryGroupStore());
+    await owner.sync();
+    await bobJoins();
+    await eve.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Ева');
+    await carol.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Кэрол');
+    await owner.sync();
+    for (final x in [bob, eve, carol]) { await x.syncAndAnnounce(); }
+    await owner.send(node.gid, GroupKind.text, {'t': 'первое'});
+    // Кэрол уходит из сети; владение переходит дважды
+    await owner.transferOwner(node.gid, 'Гость-1');          // → Боб
+    await bob.sync();                                          // поколение 2
+    await eve.sync();
+    await bob.transferOwner(node.gid, eve.byId(node.gid)!.myAlias);   // → Ева
+    await eve.sync();                                          // поколение 3
+    await eve.send(node.gid, GroupKind.text, {'t': 'после двух передач'});
+    expect(node.epoch, greaterThanOrEqualTo(3));
+    await carol.sync();                                        // Кэрол возвращается
+    expect(carol.hasProblem(node.gid), isFalse);
+    expect((await carol.messages(node.gid)).map((e) => e.body['t']), containsAll(['первое', 'после двух передач']));
+  });
+
+  test('стирание модератора доходит до того, кто был не в сети (без намёка)', () async {
+    await owner.sync();
+    await bobJoins();
+    final seq = await owner.send(node.gid, GroupKind.text, {'t': 'лишнее'});
+    await bob.sync();
+    expect((await bob.messages(node.gid)).length, 1);
+    await owner.moderate(node.gid, 'delete_entry', seq: seq);   // Боб в это время не в сети, намёк не получил
+    await bob.sync();
+    expect(await bob.messages(node.gid), isEmpty);
+  });
+
+  test('повтор той же записи под новым номером не показывается второй раз', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.send(node.gid, GroupKind.text, {'t': 'один раз'});
+    final orig = node.log.last;
+    node.log.add({...orig, 'seq': node.log.length + 1, 'ts': 9999});   // узел (или кто-то) переложил тот же шифртекст
+    await bob.sync();
+    expect((await bob.messages(node.gid)).where((e) => e.body['t'] == 'один раз').length, 1);
   });
 }

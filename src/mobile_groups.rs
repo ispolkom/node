@@ -115,6 +115,8 @@ struct JoinRequest {
 const MAX_NEW_TOPIC: usize = 40;
 const MAX_ABOUT: usize = 300;
 const MAX_REQUESTS: usize = 20;
+/// Сколько последних событий стирания хранится для догоняющих участников.
+const MAX_DELETION_EVENTS: usize = 5000;
 const REQUEST_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -153,6 +155,15 @@ struct Group {
     /// поколение → ключ участника → запечатанный ключ группы (base64, узел его не читает)
     #[serde(default)]
     key_boxes: BTreeMap<u32, HashMap<String, String>>,
+    /// поколение → чьим ключом владельца (member_pub) оно запечатано: участник, бывший не в сети во время смены владельца, по нему
+    /// понимает, какой ключ нужен для каждого старого конверта
+    #[serde(default)]
+    epoch_owner: BTreeMap<u32, String>,
+    /// журнал стираний: (номер события, номер записи). Участник, пропустивший намёк (был не в сети), догоняет стирания по курсору
+    #[serde(default)]
+    deletions: Vec<(u64, u64)>,
+    #[serde(default)]
+    next_deletion: u64,
     /// кто-то покинул группу после последней смены ключа: владельцу стоит сменить ключ
     #[serde(default)]
     rekey_needed: bool,
@@ -392,6 +403,11 @@ fn valid_member_pub(b64: &str) -> bool {
     !probe.diffie_hellman(&x25519_dalek::PublicKey::from(arr)).as_bytes().iter().all(|x| *x == 0)
 }
 
+/// Автор записи — тот же, кто действует (своё можно стереть всегда)?
+fn by_alias_is(by: &str, author: &str) -> bool {
+    by == author
+}
+
 fn random_hex(n: usize) -> String {
     use rand::RngCore;
     let mut b = vec![0u8; n];
@@ -593,6 +609,9 @@ impl Store {
             invites: Vec::new(),
             epoch: 0,
             key_boxes: BTreeMap::new(),
+            epoch_owner: BTreeMap::new(),
+            deletions: Vec::new(),
+            next_deletion: 0,
             rekey_needed: false,
             first_seq: 1,
             next_seq: 1,
@@ -847,6 +866,9 @@ impl Store {
             g.epoch = epoch;
             g.rekey_needed = false;
         }
+        if let Some(p) = g.owner().and_then(|o| o.member_pub.clone()) {
+            g.epoch_owner.insert(epoch, p);
+        }
         let slot = g.key_boxes.entry(epoch).or_default();
         let n = put.len();
         let to: Vec<String> = put.iter().map(|(k, _)| k.clone()).collect();
@@ -867,7 +889,7 @@ impl Store {
         let boxes: Vec<Value> = g
             .key_boxes
             .iter()
-            .filter_map(|(e, b)| b.get(&m.key).map(|x| json!({"epoch": e, "box": x})))
+            .filter_map(|(e, b)| b.get(&m.key).map(|x| json!({"epoch": e, "box": x, "owner_pub": g.epoch_owner.get(e)})))
             .collect();
         let owner_pub = g.owner().and_then(|o| o.member_pub.clone());
         Ok(json!({"epoch": g.epoch, "owner_pub": owner_pub, "boxes": boxes}))
@@ -1024,12 +1046,32 @@ impl Store {
             if l.deleted {
                 return Ok(());
             }
+            // стирать чужую запись можно по той же матрице прав, что и трогать автора: модератор — записи рядовых, админ — рядовых и
+            // модераторов, владелец — любые (запись ушедшего участника — любой модератор)
+            let author_role = self.get(gid)?.member_by_alias(&l.from).map(|m| m.role);
+            let allowed = by_alias_is(by, &l.from)
+                || match author_role {
+                    None | Some(Role::Member) => true,
+                    Some(Role::Moderator) => by_role == Role::Owner || by_role == Role::Admin,
+                    Some(Role::Admin) => by_role == Role::Owner,
+                    Some(Role::Owner) => false,
+                };
+            if !allowed {
+                return Err(forbidden("эту запись может стереть только тот, кто выше автора по роли"));
+            }
             l.p.clear();
             l.deleted = true;
             let author = l.from.clone();
             self.rewrite(gid, &lines)
                 .map_err(|_| Fail(StatusCode::INTERNAL_SERVER_ERROR, "не удалось стереть"))?;
             let g = self.get_mut(gid)?;
+            g.next_deletion += 1;
+            let n = g.next_deletion;
+            g.deletions.push((n, seq));
+            if g.deletions.len() > MAX_DELETION_EVENTS {
+                let drop = g.deletions.len() - MAX_DELETION_EVENTS;
+                g.deletions.drain(..drop);
+            }
             g.log(by, "delete_entry", Some(&author), Some(seq), reason);
             let to = g.keys();
             self.save()?;
@@ -1262,6 +1304,15 @@ impl Store {
             Vec::new()
         };
         Ok(json!({"members": list, "banned": banned}))
+    }
+
+    /// Стирания после курсора: `{deleted:[номера записей], cursor}`. Если курсор старее хранимого журнала стираний — `resync: true`
+    /// (участнику стоит перечитать свои записи).
+    pub fn deletions_after(&self, gid: &str, device: &str, after: u64) -> R<Value> {
+        let (g, _) = self.me(gid, device)?;
+        let oldest = g.deletions.first().map(|(n, _)| *n).unwrap_or(g.next_deletion + 1);
+        let list: Vec<u64> = g.deletions.iter().filter(|(n, _)| *n > after).map(|(_, s)| *s).collect();
+        Ok(json!({"deleted": list, "cursor": g.next_deletion, "resync": after + 1 < oldest && after < g.next_deletion}))
     }
 
     pub fn modlog(&self, gid: &str, device: Option<&str>) -> R<Value> {
@@ -1633,6 +1684,25 @@ pub(crate) async fn m_invite(
 }
 
 #[derive(Deserialize)]
+pub struct AfterQ {
+    #[serde(default)]
+    after: u64,
+}
+
+/// Стирания модераторов после курсора (для участника, который пропустил намёки).
+pub(crate) async fn m_deleted(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<AfterQ>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        with_store(|s| s.deletions_after(&gid, &me, q.after))
+    })())
+}
+
+#[derive(Deserialize)]
 pub struct TransferReq {
     alias: String,
 }
@@ -1757,6 +1827,32 @@ mod tests {
     const EVE: &str = "ee";
 
     #[test]
+    fn deletions_and_sealer_of_each_generation_are_kept_for_late_members() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes())).unwrap();
+        s.join(&gid, BOB, None, Some(&b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes()))).unwrap();
+        let bob = s.list_for(BOB)[0]["my_alias"].as_str().unwrap().to_string();
+        let owner_pub = s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().iter().find(|m| m["role"] == "owner").unwrap()["member_pub"].clone();
+        let mut boxes = HashMap::new();
+        boxes.insert(bob.clone(), b64(b"box1"));
+        s.put_keys(&gid, OWNER, 1, &boxes).unwrap();
+        let k = s.my_keys(&gid, BOB).unwrap();
+        assert_eq!(k["boxes"][0]["owner_pub"], owner_pub, "у конверта — ключ того, кто его запечатал");
+        // стирания по курсору
+        let a = s.append(&gid, OWNER, 1, &b64(b"one")).unwrap();
+        let b = s.append(&gid, OWNER, 1, &b64(b"two")).unwrap();
+        assert_eq!(s.deletions_after(&gid, BOB, 0).unwrap()["deleted"].as_array().unwrap().len(), 0);
+        s.moderate(&gid, OWNER, "delete_entry", None, Some(a), None).unwrap();
+        let d1 = s.deletions_after(&gid, BOB, 0).unwrap();
+        assert_eq!(d1["deleted"], json!([a]));
+        let cur = d1["cursor"].as_u64().unwrap();
+        s.moderate(&gid, OWNER, "delete_entry", None, Some(b), None).unwrap();
+        assert_eq!(s.deletions_after(&gid, BOB, cur).unwrap()["deleted"], json!([b]), "только новое после курсора");
+        assert!(s.deletions_after(&gid, EVE, 0).is_err(), "посторонний не видит");
+    }
+
+    #[test]
     fn a_broken_or_unwritable_index_is_an_error_not_a_silent_success() {
         // аудит Codex №7
         let d = tempfile::tempdir().unwrap();
@@ -1771,6 +1867,30 @@ mod tests {
         std::fs::write(&file_dir, b"x").unwrap();
         let mut s2 = Store::open(file_dir);
         assert!(s2.create_as("Г", "т", Kind::Open, OWNER, &[], true).is_err());
+    }
+
+    #[test]
+    fn deleting_an_entry_follows_the_role_of_its_author() {
+        // аудит Codex, раунд 2 (R2-2): модератор не стирает запись владельца
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        for d in [BOB, EVE, "cc"] {
+            s.join(&gid, d, None, None).unwrap();
+        }
+        let alias = |s: &Store, d: &str| s.list_for(d)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, eve) = (alias(&s, BOB), alias(&s, EVE));
+        s.moderate(&gid, OWNER, "promote", Some(&bob), None, None).unwrap(); // Боб — модератор
+        s.moderate(&gid, OWNER, "make_admin", Some(&eve), None, None).unwrap(); // Ева — админ
+        let by_owner = s.append(&gid, OWNER, 0, &b64(b"o")).unwrap();
+        let by_admin = s.append(&gid, EVE, 0, &b64(b"a")).unwrap();
+        let by_mod = s.append(&gid, BOB, 0, &b64(b"m")).unwrap();
+        let by_member = s.append(&gid, "cc", 0, &b64(b"x")).unwrap();
+        assert!(s.moderate(&gid, BOB, "delete_entry", None, Some(by_owner), None).is_err(), "модератор — не запись владельца");
+        assert!(s.moderate(&gid, BOB, "delete_entry", None, Some(by_admin), None).is_err(), "модератор — не запись админа");
+        assert!(s.moderate(&gid, EVE, "delete_entry", None, Some(by_owner), None).is_err(), "админ — не запись владельца");
+        assert!(s.moderate(&gid, BOB, "delete_entry", None, Some(by_member), None).is_ok(), "модератор — запись рядового");
+        assert!(s.moderate(&gid, BOB, "delete_entry", None, Some(by_mod), None).is_ok(), "своя запись");
+        assert!(s.moderate(&gid, OWNER, "delete_entry", None, Some(by_admin), None).is_ok(), "владелец — запись админа");
     }
 
     #[test]

@@ -118,6 +118,15 @@ fn tmp_name(idx: u32) -> String {
     format!("{}.{}.tmp", chunk_name(idx), hex::encode(b))
 }
 
+/// Влезет ли кусок idx размером len в заявленный размер файла с учётом уже сохранённых (заменяемый кусок того же номера не считается).
+/// Проверка и запись куска — под общим замком, чтобы параллельные куски одной заливки не превысили лимит вместе.
+static PUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+async fn fits(gid: &str, id: &str, m: &Meta, idx: u32, len: usize) -> bool {
+    let same = tokio::fs::metadata(dir_of(gid, id).join(chunk_name(idx))).await.map(|x| x.len()).unwrap_or(0);
+    stored_bytes(gid, id).await - same + len as u64 <= m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD
+}
+
 /// Суммарный объём сохранённых кусков (на диске).
 async fn stored_bytes(gid: &str, id: &str) -> u64 {
     let mut total = 0;
@@ -263,6 +272,10 @@ pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
     if idx >= m.total_chunks || body.is_empty() || body.len() > chunk_limit(&m) {
         return err(StatusCode::BAD_REQUEST, "неверный номер или размер куска");
     }
+    let _guard = PUT.lock().await;
+    if !fits(&gid, &id, &m, idx, body.len()).await {
+        return err(StatusCode::BAD_REQUEST, "куски больше заявленного размера файла");
+    }
     let d = dir_of(&gid, &id);
     let tmp = d.join(tmp_name(idx));
     if tokio::fs::write(&tmp, &body).await.is_err() || tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.is_err() {
@@ -365,6 +378,10 @@ pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &
     let m = load_meta(gid, id).await.ok_or("нет такой заливки")?;
     if m.by != key || muted || m.done || idx >= m.total_chunks || bytes.is_empty() || bytes.len() > chunk_limit(&m) {
         return Err("кусок не принят".into());
+    }
+    let _guard = PUT.lock().await;
+    if !fits(gid, id, &m, idx, bytes.len()).await {
+        return Err("куски больше заявленного размера файла".into());
     }
     let d = dir_of(gid, id);
     let tmp = d.join(tmp_name(idx));

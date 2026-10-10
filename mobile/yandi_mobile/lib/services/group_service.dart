@@ -100,46 +100,88 @@ class GroupService {
 
   /// Участник: забирает свои конверты и открывает их ключом владельца. Ключ владельца закрепляется при первом получении (TOFU):
   /// если узел потом подсунет другой, ключи не принимаются и группа помечается проблемной.
+  /// Забрать свои конверты ключа группы. Каждый конверт запечатан ключом того, кто был владельцем в его поколении (узел отдаёт это для
+  /// каждого конверта). Если запечатавший — не тот, чей ключ я закрепил, ищу в ленте запись «владение передано» от закреплённого владельца
+  /// с этим новым ключом и иду по цепочке передач (даже если пропустил несколько, пока был не в сети). Без такой записи ключи не принимаю.
   Future<void> _collectKeys(GroupInfo g, {bool asOwner = false}) async {
     final (mySeed, _) = await _memberKeys(g.id);
     final k = await api.keys(g.id);
-    final pinned = await store.read('grp_owner_${g.id}');
-    String? ownerPubStr;
-    if (asOwner) {
-      // я теперь владелец, но старые поколения ключа запечатал прежний владелец: достаю недостающие по закреплённому его ключу
-      if (pinned == null) return;
-      ownerPubStr = pinned;
-    } else {
-      ownerPubStr = k['owner_pub'] as String?;
-      if (ownerPubStr == null) return;
-      if (pinned == null) {
-        await store.write('grp_owner_${g.id}', ownerPubStr);
-      } else if (pinned != ownerPubStr) {
-        // возможно, владение передали: дочитываем ленту (старые ключи у нас есть) и ищем подтверждение изнутри группы
-        try { await _pull(g); } catch (_) {}
-        final members = [for (final x in ((await api.members(g.id))['members'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
-        final log = await store.entries(g.id, kind: GroupKind.system, limit: 2000);
-        if (handoverEndorsed(log, members, ownerPubStr)) {
-          await store.write('grp_owner_${g.id}', ownerPubStr);
-        } else {
-          _problems.add(g.id);
-          return;
+    final topOwner = k['owner_pub'] as String?;
+    var pinned = await store.read('grp_owner_${g.id}');
+    if (pinned == null) {
+      if (asOwner || topOwner == null) return;
+      pinned = topOwner;
+      await store.write('grp_owner_${g.id}', pinned);
+    }
+    final boxes = [for (final b in (k['boxes'] as List? ?? const [])) (b as Map).cast<String, dynamic>()]..sort((a, b) => (a['epoch'] as int).compareTo(b['epoch'] as int));
+    var problem = false;
+    for (var round = 0; round < 8; round++) {
+      final missing = <Map<String, dynamic>>[];
+      for (final b in boxes) {
+        if (await _groupKey(g.id, b['epoch'] as int) == null) missing.add(b);
+      }
+      if (missing.isEmpty) break;
+      var opened = false;
+      final wanted = <String>{};
+      for (final b in missing) {
+        final sealer = (b['owner_pub'] as String?) ?? topOwner;
+        if (sealer == null) continue;
+        if (sealer != pinned) {
+          wanted.add(sealer);
+          continue;
+        }
+        try {
+          final epoch = b['epoch'] as int;
+          final key = await GroupCrypto.openKey(_unb64(b['box'] as String), gid: g.id, epoch: epoch, mySeed: mySeed, ownerPub: _unb64(pinned!));
+          await _saveGroupKey(g.id, epoch, key);
+          opened = true;
+        } catch (_) {
+          problem = true; // конверт не от закреплённого владельца или повреждён — не принимаем
         }
       }
-      _problems.remove(g.id);
+      if (opened) continue; // новые ключи — можно дочитать ленту и найти следующую передачу
+      if (wanted.isEmpty) break;
+      try { await _pull(g); } catch (_) {}
+      final members = [for (final x in ((await api.members(g.id))['members'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
+      final log = await store.entries(g.id, kind: GroupKind.system, limit: 5000);
+      final next = handoverNext(log, members, pinned!, wanted);
+      if (next == null) {
+        problem = true;
+        break;
+      }
+      pinned = next;
+      await store.write('grp_owner_${g.id}', next);
     }
-    final ownerPub = _unb64(ownerPubStr);
-    for (final b in (k['boxes'] as List? ?? const [])) {
-      final epoch = (b as Map)['epoch'] as int;
-      if (await _groupKey(g.id, epoch) != null) continue;
-      try {
-        final key = await GroupCrypto.openKey(_unb64(b['box'] as String), gid: g.id, epoch: epoch, mySeed: mySeed, ownerPub: ownerPub);
-        await _saveGroupKey(g.id, epoch, key);
-      } catch (_) {
-        // конверт не от этого владельца или повреждён — не принимаем (для владельца: недостающий старый ключ просто останется недоступным)
-        if (!asOwner) _problems.add(g.id);
+    if (!asOwner) {
+      problem ? _problems.add(g.id) : _problems.remove(g.id);
+    }
+  }
+
+  /// Догнать стирания модераторов, пропущенные без сети (по курсору событий стирания на узле).
+  Future<bool> _syncDeletions(GroupInfo g) async {
+    final cur = int.tryParse(await store.read('grp_delc_${g.id}') ?? '') ?? 0;
+    final r = await api.deleted(g.id, cur);
+    var changed = false;
+    for (final s in (r['deleted'] as List? ?? const [])) {
+      await store.markDeleted(g.id, s as int);
+      changed = true;
+    }
+    if (r['resync'] == true) {
+      // журнал стираний на узле короче моего пропуска: перечитываю пометки по всей ленте
+      var after = g.firstSeq > 0 ? g.firstSeq - 1 : 0;
+      while (true) {
+        final p = await api.pull(g.id, after, limit: 500);
+        final list = [for (final x in (p['entries'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
+        if (list.isEmpty) break;
+        for (final e in list) {
+          if (e['deleted'] == true) { await store.markDeleted(g.id, e['seq'] as int); changed = true; }
+          after = e['seq'] as int;
+        }
+        if (list.length < 500) break;
       }
     }
+    await store.write('grp_delc_${g.id}', '${r['cursor'] ?? cur}');
+    return changed;
   }
 
   // ── журнал ───────────────────────────────────────────────────────────────
@@ -173,7 +215,13 @@ class GroupService {
         final isDeleted = e['deleted'] == true || (e['payload_b64'] ?? '') == '';
         final key = isDeleted ? null : await _groupKey(g.id, epoch);
         if (!isDeleted && key == null) { blocked = true; break; }
-        batch.add(await _decode(g, e, key));
+        var entry = await _decode(g, e, key);
+        final id = entry.body['i'];
+        if (id is String && (batch.any((x) => x.body['i'] == id) || await store.hasEntryId(g.id, id))) {
+          // повтор уже полученной записи (тот же шифртекст под новым номером) — не показываем и не обрабатываем
+          entry = GroupEntry(gid: g.id, seq: entry.seq, ts: entry.ts, epoch: entry.epoch, kind: GroupKind.system, from: entry.from, body: const {'op': 'dup'});
+        }
+        batch.add(entry);
         after = e['seq'] as int;
       }
       await store.putEntries(batch);
@@ -230,8 +278,10 @@ class GroupService {
             await _collectKeys(g);
           }
           final n = await _pull(g);
+          var del = false;
+          try { del = await _syncDeletions(g); } catch (_) {}
           if (n > 0 || !_rules.containsKey(g.id)) await _rebuildMeta(g);
-          if (n > 0) onChanged?.call(g.id);
+          if (n > 0 || del) onChanged?.call(g.id);
         } on GroupApiError {
           // одна группа недоступна (например, меня выгнали) — остальные продолжают
         }
@@ -301,10 +351,17 @@ class GroupService {
   }
 
   /// Одноразовый код приглашения уже использован (мной) или признан узлом недействительным: карточка в чате больше не срабатывает.
-  Future<bool> inviteSpent(String gid, String code) async => code.isNotEmpty && await store.read('grp_invspent_${gid}_$code') == '1';
+  /// Для открытой группы (кода нет) карточка гаснет только если узел ответил, что группы нет или вход запрещён (`gone`): после выхода из
+  /// открытой группы в неё можно вступить снова.
+  Future<bool> inviteSpent(String gid, String code) async =>
+      await store.read('grp_invspent_${gid}_${code.isEmpty ? 'open' : code}') == '1';
 
-  Future<void> markInviteSpent(String gid, String code) async {
-    if (code.isNotEmpty) await store.write('grp_invspent_${gid}_$code', '1');
+  Future<void> markInviteSpent(String gid, String code, {bool gone = false}) async {
+    if (code.isNotEmpty) {
+      await store.write('grp_invspent_${gid}_$code', '1');
+    } else if (gone) {
+      await store.write('grp_invspent_${gid}_open', '1');
+    }
   }
 
   /// Группы узла, куда можно вступить или попроситься.
@@ -317,23 +374,18 @@ class GroupService {
     onChanged?.call(gid);
   }
 
-  /// Передача владения подтверждена изнутри группы? Закреплённый ключ владельца меняется, только если новый владелец (по списку узла) называет
-  /// именно этот ключ, а в ленте есть служебная запись `handover` на его псевдоним с этим ключом от владельца или админа. Запись рядового
-  /// участника и сам новый владелец ничего не меняют; подмена ключа самим узлом остаётся нераспознанной (то же доверие, что при вступлении).
-  static bool handoverEndorsed(List<GroupEntry> log, List<Map<String, dynamic>> members, String ownerPubB64) {
-    String? ownerAlias;
-    for (final m in members) {
-      if (m['role'] == 'owner' && m['member_pub'] == ownerPubB64) ownerAlias = m['alias'] as String?;
+  /// Следующий ключ владельца по цепочке передач: служебная запись `handover` с ключом из `wanted`, написанная тем, чей ключ я закрепил
+  /// (его member_pub по списку узла совпадает с закреплённым). Сам новый владелец и рядовой участник такую запись не подтвердят.
+  /// Остаётся граница: узел, сговорившийся с участником, может выдать чужую запись за запись прежнего владельца (личных подписей нет).
+  static String? handoverNext(List<GroupEntry> log, List<Map<String, dynamic>> members, String pinned, Set<String> wanted) {
+    for (final e in log) {
+      if (e.deleted || e.kind != GroupKind.system || e.body['op'] != 'handover') continue;
+      final p = e.body['pub'];
+      if (p is! String || !wanted.contains(p) || p == pinned) continue;
+      final author = members.where((m) => m['alias'] == e.from);
+      if (author.isNotEmpty && author.first['member_pub'] == pinned) return p;
     }
-    if (ownerAlias == null) return false;
-    return log.any((e) =>
-        !e.deleted &&
-        e.kind == GroupKind.system &&
-        e.body['op'] == 'handover' &&
-        e.body['to'] == ownerAlias &&
-        e.body['pub'] == ownerPubB64 &&
-        e.from != ownerAlias && // сам новый владелец себя подтвердить не может
-        members.any((m) => m['alias'] == e.from && (m['role'] == 'owner' || m['role'] == 'admin')));
+    return null;
   }
 
   /// Владелец передаёт группу участнику: служебная запись «владение передано» (с ключом нового владельца) → узел меняет роли.

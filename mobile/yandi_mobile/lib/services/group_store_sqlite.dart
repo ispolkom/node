@@ -58,6 +58,13 @@ class SqliteGroupStore implements GroupStore {
   }
 
   @override
+  Future<bool> hasEntryId(String gid, String id) async {
+    if (!RegExp(r'^[0-9a-f]{8,64}$').hasMatch(id)) return false;
+    final r = await _db.rawQuery("SELECT 1 FROM group_entries WHERE gid = ? AND body LIKE ? LIMIT 1", [gid, '%"i":"$id"%']);
+    return r.isNotEmpty;
+  }
+
+  @override
   Future<void> forgetGroup(String gid) async {
     await _db.delete('group_entries', where: 'gid = ?', whereArgs: [gid]);
     // все записи этой группы в защищённом хранилище (ключи любых поколений, закреплённый ключ владельца, потраченные приглашения…)

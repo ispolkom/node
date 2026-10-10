@@ -1187,6 +1187,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
                         let to = hex::encode(id);
                         if HashId(id) == st.my_id {
+                            if crate::mobile_self::is_blocked_phone(&me) {
+                                continue; // заблокированное устройство: и звонки, и сигналы компьютеру не доходят
+                            }
                             // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
                             let blob = &d[37..37 + len];
                             let text = device_ed25519(&me).ok().and_then(|ed| crate::mobile_self::open(blob, &me, &to, 2, &ed));
@@ -1274,6 +1277,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
         .route("/mobile/groups/:gid/settings", post(crate::mobile_groups::m_settings))
         .route("/mobile/groups/:gid/owner", post(crate::mobile_groups::m_transfer))
+        .route("/mobile/groups/:gid/deleted", get(crate::mobile_groups::m_deleted))
         .route("/mobile/groups/:gid/request", post(crate::mobile_groups::m_request))
         .route("/mobile/groups/:gid/requests", get(crate::mobile_groups::m_requests))
         .route("/mobile/groups/:gid/requests/:rid", axum::routing::delete(crate::mobile_groups::m_request_done))

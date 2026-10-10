@@ -75,8 +75,15 @@ class GroupCrypto {
   /// Содержимое записи — произвольная структура JSON; вид — одна из `GroupKind`.
   static Future<Uint8List> encryptEntry(List<int> groupKey, {required String gid, required int epoch, required String from, required int kind, required Map<String, dynamic> body}) async {
     if (!GroupKind.all.contains(kind)) throw ArgumentError('bad kind');
-    final box = await _aes.encrypt(utf8.encode(jsonEncode(body)), secretKey: SecretKey(groupKey), aad: _aad(gid, epoch, from, kind));
+    // случайный номер записи внутри шифртекста: повтор того же шифртекста (узлом или кем-то ещё) получатель узнаёт и отбрасывает
+    final withId = body.containsKey('i') ? body : {...body, 'i': _randomId()};
+    final box = await _aes.encrypt(utf8.encode(jsonEncode(withId)), secretKey: SecretKey(groupKey), aad: _aad(gid, epoch, from, kind));
     return Uint8List.fromList([version, kind, ...box.concatenation()]);
+  }
+
+  static String _randomId() {
+    final r = Random.secure();
+    return List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
   }
 
   /// Вид записи без расшифровки (null — формат не наш).

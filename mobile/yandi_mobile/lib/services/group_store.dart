@@ -13,6 +13,8 @@ abstract class GroupStore {
   Future<void> markDeleted(String gid, int seq);
   Future<int> lastSeq(String gid);
   Future<void> forgetGroup(String gid);
+  /// Есть ли уже запись с таким внутренним номером (защита от повторов).
+  Future<bool> hasEntryId(String gid, String id);
 }
 
 class MemoryGroupStore implements GroupStore {
@@ -49,6 +51,9 @@ class MemoryGroupStore implements GroupStore {
 
   @override
   Future<int> lastSeq(String gid) async => (log[gid]?.keys.fold<int>(0, (a, b) => a > b ? a : b)) ?? 0;
+
+  @override
+  Future<bool> hasEntryId(String gid, String id) async => (log[gid]?.values ?? const <GroupEntry>[]).any((e) => e.body['i'] == id);
 
   @override
   Future<void> forgetGroup(String gid) async {

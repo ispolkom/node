@@ -14,6 +14,8 @@ abstract class GroupApi {
   Future<void> requestJoin(String gid, String name);
   Future<void> settings(String gid, {String? name, String? topic, String? about});
   Future<void> transferOwner(String gid, String alias);
+  /// Стирания после курсора: `{deleted:[seq], cursor, resync}`.
+  Future<Map<String, dynamic>> deleted(String gid, int after);
   Future<List<Map<String, dynamic>>> requests(String gid);
   Future<void> resolveRequest(String gid, String rid);
   Future<String> join(String gid, {String? inviteCode, String? memberPub});
