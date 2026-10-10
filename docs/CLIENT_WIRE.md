@@ -120,7 +120,7 @@
 | `POST /mobile/groups/{id}/leave` | `{ok}` |
 | `GET /mobile/groups/{id}/members` | `{members:[{alias, role, muted, joined_ms, member_pub, has_key}], banned:[...] (модераторам)}` |
 | `POST /mobile/groups/{id}/pubkey` `{member_pub}` | свой ключ для группы (32 байта base64) |
-| `GET /mobile/groups/{id}/keys` | `{epoch, owner_pub, boxes:[{epoch, box, owner_pub}]}` — только мои конверты; у каждого — ключ владельца, запечатавшего это поколение (по нему участник, бывший не в сети, идёт по цепочке передач владения: принимает новый ключ владельца только по записи `handover`, написанной тем, чей ключ закреплён) |
+| `GET /mobile/groups/{id}/keys` | `{epoch, owner_pub, first_epoch, boxes:[{epoch, box, owner_pub}]}` — `first_epoch`: самое старое поколение, конверты которого узел ещё хранит (более старые вытеснены навсегда, их записи клиент помечает `{"op":"lost"}` и читает дальше, а не ждёт ключа); только мои конверты; у каждого — ключ владельца, запечатавшего это поколение (по нему участник, бывший не в сети, идёт по цепочке передач владения: принимает новый ключ владельца только по записи `handover`, написанной тем, чей ключ закреплён) |
 | `POST /mobile/groups/{id}/keys` `{epoch, boxes:{псевдоним: base64}}` | только владелец группы: `{stored}` |
 | `GET /mobile/groups/{id}/log?after=N&limit=` | `{first_seq, last_seq, entries:[{seq, ts, from, epoch, payload_b64, deleted}]}` |
 | `POST /mobile/groups/{id}/log` `{epoch, payload_b64}` | `{seq}`; `403` — заглушён |

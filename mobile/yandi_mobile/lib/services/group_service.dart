@@ -210,11 +210,22 @@ class GroupService {
       if (list.isEmpty) break;
       final batch = <GroupEntry>[];
       var blocked = false;
+      int? firstEpoch;
       for (final e in list) {
         final epoch = (e['epoch'] ?? 0) as int;
         final isDeleted = e['deleted'] == true || (e['payload_b64'] ?? '') == '';
         final key = isDeleted ? null : await _groupKey(g.id, epoch);
-        if (!isDeleted && key == null) { blocked = true; break; }
+        if (!isDeleted && key == null) {
+          // поколение старше всех, что хранит узел, — его конверт вытеснен навсегда: запись помечаем недоступной и читаем дальше
+          firstEpoch ??= await api.keys(g.id).then((k) => (k['first_epoch'] as int?) ?? 0, onError: (_) => 0);
+          if (epoch < firstEpoch!) {
+            batch.add(GroupEntry(gid: g.id, seq: e['seq'] as int, ts: (e['ts'] ?? 0) as int, epoch: epoch, kind: GroupKind.system, from: (e['from'] ?? '') as String, body: const {'op': 'lost'}));
+            after = e['seq'] as int;
+            continue;
+          }
+          blocked = true;
+          break;
+        }
         var entry = await _decode(g, e, key);
         final id = entry.body['i'];
         if (id is String && (batch.any((x) => x.body['i'] == id) || await store.hasEntryId(g.id, id))) {

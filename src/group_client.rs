@@ -605,6 +605,7 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
         }
         let mut batch = Vec::new();
         let mut blocked = false;
+        let mut first_epoch: Option<u64> = None;
         for e in &entries {
             let (seq, ts, epoch, from) = (u(e, "seq"), u(e, "ts"), u(e, "epoch") as u32, s(e, "from"));
             let payload = e["payload_b64"].as_str().unwrap_or("");
@@ -612,6 +613,13 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
                 batch.push(Entry { seq, ts, epoch, kind: KIND_SYSTEM, from, body: json!({}), deleted: true });
             } else {
                 let Some(key) = c.group_key(gid, epoch) else {
+                    // поколение старше всех, что хранит узел, — его конверт вытеснен навсегда: запись помечаем недоступной и читаем дальше
+                    let first = *first_epoch.get_or_insert_with(|| with_store(|st| st.my_keys(gid, dev)).ok().and_then(|k| k["first_epoch"].as_u64()).unwrap_or(0));
+                    if (epoch as u64) < first {
+                        batch.push(Entry { seq, ts, epoch, kind: KIND_SYSTEM, from, body: json!({"op": "lost"}), deleted: false });
+                        after = seq;
+                        continue;
+                    }
                     blocked = true; // ключа ещё нет — придёт позже, ничего не теряем
                     break;
                 };

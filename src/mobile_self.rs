@@ -85,9 +85,33 @@ fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
         let st: Stored = serde_json::from_slice(&body).ok()?;
         Some((unb64(&st.x25519_secret)?.try_into().ok()?, unb64(&st.ed25519_secret)?.try_into().ok()?))
     };
+    let wipe = |path: &std::path::Path| {
+        if let Ok(meta) = std::fs::metadata(path) {
+            let _ = std::fs::write(path, vec![0u8; meta.len() as usize]);
+        }
+        std::fs::remove_file(path)
+    };
+    let plain_pair = || {
+        std::fs::read_to_string(&plain)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Stored>(&t).ok())
+            .and_then(|s| Some((<[u8; 32]>::try_from(unb64(&s.x25519_secret)?).ok()?, <[u8; 32]>::try_from(unb64(&s.ed25519_secret)?).ok()?)))
+    };
     match std::fs::read(&enc) {
         Ok(raw) => match open(&raw) {
-            Some((x, e)) => return make_keys(x, e),
+            Some((x, e)) => {
+                // перенос мог оборваться между записью шифрованного файла и удалением открытого: доубираем открытый, если в нём та же пара
+                if plain.exists() {
+                    if plain_pair() == Some((x, e)) {
+                        if let Err(err) = wipe(&plain) {
+                            eprintln!("[mobile-self] ⚠️  открытый файл ключей {} не удалён ({err}): удалите его вручную", plain.display());
+                        }
+                    } else {
+                        eprintln!("[mobile-self] ⚠️  рядом с шифрованным лежит открытый файл ключей {} с другой парой; он не тронут, разберитесь вручную", plain.display());
+                    }
+                }
+                return make_keys(x, e);
+            }
             None => {
                 eprintln!("[mobile-self] ⚠️  файл ключей {} не открывается (повреждён или другой мастер-ключ); он не тронут, используется временная пара", enc.display());
                 let mut x = [0u8; 32];
@@ -105,23 +129,20 @@ fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
     // шифрованного файла нет: берём (или создаём) прежний открытый и переносим
     let had_plain = plain.exists();
     let k = load_or_create(&plain);
-    let pair = std::fs::read_to_string(&plain)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Stored>(&t).ok())
-        .and_then(|s| Some((<[u8; 32]>::try_from(unb64(&s.x25519_secret)?).ok()?, <[u8; 32]>::try_from(unb64(&s.ed25519_secret)?).ok()?)));
-    if let Some((x, e)) = pair {
-        if let Some(blob) = seal(&x, &e) {
-            if crate::util::private_file::write_private(&enc, &blob).is_ok() && std::fs::read(&enc).ok().and_then(|r| open(&r)) == Some((x, e)) {
-                // перенесено и проверено: старый открытый файл затираем и удаляем
-                if let Ok(meta) = std::fs::metadata(&plain) {
-                    let _ = std::fs::write(&plain, vec![0u8; meta.len() as usize]);
-                }
-                let _ = std::fs::remove_file(&plain);
-                if had_plain {
-                    eprintln!("[mobile-self] ключи компьютера перенесены в шифрованный файл {}", enc.display());
-                }
-            }
+    let moved = plain_pair().is_some_and(|(x, e)| {
+        seal(&x, &e).is_some_and(|blob| crate::util::private_file::write_private(&enc, &blob).is_ok())
+            && std::fs::read(&enc).ok().and_then(|r| open(&r)) == Some((x, e))
+    });
+    if moved {
+        // перенесено и проверено: старый открытый файл затираем и удаляем
+        match wipe(&plain) {
+            Ok(()) if had_plain => eprintln!("[mobile-self] ключи компьютера перенесены в шифрованный файл {}", enc.display()),
+            Ok(()) => {}
+            Err(err) => eprintln!("[mobile-self] ⚠️  открытый файл ключей {} не удалён ({err}): удалите его вручную", plain.display()),
         }
+    } else if plain.exists() {
+        // открытую копию не удаляем, пока нет проверенной шифрованной: иначе пропадёт единственная
+        eprintln!("[mobile-self] ⚠️  ключи компьютера НЕ перенесены в шифрованный файл {} (нет прав на запись?); пока лежат открыто в {}", enc.display(), plain.display());
     }
     k
 }
@@ -951,6 +972,28 @@ mod tests {
         let b = load_or_create(&path);
         assert_eq!(a.x_pub, b.x_pub, "после создания та же пара читается снова");
         assert_eq!(a.ed_pub, b.ed_pub);
+    }
+
+    #[test]
+    fn interrupted_migration_is_finished_and_a_different_plain_pair_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, master) = (dir.path().join("mobile_self.json"), [5u8; 32]);
+        let old = load_or_create(&plain);
+        let copy = std::fs::read(&plain).unwrap();
+        load_protected(dir.path(), Some(&master));
+        // как будто перенос оборвался после записи .enc, до удаления открытого файла
+        std::fs::write(&plain, &copy).unwrap();
+        let k = load_protected(dir.path(), Some(&master));
+        assert_eq!(k.x_pub, old.x_pub);
+        assert!(!plain.exists(), "открытая копия той же пары доубрана");
+        // открытый файл с другой парой не трогаем (и не берём): только предупреждение
+        let other = tempfile::tempdir().unwrap();
+        let foreign = load_or_create(&other.path().join("mobile_self.json"));
+        std::fs::copy(other.path().join("mobile_self.json"), &plain).unwrap();
+        let k = load_protected(dir.path(), Some(&master));
+        assert_eq!(k.x_pub, old.x_pub);
+        assert_ne!(k.x_pub, foreign.x_pub);
+        assert!(plain.exists());
     }
 
     #[test]

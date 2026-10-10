@@ -892,7 +892,9 @@ impl Store {
             .filter_map(|(e, b)| b.get(&m.key).map(|x| json!({"epoch": e, "box": x, "owner_pub": g.epoch_owner.get(e)})))
             .collect();
         let owner_pub = g.owner().and_then(|o| o.member_pub.clone());
-        Ok(json!({"epoch": g.epoch, "owner_pub": owner_pub, "boxes": boxes}))
+        // first_epoch — самое старое поколение, конверты которого узел ещё хранит: более старые вытеснены навсегда (MAX_EPOCHS)
+        let first_epoch = g.key_boxes.keys().min().copied().unwrap_or(g.epoch);
+        Ok(json!({"epoch": g.epoch, "owner_pub": owner_pub, "boxes": boxes, "first_epoch": first_epoch}))
     }
 
     pub fn append(&mut self, gid: &str, device: &str, epoch: u32, payload_b64: &str) -> R<u64> {
