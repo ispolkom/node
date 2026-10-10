@@ -264,7 +264,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ],
         ),
       ),
-      floatingActionButton: _tabs.index == 3
+      // на вкладке «Группы» своя кнопка «+ Группа» (иначе две кнопки накладываются друг на друга)
+      floatingActionButton: _tabs.index == 2
+          ? null
+          : _tabs.index == 3
           ? FloatingActionButton(
               backgroundColor: AppTheme.accent,
               foregroundColor: Colors.black,

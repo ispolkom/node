@@ -56,7 +56,7 @@ class _GroupsTabState extends State<GroupsTab> {
                         const SizedBox(height: 16),
                         Text(_loaded ? 'Групп пока нет' : 'Загрузка…', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 15)),
                         const SizedBox(height: 8),
-                        const Text('Группы создаются на странице узла (ПК). Вступить можно по приглашению или в открытую группу узла.',
+                        const Text('Создайте свою группу кнопкой «Группа» или вступите по приглашению либо в открытую группу узла.',
                             textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                       ]),
                     ),
