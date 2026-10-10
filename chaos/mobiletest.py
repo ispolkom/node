@@ -129,7 +129,12 @@ st, r = req("GET", "/mobile/info", token="0" * 64)
 check("wrong token -> 401", st == 401, st)
 st, r = req("GET", "/mobile/contacts", token=tok)
 c = r["contacts"] if st == 200 else []
+pc = [x for x in c if x["peer_id"] == a.id]
+check("the computer itself is a contact of the phone", len(pc) == 1 and pc[0]["online"] and "Компьютер" in pc[0]["display_name"], r)
+c = [x for x in c if x["peer_id"] != a.id]
 check("contact Bob is online and has the full id", len(c) == 1 and c[0]["peer_id"] == b.id and c[0]["online"], r)
+st, r = req("GET", f"/mobile/pubkey/{a.id}", token=tok)
+check("the computer publishes a signed key bundle for phones", st == 200 and len(base64.b64decode(r.get("x25519_pub", ""))) == 32 and len(base64.b64decode(r.get("signature", ""))) == 64, (st, r))
 st, r = req("POST", f"/mobile/chat/{b.id}", {"text": "from phone via REST"}, token=tok)
 check("REST send accepted", st == 200, (st, r))
 time.sleep(4)
@@ -187,10 +192,17 @@ st, c1 = req("GET", "/mobile/contacts", token=tok1)
 other = [x for x in c1["contacts"] if x["peer_id"] == d2]
 check("phone 1 sees phone 2 as a contact (offline, distinct name)", len(other) == 1 and not other[0]["online"] and "YANDI Mobile" in other[0]["display_name"], c1)
 check("a phone does not see itself", not any(x["peer_id"] == d1 for x in c1["contacts"]))
-kx = base64.b64encode(os.urandom(32)).decode(); ke = base64.b64encode(os.urandom(32)).decode()
-st, _ = req("POST", "/mobile/pubkeys", {"ed25519_pub": ke, "x25519_pub": kx}, token=tok2)
+import ed25519_ref
+kx_raw, ed_sk = os.urandom(32), os.urandom(32)
+ed_pk = ed25519_ref.public_key(ed_sk)
+kx, ke = base64.b64encode(kx_raw).decode(), base64.b64encode(ed_pk).decode()
+st, _ = req("POST", "/mobile/pubkeys", {"ed25519_pub": ke, "x25519_pub": kx, "signature": base64.b64encode(os.urandom(64)).decode()}, token=tok2)
+check("a key bundle with a wrong signature is refused", st == 400, st)
+sig = ed25519_ref.sign(ed_sk, b"YANDI-MOBILE-KEYS-V1\0" + ed_pk + kx_raw)
+st, _ = req("POST", "/mobile/pubkeys", {"ed25519_pub": ke, "x25519_pub": kx, "signature": base64.b64encode(sig).decode()}, token=tok2)
+check("a signed key bundle is accepted", st == 200, st)
 st, r = req("GET", f"/mobile/pubkey/{d2}", token=tok1)
-check("phone 1 can fetch phone 2's key", st == 200 and r["x25519_pub"] == kx, (st, r))
+check("phone 1 can fetch phone 2's signed key bundle", st == 200 and r["x25519_pub"] == kx and r["ed25519_pub"] == ke and base64.b64decode(r["signature"]) == sig, (st, r))
 st, _ = req("GET", f"/mobile/pubkey/{b.id}", token=tok1)
 check("an ordinary contact has no key (plain text over TLS)", st == 404, st)
 # offline mail: phone 2 is not connected
