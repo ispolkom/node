@@ -60,9 +60,13 @@ class SqliteGroupStore implements GroupStore {
   @override
   Future<void> forgetGroup(String gid) async {
     await _db.delete('group_entries', where: 'gid = ?', whereArgs: [gid]);
-    for (final k in ['grp_mine_$gid', 'grp_pubsent_$gid', 'grp_owner_$gid', 'grp_owneralias_$gid', 'grp_wantname_$gid', 'grp_ignore_$gid']) {
-      await StorageService.secureDelete(k);
+    // все записи этой группы в защищённом хранилище (ключи любых поколений, закреплённый ключ владельца, потраченные приглашения…)
+    for (final k in await StorageService.secureKeys()) {
+      if (secureKeyOfGroup(k, gid)) await StorageService.secureDelete(k);
     }
-    for (var e = 0; e < 64; e++) { await StorageService.secureDelete('grp_key_${e}_$gid'); }
   }
 }
+
+/// Ключ защищённого хранилища относится к группе gid: `grp_…_<gid>` или `grp_…_<gid>_…`. Номер группы — 32 hex-знака, так что
+/// чужие группы не задеваются.
+bool secureKeyOfGroup(String key, String gid) => key.startsWith('grp_') && (key.endsWith('_$gid') || key.contains('_${gid}_'));

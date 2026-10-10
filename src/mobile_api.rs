@@ -65,6 +65,11 @@ static TUNNELS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize:
 
 const MAX_TUNNELS: usize = 256;
 const MAX_MAIL: usize = 5000;
+/// Сколько неполученных писем может держать один отправитель и одна пара «отправитель → адресат»: один телефон не вытеснит чужую почту.
+const MAX_MAIL_PER_SENDER: usize = 1500;
+const MAX_MAIL_PER_PAIR: usize = 500;
+/// Письмо дольше этого не ждёт (конверт E4 всё равно недействителен через 30 суток).
+const MAIL_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 const FT_PEER_STATUS: u8 = 0x12;
 
 #[derive(Clone)]
@@ -346,14 +351,24 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
         to: to.to_string(),
         payload_b64: base64_of(payload),
     };
-    with_mail(|l| {
-        l.push(m.clone());
-        if l.len() > MAX_MAIL {
-            let drop = l.len() - MAX_MAIL;
-            l.drain(..drop);
-        }
-    });
+    let accepted = with_mail(|l| mail_accept(l, m.clone(), now_ms()));
+    if !accepted {
+        return false; // очередь переполнена этим отправителем или вообще: новое письмо не принимаем, чужие старые не трогаем
+    }
     let _ = bus().send(Event::Mail(Arc::new(m)));
+    true
+}
+
+/// Положить письмо в общую очередь. Просроченные письма убираются; переполнение решается отказом новому письму (с квотами на отправителя
+/// и на пару), а не вытеснением чужих неполученных писем.
+fn mail_accept(l: &mut Vec<Mail>, m: Mail, now: u64) -> bool {
+    l.retain(|x| now.saturating_sub(x.ts) < MAIL_TTL_MS);
+    let from_n = l.iter().filter(|x| x.from == m.from).count();
+    let pair_n = l.iter().filter(|x| x.from == m.from && x.to == m.to).count();
+    if l.len() >= MAX_MAIL || from_n >= MAX_MAIL_PER_SENDER || pair_n >= MAX_MAIL_PER_PAIR {
+        return false;
+    }
+    l.push(m);
     true
 }
 
@@ -1540,6 +1555,44 @@ where
         .with_upgrades()
         .await
         .map_err(std::io::Error::other)
+}
+
+#[cfg(test)]
+mod mail_quota_tests {
+    use super::*;
+
+    fn mail(from: &str, to: &str, ts: u64) -> Mail {
+        Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into() }
+    }
+
+    #[test]
+    fn one_sender_cannot_push_out_someone_elses_mail() {
+        let mut l = vec![mail("B", "C", 1_000)];
+        let now = 2_000;
+        let mut accepted = 0;
+        for i in 0..(MAX_MAIL + 10) {
+            if mail_accept(&mut l, mail("A", "D", 1_500 + i as u64), now) {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, MAX_MAIL_PER_PAIR, "одна пара упирается в свою квоту");
+        assert!(l.iter().any(|x| x.from == "B" && x.to == "C"), "письмо B → C на месте");
+        // разные адресаты — упирается в квоту отправителя, а чужое всё ещё на месте
+        for i in 0..(MAX_MAIL + 10) {
+            mail_accept(&mut l, mail("A", &format!("X{i}"), 1_600 + i as u64), now);
+        }
+        assert_eq!(l.iter().filter(|x| x.from == "A").count(), MAX_MAIL_PER_SENDER);
+        assert!(l.iter().any(|x| x.from == "B" && x.to == "C"));
+        // другой отправитель по-прежнему может писать
+        assert!(mail_accept(&mut l, mail("E", "C", 1_700), now));
+    }
+
+    #[test]
+    fn expired_mail_makes_room() {
+        let mut l: Vec<Mail> = (0..MAX_MAIL as u64).map(|i| mail(&format!("S{}", i % 20), "C", i)).collect();
+        assert!(!mail_accept(&mut l, mail("N", "C", 10), 10), "очередь полна");
+        assert!(mail_accept(&mut l, mail("N", "C", MAIL_TTL_MS + 100), MAIL_TTL_MS + 100), "просроченное ушло");
+    }
 }
 
 #[cfg(test)]

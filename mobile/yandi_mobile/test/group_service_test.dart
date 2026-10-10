@@ -7,6 +7,7 @@ import 'package:yandi_mobile/services/group_api.dart';
 import 'package:yandi_mobile/services/group_files.dart';
 import 'package:yandi_mobile/services/group_service.dart';
 import 'package:yandi_mobile/services/group_store.dart';
+import 'package:yandi_mobile/services/group_store_sqlite.dart' show secureKeyOfGroup;
 
 /// Узел в миниатюре: хранит непрозрачные байты, как настоящий (проверка ролей — упрощённая).
 class FakeNode {
@@ -447,5 +448,15 @@ void main() {
     final logOk = [GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: 'Хозяин-1', body: const {'op': 'handover', 'to': 'Гость-1', 'pub': 'AAAA'})];
     expect(GroupService.handoverEndorsed(logOk, members2, 'AAAA'), isTrue);
     expect(GroupService.handoverEndorsed(logOk, members2, 'CCCC'), isFalse, reason: 'ключ не тот');
+  });
+
+  test('забыть группу: удаляются ключи любых поколений (в т.ч. ≥ 64) и только этой группы', () {
+    final g = 'ab' * 16, other = 'cd' * 16;
+    for (final k in ['grp_key_0_$g', 'grp_key_64_$g', 'grp_key_1000_$g', 'grp_mine_$g', 'grp_owner_$g', 'grp_invspent_${g}_AAAA-BBBB-CCCC']) {
+      expect(secureKeyOfGroup(k, g), isTrue, reason: k);
+    }
+    for (final k in ['grp_key_64_$other', 'grp_known', 'node_token_x', 'grp_dl_$other', 'pref_secure_keyboard']) {
+      expect(secureKeyOfGroup(k, g), isFalse, reason: k);
+    }
   });
 }

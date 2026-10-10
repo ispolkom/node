@@ -740,7 +740,7 @@ impl P2PTransport {
             
             let node_record = crate::dht::record::NodeRecord::new(
                 &identity_clone,
-                0,  // initial sequence number
+                own_record_sequence(), // растёт и между перезапусками (иначе DHT отвергает «старую» запись)
                 None,  // endpoint
                 0,  // capabilities (will be updated later)
             );
@@ -760,11 +760,9 @@ impl P2PTransport {
         let identity_clone2 = identity.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(30 * 60));
-            let mut sequence = 0u64;
-            
             loop {
                 interval.tick().await;
-                sequence += 1;
+                let sequence = own_record_sequence();
                 
                 let node_record = crate::dht::record::NodeRecord::new(
                     &identity_clone2,
@@ -6582,5 +6580,33 @@ mod relay_policy_tests {
         assert!(!punch_gate(&p1, "203.0.113.8:4000"), "same introducer again");
         assert!(!punch_gate(&p2, "203.0.113.7:4000"), "same destination from another introducer");
         assert!(punch_gate(&p2, "203.0.113.9:4000"));
+    }
+}
+
+/// Номер версии собственной записи узла в DHT: миллисекунды времени, строго возрастающие в процессе. Так новая запись после перезапуска
+/// всегда новее уже лежащей в DHT (раньше счёт шёл с нуля, и хранилище отвергало запись как устаревшую, пока её срок не истечёт).
+pub(crate) fn own_record_sequence() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let mut cur = LAST.load(Ordering::SeqCst);
+    loop {
+        let next = now.max(cur + 1);
+        match LAST.compare_exchange(cur, next, Ordering::SeqCst, Ordering::SeqCst) {
+            Ok(_) => return next,
+            Err(c) => cur = c,
+        }
+    }
+}
+
+#[cfg(test)]
+mod own_record_sequence_tests {
+    #[test]
+    fn grows_and_survives_a_restart() {
+        let a = super::own_record_sequence();
+        let b = super::own_record_sequence();
+        assert!(b > a);
+        // «прежний процесс» опубликовал маленький номер (старая схема 0, 1, 2…) — новый всегда больше
+        assert!(a > 1_000_000_000_000, "номер от времени, а не с нуля");
     }
 }

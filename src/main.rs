@@ -264,6 +264,13 @@ async fn main() -> anyhow::Result<()> {
         yandi::group_client::init(mk);
         yandi::group_client::spawn_background();
     }
+    // срок хранения файлов групп соблюдается по таймеру, даже если в группу больше ничего не заливают
+    tokio::spawn(async {
+        loop {
+            yandi::mobile_group_files::cleanup_all().await;
+            tokio::time::sleep(std::time::Duration::from_secs(600)).await;
+        }
+    });
 
     let identity_for_transport = identity.clone(); // Клон для транспортов
     let identity_for_web = identity.clone(); // Clone for Web UI/mDNS

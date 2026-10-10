@@ -696,7 +696,63 @@ async fn host_guard(req: axum::extract::Request, next: Next) -> Response {
     if !ok {
         return (StatusCode::FORBIDDEN, "forbidden host").into_response();
     }
+    let h = req.headers();
+    let get = |k: &str| h.get(k).and_then(|v| v.to_str().ok());
+    let upgrade = get("upgrade").is_some_and(|u| u.eq_ignore_ascii_case("websocket"));
+    if !request_origin_ok(req.method().as_str(), upgrade, get("host"), get("origin"), get("sec-fetch-site")) {
+        return (StatusCode::FORBIDDEN, "forbidden origin").into_response();
+    }
     next.run(req).await
+}
+
+/// Защита от подделки запросов чужой страницей (CSRF), в том числе с другого порта того же компьютера: изменяющие запросы (всё, кроме
+/// GET/HEAD/OPTIONS) и подключение веб-сокета принимаются, только если браузер говорит, что запрос с этой же страницы узла: `Origin` —
+/// ровно этот адрес и порт, `Sec-Fetch-Site` — не `cross-site`/`same-site`. Без этих заголовков (не браузер: curl, стенды) — пропускаем,
+/// их и так защищает сессия.
+fn request_origin_ok(method: &str, websocket: bool, host: Option<&str>, origin: Option<&str>, fetch_site: Option<&str>) -> bool {
+    let unsafe_method = !matches!(method, "GET" | "HEAD" | "OPTIONS");
+    if !unsafe_method && !websocket {
+        return true;
+    }
+    if let Some(site) = fetch_site {
+        if site.eq_ignore_ascii_case("cross-site") || site.eq_ignore_ascii_case("same-site") {
+            return false;
+        }
+    }
+    match origin {
+        None => true,
+        Some(o) => {
+            let Some(host) = host else { return false };
+            let o = o.trim();
+            o == format!("http://{host}") || o == format!("https://{host}")
+        }
+    }
+}
+
+#[cfg(test)]
+mod origin_guard_tests {
+    use super::request_origin_ok;
+
+    #[test]
+    fn foreign_pages_cannot_change_anything() {
+        let host = Some("127.0.0.1:9999");
+        // своя страница
+        assert!(request_origin_ok("POST", false, host, Some("http://127.0.0.1:9999"), Some("same-origin")));
+        // чужая страница на другом порту того же компьютера (тот же «сайт», другой источник)
+        assert!(!request_origin_ok("POST", false, host, Some("http://127.0.0.1:18080"), Some("same-site")));
+        assert!(!request_origin_ok("POST", false, host, Some("http://127.0.0.1:18080"), None));
+        assert!(!request_origin_ok("DELETE", false, host, Some("https://evil.example"), Some("cross-site")));
+        assert!(!request_origin_ok("POST", false, host, Some("null"), None), "Origin: null (песочница, file://)");
+        assert!(!request_origin_ok("POST", false, host, None, Some("cross-site")), "без Origin, но браузер говорит «чужой сайт»");
+        // веб-сокет с чужой страницы — тоже нет
+        assert!(!request_origin_ok("GET", true, host, Some("http://127.0.0.1:18080"), None));
+        assert!(request_origin_ok("GET", true, host, Some("http://127.0.0.1:9999"), None));
+        // чтение страниц и не-браузеры (curl, стенды) не затронуты
+        assert!(request_origin_ok("GET", false, host, Some("http://evil.example"), Some("cross-site")));
+        assert!(request_origin_ok("POST", false, host, None, None));
+        // имя localhost вместо адреса — своя страница, если совпадает с Host
+        assert!(request_origin_ok("POST", false, Some("localhost:9999"), Some("http://localhost:9999"), None));
+    }
 }
 
 #[cfg(test)]

@@ -147,6 +147,22 @@ async fn used_everywhere() -> u64 {
     total
 }
 
+fn expired(m: &Meta) -> bool {
+    now_ms().saturating_sub(m.created_ms) > if m.done { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+}
+
+/// Убирает просроченное во всех группах (вызывается по таймеру): срок хранения соблюдается, даже если в группу больше ничего не заливают.
+pub async fn cleanup_all() {
+    let Ok(mut rd) = tokio::fs::read_dir(root()).await else { return };
+    while let Ok(Some(e)) = rd.next_entry().await {
+        if let Some(g) = e.file_name().to_str() {
+            if valid_gid(g) {
+                cleanup(g).await;
+            }
+        }
+    }
+}
+
 /// Убирает просроченное и осиротевшее в одной группе.
 async fn cleanup(gid: &str) {
     let now = now_ms();
@@ -297,7 +313,7 @@ pub async fn status(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
     if let Err(r) = member(&gid, &dev) {
         return r;
     }
-    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(m) = load_meta(&gid, &id).await.filter(|m| !expired(m)) else { return StatusCode::NOT_FOUND.into_response() };
     Json(json!({"done": m.done, "total_chunks": m.total_chunks, "file_size": m.file_size, "have": present(&gid, &id).await})).into_response()
 }
 
@@ -306,7 +322,7 @@ pub async fn get_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
     if let Err(r) = member(&gid, &dev) {
         return r;
     }
-    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(m) = load_meta(&gid, &id).await.filter(|m| !expired(m)) else { return StatusCode::NOT_FOUND.into_response() };
     if !m.done || idx >= m.total_chunks {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -376,7 +392,7 @@ pub(crate) async fn pc_done(gid: &str, device: &str, id: &str) -> Result<(), Str
 /// Кусок готового файла для участника группы.
 pub(crate) async fn pc_chunk(gid: &str, device: &str, id: &str, idx: u32) -> Result<Vec<u8>, String> {
     pc_member(gid, device)?;
-    let m = load_meta(gid, id).await.ok_or("файла больше нет на узле (стёрт или истёк срок)")?;
+    let m = load_meta(gid, id).await.filter(|m| !expired(m)).ok_or("файла больше нет на узле (стёрт или истёк срок)")?;
     if !m.done || idx >= m.total_chunks {
         return Err("файл не готов".into());
     }

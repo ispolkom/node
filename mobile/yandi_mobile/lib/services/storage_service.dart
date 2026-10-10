@@ -159,6 +159,13 @@ class StorageService {
     _secureCache?[key] = value;
   }
 
+  /// Все имена ключей защищённого хранилища (для чистки по шаблону, например всех ключей одной группы).
+  static Future<List<String>> secureKeys() async {
+    final c = _secureCache;
+    if (c != null) return c.keys.toList();
+    return (await _secure.readAll()).keys.toList();
+  }
+
   static Future<void> secureDelete(String key) async {
     await _secure.delete(key: key);
     _secureCache?.remove(key);
