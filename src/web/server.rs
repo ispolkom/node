@@ -6,23 +6,23 @@
 
 use axum::{
     body::Body,
-    extract::{Path as PathExtractor, State, Multipart},
+    extract::{Multipart, Path as PathExtractor, State},
     http::{HeaderMap, StatusCode},
     middleware::Next,
     response::{Html, IntoResponse, Json, Redirect, Response},
-    routing::{get, post, put, delete},
+    routing::{delete, get, post, put},
     Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
-use tracing::{debug, info, error};
+use tracing::{debug, error, info};
 
-use crate::{MdnsService, DiscoveredNode};
 use crate::core::profile::UserProfile;
 use crate::netlayer::relay::{RelayManager, RelaySession, RelaySessionStatus};
 use crate::web::media_api;
+use crate::{DiscoveredNode, MdnsService};
 
 /// Информация о ноде для веб-интерфейса
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -115,25 +115,52 @@ pub struct AppState {
     /// Статус работы P2P ноды (true = online, false = offline)
     pub node_running: Arc<std::sync::atomic::AtomicBool>,
     /// Proxy response channel (for HTTP Proxy Client)
-    pub proxy_resp_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyResponse)>>>>,
+    pub proxy_resp_rx: Arc<
+        Mutex<
+            Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyResponse)>>,
+        >,
+    >,
     /// Proxy tunnel data channel (for CONNECT bi-directional tunneling)
-    pub proxy_tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyTunnelData)>>>>,
+    pub proxy_tunnel_rx: Arc<
+        Mutex<
+            Option<
+                tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyTunnelData)>,
+            >,
+        >,
+    >,
     /// Активный HTTP Proxy Client (хранится чтобы остановить)
     pub active_proxy_client: Arc<Mutex<Option<crate::proxy::HttpProxyClient>>>,
     /// Активный SOCKS5 Proxy Server (хранится чтобы остановить)
     pub active_socks5_proxy: Arc<Mutex<Option<crate::socks5::Socks5ProxyServer>>>,
     /// SOCKS5 proxy response channel
-    pub socks5_resp_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::socks5::Socks5ProxyResponse)>>>>,
+    pub socks5_resp_rx: Arc<
+        Mutex<
+            Option<
+                tokio::sync::mpsc::Receiver<(
+                    crate::util::HashId,
+                    crate::socks5::Socks5ProxyResponse,
+                )>,
+            >,
+        >,
+    >,
     /// SOCKS5 tunnel data channel
-    pub socks5_tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::socks5::Socks5TunnelData)>>>>,
+    pub socks5_tunnel_rx: Arc<
+        Mutex<
+            Option<
+                tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::socks5::Socks5TunnelData)>,
+            >,
+        >,
+    >,
     /// Chat Manager для P2P чата
     pub chat_manager: Arc<Mutex<Option<std::sync::Arc<crate::communication::ChatManager>>>>,
     /// File Transfer Manager для чанкованной передачи файлов
-    pub file_transfer_manager: Arc<Mutex<Option<std::sync::Arc<crate::communication::FileTransferManager>>>>,
+    pub file_transfer_manager:
+        Arc<Mutex<Option<std::sync::Arc<crate::communication::FileTransferManager>>>>,
     /// P2P Tunnel Manager для чистых P2P тоннелей
     pub p2p_tunnel_manager: Arc<Mutex<Option<crate::p2p_tunnel::P2PTunnelManager>>>,
     /// Group Manager для групп
-    pub group_manager: Arc<Mutex<Option<std::sync::Arc<crate::communication::groups::GroupManager>>>>,
+    pub group_manager:
+        Arc<Mutex<Option<std::sync::Arc<crate::communication::groups::GroupManager>>>>,
     /// Media session manager for voice/video calls
     pub media_manager: Arc<tokio::sync::Mutex<Option<crate::media::session::MediaSessionManager>>>,
     /// Media signaling bus for forwarding P2P signaling into WebSocket sessions
@@ -234,8 +261,23 @@ impl WebServer {
     /// Установить proxy channels
     pub fn with_proxy_channels(
         mut self,
-        proxy_resp_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyResponse)>>>>,
-        proxy_tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyTunnelData)>>>>,
+        proxy_resp_rx: Arc<
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::proxy::ProxyResponse)>,
+                >,
+            >,
+        >,
+        proxy_tunnel_rx: Arc<
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::Receiver<(
+                        crate::util::HashId,
+                        crate::proxy::ProxyTunnelData,
+                    )>,
+                >,
+            >,
+        >,
     ) -> Self {
         self.state.proxy_resp_rx = proxy_resp_rx;
         self.state.proxy_tunnel_rx = proxy_tunnel_rx;
@@ -245,8 +287,26 @@ impl WebServer {
     /// Установить SOCKS5 proxy channels
     pub fn with_socks5_channels(
         mut self,
-        socks5_resp_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::socks5::Socks5ProxyResponse)>>>>,
-        socks5_tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(crate::util::HashId, crate::socks5::Socks5TunnelData)>>>>,
+        socks5_resp_rx: Arc<
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::Receiver<(
+                        crate::util::HashId,
+                        crate::socks5::Socks5ProxyResponse,
+                    )>,
+                >,
+            >,
+        >,
+        socks5_tunnel_rx: Arc<
+            Mutex<
+                Option<
+                    tokio::sync::mpsc::Receiver<(
+                        crate::util::HashId,
+                        crate::socks5::Socks5TunnelData,
+                    )>,
+                >,
+            >,
+        >,
     ) -> Self {
         self.state.socks5_resp_rx = socks5_resp_rx;
         self.state.socks5_tunnel_rx = socks5_tunnel_rx;
@@ -298,35 +358,47 @@ impl WebServer {
     }
 
     /// Установить Chat Manager
-    pub fn with_chat_manager(mut self, chat_manager: std::sync::Arc<crate::communication::ChatManager>) -> Self {
+    pub fn with_chat_manager(
+        mut self,
+        chat_manager: std::sync::Arc<crate::communication::ChatManager>,
+    ) -> Self {
         self.state.chat_manager = Arc::new(Mutex::new(Some(chat_manager)));
         self
     }
 
     /// Установить File Transfer Manager
-    pub fn with_file_transfer_manager(mut self, file_transfer_manager: std::sync::Arc<crate::communication::FileTransferManager>) -> Self {
+    pub fn with_file_transfer_manager(
+        mut self,
+        file_transfer_manager: std::sync::Arc<crate::communication::FileTransferManager>,
+    ) -> Self {
         self.state.file_transfer_manager = Arc::new(Mutex::new(Some(file_transfer_manager)));
         self
     }
 
     /// Установить P2P Tunnel Manager
-    pub fn with_p2p_tunnel_manager(mut self, tunnel_manager: crate::p2p_tunnel::P2PTunnelManager) -> Self {
+    pub fn with_p2p_tunnel_manager(
+        mut self,
+        tunnel_manager: crate::p2p_tunnel::P2PTunnelManager,
+    ) -> Self {
         self.state.p2p_tunnel_manager = Arc::new(Mutex::new(Some(tunnel_manager)));
         self
     }
 
     /// Установить Group Manager
-    
 
-        pub fn with_media_manager(mut self, media_manager: crate::media::session::MediaSessionManager) -> Self {
+    pub fn with_media_manager(
+        mut self,
+        media_manager: crate::media::session::MediaSessionManager,
+    ) -> Self {
         self.state.media_manager = Arc::new(tokio::sync::Mutex::new(Some(media_manager)));
         self
     }
 
     /// Set Group Manager for groups
-    pub fn with_group_manager(mut self, group_manager: std::sync::Arc<crate::communication::groups::GroupManager>) -> Self {
-    
-
+    pub fn with_group_manager(
+        mut self,
+        group_manager: std::sync::Arc<crate::communication::groups::GroupManager>,
+    ) -> Self {
         self.state.group_manager = Arc::new(Mutex::new(Some(group_manager)));
         self
     }
@@ -430,37 +502,76 @@ impl WebServer {
             .route("/api/relay/connect/:short_id", post(api_relay_connect))
             .route("/api/gateway/start", post(api_gateway_start))
             .route("/api/gateway/stop", post(api_gateway_stop))
-            .route("/api/contacts", get(api_contacts_get).post(api_contacts_post).delete(api_contacts_delete))
+            .route(
+                "/api/contacts",
+                get(api_contacts_get)
+                    .post(api_contacts_post)
+                    .delete(api_contacts_delete),
+            )
             .route("/api/contacts/export", get(api_contacts_export))
-            .route("/api/gateways", get(api_gateways_get).post(api_gateways_post).delete(api_gateways_delete))
+            .route(
+                "/api/gateways",
+                get(api_gateways_get)
+                    .post(api_gateways_post)
+                    .delete(api_gateways_delete),
+            )
             .route("/api/settings", get(api_settings_get).put(api_settings_put))
             // Chat API endpoints
             .route("/api/chat/send/:peer_id", post(api_chat_send))
             .route("/api/chat/history/:peer_id", get(api_chat_history))
             .route("/api/chat/clear/:peer_id", post(api_chat_clear))
-            .route("/api/chat/edit/:peer_id", axum::routing::patch(api_chat_edit))
-            .route("/api/chat/delete/:peer_id", axum::routing::delete(api_chat_delete))
+            .route(
+                "/api/chat/edit/:peer_id",
+                axum::routing::patch(api_chat_edit),
+            )
+            .route(
+                "/api/chat/delete/:peer_id",
+                axum::routing::delete(api_chat_delete),
+            )
             .route("/api/chats", get(api_chats_list))
             // Groups API endpoints
             .route("/api/groups", get(api_groups_get).post(api_groups_post))
             .route("/api/groups/sync", post(api_groups_sync))
             .route("/api/groups/dht/status", get(api_groups_dht_status))
-            .route("/api/groups/:group_id", get(api_groups_get_one).delete(api_groups_delete).put(api_groups_put))
+            .route(
+                "/api/groups/:group_id",
+                get(api_groups_get_one)
+                    .delete(api_groups_delete)
+                    .put(api_groups_put),
+            )
             .route("/api/groups/:group_id/publish", post(api_groups_publish))
             .route("/api/groups/:group_id/leave", post(api_groups_leave))
-            .route("/api/groups/:group_id/members", post(api_groups_add_member).delete(api_groups_remove_member))
+            .route(
+                "/api/groups/:group_id/members",
+                post(api_groups_add_member).delete(api_groups_remove_member),
+            )
             // Group Chat API endpoints
             .route("/api/group-chat/send/:group_id", post(api_group_chat_send))
-            .route("/api/group-chat/history/:group_id", get(api_group_chat_history))
-            .route("/api/group-chat/clear/:group_id", post(api_group_chat_clear))
+            .route(
+                "/api/group-chat/history/:group_id",
+                get(api_group_chat_history),
+            )
+            .route(
+                "/api/group-chat/clear/:group_id",
+                post(api_group_chat_clear),
+            )
             // File Transfer API endpoints
             .route("/api/files/upload", post(api_files_upload))
             .route("/api/files/send-chunk/:peer_id", post(api_files_send_chunk))
             .route("/api/files/send-file/:peer_id", post(api_files_send_direct))
             .route("/api/files/send/:peer_id", post(api_files_send_direct))
-            .route("/api/files/send/:peer_id/:filename", post(api_files_send_uploaded))
-            .route("/api/files/content/:file_id/:filename", get(api_files_content))
-            .route("/api/files/status/:file_id/:filename", get(api_files_status))
+            .route(
+                "/api/files/send/:peer_id/:filename",
+                post(api_files_send_uploaded),
+            )
+            .route(
+                "/api/files/content/:file_id/:filename",
+                get(api_files_content),
+            )
+            .route(
+                "/api/files/status/:file_id/:filename",
+                get(api_files_status),
+            )
             // P2P Tunnel API endpoints
             .route("/api/tunnel/start/:short_id", post(api_tunnel_start))
             .route("/api/tunnel/stop/:short_id", post(api_tunnel_stop))
@@ -484,29 +595,80 @@ impl WebServer {
             .route("/api/media/call/:call_id/end", delete(media_api::end_call))
             .route("/api/media/call/:call_id", get(media_api::get_call_info))
             .route("/api/media/calls", get(media_api::list_calls))
-            .route("/api/media/ws/:peer_id", get(media_api::media_websocket_handler))
-            .route("/api/media/incoming-call", get(media_api::get_incoming_call))
-            .route("/api/media/call/:call_id/accept", post(media_api::accept_call))
-            .route("/api/media/call/:call_id/reject", post(media_api::reject_call))
+            .route(
+                "/api/media/ws/:peer_id",
+                get(media_api::media_websocket_handler),
+            )
+            .route(
+                "/api/media/incoming-call",
+                get(media_api::get_incoming_call),
+            )
+            .route(
+                "/api/media/call/:call_id/accept",
+                post(media_api::accept_call),
+            )
+            .route(
+                "/api/media/call/:call_id/reject",
+                post(media_api::reject_call),
+            )
             .route("/api/media/call/end", post(media_api::end_active_call))
             // Video call endpoints
-            .route("/api/media/video/call/start", post(media_api::start_video_call))
-            .route("/api/media/video/incoming-call", get(media_api::get_incoming_video_call))
-            .route("/api/media/video/call/:call_id/accept", post(media_api::accept_video_call))
-            .route("/api/media/video/call/:call_id/reject", post(media_api::reject_video_call))
-            .route("/api/media/video/call/end", post(media_api::end_active_video_call))
+            .route(
+                "/api/media/video/call/start",
+                post(media_api::start_video_call),
+            )
+            .route(
+                "/api/media/video/incoming-call",
+                get(media_api::get_incoming_video_call),
+            )
+            .route(
+                "/api/media/video/call/:call_id/accept",
+                post(media_api::accept_video_call),
+            )
+            .route(
+                "/api/media/video/call/:call_id/reject",
+                post(media_api::reject_video_call),
+            )
+            .route(
+                "/api/media/video/call/end",
+                post(media_api::end_active_video_call),
+            )
             // Pairing endpoints
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/api/mobile/devices", get(mobile_devices_handler))
-            .route("/api/mobile/devices/:id", axum::routing::delete(mobile_device_remove_handler))
+            .route(
+                "/api/mobile/devices/:id",
+                axum::routing::delete(mobile_device_remove_handler),
+            )
             // Groups: created and deleted only here (this computer); content is encrypted by the phones
-            .route("/api/mobile/groups", get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create))
-            .route("/api/mobile/groups/:gid", post(crate::mobile_groups::pc_update).delete(crate::mobile_groups::pc_delete))
-            .route("/api/mobile/groups/:gid/members", post(crate::mobile_groups::pc_add_member))
-            .route("/api/mobile/groups/:gid/owner", post(crate::mobile_groups::pc_set_owner))
-            .route("/api/mobile/groups/:gid/mod", post(crate::mobile_groups::pc_mod))
-            .route("/api/mobile/groups/:gid/modlog", get(crate::mobile_groups::pc_modlog))
-            .route("/api/mobile/groups/:gid/invite", post(crate::mobile_groups::pc_invite))
+            .route(
+                "/api/mobile/groups",
+                get(crate::mobile_groups::pc_list).post(crate::mobile_groups::pc_create),
+            )
+            .route(
+                "/api/mobile/groups/:gid",
+                post(crate::mobile_groups::pc_update).delete(crate::mobile_groups::pc_delete),
+            )
+            .route(
+                "/api/mobile/groups/:gid/members",
+                post(crate::mobile_groups::pc_add_member),
+            )
+            .route(
+                "/api/mobile/groups/:gid/owner",
+                post(crate::mobile_groups::pc_set_owner),
+            )
+            .route(
+                "/api/mobile/groups/:gid/mod",
+                post(crate::mobile_groups::pc_mod),
+            )
+            .route(
+                "/api/mobile/groups/:gid/modlog",
+                get(crate::mobile_groups::pc_modlog),
+            )
+            .route(
+                "/api/mobile/groups/:gid/invite",
+                post(crate::mobile_groups::pc_invite),
+            )
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
@@ -533,15 +695,34 @@ impl WebServer {
 pub fn host_allowed(host: &str) -> bool {
     let name = if let Some(rest) = host.strip_prefix('[') {
         // [::1]:порт
-        match rest.split_once(']') { Some((ip, tail)) if tail.is_empty() || tail.starts_with(':') => ip, _ => return false }
+        match rest.split_once(']') {
+            Some((ip, tail)) if tail.is_empty() || tail.starts_with(':') => ip,
+            _ => return false,
+        }
     } else {
-        host.rsplit_once(':').map(|(h, port)| if port.chars().all(|c| c.is_ascii_digit()) { h } else { host }).unwrap_or(host)
+        host.rsplit_once(':')
+            .map(|(h, port)| {
+                if port.chars().all(|c| c.is_ascii_digit()) {
+                    h
+                } else {
+                    host
+                }
+            })
+            .unwrap_or(host)
     };
-    matches!(name.to_ascii_lowercase().as_str(), "localhost" | "127.0.0.1" | "::1")
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "localhost" | "127.0.0.1" | "::1"
+    )
 }
 
 async fn host_guard(req: axum::extract::Request, next: Next) -> Response {
-    let ok = req.headers().get("host").and_then(|v| v.to_str().ok()).map(host_allowed).unwrap_or(false);
+    let ok = req
+        .headers()
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .map(host_allowed)
+        .unwrap_or(false);
     if !ok {
         return (StatusCode::FORBIDDEN, "forbidden host").into_response();
     }
@@ -570,10 +751,17 @@ mod host_guard_tests {
         if let Some(n) = limit {
             app = app.layer(axum::extract::DefaultBodyLimit::max(n));
         }
-        let mut body = b"--B\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n\r\n".to_vec();
+        let mut body =
+            b"--B\r\nContent-Disposition: form-data; name=\"avatar\"; filename=\"a.png\"\r\n\r\n"
+                .to_vec();
         body.extend(std::iter::repeat(0u8).take(3 * 1024 * 1024));
         body.extend_from_slice(b"\r\n--B--\r\n");
-        let req = axum::http::Request::builder().method("POST").uri("/").header("content-type", "multipart/form-data; boundary=B").body(axum::body::Body::from(body)).unwrap();
+        let req = axum::http::Request::builder()
+            .method("POST")
+            .uri("/")
+            .header("content-type", "multipart/form-data; boundary=B")
+            .body(axum::body::Body::from(body))
+            .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), 1024).await.unwrap();
         String::from_utf8_lossy(&bytes).parse().unwrap_or(0)
@@ -583,9 +771,18 @@ mod host_guard_tests {
     /// must refuse a 3 MB upload before the handler can buffer it. If a route ever raises the limit explicitly, this documents
     /// that the limit is what protects memory.
     #[tokio::test]
-    async fn the_default_body_limit_stops_a_3mb_multipart_upload_and_a_raised_limit_lets_it_through() {
-        assert_eq!(buffered_from_3mb(None).await, 0, "the default limit refuses a 3 MB upload");
-        assert_eq!(buffered_from_3mb(Some(10 * 1024 * 1024)).await, 3 * 1024 * 1024, "a raised limit lets it through");
+    async fn the_default_body_limit_stops_a_3mb_multipart_upload_and_a_raised_limit_lets_it_through(
+    ) {
+        assert_eq!(
+            buffered_from_3mb(None).await,
+            0,
+            "the default limit refuses a 3 MB upload"
+        );
+        assert_eq!(
+            buffered_from_3mb(Some(10 * 1024 * 1024)).await,
+            3 * 1024 * 1024,
+            "a raised limit lets it through"
+        );
     }
 
     #[test]
@@ -593,18 +790,46 @@ mod host_guard_tests {
         for ok in ["ring.mp3", "sounds/ring.wav"] {
             assert!(media_name_ok(ok), "{ok}");
         }
-        for bad in ["", "../secret", "a/../../b", "/etc/passwd", "..\\x", "a\0b", "./.."] {
+        for bad in [
+            "",
+            "../secret",
+            "a/../../b",
+            "/etc/passwd",
+            "..\\x",
+            "a\0b",
+            "./..",
+        ] {
             assert!(!media_name_ok(bad), "{bad:?}");
         }
     }
 
     #[test]
     fn only_this_computer_names_pass() {
-        for ok in ["localhost", "localhost:8080", "127.0.0.1:9000", "127.0.0.1", "[::1]:8080", "[::1]", "LOCALHOST:1"] {
+        for ok in [
+            "localhost",
+            "localhost:8080",
+            "127.0.0.1:9000",
+            "127.0.0.1",
+            "[::1]:8080",
+            "[::1]",
+            "LOCALHOST:1",
+        ] {
             assert!(host_allowed(ok), "{ok}");
         }
-        for bad in ["", "evil.com", "evil.com:8080", "localhost.evil.com", "127.0.0.1.evil.com:80", "evil.com:127.0.0.1",
-                    "192.168.1.5:8080", "[::2]:80", "[::1]x", "localhost:80:80", "0.0.0.0:80", "127.0.0.2"] {
+        for bad in [
+            "",
+            "evil.com",
+            "evil.com:8080",
+            "localhost.evil.com",
+            "127.0.0.1.evil.com:80",
+            "evil.com:127.0.0.1",
+            "192.168.1.5:8080",
+            "[::2]:80",
+            "[::1]x",
+            "localhost:80:80",
+            "0.0.0.0:80",
+            "127.0.0.2",
+        ] {
             assert!(!host_allowed(bad), "{bad}");
         }
     }
@@ -667,10 +892,7 @@ struct LoginRequest {
     remember_me: bool,
 }
 
-async fn api_auth_login(
-    State(state): State<AppState>,
-    Json(body): Json<LoginRequest>,
-) -> Response {
+async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> Response {
     // Brute-force throttle: reject before even hashing the password if
     // we're still cooling down from prior failures (see AuthState::
     // login_backoff_remaining — the web UI has no rate limiting otherwise
@@ -688,19 +910,26 @@ async fn api_auth_login(
             let cookie = crate::web::auth::make_session_cookie(&token, body.remember_me);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
-            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
         }
         Ok(false) => {
             state.auth_state.record_login_failure();
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Неверный пароль"})),
-            ).into_response()
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": e})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -714,29 +943,35 @@ struct SetupRequest {
     master_password_repeat: String,
 }
 
-async fn api_auth_setup(
-    State(state): State<AppState>,
-    Json(body): Json<SetupRequest>,
-) -> Response {
-    match crate::web::auth::setup_auth(&state.auth_state, &body.login_password, &body.login_password_repeat, &body.master_password, &body.master_password_repeat) {
+async fn api_auth_setup(State(state): State<AppState>, Json(body): Json<SetupRequest>) -> Response {
+    match crate::web::auth::setup_auth(
+        &state.auth_state,
+        &body.login_password,
+        &body.login_password_repeat,
+        &body.master_password,
+        &body.master_password_repeat,
+    ) {
         Ok(_master_key) => {
             let token = state.auth_state.create_session(false);
             let cookie = crate::web::auth::make_session_cookie(&token, false);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
-            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
-async fn api_auth_logout(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
+async fn api_auth_logout(State(state): State<AppState>, headers: HeaderMap) -> Response {
     let cookie_str = headers
         .get("cookie")
         .and_then(|v| v.to_str().ok())
@@ -745,7 +980,10 @@ async fn api_auth_logout(
         state.auth_state.invalidate_session(&token);
     }
     let mut resp_headers = HeaderMap::new();
-    resp_headers.insert("Set-Cookie", crate::web::auth::clear_session_cookie().parse().unwrap());
+    resp_headers.insert(
+        "Set-Cookie",
+        crate::web::auth::clear_session_cookie().parse().unwrap(),
+    );
     resp_headers.insert("Location", "/login".parse().unwrap());
     (StatusCode::FOUND, resp_headers).into_response()
 }
@@ -772,18 +1010,24 @@ async fn api_auth_rebind(
     }
     // Verify login password first
     match crate::web::auth::verify_login(&body.login_password) {
-        Ok(true) => { state.auth_state.record_login_success(); }
+        Ok(true) => {
+            state.auth_state.record_login_success();
+        }
         Ok(false) => {
             state.auth_state.record_login_failure();
             return (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Неверный пароль"})),
-            ).into_response();
+            )
+                .into_response();
         }
-        Err(e) => return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        ).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
+        }
     }
 
     match crate::web::auth::rebind_to_machine(&state.auth_state, &body.master_password) {
@@ -792,13 +1036,22 @@ async fn api_auth_rebind(
             let session_cookie = crate::web::auth::make_session_cookie(&token, body.remember_me);
             let mut resp_headers = HeaderMap::new();
             resp_headers.append("Set-Cookie", session_cookie.parse().unwrap());
-            resp_headers.append("Set-Cookie", "yandi_rebind=; Path=/; Max-Age=0".parse().unwrap());
-            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+            resp_headers.append(
+                "Set-Cookie",
+                "yandi_rebind=; Path=/; Max-Age=0".parse().unwrap(),
+            );
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({"error": e})),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -824,7 +1077,8 @@ async fn api_auth_recover(
     }
     let auth_state = state.auth_state.clone();
     let result = tokio::task::spawn_blocking(move || {
-        crate::web::auth::recover_login(&auth_state, &body.recovery_code, &body.new_login_password).map(|_| body.remember_me)
+        crate::web::auth::recover_login(&auth_state, &body.recovery_code, &body.new_login_password)
+            .map(|_| body.remember_me)
     })
     .await
     .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
@@ -835,11 +1089,20 @@ async fn api_auth_recover(
             let cookie = crate::web::auth::make_session_cookie(&token, remember_me);
             let mut resp_headers = HeaderMap::new();
             resp_headers.insert("Set-Cookie", cookie.parse().unwrap());
-            (StatusCode::OK, resp_headers, Json(serde_json::json!({"ok": true}))).into_response()
+            (
+                StatusCode::OK,
+                resp_headers,
+                Json(serde_json::json!({"ok": true})),
+            )
+                .into_response()
         }
         Err(e) => {
             state.auth_state.record_login_failure();
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": e}))).into_response()
+            (
+                StatusCode::UNAUTHORIZED,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response()
         }
     }
 }
@@ -924,7 +1187,9 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
     let info = &state.node_info;
 
     // Проверяем реальный статус P2P ноды
-    let is_running = state.node_running.load(std::sync::atomic::Ordering::Relaxed);
+    let is_running = state
+        .node_running
+        .load(std::sync::atomic::Ordering::Relaxed);
     let status = if is_running { "online" } else { "offline" };
 
     // Получаем NAT статус из транспорта
@@ -964,11 +1229,11 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
 /// Получить скорость (входящую и исходящую)
 async fn api_speed(State(state): State<AppState>) -> impl IntoResponse {
     let mut metrics = crate::netlayer::transport::WebTransportMetrics::default();
-    
+
     if let Some(transport) = &state.transport {
         metrics = transport.get_web_metrics().await;
     }
-    
+
     Json(serde_json::json!({
         "rx_speed": metrics.rx_speed,
         "rx_speed_mbps": metrics.rx_speed / 1024.0 / 1024.0,
@@ -1013,7 +1278,9 @@ async fn api_nodes(State(state): State<AppState>) -> impl IntoResponse {
     // 0. Узнаём собственный short_id чтобы НЕ выводить себя в списке —
     //    локальная нода не может подключиться к самой себе, а пользователь
     //    мог бы нажать «proxy» на собственной записи и ждать чудо.
-    let self_short_id: Option<String> = state.transport.as_ref()
+    let self_short_id: Option<String> = state
+        .transport
+        .as_ref()
         .map(|t| hex::encode(&t.identity().node_id().0[..8]))
         .or_else(|| {
             // standalone-режим (без transport'а): берём из node_info.
@@ -1026,7 +1293,10 @@ async fn api_nodes(State(state): State<AppState>) -> impl IntoResponse {
     let is_self = |sid: &str| self_short_id.as_deref().map(|s| s == sid).unwrap_or(false);
 
     // 1. Получаем mDNS ноды из кэша (отфильтровываем себя).
-    let mdns_nodes: Vec<DiscoveredNode> = state.discovered_nodes.lock().await
+    let mdns_nodes: Vec<DiscoveredNode> = state
+        .discovered_nodes
+        .lock()
+        .await
         .iter()
         .filter(|n| !is_self(&n.short_id))
         .cloned()
@@ -1041,8 +1311,7 @@ async fn api_nodes(State(state): State<AppState>) -> impl IntoResponse {
             if is_self(&peer_cid) {
                 continue;
             }
-            let already_in_mdns = mdns_nodes.iter()
-                .any(|n| n.short_id == peer_cid);
+            let already_in_mdns = mdns_nodes.iter().any(|n| n.short_id == peer_cid);
 
             if !already_in_mdns {
                 p2p_peers.push(serde_json::json!({
@@ -1062,7 +1331,8 @@ async fn api_nodes(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     // 3. Объединяем mDNS и P2P ноды
-    let all_nodes: Vec<serde_json::Value> = mdns_nodes.iter()
+    let all_nodes: Vec<serde_json::Value> = mdns_nodes
+        .iter()
         .map(|n| {
             serde_json::json!({
                 "short_id": n.short_id,
@@ -1093,7 +1363,7 @@ async fn api_nodes(State(state): State<AppState>) -> impl IntoResponse {
 /// Подключиться к ноде
 async fn api_connect(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     if state.transport.is_none() {
         return Json(serde_json::json!({
@@ -1114,7 +1384,7 @@ async fn api_connect(
 /// Запустить HTTP/SOCKS5 proxy через ноду
 async fn api_proxy_start(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     if state.transport.is_none() {
         return Json(serde_json::json!({
@@ -1145,7 +1415,10 @@ async fn api_proxy_start(
 
     // Ищем пира по short_id
     let peers = transport.get_peers().await;
-    let gateway_peer = match peers.iter().find(|p| &p.id.0[..8] == short_id_bytes.as_slice()) {
+    let gateway_peer = match peers
+        .iter()
+        .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
+    {
         Some(peer) => peer,
         None => {
             return Json(serde_json::json!({
@@ -1155,7 +1428,10 @@ async fn api_proxy_start(
         }
     };
 
-    info!("🌐 Starting HTTP Proxy through gateway: {} ({})", short_id, gateway_peer.addr);
+    info!(
+        "🌐 Starting HTTP Proxy through gateway: {} ({})",
+        short_id, gateway_peer.addr
+    );
 
     // Проверяем - уже есть активный прокси?
     if state.active_proxies.lock().await.len() > 0 {
@@ -1189,10 +1465,8 @@ async fn api_proxy_start(
     let http_port = crate::core::get_config().ports.http_proxy;
     let mut proxy_config = crate::proxy::ProxyConfig::default();
     proxy_config.client_listen_addr = format!("127.0.0.1:{http_port}");
-    let http_proxy = HttpProxyClient::new(
-        transport.clone(),
-        gateway_peer.id.clone()
-    ).with_config(proxy_config);
+    let http_proxy =
+        HttpProxyClient::new(transport.clone(), gateway_peer.id.clone()).with_config(proxy_config);
 
     let http_proxy = http_proxy.with_response_channel(resp_rx.unwrap());
     let http_proxy = http_proxy.with_tunnel_data_channel(tunnel_rx.unwrap());
@@ -1208,7 +1482,10 @@ async fn api_proxy_start(
     });
 
     // 🚨 ОТПРАВЛЯЕМ 0x30 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА!
-    info!("📤 Sending StartProxyGateway (0x30) packet to gateway {}", short_id);
+    info!(
+        "📤 Sending StartProxyGateway (0x30) packet to gateway {}",
+        short_id
+    );
     let cmd_bytes = vec![0x30u8]; // StartProxyGateway
 
     if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
@@ -1231,9 +1508,16 @@ async fn api_proxy_start(
         started_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    state.active_proxies.lock().await.insert(short_id.clone(), proxy_info);
+    state
+        .active_proxies
+        .lock()
+        .await
+        .insert(short_id.clone(), proxy_info);
 
-    info!("✅ HTTP Proxy started on 127.0.0.1:{} through gateway {}", http_port, short_id);
+    info!(
+        "✅ HTTP Proxy started on 127.0.0.1:{} through gateway {}",
+        http_port, short_id
+    );
 
     Json(serde_json::json!({
         "status": "success",
@@ -1246,7 +1530,7 @@ async fn api_proxy_start(
 /// Остановить proxy
 async fn api_proxy_stop(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     // Удаляем из active_proxies
     let removed = state.active_proxies.lock().await.remove(&short_id);
@@ -1291,7 +1575,7 @@ async fn api_proxy_status(State(state): State<AppState>) -> impl IntoResponse {
 /// Запустить SOCKS5 Proxy через gateway
 async fn api_socks5_start(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     if state.transport.is_none() {
         return Json(serde_json::json!({
@@ -1307,11 +1591,17 @@ async fn api_socks5_start(
     // «rules» / «rules-NL» — только нужные сайты (правила `route_rules`) идут через выход (быстро), остальные напрямую
     let rules_mode = short_id == "rules" || short_id.starts_with("rules-");
     let hops_mode = short_id == "hops" || short_id.starts_with("hops-");
-    let auto_country: Option<Option<String>> = if short_id == "auto" || short_id == "hops" || short_id == "rules" {
-        Some(None)
-    } else {
-        short_id.strip_prefix("auto-").or_else(|| short_id.strip_prefix("hops-")).or_else(|| short_id.strip_prefix("rules-")).and_then(crate::network_offers::normalise_country).map(Some)
-    };
+    let auto_country: Option<Option<String>> =
+        if short_id == "auto" || short_id == "hops" || short_id == "rules" {
+            Some(None)
+        } else {
+            short_id
+                .strip_prefix("auto-")
+                .or_else(|| short_id.strip_prefix("hops-"))
+                .or_else(|| short_id.strip_prefix("rules-"))
+                .and_then(crate::network_offers::normalise_country)
+                .map(Some)
+        };
     let gateway_peer = if auto_country.is_some() {
         None
     } else {
@@ -1335,9 +1625,15 @@ async fn api_socks5_start(
 
         // Ищем пира по short_id
         let peers = transport.get_peers().await;
-        match peers.iter().find(|p| &p.id.0[..8] == short_id_bytes.as_slice()) {
+        match peers
+            .iter()
+            .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
+        {
             Some(peer) => {
-                info!("🧦 Starting SOCKS5 Proxy through gateway: {} ({})", short_id, peer.addr);
+                info!(
+                    "🧦 Starting SOCKS5 Proxy through gateway: {} ({})",
+                    short_id, peer.addr
+                );
                 Some(peer.clone())
             }
             None => {
@@ -1380,11 +1676,15 @@ async fn api_socks5_start(
     let socks_port = crate::core::get_config().ports.mobile_gateway;
     let socks_password = match crate::exit_policy::local_proxy_password() {
         Ok(p) => p,
-        Err(e) => return Json(serde_json::json!({"status": "error", "message": format!("Не удалось создать пароль прокси: {e}")})),
+        Err(e) => {
+            return Json(
+                serde_json::json!({"status": "error", "message": format!("Не удалось создать пароль прокси: {e}")}),
+            )
+        }
     };
 
     // Создаём Socks5ProxyServer с авторизацией
-    use crate::socks5::{Socks5ProxyServer, Socks5Config};
+    use crate::socks5::{Socks5Config, Socks5ProxyServer};
 
     let bind_addr = format!("127.0.0.1:{socks_port}");
     let listen_addr = match bind_addr.parse() {
@@ -1400,11 +1700,11 @@ async fn api_socks5_start(
     info!("🧦 SOCKS5 Proxy binding to: {}", listen_addr);
 
     let socks5_config = Socks5Config {
-        listen_addr,  // ✅ Бинд на конкретный внешний IP
-        auth_required: true,  // ✅ Обязательная авторизация
+        listen_addr,         // ✅ Бинд на конкретный внешний IP
+        auth_required: true, // ✅ Обязательная авторизация
         username: Some("yandi".to_string()),
         password: Some(socks_password.clone()),
-        enable_udp: false,  // UDP не поддерживаем в P2P режиме
+        enable_udp: false, // UDP не поддерживаем в P2P режиме
     };
 
     let socks5_proxy = Socks5ProxyServer::new(socks5_config, transport.clone());
@@ -1418,10 +1718,22 @@ async fn api_socks5_start(
             let pool = crate::exit_select::start_pool(transport.clone(), c.clone());
             crate::exit_select::start_verifier(pool.clone(), listen_addr, socks_password.clone());
             let p = socks5_proxy.with_exit_pool(pool);
-            let p = if rules_mode { p.with_rules(crate::route_rules::Rules::load()) } else { p };
-            if hops_mode { p.with_hops() } else { p }
+            let p = if rules_mode {
+                p.with_rules(crate::route_rules::Rules::load())
+            } else {
+                p
+            };
+            if hops_mode {
+                p.with_hops()
+            } else {
+                p
+            }
         }
-        (None, None) => return Json(serde_json::json!({"status": "error", "message": "choose a gateway or automatic selection"})),
+        (None, None) => {
+            return Json(
+                serde_json::json!({"status": "error", "message": "choose a gateway or automatic selection"}),
+            )
+        }
     };
 
     // Регистрируем Station
@@ -1436,7 +1748,10 @@ async fn api_socks5_start(
 
     // 🚨 ОТПРАВЛЯЕМ 0x34 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА SOCKS5 EXIT NODE! (в режиме auto это делает очередь выходов)
     if let Some(gateway_peer) = &gateway_peer {
-        info!("📤 Sending StartSocks5Gateway (0x34) packet to gateway {}", short_id);
+        info!(
+            "📤 Sending StartSocks5Gateway (0x34) packet to gateway {}",
+            short_id
+        );
         let cmd_bytes = vec![0x34u8]; // StartSocks5Gateway
 
         if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
@@ -1457,9 +1772,16 @@ async fn api_socks5_start(
         started_at: chrono::Utc::now().to_rfc3339(),
     };
 
-    state.active_proxies.lock().await.insert(short_id.clone(), proxy_info);
+    state
+        .active_proxies
+        .lock()
+        .await
+        .insert(short_id.clone(), proxy_info);
 
-    info!("✅ SOCKS5 Proxy started on 127.0.0.1:{} through gateway {}", socks_port, short_id);
+    info!(
+        "✅ SOCKS5 Proxy started on 127.0.0.1:{} through gateway {}",
+        socks_port, short_id
+    );
 
     Json(serde_json::json!({
         "status": "success",
@@ -1490,32 +1812,64 @@ struct PersonalBody {
     relay: Option<PersonalHop>,
 }
 
-async fn api_socks5_personal(State(state): State<AppState>, Json(b): Json<PersonalBody>) -> impl IntoResponse {
+async fn api_socks5_personal(
+    State(state): State<AppState>,
+    Json(b): Json<PersonalBody>,
+) -> impl IntoResponse {
     let err = |m: &str| Json(serde_json::json!({"status": "error", "message": m}));
-    let Some(transport) = state.transport.as_ref() else { return err("P2P transport not available in standalone mode") };
+    let Some(transport) = state.transport.as_ref() else {
+        return err("P2P transport not available in standalone mode");
+    };
     let hop = |h: &PersonalHop| -> Option<crate::hops::PathHop> {
         let id: [u8; 32] = hex::decode(&h.node).ok()?.try_into().ok()?;
         let kb: [u8; 32] = hex::decode(&h.key).ok()?.try_into().ok()?;
-        Some(crate::hops::PathHop { id, key: ed25519_dalek::VerifyingKey::from_bytes(&kb).ok()? })
+        Some(crate::hops::PathHop {
+            id,
+            key: ed25519_dalek::VerifyingKey::from_bytes(&kb).ok()?,
+        })
     };
-    let Some(gateway) = hop(&PersonalHop { node: b.node.clone(), key: b.key.clone() }) else { return err("неверный номер или ключ шлюза") };
+    let Some(gateway) = hop(&PersonalHop {
+        node: b.node.clone(),
+        key: b.key.clone(),
+    }) else {
+        return err("неверный номер или ключ шлюза");
+    };
     let mut path = vec![];
     if let Some(r) = &b.relay {
-        let Some(r) = hop(r) else { return err("неверный номер или ключ ретранслятора") };
+        let Some(r) = hop(r) else {
+            return err("неверный номер или ключ ретранслятора");
+        };
         path.push(r);
     } else if let Some(r) = {
         // ретранслятор не указан: ищем по объявленной записи шлюза (подпись проверена ключом из сопряжения), берём связанного с нами
-        let connected: std::collections::HashSet<String> = transport.get_peers().await.iter().map(|p| p.id.to_hex()).collect();
+        let connected: std::collections::HashSet<String> = transport
+            .get_peers()
+            .await
+            .iter()
+            .map(|p| p.id.to_hex())
+            .collect();
         let (cards, _) = crate::network_offers::directory_snapshot(None);
         crate::relay_net::lookup_relays(&b.node.to_ascii_lowercase(), &b.key.to_ascii_lowercase())
             .into_iter()
             .filter(|id| connected.contains(id))
-            .find_map(|id| cards.iter().find(|c| c.node_id == id).and_then(|c| hop(&PersonalHop { node: c.node_id.clone(), key: c.key.clone() })))
+            .find_map(|id| {
+                cards.iter().find(|c| c.node_id == id).and_then(|c| {
+                    hop(&PersonalHop {
+                        node: c.node_id.clone(),
+                        key: c.key.clone(),
+                    })
+                })
+            })
     } {
         path.push(r);
     }
     path.push(gateway);
-    let Some(secret) = hex::decode(&b.secret).ok().and_then(|v| <[u8; 32]>::try_from(v).ok()) else { return err("неверный секрет устройств") };
+    let Some(secret) = hex::decode(&b.secret)
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+    else {
+        return err("неверный секрет устройств");
+    };
     if state.active_proxies.lock().await.len() > 0 {
         return err("Proxy already running. Stop it first.");
     }
@@ -1524,9 +1878,17 @@ async fn api_socks5_personal(State(state): State<AppState>, Json(b): Json<Person
         Ok(p) => p,
         Err(e) => return err(&format!("Не удалось создать пароль прокси: {e}")),
     };
-    use crate::socks5::{Socks5ProxyServer, Socks5Config};
-    let Ok(listen_addr) = format!("127.0.0.1:{socks_port}").parse() else { return err("bad bind address") };
-    let cfg = Socks5Config { listen_addr, auth_required: true, username: Some("yandi".to_string()), password: Some(socks_password.clone()), enable_udp: false };
+    use crate::socks5::{Socks5Config, Socks5ProxyServer};
+    let Ok(listen_addr) = format!("127.0.0.1:{socks_port}").parse() else {
+        return err("bad bind address");
+    };
+    let cfg = Socks5Config {
+        listen_addr,
+        auth_required: true,
+        username: Some("yandi".to_string()),
+        password: Some(socks_password.clone()),
+        enable_udp: false,
+    };
     let proxy = Socks5ProxyServer::new(cfg, transport.clone()).with_personal(path, secret);
     tokio::spawn(async move {
         if let Err(e) = proxy.run().await {
@@ -1535,7 +1897,12 @@ async fn api_socks5_personal(State(state): State<AppState>, Json(b): Json<Person
     });
     state.active_proxies.lock().await.insert(
         "personal".to_string(),
-        ProxyInfo { short_id: "personal".to_string(), proxy_type: ProxyType::Socks5, local_port: socks_port, started_at: chrono::Utc::now().to_rfc3339() },
+        ProxyInfo {
+            short_id: "personal".to_string(),
+            proxy_type: ProxyType::Socks5,
+            local_port: socks_port,
+            started_at: chrono::Utc::now().to_rfc3339(),
+        },
     );
     Json(serde_json::json!({
         "status": "success", "message": "SOCKS5 proxy started through the personal gateway",
@@ -1547,7 +1914,7 @@ async fn api_socks5_personal(State(state): State<AppState>, Json(b): Json<Person
 /// Остановить SOCKS5 proxy
 async fn api_socks5_stop(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     // Удаляем из active_proxies
     let removed = state.active_proxies.lock().await.remove(&short_id);
@@ -1579,7 +1946,8 @@ async fn api_socks5_status(State(state): State<AppState>) -> impl IntoResponse {
     let external_ip = &state.node_info.external_ip;
 
     // Фильтруем только SOCKS5 прокси
-    let socks5_proxies: Vec<&ProxyInfo> = proxies.values()
+    let socks5_proxies: Vec<&ProxyInfo> = proxies
+        .values()
         .filter(|p| matches!(p.proxy_type, ProxyType::Socks5))
         .collect();
 
@@ -1641,7 +2009,8 @@ async fn api_relay_sessions(State(state): State<AppState>) -> impl IntoResponse 
     let transport = state.transport.as_ref().unwrap();
     let relay_manager = transport.relay_manager.lock().await;
 
-    let sessions: Vec<serde_json::Value> = relay_manager.get_active_sessions()
+    let sessions: Vec<serde_json::Value> = relay_manager
+        .get_active_sessions()
         .iter()
         .map(|s| {
             serde_json::json!({
@@ -1709,7 +2078,7 @@ async fn api_relay_server_stop(State(state): State<AppState>) -> impl IntoRespon
 /// Подключиться к пиру через relay сервер
 async fn api_relay_connect(
     State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>
+    PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     if state.transport.is_none() {
         return Json(serde_json::json!({
@@ -1740,7 +2109,10 @@ async fn api_relay_connect(
 
     // Ищем пира по short_id
     let peers = transport.get_peers().await;
-    let target_peer = match peers.iter().find(|p| &p.id.0[..8] == short_id_bytes.as_slice()) {
+    let target_peer = match peers
+        .iter()
+        .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
+    {
         Some(peer) => peer,
         None => {
             return Json(serde_json::json!({
@@ -1847,15 +2219,32 @@ async fn api_stop() -> impl IntoResponse {
     }))
 }
 
+/// Телефоны владельца, сопряжённые с этим узлом, — собеседники веб-чата (переписка шифруется между узлом и телефоном, см. mobile_self).
+/// `short_id` у них — полный номер устройства (64 знака): по нему работают история и отправка.
+fn append_phone_contacts(data: &mut serde_json::Value) {
+    if let Some(arr) = data["contacts"].as_array_mut() {
+        for d in crate::mobile_api::devices_overview() {
+            let Some(full) = d["peer_id"].as_str() else { continue };
+            arr.push(serde_json::json!({
+                "id": format!("phone-{}", &full[..16]),
+                "name": format!("📱 {}", d["name"].as_str().unwrap_or("Телефон")),
+                "short_id": full,
+                "online": d["online"],
+                "is_phone": true,
+            }));
+        }
+    }
+}
+
 async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
     // Загружаем из contacts.json
     let contacts_path = "contacts.json";
 
     // Если файл не существует, возвращаем пустой список
     if !std::path::Path::new(contacts_path).exists() {
-        return Json(serde_json::json!({
-            "contacts": []
-        }));
+        let mut data = serde_json::json!({ "contacts": [] });
+        append_phone_contacts(&mut data);
+        return Json(data);
     }
 
     // Читаем файл
@@ -1882,6 +2271,7 @@ async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
                             }
                         }
                     }
+                    append_phone_contacts(&mut data);
                     Json(data)
                 }
                 Err(_) => {
@@ -1892,12 +2282,10 @@ async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
                 }
             }
         }
-        Err(_) => {
-            Json(serde_json::json!({
-                "contacts": []
-            }))
+        Err(_) => Json(serde_json::json!({
+            "contacts": []
+        })),
     }
-}
 }
 
 #[derive(Deserialize)]
@@ -1910,7 +2298,7 @@ struct ContactRequest {
 
 async fn api_contacts_post(
     State(state): State<AppState>,
-    axum::extract::Json(payload): axum::extract::Json<ContactRequest>
+    axum::extract::Json(payload): axum::extract::Json<ContactRequest>,
 ) -> impl IntoResponse {
     // Загружаем текущие контакты
     let contacts_path = "contacts.json";
@@ -1929,9 +2317,10 @@ async fn api_contacts_post(
     // Проверяем, это новый контакт или редактирование
     if let Some(id) = &payload.id {
         // Редактирование существующего контакта
-        if let Some(contact) = contacts.iter_mut().find(|c| {
-            c.get("id").and_then(|v| v.as_str()) == Some(id)
-        }) {
+        if let Some(contact) = contacts
+            .iter_mut()
+            .find(|c| c.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
             contact["name"] = serde_json::json!(payload.name);
             contact["short_id"] = serde_json::json!(payload.short_id);
         }
@@ -1967,7 +2356,7 @@ struct DeleteContactRequest {
 }
 
 async fn api_contacts_delete(
-    axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>
+    axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
     // Загружаем текущие контакты
     let contacts_path = "contacts.json";
@@ -1984,9 +2373,7 @@ async fn api_contacts_delete(
     }
 
     // Удаляем контакт
-    contacts.retain(|c| {
-        c.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str())
-    });
+    contacts.retain(|c| c.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
 
     // Сохраняем в файл
     let data = serde_json::json!({
@@ -2014,10 +2401,12 @@ async fn api_contacts_export() -> impl IntoResponse {
                 .and_then(|v| v.get("contacts").and_then(|c| c.as_array()).cloned())
                 .unwrap_or_default()
                 .into_iter()
-                .map(|c| serde_json::json!({
-                    "short_id": c.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
-                    "name":     c.get("name").and_then(|v| v.as_str()).unwrap_or(""),
-                }))
+                .map(|c| {
+                    serde_json::json!({
+                        "short_id": c.get("short_id").and_then(|v| v.as_str()).unwrap_or(""),
+                        "name":     c.get("name").and_then(|v| v.as_str()).unwrap_or(""),
+                    })
+                })
                 .collect(),
             Err(_) => Vec::new(),
         }
@@ -2031,7 +2420,10 @@ async fn api_contacts_export() -> impl IntoResponse {
     Response::builder()
         .status(StatusCode::OK)
         .header("Content-Type", "application/json; charset=utf-8")
-        .header("Content-Disposition", "attachment; filename=\"yandi_contacts.json\"")
+        .header(
+            "Content-Disposition",
+            "attachment; filename=\"yandi_contacts.json\"",
+        )
         .body(payload)
         .unwrap()
 }
@@ -2117,7 +2509,7 @@ struct GatewayRequest {
 }
 
 async fn api_gateways_post(
-    axum::extract::Json(payload): axum::extract::Json<GatewayRequest>
+    axum::extract::Json(payload): axum::extract::Json<GatewayRequest>,
 ) -> impl IntoResponse {
     // Загружаем текущие шлюзы
     let gateways_path = "gateways.json";
@@ -2136,9 +2528,10 @@ async fn api_gateways_post(
     // Проверяем, это новый шлюз или редактирование
     if let Some(id) = &payload.id {
         // Редактирование существующего шлюза
-        if let Some(gateway) = gateways.iter_mut().find(|g| {
-            g.get("id").and_then(|v| v.as_str()) == Some(id)
-        }) {
+        if let Some(gateway) = gateways
+            .iter_mut()
+            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(id))
+        {
             gateway["name"] = serde_json::json!(payload.name);
             gateway["short_id"] = serde_json::json!(payload.short_id);
             gateway["country"] = serde_json::json!(payload.country);
@@ -2171,7 +2564,7 @@ async fn api_gateways_post(
 }
 
 async fn api_gateways_delete(
-    axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>
+    axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
     // Загружаем текущие шлюзы
     let gateways_path = "gateways.json";
@@ -2188,9 +2581,7 @@ async fn api_gateways_delete(
     }
 
     // Удаляем шлюз
-    gateways.retain(|g| {
-        g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str())
-    });
+    gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
 
     // Сохраняем в файл
     let data = serde_json::json!({
@@ -2237,7 +2628,7 @@ async fn api_settings_get() -> impl IntoResponse {
 }
 
 async fn api_settings_put(
-    axum::extract::Json(settings): axum::extract::Json<serde_json::Value>
+    axum::extract::Json(settings): axum::extract::Json<serde_json::Value>,
 ) -> impl IntoResponse {
     use crate::update_config;
 
@@ -2245,7 +2636,11 @@ async fn api_settings_put(
     let mut config = crate::get_config();
 
     // Обновляем порты если указаны (только 1..=65535; раньше число молча обрезалось до 16 бит)
-    let port_of = |v: &serde_json::Value| v.as_u64().filter(|p| (1..=65535).contains(p)).map(|p| p as u16);
+    let port_of = |v: &serde_json::Value| {
+        v.as_u64()
+            .filter(|p| (1..=65535).contains(p))
+            .map(|p| p as u16)
+    };
     if let Some(network) = settings.get("network") {
         for (key, slot) in [
             ("discovery_port", &mut config.ports.discovery),
@@ -2258,7 +2653,11 @@ async fn api_settings_put(
             if let Some(v) = network.get(key) {
                 match port_of(v) {
                     Some(p) => *slot = p,
-                    None => return Json(serde_json::json!({"status": "error", "message": format!("{key}: port must be a number from 1 to 65535")})),
+                    None => {
+                        return Json(
+                            serde_json::json!({"status": "error", "message": format!("{key}: port must be a number from 1 to 65535")}),
+                        )
+                    }
                 }
             }
         }
@@ -2268,13 +2667,17 @@ async fn api_settings_put(
     if let Some(server) = settings.get("server") {
         if let Some(bind_address) = server.get("bind_address").and_then(|v| v.as_str()) {
             if bind_address.parse::<std::net::IpAddr>().is_err() {
-                return Json(serde_json::json!({"status": "error", "message": "bind_address must be an IP address"}));
+                return Json(
+                    serde_json::json!({"status": "error", "message": "bind_address must be an IP address"}),
+                );
             }
             config.server.bind_address = bind_address.to_string();
         }
         if let Some(log_level) = server.get("log_level").and_then(|v| v.as_str()) {
             if !["error", "warn", "info", "debug", "trace"].contains(&log_level) {
-                return Json(serde_json::json!({"status": "error", "message": "log_level must be error, warn, info, debug or trace"}));
+                return Json(
+                    serde_json::json!({"status": "error", "message": "log_level must be error, warn, info, debug or trace"}),
+                );
             }
             config.server.log_level = log_level.to_string();
         }
@@ -2312,7 +2715,9 @@ async fn api_node_stop(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     // Устанавливаем статус offline
-    state.node_running.store(false, std::sync::atomic::Ordering::Relaxed);
+    state
+        .node_running
+        .store(false, std::sync::atomic::Ordering::Relaxed);
 
     // TODO: Вызвать transport.shutdown() для закрытия сокетов
     // Пока меняем только статус
@@ -2334,7 +2739,9 @@ async fn api_node_start(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     // Устанавливаем статус online
-    state.node_running.store(true, std::sync::atomic::Ordering::Relaxed);
+    state
+        .node_running
+        .store(true, std::sync::atomic::Ordering::Relaxed);
 
     // TODO: Вызвать transport.restart() для переоткрытия сокетов
     // Пока меняем только статус
@@ -2355,8 +2762,12 @@ async fn api_chat_send(
     Json(req): Json<SendMessageRequest>,
 ) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2366,6 +2777,34 @@ async fn api_chat_send(
     }
 
     let chat_manager = chat_manager.unwrap();
+
+    // телефон владельца (сопряжён с этим узлом): сообщение шифруется ключом телефона и уходит в его очередь, не в сеть узлов
+    if crate::mobile_api::is_device_peer(&peer_id) {
+        if let Some(att) = req.attachment {
+            // файл уже загружен страницей (send-chunk положил его в uploads): узел шифрует его для телефона
+            let Some(file_ref) = att.file_ref else {
+                return Json(serde_json::json!({"status": "error", "message": "Телефону файл отправляется только загрузкой по кускам"}));
+            };
+            let Some(path) = resolve_local_file_path(&file_ref.file_id, &att.filename) else {
+                return Json(serde_json::json!({"status": "error", "message": "Загруженный файл не найден на узле"}));
+            };
+            let attachment = crate::communication::FileAttachment {
+                filename: att.filename,
+                size: att.size,
+                mime_type: att.mime_type,
+                data: None,
+                file_ref: Some(crate::communication::FileReference { file_id: file_ref.file_id, total_chunks: file_ref.total_chunks, local_name: file_ref.local_name }),
+            };
+            return match crate::mobile_api::pc_send_file_to_device(&peer_id, &path, attachment, req.text).await {
+                Ok(msg) => Json(serde_json::json!({"status": "success", "message": "Message sent", "msg_id": hex::encode(&msg.msg_id.0[..8]), "timestamp": msg.timestamp})),
+                Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+            };
+        }
+        return match crate::mobile_api::pc_send_to_device(&peer_id, req.text).await {
+            Ok(msg) => Json(serde_json::json!({"status": "success", "message": "Message sent", "msg_id": hex::encode(&msg.msg_id.0[..8]), "timestamp": msg.timestamp})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
+    }
 
     // Попытаться распарсить peer_id (поддерживает полный HashId или short_id)
     let peer_hash = if let Ok(id) = crate::util::HashId::from_hex(&peer_id) {
@@ -2391,34 +2830,37 @@ async fn api_chat_send(
     };
 
     // Подготовить attachment если есть
-    let attachment = req.attachment.map(|att| crate::communication::FileAttachment {
-        filename: att.filename,
-        size: att.size,
-        mime_type: att.mime_type,
-        data: att.data,
-        file_ref: att.file_ref.map(|file_ref| crate::communication::FileReference {
-            file_id: file_ref.file_id,
-            total_chunks: file_ref.total_chunks,
-            local_name: file_ref.local_name,
-        }),
-    });
+    let attachment = req
+        .attachment
+        .map(|att| crate::communication::FileAttachment {
+            filename: att.filename,
+            size: att.size,
+            mime_type: att.mime_type,
+            data: att.data,
+            file_ref: att
+                .file_ref
+                .map(|file_ref| crate::communication::FileReference {
+                    file_id: file_ref.file_id,
+                    total_chunks: file_ref.total_chunks,
+                    local_name: file_ref.local_name,
+                }),
+        });
 
     // Отправить сообщение
-    match chat_manager.send_message_with_attachment(peer_hash, req.text, attachment).await {
-        Ok(msg) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Message sent",
-                "msg_id": hex::encode(&msg.msg_id.0[..8]),
-                "timestamp": msg.timestamp
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to send message: {}", e)
-            }))
-        }
+    match chat_manager
+        .send_message_with_attachment(peer_hash, req.text, attachment)
+        .await
+    {
+        Ok(msg) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Message sent",
+            "msg_id": hex::encode(&msg.msg_id.0[..8]),
+            "timestamp": msg.timestamp
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to send message: {}", e)
+        })),
     }
 }
 
@@ -2428,8 +2870,12 @@ async fn api_chat_history(
     PathExtractor(peer_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2463,25 +2909,32 @@ async fn api_chat_history(
         }
     };
 
+    // переписка с телефоном владельца открыта на странице — «прочитано» по его сообщениям
+    if crate::mobile_api::is_device_peer(&peer_id) {
+        crate::mobile_api::pc_mark_read(&peer_id);
+    }
     // println!("🔍 Loading history for short_id: {}, peer_hash: {}", peer_id, hex::encode(&peer_hash.0[..8]));
     // Загрузить историю (последние 100 сообщений)
     match chat_manager.load_history(&peer_hash, 100) {
         Ok(messages) => {
             // Конвертировать HashId в hex строку для JSON (полные 32 байта)
-            let messages_json: Vec<serde_json::Value> = messages.into_iter().map(|msg| {
-                serde_json::json!({
-                    "msg_id": hex::encode(&msg.msg_id.0),  // Полный HashId (32 байта)
-                    "from": hex::encode(&msg.from.0),      // Полный HashId (32 байта)
-                    "to": hex::encode(&msg.to.0),          // Полный HashId (32 байта)
-                    "timestamp": msg.timestamp,
-                    "text": msg.text,
-                    "encrypted": msg.encrypted,
-                    "status": format!("{:?}", msg.status),
-                    "edited": msg.edited,
-                    "edit_timestamp": msg.edit_timestamp,
-                    "attachment": msg.attachment
+            let messages_json: Vec<serde_json::Value> = messages
+                .into_iter()
+                .map(|msg| {
+                    serde_json::json!({
+                        "msg_id": hex::encode(&msg.msg_id.0),  // Полный HashId (32 байта)
+                        "from": hex::encode(&msg.from.0),      // Полный HashId (32 байта)
+                        "to": hex::encode(&msg.to.0),          // Полный HashId (32 байта)
+                        "timestamp": msg.timestamp,
+                        "text": msg.text,
+                        "encrypted": msg.encrypted,
+                        "status": format!("{:?}", msg.status),
+                        "edited": msg.edited,
+                        "edit_timestamp": msg.edit_timestamp,
+                        "attachment": msg.attachment
+                    })
                 })
-            }).collect();
+                .collect();
 
             Json(serde_json::json!({
                 "status": "success",
@@ -2489,12 +2942,10 @@ async fn api_chat_history(
                 "messages": messages_json
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to load history: {}", e)
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to load history: {}", e)
+        })),
     }
 }
 
@@ -2504,8 +2955,12 @@ async fn api_chat_clear(
     PathExtractor(peer_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2541,18 +2996,14 @@ async fn api_chat_clear(
 
     // Очистить историю
     match chat_manager.clear_history(&peer_hash) {
-        Ok(_) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Chat history cleared"
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to clear history: {}", e)
-            }))
-        }
+        Ok(_) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Chat history cleared"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to clear history: {}", e)
+        })),
     }
 }
 
@@ -2563,8 +3014,12 @@ async fn api_chat_edit(
     Json(req): Json<EditMessageRequest>,
 ) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2607,20 +3062,23 @@ async fn api_chat_edit(
         }
     };
 
+    // телефон владельца: правка уходит и ему (конверт правки), а не только в историю узла
+    if crate::mobile_api::is_device_peer(&peer_id) {
+        return match crate::mobile_api::pc_edit_for_device(&peer_id, &msg_id, req.text) {
+            Ok(()) => Json(serde_json::json!({"status": "success", "message": "Message edited"})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
+    }
     // Редактировать сообщение
     match chat_manager.edit_message(&peer_hash, &msg_id, req.text) {
-        Ok(_) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Message edited"
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to edit message: {}", e)
-            }))
-        }
+        Ok(_) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Message edited"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to edit message: {}", e)
+        })),
     }
 }
 
@@ -2631,8 +3089,12 @@ async fn api_chat_delete(
     Json(req): Json<DeleteMessageRequest>,
 ) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2678,46 +3140,43 @@ async fn api_chat_delete(
     // Удалить сообщение
     if req.for_everyone {
         // Удалить для всех (отправить запрос на удаление)
-        match chat_manager.delete_message_for_everyone(&peer_hash, &msg_id).await {
-            Ok(_) => {
-                Json(serde_json::json!({
-                    "status": "success",
-                    "message": "Message deleted for everyone"
-                }))
-            }
-            Err(e) => {
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Failed to delete message: {}", e)
-                }))
-            }
+        match chat_manager
+            .delete_message_for_everyone(&peer_hash, &msg_id)
+            .await
+        {
+            Ok(_) => Json(serde_json::json!({
+                "status": "success",
+                "message": "Message deleted for everyone"
+            })),
+            Err(e) => Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to delete message: {}", e)
+            })),
         }
     } else {
         // Удалить только у себя
         match chat_manager.delete_message_local(&peer_hash, &msg_id) {
-            Ok(_) => {
-                Json(serde_json::json!({
-                    "status": "success",
-                    "message": "Message deleted locally"
-                }))
-            }
-            Err(e) => {
-                Json(serde_json::json!({
-                    "status": "error",
-                    "message": format!("Failed to delete message: {}", e)
-                }))
-            }
+            Ok(_) => Json(serde_json::json!({
+                "status": "success",
+                "message": "Message deleted locally"
+            })),
+            Err(e) => Json(serde_json::json!({
+                "status": "error",
+                "message": format!("Failed to delete message: {}", e)
+            })),
         }
     }
 }
 
 /// Получить список всех чатов
-async fn api_chats_list(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
-    let chat_manager = chat_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "Chat manager not initialized"));
+    let chat_manager = chat_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "Chat manager not initialized",
+        )
+    });
 
     if let Err(_) = chat_manager {
         return Json(serde_json::json!({
@@ -2731,21 +3190,17 @@ async fn api_chats_list(
     // Получить список чатов
     match chat_manager.list_chats() {
         Ok(peer_ids) => {
-            let chats: Vec<String> = peer_ids.iter()
-                .map(|id| hex::encode(&id.0[..8]))
-                .collect();
+            let chats: Vec<String> = peer_ids.iter().map(|id| hex::encode(&id.0[..8])).collect();
 
             Json(serde_json::json!({
                 "status": "success",
                 "chats": chats
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to list chats: {}", e)
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to list chats: {}", e)
+        })),
     }
 }
 
@@ -2801,7 +3256,6 @@ struct DeleteMessageRequest {
     msg_id: String,
     for_everyone: bool,
 }
-
 
 // === File Transfer API Handlers ===
 
@@ -2880,7 +3334,10 @@ async fn api_files_upload(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis();
-    let safe_filename = format!("{}_{timestamp}", filename.replace("/", "_").replace("\\", "_"));
+    let safe_filename = format!(
+        "{}_{timestamp}",
+        filename.replace("/", "_").replace("\\", "_")
+    );
     let file_path = uploads_dir.join(&safe_filename);
 
     // Сохраняем файл
@@ -2894,7 +3351,10 @@ async fn api_files_upload(
 
     let file_size = file_data.len();
 
-    info!("📤 File uploaded: {} ({} bytes) -> {:?}", filename, file_size, file_path);
+    info!(
+        "📤 File uploaded: {} ({} bytes) -> {:?}",
+        filename, file_size, file_path
+    );
 
     Json(serde_json::json!({
         "status": "success",
@@ -3017,7 +3477,11 @@ async fn api_files_send_direct(
         hex::encode(&peer_hash.0[..8]),
         uuid::Uuid::new_v4().simple()
     );
-    let temp_path = temp_dir.join(format!("{}__{}", transfer_id, sanitize_storage_filename(&filename)));
+    let temp_path = temp_dir.join(format!(
+        "{}__{}",
+        transfer_id,
+        sanitize_storage_filename(&filename)
+    ));
     if let Err(e) = std::fs::write(&temp_path, &file_data) {
         error!("❌ Failed to write file to disk: {}", e);
         return Json(serde_json::json!({
@@ -3026,18 +3490,28 @@ async fn api_files_send_direct(
         }));
     }
 
-    info!("📤 Sending file '{}' ({} bytes) to {} directly from memory",
-        filename, file_size, crate::util::mask_hash_id(&peer_hash));
+    info!(
+        "📤 Sending file '{}' ({} bytes) to {} directly from memory",
+        filename,
+        file_size,
+        crate::util::mask_hash_id(&peer_hash)
+    );
 
-    match file_transfer_manager.start_file_transfer_from_disk_with_id(
-        peer_hash,
-        Some(transfer_id.clone()),
-        filename.clone(),
-        temp_path,
-        mime_type.clone()
-    ).await {
+    match file_transfer_manager
+        .start_file_transfer_from_disk_with_id(
+            peer_hash,
+            Some(transfer_id.clone()),
+            filename.clone(),
+            temp_path,
+            mime_type.clone(),
+        )
+        .await
+    {
         Ok(file_id) => {
-            info!("✅ File transfer started: {} (file_id: {})", filename, file_id);
+            info!(
+                "✅ File transfer started: {} (file_id: {})",
+                filename, file_id
+            );
             Json(serde_json::json!({
                 "status": "success",
                 "message": "File transfer started",
@@ -3054,7 +3528,6 @@ async fn api_files_send_direct(
             }))
         }
     }
-
 }
 
 /// Accumulate chunks from browser and start P2P transfer when complete
@@ -3064,6 +3537,9 @@ use std::sync::LazyLock;
 use tokio::sync::Mutex as TokioMutex;
 
 const BROWSER_UPLOAD_CHUNK_SIZE: usize = crate::communication::FILE_TRANSFER_CHUNK_SIZE;
+/// Телефону владельца файл не идёт по UDP между узлами (узел сам шифрует его и кладёт в очередь телефона), поэтому страница может слать
+/// крупные куски: меньше запросов — в сотни раз быстрее. Держим ниже общего предела тела запроса (2 МБ).
+const PHONE_UPLOAD_CHUNK_SIZE: usize = 1024 * 1024;
 
 /// Накопитель чанков файлов от браузера
 #[derive(Debug, Clone)]
@@ -3082,7 +3558,8 @@ const MAX_PENDING_UPLOADS: usize = 32;
 const PENDING_UPLOAD_TTL: std::time::Duration = std::time::Duration::from_secs(3600);
 
 /// Глобальное хранилище незавершённых загрузок
-static CHUNK_UPLOADS: LazyLock<TokioMutex<HashMap<String, PendingFileUpload>>> = LazyLock::new(|| TokioMutex::new(HashMap::new()));
+static CHUNK_UPLOADS: LazyLock<TokioMutex<HashMap<String, PendingFileUpload>>> =
+    LazyLock::new(|| TokioMutex::new(HashMap::new()));
 
 /// Принять чанк файла от браузера и писать сразу во временный файл на диск.
 /// Когда все чанки получены - запустить P2P передачу из этого temp-файла.
@@ -3204,13 +3681,14 @@ async fn api_files_send_chunk(
         }
     };
 
-    if chunk_data.len() > BROWSER_UPLOAD_CHUNK_SIZE {
+    let chunk_limit = if crate::mobile_api::is_device_peer(&peer_id) { PHONE_UPLOAD_CHUNK_SIZE } else { BROWSER_UPLOAD_CHUNK_SIZE };
+    if chunk_data.len() > chunk_limit {
         return Json(serde_json::json!({
             "status": "error",
             "message": format!(
                 "Chunk too large: got {} bytes, max {} bytes",
                 chunk_data.len(),
-                BROWSER_UPLOAD_CHUNK_SIZE
+                chunk_limit
             )
         }));
     }
@@ -3250,7 +3728,8 @@ async fn api_files_send_chunk(
         fid.clone()
     } else {
         // Новый upload - генерируем ID на основе peer + timestamp
-        format!("{}_{}",
+        format!(
+            "{}_{}",
             hex::encode(&peer_hash.0[..8]),
             chrono::Utc::now().timestamp_millis()
         )
@@ -3266,12 +3745,24 @@ async fn api_files_send_chunk(
     }
 
     // limits before anything is allocated: the numbers come from the browser request
-    let max_chunks = (crate::communication::MAX_FILE_TRANSFER_SIZE as usize / BROWSER_UPLOAD_CHUNK_SIZE + 1) as u32;
-    if total_chunks == 0 || total_chunks > max_chunks || file_size > crate::communication::MAX_FILE_TRANSFER_SIZE {
-        return Json(serde_json::json!({"status": "error", "message": "File is larger than the allowed size"}));
+    let max_chunks = (crate::communication::MAX_FILE_TRANSFER_SIZE as usize
+        / chunk_limit
+        + 1) as u32;
+    if total_chunks == 0
+        || total_chunks > max_chunks
+        || file_size > crate::communication::MAX_FILE_TRANSFER_SIZE
+    {
+        return Json(
+            serde_json::json!({"status": "error", "message": "File is larger than the allowed size"}),
+        );
     }
     // the id is used in a file name: only plain characters
-    if upload_id.is_empty() || upload_id.len() > 80 || !upload_id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+    if upload_id.is_empty()
+        || upload_id.len() > 80
+        || !upload_id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
         return Json(serde_json::json!({"status": "error", "message": "Invalid file_id"}));
     }
 
@@ -3286,7 +3777,9 @@ async fn api_files_send_chunk(
         alive
     });
     if !uploads.contains_key(&upload_id) && uploads.len() >= MAX_PENDING_UPLOADS {
-        return Json(serde_json::json!({"status": "error", "message": "Too many unfinished uploads"}));
+        return Json(
+            serde_json::json!({"status": "error", "message": "Too many unfinished uploads"}),
+        );
     }
     let mut created = false;
 
@@ -3296,7 +3789,11 @@ async fn api_files_send_chunk(
             filename: filename.clone(),
             mime_type: mime_type.clone(),
             total_chunks,
-            temp_path: uploads_dir.join(format!("{}__{}", upload_id, sanitize_storage_filename(&filename))),
+            temp_path: uploads_dir.join(format!(
+                "{}__{}",
+                upload_id,
+                sanitize_storage_filename(&filename)
+            )),
             received_chunks: vec![false; total_chunks as usize],
             received_count: 0,
             started: std::time::Instant::now(),
@@ -3326,7 +3823,7 @@ async fn api_files_send_chunk(
             .write(true)
             .truncate(false)
             .open(&upload.temp_path)?;
-        let offset = (chunk_index as u64) * (BROWSER_UPLOAD_CHUNK_SIZE as u64);
+        let offset = (chunk_index as u64) * (chunk_limit as u64);
         file.seek(SeekFrom::Start(offset))?;
         file.write_all(&chunk_data)?;
         Ok(())
@@ -3345,8 +3842,13 @@ async fn api_files_send_chunk(
         upload.received_count += 1;
     }
 
-    info!("📦 Received chunk {}/{} for '{}' ({} bytes)",
-        chunk_index + 1, total_chunks, upload.filename, chunk_data.len());
+    info!(
+        "📦 Received chunk {}/{} for '{}' ({} bytes)",
+        chunk_index + 1,
+        total_chunks,
+        upload.filename,
+        chunk_data.len()
+    );
 
     // Проверяем: все ли чанки получены?
     let is_complete = upload.received_count == upload.total_chunks;
@@ -3359,16 +3861,33 @@ async fn api_files_send_chunk(
 
     drop(uploads);
 
+    // телефон владельца: по сети узлов не шлём; когда файл собран, кладём его в uploads — отправит api_chat_send (зашифровав для телефона)
+    if crate::mobile_api::is_device_peer(&peer_id) {
+        if !is_complete {
+            return Json(serde_json::json!({"status": "success", "message": "Chunk stored", "file_id": file_id, "received": received_count, "complete": false}));
+        }
+        let stored = uploads_dir.join(format!("{}__{}", file_id, sanitize_storage_filename(&upload_filename)));
+        if let Err(e) = std::fs::rename(&temp_path, &stored) {
+            return Json(serde_json::json!({"status": "error", "message": format!("Failed to store upload: {}", e)}));
+        }
+        CHUNK_UPLOADS.lock().await.remove(&file_id);
+        let size = std::fs::metadata(&stored).map(|m| m.len()).unwrap_or(file_size);
+        return Json(serde_json::json!({"status": "success", "message": "File transfer completed", "file_id": file_id, "size": size, "complete": true}));
+    }
+
     if created {
-        if let Err(e) = file_transfer_manager.register_streaming_transfer(
-            peer_hash,
-            Some(file_id.clone()),
-            upload_filename.clone(),
-            temp_path.clone(),
-            upload_mime.clone(),
-            file_size,
-            upload_total_chunks,
-        ).await {
+        if let Err(e) = file_transfer_manager
+            .register_streaming_transfer(
+                peer_hash,
+                Some(file_id.clone()),
+                upload_filename.clone(),
+                temp_path.clone(),
+                upload_mime.clone(),
+                file_size,
+                upload_total_chunks,
+            )
+            .await
+        {
             error!("❌ Failed to register streaming transfer: {}", e);
             return Json(serde_json::json!({
                 "status": "error",
@@ -3377,7 +3896,10 @@ async fn api_files_send_chunk(
         }
     }
 
-    if let Err(e) = file_transfer_manager.send_streaming_chunk(peer_hash, &file_id, chunk_index, &chunk_data).await {
+    if let Err(e) = file_transfer_manager
+        .send_streaming_chunk(peer_hash, &file_id, chunk_index, &chunk_data)
+        .await
+    {
         error!("❌ Failed to stream chunk via P2P: {}", e);
         return Json(serde_json::json!({
             "status": "error",
@@ -3399,9 +3921,15 @@ async fn api_files_send_chunk(
 
         info!("✅ All chunks received! File size: {} bytes", file_size);
 
-        match file_transfer_manager.finalize_streaming_transfer(peer_hash, &file_id).await {
+        match file_transfer_manager
+            .finalize_streaming_transfer(peer_hash, &file_id)
+            .await
+        {
             Ok(_) => {
-                info!("✅ Streaming P2P transfer finalized for file {}", upload_filename);
+                info!(
+                    "✅ Streaming P2P transfer finalized for file {}",
+                    upload_filename
+                );
                 CHUNK_UPLOADS.lock().await.remove(&file_id);
                 return Json(serde_json::json!({
                     "status": "success",
@@ -3493,8 +4021,12 @@ async fn api_files_send_uploaded(
         .first_or_octet_stream()
         .to_string();
 
-    info!("📤 Sending file '{}' ({} bytes) to {} with chunking",
-        filename, file_data.len(), crate::util::mask_hash_id(&peer_hash));
+    info!(
+        "📤 Sending file '{}' ({} bytes) to {} with chunking",
+        filename,
+        file_data.len(),
+        crate::util::mask_hash_id(&peer_hash)
+    );
 
     // Начать чанкованную передачу файла
     let transfer_id = format!(
@@ -3502,15 +4034,21 @@ async fn api_files_send_uploaded(
         hex::encode(&peer_hash.0[..8]),
         uuid::Uuid::new_v4().simple()
     );
-    match file_transfer_manager.start_file_transfer_from_disk_with_id(
-        peer_hash,
-        Some(transfer_id),
-        filename.clone(),
-        file_path.clone(),
-        mime_type
-    ).await {
+    match file_transfer_manager
+        .start_file_transfer_from_disk_with_id(
+            peer_hash,
+            Some(transfer_id),
+            filename.clone(),
+            file_path.clone(),
+            mime_type,
+        )
+        .await
+    {
         Ok(file_id) => {
-            info!("✅ File transfer started: {} (file_id: {})", filename, file_id);
+            info!(
+                "✅ File transfer started: {} (file_id: {})",
+                filename, file_id
+            );
             Json(serde_json::json!({
                 "status": "success",
                 "message": "File transfer started",
@@ -3529,7 +4067,7 @@ async fn api_files_send_uploaded(
     }
 }
 
-fn sanitize_storage_filename(filename: &str) -> String {
+pub(crate) fn sanitize_storage_filename(filename: &str) -> String {
     // Strip path components — take only the file name (SEC-08)
     let name = std::path::Path::new(filename)
         .file_name()
@@ -3553,10 +4091,30 @@ fn sanitize_storage_filename(filename: &str) -> String {
     let trimmed = trimmed.trim_end_matches(|c: char| c == '.' || c == ' ');
 
     // Reject Windows reserved names
-    let is_reserved = matches!(trimmed.to_ascii_lowercase().as_str(),
-        "con" | "prn" | "aux" | "nul" |
-        "com1" | "com2" | "com3" | "com4" | "com5" | "com6" | "com7" | "com8" | "com9" |
-        "lpt1" | "lpt2" | "lpt3" | "lpt4" | "lpt5" | "lpt6" | "lpt7" | "lpt8" | "lpt9"
+    let is_reserved = matches!(
+        trimmed.to_ascii_lowercase().as_str(),
+        "con"
+            | "prn"
+            | "aux"
+            | "nul"
+            | "com1"
+            | "com2"
+            | "com3"
+            | "com4"
+            | "com5"
+            | "com6"
+            | "com7"
+            | "com8"
+            | "com9"
+            | "lpt1"
+            | "lpt2"
+            | "lpt3"
+            | "lpt4"
+            | "lpt5"
+            | "lpt6"
+            | "lpt7"
+            | "lpt8"
+            | "lpt9"
     );
 
     if trimmed.is_empty() || is_reserved {
@@ -3566,9 +4124,13 @@ fn sanitize_storage_filename(filename: &str) -> String {
     }
 }
 
-fn resolve_local_file_path(file_id: &str, filename: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn resolve_local_file_path(file_id: &str, filename: &str) -> Option<std::path::PathBuf> {
     // SEC-07: validate file_id — only alphanumeric, underscores, and hyphens
-    if file_id.is_empty() || !file_id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
+    if file_id.is_empty()
+        || !file_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
         return None;
     }
 
@@ -3640,7 +4202,8 @@ async fn api_files_content(
                 .first_or_octet_stream()
                 .to_string();
             let data_len = data.len();
-            let is_streaming_media = content_type.starts_with("audio/") || content_type.starts_with("video/");
+            let is_streaming_media =
+                content_type.starts_with("audio/") || content_type.starts_with("video/");
 
             if let Some(range_header) = headers
                 .get(axum::http::header::RANGE)
@@ -3648,18 +4211,19 @@ async fn api_files_content(
             {
                 debug!(
                     "📡 File content request: file_id={}, filename={}, range={}, media={}",
-                    file_id,
-                    filename,
-                    range_header,
-                    is_streaming_media
+                    file_id, filename, range_header, is_streaming_media
                 );
 
                 if !is_streaming_media {
-                    if let Some((start, mut end)) = parse_single_http_range(range_header, data_len) {
+                    if let Some((start, mut end)) = parse_single_http_range(range_header, data_len)
+                    {
                         if start >= data_len {
                             return Response::builder()
                                 .status(StatusCode::RANGE_NOT_SATISFIABLE)
-                                .header(axum::http::header::CONTENT_RANGE, format!("bytes */{}", data_len))
+                                .header(
+                                    axum::http::header::CONTENT_RANGE,
+                                    format!("bytes */{}", data_len),
+                                )
                                 .header(axum::http::header::ACCEPT_RANGES, "bytes")
                                 .header("Cache-Control", "no-store")
                                 .body(Body::empty())
@@ -3674,7 +4238,10 @@ async fn api_files_content(
                                 .header(axum::http::header::CONTENT_TYPE, content_type.clone())
                                 .header(axum::http::header::ACCEPT_RANGES, "bytes")
                                 .header(axum::http::header::CONTENT_LENGTH, chunk.len().to_string())
-                                .header(axum::http::header::CONTENT_RANGE, format!("bytes {}-{}/{}", start, end, data_len))
+                                .header(
+                                    axum::http::header::CONTENT_RANGE,
+                                    format!("bytes {}-{}/{}", start, end, data_len),
+                                )
                                 .header("Cache-Control", "no-store")
                                 .body(Body::from(chunk))
                                 .unwrap();
@@ -3726,8 +4293,12 @@ async fn api_tunnel_start(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let tunnel_manager = state.p2p_tunnel_manager.lock().await;
-    let tunnel_manager = tunnel_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "P2P Tunnel manager not initialized"));
+    let tunnel_manager = tunnel_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "P2P Tunnel manager not initialized",
+        )
+    });
 
     if let Err(_) = tunnel_manager {
         return Json(serde_json::json!({
@@ -3769,20 +4340,16 @@ async fn api_tunnel_start(
 
     // Request tunnel
     match tunnel_manager.request_tunnel(peer_id, tunnel_type).await {
-        Ok(_tunnel) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": format!("P2P tunnel request sent to {}", short_id),
-                "peer": short_id,
-                "tunnel_type": format!("{:?}", tunnel_type)
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to start tunnel: {}", e)
-            }))
-        }
+        Ok(_tunnel) => Json(serde_json::json!({
+            "status": "success",
+            "message": format!("P2P tunnel request sent to {}", short_id),
+            "peer": short_id,
+            "tunnel_type": format!("{:?}", tunnel_type)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to start tunnel: {}", e)
+        })),
     }
 }
 
@@ -3792,8 +4359,12 @@ async fn api_tunnel_stop(
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     let tunnel_manager = state.p2p_tunnel_manager.lock().await;
-    let tunnel_manager = tunnel_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "P2P Tunnel manager not initialized"));
+    let tunnel_manager = tunnel_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "P2P Tunnel manager not initialized",
+        )
+    });
 
     if let Err(_) = tunnel_manager {
         return Json(serde_json::json!({
@@ -3826,28 +4397,26 @@ async fn api_tunnel_stop(
 
     // Close tunnel
     match tunnel_manager.close_tunnel(peer_id).await {
-        Ok(_) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": format!("P2P tunnel with {} closed", short_id)
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to close tunnel: {}", e)
-            }))
-        }
+        Ok(_) => Json(serde_json::json!({
+            "status": "success",
+            "message": format!("P2P tunnel with {} closed", short_id)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to close tunnel: {}", e)
+        })),
     }
 }
 
 /// List all active P2P tunnels
-async fn api_tunnel_list(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn api_tunnel_list(State(state): State<AppState>) -> impl IntoResponse {
     let tunnel_manager = state.p2p_tunnel_manager.lock().await;
-    let tunnel_manager = tunnel_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "P2P Tunnel manager not initialized"));
+    let tunnel_manager = tunnel_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "P2P Tunnel manager not initialized",
+        )
+    });
 
     if let Err(_) = tunnel_manager {
         return Json(serde_json::json!({
@@ -3861,7 +4430,8 @@ async fn api_tunnel_list(
     // Get tunnel list
     let tunnels = tunnel_manager.list_tunnels().await;
 
-    let tunnel_list: Vec<serde_json::Value> = tunnels.iter()
+    let tunnel_list: Vec<serde_json::Value> = tunnels
+        .iter()
         .map(|t| {
             serde_json::json!({
                 "peer": hex::encode(&t.peer.0[..8]),
@@ -3887,8 +4457,12 @@ async fn api_tunnel_status(
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     let tunnel_manager = state.p2p_tunnel_manager.lock().await;
-    let tunnel_manager = tunnel_manager.as_ref()
-        .ok_or_else(|| (StatusCode::SERVICE_UNAVAILABLE, "P2P Tunnel manager not initialized"));
+    let tunnel_manager = tunnel_manager.as_ref().ok_or_else(|| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "P2P Tunnel manager not initialized",
+        )
+    });
 
     if let Err(_) = tunnel_manager {
         return Json(serde_json::json!({
@@ -3935,12 +4509,10 @@ async fn api_tunnel_status(
                 }
             }))
         }
-        None => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("No active tunnel with {}", short_id)
-            }))
-        }
+        None => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("No active tunnel with {}", short_id)
+        })),
     }
 }
 
@@ -3990,15 +4562,18 @@ async fn api_p2p_peers(State(state): State<AppState>) -> impl IntoResponse {
     let p2p_transport = p2p_transport_opt.unwrap();
 
     let peers = p2p_transport.list_peers().await;
-    let peers_json: Vec<_> = peers.into_iter().map(|peer| {
-        serde_json::json!({
-            "short_id": hex::encode(&peer.id.0[..8]),
-            "node_id": hex::encode(&peer.id.0),
-            "discovery_addr": peer.addr,
-            "data_addr": peer.p2p_data_addr,
-            "nat_status": peer.nat_status.as_str(),
+    let peers_json: Vec<_> = peers
+        .into_iter()
+        .map(|peer| {
+            serde_json::json!({
+                "short_id": hex::encode(&peer.id.0[..8]),
+                "node_id": hex::encode(&peer.id.0),
+                "discovery_addr": peer.addr,
+                "data_addr": peer.p2p_data_addr,
+                "nat_status": peer.nat_status.as_str(),
+            })
         })
-    }).collect();
+        .collect();
 
     Json(serde_json::json!({
         "status": "success",
@@ -4055,12 +4630,18 @@ fn media_name_ok(path: &str) -> bool {
     !path.is_empty()
         && !path.contains('\\')
         && !path.contains('\0')
-        && std::path::Path::new(path).components().all(|c| matches!(c, std::path::Component::Normal(_)))
+        && std::path::Path::new(path)
+            .components()
+            .all(|c| matches!(c, std::path::Component::Normal(_)))
 }
 
 async fn media_handler(PathExtractor(path): PathExtractor<String>) -> impl IntoResponse {
     if !media_name_ok(&path) {
-        return (StatusCode::NOT_FOUND, [(axum::http::header::CONTENT_TYPE, "text/plain")], Vec::<u8>::new());
+        return (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            Vec::<u8>::new(),
+        );
     }
     let media_path = format!("ui/media/{}", path);
     match std::fs::read(media_path) {
@@ -4072,11 +4653,17 @@ async fn media_handler(PathExtractor(path): PathExtractor<String>) -> impl IntoR
             } else {
                 "application/octet-stream"
             };
-            (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], data)
+            (
+                StatusCode::OK,
+                [(axum::http::header::CONTENT_TYPE, content_type)],
+                data,
+            )
         }
-        Err(_) => {
-            (StatusCode::NOT_FOUND, [(axum::http::header::CONTENT_TYPE, "text/plain")], Vec::<u8>::new())
-        }
+        Err(_) => (
+            StatusCode::NOT_FOUND,
+            [(axum::http::header::CONTENT_TYPE, "text/plain")],
+            Vec::<u8>::new(),
+        ),
     }
 }
 // === Groups API Handlers ===
@@ -4095,36 +4682,43 @@ async fn api_groups_get(State(state): State<AppState>) -> impl IntoResponse {
     };
 
     let groups = group_manager.get_my_groups().await;
-    
-    let groups_json: Vec<serde_json::Value> = groups.into_iter().map(|g| {
-        let members: Vec<serde_json::Value> = g.members.values().map(|m| {
+
+    let groups_json: Vec<serde_json::Value> = groups
+        .into_iter()
+        .map(|g| {
+            let members: Vec<serde_json::Value> = g
+                .members
+                .values()
+                .map(|m| {
+                    serde_json::json!({
+                        "node_id": hex::encode(&m.node_id.0),
+                        "short_id": m.short_id,
+                        "nickname": m.nickname,
+                        "role": format!("{:?}", m.role),
+                        "joined_at": m.joined_at
+                    })
+                })
+                .collect();
+
             serde_json::json!({
-                "node_id": hex::encode(&m.node_id.0),
-                "short_id": m.short_id,
-                "nickname": m.nickname,
-                "role": format!("{:?}", m.role),
-                "joined_at": m.joined_at
+                "id": g.id.to_hex(),
+                "name": g.name,
+                "description": g.description,
+                "member_count": g.members.len(),
+                "members": members,
+                "settings": {
+                    "is_private": g.settings.is_private,
+                    "is_encrypted": g.settings.is_encrypted,
+                    "max_members": g.settings.max_members,
+                    "allow_files": g.settings.allow_files,
+                    "allow_voice": g.settings.allow_voice
+                },
+                "created_at": g.created_at,
+                "version": g.version
             })
-        }).collect();
-        
-        serde_json::json!({
-            "id": g.id.to_hex(),
-            "name": g.name,
-            "description": g.description,
-            "member_count": g.members.len(),
-            "members": members,
-            "settings": {
-                "is_private": g.settings.is_private,
-                "is_encrypted": g.settings.is_encrypted,
-                "max_members": g.settings.max_members,
-                "allow_files": g.settings.allow_files,
-                "allow_voice": g.settings.allow_voice
-            },
-            "created_at": g.created_at,
-            "version": g.version
         })
-    }).collect();
-    
+        .collect();
+
     Json(serde_json::json!({
         "status": "success",
         "groups": groups_json
@@ -4146,19 +4740,33 @@ async fn api_groups_post(
             }));
         }
     };
-    
-    let name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let description = payload.get("description").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let is_private = payload.get("is_private").and_then(|v| v.as_bool()).unwrap_or(true);
-    let is_encrypted = payload.get("is_encrypted").and_then(|v| v.as_bool()).unwrap_or(true);
-    
+
+    let name = payload
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let description = payload
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let is_private = payload
+        .get("is_private")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let is_encrypted = payload
+        .get("is_encrypted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+
     if name.is_empty() {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Group name is required"
         }));
     }
-    
+
     // Получаем ID текущей ноды
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
@@ -4168,22 +4776,27 @@ async fn api_groups_post(
             "message": "P2P transport not available"
         }));
     };
-    
+
     let settings = crate::communication::groups::GroupSettings {
         is_private,
         is_encrypted,
         ..Default::default()
     };
-    
-    let group = group_manager.create_group(name, description, my_node_id, settings).await;
+
+    let group = group_manager
+        .create_group(name, description, my_node_id, settings)
+        .await;
     let group_hash = group.id.to_hex();
-    
+
     if let Some(transport) = &state.transport {
-        if let Err(e) = group_manager.store_group_in_dht_signed(&group, transport, &transport.identity()).await {
+        if let Err(e) = group_manager
+            .store_group_in_dht_signed(&group, transport, &transport.identity())
+            .await
+        {
             tracing::warn!("Failed to store group in DHT: {}", e);
         }
     }
-    
+
     Json(serde_json::json!({
         "status": "success",
         "message": "Group created",
@@ -4212,7 +4825,7 @@ async fn api_groups_get_one(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4222,7 +4835,7 @@ async fn api_groups_get_one(
             }));
         }
     };
-    
+
     let group = match group_manager.get_group(&group_id).await {
         Some(g) => g,
         None => {
@@ -4232,18 +4845,22 @@ async fn api_groups_get_one(
             }));
         }
     };
-    
-    let members: Vec<serde_json::Value> = group.members.values().map(|m| {
-        serde_json::json!({
-            "node_id": hex::encode(&m.node_id.0),
-            "short_id": m.short_id,
-            "nickname": m.nickname,
-            "role": format!("{:?}", m.role),
-            "joined_at": m.joined_at,
-            "last_seen": m.last_seen
+
+    let members: Vec<serde_json::Value> = group
+        .members
+        .values()
+        .map(|m| {
+            serde_json::json!({
+                "node_id": hex::encode(&m.node_id.0),
+                "short_id": m.short_id,
+                "nickname": m.nickname,
+                "role": format!("{:?}", m.role),
+                "joined_at": m.joined_at,
+                "last_seen": m.last_seen
+            })
         })
-    }).collect();
-    
+        .collect();
+
     Json(serde_json::json!({
         "status": "success",
         "id": group.id.to_hex(),
@@ -4280,7 +4897,7 @@ async fn api_groups_add_member(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4290,17 +4907,23 @@ async fn api_groups_add_member(
             }));
         }
     };
-    
-    let short_id = payload.get("short_id").and_then(|v| v.as_str()).unwrap_or("");
-    let role_str = payload.get("role").and_then(|v| v.as_str()).unwrap_or("Member");
-    
+
+    let short_id = payload
+        .get("short_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let role_str = payload
+        .get("role")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Member");
+
     if short_id.is_empty() {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Short ID is required"
         }));
     }
-    
+
     // Находим пира по short_id
     let peer_id = if let Some(transport) = &state.transport {
         match transport.find_peer_by_short_id(short_id) {
@@ -4318,14 +4941,14 @@ async fn api_groups_add_member(
             "message": "P2P transport not available"
         }));
     };
-    
+
     let role = match role_str {
         "Admin" => crate::communication::groups::GroupRole::Admin,
         "Moderator" => crate::communication::groups::GroupRole::Moderator,
         "Member" => crate::communication::groups::GroupRole::Member,
         _ => crate::communication::groups::GroupRole::Member,
     };
-    
+
     // Получаем ID текущей ноды (кто добавляет)
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
@@ -4335,29 +4958,33 @@ async fn api_groups_add_member(
             "message": "P2P transport not available"
         }));
     };
-    
-    let member = crate::communication::groups::GroupMember::new(peer_id, short_id.to_string(), role);
-    
-    match group_manager.add_member(&group_id, member, &my_node_id).await {
+
+    let member =
+        crate::communication::groups::GroupMember::new(peer_id, short_id.to_string(), role);
+
+    match group_manager
+        .add_member(&group_id, member, &my_node_id)
+        .await
+    {
         Ok(()) => {
             // Если есть DHT transport, обновляем группу в DHT
             if let Some(transport) = &state.transport {
                 if let Some(group) = group_manager.get_group(&group_id).await {
-                    let _ = group_manager.store_group_in_dht_signed(&group, transport, &transport.identity()).await;
+                    let _ = group_manager
+                        .store_group_in_dht_signed(&group, transport, &transport.identity())
+                        .await;
                 }
             }
-            
+
             Json(serde_json::json!({
                 "status": "success",
                 "message": "Member added"
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": e
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": e
+        })),
     }
 }
 
@@ -4377,7 +5004,7 @@ async fn api_groups_remove_member(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4387,16 +5014,19 @@ async fn api_groups_remove_member(
             }));
         }
     };
-    
-    let short_id = payload.get("short_id").and_then(|v| v.as_str()).unwrap_or("");
-    
+
+    let short_id = payload
+        .get("short_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+
     if short_id.is_empty() {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Short ID is required"
         }));
     }
-    
+
     // Находим пира по short_id
     let peer_id = if let Some(transport) = &state.transport {
         match transport.find_peer_by_short_id(short_id) {
@@ -4414,7 +5044,7 @@ async fn api_groups_remove_member(
             "message": "P2P transport not available"
         }));
     };
-    
+
     // Получаем ID текущей ноды (кто удаляет)
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
@@ -4424,27 +5054,30 @@ async fn api_groups_remove_member(
             "message": "P2P transport not available"
         }));
     };
-    
-    match group_manager.remove_member(&group_id, &peer_id, &my_node_id).await {
+
+    match group_manager
+        .remove_member(&group_id, &peer_id, &my_node_id)
+        .await
+    {
         Ok(()) => {
             // Если есть DHT transport, обновляем группу в DHT
             if let Some(transport) = &state.transport {
                 if let Some(group) = group_manager.get_group(&group_id).await {
-                    let _ = group_manager.store_group_in_dht_signed(&group, transport, &transport.identity()).await;
+                    let _ = group_manager
+                        .store_group_in_dht_signed(&group, transport, &transport.identity())
+                        .await;
                 }
             }
-            
+
             Json(serde_json::json!({
                 "status": "success",
                 "message": "Member removed"
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": e
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": e
+        })),
     }
 }
 
@@ -4466,7 +5099,7 @@ async fn api_group_chat_send(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4476,16 +5109,20 @@ async fn api_group_chat_send(
             }));
         }
     };
-    
-    let text = payload.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    
+
+    let text = payload
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
     if text.is_empty() {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Message text is required"
         }));
     }
-    
+
     // Получаем ID текущей ноды (отправитель)
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
@@ -4495,22 +5132,25 @@ async fn api_group_chat_send(
             "message": "P2P transport not available"
         }));
     };
-    
-    match group_manager.send_message(&group_id, my_node_id, crate::communication::groups::GroupMessageType::Text(text)).await {
-        Ok(msg) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Message sent",
-                "msg_id": hex::encode(&msg.msg_id.0[..8]),
-                "timestamp": msg.timestamp
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": e
-            }))
-        }
+
+    match group_manager
+        .send_message(
+            &group_id,
+            my_node_id,
+            crate::communication::groups::GroupMessageType::Text(text),
+        )
+        .await
+    {
+        Ok(msg) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Message sent",
+            "msg_id": hex::encode(&msg.msg_id.0[..8]),
+            "timestamp": msg.timestamp
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": e
+        })),
     }
 }
 
@@ -4529,7 +5169,7 @@ async fn api_group_chat_history(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4539,26 +5179,29 @@ async fn api_group_chat_history(
             }));
         }
     };
-    
+
     let limit = 100; // TODO: из query параметра
     let messages = group_manager.get_messages(&group_id, limit).await;
-    
-    let messages_json: Vec<serde_json::Value> = messages.into_iter().map(|msg| {
-        serde_json::json!({
-            "msg_id": hex::encode(&msg.msg_id.0),
-            "from": hex::encode(&msg.from.0),
-            "from_short": hex::encode(&msg.from.0[..8]),
-            "timestamp": msg.timestamp,
-            "text": match &msg.msg_type {
-                crate::communication::groups::GroupMessageType::Text(t) => t,
-                _ => "",
-            },
-            "msg_type": format!("{:?}", msg.msg_type),
-            "edited_at": msg.edited_at,
-            "deleted": msg.deleted
+
+    let messages_json: Vec<serde_json::Value> = messages
+        .into_iter()
+        .map(|msg| {
+            serde_json::json!({
+                "msg_id": hex::encode(&msg.msg_id.0),
+                "from": hex::encode(&msg.from.0),
+                "from_short": hex::encode(&msg.from.0[..8]),
+                "timestamp": msg.timestamp,
+                "text": match &msg.msg_type {
+                    crate::communication::groups::GroupMessageType::Text(t) => t,
+                    _ => "",
+                },
+                "msg_type": format!("{:?}", msg.msg_type),
+                "edited_at": msg.edited_at,
+                "deleted": msg.deleted
+            })
         })
-    }).collect();
-    
+        .collect();
+
     Json(serde_json::json!({
         "status": "success",
         "group_id": group_id_hex,
@@ -4582,7 +5225,7 @@ async fn api_group_chat_clear(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4592,20 +5235,16 @@ async fn api_group_chat_clear(
             }));
         }
     };
-    
+
     match group_manager.clear_history(&group_id).await {
-        Ok(()) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Chat history cleared"
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": e
-            }))
-        }
+        Ok(()) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Chat history cleared"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": e
+        })),
     }
 }
 
@@ -4614,19 +5253,17 @@ async fn api_group_chat_clear(
 /// Get current user profile
 async fn api_profile_get(State(state): State<AppState>) -> impl IntoResponse {
     let short_id = state.node_info.short_id.clone();
-    
+
     match UserProfile::load() {
-        Ok(Some(profile)) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "profile": {
-                    "display_name": profile.display_name,
-                    "avatar": profile.avatar,
-                    "short_id": profile.short_id,
-                    "updated_at": profile.updated_at
-                }
-            }))
-        }
+        Ok(Some(profile)) => Json(serde_json::json!({
+            "status": "success",
+            "profile": {
+                "display_name": profile.display_name,
+                "avatar": profile.avatar,
+                "short_id": profile.short_id,
+                "updated_at": profile.updated_at
+            }
+        })),
         Ok(None) => {
             let profile = UserProfile::new(short_id);
             Json(serde_json::json!({
@@ -4639,12 +5276,10 @@ async fn api_profile_get(State(state): State<AppState>) -> impl IntoResponse {
                 }
             }))
         }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to load profile: {}", e)
-            }))
-        }
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to load profile: {}", e)
+        })),
     }
 }
 
@@ -4654,35 +5289,37 @@ async fn api_profile_put(
     Json(payload): Json<serde_json::Value>,
 ) -> impl IntoResponse {
     let short_id = state.node_info.short_id.clone();
-    let display_name = payload.get("display_name").and_then(|v| v.as_str()).map(String::from);
-    let avatar = payload.get("avatar").and_then(|v| v.as_str()).map(String::from);
-    
+    let display_name = payload
+        .get("display_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let avatar = payload
+        .get("avatar")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
     let mut profile = match UserProfile::load() {
         Ok(Some(p)) => p,
         _ => UserProfile::new(short_id),
     };
-    
+
     profile.update(display_name, avatar);
-    
+
     match profile.save() {
-        Ok(()) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Profile updated",
-                "profile": {
-                    "display_name": profile.display_name,
-                    "avatar": profile.avatar,
-                    "short_id": profile.short_id,
-                    "updated_at": profile.updated_at
-                }
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to save profile: {}", e)
-            }))
-        }
+        Ok(()) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Profile updated",
+            "profile": {
+                "display_name": profile.display_name,
+                "avatar": profile.avatar,
+                "short_id": profile.short_id,
+                "updated_at": profile.updated_at
+            }
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to save profile: {}", e)
+        })),
     }
 }
 
@@ -4692,52 +5329,46 @@ async fn api_profile_get_by_short_id(
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
     let contacts_path = "contacts.json";
-    
+
     if !std::path::Path::new(contacts_path).exists() {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Contact not found"
         }));
     }
-    
+
     match tokio::fs::read_to_string(contacts_path).await {
-        Ok(content) => {
-            match serde_json::from_str::<serde_json::Value>(&content) {
-                Ok(data) => {
-                    if let Some(contacts) = data.get("contacts").and_then(|c| c.as_array()) {
-                        for contact in contacts {
-                            if contact.get("short_id").and_then(|s| s.as_str()) == Some(&short_id) {
-                                return Json(serde_json::json!({
-                                    "status": "success",
-                                    "profile": {
-                                        "display_name": contact.get("name").and_then(|n| n.as_str()).unwrap_or(&short_id),
-                                        "avatar": contact.get("avatar"),
-                                        "short_id": short_id,
-                                        "online": contact.get("online").and_then(|o| o.as_bool()).unwrap_or(false)
-                                    }
-                                }));
-                            }
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(data) => {
+                if let Some(contacts) = data.get("contacts").and_then(|c| c.as_array()) {
+                    for contact in contacts {
+                        if contact.get("short_id").and_then(|s| s.as_str()) == Some(&short_id) {
+                            return Json(serde_json::json!({
+                                "status": "success",
+                                "profile": {
+                                    "display_name": contact.get("name").and_then(|n| n.as_str()).unwrap_or(&short_id),
+                                    "avatar": contact.get("avatar"),
+                                    "short_id": short_id,
+                                    "online": contact.get("online").and_then(|o| o.as_bool()).unwrap_or(false)
+                                }
+                            }));
                         }
                     }
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": "Contact not found"
-                    }))
                 }
-                Err(_) => {
-                    Json(serde_json::json!({
-                        "status": "error",
-                        "message": "Failed to parse contacts"
-                    }))
-                }
+                Json(serde_json::json!({
+                    "status": "error",
+                    "message": "Contact not found"
+                }))
             }
-        }
-        Err(_) => {
-            Json(serde_json::json!({
+            Err(_) => Json(serde_json::json!({
                 "status": "error",
-                "message": "Failed to read contacts"
-            }))
-        }
+                "message": "Failed to parse contacts"
+            })),
+        },
+        Err(_) => Json(serde_json::json!({
+            "status": "error",
+            "message": "Failed to read contacts"
+        })),
     }
 }
 
@@ -4750,7 +5381,7 @@ async fn api_profile_avatar(
     let avatar_dir = dirs::home_dir()
         .expect("No home directory")
         .join(".yandi/avatars");
-    
+
     // Create directory if not exists
     if let Err(e) = tokio::fs::create_dir_all(&avatar_dir).await {
         return Json(serde_json::json!({
@@ -4758,10 +5389,10 @@ async fn api_profile_avatar(
             "message": format!("Failed to create avatar directory: {}", e)
         }));
     }
-    
+
     let mut file_data: Vec<u8> = Vec::new();
     let mut file_ext = String::new();
-    
+
     while let Ok(Some(field)) = multipart.next_field().await {
         let name = field.name().unwrap_or("").to_string();
         if name == "avatar" {
@@ -4771,7 +5402,8 @@ async fn api_profile_avatar(
                     "image/jpeg" => "jpg",
                     "image/gif" => "gif",
                     _ => "png",
-                }.to_string();
+                }
+                .to_string();
             }
             match field.bytes().await {
                 Ok(data) => file_data = data.to_vec(),
@@ -4784,7 +5416,7 @@ async fn api_profile_avatar(
             }
         }
     }
-    
+
     if file_data.is_empty() {
         return Json(serde_json::json!({
             "status": "error",
@@ -4792,7 +5424,9 @@ async fn api_profile_avatar(
         }));
     }
     if file_data.len() > 4 * 1024 * 1024 {
-        return Json(serde_json::json!({"status": "error", "message": "Avatar is larger than 4 MB"}));
+        return Json(
+            serde_json::json!({"status": "error", "message": "Avatar is larger than 4 MB"}),
+        );
     }
     // the type comes from the file itself, not from what the browser claims
     file_ext = if file_data.starts_with(&[0x89, b'P', b'N', b'G']) {
@@ -4813,13 +5447,13 @@ async fn api_profile_avatar(
             "message": format!("Failed to save avatar: {}", e)
         }));
     }
-    
+
     // Update profile with avatar path
     let mut profile = match UserProfile::load() {
         Ok(Some(p)) => p,
         _ => UserProfile::new(short_id.clone()),
     };
-    
+
     let avatar_url = format!("/api/avatar/{}", short_id);
     profile.update(None, Some(avatar_url.clone()));
     if let Err(e) = profile.save() {
@@ -4828,9 +5462,9 @@ async fn api_profile_avatar(
             "message": format!("Failed to update profile: {}", e)
         }));
     }
-    
+
     // TODO: Broadcast avatar hash to peers
-    
+
     Json(serde_json::json!({
         "status": "success",
         "message": "Avatar uploaded",
@@ -4838,17 +5472,17 @@ async fn api_profile_avatar(
     }))
 }
 
-
 /// Get avatar by short_id
-async fn api_avatar_get(
-    PathExtractor(short_id): PathExtractor<String>,
-) -> impl IntoResponse {
+async fn api_avatar_get(PathExtractor(short_id): PathExtractor<String>) -> impl IntoResponse {
     let avatar_dir = dirs::home_dir()
         .expect("No home directory")
         .join(".yandi/avatars");
 
     // the name comes from the address: only a plain hex id may be used to build a file name
-    if short_id.is_empty() || short_id.len() > 64 || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if short_id.is_empty()
+        || short_id.len() > 64
+        || !short_id.bytes().all(|b| b.is_ascii_hexdigit())
+    {
         return StatusCode::NOT_FOUND.into_response();
     }
 
@@ -4863,22 +5497,29 @@ async fn api_avatar_get(
                         "gif" => "image/gif",
                         _ => "image/png",
                     };
-                    return (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, content_type)], data).into_response();
+                    return (
+                        StatusCode::OK,
+                        [(axum::http::header::CONTENT_TYPE, content_type)],
+                        data,
+                    )
+                        .into_response();
                 }
                 Err(_) => continue,
             }
         }
     }
-    
+
     let default_avatar = include_bytes!("ui/media/default-avatar.png");
-    (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "image/png")], default_avatar.to_vec()).into_response()
+    (
+        StatusCode::OK,
+        [(axum::http::header::CONTENT_TYPE, "image/png")],
+        default_avatar.to_vec(),
+    )
+        .into_response()
 }
 
-
 /// Synchronize groups with DHT
-async fn api_groups_sync(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn api_groups_sync(State(state): State<AppState>) -> impl IntoResponse {
     let group_manager = state.group_manager.lock().await;
     let group_manager = match group_manager.as_ref() {
         Some(gm) => gm,
@@ -4889,7 +5530,7 @@ async fn api_groups_sync(
             }));
         }
     };
-    
+
     let transport = match &state.transport {
         Some(t) => t,
         None => {
@@ -4899,18 +5540,21 @@ async fn api_groups_sync(
             }));
         }
     };
-    
+
     let local_groups = group_manager.get_my_groups().await;
     let mut synced_count = 0;
-    
+
     for group in &local_groups {
-        if let Err(e) = group_manager.store_group_in_dht_signed(group, transport, &transport.identity()).await {
+        if let Err(e) = group_manager
+            .store_group_in_dht_signed(group, transport, &transport.identity())
+            .await
+        {
             tracing::warn!("Failed to sync group {} to DHT: {}", group.id.to_hex(), e);
         } else {
             synced_count += 1;
         }
     }
-    
+
     Json(serde_json::json!({
         "status": "success",
         "found_groups": 0,
@@ -4920,11 +5564,8 @@ async fn api_groups_sync(
     }))
 }
 
-
 /// Get DHT status for groups
-async fn api_groups_dht_status(
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+async fn api_groups_dht_status(State(state): State<AppState>) -> impl IntoResponse {
     let group_manager = state.group_manager.lock().await;
     let group_manager = match group_manager.as_ref() {
         Some(gm) => gm,
@@ -4935,10 +5576,10 @@ async fn api_groups_dht_status(
             }));
         }
     };
-    
+
     let local_groups = group_manager.get_my_groups().await;
     let local_count = local_groups.len();
-    
+
     Json(serde_json::json!({
         "status": "success",
         "groups_in_dht": 0,
@@ -4947,7 +5588,6 @@ async fn api_groups_dht_status(
         "active_peers": 0
     }))
 }
-
 
 /// Publish group to DHT
 async fn api_groups_publish(
@@ -4964,7 +5604,7 @@ async fn api_groups_publish(
             }));
         }
     };
-    
+
     let transport = match &state.transport {
         Some(t) => t,
         None => {
@@ -4974,7 +5614,7 @@ async fn api_groups_publish(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -4984,7 +5624,7 @@ async fn api_groups_publish(
             }));
         }
     };
-    
+
     let group = match group_manager.get_group(&group_id).await {
         Some(g) => g,
         None => {
@@ -4994,23 +5634,21 @@ async fn api_groups_publish(
             }));
         }
     };
-    
-    match group_manager.store_group_in_dht_signed(&group, transport, &transport.identity()).await {
-        Ok(()) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": format!("Group {} published to DHT", group_id_hex)
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to publish group: {}", e)
-            }))
-        }
+
+    match group_manager
+        .store_group_in_dht_signed(&group, transport, &transport.identity())
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "success",
+            "message": format!("Group {} published to DHT", group_id_hex)
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to publish group: {}", e)
+        })),
     }
 }
-
 
 /// Delete group
 async fn api_groups_delete(
@@ -5027,7 +5665,7 @@ async fn api_groups_delete(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -5037,22 +5675,21 @@ async fn api_groups_delete(
             }));
         }
     };
-    
+
     let groups_dir = dirs::home_dir()
         .expect("No home directory")
         .join(".yandi/data/groups");
-    
+
     let group_dir = groups_dir.join(&group_id_hex);
     if group_dir.exists() {
         let _ = tokio::fs::remove_dir_all(group_dir).await;
     }
-    
+
     Json(serde_json::json!({
         "status": "success",
         "message": format!("Group {} deleted", group_id_hex)
     }))
 }
-
 
 /// Update group (PUT)
 async fn api_groups_put(
@@ -5070,7 +5707,7 @@ async fn api_groups_put(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -5080,9 +5717,9 @@ async fn api_groups_put(
             }));
         }
     };
-    
+
     let is_private = payload.get("is_private").and_then(|v| v.as_bool());
-    
+
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
     } else {
@@ -5091,19 +5728,20 @@ async fn api_groups_put(
             "message": "P2P transport not available"
         }));
     };
-    
+
     if let Some(is_private_val) = is_private {
-        let _ = group_manager.update_settings(&group_id, &my_node_id, |s| {
-            s.is_private = is_private_val;
-        }).await;
+        let _ = group_manager
+            .update_settings(&group_id, &my_node_id, |s| {
+                s.is_private = is_private_val;
+            })
+            .await;
     }
-    
+
     Json(serde_json::json!({
         "status": "success",
         "message": "Group updated"
     }))
 }
-
 
 /// Leave group
 async fn api_groups_leave(
@@ -5120,7 +5758,7 @@ async fn api_groups_leave(
             }));
         }
     };
-    
+
     let group_id = match crate::communication::groups::GroupId::from_hex(&group_id_hex) {
         Ok(id) => id,
         Err(e) => {
@@ -5130,7 +5768,7 @@ async fn api_groups_leave(
             }));
         }
     };
-    
+
     let my_node_id = if let Some(transport) = &state.transport {
         transport.identity().node_id()
     } else {
@@ -5139,20 +5777,19 @@ async fn api_groups_leave(
             "message": "P2P transport not available"
         }));
     };
-    
-    match group_manager.remove_member(&group_id, &my_node_id, &my_node_id).await {
-        Ok(()) => {
-            Json(serde_json::json!({
-                "status": "success",
-                "message": "Left group successfully"
-            }))
-        }
-        Err(e) => {
-            Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to leave group: {}", e)
-            }))
-        }
+
+    match group_manager
+        .remove_member(&group_id, &my_node_id, &my_node_id)
+        .await
+    {
+        Ok(()) => Json(serde_json::json!({
+            "status": "success",
+            "message": "Left group successfully"
+        })),
+        Err(e) => Json(serde_json::json!({
+            "status": "error",
+            "message": format!("Failed to leave group: {}", e)
+        })),
     }
 }
 
@@ -5180,8 +5817,13 @@ async fn video_call_handler() -> impl IntoResponse {
 
 /// Загрузить или создать PairingPayload для текущей ноды. Anchor отдаёт payload
 /// (anchor_id, x25519_pub_hex, TLS-fingerprint, anchor_url) в JSON или PNG-QR.
-async fn current_pairing_payload(state: &AppState) -> Result<crate::netlayer::pairing::PairingPayload, String> {
-    let transport = state.transport.as_ref().ok_or_else(|| "P2P transport not available".to_string())?;
+async fn current_pairing_payload(
+    state: &AppState,
+) -> Result<crate::netlayer::pairing::PairingPayload, String> {
+    let transport = state
+        .transport
+        .as_ref()
+        .ok_or_else(|| "P2P transport not available".to_string())?;
     let identity = transport.identity();
     let node_id = identity.node_id();
     let node_id_hex = hex::encode(&node_id.0[..8]);
@@ -5195,12 +5837,17 @@ async fn current_pairing_payload(state: &AppState) -> Result<crate::netlayer::pa
     // anchor_url: берём публичный IP если он есть, иначе host из конфига, иначе localhost.
     // Берём порт из ws-bind override / config.
     let ws_bind = crate::core::effective_ws_bind();
-    let port = ws_bind.split(':').last().and_then(|p| p.parse::<u16>().ok()).unwrap_or(8443);
-    let host = if state.node_info.external_ip != "unknown" && !state.node_info.external_ip.is_empty() {
-        state.node_info.external_ip.clone()
-    } else {
-        "127.0.0.1".to_string()
-    };
+    let port = ws_bind
+        .split(':')
+        .last()
+        .and_then(|p| p.parse::<u16>().ok())
+        .unwrap_or(8443);
+    let host =
+        if state.node_info.external_ip != "unknown" && !state.node_info.external_ip.is_empty() {
+            state.node_info.external_ip.clone()
+        } else {
+            "127.0.0.1".to_string()
+        };
     let anchor_url = format!("wss://{}:{}/", host, port);
 
     Ok(crate::netlayer::pairing::PairingPayload {
@@ -5213,56 +5860,106 @@ async fn current_pairing_payload(state: &AppState) -> Result<crate::netlayer::pa
 
 /// Устройства, сопряжённые с этим узлом: кто в сети, сколько соединений, когда был виден.
 async fn mobile_devices_handler() -> impl IntoResponse {
-    let mut resp = Json(serde_json::json!({"devices": crate::mobile_api::devices_overview()})).into_response();
-    resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    let mut resp =
+        Json(serde_json::json!({"devices": crate::mobile_api::devices_overview()})).into_response();
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
     resp
 }
 
-async fn mobile_device_remove_handler(axum::extract::Path(id): axum::extract::Path<String>) -> impl IntoResponse {
+async fn mobile_device_remove_handler(
+    axum::extract::Path(id): axum::extract::Path<String>,
+) -> impl IntoResponse {
     if crate::mobile_api::remove_device(&id) {
         (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
     } else {
-        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"})))
+        (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"status": "error", "message": "нет такого устройства"})),
+        )
     }
 }
 
 /// QR для приложения на телефоне: адрес узла, порт TLS-входа, отпечаток сертификата и новый разовый код (живёт 5 минут).
-async fn mobile_pairing_handler(State(state): State<AppState>, axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> impl IntoResponse {
+async fn mobile_pairing_handler(
+    State(state): State<AppState>,
+    axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> impl IntoResponse {
     let Some(port) = crate::mobile_tls::configured_port() else {
         return (StatusCode::CONFLICT, Json(serde_json::json!({"status": "error", "message": "Вход для телефона выключен: задайте порт в mobile_tls.json ({\"port\": 443}) или YANDI_MOBILE_TLS_PORT и перезапустите узел"}))).into_response();
     };
     let Some(transport) = state.transport.as_ref() else {
-        return (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"status": "error", "message": "Транспорт не готов"}))).into_response();
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"status": "error", "message": "Транспорт не готов"})),
+        )
+            .into_response();
     };
     let node_hex = hex::encode(&transport.identity().node_id().0[..8]);
     let fp = match crate::netlayer::tls_cert::TlsIdentity::load_or_generate_default(&node_hex) {
         Ok(t) => t.fingerprint_hex,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e.to_string()}))).into_response(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+            )
+                .into_response()
+        }
     };
-    let host = q.get("host").cloned().filter(|h| !h.is_empty() && h.len() < 256).unwrap_or_else(|| {
-        if state.node_info.external_ip != "unknown" && !state.node_info.external_ip.is_empty() { state.node_info.external_ip.clone() } else { "127.0.0.1".to_string() }
-    });
+    let host = q
+        .get("host")
+        .cloned()
+        .filter(|h| !h.is_empty() && h.len() < 256)
+        .unwrap_or_else(|| {
+            if state.node_info.external_ip != "unknown" && !state.node_info.external_ip.is_empty() {
+                state.node_info.external_ip.clone()
+            } else {
+                "127.0.0.1".to_string()
+            }
+        });
     let text = crate::mobile_api::pairing_qr_json(&host, port, &fp);
     let svg = match qrcode::QrCode::new(text.as_bytes()) {
-        Ok(qr) => qr.render::<qrcode::render::svg::Color>().min_dimensions(256, 256).build(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e.to_string()}))).into_response(),
+        Ok(qr) => qr
+            .render::<qrcode::render::svg::Color>()
+            .min_dimensions(256, 256)
+            .build(),
+        Err(e) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"status": "error", "message": e.to_string()})),
+            )
+                .into_response()
+        }
     };
     let mut resp = Json(serde_json::json!({"status": "ok", "host": host, "port": port, "fingerprint": fp, "expires_in_secs": 300, "qr_text": text, "qr_svg": svg})).into_response();
-    resp.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+    resp.headers_mut().insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-store"),
+    );
     resp
 }
 
 async fn pair_qr_json_handler(State(state): State<AppState>) -> impl IntoResponse {
     match current_pairing_payload(&state).await {
-        Ok(p) => (StatusCode::OK, Json(serde_json::json!({
-            "status": "ok",
-            "payload": p,
-            "qr_string": p.to_qr_string(),
-        }))).into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({
-            "status": "error",
-            "message": e,
-        }))).into_response(),
+        Ok(p) => (
+            StatusCode::OK,
+            Json(serde_json::json!({
+                "status": "ok",
+                "payload": p,
+                "qr_string": p.to_qr_string(),
+            })),
+        )
+            .into_response(),
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({
+                "status": "error",
+                "message": e,
+            })),
+        )
+            .into_response(),
     }
 }
 
@@ -5279,11 +5976,15 @@ async fn pair_qr_handler(State(state): State<AppState>) -> impl IntoResponse {
     let qr = match qrcode::QrCode::new(qr_string.as_bytes()) {
         Ok(q) => q,
         Err(e) => {
-            return (StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("qr encode failed: {}", e)).into_response();
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("qr encode failed: {}", e),
+            )
+                .into_response();
         }
     };
-    let svg = qr.render::<qrcode::render::svg::Color>()
+    let svg = qr
+        .render::<qrcode::render::svg::Color>()
         .min_dimensions(256, 256)
         .build();
     Response::builder()
@@ -5323,43 +6024,80 @@ async fn pair_issue_handler(
     // 🔐 Защита от случайных POST'ов: проверяем что запрос идёт с того же хоста
     // (origin/referer указывают на нашу же web-UI) ИЛИ присутствует pre-shared
     // X-Pair-Token из конфига. В первом приближении — Origin/Host check.
-    let host = headers.get("host").and_then(|v| v.to_str().ok()).unwrap_or("");
-    let origin = headers.get("origin").and_then(|v| v.to_str().ok()).unwrap_or("");
+    let host = headers
+        .get("host")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let origin = headers
+        .get("origin")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
     if !origin.is_empty() {
         // the Origin's host must be one of this computer's names (a name that merely CONTAINS "localhost" is not)
-        let origin_host = origin.split_once("://").map(|(_, rest)| rest.split('/').next().unwrap_or("")).unwrap_or("");
+        let origin_host = origin
+            .split_once("://")
+            .map(|(_, rest)| rest.split('/').next().unwrap_or(""))
+            .unwrap_or("");
         let ok = host_allowed(origin_host);
         if !ok {
-            return (StatusCode::FORBIDDEN, Json(PairIssueResponse {
-                status: "error".into(),
-                session_id: None, resume_secret_hex: None, expires_at: None, session_key_hex: None,
-                message: Some(format!("origin {} blocked (host {})", origin, host)),
-            })).into_response();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(PairIssueResponse {
+                    status: "error".into(),
+                    session_id: None,
+                    resume_secret_hex: None,
+                    expires_at: None,
+                    session_key_hex: None,
+                    message: Some(format!("origin {} blocked (host {})", origin, host)),
+                }),
+            )
+                .into_response();
         }
     }
 
     let transport = match state.transport.as_ref() {
         Some(t) => t,
         None => {
-            return (StatusCode::SERVICE_UNAVAILABLE, Json(PairIssueResponse {
-                status: "error".into(),
-                session_id: None, resume_secret_hex: None, expires_at: None, session_key_hex: None,
-                message: Some("P2P transport not available".into()),
-            })).into_response();
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(PairIssueResponse {
+                    status: "error".into(),
+                    session_id: None,
+                    resume_secret_hex: None,
+                    expires_at: None,
+                    session_key_hex: None,
+                    message: Some("P2P transport not available".into()),
+                }),
+            )
+                .into_response();
         }
     };
 
     // the key is stored and later used to look the client up: exactly 32 bytes of hex, nothing else
-    if req.client_pubkey_hex.len() != 64 || !req.client_pubkey_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return (StatusCode::BAD_REQUEST, Json(PairIssueResponse {
-            status: "error".into(),
-            session_id: None, resume_secret_hex: None, expires_at: None, session_key_hex: None,
-            message: Some("client_pubkey_hex must be 64 hex characters".into()),
-        })).into_response();
+    if req.client_pubkey_hex.len() != 64
+        || !req.client_pubkey_hex.bytes().all(|b| b.is_ascii_hexdigit())
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(PairIssueResponse {
+                status: "error".into(),
+                session_id: None,
+                resume_secret_hex: None,
+                expires_at: None,
+                session_key_hex: None,
+                message: Some("client_pubkey_hex must be 64 hex characters".into()),
+            }),
+        )
+            .into_response();
     }
-    let req = PairIssueRequest { client_pubkey_hex: req.client_pubkey_hex.to_ascii_lowercase(), ..req };
+    let req = PairIssueRequest {
+        client_pubkey_hex: req.client_pubkey_hex.to_ascii_lowercase(),
+        ..req
+    };
 
-    let ttl = req.ttl_secs.unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
+    let ttl = req
+        .ttl_secs
+        .unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
 
     // Генерируем session_key прямо здесь (32 случайных байта). Anchor должен
     // отдать тот же session_key мобилке через 0xC2 при первом encrypted connect'е.
@@ -5371,25 +6109,41 @@ async fn pair_issue_handler(
 
     // Сохраняем в paired_clients store (key = client_pubkey_hex).
     let mut store = transport.paired_clients.lock().await;
-    store.clients.insert(req.client_pubkey_hex.clone(), tok.clone());
+    store
+        .clients
+        .insert(req.client_pubkey_hex.clone(), tok.clone());
     let path = crate::netlayer::pairing::default_paired_clients_path();
     if let Err(e) = store.save(&path) {
-        return (StatusCode::INTERNAL_SERVER_ERROR, Json(PairIssueResponse {
-            status: "error".into(),
-            session_id: None, resume_secret_hex: None, expires_at: None, session_key_hex: None,
-            message: Some(format!("persist failed: {}", e)),
-        })).into_response();
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(PairIssueResponse {
+                status: "error".into(),
+                session_id: None,
+                resume_secret_hex: None,
+                expires_at: None,
+                session_key_hex: None,
+                message: Some(format!("persist failed: {}", e)),
+            }),
+        )
+            .into_response();
     }
 
-    info!("[pair/issue] issued session {:#x} for pubkey {}",
-          tok.session_id, &req.client_pubkey_hex[..16.min(req.client_pubkey_hex.len())]);
+    info!(
+        "[pair/issue] issued session {:#x} for pubkey {}",
+        tok.session_id,
+        &req.client_pubkey_hex[..16.min(req.client_pubkey_hex.len())]
+    );
 
-    (StatusCode::OK, Json(PairIssueResponse {
-        status: "ok".into(),
-        session_id: Some(format!("{:#x}", tok.session_id)),
-        resume_secret_hex: Some(tok.resume_secret_hex.clone()),
-        expires_at: Some(tok.expires_at),
-        session_key_hex: Some(hex::encode(session_key)),
-        message: None,
-    })).into_response()
+    (
+        StatusCode::OK,
+        Json(PairIssueResponse {
+            status: "ok".into(),
+            session_id: Some(format!("{:#x}", tok.session_id)),
+            resume_secret_hex: Some(tok.resume_secret_hex.clone()),
+            expires_at: Some(tok.expires_at),
+            session_key_hex: Some(hex::encode(session_key)),
+            message: None,
+        }),
+    )
+        .into_response()
 }

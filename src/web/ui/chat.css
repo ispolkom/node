@@ -1114,3 +1114,8 @@ body, .message-text, .chat-input, .contact-name, .contact-id, .info-name, .info-
         max-width: none;
     }
 }
+
+/* выбранное сообщение (щелчок): панель «Изменить / Удалить / Очистить чат» */
+.message { cursor: pointer; }
+.message.msg-selected { outline: 2px solid #ff9800; outline-offset: 2px; }
+.msg-ticks { font-weight: bold; letter-spacing: -2px; margin-left: 4px; }

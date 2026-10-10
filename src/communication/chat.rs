@@ -586,6 +586,33 @@ impl ChatManager {
         Ok(())
     }
 
+    /// Сохранить в историю сообщение, пришедшее не по сети узлов (с телефона владельца, см. `mobile_self`): его покажет страница чата.
+    pub fn store_local_incoming(&self, from: &HashId, msg: &ChatMessage) -> Result<()> {
+        self.storage.save_incoming(from, msg)
+    }
+
+    /// Сохранить в историю сообщение, отправленное со страницы телефону владельца.
+    pub fn store_local_outgoing(&self, to: &HashId, msg: &ChatMessage) -> Result<()> {
+        self.storage.save_outgoing(to, msg)
+    }
+
+    /// Поднять статус сообщения (квитанция телефона владельца): только вверх — «доставлено» не затирает «прочитано».
+    pub fn store_local_status(&self, peer_id: &HashId, msg_id: &HashId, status: MessageStatus) -> Result<()> {
+        fn rank(s: &MessageStatus) -> u8 {
+            match s {
+                MessageStatus::Failed => 0,
+                MessageStatus::Pending | MessageStatus::Shipping => 1,
+                MessageStatus::Delivered => 2,
+                MessageStatus::Read => 3,
+            }
+        }
+        let cur = self.storage.load_history(peer_id, usize::MAX)?.into_iter().find(|m| m.msg_id == *msg_id).map(|m| m.status);
+        match cur {
+            Some(c) if rank(&c) < rank(&status) => self.storage.update_message_status(peer_id, msg_id, status),
+            _ => Ok(()),
+        }
+    }
+
     /// Загрузить историю чата
     pub fn load_history(&self, peer_id: &HashId, limit: usize) -> Result<Vec<ChatMessage>> {
         self.storage.load_history(peer_id, limit)

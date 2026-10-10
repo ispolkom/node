@@ -21,10 +21,10 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
-use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::communication::{ChatManager, ChatMessage};
@@ -112,7 +112,9 @@ struct Device {
 impl Device {
     /// Номер телефона как собеседника: 32 байта от хэша токена (токен не раскрывается).
     fn peer_id(&self) -> String {
-        hex::encode(Sha256::digest([b"yandi-device:".as_slice(), self.token_hash.as_bytes()].concat()))
+        hex::encode(Sha256::digest(
+            [b"yandi-device:".as_slice(), self.token_hash.as_bytes()].concat(),
+        ))
     }
 }
 
@@ -130,7 +132,10 @@ pub fn init(chat: Arc<ChatManager>, p2p: Arc<crate::p2p::P2PTransport>, my_id: H
 }
 
 fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 fn devices_path() -> std::path::PathBuf {
@@ -139,7 +144,12 @@ fn devices_path() -> std::path::PathBuf {
 
 fn with_devices<R>(f: impl FnOnce(&mut Vec<Device>) -> R) -> R {
     let mut g = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
-    let list = g.get_or_insert_with(|| std::fs::read_to_string(devices_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
+    let list = g.get_or_insert_with(|| {
+        std::fs::read_to_string(devices_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    });
     let r = f(list);
     if let Ok(s) = serde_json::to_string_pretty(&*list) {
         let p = devices_path();
@@ -159,7 +169,11 @@ fn token_hash(token: &str) -> String {
 pub fn issue_pairing_code() -> String {
     use rand::Rng;
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
-    *PAIRING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pairing { code: code.clone(), expires: Instant::now() + PAIRING_TTL, fails: 0 });
+    *PAIRING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pairing {
+        code: code.clone(),
+        expires: Instant::now() + PAIRING_TTL,
+        fails: 0,
+    });
     code
 }
 
@@ -170,7 +184,10 @@ pub fn issue_pairing_code() -> String {
 pub fn pairing_qr_json(host: &str, port: u16, fingerprint_hex: &str) -> String {
     use base64::Engine;
     let json = json!({"host": host, "port": port, "pairing_code": issue_pairing_code(), "tls_fingerprint": fingerprint_hex, "tls": true}).to_string();
-    format!("YANDI-PAIR-1:{}", base64::engine::general_purpose::STANDARD.encode(json.as_bytes()))
+    format!(
+        "YANDI-PAIR-1:{}",
+        base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
+    )
 }
 
 fn same(a: &str, b: &str) -> bool {
@@ -195,7 +212,12 @@ fn mail_path() -> std::path::PathBuf {
 
 fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
     let mut g = MAIL.lock().unwrap_or_else(|e| e.into_inner());
-    let list = g.get_or_insert_with(|| std::fs::read_to_string(mail_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
+    let list = g.get_or_insert_with(|| {
+        std::fs::read_to_string(mail_path())
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default()
+    });
     let r = f(list);
     if let Ok(s) = serde_json::to_string(&*list) {
         let p = mail_path();
@@ -209,7 +231,11 @@ fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
 
 /// Спаренные устройства и их состояние: для страницы узла (кто в сети, когда был виден).
 pub fn devices_overview() -> Vec<serde_json::Value> {
-    let seen = LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_default();
+    let seen = LAST_SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default();
     with_devices(|d| d.clone())
         .into_iter()
         .map(|x| {
@@ -222,7 +248,8 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
                 "online": n > 0,
                 "connections": n,
                 "last_seen_ms": seen.get(&pid),
-                "has_keys": x.x25519_pub.is_some(),
+                "has_keys": x.x25519_pub.is_some() && x.key_sig.is_some(),
+                "peer_id": pid,
             })
         })
         .collect()
@@ -233,7 +260,10 @@ pub fn remove_device(id: &str) -> bool {
     if id.len() < 8 {
         return false;
     }
-    let Some(peer) = with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id))) else { return false };
+    let Some(peer) = with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id)))
+    else {
+        return false;
+    };
     with_devices(|d| d.retain(|x| x.peer_id() != peer));
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
     crate::mobile_groups::forget_device(&peer);
@@ -258,11 +288,19 @@ fn device_by_peer(peer: &str) -> Option<Device> {
 }
 
 fn live_count(peer: &str) -> usize {
-    LIVE.lock().unwrap_or_else(|e| e.into_inner()).as_ref().and_then(|m| m.get(peer).copied()).unwrap_or(0)
+    LIVE.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .as_ref()
+        .and_then(|m| m.get(peer).copied())
+        .unwrap_or(0)
 }
 
 fn set_live(peer: &str, up: bool) {
-    LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(peer.to_string(), now_ms());
+    LAST_SEEN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get_or_insert_with(Default::default)
+        .insert(peer.to_string(), now_ms());
     let mut g = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let m = g.get_or_insert_with(Default::default);
     let c = m.entry(peer.to_string()).or_insert(0);
@@ -286,7 +324,12 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
     if payload.is_empty() || payload.len() > MAX_TEXT + 256 || device_by_peer(to).is_none() {
         return false;
     }
-    let m = Mail { ts: next_ts(), from: from.to_string(), to: to.to_string(), payload_b64: base64_of(payload) };
+    let m = Mail {
+        ts: next_ts(),
+        from: from.to_string(),
+        to: to.to_string(),
+        payload_b64: base64_of(payload),
+    };
     with_mail(|l| {
         l.push(m.clone());
         if l.len() > MAX_MAIL {
@@ -322,7 +365,11 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
         }
     };
     if !ok {
-        return (StatusCode::FORBIDDEN, Json(json!({"error": "bad or expired pairing code"}))).into_response();
+        return (
+            StatusCode::FORBIDDEN,
+            Json(json!({"error": "bad or expired pairing code"})),
+        )
+            .into_response();
     }
     use rand::RngCore;
     let mut raw = [0u8; 32];
@@ -337,10 +384,20 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             d.remove(0);
         }
         let th = token_hash(&token);
-        if d.iter().any(|x| x.name == name || x.name.starts_with(&format!("{name} ("))) {
+        if d.iter()
+            .any(|x| x.name == name || x.name.starts_with(&format!("{name} (")))
+        {
             name = format!("{name} ({})", &th[..4]);
         }
-        d.push(Device { token_hash: th, name, created_ms: now_ms(), acked_ts: now_ms(), x25519_pub: None, ed25519_pub: None, key_sig: None });
+        d.push(Device {
+            token_hash: th,
+            name,
+            created_ms: now_ms(),
+            acked_ts: now_ms(),
+            x25519_pub: None,
+            ed25519_pub: None,
+            key_sig: None,
+        });
     });
     Json(json!({"token": token})).into_response()
 }
@@ -348,9 +405,190 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
 #[derive(Clone)]
 pub(crate) struct DeviceKey(pub(crate) String);
 
+/// Сообщение телефона самому компьютеру (конверт E3 для ключа узла): расшифровать и положить в историю веб-чата.
+fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
+    if !crate::mobile_self::first_time(blob) {
+        return;
+    }
+    let (Some(text), Some(from)) = (crate::mobile_self::open(blob), hex32(from_device)) else { return };
+    let device = HashId(from);
+    let text = match crate::mobile_self::classify(text) {
+        crate::mobile_self::Envelope::Receipt { read, ids } => {
+            let status = if read { crate::communication::MessageStatus::Read } else { crate::communication::MessageStatus::Delivered };
+            for id in ids {
+                if let Ok(mid) = HashId::from_hex(&id) {
+                    let _ = st.chat.store_local_status(&device, &mid, status.clone());
+                }
+            }
+            return;
+        }
+        crate::mobile_self::Envelope::Edit { cmid, text } => {
+            let _ = st.chat.edit_message(&device, &crate::mobile_self::incoming_id(from_device, &cmid), text);
+            return;
+        }
+        crate::mobile_self::Envelope::CapPing => {
+            node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
+            return;
+        }
+        crate::mobile_self::Envelope::Message { cmid, text } => {
+            // сообщение с номером: в историю под выведенным номером, телефону сразу «доставлено», «прочитано» — когда откроют страницу
+            let local = crate::mobile_self::incoming_id(from_device, &cmid);
+            let mut msg = ChatMessage::new(device, st.my_id, text);
+            msg.msg_id = local;
+            msg.encrypted = true;
+            msg.mark_delivered();
+            let _ = st.chat.store_local_incoming(&device, &msg);
+            crate::mobile_self::remember_unread(&local, from_device, &cmid);
+            node_mail_to_device(st, from_device, &crate::mobile_self::receipt(false, &[cmid]));
+            return;
+        }
+        crate::mobile_self::Envelope::Plain(t) => t,
+    };
+    if text.starts_with(crate::mobile_self::FILE_MARKER) {
+        // предложение файла: куски уже лежат на узле, расшифровать и показать на странице (может занять время — не держим сокет)
+        let chat = st.chat.clone();
+        let (node, dev, me) = (hex::encode(st.my_id.0), from_device.to_string(), st.my_id);
+        tokio::spawn(async move {
+            let mut msg = match crate::mobile_self::receive_file(&node, &dev, &text).await {
+                Ok(f) => {
+                    let mut m = ChatMessage::new(HashId(from), me, String::new());
+                    m.attachment = Some(f.attachment);
+                    m
+                }
+                Err(e) => ChatMessage::new(HashId(from), me, format!("⚠️ Файл с телефона не принят: {e}")),
+            };
+            msg.encrypted = true;
+            msg.mark_delivered();
+            let _ = chat.store_local_incoming(&HashId(from), &msg);
+        });
+        return;
+    }
+    let mut msg = ChatMessage::new(HashId(from), st.my_id, text);
+    msg.encrypted = true;
+    msg.mark_delivered();
+    let _ = st.chat.store_local_incoming(&HashId(from), &msg);
+}
+
+/// Это номер самого узла (компьютер как собеседник телефона)?
+pub(crate) fn is_node_peer(peer: &str) -> bool {
+    STATE.get().map(|s| hex::encode(s.my_id.0) == peer).unwrap_or(false)
+}
+
+/// Открытый x25519 телефона — только из подписанной связки, которую узел проверил при регистрации.
+fn device_x25519(peer: &str) -> Result<[u8; 32], String> {
+    let dev = device_by_peer(peer).ok_or("нет такого устройства")?;
+    dev.key_sig
+        .as_ref()
+        .and(dev.x25519_pub.as_deref())
+        .and_then(|k| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.decode(k).ok()
+        })
+        .and_then(|b| b.try_into().ok())
+        .ok_or_else(|| "телефон ещё не прислал подписанные ключи — откройте на нём приложение".to_string())
+}
+
+/// Файл со страницы узла телефону: куски шифруются своим ключом и ложатся в хранилище файлов, предложение — зашифрованной почтой.
+pub async fn pc_send_file_to_device(peer: &str, path: &std::path::Path, attachment: crate::communication::FileAttachment, text: String) -> Result<ChatMessage, String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    let x = device_x25519(peer)?;
+    let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
+    let node = hex::encode(st.my_id.0);
+    let offer = crate::mobile_self::send_file(&node, peer, path, &attachment.filename, &attachment.mime_type).await?;
+    if !deliver_mail(&node, peer, &crate::mobile_self::seal(&offer, &x)) {
+        return Err("не удалось положить предложение файла в очередь телефона".into());
+    }
+    if !text.trim().is_empty() {
+        let _ = pc_send_to_device(peer, text.clone()).await;
+    }
+    let mut msg = ChatMessage::new(st.my_id, to, String::new());
+    msg.attachment = Some(attachment);
+    msg.encrypted = true;
+    // «доставлено» — когда телефон скачал файл и удалил передачу с узла (mobile_files::remove)
+    if let Some(tid) = crate::mobile_self::offer_tid(&offer) {
+        crate::mobile_self::remember_file(&tid, peer, msg.msg_id);
+    }
+    st.chat.store_local_outgoing(&to, &msg).map_err(|e| e.to_string())?;
+    Ok(msg)
+}
+
+/// Положить телефону служебный конверт от узла (зашифрован его ключом) в очередь.
+fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
+    if let Ok(x) = device_x25519(device) {
+        deliver_mail(&hex::encode(st.my_id.0), device, &crate::mobile_self::seal(text, &x));
+    }
+}
+
+/// «Живой» сигнал телефону от узла (не хранится): ответ на пинг поддержки квитанций.
+fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
+    if let Ok(x) = device_x25519(device) {
+        let m = Mail { ts: next_ts(), from: hex::encode(st.my_id.0), to: device.to_string(), payload_b64: base64_of(&crate::mobile_self::seal(text, &x)) };
+        let _ = bus().send(Event::Live(Arc::new(m)));
+    }
+}
+
+/// Владелец открыл переписку с телефоном на странице: отправить «прочитано» по входящим, по которым ещё не отправляли.
+pub fn pc_mark_read(peer: &str) {
+    let Some(st) = STATE.get().cloned() else { return };
+    let ids = crate::mobile_self::take_unread(peer);
+    if !ids.is_empty() {
+        node_mail_to_device(&st, peer, &crate::mobile_self::receipt(true, &ids));
+    }
+}
+
+/// Правка своего сообщения со страницы: в истории узла и у телефона (конверт правки с тем же номером).
+pub fn pc_edit_for_device(peer: &str, msg_id: &HashId, text: String) -> Result<(), String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if text.is_empty() || text.len() > MAX_TEXT {
+        return Err("пустое или слишком длинное сообщение".into());
+    }
+    let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
+    let own = st.chat.load_history(&to, usize::MAX).map_err(|e| e.to_string())?.into_iter().any(|m| m.msg_id == *msg_id && m.from == st.my_id && m.attachment.is_none());
+    if !own {
+        return Err("изменить можно только своё текстовое сообщение".into());
+    }
+    st.chat.edit_message(&to, msg_id, text.clone()).map_err(|e| e.to_string())?;
+    node_mail_to_device(&st, peer, &crate::mobile_self::edit(&hex::encode(msg_id.0), &text));
+    Ok(())
+}
+
+/// Телефон забрал файл, который ему отправил узел: сообщение на странице — «доставлено».
+pub fn file_taken(tid: &str) {
+    let Some(st) = STATE.get().cloned() else { return };
+    if let Some((device, msg)) = crate::mobile_self::take_file(tid) {
+        if let Some(d) = hex32(&device) {
+            let _ = st.chat.store_local_status(&HashId(d), &msg, crate::communication::MessageStatus::Delivered);
+        }
+    }
+}
+
+/// Ответ со страницы узла телефону владельца: шифруется ключом телефона из его подписанной связки и ложится в его очередь.
+pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if text.is_empty() || text.len() > MAX_TEXT {
+        return Err("пустое или слишком длинное сообщение".into());
+    }
+    // ключ принимается узлом только с проверенной подписью (accept_pubkeys), без него не отправляем
+    let x = device_x25519(peer)?;
+    let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
+    let mut msg = ChatMessage::new(st.my_id, to, text);
+    msg.encrypted = true;
+    // конверт с номером (cmid = msg_id): телефон пришлёт «доставлено» и «прочитано»; до того — одна серая галка
+    let blob = crate::mobile_self::seal(&crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &msg.text), &x);
+    if !deliver_mail(&hex::encode(st.my_id.0), peer, &blob) {
+        return Err("не удалось положить сообщение в очередь телефона".into());
+    }
+    st.chat.store_local_outgoing(&to, &msg).map_err(|e| e.to_string())?;
+    Ok(msg)
+}
+
 /// Номер устройства (как собеседника) по хэшу его токена.
 pub(crate) fn device_peer_of(token_hash: &str) -> Option<String> {
-    with_devices(|d| d.iter().find(|x| same(&x.token_hash, token_hash)).map(|x| x.peer_id()))
+    with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, token_hash))
+            .map(|x| x.peer_id())
+    })
 }
 
 /// Это сопряжённое устройство этого узла?
@@ -358,9 +596,14 @@ pub(crate) fn is_device_peer(peer: &str) -> bool {
     device_by_peer(peer).is_some()
 }
 
-async fn auth(Query(q): Query<std::collections::HashMap<String, String>>, mut req: Request, next: Next) -> Response {
-    let bearer = req.headers().get(header::AUTHORIZATION).and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Bearer ")).map(str::to_string);
-    let Some(token) = bearer.or_else(|| q.get("token").cloned()) else {
+async fn auth(mut req: Request, next: Next) -> Response {
+    let bearer = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let Some(token) = bearer else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let h = token_hash(&token);
@@ -378,15 +621,36 @@ async fn resolve_hex(st: &MobileState, id: &str) -> Option<HashId> {
     st.p2p.find_peer_by_short_id(id).await
 }
 
-async fn info(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Json<serde_json::Value> {
+async fn info(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+) -> Json<serde_json::Value> {
     let id = hex::encode(st.my_id.0);
-    let me = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id()));
-    Json(json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true}))
+    let me = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.peer_id())
+    });
+    Json(
+        json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true}),
+    )
 }
 
-async fn contacts(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Json<serde_json::Value> {
-    let known: Vec<HashId> = st.p2p.list_peers().await.into_iter().map(|p| p.id).collect();
-    let raw: serde_json::Value = std::fs::read_to_string("contacts.json").ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or(json!({"contacts": []}));
+async fn contacts(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+) -> Json<serde_json::Value> {
+    let known: Vec<HashId> = st
+        .p2p
+        .list_peers()
+        .await
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    let raw: serde_json::Value = std::fs::read_to_string("contacts.json")
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or(json!({"contacts": []}));
     let mut out = Vec::new();
     for c in raw["contacts"].as_array().cloned().unwrap_or_default() {
         let short = c["short_id"].as_str().unwrap_or("").to_string();
@@ -401,7 +665,11 @@ async fn contacts(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(
             "is_manual": true,
         }));
     }
-    let me = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id()));
+    let me = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.peer_id())
+    });
     for d in with_devices(|d| d.clone()) {
         let pid = d.peer_id();
         if Some(&pid) == me.as_ref() {
@@ -409,6 +677,7 @@ async fn contacts(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(
         }
         out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", d.name), "online": live_count(&pid) > 0, "is_manual": false}));
     }
+    out.push(json!({"peer_id": hex::encode(st.my_id.0), "display_name": "💻 Компьютер", "online": true, "is_manual": false}));
     Json(json!({"contacts": out}))
 }
 
@@ -416,12 +685,22 @@ fn msg_json(m: &ChatMessage) -> serde_json::Value {
     json!({"id": hex::encode(m.msg_id.0), "from_peer_id": hex::encode(m.from.0), "text": m.text, "ts_ms": m.timestamp})
 }
 
-async fn history(State(st): State<Arc<MobileState>>, Path(peer): Path<String>, Query(q): Query<std::collections::HashMap<String, String>>) -> Json<serde_json::Value> {
-    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(50).clamp(1, 500);
+async fn history(
+    State(st): State<Arc<MobileState>>,
+    Path(peer): Path<String>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(50)
+        .clamp(1, 500);
     if device_by_peer(&peer).is_some() {
         return Json(json!({"messages": []})); // переписка между телефонами хранится на самих телефонах
     }
-    let Some(h) = resolve_hex(&st, &peer).await else { return Json(json!({"messages": []})) };
+    let Some(h) = resolve_hex(&st, &peer).await else {
+        return Json(json!({"messages": []}));
+    };
     let mut msgs = st.chat.load_history(&h, limit).unwrap_or_default();
     msgs.sort_by_key(|m| m.timestamp);
     let skip = msgs.len().saturating_sub(limit);
@@ -433,35 +712,81 @@ struct SendReq {
     text: String,
 }
 
-async fn send(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(peer): Path<String>, Json(req): Json<SendReq>) -> Response {
+async fn send(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(peer): Path<String>,
+    Json(req): Json<SendReq>,
+) -> Response {
     if req.text.is_empty() || req.text.len() > MAX_TEXT {
         return StatusCode::BAD_REQUEST.into_response();
     }
     if device_by_peer(&peer).is_some() {
-        let Some(me) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id())) else { return StatusCode::UNAUTHORIZED.into_response() };
-        return if deliver_mail(&me, &peer, req.text.as_bytes()) { Json(json!({"ok": true})).into_response() } else { StatusCode::BAD_REQUEST.into_response() };
+        let Some(me) = with_devices(|d| {
+            d.iter()
+                .find(|x| same(&x.token_hash, &dev))
+                .map(|x| x.peer_id())
+        }) else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+        return if deliver_mail(&me, &peer, req.text.as_bytes()) {
+            Json(json!({"ok": true})).into_response()
+        } else {
+            StatusCode::BAD_REQUEST.into_response()
+        };
     }
-    let Some(h) = resolve_hex(&st, &peer).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(h) = resolve_hex(&st, &peer).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
     match st.chat.send_message(h, req.text).await {
         Ok(m) => Json(json!({"id": hex::encode(m.msg_id.0), "ts_ms": m.timestamp})).into_response(),
-        Err(e) => (StatusCode::BAD_GATEWAY, Json(json!({"error": e.to_string()}))).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({"error": e.to_string()})),
+        )
+            .into_response(),
     }
 }
 
 /// Сообщения других людей, пришедшие после подтверждённого устройством. Номер сообщения — его время (мс).
-async fn inbox(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Query(q): Query<std::collections::HashMap<String, String>>) -> Json<serde_json::Value> {
-    let limit = q.get("limit").and_then(|v| v.parse::<usize>().ok()).unwrap_or(200).clamp(1, 1000);
-    let acked = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.acked_ts).unwrap_or(0));
+async fn inbox(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Query(q): Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    let limit = q
+        .get("limit")
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(200)
+        .clamp(1, 1000);
+    let acked = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.acked_ts)
+            .unwrap_or(0)
+    });
     let mut out: Vec<(u64, serde_json::Value)> = Vec::new();
     for peer in st.chat.list_chats().unwrap_or_default() {
+        if device_by_peer(&hex::encode(peer.0)).is_some() {
+            continue; // переписка компьютера с телефоном владельца: ответы уходят телефону зашифрованной почтой, а не отсюда
+        }
         for m in st.chat.load_history(&peer, 200).unwrap_or_default() {
             if m.from != st.my_id && m.timestamp > acked {
                 out.push((m.timestamp, json!({"id": m.timestamp, "from_peer_id": hex::encode(m.from.0), "payload_b64": base64_of(m.text.as_bytes()), "ts_ms": m.timestamp})));
             }
         }
     }
-    if let Some(me) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id())) {
-        for m in with_mail(|l| l.iter().filter(|m| m.to == me && m.ts > acked).cloned().collect::<Vec<_>>()) {
+    if let Some(me) = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.peer_id())
+    }) {
+        for m in with_mail(|l| {
+            l.iter()
+                .filter(|m| m.to == me && m.ts > acked)
+                .cloned()
+                .collect::<Vec<_>>()
+        }) {
             out.push((m.ts, json!({"id": m.ts, "from_peer_id": m.from, "payload_b64": m.payload_b64, "ts_ms": m.ts})));
         }
     }
@@ -476,7 +801,12 @@ fn base64_of(b: &[u8]) -> String {
 }
 
 fn key_bundle_message(ed25519_pub: &[u8], x25519_pub: &[u8]) -> Vec<u8> {
-    [b"YANDI-MOBILE-KEYS-V1\0".as_slice(), ed25519_pub, x25519_pub].concat()
+    [
+        b"YANDI-MOBILE-KEYS-V1\0".as_slice(),
+        ed25519_pub,
+        x25519_pub,
+    ]
+    .concat()
 }
 
 #[derive(Deserialize)]
@@ -484,14 +814,23 @@ struct AckReq {
     ids: Vec<u64>,
 }
 
-async fn inbox_ack(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<AckReq>) -> StatusCode {
-    let Some(max) = req.ids.iter().copied().max() else { return StatusCode::OK };
+async fn inbox_ack(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Json(req): Json<AckReq>,
+) -> StatusCode {
+    let Some(max) = req.ids.iter().copied().max() else {
+        return StatusCode::OK;
+    };
     with_devices(|d| {
         if let Some(x) = d.iter_mut().find(|x| same(&x.token_hash, &dev)) {
             x.acked_ts = x.acked_ts.max(max);
         }
     });
-    if let Some(me) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id())) {
+    if let Some(me) = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.peer_id())
+    }) {
         with_mail(|l| l.retain(|m| !(m.to == me && m.ts <= max)));
     }
     StatusCode::OK
@@ -499,13 +838,21 @@ async fn inbox_ack(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 
 /// Выход в интернет через этот компьютер всегда доступен устройству с токеном; куда именно он идёт, решает владелец (внешний прокси в настройках).
 async fn proxy_info() -> Json<serde_json::Value> {
-    Json(json!({"running": true, "host": "этот компьютер", "port": crate::mobile_tls::configured_port(), "upstream": crate::upstream_proxy::is_active()}))
+    Json(
+        json!({"running": true, "host": "этот компьютер", "port": crate::mobile_tls::configured_port(), "upstream": crate::upstream_proxy::is_active()}),
+    )
 }
 
 /// Публичный ключ телефона владельца (чтобы телефон шифровал сообщение для другого телефона сам); у обычных собеседников ключа нет — 404.
-async fn pubkey(Path(peer): Path<String>) -> Response {
+async fn pubkey(State(st): State<Arc<MobileState>>, Path(peer): Path<String>) -> Response {
+    if peer == hex::encode(st.my_id.0) {
+        // сам компьютер как собеседник телефона (переписка с веб-чатом узла)
+        return Json(crate::mobile_self::bundle_json()).into_response();
+    }
     match device_by_peer(&peer).and_then(|d| match (d.x25519_pub, d.ed25519_pub, d.key_sig) {
-        (Some(x), Some(e), Some(s)) => Some(json!({"x25519_pub": x, "ed25519_pub": e, "signature": s})),
+        (Some(x), Some(e), Some(s)) => {
+            Some(json!({"x25519_pub": x, "ed25519_pub": e, "signature": s}))
+        }
         _ => None,
     }) {
         Some(bundle) => Json(bundle).into_response(),
@@ -520,14 +867,19 @@ struct KeysReq {
     signature: String,
 }
 
-async fn accept_pubkeys(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<KeysReq>) -> StatusCode {
+async fn accept_pubkeys(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Json(req): Json<KeysReq>,
+) -> StatusCode {
     let decode = |k: &str| {
         use base64::Engine;
         base64::engine::general_purpose::STANDARD.decode(k).ok()
     };
-    let (Some(x25519), Some(ed25519), Some(signature)) =
-        (decode(&req.x25519_pub), decode(&req.ed25519_pub), decode(&req.signature))
-    else {
+    let (Some(x25519), Some(ed25519), Some(signature)) = (
+        decode(&req.x25519_pub),
+        decode(&req.ed25519_pub),
+        decode(&req.signature),
+    ) else {
         return StatusCode::BAD_REQUEST;
     };
     if x25519.len() != 32 || ed25519.len() != 32 || signature.len() != 64 {
@@ -537,7 +889,10 @@ async fn accept_pubkeys(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceK
         return StatusCode::BAD_REQUEST;
     };
     let signature = Signature::from_bytes(signature.as_slice().try_into().unwrap());
-    if verifying_key.verify(&key_bundle_message(&ed25519, &x25519), &signature).is_err() {
+    if verifying_key
+        .verify(&key_bundle_message(&ed25519, &x25519), &signature)
+        .is_err()
+    {
         return StatusCode::BAD_REQUEST;
     }
     with_devices(|d| {
@@ -571,18 +926,34 @@ async fn turn_credentials(axum::Extension(DeviceKey(dev)): axum::Extension<Devic
     use base64::Engine;
     use hmac::{Hmac, Mac};
     let Some(c) = turn_config() else {
-        return (StatusCode::NOT_FOUND, Json(json!({"error": "сервер звонков не настроен на узле"}))).into_response();
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json!({"error": "сервер звонков не настроен на узле"})),
+        )
+            .into_response();
     };
     const TTL: u64 = 6 * 3600;
     let username = format!("{}:{}", now_ms() / 1000 + TTL, &dev[..dev.len().min(16)]);
-    let Ok(mut mac) = Hmac::<sha1::Sha1>::new_from_slice(c.secret.as_bytes()) else { return StatusCode::INTERNAL_SERVER_ERROR.into_response() };
+    let Ok(mut mac) = Hmac::<sha1::Sha1>::new_from_slice(c.secret.as_bytes()) else {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    };
     mac.update(username.as_bytes());
     let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
     Json(json!({"host": c.host, "port": c.port, "username": username, "credential": credential, "ttl": TTL})).into_response()
 }
 
-async fn ws(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, up: WebSocketUpgrade) -> Response {
-    let Some(me) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.peer_id())) else { return StatusCode::UNAUTHORIZED.into_response() };
+async fn ws(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    up: WebSocketUpgrade,
+) -> Response {
+    let Some(me) = with_devices(|d| {
+        d.iter()
+            .find(|x| same(&x.token_hash, &dev))
+            .map(|x| x.peer_id())
+    }) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     up.on_upgrade(move |sock| ws_session(st, me, sock))
 }
 
@@ -666,6 +1037,20 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
                         let to = hex::encode(id);
+                        if HashId(id) == st.my_id {
+                            // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
+                            let blob = &d[37..37 + len];
+                            let is_cap = crate::mobile_self::first_time(blob)
+                                && crate::mobile_self::open(blob).map(|t| matches!(crate::mobile_self::classify(t), crate::mobile_self::Envelope::CapPing)).unwrap_or(false);
+                            if is_cap {
+                                node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
+                            } else {
+                                let mut f = vec![FT_PEER_OFFLINE];
+                                f.extend_from_slice(&id);
+                                if sock.send(Message::Binary(f)).await.is_err() { break; }
+                            }
+                            continue;
+                        }
                         if device_by_peer(&to).is_none() || to == me { continue; }
                         if live_count(&to) == 0 {
                             let mut f = vec![FT_PEER_OFFLINE];
@@ -681,6 +1066,11 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         id.copy_from_slice(&d[1..33]);
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_TEXT + 256 || d.len() < 37 + len { continue; }
+                        if HashId(id) == st.my_id {
+                            // самому компьютеру: узел — конечная точка, расшифровывает и кладёт в историю веб-чата
+                            phone_to_node(&st, &me, &d[37..37 + len]);
+                            continue;
+                        }
                         if device_by_peer(&hex::encode(id)).is_some() {
                             // другому телефону владельца: байты передаются как есть
                             deliver_mail(&me, &hex::encode(id), &d[37..37 + len]);
@@ -710,25 +1100,61 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/pubkey/:peer", get(pubkey))
         .route("/mobile/pubkeys", post(accept_pubkeys))
         .route("/mobile/turn", get(turn_credentials))
-        .route("/mobile/files", get(crate::mobile_files::list).post(crate::mobile_files::start))
-        .route("/mobile/files/:id", axum::routing::delete(crate::mobile_files::remove))
+        .route(
+            "/mobile/files",
+            get(crate::mobile_files::list).post(crate::mobile_files::start),
+        )
+        .route(
+            "/mobile/files/:id",
+            axum::routing::delete(crate::mobile_files::remove),
+        )
         .route("/mobile/files/:id/status", get(crate::mobile_files::status))
-        .route("/mobile/files/:id/chunk/:idx", get(crate::mobile_files::get_chunk).put(crate::mobile_files::put_chunk))
+        .route(
+            "/mobile/files/:id/chunk/:idx",
+            get(crate::mobile_files::get_chunk).put(crate::mobile_files::put_chunk),
+        )
         .route("/mobile/files/:id/done", post(crate::mobile_files::done))
         .route("/mobile/groups", get(crate::mobile_groups::m_list))
         .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
-        .route("/mobile/groups/:gid/join", post(crate::mobile_groups::m_join))
-        .route("/mobile/groups/:gid/leave", post(crate::mobile_groups::m_leave))
-        .route("/mobile/groups/:gid/members", get(crate::mobile_groups::m_members))
-        .route("/mobile/groups/:gid/pubkey", post(crate::mobile_groups::m_pub))
-        .route("/mobile/groups/:gid/keys", get(crate::mobile_groups::m_keys_get).post(crate::mobile_groups::m_keys_put))
-        .route("/mobile/groups/:gid/log", get(crate::mobile_groups::m_log_get).post(crate::mobile_groups::m_log_post))
+        .route(
+            "/mobile/groups/:gid/join",
+            post(crate::mobile_groups::m_join),
+        )
+        .route(
+            "/mobile/groups/:gid/leave",
+            post(crate::mobile_groups::m_leave),
+        )
+        .route(
+            "/mobile/groups/:gid/members",
+            get(crate::mobile_groups::m_members),
+        )
+        .route(
+            "/mobile/groups/:gid/pubkey",
+            post(crate::mobile_groups::m_pub),
+        )
+        .route(
+            "/mobile/groups/:gid/keys",
+            get(crate::mobile_groups::m_keys_get).post(crate::mobile_groups::m_keys_put),
+        )
+        .route(
+            "/mobile/groups/:gid/log",
+            get(crate::mobile_groups::m_log_get).post(crate::mobile_groups::m_log_post),
+        )
         .route("/mobile/groups/:gid/mod", post(crate::mobile_groups::m_mod))
-        .route("/mobile/groups/:gid/modlog", get(crate::mobile_groups::m_modlog))
-        .route("/mobile/groups/:gid/invite", post(crate::mobile_groups::m_invite))
+        .route(
+            "/mobile/groups/:gid/modlog",
+            get(crate::mobile_groups::m_modlog),
+        )
+        .route(
+            "/mobile/groups/:gid/invite",
+            post(crate::mobile_groups::m_invite),
+        )
         .route("/mobile/ws", get(ws))
         .layer(middleware::from_fn(auth));
-    Router::new().route("/mobile/pair", post(pair)).merge(guarded).with_state(st)
+    Router::new()
+        .route("/mobile/pair", post(pair))
+        .merge(guarded)
+        .with_state(st)
 }
 
 /// Поток, у которого уже прочитанное начало возвращается читателю первым.
@@ -739,12 +1165,19 @@ pub struct Prepended<S> {
 
 impl<S> Prepended<S> {
     pub fn new(head: Vec<u8>, inner: S) -> Self {
-        Self { head: std::io::Cursor::new(head), inner }
+        Self {
+            head: std::io::Cursor::new(head),
+            inner,
+        }
     }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Prepended<S> {
-    fn poll_read(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, buf: &mut ReadBuf<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         let pos = self.head.position() as usize;
         let rest = &self.head.get_ref()[pos..];
         if !rest.is_empty() {
@@ -758,13 +1191,23 @@ impl<S: AsyncRead + Unpin> AsyncRead for Prepended<S> {
 }
 
 impl<S: AsyncWrite + Unpin> AsyncWrite for Prepended<S> {
-    fn poll_write(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>, b: &[u8]) -> std::task::Poll<std::io::Result<usize>> {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        b: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
         std::pin::Pin::new(&mut self.inner).poll_write(cx, b)
     }
-    fn poll_flush(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_flush(cx)
     }
-    fn poll_shutdown(mut self: std::pin::Pin<&mut Self>, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
         std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
     }
 }
@@ -784,7 +1227,9 @@ fn connect_target_and_token(head: &str) -> Option<(String, String)> {
     let target = it.next()?.to_string();
     let mut token = String::new();
     for l in lines {
-        let Some((k, v)) = l.split_once(':') else { continue };
+        let Some((k, v)) = l.split_once(':') else {
+            continue;
+        };
         if k.trim().eq_ignore_ascii_case("proxy-authorization") {
             let v = v.trim();
             if let Some(t) = v.strip_prefix("Bearer ") {
@@ -792,7 +1237,10 @@ fn connect_target_and_token(head: &str) -> Option<(String, String)> {
             } else if let Some(b) = v.strip_prefix("Basic ") {
                 use base64::Engine;
                 if let Ok(raw) = base64::engine::general_purpose::STANDARD.decode(b.trim()) {
-                    token = String::from_utf8_lossy(&raw).split_once(':').map(|(_, p)| p.to_string()).unwrap_or_default();
+                    token = String::from_utf8_lossy(&raw)
+                        .split_once(':')
+                        .map(|(_, p)| p.to_string())
+                        .unwrap_or_default();
                 }
             }
         }
@@ -813,7 +1261,9 @@ where
             return Ok(());
         }
         let mut tmp = [0u8; 2048];
-        let n = tokio::time::timeout(Duration::from_secs(10), tls.read(&mut tmp)).await.map_err(|_| std::io::Error::other("timeout"))??;
+        let n = tokio::time::timeout(Duration::from_secs(10), tls.read(&mut tmp))
+            .await
+            .map_err(|_| std::io::Error::other("timeout"))??;
         if n == 0 {
             return Ok(());
         }
@@ -822,17 +1272,28 @@ where
     let end = buf.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
     let head = String::from_utf8_lossy(&buf[..end]).to_string();
     let rest = buf[end..].to_vec();
-    let reply = |code: &str| format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
-    let Some((target, token)) = connect_target_and_token(&head) else { return tls.write_all(reply("400 Bad Request").as_bytes()).await };
+    let reply =
+        |code: &str| format!("HTTP/1.1 {code}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+    let Some((target, token)) = connect_target_and_token(&head) else {
+        return tls.write_all(reply("400 Bad Request").as_bytes()).await;
+    };
     let h = token_hash(&token);
     // клиент выхода — это само устройство: за ним закрепляется один внешний прокси
-    let client = if token.is_empty() { None } else { device_peer_of(&h) };
+    let client = if token.is_empty() {
+        None
+    } else {
+        device_peer_of(&h)
+    };
     let Some(client) = client else {
-        return tls.write_all(reply("407 Proxy Authentication Required").as_bytes()).await;
+        return tls
+            .write_all(reply("407 Proxy Authentication Required").as_bytes())
+            .await;
     };
     if TUNNELS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_TUNNELS {
         TUNNELS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
-        return tls.write_all(reply("503 Service Unavailable").as_bytes()).await;
+        return tls
+            .write_all(reply("503 Service Unavailable").as_bytes())
+            .await;
     }
     struct Guard;
     impl Drop for Guard {
@@ -841,15 +1302,23 @@ where
         }
     }
     let _g = Guard;
-    let mut out = match crate::exit_policy::connect_public_for(&client, &target, Duration::from_secs(15)).await {
-        Ok(s) => s,
-        Err(e) => {
-            let code = if e.kind() == std::io::ErrorKind::PermissionDenied { "403 Forbidden" } else { "502 Bad Gateway" };
-            return tls.write_all(reply(code).as_bytes()).await;
-        }
-    };
+    let mut out =
+        match crate::exit_policy::connect_public_for(&client, &target, Duration::from_secs(15))
+            .await
+        {
+            Ok(s) => s,
+            Err(e) => {
+                let code = if e.kind() == std::io::ErrorKind::PermissionDenied {
+                    "403 Forbidden"
+                } else {
+                    "502 Bad Gateway"
+                };
+                return tls.write_all(reply(code).as_bytes()).await;
+            }
+        };
     let _ = out.set_nodelay(true);
-    tls.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n").await?;
+    tls.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
+        .await?;
     if !rest.is_empty() {
         out.write_all(&rest).await?;
     }
@@ -890,7 +1359,10 @@ where
 
 /// Похож ли начальный кусок на запрос к `/mobile/...`.
 pub fn is_mobile_request(first: &[u8]) -> bool {
-    let line = first.split(|b| *b == b'\r' || *b == b'\n').next().unwrap_or(&[]);
+    let line = first
+        .split(|b| *b == b'\r' || *b == b'\n')
+        .next()
+        .unwrap_or(&[]);
     let line = String::from_utf8_lossy(line);
     let mut it = line.split_whitespace();
     matches!((it.next(), it.next()), (Some("GET" | "POST" | "PUT" | "DELETE"), Some(p)) if p.starts_with("/mobile/"))
@@ -923,7 +1395,9 @@ mod tests {
 
     #[test]
     fn mobile_requests_are_recognised() {
-        assert!(is_mobile_request(b"POST /mobile/pair HTTP/1.1\r\nHost: x\r\n\r\n"));
+        assert!(is_mobile_request(
+            b"POST /mobile/pair HTTP/1.1\r\nHost: x\r\n\r\n"
+        ));
         assert!(is_mobile_request(b"GET /mobile/ws?token=a HTTP/1.1\r\n"));
         assert!(!is_mobile_request(b"GET / HTTP/1.1\r\n"));
         assert!(!is_mobile_request(b"GET /mobilex HTTP/1.1\r\n"));
@@ -935,7 +1409,10 @@ mod tests {
         assert!(is_connect_request(b"CONNECT a.com:443 HTTP/1.1\r\n"));
         let (t, k) = connect_target_and_token("CONNECT a.com:443 HTTP/1.1\r\nHost: a.com:443\r\nProxy-Authorization: Bearer abc\r\n\r\n").unwrap();
         assert_eq!((t.as_str(), k.as_str()), ("a.com:443", "abc"));
-        let (_, k) = connect_target_and_token("CONNECT a.com:443 HTTP/1.1\r\nproxy-authorization: Basic eTphYmM=\r\n\r\n").unwrap();
+        let (_, k) = connect_target_and_token(
+            "CONNECT a.com:443 HTTP/1.1\r\nproxy-authorization: Basic eTphYmM=\r\n\r\n",
+        )
+        .unwrap();
         assert_eq!(k, "abc");
         assert!(connect_target_and_token("GET / HTTP/1.1\r\n\r\n").is_none());
     }

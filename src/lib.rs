@@ -30,57 +30,77 @@
 //! - **core** - Cryptographic identity and configuration
 //! - **util** - Common types and utilities
 
-pub mod netlayer;
-pub mod dht;
 pub mod bootstrap;
-pub mod dataplane;
-pub mod socks5;
-pub mod observability;
-pub mod core;
-pub mod util;
-pub mod crypto;
-pub mod proxy;
-pub mod protocol;
-pub mod mdns;
-pub mod web;
 pub mod communication;
-pub mod p2p_tunnel;
-pub mod p2p;
-pub mod testnet;
+pub mod core;
+pub mod crypto;
+pub mod dataplane;
+pub mod dht;
 pub mod exit_policy;
-pub mod network_offers;
-pub mod upstream_proxy;
-pub mod ip_history;
 pub mod exit_select;
-pub mod reciprocity;
 pub mod hops;
 pub mod hops_net;
-pub mod reachability;
-pub mod relay_net;
+pub mod ip_history;
+pub mod mdns;
 pub mod mobile_api;
 pub mod mobile_files;
 pub mod mobile_groups;
+pub mod mobile_self;
 pub mod mobile_tls;
+pub mod netlayer;
+pub mod network_offers;
+pub mod observability;
+pub mod p2p;
+pub mod p2p_tunnel;
+pub mod protocol;
+pub mod proxy;
+pub mod reachability;
+pub mod reciprocity;
+pub mod relay_net;
 pub mod route_rules;
+pub mod socks5;
 pub mod supervisor;
+pub mod testnet;
+pub mod upstream_proxy;
+pub mod util;
+pub mod web;
 
 // Re-exports for convenience
-pub use core::{NodeIdentity, NetConfig, YandiConfig, PortsConfig, ClientConfig, WsConfig, init_config, get_config, update_config, set_ws_bind_override, effective_ws_bind};
-pub use util::{HashId, OSDetector, SystemInfo, NodePower, OperatingSystem, mask_hash_id, mask_ipv6, mask_ipv4, mask_public_key, format_bytes};
-pub use netlayer::{PeerInfo, NetPacket, PacketType, HelloPacket, HelloType, ExternalIpService, NetworkTopology, NodeIntrospection, NodeCapabilities, NodeRole, NodeProfile, EncryptionManager, P2PTransport, HelloEvent, P2PCli, BootstrapManager, BootstrapConfig, ExitHandlerRequest, YandiTunManager, IPv6PacketInfo};
-pub use netlayer::adaptive::{AdaptiveController, TransportMode, AdaptiveMetrics};
-pub use netlayer::transport::{TransportState, StreamStats};
+pub use core::{
+    effective_ws_bind, get_config, init_config, set_ws_bind_override, update_config, ClientConfig,
+    NetConfig, NodeIdentity, PortsConfig, WsConfig, YandiConfig,
+};
+pub use netlayer::adaptive::{AdaptiveController, AdaptiveMetrics, TransportMode};
+pub use netlayer::transport::{StreamStats, TransportState};
+pub use netlayer::{
+    BootstrapConfig, BootstrapManager, EncryptionManager, ExitHandlerRequest, ExternalIpService,
+    HelloEvent, HelloPacket, HelloType, IPv6PacketInfo, NetPacket, NetworkTopology,
+    NodeCapabilities, NodeIntrospection, NodeProfile, NodeRole, P2PCli, P2PTransport, PacketType,
+    PeerInfo, YandiTunManager,
+};
+pub use util::{
+    format_bytes, mask_hash_id, mask_ipv4, mask_ipv6, mask_public_key, HashId, NodePower,
+    OSDetector, OperatingSystem, SystemInfo,
+};
 
+pub use dht::{DhtQuery, DhtQueryType, DhtResponse, DhtStorage, KBucket, KTable, Kademlia};
 pub use netlayer::port_manager::{PortManager, PortState};
-pub use dht::{Kademlia, KTable, KBucket, DhtStorage, DhtQuery, DhtResponse, DhtQueryType};
 // pub use bootstrap::{BootstrapManager, BootstrapNode, BootstrapConfig, BootstrapSource, NodeType};  // TODO: конфликтует с netlayer::bootstrap
-pub use dataplane::{DataTransport, TransportConfig, TransportType as DataTransportType, QoSManager, PacketPriority, DataplaneMetrics, TransportStats, MultipathManager, PathSelector};
-pub use socks5::{Socks5Server, Socks5ProxyServer, Socks5Client, Socks5Config, Socks5Command, Socks5AuthMethod, Socks5Address, ExitNodeHandler};
-pub use observability::{NetworkMetrics, init_logging, LogLevel};
+pub use dataplane::{
+    DataTransport, DataplaneMetrics, MultipathManager, PacketPriority, PathSelector, QoSManager,
+    TransportConfig, TransportStats, TransportType as DataTransportType,
+};
+pub use mdns::{
+    DiscoveredNode, MdnsAnnouncer, MdnsBrowser, MdnsService, YANDI_ADMIN_TYPE, YANDI_SERVICE_TYPE,
+};
+pub use observability::{init_logging, LogLevel, NetworkMetrics};
 pub use proxy::{HttpProxyClient, HttpProxyGateway, ProxyConfig};
-pub use mdns::{MdnsService, MdnsAnnouncer, MdnsBrowser, DiscoveredNode, YANDI_SERVICE_TYPE, YANDI_ADMIN_TYPE};
-pub use web::{WebServer, NodeInfo};
-pub use web::auth::{AuthState, load_auth_state};
+pub use socks5::{
+    ExitNodeHandler, Socks5Address, Socks5AuthMethod, Socks5Client, Socks5Command, Socks5Config,
+    Socks5ProxyServer, Socks5Server,
+};
+pub use web::auth::{load_auth_state, AuthState};
+pub use web::{NodeInfo, WebServer};
 // P2P Transport for communications (port 9999) - без алиаса, используем полный путь
 
 /// YANDI version

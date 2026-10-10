@@ -128,7 +128,8 @@ pub struct StartReq {
 /// Начать передачу: узел выдаёт номер, под которым отправитель заливает куски.
 pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<StartReq>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
-    if req.to_peer_id == me || !is_device_peer(&req.to_peer_id) {
+    // получатель — другой телефон владельца или сам компьютер (переписка телефона с веб-чатом узла, см. mobile_self)
+    if req.to_peer_id == me || !(is_device_peer(&req.to_peer_id) || crate::mobile_api::is_node_peer(&req.to_peer_id)) {
         return err(StatusCode::BAD_REQUEST, "файлы можно отправлять только на другое сопряжённое устройство");
     }
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
@@ -265,6 +266,70 @@ pub async fn remove(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
     if m.from != me && m.to != me {
         return StatusCode::FORBIDDEN.into_response();
     }
+    if m.to == me && m.done && crate::mobile_api::is_node_peer(&m.from) {
+        // телефон забрал файл, отправленный со страницы узла: там он станет «доставлено»
+        crate::mobile_api::file_taken(&id);
+    }
     let _ = tokio::fs::remove_dir_all(dir_of(&id)).await;
     StatusCode::OK.into_response()
+}
+
+// ── Узел сам как сторона передачи (компьютер ↔ телефон, `mobile_self`) ──
+
+/// Готовая передача от этого устройства этому получателю: (число кусков, размер). Иначе None.
+pub(crate) async fn ready_for(id: &str, from: &str, to: &str) -> Option<(u32, u64)> {
+    let m = load_meta(id).await?;
+    (m.done && m.from == from && m.to == to).then_some((m.total_chunks, m.file_size))
+}
+
+pub(crate) async fn read_chunk(id: &str, idx: u32) -> Option<Vec<u8>> {
+    if !valid_id(id) {
+        return None;
+    }
+    tokio::fs::read(dir_of(id).join(chunk_name(idx))).await.ok()
+}
+
+pub(crate) async fn drop_transfer(id: &str) {
+    if valid_id(id) {
+        let _ = tokio::fs::remove_dir_all(dir_of(id)).await;
+    }
+}
+
+/// Узел начинает передачу телефону (те же лимиты, что и у телефонов).
+pub(crate) async fn node_begin(from: &str, to: &str, file_size: u64, total_chunks: u32) -> Result<String, String> {
+    if total_chunks == 0 || total_chunks > MAX_CHUNKS || file_size == 0 || file_size > MAX_FILE {
+        return Err("файл слишком большой или пустой".into());
+    }
+    cleanup().await;
+    let metas = all_meta().await;
+    let used: u64 = metas.iter().map(|m| m.file_size + m.total_chunks as u64 * CHUNK_OVERHEAD).sum();
+    if used + file_size + total_chunks as u64 * CHUNK_OVERHEAD > MAX_STORE {
+        return Err("на узле нет места для файлов".into());
+    }
+    let id = {
+        use rand::RngCore;
+        let mut b = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut b);
+        hex::encode(b)
+    };
+    let meta = Meta { id: id.clone(), from: from.to_string(), to: to.to_string(), file_name: "file".into(), file_size, total_chunks, created_ms: now_ms(), done: false };
+    tokio::fs::create_dir_all(dir_of(&id)).await.map_err(|e| e.to_string())?;
+    save_meta(&meta).await.map_err(|e| e.to_string())?;
+    Ok(id)
+}
+
+pub(crate) async fn node_put(id: &str, idx: u32, bytes: &[u8]) -> Result<(), String> {
+    if !valid_id(id) || bytes.is_empty() || bytes.len() > MAX_CHUNK_BYTES {
+        return Err("неверный кусок".into());
+    }
+    let d = dir_of(id);
+    let tmp = d.join(format!("{}.tmp", chunk_name(idx)));
+    tokio::fs::write(&tmp, bytes).await.map_err(|e| e.to_string())?;
+    tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.map_err(|e| e.to_string())
+}
+
+pub(crate) async fn node_finish(id: &str) -> Result<(), String> {
+    let mut m = load_meta(id).await.ok_or("нет такой передачи")?;
+    m.done = true;
+    save_meta(&m).await.map_err(|e| e.to_string())
 }

@@ -65,6 +65,17 @@
                     <div class="chat-messages" id="chatMessages">
                         <div class="no-chat-selected">Выберите контакт из списка слева</div>
                     </div>
+                    <div id="msgSelectBar" style="display:none;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid #8884;flex-wrap:wrap">
+                        <span id="msgSelectCount"></span>
+                        <button class="btn btn-sm btn-warning" id="msgEditBtn" onclick="startEditSelected()">✏️ Изменить</button>
+                        <button class="btn btn-sm btn-danger" onclick="deleteSelected()">🗑️ Удалить</button>
+                        <button class="btn btn-sm" onclick="clearChatHistory()">🧹 Очистить чат</button>
+                        <button class="btn btn-sm" onclick="clearSelection()">✖ Отмена</button>
+                    </div>
+                    <div id="msgEditBar" style="display:none;align-items:center;gap:8px;padding:6px 10px;border-top:1px solid #8884">
+                        <span>✏️ Редактирование сообщения</span>
+                        <button class="btn btn-sm" onclick="cancelEdit()">✖</button>
+                    </div>
                     <div class="chat-input-area" id="chatInputArea" style="display: none;">
                         <button class="chat-attach-btn" onclick="attachFile()" title="Прикрепить файл">📎</button>
                         <button class="chat-emoji-btn" id="emojiBtn" title="Смайлы">😊</button>
@@ -256,6 +267,10 @@
         var currentContactId = null, currentContactShortId = null, currentContactName = null, myNodeId = null, autoRefreshInterval = null, pendingAttachment = null, lastMessageCount = 0, lastIncomingCount = 0;
         var pendingTransfers = {};
         var onlineContacts = new Set();   // short_id контактов, которые сейчас онлайн
+        var selectedMsgs = new Map();     // выбранные сообщения: msg_id → {own, text}
+        var editingMsgId = null;          // правится это сообщение (своё)
+        var lastRenderKey = '';           // чтобы опрос раз в 5 с не перерисовывал без изменений (и не сбрасывал выделение/прокрутку)
+        var phonePeers = new Set();       // short_id контактов-телефонов владельца (им файлы идут крупными кусками)
         var contactsInitialized = false;  // не играть звук при первой загрузке
 
         document.addEventListener('DOMContentLoaded', function() {
@@ -291,6 +306,7 @@
                     }
                 });
             }
+            phonePeers = new Set(contacts.filter(function(c) { return c.is_phone; }).map(function(c) { return c.short_id; }));
             // Обновляем Set текущего онлайн-состояния
             onlineContacts = new Set(contacts.filter(function(c) { return c.online; }).map(function(c) { return c.short_id; }));
             contactsInitialized = true;
@@ -357,6 +373,7 @@
             var activeEl = document.querySelector('.contact-item[data-short-id="' + shortId + '"]');
             if (activeEl) activeEl.classList.add('active');
             updateContactStatus(shortId);
+            selectedMsgs.clear(); updateSelectBar(); if (editingMsgId) cancelEdit(); lastRenderKey = '';
             loadMessages(shortId);
             lastMessageCount = 0;
             lastIncomingCount = 0;
@@ -386,6 +403,72 @@
             return html;
         }
 
+        // Галочки как в приложении: одна серая — отправлено, две серые — доставлено, две оранжевые — прочитано
+        function statusTicks(status) {
+            if (status === 'Read') return '<span class="msg-ticks" style="color:#ff9800" title="Прочитано">✓✓</span>';
+            if (status === 'Delivered') return '<span class="msg-ticks" style="color:#9e9e9e" title="Доставлено">✓✓</span>';
+            if (status === 'Failed') return '<span class="msg-ticks" style="color:#e74c3c" title="Не доставлено">⚠</span>';
+            return '<span class="msg-ticks" style="color:#9e9e9e" title="Отправлено">✓</span>';
+        }
+
+        function toggleMessageSelect(el, ev) {
+            if (ev && ev.target && ev.target.closest && ev.target.closest('a, button, audio, video')) return; // клик по ссылке/плееру — не выделение
+            var id = el.getAttribute('data-msg-id');
+            if (!id) return;
+            if (selectedMsgs.has(id)) { selectedMsgs.delete(id); el.classList.remove('msg-selected'); }
+            else {
+                var t = el.querySelector('.message-text');
+                selectedMsgs.set(id, { own: el.getAttribute('data-own') === '1', text: t ? t.textContent : '' });
+                el.classList.add('msg-selected');
+            }
+            updateSelectBar();
+        }
+
+        function updateSelectBar() {
+            var bar = document.getElementById('msgSelectBar');
+            var n = selectedMsgs.size;
+            bar.style.display = n ? 'flex' : 'none';
+            document.getElementById('msgSelectCount').textContent = 'Выбрано: ' + n;
+            var one = n === 1 ? selectedMsgs.values().next().value : null;
+            document.getElementById('msgEditBtn').style.display = (one && one.own) ? '' : 'none';
+        }
+
+        function clearSelection() {
+            selectedMsgs.clear();
+            document.querySelectorAll('.message.msg-selected').forEach(function(el) { el.classList.remove('msg-selected'); });
+            updateSelectBar();
+        }
+
+        function startEditSelected() {
+            if (selectedMsgs.size !== 1) return;
+            var id = selectedMsgs.keys().next().value, m = selectedMsgs.get(id);
+            if (!m.own) return;
+            editingMsgId = id;
+            var input = document.getElementById('messageInput');
+            input.value = m.text;
+            input.focus();
+            document.getElementById('msgEditBar').style.display = 'flex';
+            clearSelection();
+        }
+
+        function cancelEdit() {
+            editingMsgId = null;
+            document.getElementById('msgEditBar').style.display = 'none';
+            document.getElementById('messageInput').value = '';
+        }
+
+        // удаление только у себя (как в приложении: у собеседника сообщение остаётся)
+        function deleteSelected() {
+            var ids = Array.from(selectedMsgs.keys());
+            if (!ids.length || !currentContactShortId) return;
+            var peer = currentContactShortId;
+            showConfirm('🗑️ Удаление', 'Удалить ' + ids.length + ' сообщ. у себя? У собеседника они останутся.', function() {
+                Promise.all(ids.map(function(id) {
+                    return fetch('/api/chat/delete/' + peer, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msg_id: id, for_everyone: false }) });
+                })).then(function() { clearSelection(); lastRenderKey = ''; loadMessages(peer); }).catch(function() { showAlert('❌ Ошибка', 'Не удалось удалить'); });
+            });
+        }
+
         function currentTimeLabel() {
             return new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
         }
@@ -404,14 +487,18 @@
                 .map(function(key) { return pendingTransfers[key]; })
                 .filter(function(item) { return item.peerId === currentContactShortId; });
 
+            var renderKey = currentContactShortId + '|' + JSON.stringify(items.map(function(m) { return [m.msg_id, m.status, m.edited, m.text]; })) + '|' + JSON.stringify(pendingForPeer.map(function(t) { return [t.sentChunks, t.complete, t.error]; }));
+            if (renderKey === lastRenderKey) return;
+            lastRenderKey = renderKey;
             if (items.length === 0 && pendingForPeer.length === 0) { div.innerHTML = '<p class="text-muted" style="text-align: center;">Нет сообщений</p>'; lastMessageCount = 0; return; }
             var html = '';
             for (var i = 0; i < items.length; i++) {
                 var msg = items[i];
                 var isSent = (msg.from === myNodeId);
                 var time = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-                html += '<div class="message ' + (isSent ? 'sent' : 'received') + '">';
-                html += '<div class="message-time">' + time + '</div>';
+                var sel = selectedMsgs.has(msg.msg_id);
+                html += '<div class="message ' + (isSent ? 'sent' : 'received') + (sel ? ' msg-selected' : '') + '" data-msg-id="' + escapeHTML(msg.msg_id) + '" data-own="' + (isSent && !msg.attachment ? '1' : '') + '" onclick="toggleMessageSelect(this, event)">';
+                html += '<div class="message-time">' + time + (msg.edited ? ' · изменено' : '') + (isSent ? ' ' + statusTicks(msg.status) : '') + '</div>';
                 if (msg.attachment) html += renderAttachment(msg.attachment);
                 if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
                 html += '</div>';
@@ -517,6 +604,14 @@
             var text = input.value.trim();
             if (pendingAttachment) { sendFileMessage(text); return; }
             if (!text) return;
+            if (editingMsgId) {
+                var mid = editingMsgId;
+                fetch('/api/chat/edit/' + currentContactShortId, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ msg_id: mid, text: text }) }).then(function(res) { return res.json(); }).then(function(data) {
+                    if (data.status === 'success') { cancelEdit(); lastRenderKey = ''; loadMessages(currentContactShortId); }
+                    else showAlert('❌ Ошибка', data.message);
+                }).catch(function() { showAlert('❌ Ошибка', 'Ошибка правки'); });
+                return;
+            }
             fetch('/api/chat/send/' + currentContactShortId, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text }) }).then(function(res) { return res.json(); }).then(function(data) {
                 if (data.status === 'success') { input.value = ''; loadMessages(currentContactShortId); }
                 else showAlert('❌ Ошибка', data.message);
@@ -554,7 +649,8 @@
             
             const targetPeerShortId = currentContactShortId;
             const file = pendingAttachment;
-            const CHUNK_SIZE = 700;
+            // телефону владельца файл уходит не по UDP между узлами, а через сам узел: крупные куски (1 МБ) — в сотни раз быстрее
+            const CHUNK_SIZE = phonePeers.has(targetPeerShortId) ? 1024 * 1024 : 700;
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
             let file_id = null;
             const transferLocalId = 'upload_' + Date.now() + '_' + Math.random().toString(16).slice(2);
@@ -641,7 +737,7 @@
         function clearChatHistory() {
             if (!currentContactShortId) return;
             showConfirm('🗑️ Очистка истории', 'Удалить всю историю переписки?', function() {
-                fetch('/api/chat/clear/' + currentContactShortId, { method: 'POST' }).then(function() { loadMessages(currentContactShortId); showAlert('✅ Успешно', 'История очищена'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка очистки'); });
+                fetch('/api/chat/clear/' + currentContactShortId, { method: 'POST' }).then(function() { clearSelection(); lastRenderKey = ''; loadMessages(currentContactShortId); showAlert('✅ Успешно', 'История очищена'); }).catch(function() { showAlert('❌ Ошибка', 'Ошибка очистки'); });
             });
         }
         // function startCall() moved to voice-call.js
