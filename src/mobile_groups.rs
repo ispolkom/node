@@ -419,6 +419,8 @@ fn bad(msg: &'static str) -> Fail {
 
 /// Все группы узла: описание в `index.json`, журнал каждой — `<id>.log` (по записи JSON в строке) в папке `groups`.
 pub struct Store {
+    /// индекс не открылся (повреждён/не читается): изменения запрещены, чтобы не перезаписать его пустым
+    broken: Option<String>,
     dir: PathBuf,
     groups: BTreeMap<String, Group>,
     /// смещения строк журнала (индекс i — запись first_seq + i), строятся при первом обращении
@@ -427,22 +429,37 @@ pub struct Store {
 
 impl Store {
     pub fn open(dir: PathBuf) -> Self {
-        let groups: Vec<Group> = std::fs::read_to_string(dir.join("index.json"))
-            .ok()
-            .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or_default();
+        let path = dir.join("index.json");
+        // нет файла — пусто; файл есть, но не читается или повреждён — НЕ начинаем с пустого и ничего не перезаписываем
+        let (groups, broken): (Vec<Group>, Option<String>) = match std::fs::read_to_string(&path) {
+            Ok(text) => match serde_json::from_str(&text) {
+                Ok(g) => (g, None),
+                Err(e) => (Vec::new(), Some(format!("{} повреждён ({e}); файл не тронут", path.display()))),
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (Vec::new(), None),
+            Err(e) => (Vec::new(), Some(format!("{} не читается ({e}); файл не тронут", path.display()))),
+        };
+        if let Some(b) = &broken {
+            eprintln!("[groups] ⚠️  хранилище групп: {b}. Изменения групп отключены до восстановления.");
+        }
         Self {
             dir,
             groups: groups.into_iter().map(|g| (g.id.clone(), g)).collect(),
             offsets: HashMap::new(),
+            broken,
         }
     }
 
-    fn save(&self) {
-        let list: Vec<&Group> = self.groups.values().collect();
-        if let Ok(s) = serde_json::to_vec_pretty(&list) {
-            let _ = crate::util::private_file::write_private(&self.dir.join("index.json"), &s);
+    /// Сохранить описание групп. Ошибка записи (диск заполнен, нет прав) и повреждённый при открытии индекс — это ошибка операции, а не
+    /// «успех только в памяти» (после перезапуска изменение пропало бы).
+    fn save(&self) -> R<()> {
+        if self.broken.is_some() {
+            return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено; изменения отключены до восстановления"));
         }
+        let list: Vec<&Group> = self.groups.values().collect();
+        let s = serde_json::to_vec_pretty(&list).map_err(|_| Fail(StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить группы"))?;
+        crate::util::private_file::write_private(&self.dir.join("index.json"), &s)
+            .map_err(|_| Fail(StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить группы (диск?)"))
     }
 
     fn log_path(&self, gid: &str) -> PathBuf {
@@ -610,7 +627,7 @@ impl Store {
         g.log(&actor, "create", None, None, None);
         let to = g.keys();
         self.groups.insert(id.clone(), g);
-        self.save();
+        self.save()?;
         hint(&id, HINT_CHANGED, 0, to);
         Ok(id)
     }
@@ -643,7 +660,7 @@ impl Store {
         }
         g.log(&by, "settings", None, None, None);
         let to = g.keys();
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, to);
         Ok(())
     }
@@ -679,7 +696,7 @@ impl Store {
         g.rekey_needed = true;
         g.log(&me_alias, "transfer", Some(&target.alias), None, None);
         let to = g.keys();
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, to.clone());
         hint(gid, HINT_KEYS, 0, to);
         Ok(())
@@ -690,7 +707,7 @@ impl Store {
         self.offsets.remove(gid);
         let _ = std::fs::remove_file(self.log_path(gid));
         crate::mobile_group_files::drop_group(gid);
-        self.save();
+        self.save()?;
         hint(gid, HINT_DELETED, 0, g.keys());
         Ok(())
     }
@@ -759,7 +776,7 @@ impl Store {
             None,
         );
         let to = g.keys();
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, to);
         Ok(alias)
     }
@@ -777,7 +794,7 @@ impl Store {
         g.log(&m.alias, "leave", Some(&m.alias), None, None);
         let mut to = g.keys();
         to.push(key);
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, to);
         Ok(())
     }
@@ -796,7 +813,7 @@ impl Store {
             boxes.remove(&key);
         }
         let owner = g.owner().map(|o| vec![o.key.clone()]).unwrap_or_default();
-        self.save();
+        self.save()?;
         hint(gid, HINT_KEYS, 0, owner);
         Ok(())
     }
@@ -840,7 +857,7 @@ impl Store {
             let first = *g.key_boxes.keys().next().unwrap();
             g.key_boxes.remove(&first);
         }
-        self.save();
+        self.save()?;
         hint(gid, HINT_KEYS, epoch as u64, to);
         Ok(n)
     }
@@ -908,7 +925,7 @@ impl Store {
         if pos + bytes.len() as u64 > MAX_JOURNAL_BYTES {
             self.trim(gid);
         }
-        self.save();
+        self.save()?;
         hint(gid, HINT_LOG, seq, to);
         Ok(seq)
     }
@@ -1015,7 +1032,7 @@ impl Store {
             let g = self.get_mut(gid)?;
             g.log(by, "delete_entry", Some(&author), Some(seq), reason);
             let to = g.keys();
-            self.save();
+            self.save()?;
             hint(gid, HINT_LOG, seq, to);
             return Ok(());
         }
@@ -1028,7 +1045,7 @@ impl Store {
                 return Err(Fail(StatusCode::NOT_FOUND, "нет такого запрета"));
             }
             g.log(by, "unban", Some(alias), None, reason);
-            self.save();
+            self.save()?;
             return Ok(());
         }
         let alias = alias.ok_or_else(|| bad("нужен псевдоним"))?;
@@ -1090,7 +1107,7 @@ impl Store {
         if !notify.contains(&target.key) {
             notify.push(target.key);
         }
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, notify);
         Ok(())
     }
@@ -1128,7 +1145,7 @@ impl Store {
             by: by.to_string(),
         });
         g.log(by, "invite", None, None, None);
-        self.save();
+        self.save()?;
         Ok(json!({"code": code, "group_id": gid, "expires_ms": expires_ms}))
     }
 
@@ -1158,7 +1175,7 @@ impl Store {
     pub fn set_about(&mut self, gid: &str, about: &str) {
         if let Some(g) = self.groups.get_mut(gid) {
             g.about = clean(about, MAX_ABOUT);
-            self.save();
+            if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
         }
     }
 
@@ -1197,7 +1214,7 @@ impl Store {
         }
         g.requests.push(JoinRequest { id: random_hex(8), peer: device.to_string(), name: clean(name, 64), ts: now });
         let to: Vec<String> = g.members.iter().filter(|m| m.role != Role::Member).map(|m| m.key.clone()).collect();
-        self.save();
+        self.save()?;
         hint(gid, HINT_CHANGED, 0, to);
         Ok(())
     }
@@ -1227,7 +1244,7 @@ impl Store {
         if g.requests.len() == before {
             return Err(not_found());
         }
-        self.save();
+        self.save()?;
         Ok(())
     }
 
@@ -1292,10 +1309,10 @@ impl Store {
             }
         }
         if had_request && changed.is_empty() {
-            self.save();
+            if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
         }
         if !changed.is_empty() {
-            self.save();
+            if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
             for (gid, to) in changed {
                 hint(&gid, HINT_CHANGED, 0, to);
             }
@@ -1738,6 +1755,23 @@ mod tests {
     const OWNER: &str = "aa";
     const BOB: &str = "bb";
     const EVE: &str = "ee";
+
+    #[test]
+    fn a_broken_or_unwritable_index_is_an_error_not_a_silent_success() {
+        // аудит Codex №7
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("groups");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("index.json"), b"{broken").unwrap();
+        let mut s = Store::open(dir.clone());
+        assert!(s.create_as("Г", "т", Kind::Open, OWNER, &[], true).is_err(), "повреждённый индекс: изменения запрещены");
+        assert_eq!(std::fs::read(dir.join("index.json")).unwrap(), b"{broken", "и он не перезаписан пустым");
+        // каталог групп — обычный файл: запись невозможна → ошибка, а не «успех в памяти»
+        let file_dir = d.path().join("not_a_dir");
+        std::fs::write(&file_dir, b"x").unwrap();
+        let mut s2 = Store::open(file_dir);
+        assert!(s2.create_as("Г", "т", Kind::Open, OWNER, &[], true).is_err());
+    }
 
     #[test]
     fn weak_member_keys_are_refused() {

@@ -147,8 +147,8 @@ impl Vault {
         aead_open(&self.key, aad.as_bytes(), &unb64(text.trim())?)
     }
 
-    fn write_private(&self, name: &str, data: &[u8]) {
-        let _ = crate::util::private_file::write_private(&self.dir.join(name), data);
+    fn write_private(&self, name: &str, data: &[u8]) -> std::io::Result<()> {
+        crate::util::private_file::write_private(&self.dir.join(name), data)
     }
 }
 
@@ -198,6 +198,8 @@ struct Client {
     rules: HashMap<String, Vec<u8>>,
     names: HashMap<String, HashMap<String, String>>,
     problems: HashSet<String>,
+    /// группы, у которых часть ленты на диске не открылась (повреждение)
+    damaged: HashSet<String>,
 }
 
 static CLIENT: OnceLock<Mutex<Option<Client>>> = OnceLock::new();
@@ -209,19 +211,40 @@ fn cell() -> &'static Mutex<Option<Client>> {
 /// Запуск: ключ хранилища выводится из мастер-ключа узла. Без мастер-ключа группы на ПК не работают (ничего не пишется открытым).
 pub fn init(master: [u8; 32]) {
     let vault = Vault::new(crate::util::data_dir::data_dir().join("groups_pc"), &master);
-    let state = std::fs::read_to_string(vault.dir.join("state.enc"))
-        .ok()
-        .and_then(|t| vault.open("state", &t))
-        .and_then(|b| serde_json::from_slice::<State>(&b).ok())
-        .unwrap_or_default();
-    *cell().lock().unwrap_or_else(|e| e.into_inner()) = Some(Client { vault, state, logs: HashMap::new(), rules: HashMap::new(), names: HashMap::new(), problems: HashSet::new() });
+    match load_state(&vault) {
+        Ok(state) => {
+            *cell().lock().unwrap_or_else(|e| e.into_inner()) =
+                Some(Client { vault, state, logs: HashMap::new(), rules: HashMap::new(), names: HashMap::new(), problems: HashSet::new(), damaged: HashSet::new() });
+        }
+        Err(e) => {
+            // существующее состояние не открывается — НЕ начинаем с пустого (иначе новые ключи участника и перезапись): группы на ПК
+            // выключены до восстановления, файлы не тронуты
+            eprintln!("[groups-pc] ⚠️  {e}");
+            let _ = INIT_ERROR.set(e);
+        }
+    }
+}
+
+static INIT_ERROR: OnceLock<String> = OnceLock::new();
+
+/// Состояние хранилища: нет файла — пустое; файл есть, но не открывается (повреждён, другой мастер-ключ, ошибка чтения) — ошибка.
+fn load_state(vault: &Vault) -> Result<State, String> {
+    let path = vault.dir.join("state.enc");
+    match std::fs::read_to_string(&path) {
+        Ok(t) => vault
+            .open("state", &t)
+            .and_then(|b| serde_json::from_slice::<State>(&b).ok())
+            .ok_or_else(|| format!("состояние групп ПК ({}) не открывается: повреждено или другой мастер-ключ; файл не тронут", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(State::default()),
+        Err(e) => Err(format!("состояние групп ПК не читается ({e}); файл не тронут")),
+    }
 }
 
 fn with_client<T>(f: impl FnOnce(&mut Client) -> Result<T, String>) -> Result<T, String> {
     let mut g = cell().lock().unwrap_or_else(|e| e.into_inner());
     match g.as_mut() {
         Some(c) => f(c),
-        None => Err("группы на компьютере недоступны: нет мастер-ключа узла".into()),
+        None => Err(INIT_ERROR.get().cloned().unwrap_or_else(|| "группы на компьютере недоступны: нет мастер-ключа узла".into())),
     }
 }
 
@@ -234,10 +257,14 @@ fn fail(e: crate::mobile_groups::Fail) -> String {
 }
 
 impl Client {
-    fn save(&self) {
-        if let Ok(j) = serde_json::to_vec(&self.state) {
-            self.vault.write_private("state.enc", self.vault.seal("state", &j).as_bytes());
+    fn save(&self) -> bool {
+        let r = serde_json::to_vec(&self.state)
+            .map_err(|e| e.to_string())
+            .and_then(|j| self.vault.write_private("state.enc", self.vault.seal("state", &j).as_bytes()).map_err(|e| e.to_string()));
+        if let Err(e) = &r {
+            eprintln!("[groups-pc] ⚠️  состояние групп не сохранено: {e}");
         }
+        r.is_ok()
     }
 
     fn gstate(&mut self, gid: &str) -> &mut GState {
@@ -246,7 +273,7 @@ impl Client {
             rand::thread_rng().fill_bytes(&mut seed);
             let pubk = PublicKey::from(&StaticSecret::from(seed)).to_bytes();
             self.state.groups.insert(gid.to_string(), GState { seed: b64(&seed), pubk: b64(&pubk), ..Default::default() });
-            self.save();
+            let _ = self.save();
         }
         self.state.groups.get_mut(gid).expect("gstate")
     }
@@ -257,27 +284,41 @@ impl Client {
 
     fn load_log(&mut self, gid: &str) -> &mut Vec<Entry> {
         if !self.logs.contains_key(gid) {
-            let list: Vec<Entry> = std::fs::read_to_string(self.vault.dir.join(Self::log_name(gid)))
-                .map(|t| t.lines().filter_map(|l| self.vault.open(gid, l)).filter_map(|b| serde_json::from_slice::<Entry>(&b).ok()).collect())
-                .unwrap_or_default();
+            let text = std::fs::read_to_string(self.vault.dir.join(Self::log_name(gid))).unwrap_or_default();
+            let mut list = Vec::new();
+            let mut bad = 0usize;
+            for l in text.lines().filter(|l| !l.trim().is_empty()) {
+                match self.vault.open(gid, l).and_then(|b| serde_json::from_slice::<Entry>(&b).ok()) {
+                    Some(e) => list.push(e),
+                    None => bad += 1,
+                }
+            }
+            if bad > 0 {
+                eprintln!("[groups-pc] ⚠️  в ленте группы {gid} не открылось строк: {bad} (повреждение на диске)");
+                self.damaged.insert(gid.to_string());
+            }
             self.logs.insert(gid.to_string(), list);
         }
         self.logs.get_mut(gid).expect("log")
     }
 
     /// Дописывает расшифрованные записи (строка — запись, под тем же ключом хранилища).
-    fn append_log(&mut self, gid: &str, entries: &[Entry]) {
+    fn append_log(&mut self, gid: &str, entries: &[Entry]) -> Result<(), String> {
         if entries.is_empty() {
-            return;
+            return Ok(());
         }
-        let mut text = std::fs::read_to_string(self.vault.dir.join(Self::log_name(gid))).unwrap_or_default();
+        let mut text = match std::fs::read_to_string(self.vault.dir.join(Self::log_name(gid))) {
+            Ok(t) => t,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(format!("лента группы не читается: {e}")), // не перезаписываем то, что не смогли прочитать
+        };
         for e in entries {
             if let Ok(j) = serde_json::to_vec(e) {
                 text.push_str(&self.vault.seal(gid, &j));
                 text.push('\n');
             }
         }
-        self.vault.write_private(&Self::log_name(gid), text.as_bytes());
+        self.vault.write_private(&Self::log_name(gid), text.as_bytes()).map_err(|e| format!("лента группы не сохранена: {e}"))?;
         let log = self.load_log(gid);
         for e in entries {
             if !log.iter().any(|x| x.seq == e.seq) {
@@ -285,6 +326,7 @@ impl Client {
             }
         }
         log.sort_by_key(|e| e.seq);
+        Ok(())
     }
 
     fn group_key(&self, gid: &str, epoch: u32) -> Option<[u8; 32]> {
@@ -322,7 +364,7 @@ pub fn sync_all() {
             }
         }
         if changed {
-            c.save();
+            let _ = c.save();
         }
         for g in &list {
             let gid = s(g, "id");
@@ -340,7 +382,7 @@ fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str) -> Result<(), Str
         let p = c.gstate(gid).pubk.clone();
         with_store(|st| st.set_pub(gid, dev, &p)).map_err(fail)?;
         c.gstate(gid).pub_sent = true;
-        c.save();
+        let _ = c.save();
     }
     // 2) ключи: владелец раздаёт, участник забирает
     if role == "owner" {
@@ -392,7 +434,7 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
         }
     }
     c.gstate(gid).keys.insert(new_epoch, b64(&key));
-    c.save();
+    let _ = c.save();
     with_store(|st| st.put_keys(gid, dev, new_epoch, &boxes)).map_err(fail)?;
     Ok(())
 }
@@ -431,7 +473,7 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
     if !as_owner { match c.gstate(gid).owner_pub.clone() {
         None => {
             c.gstate(gid).owner_pub = Some(owner_pub_s);
-            c.save();
+            let _ = c.save();
         }
         Some(pinned) if pinned != owner_pub_s => {
             // возможно, владение передали: сначала дочитываем ленту (старые ключи у нас есть) и ищем подтверждение изнутри группы
@@ -445,7 +487,7 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
             let log = c.load_log(gid).clone();
             if handover_endorsed(&log, &members, &owner_pub_s) {
                 c.gstate(gid).owner_pub = Some(owner_pub_s.clone());
-                c.save();
+                let _ = c.save();
             } else {
                 c.problems.insert(gid.to_string());
                 return Ok(());
@@ -464,7 +506,7 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
         match b["box"].as_str().and_then(unb64).map(|w| open_key(&w, gid, epoch, &my_seed, &owner_pub)) {
             Some(Ok(key)) => {
                 c.gstate(gid).keys.insert(epoch, b64(&key));
-                c.save();
+                let _ = c.save();
             }
             _ => {
                 if !as_owner {
@@ -508,9 +550,12 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
             }
             after = seq;
         }
-        c.append_log(gid, &batch);
+        // курсор двигаем, только если записи надёжно легли на диск: иначе после перезапуска они были бы пропущены навсегда
+        c.append_log(gid, &batch)?;
         c.gstate(gid).last_seq = after;
-        c.save();
+        if !c.save() {
+            return Err("состояние групп не сохранено".into());
+        }
         if blocked || entries.len() < 200 {
             break;
         }
@@ -557,7 +602,7 @@ fn announce_name(c: &mut Client, dev: &str, gid: &str, alias: &str) {
     if let Ok(payload) = encrypt_entry(&key, gid, epoch, alias, KIND_SYSTEM, &json!({"op": "name", "n": want})) {
         if with_store(|st| st.append(gid, dev, epoch, &b64(&payload))).is_ok() {
             c.gstate(gid).want_name = None;
-            c.save();
+            let _ = c.save();
         }
     }
 }
@@ -576,7 +621,9 @@ pub fn refresh_entry(gid: &str, seq: u64) {
                 }
                 let snapshot = log.clone();
                 let text: String = snapshot.iter().filter_map(|e| serde_json::to_vec(e).ok()).map(|j| c.vault.seal(gid, &j) + "\n").collect();
-                c.vault.write_private(&Client::log_name(gid), text.as_bytes());
+                if let Err(e) = c.vault.write_private(&Client::log_name(gid), text.as_bytes()) {
+                    eprintln!("[groups-pc] ⚠️  пометка стёртой записи не сохранена: {e}");
+                }
             }
         }
         Ok(())
@@ -682,7 +729,7 @@ pub fn join(gid: &str, code: Option<&str>, name: &str) -> Result<(), String> {
         let g = c.gstate(gid);
         g.pub_sent = true;
         g.want_name = Some(name.trim().to_string());
-        c.save();
+        let _ = c.save();
         Ok(())
     })?;
     sync_all();
@@ -709,7 +756,7 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
             .map(|e| json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": e.body}))
             .collect();
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
-        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "deny": deny, "messages": items}))
+        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items}))
     })
 }
 
@@ -762,7 +809,7 @@ pub fn leave(gid: &str) -> Result<(), String> {
         c.state.known.remove(gid);
         c.logs.remove(gid);
         let _ = std::fs::remove_file(c.vault.dir.join(Client::log_name(gid)));
-        c.save();
+        let _ = c.save();
         Ok(())
     })
 }
@@ -774,7 +821,7 @@ pub fn forget_local(gid: &str) -> Result<(), String> {
         c.state.known.remove(gid);
         c.logs.remove(gid);
         let _ = std::fs::remove_file(c.vault.dir.join(Client::log_name(gid)));
-        c.save();
+        let _ = c.save();
         Ok(())
     })
 }
@@ -905,7 +952,7 @@ pub async fn answer_request(gid: &str, rid: &str, accept: bool, never: bool) -> 
             if !g.ignored.contains(&peer) {
                 g.ignored.push(peer.clone());
             }
-            c.save();
+            let _ = c.save();
             Ok(())
         })?;
     }
@@ -1111,6 +1158,24 @@ mod tests {
         assert_eq!(kind_for_name("clip.mp4"), KIND_VIDEO);
         assert_eq!(kind_for_name("doc.pdf"), KIND_FILE);
         assert_eq!(kind_for_name("noext"), KIND_FILE);
+    }
+
+    #[test]
+    fn damaged_or_foreign_state_is_not_replaced_with_an_empty_one() {
+        // аудит Codex №9: повреждённое состояние или чужой мастер-ключ — ошибка, а не тихий старт с пустого (новые ключи, перезапись)
+        let dir = tempfile::tempdir().unwrap();
+        let v = Vault::new(dir.path().join("v"), &[1u8; 32]);
+        assert!(load_state(&v).unwrap().groups.is_empty(), "файла нет — пустое состояние");
+        std::fs::write(v.dir.join("state.enc"), b"garbage").unwrap();
+        assert!(load_state(&v).is_err(), "мусор — ошибка");
+        assert_eq!(std::fs::read(v.dir.join("state.enc")).unwrap(), b"garbage", "файл не тронут");
+        let mut st = State::default();
+        st.known.insert("g".into(), "Группа".into());
+        let sealed = v.seal("state", &serde_json::to_vec(&st).unwrap());
+        std::fs::write(v.dir.join("state.enc"), &sealed).unwrap();
+        assert_eq!(load_state(&v).unwrap().known.get("g").map(String::as_str), Some("Группа"));
+        let other = Vault::new(dir.path().join("v"), &[2u8; 32]);
+        assert!(load_state(&other).is_err(), "чужой мастер-ключ — ошибка, а не пустое состояние");
     }
 
     #[test]

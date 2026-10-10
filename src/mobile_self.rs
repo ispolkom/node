@@ -50,21 +50,47 @@ fn keys() -> &'static Keys {
 }
 
 fn load_or_create(path: &std::path::Path) -> Keys {
-    let stored: Option<([u8; 32], [u8; 32])> = std::fs::read_to_string(path)
-        .ok()
-        .and_then(|s| serde_json::from_str::<Stored>(&s).ok())
-        .and_then(|s| Some((unb64(&s.x25519_secret)?.try_into().ok()?, unb64(&s.ed25519_secret)?.try_into().ok()?)));
-    let (x, e) = stored.unwrap_or_else(|| {
+    let random_pair = || {
         let mut x = [0u8; 32];
         let mut e = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut x);
         rand::thread_rng().fill_bytes(&mut e);
-        if let Ok(s) = serde_json::to_vec(&Stored { x25519_secret: b64(&x), ed25519_secret: b64(&e) }) {
-            let _ = crate::util::private_file::write_private(path, &s);
-        }
         (x, e)
-    });
-    make_keys(x, e)
+    };
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            let parsed: Option<([u8; 32], [u8; 32])> = serde_json::from_str::<Stored>(&text)
+                .ok()
+                .and_then(|s| Some((unb64(&s.x25519_secret)?.try_into().ok()?, unb64(&s.ed25519_secret)?.try_into().ok()?)));
+            match parsed {
+                Some((x, e)) => make_keys(x, e),
+                None => {
+                    // повреждённый файл ключей НЕ перезаписываем: его можно восстановить. Работаем на временной паре (телефоны увидят
+                    // смену ключа и откажутся от связи — это честнее, чем молча подменить личность компьютера навсегда).
+                    eprintln!("[mobile-self] ⚠️  файл ключей {} повреждён; он не тронут, используется временная пара до восстановления (или удалите файл, чтобы создать новую)", path.display());
+                    let (x, e) = random_pair();
+                    make_keys(x, e)
+                }
+            }
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let (x, e) = random_pair();
+            match serde_json::to_vec(&Stored { x25519_secret: b64(&x), ed25519_secret: b64(&e) }) {
+                Ok(s) => {
+                    if let Err(err) = crate::util::private_file::write_private(path, &s) {
+                        eprintln!("[mobile-self] ⚠️  не удалось сохранить новые ключи ({err}); после перезапуска они сменятся");
+                    }
+                }
+                Err(err) => eprintln!("[mobile-self] ⚠️  не удалось подготовить ключи к записи: {err}"),
+            }
+            make_keys(x, e)
+        }
+        Err(err) => {
+            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); он не тронут, используется временная пара", path.display());
+            let (x, e) = random_pair();
+            make_keys(x, e)
+        }
+    }
 }
 
 fn make_keys(x: [u8; 32], e: [u8; 32]) -> Keys {
@@ -827,5 +853,26 @@ mod tests {
         assert!(take_unread(&from).is_empty());
         assert!(crate::mobile_files::ready_for(&parsed.tid, &from, "receipt-bad-pc").await.is_some());
         crate::mobile_files::drop_transfer(&parsed.tid).await;
+    }
+
+    #[test]
+    fn corrupt_pc_identity_is_left_untouched() {
+        // тест Codex (аудит №8): повреждённый файл ключей не заменяется молча новой парой
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fixture_identity.json");
+        let original = b"damaged identity fixture";
+        std::fs::write(&path, original).unwrap();
+        let _generated = load_or_create(&path);
+        assert_eq!(std::fs::read(&path).unwrap(), original, "существующий повреждённый файл ключей не должен перезаписываться");
+    }
+
+    #[test]
+    fn missing_pc_identity_is_created_once_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("id.json");
+        let a = load_or_create(&path);
+        let b = load_or_create(&path);
+        assert_eq!(a.x_pub, b.x_pub, "после создания та же пара читается снова");
+        assert_eq!(a.ed_pub, b.ed_pub);
     }
 }

@@ -247,6 +247,7 @@
                 var g = d.group || {};
                 $('mgHead').innerHTML = '<b>' + esc(g.name) + '</b> <span class="mg-tag">' + (KIND[g.kind] || '') + '</span> <span class="mg-sub">вы: ' + esc(g.my_alias) + ' · ' + ROLE[g.role] + '</span> '
                     + '<button class="btn btn-sm" id="mgGear" type="button" title="Настройки группы">⚙ Настройки</button>';
+                if (d.damaged) { $('mgBanner').innerHTML = '<span style="color:#ff4001">Часть ленты этой группы на диске компьютера не открылась (повреждение файла). Новые сообщения приходят как обычно.</span>'; } else
                 $('mgBanner').innerHTML = d.problem ? '<span style="color:#ff4001">Ключ владельца группы изменился. Не доверяйте новым ключам, пока не проверите владельца лично.</span>'
                     : (!d.has_key && g.role !== 'owner' ? 'Ключ группы ещё не получен: сообщения появятся, когда владелец раздаст ключи.' : '');
                 var can = !g.muted && (d.has_key || g.role === 'owner');
