@@ -2,7 +2,8 @@ import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:open_filex/open_filex.dart';
+import '../services/vault_files.dart';
+import 'file_viewer_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -524,13 +525,28 @@ class _FileCard extends StatelessWidget {
   }
 
   List<Widget> _openActions(BuildContext context, AppState state, String path) => [
+    // Просмотр — внутри приложения (файл не передаётся другим программам).
     _Action(icon: Icons.open_in_new, label: 'Открыть', onTap: () async {
-      final r = await OpenFilex.open(path, type: offer.mime == 'application/octet-stream' ? null : offer.mime);
-      if (r.type != ResultType.done && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Нечем открыть этот файл (${r.message})')));
-      }
+      final v = await VaultFiles.describe(path);
+      if (!context.mounted) return;
+      await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
     }),
-    _Action(icon: Icons.save_alt, label: 'В «Загрузки»', onTap: () async {
+    // Вынести файл наружу можно только осознанно: после этого его видят другие приложения.
+    _Action(icon: Icons.save_alt, label: 'Вынести наружу', onTap: () async {
+      final ok = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.surface,
+          title: const Text('Вынести из защищённого пространства?', style: TextStyle(color: AppTheme.text)),
+          content: const Text('Файл будет скопирован в «Загрузки» телефона. Там его смогут увидеть другие приложения, а по самому файлу '
+              'можно связать вас с этим собеседником. Продолжить?', style: TextStyle(color: AppTheme.textSecondary)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Вынести', style: TextStyle(color: Colors.redAccent))),
+          ],
+        ),
+      );
+      if (ok != true) return;
       final uri = await state.saveToDownloads(path, FileTransferService.safeName(offer.name), offer.mime);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(

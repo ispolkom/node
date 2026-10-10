@@ -7,6 +7,7 @@ import '../theme.dart';
 import 'chat_screen.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
+import 'files_tab.dart';
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -16,13 +17,19 @@ class HomeScreen extends StatefulWidget {
 
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
   late final TabController _tabs;
+  final _filesKey = GlobalKey<FilesTabState>();
   final _searchCtrl = TextEditingController();
   String _query = '';
 
   @override
   void initState() {
     super.initState();
-    _tabs = TabController(length: 3, vsync: this);
+    _tabs = TabController(length: 4, vsync: this);
+    _tabs.addListener(() {
+      if (!mounted) return;
+      setState(() {});   // кнопка «+» зависит от вкладки
+      if (_tabs.index == 3 && !_tabs.indexIsChanging) _filesKey.currentState?.reload();
+    });
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<AppState>().refreshContacts();
       NotificationService.cancelAll();   // события просмотрены — гасим значок у иконки
@@ -243,21 +250,31 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             Tab(text: 'Контакты'),
             Tab(text: 'Поиск'),
             Tab(text: 'Группы'),
+            Tab(text: 'Файлы'),
           ],
         ),
       ),
-      floatingActionButton: FloatingActionButton(
-        backgroundColor: AppTheme.accent,
-        foregroundColor: Colors.black,
-        onPressed: () => _showAddContactDialog(context, state),
-        child: const Icon(Icons.person_add),
-      ),
+      floatingActionButton: _tabs.index == 3
+          ? FloatingActionButton(
+              backgroundColor: AppTheme.accent,
+              foregroundColor: Colors.black,
+              tooltip: 'Добавить файл в хранилище',
+              onPressed: () => _filesKey.currentState?.addFiles(),
+              child: const Icon(Icons.add),
+            )
+          : FloatingActionButton(
+              backgroundColor: AppTheme.accent,
+              foregroundColor: Colors.black,
+              onPressed: () => _showAddContactDialog(context, state),
+              child: const Icon(Icons.person_add),
+            ),
       body: TabBarView(
         controller: _tabs,
         children: [
           _contactsBody(context, state),
           _searchBody(context, state),
           _groupsBody(context),
+          FilesTab(key: _filesKey),
         ],
       ),
     );

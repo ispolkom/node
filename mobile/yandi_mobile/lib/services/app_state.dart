@@ -1,3 +1,4 @@
+import 'files_host.dart';
 import 'dart:async' as async_lib;
 import 'dart:convert';
 import 'dart:io';
@@ -34,7 +35,7 @@ import 'package:flutter/material.dart' show MaterialPageRoute;
 ///   4. NodeDiscovery.discoverOnStartup() — найти/обновить ноды
 ///   5. NodeManager.selectBest() — выбрать лучшую ноду
 ///   6. Запустить WsService + ApiService
-class AppState extends ChangeNotifier {
+class AppState extends ChangeNotifier implements FilesHost {
   // ── Публичные поля ─────────────────────────────────────────────────────────
   Identity?    identity;           // криптографическая личность пользователя
   bool         nodeOnline  = false;
@@ -452,6 +453,10 @@ class AppState extends ChangeNotifier {
   Future<bool> canSendFiles(String peerId) async => await (_ws?.canEncryptTo(peerId) ?? Future.value(false));
 
   /// Отправить файл: шифрование на телефоне, куски на узел, ключ получателю в зашифрованном сообщении.
+  @override
+  int get transferCount => fileStates.length;
+
+  @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
     if (_api == null || _ws == null) return 'Нет связи с узлом';
     final svc = FileTransferService(_api!);
