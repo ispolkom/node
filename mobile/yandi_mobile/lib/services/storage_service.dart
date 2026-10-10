@@ -30,13 +30,31 @@ class StorageService {
     final path = p.join(dir.path, 'yandi.db');
     _db = await openDatabase(
       path,
-      version: 4,
+      version: 5,
       onCreate: _createTables,
       onUpgrade: _onUpgrade,
     );
   }
 
+  static Future<void> _createGroupTables(Database db) async {
+    await db.execute('''
+      CREATE TABLE IF NOT EXISTS group_entries (
+        gid     TEXT NOT NULL,
+        seq     INTEGER NOT NULL,
+        ts      INTEGER NOT NULL,
+        epoch   INTEGER NOT NULL,
+        kind    INTEGER NOT NULL,
+        sender  TEXT NOT NULL,
+        body    TEXT NOT NULL,
+        deleted INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (gid, seq)
+      )
+    ''');
+    await db.execute('CREATE INDEX IF NOT EXISTS idx_group_kind ON group_entries(gid, kind, seq)');
+  }
+
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 5) await _createGroupTables(db);
     if (oldVersion < 4) {
       // Ключи собеседников, закэшированные до подписанных связок, ничем не проверены: стираем, их перезапросят с проверкой подписи.
       try { await db.delete('peer_pubkeys'); } catch (_) {}
@@ -60,6 +78,7 @@ class StorageService {
   }
 
   static Future<void> _createTables(Database db, int version) async {
+    await _createGroupTables(db);
     await db.execute('''
       CREATE TABLE nodes (
         id           TEXT PRIMARY KEY,

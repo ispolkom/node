@@ -1,3 +1,6 @@
+import 'group_service.dart';
+import 'group_api_http.dart';
+import 'group_store_sqlite.dart';
 import 'files_host.dart';
 import 'dart:async' as async_lib;
 import 'dart:convert';
@@ -142,6 +145,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       return;
     }
     nodeError = null;
+    groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners());
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
@@ -150,6 +154,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         unawaited(refreshContacts());
         unawaited(_syncInbox());
         announceReceiptSupport();
+        unawaited(syncGroups());
       },
       getPeerBundle: (peerId) => _api!.getPeerBundle(peerId),
       ownPeerId: () => _api!.devicePeerId(),
@@ -160,6 +165,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws!.fileOfferStream.listen(_onFileOffer);
     _ws!.liveStream.listen(_onLiveSignal);
     _ws!.offlineStream.listen(calls.onPeerOffline);
+    _ws!.groupStream.listen(_onGroupHint);
 
     chatBg.start(node);
 
@@ -171,6 +177,36 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   async_lib.Timer? _presenceTimer;
+
+  /// Группы узла (ключи, журнал, правила). Пересоздаётся вместе с подключением к узлу.
+  GroupService? groups;
+
+  Future<void> syncGroups({String? only}) async {
+    final g = groups;
+    if (g == null) return;
+    try {
+      await g.syncAndAnnounce();
+    } catch (_) {}
+    notifyListeners();
+  }
+
+  void _onGroupHint(GroupHintEvent h) {
+    final g = groups;
+    if (g == null) return;
+    if (h.what == 1) {
+      // новая запись — обычная синхронизация; изменённая (стёртая) старая — перечитать именно её
+      unawaited(() async {
+        final last = await SqliteGroupStore().lastSeq(h.gid);
+        if (h.seq > 0 && h.seq <= last) {
+          try { await g.refreshEntry(h.gid, h.seq); } catch (_) {}
+        } else {
+          await syncGroups();
+        }
+      }());
+    } else {
+      unawaited(syncGroups());
+    }
+  }
 
   Future<void> _loadInitialData() async {
     unawaited(_initDownloadsDir());

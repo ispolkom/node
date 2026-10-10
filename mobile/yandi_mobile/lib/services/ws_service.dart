@@ -20,6 +20,15 @@ const int ftSendMsg    = 0x30;
 const int ftLiveMsg     = 0x13;
 const int ftPeerOffline = 0x14;
 const int ftSendLive    = 0x31;
+// намёк «в группе что-то изменилось» (без содержимого): [0x15][16 номер группы][1 что][8 seq LE]
+const int ftGroupHint   = 0x15;
+
+class GroupHintEvent {
+  final String gid;
+  final int what;   // 1 запись (новая или стёртая), 2 ключи, 3 состав/настройки, 4 группа удалена
+  final int seq;
+  const GroupHintEvent(this.gid, this.what, this.seq);
+}
 
 class IncomingChatEvent {
   final String   fromPeerId;
@@ -84,6 +93,7 @@ class WsService {
   final _fileOfferCtrl = StreamController<FileOfferEvent>.broadcast();
   final _liveCtrl      = StreamController<LiveSignalEvent>.broadcast();
   final _offlineCtrl   = StreamController<String>.broadcast();
+  final _groupCtrl     = StreamController<GroupHintEvent>.broadcast();
 
   Stream<IncomingChatEvent> get chatStream      => _chatCtrl.stream;
   Stream<PeerStatusEvent>   get statusStream    => _statusCtrl.stream;
@@ -91,6 +101,7 @@ class WsService {
   Stream<LiveSignalEvent>   get liveStream      => _liveCtrl.stream;
   /// Номер телефона, которому сигнал не доставлен: его нет на связи.
   Stream<String>            get offlineStream   => _offlineCtrl.stream;
+  Stream<GroupHintEvent>    get groupStream     => _groupCtrl.stream;
   bool get connected => _channel != null;
 
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
@@ -194,6 +205,12 @@ class WsService {
 
       case ftLiveMsg:
         await _handleLiveMsg(data);
+
+      case ftGroupHint:
+        if (data.length >= 26) {
+          final seq = ByteData.sublistView(data, 18, 26).getUint64(0, Endian.little);
+          _groupCtrl.add(GroupHintEvent(_bytesToHex(data.sublist(1, 17)), data[17], seq));
+        }
 
       case ftPeerOffline:
         if (data.length >= 33) _offlineCtrl.add(_bytesToHex(data.sublist(1, 33)));
@@ -348,6 +365,7 @@ class WsService {
     _statusCtrl.close();
     _liveCtrl.close();
     _offlineCtrl.close();
+    _groupCtrl.close();
   }
 
   // ── TLS pinning ────────────────────────────────────────────────────────────

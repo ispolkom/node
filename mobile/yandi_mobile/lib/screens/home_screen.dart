@@ -8,6 +8,7 @@ import 'chat_screen.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 import 'files_tab.dart';
+import 'groups_tab.dart';
 import '../widgets/avatar_circle.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -277,7 +278,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         children: [
           _contactsBody(context, state),
           _searchBody(context, state),
-          _groupsBody(context),
+          const GroupsTab(),
           FilesTab(key: _filesKey),
         ],
       ),
@@ -358,28 +359,6 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     ),
         ),
       ],
-    );
-  }
-
-  Widget _groupsBody(BuildContext context) {
-    return const Center(
-      child: Padding(
-        padding: EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.groups_outlined, color: AppTheme.textSecondary, size: 64),
-            SizedBox(height: 16),
-            Text('Групп пока нет',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 15)),
-            SizedBox(height: 8),
-            Text('Группы создаются на странице узла (ПК). Скоро появятся здесь.',
-                textAlign: TextAlign.center,
-                style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-          ],
-        ),
-      ),
     );
   }
 
