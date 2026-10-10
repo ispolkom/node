@@ -61,6 +61,7 @@ class FileOfferEvent {
 /// Расшифровка происходит на мобилке приватным X25519 ключом Identity.
 class WsService {
   final Identity _identity;
+  final ReplayGuard _replayGuard = ReplayGuard();
 
   /// Вызывается когда переподключение к текущей ноде не удалось
   /// (задержка достигла максимума). AppState использует это для failover.
@@ -212,6 +213,7 @@ class WsService {
     final text = await E2ECrypto.decrypt(
       Uint8List.fromList(payload),
       (theirPub) => _identity.ecdh(theirPub),
+      replayGuard: _replayGuard,
     );
     if (text == null) return;
 
@@ -231,7 +233,11 @@ class WsService {
     if (data.length < 45 + pLen) return;
     final payload = Uint8List.fromList(data.sublist(45, 45 + pLen));
     if (!E2ECrypto.isEncrypted(payload)) return;
-    final text = await E2ECrypto.decrypt(payload, (theirPub) => _identity.ecdh(theirPub));
+    final text = await E2ECrypto.decrypt(
+      payload,
+      (theirPub) => _identity.ecdh(theirPub),
+      replayGuard: _replayGuard,
+    );
     if (text == null) return;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
   }

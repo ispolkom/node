@@ -1,20 +1,29 @@
 import 'dart:convert';
 import 'dart:typed_data';
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
 
 /// E2E / X25519 + AES-256-GCM
 ///
 /// Формат зашифрованного blob:
-///   [1B magic=0xE2][32B ephemeral_pub][12B nonce][ciphertext+16B tag]
+///   [1B magic=0xE3][32B ephemeral_pub][12B nonce][ciphertext+16B tag]
 ///
 /// Отправитель генерирует ephemeral X25519 keypair,
 /// вычисляет ECDH с публичным ключом получателя,
-/// шифрует AES-256-GCM(shared_secret, nonce, plaintext).
+/// шифрует AES-256-GCM(shared_secret, nonce, plaintext, AAD).
 ///
 /// Получатель видит ephemeral_pub, вычисляет ECDH своим приватным ключом
 /// и расшифровывает.
 class E2ECrypto {
-  static const _magic = 0xE2;
+  static const _magic = 0xE3;
+  static const _aadPrefix = 'YANDI-E2E-V2';
+  static const int _maxReplayEntries = 2048;
+
+  static List<int> _aad(List<int> ephemeralPub) =>
+      [...utf8.encode(_aadPrefix), 0, ...ephemeralPub];
+
+  static bool _remember(ReplayGuard? guard, List<int> data) =>
+      guard == null || guard._remember(crypto.sha256.convert(data).bytes);
 
   static bool isEncrypted(List<int> data) =>
       data.isNotEmpty && data[0] == _magic && data.length > 45;
@@ -40,6 +49,7 @@ class E2ECrypto {
       utf8.encode(text),
       secretKey:  sk,
       nonce:      nonce,
+      aad:        _aad(ephemeralPub.bytes),
     );
 
     // 4. Сборка: magic + ephemeral_pub(32) + nonce(12) + ciphertext+tag
@@ -58,6 +68,7 @@ class E2ECrypto {
   static Future<String?> decrypt(
     Uint8List data,
     Future<Uint8List> Function(List<int> theirPub) ecdhFn,
+    {ReplayGuard? replayGuard}
   ) async {
     if (!isEncrypted(data)) return null;
     try {
@@ -74,10 +85,29 @@ class E2ECrypto {
       final tag        = cipherAndTag.sublist(cipherAndTag.length - 16);
 
       final box = SecretBox(cipherText, nonce: nonce, mac: Mac(tag));
-      final plain = await aes.decrypt(box, secretKey: sk);
+      final plain = await aes.decrypt(
+        box,
+        secretKey: sk,
+        aad: _aad(ephemeralPub),
+      );
+      if (!_remember(replayGuard, data)) return null;
       return utf8.decode(plain);
     } catch (_) {
       return null;
     }
+  }
+}
+
+class ReplayGuard {
+  final Set<String> _seen = <String>{};
+
+  bool _remember(List<int> digest) {
+    final key = base64Url.encode(digest);
+    if (_seen.contains(key)) return false;
+    if (_seen.length >= E2ECrypto._maxReplayEntries) {
+      _seen.remove(_seen.first);
+    }
+    _seen.add(key);
+    return true;
   }
 }
