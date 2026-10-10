@@ -654,6 +654,17 @@ impl WebServer {
             // удаление группы — только с повторным вводом пароля узла (открытая сессия админки не даёт права удалить)
             .route("/api/mobile/groups/:gid/delete", post(api_mobile_group_delete))
             .route("/phone-groups", get(phone_groups_handler))
+            // группы на компьютере: узел как участник (свой ключ, своя лента); видно только то, куда узел вошёл сам
+            .route("/my-groups", get(my_groups_handler))
+            .route("/api/my-groups", get(api_my_groups))
+            .route("/api/my-groups/create", post(api_my_groups_create))
+            .route("/api/my-groups/:gid/join", post(api_my_groups_join))
+            .route("/api/my-groups/:gid/request", post(api_my_groups_request))
+            .route("/api/my-groups/:gid/messages", get(api_my_groups_messages))
+            .route("/api/my-groups/:gid/send", post(api_my_groups_send))
+            .route("/api/my-groups/:gid/rules", post(api_my_groups_rules))
+            .route("/api/my-groups/:gid/leave", post(api_my_groups_leave))
+            .route("/api/my-groups/:gid/forget", post(api_my_groups_forget))
             .route(
                 "/api/mobile/groups/:gid/modlog",
                 get(crate::mobile_groups::pc_modlog),
@@ -863,6 +874,96 @@ async fn auth_middleware(
 }
 
 // === Auth Page Handlers ===
+
+async fn my_groups_handler() -> Html<&'static str> {
+    Html(include_str!("ui/my-groups.html"))
+}
+
+fn grp_reply(r: Result<serde_json::Value, String>) -> Response {
+    match r {
+        Ok(v) => Json(v).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
+}
+
+async fn api_my_groups() -> Response {
+    grp_reply(crate::group_client::list())
+}
+
+#[derive(Deserialize)]
+struct MyGroupCreate {
+    name: String,
+    #[serde(default)]
+    topic: String,
+    kind: String,
+}
+
+async fn api_my_groups_create(Json(b): Json<MyGroupCreate>) -> Response {
+    grp_reply(crate::group_client::create(&b.name, &b.topic, &b.kind).map(|id| serde_json::json!({"id": id})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupJoin {
+    #[serde(default)]
+    code: String,
+    #[serde(default)]
+    name: String,
+}
+
+async fn api_my_groups_join(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
+    let code = if b.code.trim().is_empty() { None } else { Some(b.code.trim().to_string()) };
+    grp_reply(crate::group_client::join(&gid, code.as_deref(), &b.name).map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_request(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupJoin>) -> Response {
+    grp_reply(crate::group_client::request_invite(&gid, &b.name).map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupAfter {
+    #[serde(default)]
+    after: u64,
+}
+
+async fn api_my_groups_messages(axum::extract::Path(gid): axum::extract::Path<String>, axum::extract::Query(q): axum::extract::Query<MyGroupAfter>) -> Response {
+    grp_reply(crate::group_client::messages(&gid, q.after))
+}
+
+#[derive(Deserialize)]
+struct MyGroupSend {
+    text: String,
+}
+
+async fn api_my_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSend>) -> Response {
+    let text = b.text.trim().to_string();
+    if text.is_empty() || text.len() > 8000 {
+        return grp_reply(Err("пустое или слишком длинное сообщение".into()));
+    }
+    // ссылка — отдельный вид записи, чтобы группа могла её запретить (как в приложении)
+    let is_link = {
+        let l = text.to_lowercase();
+        l.contains("http://") || l.contains("https://") || l.contains("www.")
+    };
+    let kind = if is_link { crate::group_client::KIND_LINK } else { crate::group_client::KIND_TEXT };
+    grp_reply(crate::group_client::send(&gid, kind, serde_json::json!({"t": text})).map(|seq| serde_json::json!({"seq": seq})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupRules {
+    deny: Vec<u8>,
+}
+
+async fn api_my_groups_rules(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupRules>) -> Response {
+    grp_reply(crate::group_client::set_rules(&gid, &b.deny).map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_leave(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+    grp_reply(crate::group_client::leave(&gid).map(|_| serde_json::json!({"ok": true})))
+}
+
+async fn api_my_groups_forget(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
+    grp_reply(crate::group_client::forget_local(&gid).map(|_| serde_json::json!({"ok": true})))
+}
 
 async fn phone_groups_handler() -> Html<&'static str> {
     Html(include_str!("ui/phone-groups.html"))
