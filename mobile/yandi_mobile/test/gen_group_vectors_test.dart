@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_mobile/crypto/file_crypto.dart';
 import 'package:yandi_mobile/crypto/group_crypto.dart';
 
 /// Не проверка, а генератор контрольных векторов для Rust-клиента групп на узле (tests: src/group_client.rs).
@@ -20,6 +21,13 @@ void main() {
       'key': base64.encode(key), 'epoch': 3, 'box': base64.encode(box),
       'from': 'Тихий Лис-42', 'entry': base64.encode(entry), 'text': 'привет 😀',
     })}');
+  });
+
+  test('print file vector', () async {
+    final key = Uint8List.fromList(List.generate(32, (i) => 7));
+    const tid = 'abababababababababababababababab';
+    final chunk = await FileCrypto.encryptChunk(key, tid, 1, 3, utf8.encode('кусок файла 😀'));
+    print('FILEVECTOR ${jsonEncode({'key': base64.encode(key), 'fid': tid, 'idx': 1, 'total': 3, 'chunk': base64.encode(chunk), 'plain': 'кусок файла 😀'})}');
   });
 }
 

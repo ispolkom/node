@@ -70,10 +70,15 @@
                     <div id="mgHead" style="margin-bottom:6px"><span class="form-help">Выберите группу слева.</span></div>
                     <div id="mgBanner" class="form-help"></div>
                     <div class="mg-feed" id="mgFeed"></div>
-                    <div style="display:flex;gap:6px;margin-top:8px">
+                    <div id="mgEmoji" style="display:none;flex-wrap:wrap;gap:2px;margin-top:6px;max-height:140px;overflow:auto;border:1px solid #8884;border-radius:8px;padding:4px"></div>
+                    <div style="display:flex;gap:6px;margin-top:8px;align-items:flex-end">
+                        <button class="btn btn-sm" id="mgEmojiBtn" type="button" title="Эмодзи" disabled>😀</button>
+                        <button class="btn btn-sm" id="mgAttach" type="button" title="Прикрепить файл (до 200 МБ)" disabled>📎</button>
+                        <input type="file" id="mgFile" style="display:none">
                         <textarea id="mgText" class="form-input" rows="2" style="flex:1" placeholder="Сообщение… (Ctrl+Enter — отправить)" disabled></textarea>
                         <button class="btn btn-primary" id="mgSend" type="button" disabled>Отправить</button>
                     </div>
+                    <div id="mgUp" class="mg-sub"></div>
                     <div id="mgRequests" style="margin-top:8px"></div>
                 </div>
             </div>
@@ -245,15 +250,27 @@
                 $('mgBanner').innerHTML = d.problem ? '<span style="color:#ff4001">Ключ владельца группы изменился. Не доверяйте новым ключам, пока не проверите владельца лично.</span>'
                     : (!d.has_key && g.role !== 'owner' ? 'Ключ группы ещё не получен: сообщения появятся, когда владелец раздаст ключи.' : '');
                 var can = !g.muted && (d.has_key || g.role === 'owner');
-                $('mgText').disabled = !can; $('mgSend').disabled = !can;
+                $('mgText').disabled = !can; $('mgSend').disabled = !can; $('mgEmojiBtn').disabled = !can; $('mgAttach').disabled = !can || upBusy;
                 $('mgText').placeholder = g.muted ? 'Вы заглушены в этой группе' : 'Сообщение… (Ctrl+Enter — отправить)';
                 var feed = $('mgFeed'), atEnd = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30;
                 if (reset) feed.innerHTML = '';
                 (d.messages || []).forEach(function (m) {
-                    var b = m.body || {}, text = b.t != null ? b.t : (b.n ? '📎 ' + b.n + (b.z ? ' (' + Math.round(b.z / 1024) + ' КБ)' : '') : '');
+                    var b = m.body || {};
                     var div = document.createElement('div');
                     div.className = 'mg-msg' + (m.mine ? ' mine' : '');
-                    div.innerHTML = (m.mine ? '' : '<div class="mg-author">' + esc(m.author) + '</div>') + '<div>' + esc(text) + '</div><div class="mg-time">' + t(m.ts) + '</div>';
+                    var inner;
+                    if (b.f) {
+                        // вложение: узел расшифровывает и проверяет файл; картинки показываем сразу, остальное — ссылкой
+                        var url = '/api/groups/' + encodeURIComponent(gid) + '/file/' + m.seq;
+                        var icon = { 2: '🖼', 3: '📄', 4: '🎵', 5: '🎬' }[m.kind] || '📎';
+                        inner = (m.kind === 2 ? '<a href="' + url + '" target="_blank" rel="noopener"><img src="' + url + '" alt="" style="max-width:240px;max-height:240px;border-radius:8px;display:block"></a>' : '')
+                            + (m.kind === 4 ? '<audio controls preload="none" src="' + url + '" style="max-width:260px"></audio>' : '')
+                            + (m.kind === 5 ? '<video controls preload="none" src="' + url + '" style="max-width:260px;max-height:200px"></video>' : '')
+                            + '<div>' + icon + ' <a href="' + url + '" download="' + esc(b.n || 'file') + '">' + esc(b.n || 'файл') + '</a> <span class="mg-sub">' + fmtSize(b.z || 0) + '</span></div>';
+                    } else {
+                        inner = '<div>' + esc(b.t != null ? b.t : '') + '</div>';
+                    }
+                    div.innerHTML = (m.mine ? '' : '<div class="mg-author">' + esc(m.author) + '</div>') + inner + '<div class="mg-time">' + t(m.ts) + '</div>';
                     feed.appendChild(div);
                     if (m.seq > lastSeq) lastSeq = m.seq;
                 });
@@ -452,6 +469,41 @@
                 var action = want === 'admin' ? 'make_admin' : (want === 'moderator' ? 'promote' : 'demote');
                 api('POST', '/api/groups/' + gid + '/mod', { action: action, alias: memAlias }).then(function () { done('Роль изменена.'); }).catch(function (er) { say(er.message); });
             }
+        });
+
+        // ── вложения и эмодзи ──
+        var upBusy = false;
+        function fmtSize(z) { return z >= 1048576 ? (z / 1048576).toFixed(1) + ' МБ' : Math.max(1, Math.ceil(z / 1024)) + ' КБ'; }
+        $('mgAttach').addEventListener('click', function () { if (!upBusy) $('mgFile').click(); });
+        $('mgFile').addEventListener('change', function () {
+            var f = $('mgFile').files && $('mgFile').files[0];
+            $('mgFile').value = '';
+            if (!f || !cur) return;
+            if (f.size > 200 * 1048576) { say('В группе файлы до 200 МБ'); return; }
+            if (!f.size) { say('Файл пустой'); return; }
+            var gid = cur, xhr = new XMLHttpRequest();
+            upBusy = true; $('mgAttach').disabled = true;
+            xhr.open('POST', '/api/groups/' + encodeURIComponent(gid) + '/upload?name=' + encodeURIComponent(f.name));
+            xhr.upload.onprogress = function (e) { if (e.lengthComputable) $('mgUp').textContent = 'Загрузка «' + f.name + '»: ' + Math.round(e.loaded * 100 / e.total) + '%'; };
+            xhr.onload = function () {
+                upBusy = false; $('mgAttach').disabled = false;
+                var j = {}; try { j = JSON.parse(xhr.responseText || '{}'); } catch (e) {}
+                if (xhr.status === 200) { $('mgUp').textContent = ''; say('Файл отправлен.'); loadFeed(false); }
+                else { $('mgUp').textContent = ''; say('Файл не отправлен: ' + (j.error || ('ошибка ' + xhr.status))); }
+            };
+            xhr.onerror = function () { upBusy = false; $('mgAttach').disabled = false; $('mgUp').textContent = ''; say('Нет связи с узлом.'); };
+            $('mgUp').textContent = 'Загрузка «' + f.name + '»…';
+            xhr.send(f);
+        });
+        var EMOJI = ['😀','😂','🥹','😊','😍','🥰','😘','😎','🤔','😅','😉','🙂','😢','😭','😡','😱','👍','👎','👏','🙏','💪','👋','🤝','✌️','👌','🤞','🙌','❤️','💔','🔥','✨','🎉','🎂','🌹','🌞','🌧','⚡','☕','🍺','🍕','🚗','🏠','📷','🎵','⚽','✅','❌','❓','‼️','💯'];
+        $('mgEmoji').innerHTML = EMOJI.map(function (e) { return '<button type="button" class="btn btn-sm" data-emo="' + e + '" style="font-size:18px;padding:2px 6px">' + e + '</button>'; }).join('');
+        $('mgEmojiBtn').addEventListener('click', function () { var p = $('mgEmoji'); p.style.display = p.style.display === 'none' ? 'flex' : 'none'; });
+        $('mgEmoji').addEventListener('click', function (e) {
+            var em = e.target && e.target.getAttribute && e.target.getAttribute('data-emo');
+            if (!em) return;
+            var ta = $('mgText'), a = ta.selectionStart || 0, z = ta.selectionEnd || 0;
+            ta.value = ta.value.slice(0, a) + em + ta.value.slice(z);
+            ta.focus(); ta.selectionStart = ta.selectionEnd = a + em.length;
         });
         function send() {
             var text = $('mgText').value.trim();

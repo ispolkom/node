@@ -914,6 +914,107 @@ pub fn devices() -> Value {
     json!(crate::mobile_api::device_list().iter().map(|(p, n)| json!({"id": p, "name": n})).collect::<Vec<_>>())
 }
 
+// ── Файлы групп (скрепка на странице узла) ──
+// Формат тот же, что в приложении (`file_crypto.dart`, `group_files.dart`): куски по 256 КБ, свой ключ на файл,
+// кусок = [12 случайное число][шифртекст][16 метка], AAD = `yandi-file:v1|<номер файла>|<номер куска>|<всего кусков>`;
+// запись журнала несёт `{f, n, z, c, k, h}` (номер на узле, имя, размер, кусков, ключ, sha256).
+const FILE_CHUNK: usize = 256 * 1024;
+
+fn file_aad(fid: &str, idx: u32, total: u32) -> Vec<u8> {
+    format!("yandi-file:v1|{fid}|{idx}|{total}").into_bytes()
+}
+
+/// Вид записи по имени файла: так работают разделы «Картинки / Аудио / Видео / Файлы» (как в приложении).
+pub fn kind_for_name(name: &str) -> u8 {
+    let ext = name.rsplit_once('.').map(|(_, e)| e.to_lowercase()).unwrap_or_default();
+    match ext.as_str() {
+        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "heic" => KIND_IMAGE,
+        "mp3" | "ogg" | "oga" | "opus" | "wav" | "flac" | "m4a" | "aac" => KIND_AUDIO,
+        "mp4" | "mkv" | "webm" | "mov" | "avi" | "3gp" => KIND_VIDEO,
+        _ => KIND_FILE,
+    }
+}
+
+/// Залить файл в группу от компьютера и написать о нём запись. Запрещённый правилами вид отвергается здесь же.
+pub async fn upload_file(gid: &str, name: &str, data: Vec<u8>) -> Result<u64, String> {
+    use sha2::Digest;
+    let dev = pc_device()?;
+    let name: String = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(120).collect();
+    let name = if name.trim().is_empty() { "file".to_string() } else { name };
+    let kind = kind_for_name(&name);
+    // проверки до заливки: участник, не заглушён, вид разрешён, ключ есть
+    with_client(|c| {
+        let info = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
+        if info["muted"].as_bool().unwrap_or(false) {
+            return Err("вы заглушены в этой группе".to_string());
+        }
+        if !kind_allowed(c, gid, kind) {
+            return Err("в этой группе запрещён такой вид файлов".to_string());
+        }
+        let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
+        c.group_key(gid, epoch).ok_or("ключ группы ещё не получен — подождите владельца")?;
+        Ok(())
+    })?;
+    if data.is_empty() {
+        return Err("файл пустой".into());
+    }
+    let size = data.len() as u64;
+    let total = data.len().div_ceil(FILE_CHUNK) as u32;
+    let fid = crate::mobile_group_files::pc_begin(gid, &dev, size, total).await?;
+    let mut fkey = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut fkey);
+    for (i, part) in data.chunks(FILE_CHUNK).enumerate() {
+        let wire = aead_seal(&fkey, &file_aad(&fid, i as u32, total), part);
+        if let Err(e) = crate::mobile_group_files::pc_put(gid, &dev, &fid, i as u32, &wire).await {
+            let _ = crate::mobile_group_files::pc_remove(gid, &dev, &fid).await;
+            return Err(e);
+        }
+    }
+    crate::mobile_group_files::pc_done(gid, &dev, &fid).await?;
+    let h = hex::encode(sha2::Sha256::digest(&data));
+    let body = json!({"f": fid, "n": name, "z": size, "c": total, "k": b64(&fkey), "h": h});
+    match send(gid, kind, body) {
+        Ok(seq) => Ok(seq),
+        Err(e) => {
+            let _ = crate::mobile_group_files::pc_remove(gid, &dev, &fid).await;
+            Err(e)
+        }
+    }
+}
+
+/// Скачать, расшифровать и проверить файл записи №seq. Подмена, перестановка или обрезка кусков и несовпадение суммы — ошибка.
+pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), String> {
+    use sha2::Digest;
+    let dev = pc_device()?;
+    let body = with_client(|c| {
+        let log = c.load_log(gid).clone();
+        let deny = c.rules.get(gid).cloned().unwrap_or_default();
+        let e = log.iter().find(|e| e.seq == seq && !e.deleted).ok_or("нет такой записи")?;
+        if deny.contains(&e.kind) {
+            return Err("в этой группе запрещён такой вид файлов".to_string());
+        }
+        Ok(e.body.clone())
+    })?;
+    let fid = body["f"].as_str().ok_or("в записи нет файла")?.to_string();
+    let name = body["n"].as_str().unwrap_or("file").to_string();
+    let size = body["z"].as_u64().unwrap_or(0);
+    let total = body["c"].as_u64().unwrap_or(0) as u32;
+    let key = body["k"].as_str().and_then(unb64).and_then(|k| arr32(&k)).ok_or("неверный ключ файла")?;
+    if total == 0 || size == 0 || size > crate::mobile_group_files::MAX_GROUP_FILE {
+        return Err("неверное описание файла".into());
+    }
+    let mut out = Vec::with_capacity(size as usize);
+    for i in 0..total {
+        let wire = crate::mobile_group_files::pc_chunk(gid, &dev, &fid, i).await?;
+        let part = aead_open(&key, &file_aad(&fid, i, total), &wire).ok_or("кусок файла повреждён или подменён")?;
+        out.extend_from_slice(&part);
+    }
+    if out.len() as u64 != size || body["h"].as_str() != Some(hex::encode(sha2::Sha256::digest(&out)).as_str()) {
+        return Err("файл повреждён или подменён".into());
+    }
+    Ok((name, out))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -985,6 +1086,28 @@ mod tests {
         let mut gone = entry("Старый", "Новый", &new_pub);
         gone.deleted = true;
         assert!(!handover_endorsed(&[gone], &members("owner"), &new_pub), "стёртая запись не считается");
+    }
+
+    #[test]
+    fn file_chunks_match_the_app_format() {
+        let v: Value = serde_json::from_str(include_str!("../tests/data/group_file_vector.json")).unwrap();
+        let key = arr32(&unb64(v["key"].as_str().unwrap()).unwrap()).unwrap();
+        let (fid, idx, total) = (v["fid"].as_str().unwrap(), v["idx"].as_u64().unwrap() as u32, v["total"].as_u64().unwrap() as u32);
+        let wire = unb64(v["chunk"].as_str().unwrap()).unwrap();
+        // кусок, зашифрованный приложением, открывается здесь
+        assert_eq!(aead_open(&key, &file_aad(fid, idx, total), &wire).unwrap(), v["plain"].as_str().unwrap().as_bytes());
+        // не на своём месте (другой номер, другое число кусков, другой файл) — не открывается
+        assert!(aead_open(&key, &file_aad(fid, idx + 1, total), &wire).is_none());
+        assert!(aead_open(&key, &file_aad(fid, idx, total + 1), &wire).is_none());
+        assert!(aead_open(&key, &file_aad("cdcdcdcdcdcdcdcdcdcdcdcdcdcdcdcd", idx, total), &wire).is_none());
+        // свой кусок — того же вида (12 + шифртекст + 16)
+        let mine = aead_seal(&key, &file_aad(fid, 0, 1), b"abc");
+        assert_eq!(mine.len(), 12 + 3 + 16);
+        assert_eq!(kind_for_name("Фото.JPG"), KIND_IMAGE);
+        assert_eq!(kind_for_name("song.mp3"), KIND_AUDIO);
+        assert_eq!(kind_for_name("clip.mp4"), KIND_VIDEO);
+        assert_eq!(kind_for_name("doc.pdf"), KIND_FILE);
+        assert_eq!(kind_for_name("noext"), KIND_FILE);
     }
 
     #[test]

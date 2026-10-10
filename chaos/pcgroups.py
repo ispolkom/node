@@ -273,6 +273,63 @@ d = wait(pc_sees)
 check("the PC reads the phone's message", d is not None, d)
 check("the author is shown by pseudonym", d and [m for m in d["messages"] if m["mine"] is False][0]["from"] == alias, d)
 
+# 2b) files: phone -> PC and PC -> phone in the app's chunk format; tampering, outsiders
+import hashlib
+CH = 256 * 1024
+def phone_upload(phone, gid_, alias_, name, data, kind):
+    fkey = os.urandom(32)
+    total = (len(data) + CH - 1) // CH
+    st, r = phone.call("POST", f"/mobile/groups/{gid_}/files", {"file_size": len(data), "total_chunks": total})
+    fid = r["file_id"]
+    for i in range(total):
+        part = data[i * CH:(i + 1) * CH]
+        wire = seal(fkey, f"yandi-file:v1|{fid}|{i}|{total}".encode(), part)
+        rawreq("PUT", f"/mobile/groups/{gid_}/files/{fid}/chunk/{i}", wire, token=phone.t)
+    phone.call("POST", f"/mobile/groups/{gid_}/files/{fid}/done", {})
+    body = {"f": fid, "n": name, "z": len(data), "c": total, "k": b64(fkey), "h": hashlib.sha256(data).hexdigest()}
+    st, r = phone.write(gid_, alias_, kind, body)
+    return fid, r.get("seq")
+blob = os.urandom(600 * 1024 + 77)
+fid_ph, seq_ph = phone_upload(ph, gid, alias, "снимок.png", blob, 2)
+def pc_has(seq_):
+    st, d = a.api("GET", f"/api/groups/{gid}/messages?after=0")
+    return d if any(m["seq"] == seq_ for m in d.get("messages", [])) else None
+check("the PC sees the phone's file record", wait(lambda: pc_has(seq_ph)) is not None)
+st, body, hd = a._http("GET", f"/api/groups/{gid}/file/{seq_ph}", None, a.cookie)
+check("the PC downloads, decrypts and verifies the phone's file byte for byte", st == 200 and body == blob, (st, len(body) if isinstance(body, (bytes, bytearray)) else body))
+check("a picture is shown in place, with nosniff and a sandbox", hd.get("Content-Type") == "image/png" and hd.get("X-Content-Type-Options") == "nosniff" and "sandbox" in (hd.get("Content-Security-Policy") or ""), dict(hd))
+# upload from the PC (raw body)
+import urllib.parse, http.client as HC
+def pc_upload(name, data):
+    h = HC.HTTPConnection("127.0.0.1", a.web, timeout=60)
+    h.request("POST", f"/api/groups/{gid}/upload?name=" + urllib.parse.quote(name), data, {"Cookie": a.cookie, "Content-Type": "application/octet-stream"})
+    r = h.getresponse(); raw = r.read()
+    try:
+        return r.status, json.loads(raw)
+    except Exception:
+        return r.status, raw
+pc_blob = os.urandom(300 * 1024) + "<script>alert(1)</script>".encode()
+st, r = pc_upload("отчёт.html", pc_blob)
+check("the PC attaches a file to the group", st == 200 and r.get("seq"), (st, r))
+pc_seq = r.get("seq")
+st, p_ = ph.call("GET", f"/mobile/groups/{gid}/log?after={pc_seq - 1}")
+e = p_["entries"][0]
+kind, fb = dec_entry(ph.keys[e["epoch"]], base64.b64decode(e["payload_b64"]), gid, e["epoch"], e["from"])
+got = b""
+for i in range(fb["c"]):
+    stc, wire = rawreq("GET", f"/mobile/groups/{gid}/files/{fb['f']}/chunk/{i}", None, token=ph.t)
+    got += opn(base64.b64decode(fb["k"]), f"yandi-file:v1|{fb['f']}|{i}|{fb['c']}".encode(), wire)
+check("the phone opens the PC's file with its own crypto (same format)", kind == 3 and got == pc_blob and hashlib.sha256(got).hexdigest() == fb["h"] and fb["n"] == "отчёт.html", (kind, len(got)))
+st, body, hd = a._http("GET", f"/api/groups/{gid}/file/{pc_seq}", None, a.cookie)
+check("an HTML attachment is never served as a page (download only)", hd.get("Content-Type") == "application/octet-stream" and (hd.get("Content-Disposition") or "").startswith("attachment"), dict(hd))
+# tampering with a stored chunk on the node's disk
+cpath = os.path.join(a.dir, f"home/.local/share/yandi/groups/files/{gid}/{fid_ph}/c000001")
+raw = bytearray(open(cpath, "rb").read()); raw[40] ^= 1; open(cpath, "wb").write(bytes(raw))
+st, body, hd = a._http("GET", f"/api/groups/{gid}/file/{seq_ph}", None, a.cookie)
+check("a tampered chunk is detected and nothing is served", st == 400, st)
+st, r = a.api("GET", f"/api/groups/{'0' * 32}/file/1")
+check("a file of a group the PC is not in cannot be fetched", st == 400, (st, r))
+
 # 3) name announce, rules
 st, r = ph.write(gid, alias, 7, {"op": "name", "n": "Телефон-Боб"})
 d = wait(lambda: (lambda x: x if any(m["author"] == "Телефон-Боб" for m in x["messages"]) else None)(a.api("GET", f"/api/groups/{gid}/messages?after=0")[1]))
@@ -281,6 +338,8 @@ st, r = a.api("POST", f"/api/groups/{gid}/rules", {"deny": [2, 6]})
 check("the owner PC sets rules", st == 200, (st, r))
 st, r = a.api("POST", f"/api/groups/{gid}/send", {"text": "смотри https://example.org"})
 check("the PC itself refuses a banned kind (link)", st == 400, (st, r))
+st, r = pc_upload("фото.jpg", b"\xff\xd8\xff" + os.urandom(1000))
+check("the PC refuses to attach a banned kind (image)", st == 400, (st, r))
 rd = ph.read(gid)
 check("the phone sees the rules entry (system, from the owner)", any(k == 7 and b.get("op") == "rules" and sorted(b["deny"]) == [2, 6] for _, k, b in rd), rd)
 st, r = ph.call("POST", f"/mobile/groups/{gid}/log", {"epoch": 1, "payload_b64": b64(enc_entry(ph.keys[1], gid, 1, alias, 2, {"n": "x.jpg"}))})

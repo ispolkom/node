@@ -629,6 +629,12 @@ impl WebServer {
             .route("/api/groups/:gid/mod", post(api_groups_mod))
             .route("/api/groups/:gid/settings", post(api_groups_settings))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
+            // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
+            .route(
+                "/api/groups/:gid/upload",
+                post(api_groups_upload).layer(axum::extract::DefaultBodyLimit::max(crate::mobile_group_files::MAX_GROUP_FILE as usize + (1 << 20))),
+            )
+            .route("/api/groups/:gid/file/:seq", get(api_groups_file))
             .route("/api/groups/:gid/invite-code", post(api_groups_invite_code))
             .route("/api/groups/:gid/invite-device", post(api_groups_invite_device))
             .route("/api/groups/:gid/answer", post(api_groups_answer))
@@ -961,6 +967,37 @@ struct MyGroupTransfer {
 
 async fn api_groups_transfer(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupTransfer>) -> Response {
     grp_reply(crate::group_client::transfer_owner(&gid, &b.alias).map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupUploadQ {
+    #[serde(default)]
+    name: String,
+}
+
+async fn api_groups_upload(axum::extract::Path(gid): axum::extract::Path<String>, axum::extract::Query(q): axum::extract::Query<MyGroupUploadQ>, body: axum::body::Bytes) -> Response {
+    grp_reply(crate::group_client::upload_file(&gid, &q.name, body.to_vec()).await.map(|seq| serde_json::json!({"seq": seq})))
+}
+
+/// Файл из записи группы: расшифровывается и проверяется в узле; отдаётся как чужое вложение (безопасные типы — на месте, остальное — скачать;
+/// `nosniff` и `sandbox`, чтобы файл не выполнился в источнике страницы администратора).
+async fn api_groups_file(axum::extract::Path((gid, seq)): axum::extract::Path<(String, u64)>) -> Response {
+    match crate::group_client::download_file(&gid, seq).await {
+        Ok((name, data)) => {
+            let content_type = safe_served_type(&name);
+            let disposition = served_disposition(&content_type, &name);
+            Response::builder()
+                .status(StatusCode::OK)
+                .header("Content-Type", content_type)
+                .header("Content-Disposition", disposition)
+                .header("X-Content-Type-Options", "nosniff")
+                .header("Content-Security-Policy", "sandbox; default-src 'none'; img-src 'self' data:; media-src 'self'")
+                .header("Cache-Control", "no-store")
+                .body(axum::body::Body::from(data))
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+    }
 }
 
 async fn api_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {
