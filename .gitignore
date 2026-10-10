@@ -29,6 +29,14 @@ configs/supernodes.json
 data/.yandi_cache/
 /target-mutants/
 
+# Flutter / Android generated state and machine-local configuration
+mobile/yandi_mobile/.dart_tool/
+mobile/yandi_mobile/build/
+mobile/yandi_mobile/android/.gradle/
+mobile/yandi_mobile/android/local.properties
+mobile/yandi_mobile/.flutter-plugins
+mobile/yandi_mobile/.flutter-plugins-dependencies
+
 # Локальные настройки и секреты владельца узла (не коммитить)
 nodes/bootstrap.json
 *.key
