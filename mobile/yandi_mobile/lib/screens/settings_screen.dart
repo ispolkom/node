@@ -110,7 +110,9 @@ class SettingsScreen extends StatelessWidget {
             label: 'SOCKS5',
             value: state.proxyHost != null
                 ? '${state.proxyHost}:${state.proxyPort}'
-                : 'Не запущен (включите в веб-интерфейсе ноды)',
+                : state.proxyUnreachable
+                    ? 'Узел не ответил — проверьте связь и откройте настройки снова'
+                    : 'Не запущен (включите в веб-интерфейсе ноды)',
           ),
           ListTile(
             tileColor: AppTheme.surface,

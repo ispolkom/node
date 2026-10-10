@@ -906,9 +906,13 @@ class AppState extends ChangeNotifier implements FilesHost {
     notifyListeners();
   }
 
+  /// Последний запрос о прокси узла не удался (узла нет на связи): тогда «не запущен» говорить нельзя.
+  bool proxyUnreachable = false;
+
   Future<void> refreshProxyInfo() async {
     try {
       final info = await _api!.getProxyInfo();
+      proxyUnreachable = false;
       if (info['running'] == true) {
         proxyHost = info['host'] as String?;
         proxyPort = info['port'] as int?;
@@ -917,7 +921,10 @@ class AppState extends ChangeNotifier implements FilesHost {
         proxyPort = null;
       }
       notifyListeners();
-    } catch (_) {}
+    } catch (_) {
+      proxyUnreachable = true;
+      notifyListeners();
+    }
   }
 
   // ── VPN ───────────────────────────────────────────────────────────────────

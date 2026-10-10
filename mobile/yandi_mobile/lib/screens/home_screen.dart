@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/contact.dart';
@@ -241,8 +242,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           IconButton(
             tooltip: 'Настройки',
             icon: const YandiIcon(YandiGlyph.settings, color: AppTheme.textSecondary, label: 'Настройки'),
-            onPressed: () => Navigator.push(context,
-                MaterialPageRoute(builder: (_) => const SettingsScreen())),
+            onPressed: () {
+              unawaited(state.refreshProxyInfo());   // статус прокси узла берём заново при открытии настроек
+              Navigator.push(context, MaterialPageRoute(builder: (_) => const SettingsScreen()));
+            },
           ),
         ],
         bottom: TabBar(
