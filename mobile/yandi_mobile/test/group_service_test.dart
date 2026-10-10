@@ -347,4 +347,13 @@ void main() {
     expect(await owner.joinRequests(node.gid), isEmpty, reason: 'тихо закрыта');
     expect(node.reqs, isEmpty, reason: 'и убрана с узла');
   });
+
+  test('карточка приглашения: использованный код помнится, для открытой группы (без кода) не блокируется', () async {
+    expect(await bob.inviteSpent(node.gid, 'AAAA-BBBB-CCCC'), isFalse);
+    await bob.markInviteSpent(node.gid, 'AAAA-BBBB-CCCC');
+    expect(await bob.inviteSpent(node.gid, 'AAAA-BBBB-CCCC'), isTrue);
+    expect(await bob.inviteSpent(node.gid, 'DDDD-EEEE-FFFF'), isFalse, reason: 'другой код');
+    await bob.markInviteSpent(node.gid, '');
+    expect(await bob.inviteSpent(node.gid, ''), isFalse, reason: 'открытая группа: можно вступить снова после выхода');
+  });
 }

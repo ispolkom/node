@@ -3,6 +3,7 @@ import 'package:provider/provider.dart';
 import '../models/group.dart';
 import '../models/group_invite.dart';
 import '../services/app_state.dart';
+import '../services/group_api.dart';
 import '../theme.dart';
 import 'group_chat_screen.dart';
 
@@ -364,9 +365,23 @@ Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
   final messenger = ScaffoldMessenger.of(context);
   try {
     await state.groups!.join(m.invite.gid, inviteCode: m.invite.code.isEmpty ? null : m.invite.code, displayName: name);
+    await state.groups!.markInviteSpent(m.invite.gid, m.invite.code);
     await state.syncGroups();
     messenger.showSnackBar(const SnackBar(content: Text('Вы в группе — она во вкладке «Группы»')));
+  } on GroupApiError catch (e) {
+    // код использован, просрочен или группа удалена: карточка больше не срабатывает
+    if (e.status == 403 || e.status == 404) {
+      await state.groups!.markInviteSpent(m.invite.gid, m.invite.code);
+      messenger.showSnackBar(const SnackBar(content: Text('Приглашение уже недействительно: оно использовано, просрочено или группы больше нет')));
+    } else if (e.status == 409) {
+      await state.groups!.markInviteSpent(m.invite.gid, m.invite.code);
+      await state.syncGroups();
+      messenger.showSnackBar(const SnackBar(content: Text('Вы уже в этой группе')));
+    } else {
+      messenger.showSnackBar(SnackBar(content: Text('Не удалось вступить: ${e.message}')));
+    }
   } catch (e) {
     messenger.showSnackBar(SnackBar(content: Text('Не удалось вступить: $e')));
   }
+  state.notifyListenersPublic();
 }

@@ -547,14 +547,36 @@
                 return { g: String(j.g).toLowerCase(), c: c.toUpperCase(), n: String(j.n || '').replace(/[\x00-\x1f]/g, '').slice(0, 64) };
             } catch (e) { return null; }
         }
+        // состояние карточек приглашений: в какие группы я уже вступил и какие коды потрачены
+        var myGroupIds = {};
+        function giKey(gi) { return 'gi_spent_' + gi.g + '_' + gi.c; }
+        function giSpent(gi) { if (!gi.c) return false; try { return localStorage.getItem(giKey(gi)) === '1'; } catch (e) { return false; } }
+        function giMarkSpent(gi) { if (!gi.c) return; try { localStorage.setItem(giKey(gi), '1'); } catch (e) {} }
+        function refreshMyGroups() {
+            fetch('/api/groups', { cache: 'no-store' }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+                if (!d) return;
+                var m = {}; (d.groups || []).forEach(function (g) { m[g.id] = true; });
+                if (JSON.stringify(m) !== JSON.stringify(myGroupIds)) { myGroupIds = m; if (currentContactShortId) { lastRenderKey = ''; try { loadMessages(currentContactShortId); } catch (e) {} } }
+            }).catch(function () {});
+        }
+        refreshMyGroups();
+        setInterval(refreshMyGroups, 15000);
         document.addEventListener('click', function (e) {
             var b = e.target && e.target.getAttribute && e.target.getAttribute('data-gi-join');
             if (!b) return;
+            var gi = { g: b, c: e.target.getAttribute('data-gi-code') || '', n: e.target.getAttribute('data-gi-name') || '' };
+            if (myGroupIds[gi.g]) { alert('Вы уже в этой группе.'); return; }
             var name = prompt('Ваше имя в группе (узел его не видит: оно пишется зашифрованно)');
             if (!name) return;
-            fetch('/api/groups/' + b + '/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: e.target.getAttribute('data-gi-code') || '', name: name }) })
-                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); alert('Вы в группе. Она на странице «Группы».'); }); })
-                .catch(function (er) { alert('Не удалось вступить: ' + er.message); });
+            fetch('/api/groups/' + b + '/join', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code: gi.c, name: name }) })
+                .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) {
+                    if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status));
+                    giMarkSpent(gi); myGroupIds[gi.g] = true; alert('Вы в группе. Она на странице «Группы».'); refreshMyGroups();
+                }); })
+                .catch(function (er) {
+                    if (/приглашени|уже участник|нет такой группы/i.test(er.message)) { giMarkSpent(gi); alert('Приглашение недействительно: ' + er.message); refreshMyGroups(); }
+                    else alert('Не удалось вступить: ' + er.message);
+                });
         });
 
         function renderMessages(messages) {
@@ -571,7 +593,7 @@
                 .map(function(key) { return pendingTransfers[key]; })
                 .filter(function(item) { return item.peerId === currentContactShortId; });
 
-            var renderKey = currentContactShortId + '|' + JSON.stringify(items.map(function(m) { return [m.msg_id, m.status, m.edited, m.text]; })) + '|' + JSON.stringify(pendingForPeer.map(function(t) { return [t.sentChunks, t.complete, t.error]; }));
+            var renderKey = currentContactShortId + '|' + Object.keys(myGroupIds).join(',') + '|' + JSON.stringify(items.map(function(m) { return [m.msg_id, m.status, m.edited, m.text]; })) + '|' + JSON.stringify(pendingForPeer.map(function(t) { return [t.sentChunks, t.complete, t.error]; }));
             if (renderKey === lastRenderKey) return;
             lastRenderKey = renderKey;
             if (items.length === 0 && pendingForPeer.length === 0) { div.innerHTML = '<p class="text-muted" style="text-align: center;">Нет сообщений</p>'; lastMessageCount = 0; return; }
@@ -585,8 +607,14 @@
                 html += '<div class="message-time">' + time + (msg.edited ? ' · изменено' : '') + (isSent ? ' ' + statusTicks(msg.status) : '') + '</div>';
                 if (msg.attachment) html += renderAttachment(msg.attachment);
                 var gi = groupInviteOf(msg.text);
-                if (gi) html += '<div class="message-text"><b>Приглашение в группу' + (gi.n ? ' «' + escapeHTML(gi.n) + '»' : '') + '</b><br>'
-                    + (isSent ? '<span style="opacity:.7">Приглашение отправлено</span>' : '<button class="btn btn-sm btn-primary" type="button" data-gi-join="' + escapeHTML(gi.g) + '" data-gi-code="' + escapeHTML(gi.c) + '" data-gi-name="' + escapeHTML(gi.n) + '">Вступить</button>') + '</div>';
+                if (gi) {
+                    var spent = giSpent(gi), inG = myGroupIds[gi.g];
+                    var giBody = isSent ? '<span style="opacity:.7">Приглашение отправлено</span>'
+                        : (inG ? '<span style="opacity:.7">Вы уже в этой группе</span> <a href="/groups">Открыть</a>'
+                        : (spent ? '<span style="opacity:.7">Приглашение уже недействительно</span>'
+                        : '<button class="btn btn-sm btn-primary" type="button" data-gi-join="' + escapeHTML(gi.g) + '" data-gi-code="' + escapeHTML(gi.c) + '" data-gi-name="' + escapeHTML(gi.n) + '">Вступить</button>'));
+                    html += '<div class="message-text"><b>Приглашение в группу' + (gi.n ? ' «' + escapeHTML(gi.n) + '»' : '') + '</b><br>' + giBody + '</div>';
+                }
                 else if (msg.text) html += '<div class="message-text">' + escapeHTML(msg.text) + '</div>';
                 html += '</div>';
             }

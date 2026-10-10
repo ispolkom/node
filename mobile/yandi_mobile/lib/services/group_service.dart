@@ -286,6 +286,13 @@ class GroupService {
     return gid;
   }
 
+  /// Одноразовый код приглашения уже использован (мной) или признан узлом недействительным: карточка в чате больше не срабатывает.
+  Future<bool> inviteSpent(String gid, String code) async => code.isNotEmpty && await store.read('grp_invspent_${gid}_$code') == '1';
+
+  Future<void> markInviteSpent(String gid, String code) async {
+    if (code.isNotEmpty) await store.write('grp_invspent_${gid}_$code', '1');
+  }
+
   /// Группы узла, куда можно вступить или попроситься.
   Future<List<DiscoverGroup>> discover() async => [for (final j in await api.openGroups()) DiscoverGroup.fromJson(j)];
 

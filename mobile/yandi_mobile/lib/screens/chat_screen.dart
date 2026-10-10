@@ -8,6 +8,7 @@ import '../widgets/avatar_circle.dart';
 import '../models/group_invite.dart';
 import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
+import 'group_chat_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -623,20 +624,39 @@ class _InviteCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final gid = invite.invite.gid;
+    final inGroup = state.groups?.byId(gid) != null;
+    Widget status(String text, {bool openBtn = false}) => Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+          Text(text, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          if (openBtn)
+            TextButton(
+              style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(0, 28), alignment: Alignment.centerLeft),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupChatScreen(gid: gid))),
+              child: const Text('Открыть группу', style: TextStyle(color: AppTheme.accent)),
+            ),
+        ]);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Row(mainAxisSize: MainAxisSize.min, children: [
-        const Icon(Icons.group_add_outlined, color: AppTheme.accent),
+        Icon(Icons.group_add_outlined, color: inGroup && !outgoing ? AppTheme.textSecondary : AppTheme.accent),
         const SizedBox(width: 8),
         Flexible(child: Text('Приглашение в группу${invite.name.isEmpty ? '' : ' «${invite.name}»'}', style: const TextStyle(color: AppTheme.text, fontSize: 15))),
       ]),
       const SizedBox(height: 6),
       if (outgoing)
         const Text('Приглашение отправлено (действует сутки, один раз)', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))
+      else if (inGroup)
+        status('Вы уже в этой группе', openBtn: true)
       else
-        FilledButton(
-          style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
-          onPressed: () => joinInvited(context, invite),
-          child: const Text('Вступить'),
+        FutureBuilder<bool>(
+          future: state.groups?.inviteSpent(gid, invite.invite.code) ?? Future.value(false),
+          builder: (_, snap) => snap.data == true
+              ? status('Приглашение уже недействительно')
+              : FilledButton(
+                  style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
+                  onPressed: () => joinInvited(context, invite),
+                  child: const Text('Вступить'),
+                ),
         ),
     ]);
   }
