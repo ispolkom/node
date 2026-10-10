@@ -15,12 +15,8 @@ import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.net.ServerSocket
 import java.net.Socket
-import java.security.MessageDigest
-import java.security.cert.CertificateException
-import java.security.cert.X509Certificate
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
-import javax.net.ssl.X509TrustManager
 import kotlin.concurrent.thread
 
 /**
@@ -60,6 +56,7 @@ class YandiVpnService : VpnService() {
                 val host = intent.getStringExtra("host") ?: return START_NOT_STICKY
                 val port = intent.getIntExtra("port", 443)
                 val fp   = intent.getStringExtra("fingerprint") ?: ""
+                if (!Regex("[0-9a-fA-F]{64}").matches(fp.trim())) return START_NOT_STICKY   // без закреплённого сертификата VPN не поднимаем
                 val tok  = intent.getStringExtra("token") ?: return START_NOT_STICKY
                 start(host, port, fp, tok)
             }
@@ -234,14 +231,8 @@ class LocalProxy(
         raw.connect(InetSocketAddress(host, port), 10_000)
         raw.tcpNoDelay = true
         val ctx = SSLContext.getInstance("TLS")
-        ctx.init(null, arrayOf(object : X509TrustManager {
-            override fun checkClientTrusted(chain: Array<X509Certificate>, a: String) {}
-            override fun checkServerTrusted(chain: Array<X509Certificate>, a: String) {
-                val fp = MessageDigest.getInstance("SHA-256").digest(chain[0].encoded).joinToString("") { "%02x".format(it) }
-                if (fingerprint.isNotEmpty() && !fp.equals(fingerprint, true)) throw CertificateException("отпечаток сертификата не совпал")
-            }
-            override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
-        }), null)
+        // Тот же строгий пин, что у сокета сообщений (YandiService): пустой/неверный отпечаток — отказ ДО отправки токена, а не «доверять любому».
+        ctx.init(null, arrayOf(PinnedTrustManager(fingerprint)), null)
         val tls = ctx.socketFactory.createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
         tls.startHandshake()
         val out = tls.outputStream
