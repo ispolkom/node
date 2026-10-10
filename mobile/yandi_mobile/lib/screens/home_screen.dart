@@ -9,6 +9,7 @@ import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 import 'files_tab.dart';
 import 'groups_tab.dart';
+import '../widgets/yandi_icons.dart';
 import '../widgets/avatar_circle.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -233,12 +234,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
           IconButton(
             tooltip: 'Чёрный список',
-            icon: const Icon(Icons.block, color: AppTheme.textSecondary),
+            icon: const YandiIcon(YandiGlyph.blacklist, color: AppTheme.textSecondary, label: 'Чёрный список'),
             onPressed: () => Navigator.push(context,
                 MaterialPageRoute(builder: (_) => const BlacklistScreen())),
           ),
           IconButton(
-            icon: const Icon(Icons.settings, color: AppTheme.textSecondary),
+            tooltip: 'Настройки',
+            icon: const YandiIcon(YandiGlyph.settings, color: AppTheme.textSecondary, label: 'Настройки'),
             onPressed: () => Navigator.push(context,
                 MaterialPageRoute(builder: (_) => const SettingsScreen())),
           ),
@@ -252,10 +254,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           labelColor: AppTheme.accent,
           unselectedLabelColor: AppTheme.textSecondary,
           tabs: const [
-            Tab(text: 'Контакты'),
-            Tab(text: 'Поиск'),
-            Tab(text: 'Группы'),
-            Tab(text: 'Файлы'),
+            Tab(icon: YandiIcon(YandiGlyph.contacts, label: 'Контакты')),
+            Tab(icon: YandiIcon(YandiGlyph.search, label: 'Поиск')),
+            Tab(icon: YandiIcon(YandiGlyph.groups, label: 'Группы')),
+            Tab(icon: YandiIcon(YandiGlyph.folder, label: 'Файлы')),
           ],
         ),
       ),
@@ -491,7 +493,7 @@ class _ContactListState extends State<_ContactList> {
           padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
           child: TextButton.icon(
             onPressed: () => setState(() => _showHidden = !_showHidden),
-            icon: Icon(_showHidden ? Icons.visibility_off_outlined : Icons.visibility_outlined, color: AppTheme.textSecondary, size: 18),
+            icon: const YandiIcon(YandiGlyph.offline, color: AppTheme.textSecondary, size: 18),
             label: Text(_showHidden ? 'Скрыть неактивные устройства' : 'Скрытые устройства (${hidden.length}) — давно не в сети',
                 style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
