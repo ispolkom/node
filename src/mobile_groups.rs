@@ -606,36 +606,6 @@ impl Store {
         Ok(id)
     }
 
-    pub fn update(
-        &mut self,
-        gid: &str,
-        name: Option<&str>,
-        topic: Option<&str>,
-        kind: Option<Kind>,
-    ) -> R<()> {
-        let g = self.get_mut(gid)?;
-        if let Some(n) = name {
-            let n = clean(n, MAX_NAME);
-            if n.is_empty() {
-                return Err(bad("нужно название группы"));
-            }
-            g.name = n;
-        }
-        if let Some(t) = topic {
-            g.topic = clean(t, MAX_TOPIC);
-        }
-        if let Some(k) = kind {
-            if k != g.kind {
-                g.invites.clear();
-            }
-            g.kind = k;
-        }
-        g.log(PC, "settings", None, None, None);
-        let to = g.keys();
-        self.save();
-        hint(gid, HINT_CHANGED, 0, to);
-        Ok(())
-    }
 
     /// Настройки группы меняют владелец и админ: название, тематика, описание. Название и тематика не бывают пустыми.
     pub fn update_settings(&mut self, gid: &str, device: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> R<()> {
@@ -669,68 +639,41 @@ impl Store {
         Ok(())
     }
 
-    pub fn add_member(&mut self, gid: &str, device: &str) -> R<String> {
-        let g = self.get_mut(gid)?;
-        let key = member_key(gid, device);
-        if g.member(&key).is_some() {
-            return Err(Fail(StatusCode::CONFLICT, "уже участник"));
-        }
-        if g.members.len() >= MAX_MEMBERS {
-            return Err(Fail(StatusCode::INSUFFICIENT_STORAGE, "группа заполнена"));
-        }
-        // добавление с компьютера снимает запрет
-        g.banned.retain(|b| b.key != key);
-        let alias = g.new_alias();
-        g.members.push(Member {
-            key,
-            alias: alias.clone(),
-            role: Role::Member,
-            muted: false,
-            joined_ms: now_ms(),
-            member_pub: None,
-        });
-        g.log(PC, "add", Some(&alias), None, None);
-        let to = g.keys();
-        self.save();
-        hint(gid, HINT_CHANGED, 0, to);
-        Ok(alias)
-    }
 
-    /// Поставить владельцем группы другое устройство (например, если прежнее потеряно). Новый владелец должен сменить ключ.
-    pub fn set_owner(&mut self, gid: &str, device: &str) -> R<String> {
+
+    /// Владелец передаёт группу участнику (по псевдониму). Прежний владелец становится админом, новый должен создать новое поколение ключа
+    /// (`rekey_needed`). Участнику нужен ключ группы (`member_pub`), иначе он не сможет раздавать ключи.
+    pub fn transfer_owner(&mut self, gid: &str, device: &str, to_alias: &str) -> R<()> {
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner {
+            return Err(forbidden("передать группу может только её владелец"));
+        }
+        let me_key = me.key.clone();
+        let me_alias = me.alias.clone();
         let g = self.get_mut(gid)?;
-        let key = member_key(gid, device);
-        if g.member(&key).is_none() {
-            if g.members.len() >= MAX_MEMBERS {
-                return Err(Fail(StatusCode::INSUFFICIENT_STORAGE, "группа заполнена"));
-            }
-            g.banned.retain(|b| b.key != key);
-            let alias = g.new_alias();
-            g.members.push(Member {
-                key: key.clone(),
-                alias,
-                role: Role::Member,
-                muted: false,
-                joined_ms: now_ms(),
-                member_pub: None,
-            });
+        let target = g.member_by_alias(to_alias).cloned().ok_or_else(|| Fail(StatusCode::NOT_FOUND, "нет такого участника"))?;
+        if target.key == me_key {
+            return Err(bad("группа уже ваша"));
+        }
+        if target.member_pub.is_none() {
+            return Err(Fail(StatusCode::CONFLICT, "у участника ещё нет ключа группы (он должен открыть приложение)"));
         }
         for m in g.members.iter_mut() {
-            if m.role == Role::Owner {
-                m.role = Role::Member;
+            if m.key == me_key {
+                m.role = Role::Admin;
             }
-            if m.key == key {
+            if m.key == target.key {
                 m.role = Role::Owner;
                 m.muted = false;
             }
         }
         g.rekey_needed = true;
-        let alias = g.member(&key).map(|m| m.alias.clone()).unwrap_or_default();
-        g.log(PC, "owner", Some(&alias), None, None);
+        g.log(&me_alias, "transfer", Some(&target.alias), None, None);
         let to = g.keys();
         self.save();
-        hint(gid, HINT_CHANGED, 0, to);
-        Ok(alias)
+        hint(gid, HINT_CHANGED, 0, to.clone());
+        hint(gid, HINT_KEYS, 0, to);
+        Ok(())
     }
 
     pub fn delete(&mut self, gid: &str) -> R<()> {
@@ -1034,17 +977,6 @@ impl Store {
         self.apply_mod(gid, &me.alias, me.role, action, alias, seq, reason)
     }
 
-    /// То же со страницы узла: владелец компьютера может всё, кроме смены владельца (для неё `set_owner`).
-    pub fn moderate_pc(
-        &mut self,
-        gid: &str,
-        action: &str,
-        alias: Option<&str>,
-        seq: Option<u64>,
-        reason: Option<&str>,
-    ) -> R<()> {
-        self.apply_mod(gid, PC, Role::Owner, action, alias, seq, reason)
-    }
 
     #[allow(clippy::too_many_arguments)]
     fn apply_mod(
@@ -1167,12 +1099,6 @@ impl Store {
         self.make_invite(gid, &by, uses, ttl_ms)
     }
 
-    pub fn invite_pc(&mut self, gid: &str, uses: u32, ttl_ms: Option<u64>) -> R<Value> {
-        if self.get(gid)?.kind != Kind::Invite {
-            return Err(forbidden("в эту группу не вступают по приглашению"));
-        }
-        self.make_invite(gid, PC, uses, ttl_ms)
-    }
 
     fn make_invite(&mut self, gid: &str, by: &str, uses: u32, ttl_ms: Option<u64>) -> R<Value> {
         let code = invite_code();
@@ -1681,6 +1607,24 @@ pub(crate) async fn m_invite(
 }
 
 #[derive(Deserialize)]
+pub struct TransferReq {
+    alias: String,
+}
+
+/// Владелец передаёт группу участнику.
+pub(crate) async fn m_transfer(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<TransferReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.transfer_owner(&gid, &me, &req.alias)))
+    })())
+}
+
+#[derive(Deserialize)]
 pub struct SettingsReq {
     #[serde(default)]
     name: Option<String>,
@@ -1785,6 +1729,30 @@ mod tests {
     const OWNER: &str = "aa";
     const BOB: &str = "bb";
     const EVE: &str = "ee";
+
+    #[test]
+    fn owner_hands_the_group_over() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, Some(&b64(&[7u8; 32]))).unwrap();
+        s.join(&gid, EVE, None, None).unwrap();
+        let alias = |s: &Store, d: &str| s.list_for(d)[0]["my_alias"].as_str().unwrap().to_string();
+        let (owner, bob, eve) = (alias(&s, OWNER), alias(&s, BOB), alias(&s, EVE));
+        assert!(s.transfer_owner(&gid, BOB, &bob).is_err(), "не владелец не передаёт");
+        assert!(s.transfer_owner(&gid, OWNER, &owner).is_err(), "самому себе");
+        assert!(s.transfer_owner(&gid, OWNER, "нет такого").is_err());
+        assert!(s.transfer_owner(&gid, OWNER, &eve).is_err(), "участнику без ключа группы нельзя");
+        s.transfer_owner(&gid, OWNER, &bob).unwrap();
+        assert_eq!(s.list_for(BOB)[0]["role"], "owner");
+        assert_eq!(s.list_for(OWNER)[0]["role"], "admin", "прежний владелец становится админом");
+        assert_eq!(s.list_for(BOB)[0]["rekey_needed"], true, "новый владелец должен сменить ключ");
+        assert_eq!(s.list_for(OWNER)[0]["rekey_needed"], false, "а прежнему это уже не видно");
+        // права поменялись местами
+        assert!(s.transfer_owner(&gid, OWNER, &eve).is_err(), "прежний владелец больше не передаёт");
+        assert!(s.moderate(&gid, OWNER, "kick", Some(&bob), None, None).is_err(), "и не трогает нового владельца");
+        assert!(s.moderate(&gid, BOB, "demote", Some(&owner), None, None).is_ok(), "новый владелец может разжаловать прежнего");
+        assert_eq!(s.modlog(&gid, Some(BOB)).unwrap()["modlog"].as_array().unwrap().iter().filter(|x| x["action"] == "transfer").count(), 1);
+    }
 
     #[test]
     fn admin_tier_follows_the_matrix() {

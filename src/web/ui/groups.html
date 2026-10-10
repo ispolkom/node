@@ -108,6 +108,30 @@
         </div>
     </div>
 
+    <div id="ownDlg" style="display:none;position:fixed;inset:0;background:#000b;z-index:60;align-items:center;justify-content:center">
+        <div class="card" style="max-width:420px;width:92%;padding:16px">
+            <h3 style="margin:0 0 4px">Передать группу</h3>
+            <div class="mg-sub" style="margin-bottom:8px">Выберите нового владельца из участников.</div>
+            <div id="ownList" style="max-height:40vh;overflow:auto;border:1px solid #8884;border-radius:8px"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:10px">
+                <button class="btn" id="ownCancel" type="button">Отмена</button>
+                <button class="btn btn-primary" id="ownOk" type="button" disabled>ОК</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="ownConfirm" style="display:none;position:fixed;inset:0;background:#000c;z-index:70;align-items:center;justify-content:center">
+        <div class="card" style="max-width:420px;width:92%;padding:16px">
+            <h3 style="margin:0 0 8px">Вы уверены?</h3>
+            <p class="form-help">Вы уверены, что хотите передать права на группу? Это действие необратимо без согласия нового владельца. Вы станете админом.</p>
+            <div id="ownErr" class="form-help" style="color:#e74c3c;min-height:1.2em"></div>
+            <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:8px">
+                <button class="btn" id="ownNo" type="button">Нет</button>
+                <button class="btn" id="ownYes" type="button" disabled style="color:#e74c3c">Да</button>
+            </div>
+        </div>
+    </div>
+
     <div id="memDlg" style="display:none;position:fixed;inset:0;background:#000b;z-index:60;align-items:center;justify-content:center">
         <div class="card" style="max-width:380px;width:92%;padding:16px">
             <h3 style="margin:0 0 4px" id="memTitle"></h3>
@@ -328,17 +352,51 @@
             var log = (d.modlog || []).slice(-20).reverse();
             if (log.length) h += '<hr style="opacity:.2"><details><summary>Журнал действий модераторов</summary>' + log.map(function (x) {
                 return '<div class="mg-sub">' + esc(new Date(x.ts).toLocaleString()) + ' — ' + esc(x.by) + ': ' + esc(x.action) + (x.target ? ' «' + esc(x.target) + '»' : '') + '</div>'; }).join('') + '</details>';
+            // передача владения — отдельный блок
+            if (owner && d.members.length > 1) h += '<hr style="opacity:.2"><b>Передача владения</b><div class="mg-sub">Передайте группу другому участнику. Вы станете админом.</div><button class="btn btn-sm" id="setTransfer" type="button" style="margin-top:6px">Передать группу…</button>';
             // выход
             if (!owner) h += '<hr style="opacity:.2"><button class="btn btn-sm" id="setLeave" type="button" style="color:#e74c3c">Выйти из группы</button>';
             body.innerHTML = h;
             body.scrollTop = keepScroll;
         }
+
+        // ── Передача владения: выбор участника → подтверждение «Да / Нет» ──
+        var ownPick = null, ownTimer = null;
+        function openOwnerPicker() {
+            ownPick = null; $('ownOk').disabled = true;
+            var g = setInfo.group;
+            $('ownList').innerHTML = setInfo.members.filter(function (m) { return m.alias !== g.my_alias; }).map(function (m) {
+                return '<div class="mg-item" data-own="' + esc(m.alias) + '">' + esc(m.name || m.alias) + (m.name ? ' <span class="mg-sub">' + esc(m.alias) + '</span>' : '') + ' <span class="mg-tag">' + ROLE[m.role] + '</span></div>';
+            }).join('');
+            $('ownDlg').style.display = 'flex';
+        }
+        $('ownList').addEventListener('click', function (e) {
+            var it = e.target && e.target.closest ? e.target.closest('[data-own]') : null;
+            if (!it) return;
+            ownPick = it.getAttribute('data-own'); $('ownOk').disabled = false;
+            Array.prototype.forEach.call($('ownList').children, function (c) { c.classList.toggle('sel', c === it); });
+        });
+        $('ownCancel').addEventListener('click', function () { $('ownDlg').style.display = 'none'; });
+        $('ownOk').addEventListener('click', function () {
+            if (!ownPick) return;
+            $('ownErr').textContent = ''; $('ownYes').disabled = true; $('ownConfirm').style.display = 'flex';
+            if (ownTimer) clearTimeout(ownTimer);
+            ownTimer = setTimeout(function () { $('ownYes').disabled = false; }, 3000);   // чтобы не нажать «Да» по ошибке
+        });
+        $('ownNo').addEventListener('click', function () { $('ownConfirm').style.display = 'none'; if (ownTimer) clearTimeout(ownTimer); });
+        $('ownYes').addEventListener('click', function () {
+            if (!ownPick || !cur) return;
+            api('POST', '/api/groups/' + encodeURIComponent(cur) + '/transfer', { alias: ownPick })
+                .then(function () { $('ownConfirm').style.display = 'none'; $('ownDlg').style.display = 'none'; say('Группа передана.'); refreshSettings(); loadList(); loadFeed(true); })
+                .catch(function (er) { $('ownErr').textContent = er.message; });
+        });
         $('mgHead').addEventListener('click', function (e) { if (e.target && e.target.id === 'mgGear') openSettings(); });
         $('setClose').addEventListener('click', function () { $('setDlg').style.display = 'none'; });
         $('setBody').addEventListener('click', function (e) {
             var el = e.target; if (!el || !cur) return;
             var gid = encodeURIComponent(cur);
             var mem = el.closest ? el.closest('[data-mem]') : null;
+            if (el.id === 'setTransfer') { openOwnerPicker(); return; }
             if (mem) { openMember(mem.getAttribute('data-mem')); return; }
             if (el.getAttribute && el.getAttribute('data-unban')) {
                 api('POST', '/api/groups/' + gid + '/mod', { action: 'unban', alias: el.getAttribute('data-unban') }).then(function () { say('Вход снова разрешён.'); refreshSettings(); }).catch(fail); return;

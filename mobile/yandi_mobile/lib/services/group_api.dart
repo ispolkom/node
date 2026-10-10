@@ -13,6 +13,7 @@ abstract class GroupApi {
   Future<String> create(String name, String topic, String about, String kind);
   Future<void> requestJoin(String gid, String name);
   Future<void> settings(String gid, {String? name, String? topic, String? about});
+  Future<void> transferOwner(String gid, String alias);
   Future<List<Map<String, dynamic>>> requests(String gid);
   Future<void> resolveRequest(String gid, String rid);
   Future<String> join(String gid, {String? inviteCode, String? memberPub});

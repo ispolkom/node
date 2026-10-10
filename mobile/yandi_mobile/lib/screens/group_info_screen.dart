@@ -181,6 +181,59 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
 
   String _roleName(String r) => switch (r) { 'owner' => 'владелец', 'admin' => 'админ', 'moderator' => 'модератор', _ => 'участник' };
 
+  /// Передача владения: выбор участника из списка с прокруткой → «Вы уверены?» (кнопка «Да» оживает через 3 секунды).
+  Future<void> _transferOwnership(GroupInfo g) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final candidates = _members.where((m) => m.alias != g.myAlias).toList();
+    String? pick;
+    final chosen = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(padding: EdgeInsets.all(16), child: Text('Кому передать группу', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.5),
+            child: ListView(shrinkWrap: true, children: [
+              for (final m in candidates)
+                RadioListTile<String>(
+                  value: m.alias,
+                  groupValue: pick,
+                  activeColor: AppTheme.accent,
+                  title: Text(_svc.displayName(g.id, m.alias), style: const TextStyle(color: AppTheme.text)),
+                  subtitle: Text('${m.alias} · ${_roleName(m.role)}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                  onChanged: (v) => setS(() => pick = v),
+                ),
+            ]),
+          ),
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(children: [
+              Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена'))),
+              const SizedBox(width: 12),
+              Expanded(child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: pick == null ? null : () => Navigator.pop(ctx, pick), child: const Text('ОК'))),
+            ]),
+          ),
+        ]),
+      )),
+    );
+    if (chosen == null || !mounted) return;
+    final sure = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => _SureDialog(),
+    );
+    if (sure != true) return;
+    try {
+      await _svc.transferOwner(g.id, chosen);
+      messenger.showSnackBar(const SnackBar(content: Text('Группа передана. Вы теперь админ.')));
+      await _load();
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('$e')));
+    }
+  }
+
   Future<bool> _confirm(String text) async {
     final ok = await showDialog<bool>(
       context: context,
@@ -388,6 +441,11 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           for (final l in _modlog)
             ListTile(dense: true, title: Text('${l['by'] ?? ''}: ${l['action'] ?? ''}${l['target'] != null ? ' → ${l['target']}' : ''}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
         ],
+        if (g.isOwner && _members.length > 1) ...[
+          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Передача владения', style: TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('Передайте группу другому участнику. Вы станете админом.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+          ListTile(leading: const Icon(Icons.swap_horiz, color: AppTheme.incoming), title: const Text('Передать группу…', style: TextStyle(color: AppTheme.incoming)), onTap: () => _transferOwnership(g)),
+        ],
         if (!g.isOwner)
           ListTile(
             leading: const Icon(Icons.logout, color: AppTheme.incoming),
@@ -403,4 +461,31 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       ]),
     );
   }
+}
+
+/// «Вы уверены?» с кнопкой «Да», которая оживает через 3 секунды (чтобы не нажать по ошибке).
+class _SureDialog extends StatefulWidget {
+  @override
+  State<_SureDialog> createState() => _SureDialogState();
+}
+
+class _SureDialogState extends State<_SureDialog> {
+  bool _ready = false;
+
+  @override
+  void initState() {
+    super.initState();
+    Future.delayed(const Duration(seconds: 3), () { if (mounted) setState(() => _ready = true); });
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Вы уверены?', style: TextStyle(color: AppTheme.text)),
+        content: const Text('Вы уверены, что хотите передать права на группу? Это действие необратимо без согласия нового владельца.', style: TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Нет')),
+          TextButton(onPressed: _ready ? () => Navigator.pop(context, true) : null, child: Text(_ready ? 'Да' : 'Да (3 с)', style: TextStyle(color: _ready ? AppTheme.incoming : AppTheme.textSecondary))),
+        ],
+      );
 }

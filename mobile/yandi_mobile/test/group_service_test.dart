@@ -57,6 +57,15 @@ class _Api implements GroupApi {
     if (about != null) n.about = about;
   }
   @override
+  Future<void> transferOwner(String gid, String alias) async {
+    if (me['role'] != 'owner') throw const GroupApiError(403, 'передать группу может только её владелец');
+    final target = n.members.values.firstWhere((m) => m['alias'] == alias);
+    if (target['pub'] == null) throw const GroupApiError(409, 'нет ключа');
+    me['role'] = 'admin';
+    target['role'] = 'owner';
+    n.rekeyNeeded = true;
+  }
+  @override
   Future<void> requestJoin(String gid, String name) async {
     if (n.reqs.any((r) => r['dev'] == dev)) throw const GroupApiError(409, 'просьба уже отправлена');
     n.reqs.add({'id': 'r${n.reqs.length}', 'dev': dev, 'name': name});
@@ -395,5 +404,48 @@ void main() {
     expect(owner.rules(node.gid).allows(GroupKind.video), isFalse, reason: 'владелец принял правила от админа');
     expect(owner.byId(node.gid)!.name, 'Имя от админа');
     await eve.sync();
+  });
+
+  test('передача владения: новый владелец раздаёт новое поколение, участники принимают его ключ по записи изнутри группы', () async {
+    await owner.sync();
+    await bobJoins();                       // Боб — участник, закрепил ключ владельца
+    await owner.send(node.gid, GroupKind.text, {'t': 'до передачи'});
+    await bob.sync();
+    await eve.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Ева');
+    await owner.sync();                     // Еве раздан ключ
+    await eve.sync();
+    await owner.transferOwner(node.gid, 'Гость-1');   // Бобу
+    expect(owner.byId(node.gid)!.role, 'admin');
+    await bob.sync();                       // Боб — новый владелец: создаёт поколение 2
+    expect(bob.byId(node.gid)!.isOwner, isTrue);
+    expect(node.epoch, 2);
+    await bob.send(node.gid, GroupKind.text, {'t': 'я теперь владелец'});
+    await owner.sync();                     // бывший владелец принимает ключ нового
+    await eve.sync();                       // Ева закрепляла ключ прежнего владельца: по записи handover перезакрепляет нового
+    expect(eve.hasProblem(node.gid), isFalse, reason: 'передача подтверждена изнутри группы');
+    expect((await eve.messages(node.gid)).map((e) => e.body['t']), contains('я теперь владелец'));
+    expect((await owner.messages(node.gid)).map((e) => e.body['t']), contains('я теперь владелец'));
+  });
+
+  test('передача владения: нельзя не владельцу, без ключа у участника, и подделка записи рядовым ничего не меняет', () async {
+    await owner.sync();
+    await bobJoins();
+    await expectLater(bob.transferOwner(node.gid, 'Хозяин-1'), throwsA(isA<GroupSendRefused>()));
+    final log = [
+      GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: 'Гость-1', body: const {'op': 'handover', 'to': 'Гость-1', 'pub': 'AAAA'}),
+    ];
+    final members = [
+      {'alias': 'Хозяин-1', 'role': 'owner', 'member_pub': 'BBBB'},
+      {'alias': 'Гость-1', 'role': 'member', 'member_pub': 'AAAA'},
+    ];
+    expect(GroupService.handoverEndorsed(log, members, 'AAAA'), isFalse, reason: 'новый не владелец по списку узла');
+    final members2 = [
+      {'alias': 'Хозяин-1', 'role': 'admin', 'member_pub': 'BBBB'},
+      {'alias': 'Гость-1', 'role': 'owner', 'member_pub': 'AAAA'},
+    ];
+    expect(GroupService.handoverEndorsed(log, members2, 'AAAA'), isFalse, reason: 'запись написал сам новый владелец, подтвердить должен прежний');
+    final logOk = [GroupEntry(gid: node.gid, seq: 1, ts: 0, epoch: 1, kind: GroupKind.system, from: 'Хозяин-1', body: const {'op': 'handover', 'to': 'Гость-1', 'pub': 'AAAA'})];
+    expect(GroupService.handoverEndorsed(logOk, members2, 'AAAA'), isTrue);
+    expect(GroupService.handoverEndorsed(logOk, members2, 'CCCC'), isFalse, reason: 'ключ не тот');
   });
 }

@@ -344,9 +344,10 @@ fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str) -> Result<(), Str
     }
     // 2) ключи: владелец раздаёт, участник забирает
     if role == "owner" {
+        let _ = collect_keys(c, dev, gid, true);
         provision(c, dev, g, gid, &alias, epoch)?;
     } else {
-        collect_keys(c, dev, gid)?;
+        collect_keys(c, dev, gid, false)?;
     }
     // 3) журнал
     pull(c, dev, gid, g)?;
@@ -393,24 +394,65 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
     Ok(())
 }
 
-fn collect_keys(c: &mut Client, dev: &str, gid: &str) -> Result<(), String> {
+/// Передача владения подтверждена изнутри группы? Закреплённый ключ владельца меняется только если: новый владелец (по списку узла) называет
+/// именно этот ключ, а в ленте есть служебная запись `handover` на его псевдоним с этим ключом от владельца или админа.
+/// Запись рядового участника ничего не меняет, а подмена ключа самим узлом остаётся нераспознанной (тот же уровень доверия, что при вступлении).
+fn handover_endorsed(log: &[Entry], members: &[(String, String, String)], owner_pub: &str) -> bool {
+    let Some((owner_alias, _, _)) = members.iter().find(|(_, role, p)| role == "owner" && p == owner_pub) else { return false };
+    log.iter().any(|e| {
+        !e.deleted
+            && e.kind == KIND_SYSTEM
+            && e.body["op"] == "handover"
+            && e.body["to"].as_str() == Some(owner_alias.as_str())
+            && e.body["pub"].as_str() == Some(owner_pub)
+            && &e.from != owner_alias // сам новый владелец себя подтвердить не может
+            && members.iter().any(|(alias, role, _)| alias == &e.from && (role == "owner" || role == "admin"))
+    })
+}
+
+fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<(), String> {
     let my_seed = c.seed(gid).ok_or("нет ключа")?;
     let k = with_store(|st| st.my_keys(gid, dev)).map_err(fail)?;
-    let Some(owner_pub_s) = k["owner_pub"].as_str().map(|x| x.to_string()) else { return Ok(()) };
+    // владелец тоже забирает недостающие старые поколения: их запечатал прежний владелец, берём его закреплённый ключ
+    let owner_pub_s = if as_owner {
+        match c.state.groups.get(gid).and_then(|g| g.owner_pub.clone()) {
+            Some(p) => p,
+            None => return Ok(()),
+        }
+    } else {
+        let Some(p) = k["owner_pub"].as_str().map(|x| x.to_string()) else { return Ok(()) };
+        p
+    };
     let Some(owner_pub) = unb64(&owner_pub_s).and_then(|p| arr32(&p)) else { return Ok(()) };
     // ключ владельца закрепляется при первом получении: потом узел не подсунет другой
-    match c.gstate(gid).owner_pub.clone() {
+    if !as_owner { match c.gstate(gid).owner_pub.clone() {
         None => {
             c.gstate(gid).owner_pub = Some(owner_pub_s);
             c.save();
         }
         Some(pinned) if pinned != owner_pub_s => {
-            c.problems.insert(gid.to_string());
-            return Ok(());
+            // возможно, владение передали: сначала дочитываем ленту (старые ключи у нас есть) и ищем подтверждение изнутри группы
+            if let Some(g) = with_store(|st| st.list_for(dev)).into_iter().find(|g| s(g, "id") == gid) {
+                let _ = pull(c, dev, gid, &g);
+            }
+            let members: Vec<(String, String, String)> = with_store(|st| st.members(gid, dev))
+                .ok()
+                .and_then(|m| m["members"].as_array().map(|l| l.iter().map(|x| (s(x, "alias"), s(x, "role"), s(x, "member_pub"))).collect()))
+                .unwrap_or_default();
+            let log = c.load_log(gid).clone();
+            if handover_endorsed(&log, &members, &owner_pub_s) {
+                c.gstate(gid).owner_pub = Some(owner_pub_s.clone());
+                c.save();
+            } else {
+                c.problems.insert(gid.to_string());
+                return Ok(());
+            }
         }
         _ => {}
+    } }
+    if !as_owner {
+        c.problems.remove(gid);
     }
-    c.problems.remove(gid);
     for b in k["boxes"].as_array().cloned().unwrap_or_default() {
         let epoch = u(&b, "epoch") as u32;
         if c.group_key(gid, epoch).is_some() {
@@ -422,7 +464,9 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str) -> Result<(), String> {
                 c.save();
             }
             _ => {
-                c.problems.insert(gid.to_string());
+                if !as_owner {
+                    c.problems.insert(gid.to_string());
+                }
             }
         }
     }
@@ -732,6 +776,28 @@ pub fn forget_local(gid: &str) -> Result<(), String> {
     })
 }
 
+/// Владелец передаёт группу участнику: сначала в ленту кладётся служебная запись «владение передано» (с ключом нового владельца), затем узел
+/// меняет роли. Прежний владелец становится админом; новый создаст новое поколение ключа.
+pub fn transfer_owner(gid: &str, alias: &str) -> Result<(), String> {
+    let dev = pc_device()?;
+    with_client(|c| {
+        let info = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
+        if s(&info, "role") != "owner" {
+            return Err("передать группу может только её владелец".into());
+        }
+        let members = with_store(|st| st.members(gid, &dev)).map_err(fail)?;
+        let target = members["members"].as_array().and_then(|l| l.iter().find(|x| s(x, "alias") == alias).cloned()).ok_or("нет такого участника")?;
+        let pubk = target["member_pub"].as_str().ok_or("у участника ещё нет ключа группы (он должен открыть приложение)")?.to_string();
+        let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
+        let key = c.group_key(gid, epoch).ok_or("ключ группы не создан")?;
+        let payload = encrypt_entry(&key, gid, epoch, &s(&info, "my_alias"), KIND_SYSTEM, &json!({"op": "handover", "to": alias, "pub": pubk}))?;
+        with_store(|st| st.append(gid, &dev, epoch, &b64(&payload))).map_err(fail)?;
+        with_store(|st| st.transfer_owner(gid, &dev, alias)).map_err(fail)
+    })?;
+    sync_all();
+    Ok(())
+}
+
 /// Владелец меняет название, тематику и описание своей группы.
 pub fn update_settings(gid: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> Result<(), String> {
     let dev = pc_device()?;
@@ -898,6 +964,27 @@ mod tests {
         *flipped.last_mut().unwrap() ^= 1;
         assert!(decrypt_entry(&key, &flipped, gid, 2, "Лис-1").is_err());
         assert!(encrypt_entry(&key, gid, 2, "x", 99, &json!({})).is_err());
+    }
+
+    #[test]
+    fn handover_is_trusted_only_when_endorsed_from_inside_by_a_manager() {
+        let new_pub = b64(&[9u8; 32]);
+        let members = |new_role: &str| vec![
+            ("Старый".to_string(), "admin".to_string(), b64(&[1u8; 32])),
+            ("Новый".to_string(), new_role.to_string(), new_pub.clone()),
+            ("Рядовой".to_string(), "member".to_string(), b64(&[3u8; 32])),
+        ];
+        let entry = |from: &str, to: &str, pubk: &str| Entry { seq: 1, ts: 0, epoch: 1, kind: KIND_SYSTEM, from: from.to_string(), body: json!({"op": "handover", "to": to, "pub": pubk}), deleted: false };
+        assert!(handover_endorsed(&[entry("Старый", "Новый", &new_pub)], &members("owner"), &new_pub), "от прежнего владельца (теперь админ)");
+        assert!(!handover_endorsed(&[entry("Рядовой", "Новый", &new_pub)], &members("owner"), &new_pub), "запись рядового не считается");
+        assert!(!handover_endorsed(&[], &members("owner"), &new_pub), "без записи нельзя");
+        assert!(!handover_endorsed(&[entry("Старый", "Новый", &new_pub)], &members("member"), &new_pub), "новый не владелец по списку узла");
+        assert!(!handover_endorsed(&[entry("Новый", "Новый", &new_pub)], &members("owner"), &new_pub), "сам новый владелец себя не подтверждает");
+        assert!(!handover_endorsed(&[entry("Старый", "Рядовой", &new_pub)], &members("owner"), &new_pub), "запись про другого");
+        assert!(!handover_endorsed(&[entry("Старый", "Новый", &b64(&[5u8; 32]))], &members("owner"), &new_pub), "запись с другим ключом");
+        let mut gone = entry("Старый", "Новый", &new_pub);
+        gone.deleted = true;
+        assert!(!handover_endorsed(&[gone], &members("owner"), &new_pub), "стёртая запись не считается");
     }
 
     #[test]

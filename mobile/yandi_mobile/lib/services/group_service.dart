@@ -97,28 +97,44 @@ class GroupService {
 
   /// Участник: забирает свои конверты и открывает их ключом владельца. Ключ владельца закрепляется при первом получении (TOFU):
   /// если узел потом подсунет другой, ключи не принимаются и группа помечается проблемной.
-  Future<void> _collectKeys(GroupInfo g) async {
+  Future<void> _collectKeys(GroupInfo g, {bool asOwner = false}) async {
     final (mySeed, _) = await _memberKeys(g.id);
     final k = await api.keys(g.id);
-    final ownerPub = k['owner_pub'] as String?;
-    if (ownerPub == null) return;
     final pinned = await store.read('grp_owner_${g.id}');
-    if (pinned == null) {
-      await store.write('grp_owner_${g.id}', ownerPub);
-    } else if (pinned != ownerPub) {
-      _problems.add(g.id);
-      return;
+    String? ownerPubStr;
+    if (asOwner) {
+      // я теперь владелец, но старые поколения ключа запечатал прежний владелец: достаю недостающие по закреплённому его ключу
+      if (pinned == null) return;
+      ownerPubStr = pinned;
+    } else {
+      ownerPubStr = k['owner_pub'] as String?;
+      if (ownerPubStr == null) return;
+      if (pinned == null) {
+        await store.write('grp_owner_${g.id}', ownerPubStr);
+      } else if (pinned != ownerPubStr) {
+        // возможно, владение передали: дочитываем ленту (старые ключи у нас есть) и ищем подтверждение изнутри группы
+        try { await _pull(g); } catch (_) {}
+        final members = [for (final x in ((await api.members(g.id))['members'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
+        final log = await store.entries(g.id, kind: GroupKind.system, limit: 2000);
+        if (handoverEndorsed(log, members, ownerPubStr)) {
+          await store.write('grp_owner_${g.id}', ownerPubStr);
+        } else {
+          _problems.add(g.id);
+          return;
+        }
+      }
+      _problems.remove(g.id);
     }
-    _problems.remove(g.id);
+    final ownerPub = _unb64(ownerPubStr);
     for (final b in (k['boxes'] as List? ?? const [])) {
       final epoch = (b as Map)['epoch'] as int;
       if (await _groupKey(g.id, epoch) != null) continue;
       try {
-        final key = await GroupCrypto.openKey(_unb64(b['box'] as String), gid: g.id, epoch: epoch, mySeed: mySeed, ownerPub: _unb64(ownerPub));
+        final key = await GroupCrypto.openKey(_unb64(b['box'] as String), gid: g.id, epoch: epoch, mySeed: mySeed, ownerPub: ownerPub);
         await _saveGroupKey(g.id, epoch, key);
       } catch (_) {
-        // конверт не от этого владельца или повреждён — не принимаем
-        _problems.add(g.id);
+        // конверт не от этого владельца или повреждён — не принимаем (для владельца: недостающий старый ключ просто останется недоступным)
+        if (!asOwner) _problems.add(g.id);
       }
     }
   }
@@ -204,6 +220,7 @@ class GroupService {
         try {
           await _publishPub(g.id);
           if (g.isOwner) {
+            try { await _collectKeys(g, asOwner: true); } catch (_) {}
             await _provision(g);
             relist = true;   // номер поколения мог вырасти: список должен показывать актуальный, иначе отправка решит, что ключа нет
           } else {
@@ -295,6 +312,42 @@ class GroupService {
     await api.settings(gid, name: name, topic: topic, about: about);
     groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
     onChanged?.call(gid);
+  }
+
+  /// Передача владения подтверждена изнутри группы? Закреплённый ключ владельца меняется, только если новый владелец (по списку узла) называет
+  /// именно этот ключ, а в ленте есть служебная запись `handover` на его псевдоним с этим ключом от владельца или админа. Запись рядового
+  /// участника и сам новый владелец ничего не меняют; подмена ключа самим узлом остаётся нераспознанной (то же доверие, что при вступлении).
+  static bool handoverEndorsed(List<GroupEntry> log, List<Map<String, dynamic>> members, String ownerPubB64) {
+    String? ownerAlias;
+    for (final m in members) {
+      if (m['role'] == 'owner' && m['member_pub'] == ownerPubB64) ownerAlias = m['alias'] as String?;
+    }
+    if (ownerAlias == null) return false;
+    return log.any((e) =>
+        !e.deleted &&
+        e.kind == GroupKind.system &&
+        e.body['op'] == 'handover' &&
+        e.body['to'] == ownerAlias &&
+        e.body['pub'] == ownerPubB64 &&
+        e.from != ownerAlias && // сам новый владелец себя подтвердить не может
+        members.any((m) => m['alias'] == e.from && (m['role'] == 'owner' || m['role'] == 'admin')));
+  }
+
+  /// Владелец передаёт группу участнику: служебная запись «владение передано» (с ключом нового владельца) → узел меняет роли.
+  /// Прежний владелец становится админом, новый создаст новое поколение ключа.
+  Future<void> transferOwner(String gid, String alias) async {
+    final g = byId(gid);
+    if (g == null || !g.isOwner) throw const GroupSendRefused('Передать группу может только её владелец');
+    final m = await api.members(gid);
+    final target = (m['members'] as List? ?? const []).cast<Map>().where((x) => x['alias'] == alias).toList();
+    if (target.isEmpty) throw const GroupSendRefused('Участник не найден');
+    final pub = target.first['member_pub'] as String?;
+    if (pub == null) throw const GroupSendRefused('У участника ещё нет ключа группы: он должен открыть приложение');
+    final key = await _groupKey(gid, g.epoch);
+    if (key == null) throw const GroupSendRefused('Ключ группы не создан');
+    await _append(g, GroupKind.system, {'op': 'handover', 'to': alias, 'pub': pub}, key);
+    await api.transferOwner(gid, alias);
+    await sync(only: gid);
   }
 
   /// Попросить владельца прислать приглашение в группу «по приглашению».

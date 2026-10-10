@@ -628,6 +628,7 @@ impl WebServer {
             .route("/api/groups/:gid/info", get(api_groups_info))
             .route("/api/groups/:gid/mod", post(api_groups_mod))
             .route("/api/groups/:gid/settings", post(api_groups_settings))
+            .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             .route("/api/groups/:gid/invite-code", post(api_groups_invite_code))
             .route("/api/groups/:gid/invite-device", post(api_groups_invite_device))
             .route("/api/groups/:gid/answer", post(api_groups_answer))
@@ -951,6 +952,15 @@ struct MyGroupSettings {
 
 async fn api_groups_settings(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSettings>) -> Response {
     grp_reply(crate::group_client::update_settings(&gid, b.name.as_deref(), b.topic.as_deref(), b.about.as_deref()).map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupTransfer {
+    alias: String,
+}
+
+async fn api_groups_transfer(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupTransfer>) -> Response {
+    grp_reply(crate::group_client::transfer_owner(&gid, &b.alias).map(|_| serde_json::json!({"ok": true})))
 }
 
 async fn api_groups_invite_code(axum::extract::Path(gid): axum::extract::Path<String>) -> Response {

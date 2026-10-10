@@ -168,13 +168,18 @@ class Phone:
         st, r = self.call("POST", f"/mobile/groups/{gid}/keys", {"epoch": epoch, "boxes": boxes})
         assert st == 200, (st, r)
         return epoch
-    def collect(self, gid):
+    def collect(self, gid, owner_pub=None):
+        """owner_pub: the pinned key of the previous owner (used when this phone is the owner now and misses old generations)"""
         st, k = self.call("GET", f"/mobile/groups/{gid}/keys")
-        if st != 200 or not k.get("owner_pub"):
+        pub = owner_pub or k.get("owner_pub")
+        if st != 200 or not pub:
             return
         for b in k["boxes"]:
             if b["epoch"] not in self.keys:
-                self.keys[b["epoch"]] = open_key(base64.b64decode(b["box"]), gid, b["epoch"], self.seed, base64.b64decode(k["owner_pub"]))
+                try:
+                    self.keys[b["epoch"]] = open_key(base64.b64decode(b["box"]), gid, b["epoch"], self.seed, base64.b64decode(pub))
+                except Exception:
+                    pass
     def read(self, gid):
         st, p = self.call("GET", f"/mobile/groups/{gid}/log?after=0")
         out = []
@@ -385,6 +390,50 @@ st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "demote", "alias": al
 st, r = ph.call("POST", f"/mobile/groups/{gid}/settings", {"name": "Взлом"})
 check("after the PC takes the admin role back the phone cannot change settings", st == 403, (st, r))
 st, r = a.api("POST", f"/api/groups/{gid}/settings", {"name": "Болталка"})
+
+# 4c) handing the group over: PC -> phone, then phone -> another phone; the PC (no longer owner) accepts the new key by the in-group record
+got = wait(lambda: (eve.collect(gid), eve.keys)[1])
+check("the second phone holds the group key", bool(got), eve.keys)
+st, r = a.api("POST", f"/api/groups/{gid}/transfer", {"alias": "нет такого"})
+check("a transfer to a stranger is refused", st == 400, (st, r))
+st, r = a.api("POST", f"/api/groups/{gid}/transfer", {"alias": alias})
+check("the PC owner hands the group to the phone", st == 200, (st, r))
+st, r = ph.call("GET", "/mobile/groups")
+g_ = [x for x in r["groups"] if x["id"] == gid][0]
+check("the phone is now the owner and must create a new key", g_["role"] == "owner" and g_["rekey_needed"] is True, g_)
+st, r = a.api("GET", f"/api/groups/{gid}/info")
+check("the PC became an admin", r["group"]["role"] == "admin", r["group"])
+ep = ph.provision(gid)
+check("the new owner creates the next key generation", ep >= 2, ep)
+ph.write(gid, alias, 1, {"t": "я теперь владелец"})
+def pc_reads_new():
+    st, d = a.api("GET", f"/api/groups/{gid}/messages?after=0")
+    return d if any(m["body"].get("t") == "я теперь владелец" for m in d.get("messages", [])) else None
+check("the PC (now admin) reads the new owner's message under the new key", wait(pc_reads_new) is not None)
+st, r = a.api("POST", f"/api/groups/{gid}/transfer", {"alias": alias})
+check("the PC can no longer hand the group over", st == 400, (st, r))
+st, r = a.api("POST", f"/api/groups/{gid}/mod", {"action": "kick", "alias": alias})
+check("and cannot touch the new owner", st == 400, (st, r))
+
+# phone -> eve with an in-group handover record; PC pinned the phone's key and has to re-pin
+pc_alias2 = a.api("GET", f"/api/groups/{gid}/info")[1]["group"]["my_alias"]
+st, mem = ph.call("GET", f"/mobile/groups/{gid}/members")
+eve_pub = [m for m in mem["members"] if m["alias"] == eve_alias][0]["member_pub"]
+ph.write(gid, alias, 7, {"op": "handover", "to": eve_alias, "pub": eve_pub})
+st, r = ph.call("POST", f"/mobile/groups/{gid}/owner", {"alias": "нет такого"})
+check("a phone owner cannot hand over to a stranger", st == 404, (st, r))
+st, r = ph.call("POST", f"/mobile/groups/{gid}/owner", {"alias": eve_alias})
+check("the phone owner hands the group over to the second phone", st == 200, (st, r))
+st, r = ph.call("POST", f"/mobile/groups/{gid}/owner", {"alias": eve_alias})
+check("a former owner cannot hand over again", st == 403, (st, r))
+eve.collect(gid, owner_pub=b64(ph.pub))   # eve is the owner now: she takes the missing old generation with the previous owner's key
+ep2 = eve.provision(gid)
+check("the second phone creates the next key generation", ep2 >= 3, ep2)
+eve.write(gid, eve_alias, 1, {"t": "третий владелец"})
+def pc_reads_third():
+    st, d = a.api("GET", f"/api/groups/{gid}/messages?after=0")
+    return d if d.get("problem") is False and any(m["body"].get("t") == "третий владелец" for m in d.get("messages", [])) else None
+check("the PC accepts the new owner's key by the in-group handover record and reads on", wait(pc_reads_third) is not None, a.api("GET", f"/api/groups/{gid}/messages?after=0")[1].get("problem"))
 
 st, r = a.api("POST", "/api/groups/create", {"name": "Приватная", "topic": "личное", "about": "для проверки", "kind": "invite"})
 pgid = r["id"]
