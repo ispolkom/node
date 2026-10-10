@@ -26,7 +26,7 @@ class StorageService {
     final path = p.join(dir.path, 'yandi.db');
     _db = await openDatabase(
       path,
-      version: 2,
+      version: 3,
       onCreate: _createTables,
       onUpgrade: _onUpgrade,
     );
@@ -35,6 +35,19 @@ class StorageService {
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
     if (oldVersion < 2) {
       try { await db.execute('ALTER TABLE nodes ADD COLUMN version TEXT NOT NULL DEFAULT ""'); } catch (_) {}
+    }
+    if (oldVersion < 3) {
+      // Migrate every legacy bearer token before normal reads, rather than
+      // waiting for loadNodes() to visit a row. If secure storage fails, the
+      // migration fails closed and the plaintext token is not silently kept.
+      final rows = await db.query('nodes', columns: ['id', 'token']);
+      for (final row in rows) {
+        final id = row['id'] as String?;
+        final token = row['token'] as String?;
+        if (id == null || token == null || token.isEmpty) continue;
+        await secureWrite('$_nodeTokKey$id', token);
+        await db.update('nodes', {'token': null}, where: 'id = ?', whereArgs: [id]);
+      }
     }
   }
 
