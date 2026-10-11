@@ -55,13 +55,26 @@ class FilesTabState extends State<FilesTab> {
   Future<void> addFiles() async {
     final res = await FilePicker.platform.pickFiles(allowMultiple: true);
     if (res == null) return;
-    final v = _vault;
-    if (v == null) return;
-    for (final f in res.files) {
-      final p = f.path;
-      if (p != null) await v.importFile(p, name: f.name);
+    var failed = 0;
+    try {
+      final v = _vault;
+      if (v == null) return;
+      for (final f in res.files) {
+        final p = f.path;
+        if (p == null) continue;
+        try {
+          await v.importFile(p, name: f.name);
+        } catch (_) {
+          failed++;
+        }
+      }
+    } finally {
+      // открытая копия выбора не должна остаться во временном каталоге ни при какой ошибке
+      try { await FilePicker.platform.clearTemporaryFiles(); } catch (_) {}
     }
-    try { await FilePicker.platform.clearTemporaryFiles(); } catch (_) {}
+    if (failed > 0 && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось добавить файлов: $failed (нет места или нет доступа)')));
+    }
     await reload();
   }
 

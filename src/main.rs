@@ -265,10 +265,11 @@ async fn main() -> anyhow::Result<()> {
         yandi::group_client::init(mk);
         yandi::group_client::spawn_background();
     }
-    // срок хранения файлов групп соблюдается по таймеру, даже если в группу больше ничего не заливают
+    // срок хранения файлов групп и личных передач соблюдается по таймеру, даже если в группу больше ничего не заливают
     tokio::spawn(async {
         loop {
             yandi::mobile_group_files::cleanup_all().await;
+            yandi::mobile_files::cleanup_expired().await; // и личных передач между устройствами
             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
         }
     });
