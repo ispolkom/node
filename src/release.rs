@@ -40,9 +40,13 @@ pub struct Manifest {
     pub files: Vec<FileEntry>,
 }
 
+/// Release phrase normalization v1: NFC (ICU4X 2.2.0), then Unicode whitespace collapse.
+pub const PHRASE_NORMALIZATION_VERSION: u32 = 1;
 pub fn normalize(p: &str) -> Zeroizing<String> {
+    let mut nfc = Zeroizing::new(String::new());
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize_to(p, &mut *nfc).expect("String write");
     let mut out = Zeroizing::new(String::new());
-    for word in p.split_whitespace() {
+    for word in nfc.split_whitespace() {
         if !out.is_empty() { out.push(' '); }
         out.push_str(word);
     }
@@ -295,6 +299,20 @@ mod tests {
         let bytes = manifest_bytes(&m);
         let sig = sign(&bytes, &k).unwrap();
         (bytes, sig, vk)
+    }
+
+    #[test]
+    fn r7_nfc_vectors_and_legacy_nfc_key_compatibility() {
+        for (input, expected) in [(" е\u{308}  и\u{306} ", "ё й"), ("Cafe\u{301}\tÅ", "Café Å"), ("A\u{30a}", "Å")] {
+            assert_eq!(&*normalize(input), expected);
+            assert_eq!(derive_signing_key(input, cheap()).to_bytes(), derive_signing_key(expected, cheap()).to_bytes());
+        }
+        // Exact legacy KDF for an already NFC phrase: salt and parameters unchanged.
+        let phrase = "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать";
+        let mut legacy = Zeroizing::new([0u8; 32]);
+        Argon2::new(Algorithm::Argon2id, Version::V0x13, cheap())
+            .hash_password_into(phrase.as_bytes(), KEY_SALT, &mut *legacy).unwrap();
+        assert_eq!(derive_signing_key(phrase, cheap()).to_bytes(), *legacy);
     }
 
     #[test]
