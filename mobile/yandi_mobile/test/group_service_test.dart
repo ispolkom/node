@@ -7,7 +7,6 @@ import 'package:yandi_mobile/services/group_api.dart';
 import 'package:yandi_mobile/services/group_files.dart';
 import 'package:yandi_mobile/services/group_service.dart';
 import 'package:yandi_mobile/services/group_store.dart';
-import 'package:yandi_mobile/services/group_store_sqlite.dart' show secureKeyOfGroup;
 
 /// Узел в миниатюре: хранит непрозрачные байты, как настоящий (проверка ролей — упрощённая).
 class FakeNode {

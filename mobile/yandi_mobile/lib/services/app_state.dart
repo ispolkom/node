@@ -21,6 +21,7 @@ import 'avatar_service.dart';
 import 'avatar_processor.dart';
 import '../crypto/identity.dart';
 import 'storage_service.dart';
+import 'vault_service.dart';
 import 'api_service.dart' as api_svc;
 import 'ws_service.dart';
 import 'vpn_service.dart' show YandiVpnService;
@@ -1044,6 +1045,38 @@ class AppState extends ChangeNotifier implements FilesHost {
   void dismissFileOffer(String transferId) {
     pendingFileOffers.removeWhere((e) => e.transferId == transferId);
     notifyListeners();
+  }
+
+  /// Блокировка приложения: связь с узлом закрывается, всё расшифрованное из памяти убирается, база закрывается.
+  /// (Уведомления о новых сообщениях при этом приходят: служба в фоне ничего не расшифровывает; почта ждёт на узле до входа.)
+  Future<void> lockDown() async {
+    _presenceTimer?.cancel();
+    _ws?.dispose();
+    _ws = null;
+    _api?.dispose();
+    _api = null;
+    nodeOnline = false;
+    nodeError = null;
+    identity = null;
+    groups = null;
+    avatars = null;
+    contacts = [];
+    nodeManager.clear();
+    _chats.clear();
+    _unread.clear();
+    _blocked.clear();
+    _editedIds.clear();
+    _readAcked.clear();
+    pendingFileOffers.clear();
+    activeChatPeerId = null;
+    notifyListeners();
+  }
+
+  /// «Удалить всё»: службы останавливаются, память очищается, затем стираются ключи, база, файлы и секреты.
+  Future<void> eraseEverything() async {
+    try { await chatBg.stop(); } catch (_) {}
+    await lockDown();
+    await VaultService.instance.eraseEverything();
   }
 
   @override

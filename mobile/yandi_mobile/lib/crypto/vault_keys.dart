@@ -100,11 +100,10 @@ class VaultKeys {
   Uint8List? _dk;
 
   static const minPasswordLength = 6;
-  /// Фраза слабее — отвергается: достаточно 5 непустых полей ИЛИ 25 знаков всего.
-  static const minPhraseFields = 5;
-  static const minPhraseChars = 25;
-  /// Позиций в фразе (как на экране создания аккаунта).
-  static const phraseFieldCount = 20;
+  /// Фраза: ровно 4 поля, в каждом не короче 5 знаков, поля разные. Это частная переписка, а не оборона государства: слов хватает,
+  /// чтобы вскрывать каждого пользователя по отдельности было невыгодно (замок «фраза» стоит за тяжёлым Argon2id).
+  static const phraseFieldCount = 4;
+  static const minPhraseFieldChars = 5;
   /// После скольких подряд неверных попыток начинаются паузы.
   static const freeAttempts = 3;
 
@@ -136,7 +135,10 @@ class VaultKeys {
 
   // ── Создание, открытие, восстановление ────────────────────────────────────────────────────────────────────────────
 
-  static Future<bool> exists(VaultBackend b) async => (await b.readBlob()) != null;
+  static Future<bool> exists(VaultBackend b) async {
+    final t = await b.readBlob();
+    return t != null && t.isNotEmpty;
+  }
 
   /// Создать хранилище: пароль обязателен (≥ 6 знаков), фраза — по желанию (null или пустые поля — без восстановления).
   /// Существующее хранилище не перезаписывается.
@@ -152,7 +154,7 @@ class VaultKeys {
     final phrase = phraseFields == null ? null : normalizePhrase(phraseFields);
     final hasPhrase = phrase != null && phrase.replaceAll('|', '').isNotEmpty;
     if (hasPhrase && !phraseStrongEnough(phraseFields!)) {
-      throw VaultPolicyError('Фраза слишком короткая: минимум $minPhraseFields полей или $minPhraseChars знаков');
+      throw VaultPolicyError('Фраза: $phraseFieldCount разных слова, в каждом не меньше $minPhraseFieldChars знаков');
     }
     final rnd = Random.secure();
     Uint8List rb(int n) => Uint8List.fromList(List.generate(n, (_) => rnd.nextInt(256)));
@@ -227,16 +229,17 @@ class VaultKeys {
   // ── Фраза ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
   /// Каждое поле: обрезать, привести к нижнему регистру, «ё» → «е», пробелы внутри схлопнуть; позиция сохраняется (`|` между полями).
+  /// Лишние поля сверх четырёх отбрасываются, недостающие — пустые.
   /// Так опечатки в регистре и «ё/е» не лишают человека данных.
   static String normalizePhrase(List<String> fields) {
     final f = List<String>.generate(phraseFieldCount, (i) => i < fields.length ? fields[i] : '');
     return f.map((s) => s.trim().toLowerCase().replaceAll('ё', 'е').replaceAll(RegExp(r'\s+'), ' ')).join('|');
   }
 
+  /// Все четыре поля заполнены, в каждом ≥ 5 знаков, и они не повторяют друг друга.
   static bool phraseStrongEnough(List<String> fields) {
-    final parts = normalizePhrase(fields).split('|').where((s) => s.isNotEmpty).toList();
-    final chars = parts.fold<int>(0, (a, s) => a + s.runes.length);
-    return parts.length >= minPhraseFields || chars >= minPhraseChars;
+    final parts = normalizePhrase(fields).split('|');
+    return parts.every((s) => s.runes.length >= minPhraseFieldChars) && parts.toSet().length == parts.length;
   }
 
   // ── Внутреннее ─────────────────────────────────────────────────────────────────────────────────────────────────────

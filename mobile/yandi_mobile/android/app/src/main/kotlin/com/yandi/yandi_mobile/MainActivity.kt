@@ -50,10 +50,12 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
-                // экран настроек этого приложения (разрешения: камера и др.), если запрос разрешения не показывается
-                "appSettings" -> {
-                    runCatching {
-                        startActivity(Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                // окно закрыто от скриншотов, записи экрана и превью в списке приложений (экраны ввода пароля и секретных слов)
+                "secure" -> {
+                    val on = call.argument<Boolean>("on") ?: false
+                    runOnUiThread {
+                        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
                     }
                     result.success(true)
                 }

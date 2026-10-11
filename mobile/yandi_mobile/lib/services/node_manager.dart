@@ -22,6 +22,9 @@ class NodeManager {
 
   TrustedNode? get preferredNode => activeNode;
 
+  /// Блокировка / стирание: список узлов из памяти убираем.
+  void clear() => _nodes = [];
+
   Future<void> load() async {
     _nodes = await StorageService.loadNodes();
   }

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
-import 'package:provider/provider.dart';
-import '../services/app_state.dart';
+import '../services/storage_service.dart';
+import '../services/vault_service.dart';
+import 'vault_screens.dart';
 import '../theme.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -17,13 +18,16 @@ class _SplashScreenState extends State<SplashScreen> {
   }
 
   Future<void> _init() async {
-    final state = context.read<AppState>();
-    await state.init();
-    if (!mounted) return;
-    if (state.isPaired) {
-      Navigator.of(context).pushReplacementNamed('/home');
+    // Сначала закрытая среда: нет хранилища — создаём (слова, пароль); есть, но закрыто — вводим пароль. Приложение стартует только после входа.
+    await StorageService.init();
+    final vault = VaultService.instance;
+    final nav = Navigator.of(context);
+    if (!await vault.exists()) {
+      nav.pushReplacementNamed('/vault-setup');
+    } else if (!vault.unlocked) {
+      nav.pushReplacementNamed('/vault-unlock');
     } else {
-      Navigator.of(context).pushReplacementNamed('/pair');
+      await enterVaultedApp(context);
     }
   }
 

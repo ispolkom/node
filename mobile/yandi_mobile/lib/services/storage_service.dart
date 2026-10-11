@@ -1,11 +1,9 @@
 import 'dart:convert';
-import 'dart:math';
 import 'dart:io';
-import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
-import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/trusted_node.dart';
 import '../models/message.dart';
 import '../crypto/replay_ledger.dart';
@@ -13,7 +11,8 @@ import '../crypto/replay_ledger.dart';
 /// Единое хранилище приложения.
 ///
 /// flutter_secure_storage  — секреты (ключи идентичности, токены)
-/// SQLite                  — ноды, история сообщений, кэш публичных ключей
+/// SQLCipher               — ноды, история сообщений, группы, кэш публичных ключей: вся база зашифрована ключом данных (см. VaultKeys),
+///                           который есть только пока приложение открыто паролем
 class StorageService {
   static Database? _db;
   static ReplayLedger? replayLedger;
@@ -24,16 +23,120 @@ class StorageService {
 
   // ── Инициализация ──────────────────────────────────────────────────────────
 
+  /// Без базы: только то, что не требует ключа (журнал повторов). Базу открывает [openEncrypted] после ввода пароля.
   static Future<void> init() async {
+    if (replayLedger != null) return;
     final dir  = await getApplicationDocumentsDirectory();
     replayLedger = ReplayLedger(File(p.join(dir.path,'e2e_replay_e4.json')));
-    final path = p.join(dir.path, 'yandi.db');
-    _db = await openDatabase(
-      path,
-      version: 5,
-      onCreate: _createTables,
-      onUpgrade: _onUpgrade,
-    );
+  }
+
+  /// «Удалить всё»: база (все её файлы), журнал повторов, скачанные файлы, аватарки и всё защищённое хранилище (ключи, токены).
+  /// Каждый файл затирается (там, где есть нативное затирание) и удаляется; после этого приложение как только что установленное.
+  static Future<void> eraseAllLocalData() async {
+    await closeDb();
+    replayLedger = null;
+    final docs = await getApplicationDocumentsDirectory();
+    final support = await getApplicationSupportDirectory();
+    for (final d in [docs, support]) {
+      if (!await d.exists()) continue;
+      await for (final e in d.list(recursive: true, followLinks: false)) {
+        if (e is File) await _wipeAndDelete(e.path);
+      }
+      await for (final e in d.list(followLinks: false)) {
+        if (e is Directory) {
+          try { await e.delete(recursive: true); } catch (_) {}
+        }
+      }
+    }
+    await _secure.deleteAll();
+    _secureCache = null;
+  }
+
+  static bool get dbOpen => _db != null;
+
+  /// Затирание поверх байтов перед удалением (на телефоне — нативное, задаётся при старте приложения); без него файл просто удаляется.
+  static Future<bool> Function(String path)? wipeHook;
+
+  static const _plainName = 'yandi.db';       // прежняя нешифрованная база (только для переноса)
+  static const _encName   = 'yandi_enc.db';   // зашифрованная
+
+  /// Открыть зашифрованную базу ключом данных [key] (32 байта). Прежняя нешифрованная переносится и затирается.
+  /// Неверный ключ — исключение (база не открывается, не пересоздаётся и не портится).
+  static Future<void> openEncrypted(List<int> key) async {
+    if (_db != null) return;
+    final dir = await getApplicationDocumentsDirectory();
+    final plainPath = p.join(dir.path, _plainName);
+    final encPath   = p.join(dir.path, _encName);
+    final pass = _rawKey(key);
+    if (await _isPlainSqlite(plainPath)) await _migratePlain(plainPath, encPath, pass);
+    _db = await openDatabase(encPath, version: 5, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+  }
+
+  /// Закрыть базу (блокировка приложения): после этого без пароля прочесть её нечем.
+  static Future<void> closeDb() async {
+    final d = _db;
+    _db = null;
+    if (d != null) await d.close();
+  }
+
+  /// SQLCipher принимает готовый ключ в виде `x'<64 hex>'`: без лишнего растяжения, ключ уже случайный.
+  static String _rawKey(List<int> key) => "x'${key.map((b) => b.toRadixString(16).padLeft(2, '0')).join()}'";
+
+  static Future<bool> _isPlainSqlite(String path) async {
+    final f = File(path);
+    if (!await f.exists()) return false;
+    final raf = await f.open();
+    try {
+      final head = await raf.read(16);
+      return head.length == 16 && String.fromCharCodes(head) == 'SQLite format 3\u0000';
+    } finally {
+      await raf.close();
+    }
+  }
+
+  /// Перенос: читаем все таблицы из старой базы, пишем в новую зашифрованную (через временный файл: оборванный перенос ничего не ломает),
+  /// проверяем число строк, затем затираем и удаляем старую вместе с её служебными файлами.
+  static Future<void> _migratePlain(String plainPath, String encPath, String pass) async {
+    final tmp = '$encPath.tmp';
+    for (final f in [tmp, '$tmp-journal', '$tmp-wal', '$tmp-shm']) {
+      try { await File(f).delete(); } catch (_) {}
+    }
+    final src = await openDatabase(plainPath, readOnly: true);
+    final dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
+    try {
+      for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
+        List<Map<String, Object?>> rows;
+        try { rows = await src.query(t); } catch (_) { continue; }   // таблицы может не быть в очень старой базе
+        for (var i = 0; i < rows.length; i += 200) {
+          final b = dst.batch();
+          for (final r in rows.skip(i).take(200)) {
+            b.insert(t, r, conflictAlgorithm: ConflictAlgorithm.replace);
+          }
+          await b.commit(noResult: true);
+        }
+        final copied = Sqflite.firstIntValue(await dst.rawQuery('SELECT COUNT(*) FROM $t'));
+        if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
+      }
+    } finally {
+      await src.close();
+      await dst.close();
+    }
+    await File(tmp).rename(encPath);
+    for (final f in [plainPath, '$plainPath-journal', '$plainPath-wal', '$plainPath-shm']) {
+      await _wipeAndDelete(f);
+    }
+  }
+
+  static Future<void> _wipeAndDelete(String path) async {
+    final f = File(path);
+    if (!await f.exists()) return;
+    final w = wipeHook;
+    if (w != null) {
+      try { await w(path); } catch (_) {}
+    }
+    if (await f.exists()) {
+      try { await f.delete(); } catch (_) {}
+    }
   }
 
   static Future<void> _createGroupTables(Database db) async {
@@ -139,6 +242,9 @@ class StorageService {
   // flutter_secure_storage на слабых телефонах читает ~1 с за ключ, а при запуске их читается с десяток (запуск тянулся 10+ с).
   // Поэтому при старте всё читается одним readAll(), дальше — из памяти; запись идёт и в память, и в хранилище.
   static Map<String, String>? _secureCache;
+
+  /// Блокировка: расшифрованные значения защищённого хранилища из памяти убираем (при следующем входе читаются заново).
+  static void dropSecureCache() => _secureCache = null;
 
   static Future<void> warmSecureCache() async {
     try {
@@ -382,38 +488,6 @@ class StorageService {
 
   static Future<void> deleteManualContact(String peerId) async {
     await db.delete('manual_contacts', where: 'peer_id = ?', whereArgs: [peerId]);
-  }
-
-  // ── PIN-блокировка ────────────────────────────────────────────────────────
-
-  static Future<bool> hasPinSet() async => (await secureRead('pin_hash')) != null;
-
-  /// Сохранить PIN: sha256(pin || random_salt), соль хранится рядом.
-  /// Ключи уже защищены Android Keystore — одна итерация sha256 достаточна.
-  static Future<void> savePin(String pin) async {
-    final rng   = Random.secure();
-    final salt  = List<int>.generate(16, (_) => rng.nextInt(256));
-    final saltHex = salt.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
-    final hash  = _pinHash(pin, saltHex);
-    await secureWrite('pin_salt', saltHex);
-    await secureWrite('pin_hash', hash);
-  }
-
-  static Future<bool> verifyPin(String pin) async {
-    final salt = await secureRead('pin_salt');
-    final hash = await secureRead('pin_hash');
-    if (salt == null || hash == null) return false;
-    return _pinHash(pin, salt) == hash;
-  }
-
-  static Future<void> clearPin() async {
-    await secureDelete('pin_hash');
-    await secureDelete('pin_salt');
-  }
-
-  static String _pinHash(String pin, String saltHex) {
-    final bytes = utf8.encode(pin + saltHex);
-    return crypto.sha256.convert(bytes).toString();
   }
 
   // ── Обратная совместимость: my_node_id ────────────────────────────────────

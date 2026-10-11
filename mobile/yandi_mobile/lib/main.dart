@@ -5,9 +5,9 @@ import 'package:provider/provider.dart';
 import 'services/app_state.dart';
 import 'services/background_worker.dart';
 import 'services/notification_service.dart';
-import 'services/app_lock_service.dart';
+import 'services/vault_lock.dart';
 import 'screens/splash_screen.dart';
-import 'screens/create_account_screen.dart';
+import 'screens/vault_screens.dart';
 import 'screens/pair_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/nodes_screen.dart';
@@ -17,6 +17,7 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterCryptography.enable();
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
+  VaultLockObserver(NotificationService.navigatorKey).attach();
   runApp(
     ChangeNotifierProvider(
       create: (_) => AppState(),
@@ -52,11 +53,15 @@ class YandiApp extends StatelessWidget {
       theme:          AppTheme.dark,
       navigatorKey:   NotificationService.navigatorKey,
       initialRoute:   '/',
+      onGenerateRoute: (settings) {
+        if (settings.name == '/vault-unlock') {
+          return MaterialPageRoute(settings: settings, builder: (_) => VaultUnlockScreen(justCreated: settings.arguments == true));
+        }
+        return null;
+      },
       routes: {
         '/':                  (_) => const SplashScreen(),
-        '/create-account':    (_) => const CreateAccountScreen(),
-        '/restore-account':   (_) => const CreateAccountScreen(isRestore: true),
-        '/restore':           (_) => const CreateAccountScreen(isRestore: true),
+        '/vault-setup':       (_) => const VaultSetupScreen(),
         '/pair':              (_) => const PairScreen(),
         '/home':              (_) => const _LifecycleWrapper(child: HomeScreen()),
         '/nodes':             (_) => const NodesScreen(),
@@ -95,10 +100,8 @@ class _LifecycleWrapperState extends State<_LifecycleWrapper>
     if (s == AppLifecycleState.resumed) {
       appState.onScreenOn();
       NotificationService.cancelAll();   // вернулись в приложение — события просмотрены, значок гаснет
-      AppLockService.onForeground(context);
     } else if (s == AppLifecycleState.paused) {
       appState.onScreenOff();
-      AppLockService.onBackground();
     } else if (s == AppLifecycleState.inactive ||
                s == AppLifecycleState.detached) {
       appState.onScreenOff();

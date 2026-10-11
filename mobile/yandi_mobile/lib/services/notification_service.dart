@@ -1,3 +1,4 @@
+import 'vault_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 
@@ -43,7 +44,8 @@ class NotificationService {
     if (peerId == null || peerId.isEmpty) return;
 
     final nav = navigatorKey.currentState;
-    if (nav != null) {
+    // пока приложение заблокировано, уведомление не открывает чат в обход входа: после ввода пароля главный экран сам откроет нужный
+    if (nav != null && VaultService.instance.unlocked) {
       // Приложение живо — открываем чат напрямую
       nav.pushNamed('/home');
       // HomeScreen заметит pendingOpenPeerId и откроет нужный чат

@@ -3,7 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/vault_keys.dart';
 
 const _t = VaultKdf.test;
-const _strong = ['мой', 'Тайный', 'первый', 'слово', 'ёлка'];   // 5 полей
+const _strong = ['Тайный', 'первый', 'слово', 'ёлочка'];   // 4 поля по 5+ знаков
 
 Future<VaultKeys> _make(MemoryVaultBackend b, {List<String>? phrase = _strong, String pw = 'пароль-6'}) =>
     VaultKeys.create(b, password: pw, phraseFields: phrase, pwKdf: _t, phKdf: _t);
@@ -27,13 +27,14 @@ void main() {
   test('политика: пароль от 6 знаков, слабая фраза отвергается, пустая фраза — без восстановления', () async {
     await expectLater(_make(MemoryVaultBackend(), pw: '12345'), throwsA(isA<VaultPolicyError>()));
     await expectLater(_make(MemoryVaultBackend(), phrase: ['привет', 'мир']), throwsA(isA<VaultPolicyError>()));
-    // 25 знаков в одном поле тоже годится
-    await _make(MemoryVaultBackend(), phrase: ['а' * 25]);
+    await expectLater(_make(MemoryVaultBackend(), phrase: ['тайный', 'первый', 'слово', 'мир']), throwsA(isA<VaultPolicyError>()), reason: 'в каждом поле от 5 знаков');
+    await expectLater(_make(MemoryVaultBackend(), phrase: ['тайный', 'ТАЙНЫЙ', 'слово', 'ёлочка']), throwsA(isA<VaultPolicyError>()), reason: 'поля разные');
+    await _make(MemoryVaultBackend(), phrase: ['тайный', 'первый', 'слово', 'ёлочка']);
     final b = MemoryVaultBackend();
     await _make(b, phrase: null);
     await expectLater(VaultKeys.recoverWithPhrase(b, _strong, 'новый-пароль'), throwsA(isA<VaultNoRecovery>()));
     final b2 = MemoryVaultBackend();
-    await _make(b2, phrase: List.filled(20, ''));
+    await _make(b2, phrase: List.filled(4, ''));
     await expectLater(VaultKeys.recoverWithPhrase(b2, _strong, 'новый-пароль'), throwsA(isA<VaultNoRecovery>()), reason: 'пустые поля = фразы нет');
   });
 
@@ -87,8 +88,8 @@ void main() {
     v.lock();
 
     // другие позиции тех же слов — не та фраза
-    await expectLater(VaultKeys.recoverWithPhrase(b, ['Тайный', 'мой', 'первый', 'слово', 'ёлка'], 'новый-пароль'), throwsA(isA<VaultWrongSecret>()));
-    final r = await VaultKeys.recoverWithPhrase(b, ['  МОЙ ', 'тайный', 'ПЕРВЫЙ', 'слово', 'елка'], 'новый-пароль');
+    await expectLater(VaultKeys.recoverWithPhrase(b, ['первый', 'Тайный', 'слово', 'ёлочка'], 'новый-пароль'), throwsA(isA<VaultWrongSecret>()));
+    final r = await VaultKeys.recoverWithPhrase(b, ['  ТАЙНЫЙ ', 'первый', 'СЛОВО', 'елочка'], 'новый-пароль');
     expect(await r.subKey('db'), key);
     r.lock();
     await expectLater(VaultKeys.unlock(b, 'пароль-6'), throwsA(isA<VaultWrongSecret>()));
@@ -144,7 +145,7 @@ void main() {
   });
 
   test('нормализация фразы: позиция сохраняется, пустые поля занимают место', () {
-    expect(VaultKeys.normalizePhrase(['А', '', 'б']).startsWith('а||б|'), isTrue);
+    expect(VaultKeys.normalizePhrase(['А', '', 'б']), 'а||б|');
     expect(VaultKeys.normalizePhrase(['а', 'б']), isNot(VaultKeys.normalizePhrase(['', 'а', 'б'])));
     expect(VaultKeys.normalizePhrase(['Ёж  Ёлка']).split('|').first, 'еж елка');
   });
