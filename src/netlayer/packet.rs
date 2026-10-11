@@ -1018,9 +1018,6 @@ pub mod hello_caps {
     /// Старые узлы без этого бита получают classical EXTEND (без pubkey'а) и продолжают
     /// работать с deterministic derive_hop_key. Caps-биты — backward-compat lever.
     pub const TELESCOPING_HANDSHAKE: u16 = 0x0800;
-    /// Absolute byte offsets in SOCKS5 and HTTP CONNECT streams.
-    pub const STREAM_OFFSET: u16 = 0x1000;
-    pub fn supports_stream_offsets(caps: u16) -> bool { caps & STREAM_OFFSET != 0 }
 }
 
 /// NAT Relay structures for future relay implementation
@@ -1197,7 +1194,6 @@ mod hello_signature_tests {
             ("x25519_public", Box::new(|p| p.x25519_public[0] ^= 1)),
             ("cid", Box::new(|p| p.cid[0] ^= 1)),
             ("capabilities", Box::new(|p| p.capabilities ^= 0x0001)),
-            ("capabilities stream offset bit", Box::new(|p| p.capabilities ^= hello_caps::STREAM_OFFSET)),
             ("capabilities relay bit", Box::new(|p| p.capabilities |= hello_caps::RELAY)),
             ("timestamp", Box::new(|p| p.timestamp += 1)),
             ("nonce", Box::new(|p| p.nonce ^= 1)),

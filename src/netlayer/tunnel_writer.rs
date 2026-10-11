@@ -16,10 +16,10 @@ use tokio::{
 struct Block {
     data: Vec<u8>,
     close: bool,
-    offset: Option<u64>,
+    offset: u64,
 }
 impl super::stream_order::Chunk for rx_pipeline::Queued<Block> {
-    fn offset(&self) -> Option<u64> {
+    fn offset(&self) -> u64 {
         self.value.offset
     }
     fn len(&self) -> usize {
@@ -74,16 +74,7 @@ impl TunnelWriter {
     pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.closed.subscribe()
     }
-    #[cfg(test)]
-    pub fn enqueue(&self, data: Vec<u8>, close: bool) -> Result<(), ()> {
-        self.enqueue_offset(data, close, None)
-    }
-    pub fn enqueue_offset(
-        &self,
-        data: Vec<u8>,
-        close: bool,
-        offset: Option<u64>,
-    ) -> Result<(), ()> {
+    pub fn enqueue_offset(&self, data: Vec<u8>, close: bool, offset: u64) -> Result<(), ()> {
         let len = data.len();
         self.tx
             .try_send(
@@ -117,14 +108,13 @@ where
     K: Eq + Hash + Clone + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    spawn_stream_writer(writer, tunnels, key, false)
+    spawn_stream_writer(writer, tunnels, key)
 }
 
 pub(crate) fn spawn_stream_writer<K, W>(
     writer: W,
     tunnels: Arc<Mutex<HashMap<K, TunnelWriter>>>,
     key: K,
-    ordered: bool,
 ) -> TunnelWriter
 where
     K: Eq + Hash + Clone + Send + 'static,
@@ -135,7 +125,7 @@ where
         30_000,
         600_000,
     ) as u64);
-    spawn_ordered_with_limits(writer, tunnels, key, Limits::tunnel(), timeout, ordered)
+    spawn_ordered_with_limits(writer, tunnels, key, Limits::tunnel(), timeout)
 }
 
 #[cfg(test)]
@@ -150,7 +140,7 @@ where
     K: Eq + Hash + Clone + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    spawn_ordered_with_limits(writer, tunnels, key, limits, timeout, false)
+    spawn_ordered_with_limits(writer, tunnels, key, limits, timeout)
 }
 
 fn spawn_ordered_with_limits<K, W>(
@@ -159,7 +149,6 @@ fn spawn_ordered_with_limits<K, W>(
     key: K,
     limits: Limits,
     timeout: Duration,
-    ordered: bool,
 ) -> TunnelWriter
 where
     K: Eq + Hash + Clone + Send + 'static,
@@ -176,19 +165,15 @@ where
         let mut gauge = ReorderGauge::default();
         loop {
             let incoming = async { rx.lock().await.recv().await };
-            let block = if ordered {
-                if let Some(expires) = reorder.expires() {
-                    tokio::select! {
-                        biased;
-                        _ = tokio::time::sleep_until(expires) => {
-                            stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
-                            tracing::warn!("[rx] stream gap deadline; closing this tunnel");
-                            break;
-                        }
-                        block = incoming => block,
+            let block = if let Some(expires) = reorder.expires() {
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(expires) => {
+                        stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
+                        tracing::warn!("[rx] stream gap deadline; closing this tunnel");
+                        break;
                     }
-                } else {
-                    incoming.await
+                    block = incoming => block,
                 }
             } else {
                 incoming.await
@@ -197,60 +182,46 @@ where
                 break;
             };
             let mut ready = Vec::new();
-            let close;
-            if ordered {
-                match reorder.insert(block, tokio::time::Instant::now()) {
-                    Ok((moved, duplicate)) => {
-                        if moved {
-                            stats.tunnel_reordered.fetch_add(1, Ordering::Relaxed);
-                        }
-                        if duplicate {
-                            stats
-                                .tunnel_stream_duplicates
-                                .fetch_add(1, Ordering::Relaxed);
-                        }
+            match reorder.insert(block, tokio::time::Instant::now()) {
+                Ok((moved, duplicate)) => {
+                    if moved {
+                        stats.tunnel_reordered.fetch_add(1, Ordering::Relaxed);
                     }
-                    Err(error) => {
-                        match error {
-                            super::stream_order::Error::Gap => {
-                                stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
-                            }
-                            super::stream_order::Error::Overflow => {
-                                stats.tunnel_stream_overflow.fetch_add(1, Ordering::Relaxed);
-                            }
-                            _ => {
-                                stats.tunnel_stream_invalid.fetch_add(1, Ordering::Relaxed);
-                            }
-                        }
-                        tracing::warn!(
-                            ?error,
-                            "[rx] stream reassembly failed; closing this tunnel"
-                        );
-                        break;
-                    }
-                }
-                gauge.set(reorder.size(), reorder.bytes);
-                while let Some((block, skip, counted_duplicate)) =
-                    reorder.pop(tokio::time::Instant::now())
-                {
-                    if skip > 0 && !counted_duplicate {
+                    if duplicate {
                         stats
                             .tunnel_stream_duplicates
                             .fetch_add(1, Ordering::Relaxed);
                     }
-                    ready.push((block, skip));
                 }
-                gauge.set(reorder.size(), reorder.bytes);
-                close = reorder.finished();
-            } else {
-                // A pinned legacy tunnel must not switch codecs midstream.
-                if block.value.offset.is_some() {
-                    stats.tunnel_stream_invalid.fetch_add(1, Ordering::Relaxed);
+                Err(error) => {
+                    match error {
+                        super::stream_order::Error::Gap => {
+                            stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
+                        }
+                        super::stream_order::Error::Overflow => {
+                            stats.tunnel_stream_overflow.fetch_add(1, Ordering::Relaxed);
+                        }
+                        _ => {
+                            stats.tunnel_stream_invalid.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                    tracing::warn!(?error, "[rx] stream reassembly failed; closing this tunnel");
                     break;
                 }
-                close = block.value.close;
-                ready.push((block, 0));
             }
+            gauge.set(reorder.size(), reorder.bytes);
+            while let Some((block, skip, counted_duplicate)) =
+                reorder.pop(tokio::time::Instant::now())
+            {
+                if skip > 0 && !counted_duplicate {
+                    stats
+                        .tunnel_stream_duplicates
+                        .fetch_add(1, Ordering::Relaxed);
+                }
+                ready.push((block, skip));
+            }
+            gauge.set(reorder.size(), reorder.bytes);
+            let close = reorder.finished();
             let write_timeout = reorder
                 .expires()
                 .map(|t| {
@@ -269,7 +240,7 @@ where
             })
             .await;
             if !matches!(result, Ok(Ok(()))) {
-                if ordered && reorder.check(tokio::time::Instant::now()).is_err() {
+                if reorder.check(tokio::time::Instant::now()).is_err() {
                     stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
                 } else {
                     stats.tunnel_write_failed.fetch_add(1, Ordering::Relaxed);
@@ -316,9 +287,9 @@ mod tests {
                 2,
                 spawn_writer_with_limits(fast, tunnels.clone(), 2, limits, Duration::from_secs(30)),
             );
-            map[&1].enqueue(vec![7; 8], false).unwrap();
-            map[&2].enqueue(vec![1, 2], false).unwrap();
-            map[&2].enqueue(vec![3, 4], true).unwrap();
+            map[&1].enqueue_offset(vec![7; 8], false, 0).unwrap();
+            map[&2].enqueue_offset(vec![1, 2, 3, 4], false, 0).unwrap();
+            map[&2].enqueue_offset(vec![], true, 4).unwrap();
         }
         let mut received = Vec::new();
         tokio::time::timeout(Duration::from_secs(1), fast_peer.read_to_end(&mut received))
@@ -329,7 +300,7 @@ mod tests {
         {
             let mut map = tunnels.lock().await;
             // Budget includes the pending TCP write, even after it left mpsc.
-            assert!(map[&1].enqueue(vec![8], false).is_err());
+            assert!(map[&1].enqueue_offset(vec![8], false, 8).is_err());
             map.remove(&1);
         }
         tokio::time::timeout(Duration::from_secs(1), closed.changed())
@@ -360,7 +331,7 @@ mod tests {
             closed = writer.subscribe();
             map.insert(1, writer);
             map.insert(2, spawn_writer(other, tunnels.clone(), 2));
-            map[&1].enqueue(vec![1], false).unwrap();
+            map[&1].enqueue_offset(vec![1], false, 0).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(1), closed.changed())
             .await
@@ -386,7 +357,7 @@ mod tests {
             );
             closed = writer.subscribe();
             map.insert(1, writer);
-            map[&1].enqueue(vec![7; 8], false).unwrap();
+            map[&1].enqueue_offset(vec![7; 8], false, 0).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(1), closed.changed())
             .await
@@ -423,7 +394,7 @@ mod stream_tests {
         let mut closed;
         {
             let mut map = tunnels.lock().await;
-            let writer = spawn_stream_writer(socket, tunnels.clone(), 1, true);
+            let writer = spawn_stream_writer(socket, tunnels.clone(), 1);
             closed = writer.subscribe();
             map.insert(1, writer);
             // Concurrent completion workers may enqueue any permutation, including close first.
@@ -438,14 +409,14 @@ mod stream_tests {
                         tunnel_id: 1,
                         data: data.to_vec(),
                         close,
-                        byte_offset: Some(offset),
+                        byte_offset: offset,
                     };
-                    let parsed = ProxyTunnelData::from_bincode(&d.to_bincode().unwrap()).unwrap();
+                    let parsed = ProxyTunnelData::parse(&d.encode()).unwrap();
                     (parsed.data, parsed.close, parsed.byte_offset)
                 } else {
                     let mut d = Socks5TunnelData::new(1, data.to_vec());
                     d.close = close;
-                    d.byte_offset = Some(offset);
+                    d.byte_offset = offset;
                     let parsed = Socks5TunnelData::parse(&d.encode()).unwrap();
                     (parsed.data, parsed.close, parsed.byte_offset)
                 };
@@ -483,8 +454,8 @@ mod stream_tests {
             let tunnels = Arc::new(Mutex::new(HashMap::new()));
             {
                 let mut map = tunnels.lock().await;
-                map.insert(1, spawn_stream_writer(socket, tunnels.clone(), 1, true));
-                map[&1].enqueue_offset(vec![], true, Some(64)).unwrap();
+                map.insert(1, spawn_stream_writer(socket, tunnels.clone(), 1));
+                map[&1].enqueue_offset(vec![], true, 64).unwrap();
             }
             let barrier = Arc::new(tokio::sync::Barrier::new(4));
             let mut workers = Vec::new();
@@ -500,15 +471,13 @@ mod stream_tests {
                                 tunnel_id: 1,
                                 data: vec![offset as u8],
                                 close: false,
-                                byte_offset: Some(offset),
+                                byte_offset: offset,
                             };
-                            let parsed =
-                                ProxyTunnelData::from_bincode(&block.to_bincode().unwrap())
-                                    .unwrap();
+                            let parsed = ProxyTunnelData::parse(&block.encode()).unwrap();
                             (parsed.data, parsed.byte_offset)
                         } else {
                             let mut block = Socks5TunnelData::new(1, vec![offset as u8]);
-                            block.byte_offset = Some(offset);
+                            block.byte_offset = offset;
                             let parsed = Socks5TunnelData::parse(&block.encode()).unwrap();
                             (parsed.data, parsed.byte_offset)
                         };
@@ -532,6 +501,55 @@ mod stream_tests {
     }
 
     #[tokio::test]
+    async fn unknown_tunnel_versions_leave_existing_tunnels_usable() {
+        for http in [false, true] {
+            let tunnels = Arc::new(Mutex::new(HashMap::new()));
+            let (first, mut first_peer) = tokio::io::duplex(64);
+            let (other, mut other_peer) = tokio::io::duplex(64);
+            {
+                let mut map = tunnels.lock().await;
+                map.insert(1, spawn_stream_writer(first, tunnels.clone(), 1));
+                map.insert(2, spawn_stream_writer(other, tunnels.clone(), 2));
+            }
+            for version in [0, 2] {
+                let mut wire = if http {
+                    ProxyTunnelData {
+                        tunnel_id: 1,
+                        byte_offset: 0,
+                        close: true,
+                        data: vec![],
+                    }
+                    .encode()
+                } else {
+                    Socks5TunnelData::close(1).encode()
+                };
+                wire[1] = version;
+                // The train/batch dispatcher uses this admission guard before routing.
+                assert!(super::super::tunnel_wire::reject_invalid(&wire));
+            }
+            {
+                let map = tunnels.lock().await;
+                assert_eq!(map.len(), 2);
+                for id in [1, 2] {
+                    assert!(!*map[&id].subscribe().borrow());
+                    map[&id].enqueue_offset(vec![id as u8], false, 0).unwrap();
+                    map[&id].enqueue_offset(vec![], true, 1).unwrap();
+                }
+            }
+            let mut a = Vec::new();
+            let mut b = Vec::new();
+            tokio::time::timeout(Duration::from_secs(1), async {
+                first_peer.read_to_end(&mut a).await.unwrap();
+                other_peer.read_to_end(&mut b).await.unwrap();
+            })
+            .await
+            .unwrap();
+            assert_eq!(a, [1]);
+            assert_eq!(b, [2]);
+        }
+    }
+
+    #[tokio::test]
     async fn gap_timer_closes_without_joining_suffix_and_releases_budget() {
         let tunnels = Arc::new(Mutex::new(HashMap::new()));
         let (socket, mut peer) = tokio::io::duplex(64);
@@ -541,13 +559,13 @@ mod stream_tests {
         let mut closed;
         {
             let mut map = tunnels.lock().await;
-            let writer = spawn_stream_writer(socket, tunnels.clone(), 1, true);
+            let writer = spawn_stream_writer(socket, tunnels.clone(), 1);
             closed = writer.subscribe();
             map.insert(1, writer);
             map[&1]
-                .enqueue_offset(b"suffix".to_vec(), false, Some(3))
+                .enqueue_offset(b"suffix".to_vec(), false, 3)
                 .unwrap();
-            map[&1].enqueue_offset(vec![], true, Some(9)).unwrap();
+            map[&1].enqueue_offset(vec![], true, 9).unwrap();
         }
         tokio::time::timeout(Duration::from_secs(7), closed.changed())
             .await
@@ -564,29 +582,5 @@ mod stream_tests {
         );
         assert_eq!(stats.tunnel_reorder_depth.load(Ordering::Relaxed), 0);
         assert_eq!(stats.tunnel_reorder_bytes.load(Ordering::Relaxed), 0);
-    }
-    #[tokio::test]
-    async fn pinned_mode_rejects_mixed_forms() {
-        for ordered in [true, false] {
-            let tunnels = Arc::new(Mutex::new(HashMap::new()));
-            let (socket, mut peer) = tokio::io::duplex(64);
-            let mut closed;
-            {
-                let mut map = tunnels.lock().await;
-                let writer = spawn_stream_writer(socket, tunnels.clone(), 1, ordered);
-                closed = writer.subscribe();
-                map.insert(1, writer);
-                map[&1]
-                    .enqueue_offset(vec![7], false, if ordered { None } else { Some(0) })
-                    .unwrap();
-            }
-            tokio::time::timeout(Duration::from_secs(1), closed.changed())
-                .await
-                .unwrap()
-                .unwrap();
-            let mut received = Vec::new();
-            peer.read_to_end(&mut received).await.unwrap();
-            assert!(received.is_empty());
-        }
     }
 }

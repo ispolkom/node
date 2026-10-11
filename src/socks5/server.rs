@@ -715,11 +715,10 @@ impl Socks5ProxyServer {
         let (mut client_read, client_write) = client_stream.into_split();
 
         // 12. Сохраняем write half в active_tunnels
-        let ordered = self.transport.peer_stream_offsets(exit_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(client_write, self.active_tunnels.clone(), request_id, ordered);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(client_write, self.active_tunnels.clone(), request_id);
             writer_closed = writer.subscribe();
             tunnels.insert(request_id, writer);
         }
@@ -732,7 +731,7 @@ impl Socks5ProxyServer {
         // Запускаем в фоновом режиме, чтобы handle_tunnel_data мог работать параллельно!
         tokio::spawn(async move {
             const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
-            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; BUFFER_SIZE];
             loop {
                 match tokio::select! {

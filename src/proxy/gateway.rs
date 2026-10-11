@@ -22,9 +22,7 @@ async fn send_tunnel_data(
     target_node: HashId,
     tunnel_data: ProxyTunnelData,
 ) -> Result<()> {
-    // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-    let data_bytes = tunnel_data.to_bincode()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize tunnel data: {}", e))?;
+    let data_bytes = tunnel_data.encode();
 
     // ✅ Используем ОДНУ И ТУ ЖЕ Station (не создаём новую!)
     station.send_train(target_node, data_bytes).await
@@ -222,12 +220,11 @@ impl HttpProxyGateway {
         let (mut read_half, write_half) = target_stream.into_split();
 
         // Store write_half in active_tunnels
-        let ordered = self.transport.peer_stream_offsets(source_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
             // соединения разных узлов — раздельно: номер туннеля выбирает сам узел, чужой номер не даёт доступа к чужому соединению
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), (source_node, tunnel_id), ordered);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), (source_node, tunnel_id));
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, tunnel_id), writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
@@ -239,7 +236,7 @@ impl HttpProxyGateway {
         let transport_to_client = transport.clone();
         let station_to_client = self.station.clone(); // ✅ Добавляем!
         tokio::spawn(async move {
-            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
                 match tokio::select! {
@@ -343,9 +340,7 @@ impl HttpProxyGateway {
         target_node: HashId,
         tunnel_data: ProxyTunnelData,
     ) -> Result<()> {
-        // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-        let data_bytes = tunnel_data.to_bincode()
-            .context("Failed to serialize tunnel data")?;
+        let data_bytes = tunnel_data.encode();
 
         debug!("📤 Sending tunnel data #{} ({} bytes)", tunnel_data.tunnel_id, data_bytes.len());
 

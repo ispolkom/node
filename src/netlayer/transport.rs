@@ -87,6 +87,7 @@ pub struct WagonStats {
     pub tunnel_stream_overflow: AtomicU64,
     pub tunnel_stream_duplicates: AtomicU64,
     pub tunnel_stream_invalid: AtomicU64,
+    pub tunnel_version_rejected: AtomicU64,
 
     /// Вторые копии датаграмм, отброшенные по счётчику сессии до расшифровки
     pub duplicates_dropped: AtomicU64,
@@ -121,6 +122,7 @@ impl WagonStats {
             tunnel_stream_overflow: AtomicU64::new(0),
             tunnel_stream_duplicates: AtomicU64::new(0),
             tunnel_stream_invalid: AtomicU64::new(0),
+            tunnel_version_rejected: AtomicU64::new(0),
 
             duplicates_dropped: AtomicU64::new(0),
         }
@@ -174,11 +176,11 @@ impl WagonStats {
             self.rx_queue_wait_ns.load(Ordering::Relaxed), self.rx_worker_dequeued.load(Ordering::Relaxed), self.tunnel_queue_depth.load(Ordering::Relaxed),
             self.tunnel_queue_bytes.load(Ordering::Relaxed), self.tunnel_queue_overflow.load(Ordering::Relaxed),
             self.tunnel_write_failed.load(Ordering::Relaxed));
-        println!("[STREAM-STATS] reordered={} depth={} bytes={} gap_closed={} overflow={} duplicates={} invalid={}",
+        println!("[STREAM-STATS] reordered={} depth={} bytes={} gap_closed={} overflow={} duplicates={} invalid={} version_rejected={}",
             self.tunnel_reordered.load(Ordering::Relaxed), self.tunnel_reorder_depth.load(Ordering::Relaxed),
             self.tunnel_reorder_bytes.load(Ordering::Relaxed), self.tunnel_gap_closed.load(Ordering::Relaxed),
             self.tunnel_stream_overflow.load(Ordering::Relaxed), self.tunnel_stream_duplicates.load(Ordering::Relaxed),
-            self.tunnel_stream_invalid.load(Ordering::Relaxed));
+            self.tunnel_stream_invalid.load(Ordering::Relaxed), self.tunnel_version_rejected.load(Ordering::Relaxed));
         println!("🚂 [WAGON-STATS] Path0: sent={}, recv={}, loss={}%", sent0, recv0, loss0);
         println!("🚂 [WAGON-STATS] Path1: sent={}, recv={}, loss={}%", sent1, recv1, loss1);
         println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, path0_lost={}",
@@ -631,7 +633,6 @@ impl P2PTransport {
         discovery_port: u16,
         data_port: u16,
     ) -> Result<Arc<Self>, String> {
-        let capabilities = capabilities | crate::netlayer::packet::hello_caps::STREAM_OFFSET;
         println!("[transport] Initializing P2P transport");
 
         // ⚠️ Hardening — sysctl preflight: проверяем что kernel позволит наш SO_RCVBUF.
@@ -1688,7 +1689,8 @@ impl P2PTransport {
         });
     }
 
-    /// N>1 may reorder completed trains: stream offsets are migration step 2.
+    /// Offset reassembly preserves tunnel order across completion workers.
+    /// Losing both full copies leaves a gap and fails that stream.
     fn data_workers() -> usize {
         super::rx_pipeline::env_limit("YANDI_RX_WORKERS", 1, 16)
     }
@@ -1702,9 +1704,6 @@ impl P2PTransport {
         let (tx, queue) = super::rx_pipeline::queue(super::rx_pipeline::Limits::rx(),
             &stats.rx_queue_depth, &stats.rx_queue_bytes);
         let workers = Self::data_workers();
-        if workers > 1 {
-            tracing::warn!("YANDI_RX_WORKERS={workers}: negotiated SOCKS5/CONNECT offsets preserve byte order; legacy tunnel streams remain UNSAFE across trains");
-        }
         let mut tasks = Vec::new();
         for _ in 0..workers {
             let socket = socket.clone();
@@ -3206,8 +3205,10 @@ impl P2PTransport {
                                                                         tracing::trace!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
 
 
+                                                                    if super::tunnel_wire::reject_invalid(&data) { continue; }
+
                                                                     // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
-                                                                    if let Ok(tunnel_data) = crate::proxy::ProxyTunnelData::from_bincode(&data) {
+                                                                    if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(&data) {
                                                                             let tunnel_id = tunnel_data.tunnel_id;
                                                                             let data_len = tunnel_data.data.len();
 
@@ -3377,9 +3378,10 @@ impl P2PTransport {
                                                         for packet in sorted_packets {
                                                             // Пытаемся распознать тип данных
                                                             let data = &packet.data;
+                                                            if super::tunnel_wire::reject_invalid(data) { continue; }
 
                                                             // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
-                                                            if let Ok(tunnel_data) = serde_json::from_slice::<crate::proxy::ProxyTunnelData>(data) {
+                                                            if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(data) {
                                                                 let tunnel_id = tunnel_data.tunnel_id;
                                                                 let data_len = tunnel_data.data.len();
 
@@ -3446,13 +3448,6 @@ impl P2PTransport {
                                                                 if let Some(ref tx) = proxy_response_tx {
                                                                     let peer_id_for_tx = peer_id.clone();
                                                                     let _ = tx.send((peer_id, proxy_resp)).await;
-                                                                }
-                                                            }
-                                                            // HTTP Proxy Tunnel Data
-                                                            else if let Ok(tunnel_data) = serde_json::from_slice::<crate::proxy::ProxyTunnelData>(data) {
-                                                                if let Some(ref tx) = proxy_tunnel_data_tx {
-                                                                    let peer_id_for_tx = peer_id.clone();
-                                                                    let _ = tx.send((peer_id, tunnel_data)).await;
                                                                 }
                                                             }
                                                             // TUN Wagon
@@ -5300,16 +5295,6 @@ impl P2PTransport {
     }
 
     /// Get peer info
-    /// Only authenticated Hello capabilities stored in the peer table enable the new codec.
-    pub async fn peer_stream_offsets(&self, peer_id: HashId) -> bool {
-        Self::peer_has_stream_offsets(self.get_peer(peer_id).await.as_ref())
-    }
-
-    fn peer_has_stream_offsets(peer: Option<&PeerInfo>) -> bool {
-        peer.is_some_and(|p| p.verified_signing_pubkey.is_some()
-            && crate::netlayer::packet::hello_caps::supports_stream_offsets(p.caps_bits))
-    }
-
     pub async fn get_peer(&self, peer_id: HashId) -> Option<PeerInfo> {
         let peers = self.peers.lock().await;
         peers.get(&peer_id).cloned()
@@ -6633,21 +6618,5 @@ mod own_record_sequence_tests {
         assert!(b > a);
         // «прежний процесс» опубликовал маленький номер (старая схема 0, 1, 2…) — новый всегда больше
         assert!(a > 1_000_000_000_000, "номер от времени, а не с нуля");
-    }
-}
-
-#[cfg(test)]
-mod stream_order_capability_tests {
-    use super::*;
-    #[test]
-    fn only_verified_hello_can_enable_stream_offsets() {
-        assert!(!P2PTransport::peer_has_stream_offsets(None));
-        let mut peer = PeerInfo::new(HashId([7;32]), "127.0.0.1:9998");
-        peer.caps_bits = crate::netlayer::packet::hello_caps::STREAM_OFFSET;
-        assert!(!P2PTransport::peer_has_stream_offsets(Some(&peer)));
-        peer.verified_signing_pubkey = Some([8;32]);
-        assert!(P2PTransport::peer_has_stream_offsets(Some(&peer)));
-        peer.caps_bits = crate::netlayer::packet::hello_caps::TELESCOPING_HANDSHAKE;
-        assert!(!P2PTransport::peer_has_stream_offsets(Some(&peer)));
     }
 }

@@ -5,27 +5,26 @@ use tokio::time::Instant;
 
 pub(crate) struct Cursor {
     next: u64,
-    ordered: bool,
 }
 impl Cursor {
-    pub fn new(ordered: bool) -> Self {
-        Self { next: 0, ordered }
+    pub fn new() -> Self {
+        Self { next: 0 }
     }
-    pub fn block(&mut self, len: usize) -> Result<Option<u64>, ()> {
+    pub fn block(&mut self, len: usize) -> Result<u64, ()> {
         let start = self.next;
         self.next = self
             .next
             .checked_add(u64::try_from(len).map_err(|_| ())?)
             .ok_or(())?;
-        Ok(self.ordered.then_some(start))
+        Ok(start)
     }
-    pub fn end(&self) -> Option<u64> {
-        self.ordered.then_some(self.next)
+    pub fn end(&self) -> u64 {
+        self.next
     }
 }
 
 pub(crate) trait Chunk {
-    fn offset(&self) -> Option<u64>;
+    fn offset(&self) -> u64;
     fn len(&self) -> usize;
     fn close(&self) -> bool;
 }
@@ -84,7 +83,7 @@ impl<T: Chunk> Reorder<T> {
     // Returns (reordered, duplicate). Close is stored separately, never overtakes data.
     pub fn insert(&mut self, block: T, now: Instant) -> Result<(bool, bool), Error> {
         self.check(now)?;
-        let start = block.offset().ok_or(Error::Invalid)?;
+        let start = block.offset();
         let end = start
             .checked_add(u64::try_from(block.len()).map_err(|_| Error::Invalid)?)
             .ok_or(Error::Invalid)?;
@@ -170,8 +169,8 @@ mod tests {
     #[derive(Debug)]
     struct B(u64, Vec<u8>, bool);
     impl Chunk for B {
-        fn offset(&self) -> Option<u64> {
-            Some(self.0)
+        fn offset(&self) -> u64 {
+            self.0
         }
         fn len(&self) -> usize {
             self.1.len()
@@ -301,10 +300,10 @@ mod tests {
         assert_eq!(drain(&mut r, now), vec![7]);
         r.insert(B(u64::MAX, vec![], true), now).unwrap();
         assert!(r.finished());
-        let mut c = Cursor::new(true);
+        let mut c = Cursor::new();
         c.next = u64::MAX - 1;
-        assert_eq!(c.block(1), Ok(Some(u64::MAX - 1)));
+        assert_eq!(c.block(1), Ok(u64::MAX - 1));
         assert_eq!(c.block(1), Err(()));
-        assert_eq!(c.end(), Some(u64::MAX));
+        assert_eq!(c.end(), u64::MAX);
     }
 }

@@ -188,7 +188,6 @@ impl ExitNodeHandler {
         let (mut target_read, target_write) = target_stream.into_split();
 
         // Store write half in active_tunnels
-        let ordered = self.transport.peer_stream_offsets(source_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
@@ -197,7 +196,7 @@ impl ExitNodeHandler {
                 return Err(anyhow!("tunnel limit reached"));
             }
             // соединения разных узлов — раздельно (номер туннеля выбирает сам узел)
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(target_write, self.active_tunnels.clone(), (source_node, request.request_id), ordered);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(target_write, self.active_tunnels.clone(), (source_node, request.request_id));
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, request.request_id), writer);
         }
@@ -210,7 +209,7 @@ impl ExitNodeHandler {
         let tunnels_for_cleanup = self.active_tunnels.clone();
         let station_for_close = station_clone.clone();
         tokio::spawn(async move {
-            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let target_to_client = async {
                 const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
                 let mut buf = vec![0u8; BUFFER_SIZE];

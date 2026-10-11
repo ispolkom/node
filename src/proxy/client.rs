@@ -21,9 +21,7 @@ async fn send_tunnel_data_to_gateway(
     gateway_node: HashId,
     tunnel_data: ProxyTunnelData,
 ) -> Result<()> {
-    // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-    let data_bytes = tunnel_data.to_bincode()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize tunnel data: {}", e))?;
+    let data_bytes = tunnel_data.encode();
 
     // ✅ Используем ОДНУ И ТУ ЖЕ Station (не создаём новую!)
     station.send_train(gateway_node, data_bytes).await
@@ -471,11 +469,10 @@ impl HttpProxyClient {
         let (mut read_half, write_half) = stream.into_split();
 
         // Store write_half in active_tunnels
-        let ordered = self.transport.peer_stream_offsets(self.gateway_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), tunnel_id, ordered);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), tunnel_id);
             writer_closed = writer.subscribe();
             tunnels.insert(tunnel_id, writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
@@ -485,7 +482,7 @@ impl HttpProxyClient {
 
         // Task 1: Read from browser and send to gateway via YTP
         tokio::spawn(async move {
-            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
                 match tokio::select! {

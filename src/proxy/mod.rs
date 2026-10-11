@@ -139,7 +139,7 @@ impl ProxyResponse {
 }
 
 /// Tunnel data for CONNECT (bi-directional streaming)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProxyTunnelData {
     /// Tunnel ID (matches CONNECT request_id)
     pub tunnel_id: u64,
@@ -147,31 +147,20 @@ pub struct ProxyTunnelData {
     pub data: Vec<u8>,
     /// Close flag (true if this is the last chunk)
     pub close: bool,
-    // Skipped in bincode: legacy layout remains exactly (u64, Vec<u8>, bool).
-    #[serde(skip)]
-    pub byte_offset: Option<u64>,
+    /// Absolute byte offset in this direction; close carries the final offset.
+    pub byte_offset: u64,
 }
 
 impl ProxyTunnelData {
-    /// ⚡ Сериализовать через bincode (в 3-5 раз быстрее JSON)
-    pub fn to_bincode(&self) -> Result<Vec<u8>, bincode::Error> {
-        let legacy = bincode::serialize(self)?;
-        if let Some(offset) = self.byte_offset {
-            let mut wire = b"YANDISO2".to_vec();
-            wire.extend_from_slice(&offset.to_be_bytes());
-            wire.extend_from_slice(&legacy);
-            Ok(wire)
-        } else { Ok(legacy) }
+    pub fn encode(&self) -> Vec<u8> {
+        crate::netlayer::tunnel_wire::encode(crate::netlayer::tunnel_wire::HTTP_CONNECT,
+            self.tunnel_id, self.byte_offset, self.close, &self.data)
     }
 
-    /// ⚡ Десериализовать из bincode
-    pub fn from_bincode(data: &[u8]) -> Result<Self, bincode::Error> {
-        if data.starts_with(b"YANDISO2") {
-            if data.len() < 16 { return Err(Box::new(bincode::ErrorKind::Custom("short stream offset".into()))); }
-            let mut block: Self = bincode::deserialize(&data[16..])?;
-            block.byte_offset = Some(u64::from_be_bytes(data[8..16].try_into().unwrap()));
-            Ok(block)
-        } else { bincode::deserialize(data) }
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let (tunnel_id, byte_offset, close, data) = crate::netlayer::tunnel_wire::decode(
+            bytes, crate::netlayer::tunnel_wire::HTTP_CONNECT)?;
+        Some(Self { tunnel_id, byte_offset, close, data: data.to_vec() })
     }
 }
 
@@ -222,38 +211,5 @@ mod tests {
         let config = ProxyConfig::default();
 
         assert_eq!(config.auth_token, None);
-    }
-}
-
-#[cfg(test)]
-mod stream_offset_tests {
-    use super::*;
-    use crate::netlayer::{packet::hello_caps, stream_order::Cursor};
-    #[derive(Serialize, Deserialize)]
-    struct Legacy { tunnel_id: u64, data: Vec<u8>, close: bool }
-    #[test]
-    fn capability_selects_wire_and_legacy_bincode_layout_is_unchanged() {
-        let old = Legacy { tunnel_id: 123, data: vec![3,2,1], close: false };
-        let old_wire = bincode::serialize(&old).unwrap();
-        let parsed = ProxyTunnelData::from_bincode(&old_wire).unwrap();
-        assert_eq!(parsed.byte_offset, None); assert_eq!(parsed.to_bincode().unwrap(), old_wire);
-        for caps in [0, hello_caps::TELESCOPING_HANDSHAKE, hello_caps::STREAM_OFFSET, u16::MAX] {
-            let ordered = hello_caps::supports_stream_offsets(caps);
-            let mut cursor = Cursor::new(ordered);
-            let d = ProxyTunnelData { tunnel_id:123, data:vec![3,2,1], close:false, byte_offset:cursor.block(3).unwrap() };
-            let wire = d.to_bincode().unwrap();
-            assert_eq!(wire.starts_with(b"YANDISO2"), ordered);
-            if !ordered { assert_eq!(wire, old_wire); assert_eq!(bincode::deserialize::<Legacy>(&wire).unwrap().data, d.data); }
-            let parsed = ProxyTunnelData::from_bincode(&wire).unwrap();
-            assert_eq!(parsed.byte_offset, ordered.then_some(0)); assert_eq!(parsed.data, d.data);
-            let close = ProxyTunnelData { tunnel_id:123, data:vec![], close:true, byte_offset:cursor.end() };
-            assert_eq!(ProxyTunnelData::from_bincode(&close.to_bincode().unwrap()).unwrap().byte_offset, ordered.then_some(3));
-        }
-    }
-    #[test]
-    fn truncated_prefix_and_full_u64() {
-        for len in 8..16 { let mut b=b"YANDISO2".to_vec(); b.resize(len,0); assert!(ProxyTunnelData::from_bincode(&b).is_err()); }
-        let d=ProxyTunnelData { tunnel_id:1, data:vec![], close:true, byte_offset:Some(u64::MAX) };
-        assert_eq!(ProxyTunnelData::from_bincode(&d.to_bincode().unwrap()).unwrap().byte_offset, Some(u64::MAX));
     }
 }
