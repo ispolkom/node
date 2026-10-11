@@ -34,7 +34,7 @@ chacha20poly1305 = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
 sha1 = "0.10"
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["zeroize"] }
 
 # Image processing
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif"] }
@@ -159,5 +159,4 @@ path = "tests/stress_test.rs"
 [[test]]
 name = "media_integration"
 path = "tests/media_integration.rs"
-
 
