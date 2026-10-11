@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
@@ -27,8 +28,14 @@ class StorageService {
   static Future<void> init() async {
     if (replayLedger != null) return;
     final dir  = await getApplicationDocumentsDirectory();
-    replayLedger = ReplayLedger(File(p.join(dir.path,'e2e_replay_e4.json')));
+    replayLedger = ReplayLedger(File(p.join(dir.path, 'e2e_replay_e4.json')), seal: ledgerSeal, open: ledgerOpen);
   }
+
+  /// Журнал повторов шифруется ключом данных (в нём номера собеседников); старый открытый вид читается и при первой записи шифруется,
+  /// порча и чужой ключ — ошибка (журнал не сбрасывается).
+  static Future<String> ledgerSeal(String json) => _wrap('ledger:replay', json);
+  static Future<String> ledgerOpen(String stored) async =>
+      await _unwrap('ledger:replay', stored, migrated: false) ?? (throw StateError('Corrupt replay ledger'));
 
   /// «Удалить всё»: база (все её файлы), журнал повторов, скачанные файлы, аватарки и всё защищённое хранилище (ключи, токены).
   /// Каждый файл затирается (там, где есть нативное затирание) и удаляется; после этого приложение как только что установленное.
@@ -37,7 +44,8 @@ class StorageService {
     replayLedger = null;
     final docs = await getApplicationDocumentsDirectory();
     final support = await getApplicationSupportDirectory();
-    for (final d in [docs, support]) {
+    final cache = await getTemporaryDirectory();
+    for (final d in [docs, support, cache]) {
       if (!await d.exists()) continue;
       await for (final e in d.list(recursive: true, followLinks: false)) {
         if (e is File) await _wipeAndDelete(e.path);
@@ -50,6 +58,7 @@ class StorageService {
     }
     await _secure.deleteAll();
     _secureCache = null;
+    _secureKey = null;
   }
 
   static bool get dbOpen => _db != null;
@@ -239,6 +248,57 @@ class StorageService {
 
   // ── Secure storage helpers ─────────────────────────────────────────────────
 
+  // ── Защита значений ключом данных ──────────────────────────────────────────────────────────────────────────────
+  // Сами по себе значения хранилища Android защищены ключом Keystore, но root, запустивший код от имени приложения, их получит.
+  // Поэтому каждое значение ещё шифруется ключом данных (AES-256-GCM; имя ключа входит в проверку — значения не подменить друг другом).
+  // Пока приложение заблокировано, ключа нет: прочесть секреты нечем. Служебные записи самого хранилища ключей (`vault_…`) остаются
+  // как есть: без них пароль не проверить.
+
+  static const _wrapPrefix = 'e1:';
+  static const _kMigrated = 'vault_secure_wrapped';
+  static final _aes = AesGcm.with256bits();
+  static List<int>? _secureKey;
+
+  static bool _isRaw(String key) => key.startsWith('vault_');
+
+  /// Ключ защиты значений (подключ ключа данных); null — заблокировано. Задаётся при входе, стирается при блокировке.
+  static void setSecureKey(List<int>? key) {
+    _secureKey = key;
+    if (key == null) _secureCache = null;
+  }
+
+  static Future<String> _wrap(String key, String plain) async {
+    final k = _secureKey;
+    if (k == null) throw StateError('защищённое хранилище заблокировано');
+    final box = await _aes.encrypt(utf8.encode(plain), secretKey: SecretKey(k), aad: utf8.encode('yandi-secure:v1:$key'));
+    return _wrapPrefix + base64.encode(box.concatenation());
+  }
+
+  /// null — значения нет, оно повреждено или подменено; открытое значение принимается только до завершения переноса.
+  static Future<String?> _unwrap(String key, String? stored, {bool migrated = true}) async {
+    if (stored == null) return null;
+    if (!stored.startsWith(_wrapPrefix)) return migrated ? null : stored;
+    final k = _secureKey;
+    if (k == null) return null;
+    try {
+      final box = SecretBox.fromConcatenation(base64.decode(stored.substring(_wrapPrefix.length)), nonceLength: 12, macLength: 16);
+      return utf8.decode(await _aes.decrypt(box, secretKey: SecretKey(k), aad: utf8.encode('yandi-secure:v1:$key')));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Один раз после обновления: старые открытые значения заворачиваются под ключ данных. Затем открытые значения не принимаются.
+  static Future<void> wrapExistingSecureValues() async {
+    if (await _secure.read(key: _kMigrated) == '1') return;
+    final all = await _secure.readAll();
+    for (final e in all.entries) {
+      if (_isRaw(e.key) || e.value.startsWith(_wrapPrefix)) continue;
+      await _secure.write(key: e.key, value: await _wrap(e.key, e.value));
+    }
+    await _secure.write(key: _kMigrated, value: '1');
+  }
+
   // flutter_secure_storage на слабых телефонах читает ~1 с за ключ, а при запуске их читается с десяток (запуск тянулся 10+ с).
   // Поэтому при старте всё читается одним readAll(), дальше — из памяти; запись идёт и в память, и в хранилище.
   static Map<String, String>? _secureCache;
@@ -248,7 +308,18 @@ class StorageService {
 
   static Future<void> warmSecureCache() async {
     try {
-      _secureCache = await _secure.readAll();
+      final all = await _secure.readAll();
+      final migrated = all[_kMigrated] == '1';
+      final out = <String, String>{};
+      for (final e in all.entries) {
+        if (_isRaw(e.key)) {
+          out[e.key] = e.value;
+          continue;
+        }
+        final v = await _unwrap(e.key, e.value, migrated: migrated);
+        if (v != null) out[e.key] = v;
+      }
+      _secureCache = out;
     } catch (_) {
       _secureCache = null; // не вышло — читаем по одному, как раньше
     }
@@ -257,11 +328,13 @@ class StorageService {
   static Future<String?> secureRead(String key) async {
     final c = _secureCache;
     if (c != null) return c[key];
-    return _secure.read(key: key);
+    final raw = await _secure.read(key: key);
+    if (_isRaw(key)) return raw;
+    return _unwrap(key, raw, migrated: (await _secure.read(key: _kMigrated)) == '1');
   }
 
   static Future<void> secureWrite(String key, String value) async {
-    await _secure.write(key: key, value: value);
+    await _secure.write(key: key, value: _isRaw(key) ? value : await _wrap(key, value));
     _secureCache?[key] = value;
   }
 

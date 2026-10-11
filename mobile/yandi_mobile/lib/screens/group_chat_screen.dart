@@ -1,17 +1,16 @@
 import 'dart:io';
-import 'dart:math';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
+import '../crypto/file_vault.dart';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
 import '../models/group_invite.dart';
 import '../services/app_state.dart';
-import '../services/file_transfer_service.dart';
 import '../services/group_files.dart';
 import '../services/group_service.dart';
-import '../services/vault_files.dart';
+import '../services/vault_service.dart';
 import 'file_viewer_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_keyboard.dart';
@@ -99,7 +98,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
     setState(() => _progress['up'] = 0);
     try {
-      final d = await GroupFiles(svc.api).upload(widget.gid, File(path), name, onProgress: (done, total) {
+      final d = await GroupFiles(svc.api, vault: await VaultService.instance.files()).upload(widget.gid, File(path), name, onProgress: (done, total) {
         if (mounted) setState(() => _progress['up'] = done / total);
       });
       try {
@@ -108,7 +107,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         try { await svc.api.fileDelete(widget.gid, d['f'] as String); } catch (_) {}   // запись не ушла — файл на узле не нужен
         rethrow;
       }
-      _paths[d['f'] as String] = path;   // свой файл уже у меня
+      // свой файл остаётся у меня зашифрованным под номером файла; открытая копия из выбора файла затирается
+      try {
+        final vf = await context.read<AppState>().vaultFiles();
+        _paths[d['f'] as String] = (await vf.importAs(path, d['f'] as String, name: name)).path;
+        await context.read<AppState>().dropPickerCopy(path);
+      } catch (_) {}
       await svc.sync(only: widget.gid);
       await _load();
     } on GroupSendRefused catch (e) {
@@ -124,8 +128,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final fid = d['f'] as String;
     final mem = _paths[fid];
     if (mem != null && File(mem).existsSync()) return mem;
-    final saved = await _svc!.store.read('grp_dl_$fid');
-    if (saved != null && File(saved).existsSync()) { _paths[fid] = saved; return saved; }
+    final p = (await context.read<AppState>().vaultFiles()).pathFor(FileVault.safeId(fid));
+    if (File(p).existsSync()) { _paths[fid] = p; return p; }
     return null;
   }
 
@@ -133,13 +137,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final fid = d['f'] as String;
     var path = await _localPath(d);
     if (path == null) {
-      final dir = await FileTransferService.downloadsDir();
-      final safe = ((d['n'] as String?) ?? 'file').replaceAll(RegExp(r'[\\/\x00-\x1f]'), '_');
-      final prefix = List.generate(4, (_) => Random.secure().nextInt(256).toRadixString(16).padLeft(2, '0')).join();
-      final out = File('${dir.path}/${prefix}_$safe');
+      final vf = await context.read<AppState>().vaultFiles();
+      final out = File(vf.pathFor(FileVault.safeId(fid)));
+      final part = File('${out.path}.part');   // пока качается, файла в хранилище нет
       setState(() => _progress[fid] = 0);
       try {
-        await GroupFiles(_svc!.api).download(widget.gid, d, out, onProgress: (done, total) {
+        await GroupFiles(_svc!.api, vault: await VaultService.instance.files()).download(widget.gid, d, part, onProgress: (done, total) {
           if (mounted) setState(() => _progress[fid] = done / total);
         });
       } catch (e) {
@@ -148,11 +151,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       } finally {
         if (mounted) setState(() => _progress.remove(fid));
       }
-      await _svc!.store.write('grp_dl_$fid', out.path);
+      await part.rename(out.path);
       _paths[fid] = out.path;
       path = out.path;
     }
-    final v = await VaultFiles.describe(path);
+    final v = await (await context.read<AppState>().vaultFiles()).describe(path);
     if (!mounted) return;
     await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
   }

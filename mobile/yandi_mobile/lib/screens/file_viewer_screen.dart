@@ -1,13 +1,17 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
+import '../services/vault_bytes_cache.dart';
 import '../services/vault_files.dart';
+import '../services/vault_service.dart';
 import '../theme.dart';
 
 /// Просмотр файла внутри приложения, без передачи другим программам: картинки, текст, звук. Остальное — только сведения о файле.
+/// Файл расшифровывается в памяти; открытой копии на диске нет.
 class FileViewerScreen extends StatefulWidget {
   final VaultFile file;
   final VoidCallback? onShare;
@@ -57,7 +61,7 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   Future<String> _readText() async {
     try {
       const limit = 256 * 1024;
-      final bytes = await File(f.path).openRead(0, limit).fold<List<int>>(<int>[], (a, b) => a..addAll(b));
+      final bytes = await (await VaultService.instance.files()).readPrefix(File(f.path), limit);
       final text = utf8.decode(bytes, allowMalformed: true);
       return f.size > limit ? '$text\n\n… показаны первые 256 КБ из ${humanSize(f.size)}' : text;
     } catch (_) {
@@ -69,7 +73,16 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
     if (f.isImage) {
       return InteractiveViewer(
         maxScale: 6,
-        child: Center(child: Image.file(File(f.path), errorBuilder: (_, __, ___) => _info('Не удалось показать картинку: файл повреждён или формат не поддерживается'))),
+        child: Center(
+          child: FutureBuilder<Uint8List?>(
+            future: VaultBytesCache.load(f.path),
+            builder: (_, snap) {
+              final b = snap.data;
+              if (b == null) return snap.connectionState == ConnectionState.done ? _info('Не удалось показать картинку: файл повреждён или слишком большой') : const CircularProgressIndicator(color: AppTheme.accent);
+              return Image.memory(b, errorBuilder: (_, __, ___) => _info('Не удалось показать картинку: файл повреждён или формат не поддерживается'));
+            },
+          ),
+        ),
       );
     }
     if (f.isText) {
@@ -110,7 +123,13 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
                 if (p == null) return;
                 if (_playing) { await p.pause(); }
                 else if (_pos > Duration.zero && _pos < _dur) { await p.resume(); }
-                else { await p.play(DeviceFileSource(f.path)); }
+                else {
+                  try {
+                    await p.play(BytesSource(await (await VaultService.instance.files()).readAll(File(f.path))));
+                  } catch (_) {
+                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Не удалось воспроизвести: файл повреждён')));
+                  }
+                }
               },
             ),
           ]),

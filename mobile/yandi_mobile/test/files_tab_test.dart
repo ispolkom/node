@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/screens/files_tab.dart';
 import 'package:yandi_mobile/models/contact.dart';
 import 'package:yandi_mobile/services/files_host.dart';
+import 'package:yandi_mobile/crypto/file_vault.dart';
 import 'package:yandi_mobile/services/vault_files.dart';
 import 'package:yandi_mobile/theme.dart';
 
@@ -20,6 +21,22 @@ class FakeHost extends ChangeNotifier implements FilesHost {
   }
 }
 
+final _key = List<int>.generate(32, (i) => i + 9);
+FileVault _fv() => FileVault.withKey(_key, chunkSize: 1024);
+
+/// Зашифрованный файл-образец в папке хранилища (дисковый ввод-вывод — внутри runAsync).
+Future<File> _enc(WidgetTester t, Directory d, String id, String name, List<int> data, {DateTime? created}) async {
+  final f = File('${d.path}/$id.yfe');
+  await t.runAsync(() async {
+    final w = await _fv().create(f, name: name, mime: 'text/plain', size: data.length, createdMs: created?.millisecondsSinceEpoch);
+    await w.add(data);
+    await w.close();
+  });
+  return f;
+}
+
+String _id(int n) => n.toString().padLeft(32, '0');
+
 void main() {
   late Directory dir;
   late FakeHost host;
@@ -35,8 +52,8 @@ void main() {
   }
 
   Future<void> pump(WidgetTester t) async {
-    await t.pumpWidget(MaterialApp(theme: AppTheme.dark, home: Scaffold(body: FilesTab(vault: VaultFiles(dir), host: host))));
-    await io(t);
+    await t.pumpWidget(MaterialApp(theme: AppTheme.dark, home: Scaffold(body: FilesTab(vault: VaultFiles(dir, vault: () async => _fv(), tempDir: Directory('${dir.path}/tmp')), host: host))));
+    await io(t, 30);   // чтение зашифрованного файла — несколько шагов ввода-вывода на каждый
   }
 
   testWidgets('пустое хранилище: понятная подсказка', (t) async {
@@ -45,18 +62,18 @@ void main() {
   });
 
   testWidgets('файлы показываются без служебного префикса, новые сверху', (t) async {
-    File('${dir.path}/aaaaaaaa_old.txt')..writeAsStringSync('a')..setLastModifiedSync(DateTime(2020));
-    File('${dir.path}/bbbbbbbb_new.bin')..writeAsBytesSync([1, 2, 3])..setLastModifiedSync(DateTime(2026));
+    await _enc(t, dir, _id(1), 'old.txt', [97], created: DateTime(2020));
+    await _enc(t, dir, _id(2), 'new.bin', [1, 2, 3], created: DateTime(2026));
     await pump(t);
     expect(find.text('old.txt'), findsOneWidget);
     expect(find.text('new.bin'), findsOneWidget);
-    expect(find.textContaining('aaaaaaaa'), findsNothing);
+    expect(find.textContaining('0000000000'), findsNothing, reason: 'номер файла на диске человеку не показывается');
     expect(t.getTopLeft(find.text('new.bin')).dy, lessThan(t.getTopLeft(find.text('old.txt')).dy));
   });
 
   testWidgets('долгое нажатие выбирает; удаление — с подтверждением, файл исчезает с диска', (t) async {
-    final a = File('${dir.path}/11111111_a.txt')..writeAsStringSync('a');
-    final b = File('${dir.path}/22222222_b.txt')..writeAsStringSync('b');
+    final a = await _enc(t, dir, _id(11), 'a.txt', [97]);
+    final b = await _enc(t, dir, _id(12), 'b.txt', [98]);
     await pump(t);
     await t.longPress(find.text('a.txt'));
     await t.pump();
@@ -77,7 +94,7 @@ void main() {
   });
 
   testWidgets('отмена подтверждения ничего не удаляет', (t) async {
-    final a = File('${dir.path}/33333333_keep.txt')..writeAsStringSync('k');
+    final a = await _enc(t, dir, _id(33), 'keep.txt', [107]);
     await pump(t);
     await t.tap(find.byIcon(Icons.more_vert));
     await t.pumpAndSettle();
@@ -90,7 +107,7 @@ void main() {
   });
 
   testWidgets('пересылка: список контактов YANDI, отправка выбранному контакту', (t) async {
-    File('${dir.path}/44444444_report.txt').writeAsStringSync('r');
+    await _enc(t, dir, _id(44), 'report.txt', [114]);
     await pump(t);
     await t.tap(find.byIcon(Icons.more_vert));
     await t.pumpAndSettle();

@@ -6,7 +6,11 @@ import 'dart:io';
 /// On corruption/write error/capacity exhaustion: fail closed, never reset or evict live IDs.
 class ReplayLedger {
   final File file;
-  ReplayLedger(this.file);
+  /// Шифрование файла журнала (в нём номера собеседников): [seal] — перед записью, [open] — после чтения (может принять и старый открытый
+  /// вид, но порчу обязан отвергнуть исключением: журнал не сбрасывается и не «лечится»). Без них файл открытый (тесты).
+  final Future<String> Function(String json)? seal;
+  final Future<String> Function(String stored)? open;
+  ReplayLedger(this.file, {this.seal, this.open});
   static Future<void> _tail = Future.value();
 
   Future<bool> claim(String id, int expiresMs, {int? nowMs}) {
@@ -15,7 +19,7 @@ class ReplayLedger {
       try {
         final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
         final Map<String, dynamic> seen = await file.exists()
-            ? jsonDecode(await file.readAsString()) as Map<String, dynamic>
+            ? jsonDecode(open != null ? await open!(await file.readAsString()) : await file.readAsString()) as Map<String, dynamic>
             : {};
         if (seen.values.any((v) => v is! int))
           throw StateError('Corrupt replay ledger');
@@ -28,7 +32,7 @@ class ReplayLedger {
           throw StateError('Replay ledger full or envelope expired');
         seen[id] = expiresMs;
         final temp = File('${file.path}.tmp');
-        await temp.writeAsString(jsonEncode(seen), flush: true);
+        await temp.writeAsString(seal != null ? await seal!(jsonEncode(seen)) : jsonEncode(seen), flush: true);
         await temp.rename(file.path);
         result.complete(true);
       } catch (e, st) {

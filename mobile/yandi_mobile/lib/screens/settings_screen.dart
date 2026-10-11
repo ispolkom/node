@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../services/app_state.dart';
+import '../services/vault_lock.dart';
+import 'vault_screens.dart';
 import '../theme.dart';
 import '../widgets/avatar_circle.dart';
 
@@ -22,7 +24,7 @@ class SettingsScreen extends StatelessWidget {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(leading: const Icon(Icons.photo_outlined), title: const Text('Выбрать фото'), onTap: () => Navigator.pop(ctx, 'photo')),
           ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text('Выбрать эмодзи'), onTap: () => Navigator.pop(ctx, 'emoji')),
-          if (state.myAvatarFile != null)
+          if (state.myAvatarBytes != null)
             ListTile(leading: const Icon(Icons.delete_outline, color: Colors.redAccent), title: const Text('Убрать картинку', style: TextStyle(color: Colors.redAccent)), onTap: () => Navigator.pop(ctx, 'clear')),
         ]),
       ),
@@ -129,6 +131,29 @@ class SettingsScreen extends StatelessWidget {
                   ? (_) => state.toggleVpn()
                   : null,
             ),
+          ),
+
+          // Защита
+          _Section(title: 'Защита'),
+          ListTile(
+            tileColor: AppTheme.surface,
+            leading: const Icon(Icons.lock_outline, color: AppTheme.textSecondary),
+            title: const Text('Заблокировать сейчас', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Иначе приложение блокируется само через минуту после выхода из него.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () => VaultLockObserver.instance?.lockNow(),
+          ),
+          ListTile(
+            tileColor: AppTheme.surface,
+            leading: const Icon(Icons.password_outlined, color: AppTheme.textSecondary),
+            title: const Text('Сменить пароль', style: TextStyle(color: AppTheme.text)),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultChangePasswordScreen())),
+          ),
+          ListTile(
+            tileColor: AppTheme.surface,
+            leading: const Icon(Icons.delete_forever_outlined, color: Colors.redAccent),
+            title: const Text('Удалить всё', style: TextStyle(color: Colors.redAccent)),
+            subtitle: const Text('Стереть все данные приложения с этого телефона (нужен пароль).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultEraseScreen())),
           ),
 
           // Аккаунт

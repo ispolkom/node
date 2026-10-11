@@ -50,6 +50,13 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
+                // системное окно удаления этого приложения (после «Удалить всё» с паролем)
+                "uninstall" -> {
+                    runCatching {
+                        startActivity(Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                    result.success(true)
+                }
                 // окно закрыто от скриншотов, записи экрана и превью в списке приложений (экраны ввода пароля и секретных слов)
                 "secure" -> {
                     val on = call.argument<Boolean>("on") ?: false

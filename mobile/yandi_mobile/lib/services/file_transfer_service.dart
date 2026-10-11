@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:path_provider/path_provider.dart';
 import '../crypto/file_crypto.dart';
+import '../crypto/file_vault.dart';
 import '../models/file_offer.dart';
 import 'api_service.dart';
 import 'pool.dart';
@@ -41,7 +42,9 @@ class _DigestSink implements Sink<crypto.Digest> {
 
 class FileTransferService {
   final ApiService _api;
-  FileTransferService(this._api);
+  /// Шифрование файлов хранилища ключом этого сеанса: принятые файлы пишутся сразу зашифрованными, зашифрованные читаются при отправке.
+  final FileVault? vault;
+  FileTransferService(this._api, {this.vault});
 
   /// Папка, куда складываются полученные файлы (внутри приложения).
   static Future<Directory> downloadsDir() async {
@@ -59,7 +62,8 @@ class FileTransferService {
     return n.length > 100 ? n.substring(n.length - 100) : n;
   }
 
-  static String localName(FileOffer o) => '${o.tid.substring(0, 8)}_${safeName(o.name)}';
+  /// Имя файла на диске: безликий номер передачи (настоящее имя лежит внутри зашифрованного файла).
+  static String localName(FileOffer o) => '${FileVault.safeId(o.tid)}${FileVault.extension}';
 
   static String guessMime(String name) {
     final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
@@ -85,11 +89,12 @@ class FileTransferService {
 
   /// Шаг 1 отправки: занять передачу на узле и подготовить ключ. Ещё ничего не залито.
   Future<FileOffer> prepare({required String toPeerId, required String path, String? name}) async {
-    final file = File(path);
-    final size = await file.length();
+    final src = await FileSource.open(path, vault: vault);
+    final size = src.length;
+    await src.close();
     if (size == 0) throw TransferException('Файл пустой');
     if (size > maxFileSize) throw TransferException('Файл больше 1 ГБ');
-    final fileName = safeName(name ?? file.path.split(Platform.pathSeparator).last);
+    final fileName = safeName(name ?? path.split(Platform.pathSeparator).last);
     final chunks = max(1, (size / chunkSizeFor(size)).ceil());
     // узлу уходит безликая подпись: настоящее имя только внутри зашифрованного предложения
     final tid = await _api.startFileTransfer(toPeerId: toPeerId, fileName: 'file', fileSize: size, totalChunks: chunks);
@@ -105,7 +110,7 @@ class FileTransferService {
     final key = base64.decode(offer.key);
     final out = _DigestSink();
     final hash = crypto.sha256.startChunkedConversion(out);
-    final raf = await File(path).open();
+    final src = await FileSource.open(path, vault: vault);
     final cs = chunkSizeFor(offer.size);
     var finished = 0;
     // чтение и контрольная сумма — строго по порядку (очередь), шифрование и заливка — параллельно (parallelFor)
@@ -115,13 +120,13 @@ class FileTransferService {
       readLock = readLock.then((_) async {
         try {
           final want = min(cs, offer.size - i * cs);
-          final buf = Uint8List(want);
-          var got = 0;
-          while (got < want) {
-            final n = await raf.readInto(buf, got, want);
-            if (n <= 0) throw TransferException('Файл изменился во время отправки');
-            got += n;
+          final Uint8List buf;
+          try {
+            buf = await src.readAt(i * cs, want);
+          } on FileVaultException catch (e) {
+            throw TransferException('Не удалось прочитать файл: $e');
           }
+          if (buf.length != want) throw TransferException('Файл изменился во время отправки');
           hash.add(buf);
           result.complete(buf);
         } catch (e, st) {
@@ -138,7 +143,7 @@ class FileTransferService {
         onProgress?.call(++finished / offer.chunks);
       });
     } finally {
-      await raf.close();
+      await src.close();
     }
     hash.close();
     await _retry<bool>(() async => await _api.completeTransfer(offer.tid) ? true : null, 'завершение');
@@ -153,7 +158,9 @@ class FileTransferService {
     final key = base64.decode(offer.key);
     final out = _DigestSink();
     final hash = crypto.sha256.startChunkedConversion(out);
-    final sink = part.openWrite();
+    // с ключом хранилища файл пишется сразу зашифрованным (открытого содержимого на диске не бывает); без него — как раньше (тесты)
+    final w = vault == null ? null : await vault!.create(part, name: safeName(offer.name), mime: offer.mime, size: offer.size);
+    final sink = w == null ? part.openWrite() : null;
     var total = 0;
     try {
       var i = -1;
@@ -169,20 +176,36 @@ class FileTransferService {
         }
         total += plain.length;
         hash.add(plain);
-        sink.add(plain);
+        if (w != null) {
+          try {
+            await w.add(plain);
+          } on FileVaultException {
+            throw TransferException('Размер не совпал: получено больше, чем заявлено (${offer.size} байт)');
+          }
+        } else {
+          sink!.add(plain);
+        }
         onProgress?.call((i + 1) / offer.chunks);
       }
-      await sink.close();
       hash.close();
       if (total != offer.size) throw TransferException('Размер не совпал: получено $total из ${offer.size} байт');
       if (offer.sha.isNotEmpty && out.value.toString() != offer.sha) {
         throw TransferException('Контрольная сумма не совпала: файл повреждён');
       }
+      if (w != null) {
+        await w.close();
+      } else {
+        await sink!.close();
+      }
       final target = File(path);
       if (await target.exists()) await target.delete();
       await part.rename(path);
     } catch (_) {
-      try { await sink.close(); } catch (_) {}
+      if (w != null) {
+        await w.abort();
+      } else {
+        try { await sink!.close(); } catch (_) {}
+      }
       if (await part.exists()) await part.delete();
       rethrow;
     }

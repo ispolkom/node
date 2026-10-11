@@ -107,12 +107,13 @@ abstract class _SecretFormState<T extends StatefulWidget> extends State<T> {
     return SecureKeyboard(key: ValueKey(c), controller: c, onEnter: _enter);
   }
 
-  Widget page({required String title, required List<Widget> children}) {
+  Widget page({required String title, required List<Widget> children, bool canGoBack = false}) {
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        automaticallyImplyLeading: false,
+        automaticallyImplyLeading: canGoBack,
+        iconTheme: const IconThemeData(color: AppTheme.text),
         title: Text(title, style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold)),
       ),
       body: SafeArea(
@@ -464,6 +465,148 @@ class _VaultRecoverScreenState extends _SecretFormState<VaultRecoverScreen> {
       primary(_busy ? 'Проверяем…' : 'Восстановить', _busy ? null : submit),
       link('Назад', () => Navigator.of(context).pop()),
       if (_noWords) link('Удалить всё и начать заново', eraseAndRestart, color: Colors.redAccent),
+    ]);
+  }
+}
+
+// ── Из настроек: смена пароля и «Удалить всё» ────────────────────────────────────────────────────────────────────────
+
+class VaultChangePasswordScreen extends StatefulWidget {
+  const VaultChangePasswordScreen({super.key});
+  @override
+  State<VaultChangePasswordScreen> createState() => _VaultChangePasswordScreenState();
+}
+
+class _VaultChangePasswordScreenState extends _SecretFormState<VaultChangePasswordScreen> {
+  final _old = TextEditingController();
+  final _new = TextEditingController();
+  final _new2 = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  List<TextEditingController> get order => [_old, _new, _new2];
+
+  @override
+  void dispose() {
+    for (final c in [_old, _new, _new2]) {
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Future<void> submit() async {
+    if (_busy) return;
+    final problem = _SecretFormState.pwProblem(_new.text, _new2.text);
+    if (problem.isNotEmpty) {
+      setState(() => _error = problem);
+      return;
+    }
+    setState(() { _busy = true; _error = null; });
+    try {
+      await VaultService.instance.changePassword(_old.text, _new.text);
+      _SecretFormState.clear([_old, _new, _new2]);
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён')));
+      Navigator.of(context).pop();
+      return;
+    } on VaultWrongSecret catch (e) {
+      _error = 'Старый пароль неверный (подряд неверных: ${e.failures})';
+    } on VaultThrottled catch (e) {
+      _error = 'Слишком много попыток, подождите ${e.wait.inSeconds} с';
+    } on VaultPolicyError catch (e) {
+      _error = e.message;
+    } catch (e) {
+      _error = 'Не удалось сменить пароль: $e';
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return page(title: 'Сменить пароль', canGoBack: true, children: [
+      info('Данные не перешифровываются: меняется только пароль, которым они открываются.'),
+      field('Старый пароль', _old),
+      field('Новый пароль', _new),
+      field('Повторите новый пароль', _new2),
+      errorText(_error),
+      primary(_busy ? 'Меняем…' : 'Сменить', _busy ? null : submit),
+    ]);
+  }
+}
+
+class VaultEraseScreen extends StatefulWidget {
+  const VaultEraseScreen({super.key});
+  @override
+  State<VaultEraseScreen> createState() => _VaultEraseScreenState();
+}
+
+class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
+  static const _ch = MethodChannel('com.yandi.yandi_mobile/files');
+  final _pw = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  List<TextEditingController> get order => [_pw];
+
+  @override
+  void dispose() {
+    _pw.dispose();
+    super.dispose();
+  }
+
+  @override
+  void submit() => _erase(uninstall: false);
+
+  Future<void> _erase({required bool uninstall}) async {
+    if (_busy) return;
+    if (_pw.text.isEmpty) {
+      setState(() => _error = 'Введите пароль');
+      return;
+    }
+    setState(() { _busy = true; _error = null; });
+    try {
+      await VaultService.instance.verifyPassword(_pw.text);
+    } on VaultWrongSecret catch (e) {
+      _fail('Неверный пароль (подряд неверных: ${e.failures})');
+      return;
+    } on VaultThrottled catch (e) {
+      _fail('Слишком много попыток, подождите ${e.wait.inSeconds} с');
+      return;
+    } catch (e) {
+      _fail('Не удалось проверить пароль: $e');
+      return;
+    }
+    if (!mounted) return;
+    final ok = await confirm('Стереть всё?', 'Все данные YANDI на этом телефоне будут стёрты без возможности восстановления: сообщения, файлы, ключи, настройки.', 'Стереть');
+    if (!ok || !mounted) {
+      setState(() => _busy = false);
+      return;
+    }
+    final nav = Navigator.of(context);
+    await context.read<AppState>().eraseEverything();
+    if (uninstall) {
+      try { await _ch.invokeMethod('uninstall'); } catch (_) {}
+    }
+    nav.pushNamedAndRemoveUntil('/vault-setup', (_) => false);
+  }
+
+  void _fail(String e) {
+    _pw.clear();
+    if (mounted) setState(() { _busy = false; _error = e; });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return page(title: 'Удалить всё', canGoBack: true, children: [
+      info('Будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Для подтверждения введите пароль. '
+          'Вернуть данные потом нельзя: ни по паролю, ни по секретным словам.'),
+      field('Пароль', _pw),
+      errorText(_error),
+      primary(_busy ? 'Проверяем…' : 'Стереть данные', _busy ? null : () => _erase(uninstall: false)),
+      link('Стереть данные и удалить приложение', _busy ? () {} : () => _erase(uninstall: true), color: Colors.redAccent),
     ]);
   }
 }

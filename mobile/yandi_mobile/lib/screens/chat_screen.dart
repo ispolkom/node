@@ -2,7 +2,6 @@ import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import '../services/vault_files.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
 import '../models/group_invite.dart';
@@ -15,6 +14,7 @@ import '../models/file_offer.dart';
 import '../models/message.dart';
 import '../services/app_state.dart';
 import '../services/file_transfer_service.dart' show FileTransferService, maxFileSize;
+import '../widgets/vault_image.dart';
 import '../theme.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 
@@ -506,8 +506,7 @@ class _FileCard extends StatelessWidget {
             padding: const EdgeInsets.only(bottom: 8),
             child: ClipRRect(
               borderRadius: BorderRadius.circular(10),
-              child: Image.file(File(local), width: 220, cacheWidth: 440, fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) => const SizedBox.shrink()),
+              child: VaultImage(path: local, width: 220, cacheWidth: 440),
             ),
           ),
         Row(
@@ -555,7 +554,7 @@ class _FileCard extends StatelessWidget {
   List<Widget> _openActions(BuildContext context, AppState state, String path) => [
     // Просмотр — внутри приложения (файл не передаётся другим программам).
     _Action(icon: Icons.open_in_new, label: 'Открыть', onTap: () async {
-      final v = await VaultFiles.describe(path);
+      final v = await (await state.vaultFiles()).describe(path);
       if (!context.mounted) return;
       await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
     }),

@@ -7,8 +7,13 @@ import 'vault_service.dart';
 /// Блокировка приложения: через минуту после ухода в фон (или при возврате, если минута прошла) соединения закрываются, память
 /// очищается, ключ стирается, база закрывается, и открывается экран ввода пароля. Во время звонка блокировка откладывается.
 class VaultLockObserver with WidgetsBindingObserver {
-  VaultLockObserver(this.navigatorKey);
+  VaultLockObserver(this.navigatorKey) {
+    instance = this;
+  }
   final GlobalKey<NavigatorState> navigatorKey;
+
+  /// Для кнопки «Заблокировать сейчас».
+  static VaultLockObserver? instance;
 
   static const lockAfter = Duration(seconds: 60);
   DateTime? _backgroundedAt;

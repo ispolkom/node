@@ -21,6 +21,9 @@ import 'avatar_service.dart';
 import 'avatar_processor.dart';
 import '../crypto/identity.dart';
 import 'storage_service.dart';
+import '../crypto/file_vault.dart';
+import 'vault_bytes_cache.dart';
+import 'vault_files.dart';
 import 'vault_service.dart';
 import 'api_service.dart' as api_svc;
 import 'ws_service.dart';
@@ -105,10 +108,13 @@ class AppState extends ChangeNotifier implements FilesHost {
       read: () => StorageService.secureRead('avatars_v1'),
       write: (s) => StorageService.secureWrite('avatars_v1', s),
       wipe: AppState.wipeFile,
+      sealer: AvatarSealer(() => VaultService.instance.subKey('avatars')),
     );
     await av.load();
     av.addListener(notifyListeners);
     avatars = av;
+
+    unawaited(_filesHousekeeping());
 
     // 2. Ключи пользователя (генерируются один раз и навсегда)
     identity = await Identity.loadOrGenerate();
@@ -516,6 +522,40 @@ class AppState extends ChangeNotifier implements FilesHost {
     _downloadsDir ??= await FileTransferService.downloadsDir();
   }
 
+  VaultFiles? _vaultFiles;
+
+  /// Открытая копия, которую сделал выбор файла (в кеше приложения), после шифрования затирается; чужие файлы не трогаем.
+  Future<void> dropPickerCopy(String path) async {
+    try {
+      final cache = await pp.getTemporaryDirectory();
+      if (!path.startsWith(cache.path)) return;
+      if (!await wipeFile(path)) {
+        final f = File(path);
+        if (await f.exists()) await f.delete();
+      }
+    } catch (_) {}
+  }
+
+  /// Хранилище файлов (зашифрованное) с папкой `yandi_downloads`; временные расшифрованные копии — в кеше приложения.
+  Future<VaultFiles> vaultFiles() async {
+    final v = _vaultFiles;
+    if (v != null) return v;
+    final tmp = await pp.getTemporaryDirectory();
+    return _vaultFiles = VaultFiles(await FileTransferService.downloadsDir(),
+        vault: VaultService.instance.files, wipe: AppState.wipeFile, tempDir: Directory('${tmp.path}/vtmp'));
+  }
+
+  /// После входа: остатки временных расшифрованных копий затираются, недоделанные удаления дочищаются, старые открытые файлы
+  /// (до включения защиты) шифруются.
+  Future<void> _filesHousekeeping() async {
+    try {
+      final vf = await vaultFiles();
+      await vf.cleanTemp();
+      await vf.finishPendingWipes();
+      await vf.migrateLegacy();
+    } catch (_) {}
+  }
+
   /// Файлы можно слать только на своё устройство: у него есть ключ для E2E.
   Future<bool> canSendFiles(String peerId) async => await (_ws?.canEncryptTo(peerId) ?? Future.value(false));
 
@@ -526,7 +566,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
     if (_api == null || _ws == null) return 'Нет связи с узлом';
-    final svc = FileTransferService(_api!);
+    final svc = FileTransferService(_api!, vault: await VaultService.instance.files());
     late FileOffer offer;
     try {
       if (!await canSendFiles(peerId)) return 'Файлы можно отправлять только на свои устройства, у этого собеседника нет ключа';
@@ -536,7 +576,22 @@ class AppState extends ChangeNotifier implements FilesHost {
     } catch (e) {
       return 'Не удалось начать отправку: $e';
     }
-    _outgoingPaths[offer.tid] = path;
+    // Источник отправки — всегда зашифрованная копия в хранилище под номером передачи: открытая копия из выбора файла не остаётся,
+    // а отправленный файл виден во вкладке «Файлы» и в чате.
+    var source = path;
+    var created = false;
+    if (!FileVault.isVaultPath(path)) {
+      try {
+        final vf = await vaultFiles();
+        source = (await vf.importAs(path, offer.tid, name: name, mime: offer.mime)).path;
+        created = true;
+      } catch (e) {
+        try { await _api!.deleteTransfer(offer.tid); } catch (_) {}
+        return 'Не удалось положить файл в защищённое хранилище: $e';
+      }
+      await dropPickerCopy(path);
+    }
+    _outgoingPaths[offer.tid] = source;
     fileStates[offer.tid] = FileState.working(0);
     // сообщение в чате появляется сразу и показывает ход отправки; получателю предложение уйдёт, когда всё залито
     final msg = ChatMessage(
@@ -547,7 +602,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     await StorageService.saveMessage(msg);
     notifyListeners();
     try {
-      final done = await svc.upload(offer, path, onProgress: (f) {
+      final done = await svc.upload(offer, source, onProgress: (f) {
         fileStates[offer.tid] = FileState.working(f);
         notifyListeners();
       });
@@ -560,6 +615,10 @@ class AppState extends ChangeNotifier implements FilesHost {
       await StorageService.updateMessageStatus(msg.id, MessageStatus.delivered);
     } catch (e) {
       fileStates[offer.tid] = FileState.failed(e is TransferException ? e.message : '$e');
+      if (created) {
+        try { await (await vaultFiles()).deleteForever(source); } catch (_) {}
+        _outgoingPaths.remove(offer.tid);
+      }
       final failed = msg.copyWith(status: MessageStatus.failed);
       _replaceMessage(peerId, msg.id, failed);
       await StorageService.updateMessageStatus(msg.id, MessageStatus.failed);
@@ -582,7 +641,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     fileStates[o.tid] = FileState.working(0);
     notifyListeners();
     try {
-      await FileTransferService(_api!).download(o, onProgress: (f) {
+      await FileTransferService(_api!, vault: await VaultService.instance.files()).download(o, onProgress: (f) {
         fileStates[o.tid] = FileState.working(f);
         notifyListeners();
       });
@@ -607,7 +666,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Скопировать полученный файл в общую папку «Загрузки», чтобы он был виден в файловом менеджере.
   Future<String?> saveToDownloads(String path, String name, String mime) async {
     try {
-      return await _filesChannel.invokeMethod<String>('saveToDownloads', {'path': path, 'name': name, 'mime': mime});
+      // наружу уходит расшифрованная копия (это и есть «вынести»); временный файл затирается сразу после сохранения
+      final vf = await vaultFiles();
+      return await vf.withPlain(path, (plain) => _filesChannel.invokeMethod<String>('saveToDownloads', {'path': plain, 'name': name, 'mime': mime}));
     } catch (_) {
       return null;
     }
@@ -682,8 +743,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();
 
-  File? avatarFile(String peerId) => avatars?.fileForPeer(peerId);
-  File? get myAvatarFile => avatars?.myFile;
+  Uint8List? avatarBytes(String peerId) => avatars?.bytesForPeer(peerId);
+  Uint8List? get myAvatarBytes => avatars?.myBytes;
 
   bool _avatarEligible(String peerId) {
     final c = contactFor(peerId);
@@ -1060,6 +1121,8 @@ class AppState extends ChangeNotifier implements FilesHost {
     identity = null;
     groups = null;
     avatars = null;
+    _vaultFiles = null;
+    VaultBytesCache.clear();
     contacts = [];
     nodeManager.clear();
     _chats.clear();

@@ -1,46 +1,99 @@
+import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_mobile/crypto/file_vault.dart';
 import 'package:yandi_mobile/services/vault_files.dart';
 
+final _key = List<int>.generate(32, (i) => i + 3);
+FileVault _fv() => FileVault.withKey(_key, chunkSize: 1024);
+
+/// Зашифрованный файл-образец прямо в папке хранилища.
+Future<File> _enc(Directory d, String id, String name, List<int> data, {int? createdMs}) async {
+  final f = File('${d.path}/$id.yfe');
+  final w = await _fv().create(f, name: name, mime: 'x', size: data.length, createdMs: createdMs);
+  await w.add(data);
+  await w.close();
+  return f;
+}
+
+const _a = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', _b = 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb', _c = 'cccccccccccccccccccccccccccccccc';
+
 void main() {
-  late Directory dir;
+  late Directory dir, d;
   late VaultFiles vault;
-  setUp(() { dir = Directory.systemTemp.createTempSync('yandi_vault'); vault = VaultFiles(Directory('${dir.path}/yandi_downloads')); });
+  VaultFiles mk({Future<bool> Function(String)? wipe}) => VaultFiles(d, vault: () async => _fv(), wipe: wipe, tempDir: Directory('${dir.path}/tmp'));
+  setUp(() {
+    dir = Directory.systemTemp.createTempSync('yandi_vault');
+    d = Directory('${dir.path}/yandi_downloads')..createSync();
+    vault = mk();
+  });
   tearDown(() => dir.deleteSync(recursive: true));
 
-  test('служебный префикс убирается из имени для человека', () {
-    expect(VaultFiles.displayName('281eea1a_1.jpg'), '1.jpg');
-    expect(VaultFiles.displayName('photo_big.jpg'), 'photo_big.jpg');   // не наш префикс — не трогаем
-  });
-
-  test('список: новые сверху, недокачанное не показывается, тип по имени', () async {
-    final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    File('${d.path}/aaaaaaaa_old.mp3').writeAsBytesSync([1, 2, 3]);
-    await Future<void>.delayed(const Duration(milliseconds: 20));
-    File('${d.path}/bbbbbbbb_new.png').writeAsBytesSync([1, 2]);
-    File('${d.path}/cccccccc_half.bin.part').writeAsBytesSync([9]);
+  test('список: новые сверху, недокачанное и повреждённое не показывается, имя и тип берутся изнутри файла', () async {
+    await _enc(d, _a, 'old.mp3', [1, 2, 3], createdMs: DateTime(2020).millisecondsSinceEpoch);
+    await _enc(d, _b, 'new.png', [1, 2], createdMs: DateTime(2026).millisecondsSinceEpoch);
+    File('${d.path}/$_c.yfe.part').writeAsBytesSync([9]);
+    File('${d.path}/dddddddddddddddddddddddddddddddd.yfe').writeAsBytesSync(List.filled(100, 7));   // не наш формат
     final l = await vault.list();
     expect(l.map((f) => f.name), ['new.png', 'old.mp3']);
-    expect(l.first.isImage, isTrue);
-    expect(l.last.isAudio, isTrue);
     expect(l.first.size, 2);
+    expect(l.first.id, _b);
+    // на диске имён нет
+    expect(d.listSync().map((e) => e.uri.pathSegments.last).any((n) => n.contains('png') || n.contains('mp3')), isFalse);
   });
 
-  test('импорт делает копию в хранилище, исходный файл остаётся', () async {
-    final src = File('${dir.path}/doc.txt')..writeAsStringSync('привет');
+  test('импорт делает зашифрованную копию, исходный файл остаётся, на диске нет ни имени, ни текста', () async {
+    final src = File('${dir.path}/doc.txt')..writeAsStringSync('привет, секретный мир');
     final v = await vault.importFile(src.path);
     expect(v.name, 'doc.txt');
-    expect(File(v.path).readAsStringSync(), 'привет');
+    expect(v.mime, 'text/plain');
+    expect(RegExp(r'^[0-9a-f]{32}\.yfe$').hasMatch(v.path.split('/').last), isTrue);
+    expect(await _fv().readAll(File(v.path)), src.readAsBytesSync());
+    final raw = File(v.path).readAsBytesSync();
+    expect(String.fromCharCodes(raw), isNot(contains('doc.txt')));
     expect(src.existsSync(), isTrue);
     expect((await vault.list()).length, 1);
   });
 
+  test('импорт под заданным номером; чужой номер с путями сводится к безопасному имени', () async {
+    final src = File('${dir.path}/p.bin')..writeAsBytesSync([1, 2, 3, 4]);
+    final v = await vault.importAs(src.path, _a, name: 'снимок.jpg');
+    expect(v.path, '${d.path}/$_a.yfe');
+    expect(v.mime, 'image/jpeg');
+    final evil = await vault.importAs(src.path, '../../etc/passwd', name: 'x.bin');
+    expect(evil.path.startsWith('${d.path}/'), isTrue);
+    expect(RegExp(r'^[0-9a-f]{32}\.yfe$').hasMatch(evil.path.split('/').last), isTrue);
+    expect(Directory(dir.path).listSync(recursive: true).whereType<File>().every((f) => f.path.startsWith(d.path) || f.path.startsWith('${dir.path}/p.bin')), isTrue);
+  });
+
+  test('временная расшифрованная копия: есть на время работы, потом затёрта (и при ошибке тоже)', () async {
+    final src = File('${dir.path}/r.pdf')..writeAsBytesSync(List.generate(2500, (i) => i % 251));
+    final v = await vault.importFile(src.path);
+    String? seen;
+    final r = await vault.withPlain(v.path, (plain) async {
+      seen = plain;
+      expect(File(plain).readAsBytesSync(), src.readAsBytesSync());
+      expect(plain.endsWith('.pdf'), isTrue);
+      return 42;
+    });
+    expect(r, 42);
+    expect(File(seen!).existsSync(), isFalse);
+    await expectLater(vault.withPlain(v.path, (plain) async {
+      seen = plain;
+      throw StateError('сбой');
+    }), throwsStateError);
+    expect(File(seen!).existsSync(), isFalse);
+    // остаток прошлого сеанса чистится при входе
+    final tmp = Directory('${dir.path}/tmp')..createSync();
+    File('${tmp.path}/left.bin').writeAsBytesSync([1]);
+    await vault.cleanTemp();
+    expect(tmp.listSync(), isEmpty);
+  });
+
   test('удаление: файл мгновенно пропадает из списка, затирание и удаление идут в фоне', () async {
-    final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    final f = File('${d.path}/dddddddd_secret.bin')..writeAsBytesSync(Uint8List.fromList(List<int>.filled(1000, 0x41)));
+    final f = await _enc(d, _a, 'secret.bin', List<int>.filled(1000, 0x41));
     final wiped = <String>[];
-    final v = VaultFiles(d, wipe: (p) async { wiped.add(p); await File(p).delete(); return true; });
+    final v = mk(wipe: (p) async { wiped.add(p); await File(p).delete(); return true; });
     await v.deleteForever(f.path);
     expect(f.existsSync(), isFalse);
     expect(await v.list(), isEmpty, reason: 'из списка ушёл сразу');
@@ -51,39 +104,52 @@ void main() {
   });
 
   test('если затирание не вышло, файл не удаляется молча: скрыт из списка и дочищается при следующем запуске', () async {
-    final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    final f = File('${d.path}/eeeeeeee_x.bin')..writeAsStringSync('x');
-    final v = VaultFiles(d, wipe: (p) async => false);
+    final f = await _enc(d, _a, 'x.bin', [1]);
+    final v = mk(wipe: (p) async => false);
     await v.deleteForever(f.path);
     await v.idle;
     expect(await v.list(), isEmpty, reason: 'в хранилище его уже не видно');
-    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['eeeeeeee_x.bin.wipe'], reason: 'но байты не брошены открытыми без затирания');
-    final later = VaultFiles(d, wipe: (p) async { await File(p).delete(); return true; });
+    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['$_a.yfe.wipe'], reason: 'но файл не брошен без затирания');
+    final later = mk(wipe: (p) async { await File(p).delete(); return true; });
     await later.finishPendingWipes();
     expect(d.listSync(), isEmpty);
-    final v2 = VaultFiles(d);   // без нативного затирания вовсе
-    final g = File('${d.path}/ffffffff_y.bin')..writeAsStringSync('y');
-    await v2.deleteForever(g.path);
-    await v2.idle;
+    final g = await _enc(d, _b, 'y.bin', [2]);
+    await vault.deleteForever(g.path);   // без нативного затирания вовсе
+    await vault.idle;
     expect(d.listSync(), isEmpty);
   });
 
   test('недоделанное удаление дочищается, а в списке не видно', () async {
-    final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    File('${d.path}/aaaaaaaa_half.bin.wipe').writeAsStringSync('остаток');
-    File('${d.path}/bbbbbbbb_ok.txt').writeAsStringSync('ok');
-    final v = VaultFiles(d, wipe: (p) async { await File(p).delete(); return true; });
+    File('${d.path}/$_a.yfe.wipe').writeAsStringSync('остаток');
+    await _enc(d, _b, 'ok.txt', [1, 2]);
+    final v = mk(wipe: (p) async { await File(p).delete(); return true; });
     expect((await v.list()).map((f) => f.name), ['ok.txt']);
     await v.finishPendingWipes();
-    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['bbbbbbbb_ok.txt']);
+    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['$_b.yfe']);
   });
 
   test('deleteAll удаляет всё выбранное', () async {
-    final d = Directory('${dir.path}/yandi_downloads')..createSync();
-    final a = File('${d.path}/11111111_a')..writeAsStringSync('a');
-    final b = File('${d.path}/22222222_b')..writeAsStringSync('b');
-    File('${d.path}/33333333_keep')..writeAsStringSync('k');
+    final a = await _enc(d, _a, 'a', [1]);
+    final b = await _enc(d, _b, 'b', [2]);
+    await _enc(d, _c, 'keep', [3]);
     await vault.deleteAll([a.path, b.path]);
     expect((await vault.list()).map((f) => f.name), ['keep']);
+  });
+
+  test('перенос старых открытых файлов: шифруются, оригиналы стираются, недокачанное старого вида удаляется, повтор ничего не делает', () async {
+    File('${d.path}/aaaaaaaa_old.txt').writeAsStringSync('старый текст');
+    File('${d.path}/bbbbbbbb_pic.png').writeAsBytesSync([1, 2, 3]);
+    File('${d.path}/cccccccc_half.bin.part').writeAsBytesSync([9]);
+    await _enc(d, _a, 'уже.зашифрован', [5]);
+    File('${d.path}/$_b.yfe.part').writeAsBytesSync([8]);   // идущая загрузка нового вида не трогается
+    expect(await vault.migrateLegacy(), 2);
+    final names = (await vault.list()).map((f) => f.name).toSet();
+    expect(names, {'old.txt', 'pic.png', 'уже.зашифрован'});
+    final old = (await vault.list()).firstWhere((f) => f.name == 'old.txt');
+    expect(utf8.decode(await _fv().readAll(File(old.path))), 'старый текст');
+    final left = d.listSync().map((e) => e.uri.pathSegments.last).toList();
+    expect(left.any((n) => n.contains('old') || n.contains('pic') || n.contains('half')), isFalse, reason: '$left');
+    expect(left, contains('$_b.yfe.part'));
+    expect(await vault.migrateLegacy(), 0);
   });
 }

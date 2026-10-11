@@ -1,14 +1,13 @@
 import 'dart:async';
-import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../services/files_host.dart';
-import '../services/file_transfer_service.dart';
 import '../services/vault_files.dart';
 import '../theme.dart';
+import '../widgets/vault_image.dart';
 import 'file_viewer_screen.dart';
 
 /// Вкладка «Файлы»: общее защищённое хранилище приложения. Смотреть можно, не выходя из приложения; удаление — сразу и насовсем, без корзины;
@@ -38,7 +37,8 @@ class FilesTabState extends State<FilesTab> {
   Future<void> reload() async {
     var v = _vault ?? widget.vault;
     if (v == null) {
-      v = VaultFiles(await FileTransferService.downloadsDir(), wipe: AppState.wipeFile);
+      if (!mounted) return;
+      v = await context.read<AppState>().vaultFiles();
     }
     _vault = v;
     unawaited(v.finishPendingWipes());   // доделать затирание, прерванное закрытием приложения
@@ -168,7 +168,7 @@ class FilesTabState extends State<FilesTab> {
     if (f.isImage) {
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.file(File(f.path), width: 48, height: 48, fit: BoxFit.cover, cacheWidth: 96, errorBuilder: (_, __, ___) => Icon(_icon(f), color: AppTheme.textSecondary, size: 32)),
+        child: VaultImage(path: f.path, width: 48, height: 48, cacheWidth: 96, fallback: (_) => Icon(_icon(f), color: AppTheme.textSecondary, size: 32)),
       );
     }
     return Icon(_icon(f), color: AppTheme.textSecondary, size: 32);

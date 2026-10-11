@@ -15,7 +15,8 @@ void main() {
   late Directory dir;
   late String? stored;
   late AvatarService svc;
-  AvatarService make() => AvatarService(dir: Directory('${dir.path}/avatars'), read: () async => stored, write: (s) async => stored = s);
+  final sealer = AvatarSealer(() async => List<int>.generate(32, (i) => i + 5));
+  AvatarService make() => AvatarService(dir: Directory('${dir.path}/avatars'), read: () async => stored, write: (s) async => stored = s, sealer: sealer);
   setUp(() { dir = Directory.systemTemp.createTempSync('yandi_ava'); stored = null; svc = make(); });
   tearDown(() => dir.deleteSync(recursive: true));
 
@@ -40,10 +41,10 @@ void main() {
     final sent = <String>[];
     await svc.onAnnounce('peerA', h, (t) async => sent.add(t));
     expect(sent, [AvatarMsg.request(h)]);
-    expect(svc.fileForPeer('peerA'), isNull);
+    expect(svc.bytesForPeer('peerA'), isNull);
     expect(await svc.onImage('peerA', h, p), isTrue);
     expect(svc.hashForPeer('peerA'), h);
-    expect(svc.fileForPeer('peerA')!.readAsBytesSync(), p);
+    expect(svc.bytesForPeer('peerA'), p);
   });
 
   test('то же объявление повторно не вызывает нового запроса', () async {
@@ -64,7 +65,7 @@ void main() {
     expect(await svc.onImage('peerA', h, Uint8List.fromList(List.filled(300, 7))), isFalse, reason: 'не PNG');
     await svc.onAnnounce('peerA', h, (t) async {});
     expect(await svc.onImage('peerA', h, p, decodes: (_) async => false), isFalse, reason: 'декодер отказал');
-    expect(svc.fileForPeer('peerA'), isNull);
+    expect(svc.bytesForPeer('peerA'), isNull);
   });
 
   test('картинка запрошена у одного контакта, пришла от другого — не принимается', () async {
@@ -83,8 +84,8 @@ void main() {
     expect(svc.hashForPeer('peerB'), h);
     expect(Directory('${dir.path}/avatars').listSync().whereType<File>().length, 1);
     await svc.forgetPeer('peerA');
-    expect(svc.fileForPeer('peerA'), isNull);
-    expect(svc.fileForPeer('peerB'), isNotNull, reason: 'файл нужен второму контакту — остаётся');
+    expect(svc.bytesForPeer('peerA'), isNull);
+    expect(svc.bytesForPeer('peerB'), isNotNull, reason: 'файл нужен второму контакту — остаётся');
     await svc.forgetPeer('peerB');
     expect(Directory('${dir.path}/avatars').listSync().whereType<File>(), isEmpty, reason: 'на файл никто не ссылается — удалён');
   });
@@ -100,7 +101,7 @@ void main() {
   test('своя картинка: отдаётся только по запросу с её хэшем', () async {
     final p = fakePng(9);
     final h = await svc.setMine(p);
-    expect(svc.myFile!.readAsBytesSync(), p);
+    expect(svc.myBytes, p);
     final sent = <String>[];
     await svc.onRequest('peerA', AvatarMsg.hashOf(fakePng(10)), (t) async => sent.add(t));
     expect(sent, isEmpty, reason: 'запросили не ту');
@@ -110,7 +111,7 @@ void main() {
     await svc.clearMine();
     await svc.onRequest('peerA', h, (t) async => sent.add(t));
     expect(sent.length, 1, reason: 'после удаления отдавать нечего');
-    expect(svc.myFile, isNull);
+    expect(svc.myBytes, isNull);
   });
 
   test('привязки и своя картинка переживают перезапуск', () async {
@@ -122,7 +123,7 @@ void main() {
     await again.load();
     expect(again.hashForPeer('peerA'), h);
     expect(again.myHash, mine);
-    expect(again.fileForPeer('peerA'), isNotNull);
+    expect(again.bytesForPeer('peerA'), isNotNull);
   });
 
   test('setMine отвергает не-PNG и слишком большое', () async {
@@ -134,7 +135,7 @@ void main() {
     final dirB = Directory('${dir.path}/b');
     String? storedB;
     final a = svc;
-    final b = AvatarService(dir: Directory('${dirB.path}/avatars'), read: () async => storedB, write: (s) async => storedB = s);
+    final b = AvatarService(dir: Directory('${dirB.path}/avatars'), read: () async => storedB, write: (s) async => storedB = s, sealer: sealer);
     final png = fakePng(21);
     final h = await a.setMine(png);
 
@@ -149,7 +150,7 @@ void main() {
     m = AvatarMsg.tryParse(toB.removeLast())!;
     expect(m.kind, 'a');
     expect(await b.onImage('A', m.hash, m.png!), isTrue);
-    expect(b.fileForPeer('A')!.readAsBytesSync(), png);
+    expect(b.bytesForPeer('A'), png);
     expect(b.hashForPeer('A'), h);
 
     // А меняет картинку: Б получает новый хэш, запрашивает, старый файл удаляется как неиспользуемый
@@ -162,5 +163,30 @@ void main() {
     expect(await b.onImage('A', img.hash, img.png!), isTrue);
     expect(b.hashForPeer('A'), h2);
     expect(Directory('${dirB.path}/avatars').listSync().whereType<File>().length, 1);
+  });
+
+  test('на диске картинка зашифрована; старый открытый .png шифруется и стирается при загрузке', () async {
+    final p = fakePng(21), h = AvatarMsg.hashOf(p);
+    await svc.onAnnounce('peerA', h, (t) async {});
+    await svc.onImage('peerA', h, p);
+    final enc = File('${dir.path}/avatars/$h.yav');
+    expect(enc.existsSync(), isTrue);
+    expect(enc.readAsBytesSync().length, p.length + 28, reason: 'nonce 12 + метка 16');
+    expect(String.fromCharCodes(enc.readAsBytesSync()).contains(String.fromCharCodes(p.sublist(8, 40))), isFalse);
+    // чужой ключ не открывает
+    final other = AvatarService(dir: Directory('${dir.path}/avatars'), read: () async => stored, write: (s) async => stored = s,
+        sealer: AvatarSealer(() async => List<int>.filled(32, 1)));
+    await other.load();
+    expect(other.bytesForPeer('peerA'), isNull);
+
+    // старый открытый файл
+    final q = fakePng(22), hq = AvatarMsg.hashOf(q);
+    File('${dir.path}/avatars/$hq.png').writeAsBytesSync(q);
+    stored = '{"me":null,"peers":{"peerB":"$hq"}}';
+    final mig = make();
+    await mig.load();
+    expect(mig.bytesForPeer('peerB'), q);
+    expect(File('${dir.path}/avatars/$hq.png').existsSync(), isFalse, reason: 'открытый оригинал стёрт');
+    expect(File('${dir.path}/avatars/$hq.yav').existsSync(), isTrue);
   });
 }

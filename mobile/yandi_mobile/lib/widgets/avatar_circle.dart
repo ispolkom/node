@@ -18,14 +18,14 @@ class AvatarCircle extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final file = !showImage ? null : (mine ? state.myAvatarFile : state.avatarFile(peerId!));
+    final bytes = !showImage ? null : (mine ? state.myAvatarBytes : state.avatarBytes(peerId!));
     final initial = label.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim();
     return CircleAvatar(
       radius: radius,
       backgroundColor: AppTheme.surface,
-      backgroundImage: file != null ? FileImage(file) : null,
-      onBackgroundImageError: file != null ? (_, __) {} : null,
-      child: file != null
+      backgroundImage: bytes != null ? MemoryImage(bytes) : null,
+      onBackgroundImageError: bytes != null ? (_, __) {} : null,
+      child: bytes != null
           ? null
           : Text(initial.isNotEmpty ? initial[0].toUpperCase() : '?',
               style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold, fontSize: radius * 0.75)),

@@ -1,16 +1,18 @@
 import 'dart:io';
 import 'dart:math';
+import '../crypto/file_vault.dart';
 import 'file_transfer_service.dart';
 
-/// Файл в изолированном хранилище приложения (папка внутри песочницы Android, недоступная другим приложениям).
+/// Файл в изолированном хранилище приложения (папка внутри песочницы Android, недоступная другим приложениям), зашифрованный.
+/// На диске он называется безликим номером (`<32 hex>.yfe`); настоящее имя, тип и размер лежат внутри и видны только при входе.
 class VaultFile {
   final String path;
-  final String fileName;   // как на диске: <8 hex>_<имя>
+  final String id;
   final String name;       // для человека
   final int size;
   final DateTime modified;
   final String mime;
-  const VaultFile({required this.path, required this.fileName, required this.name, required this.size, required this.modified, required this.mime});
+  const VaultFile({required this.path, required this.id, required this.name, required this.size, required this.modified, required this.mime});
 
   bool get isImage => mime.startsWith('image/');
   bool get isAudio => mime.startsWith('audio/');
@@ -18,78 +20,114 @@ class VaultFile {
   bool get isText => mime.startsWith('text/') || mime == 'application/json' || mime == 'application/xml';
 }
 
-/// Список, импорт и удаление файлов хранилища. Принятые файлы лежат здесь же (`yandi_downloads`), так что это тот же общий список.
+/// Список, импорт и удаление файлов хранилища. Принятые и отправленные файлы лежат здесь же (`yandi_downloads`), так что это общий список.
 class VaultFiles {
   final Directory dir;
+  /// Шифрование файлов ключом этого сеанса (пока заблокировано — ошибка).
+  final Future<FileVault> Function() vault;
   /// Затирание поверх байтов и удаление (на телефоне — нативное, `FileWipe`). Без него файл просто удаляется.
   final Future<bool> Function(String path)? wipe;
-  VaultFiles(this.dir, {this.wipe});
+  /// Где лежат временные расшифрованные копии (на телефоне — кеш приложения); по умолчанию рядом, в `tmp`.
+  final Directory? tempDir;
+  VaultFiles(this.dir, {required this.vault, this.wipe, this.tempDir});
 
   /// Фоновые затирания (чтобы тест и интерфейс могли дождаться конца).
   Future<void> _idle = Future.value();
   Future<void> get idle => _idle;
 
   static const _doomed = '.wipe';
-  static final _prefix = RegExp(r'^[0-9a-f]{8}_');
+  static const _part = '.part';
+  static final _legacyPrefix = RegExp(r'^[0-9a-f]{8}_');
 
-  /// Имя без служебного префикса номера передачи.
-  static String displayName(String fileName) => fileName.replaceFirst(_prefix, '');
-
-  static String _randomPrefix() {
+  static String _randomId() {
     final r = Random.secure();
-    return List.generate(4, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+    return List.generate(16, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
   }
+
+  String pathFor(String id) => '${dir.path}/$id${FileVault.extension}';
 
   Future<List<VaultFile>> list() async {
     if (!await dir.exists()) return [];
+    final v = await vault();
     final out = <VaultFile>[];
     await for (final e in dir.list(followLinks: false)) {
-      if (e is! File) continue;
-      final fileName = e.uri.pathSegments.last;
-      if (fileName.endsWith('.part') || fileName.endsWith(_doomed)) continue;    // недокачанное и уже удаляемое не показываем
-      final st = await e.stat();
-      out.add(VaultFile(
-        path: e.path, fileName: fileName, name: displayName(fileName), size: st.size, modified: st.modified,
-        mime: FileTransferService.guessMime(fileName),
-      ));
+      if (e is! File || !FileVault.isVaultPath(e.path)) continue;    // недокачанное (.part) и уже удаляемое (.wipe) не показываем
+      try {
+        out.add(_describe(e.path, await v.readMeta(e)));
+      } catch (_) {
+        // файл не открывается (повреждён) — в списке его нет; удалить его можно через «удалить всё»
+      }
     }
     out.sort((a, b) => b.modified.compareTo(a.modified));
     return out;
   }
 
-  /// Описание уже лежащего файла (например, полученного в чате) в том же виде, что и в списке.
-  static Future<VaultFile> describe(String path) async {
-    final f = File(path);
-    final st = await f.stat();
-    final fileName = f.uri.pathSegments.last;
-    return VaultFile(path: path, fileName: fileName, name: displayName(fileName), size: st.size, modified: st.modified, mime: FileTransferService.guessMime(fileName));
-  }
+  VaultFile _describe(String path, FileMeta m) => VaultFile(
+        path: path, id: FileVault.idOf(path), name: m.name, size: m.size,
+        modified: DateTime.fromMillisecondsSinceEpoch(m.createdMs), mime: m.mime,
+      );
 
-  /// Положить копию файла в хранилище (чтобы потом переслать оттуда). Исходный файл не трогаем.
-  Future<VaultFile> importFile(String sourcePath, {String? name}) async {
+  /// Описание уже лежащего файла (например, полученного в чате) в том же виде, что и в списке.
+  Future<VaultFile> describe(String path) async => _describe(path, await (await vault()).readMeta(File(path)));
+
+  /// Положить зашифрованную копию файла в хранилище (чтобы потом переслать оттуда). Исходный файл не трогаем.
+  Future<VaultFile> importFile(String sourcePath, {String? name}) =>
+      importAs(sourcePath, _randomId(), name: name);
+
+  /// То же с заданным номером (полученный файл — номер передачи, отправленный — тоже).
+  Future<VaultFile> importAs(String sourcePath, String id, {String? name, String? mime}) async {
     final base = FileTransferService.safeName(name ?? sourcePath.split(Platform.pathSeparator).last);
     if (!await dir.exists()) await dir.create(recursive: true);
-    final target = File('${dir.path}/${_randomPrefix()}_$base');
-    await File(sourcePath).copy(target.path);
-    final st = await target.stat();
-    return VaultFile(path: target.path, fileName: target.uri.pathSegments.last, name: base, size: st.size, modified: st.modified, mime: FileTransferService.guessMime(base));
+    final target = File(pathFor(FileVault.safeId(id)));
+    final m = await (await vault()).importFile(File(sourcePath), target, name: base, mime: mime ?? FileTransferService.guessMime(base));
+    return _describe(target.path, m);
+  }
+
+  /// Расшифрованная копия на время работы [use] (отправка, «вынести наружу»), затем она затирается. Если приложение убьют посреди
+  /// работы, остаток чистится при следующем входе ([cleanTemp]).
+  Future<T> withPlain<T>(String path, Future<T> Function(String plainPath) use) async {
+    final t = await _tmp();
+    final v = await vault();
+    final meta = await v.readMeta(File(path));
+    final ext = meta.name.contains('.') ? '.${meta.name.split('.').last.replaceAll(RegExp(r'[^A-Za-z0-9]'), '')}' : '';
+    final f = File('${t.path}/${_randomId()}$ext');
+    try {
+      await v.exportTo(File(path), f);
+      return await use(f.path);
+    } finally {
+      await _wipeAndDelete(f.path);
+    }
+  }
+
+  Future<Directory> _tmp() async {
+    final d = tempDir ?? Directory('${dir.path}/tmp');
+    if (!await d.exists()) await d.create(recursive: true);
+    return d;
+  }
+
+  /// Остатки временных расшифрованных копий (прошлый сеанс оборвался) затираются и удаляются.
+  Future<void> cleanTemp() async {
+    final d = tempDir ?? Directory('${dir.path}/tmp');
+    if (!await d.exists()) return;
+    await for (final e in d.list(followLinks: false)) {
+      if (e is File) await _wipeAndDelete(e.path);
+    }
   }
 
   /// Удаление сразу и насовсем, без корзины. Файл мгновенно пропадает из списка (переименование), а затирание поверх его байтов и
   /// удаление идут в фоне: на большом файле оно занимает время, и ждать его интерфейсу незачем. Недоделанное (закрыли приложение)
   /// дочищается при следующем открытии вкладки ([finishPendingWipes]).
-  /// Честная оговорка: на флеш-памяти телефона затирание не гарантирует, что старые блоки физически исчезли (выравнивание износа).
-  /// Настоящее стирание даст шифрование файлов собственным ключом (защищённое хранилище): тогда достаточно удалить ключ.
+  /// Содержимое и так зашифровано: без ключа данных остаток на флеш-памяти не прочесть (а после «удалить всё» ключа нет совсем).
   Future<void> deleteForever(String path) async {
     final f = File(path);
     if (!await f.exists()) return;
     var doomed = '$path$_doomed';
     // имя занято (остаток прошлого сбоя, в том числе каталог) — берём уникальное: просьба удалить не должна теряться
-    if (await FileSystemEntity.type(doomed, followLinks: false) != FileSystemEntityType.notFound) doomed = '$path.${_randomPrefix()}$_doomed';
+    if (await FileSystemEntity.type(doomed, followLinks: false) != FileSystemEntityType.notFound) doomed = '$path.${_randomId().substring(0, 8)}$_doomed';
     try {
       await f.rename(doomed);
     } catch (_) {
-      // переименовать не вышло: затираем на месте; без затирания (не Android) — просто удаляем, но не бросаем открытые байты
+      // переименовать не вышло: затираем на месте; без затирания (не Android) — просто удаляем
       final w = wipe;
       if (w == null) {
         try { await f.delete(); } catch (_) {}
@@ -108,7 +146,7 @@ class VaultFiles {
       try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
       return;
     }
-    // затереть не вышло — файл не удаляем молча: он остаётся с пометкой `.wipe` и дочищается при следующем запуске (finishPendingWipes)
+    // затереть не вышло — файл не удаляем молча: он остаётся и дочищается при следующем запуске (finishPendingWipes)
     try { await w(path); } catch (_) {}
   }
 
@@ -123,5 +161,34 @@ class VaultFiles {
       if (e is File && e.path.endsWith(_doomed)) _idle = _idle.then((_) => _wipeAndDelete(e.path));
     }
     await _idle;
+  }
+
+  /// Один раз после обновления: старые открытые файлы (`<8 hex>_<имя>`) шифруются, оригиналы затираются; открытые недокачанные
+  /// остатки (`….part` старого вида) удаляются. Возвращает число перенесённых файлов.
+  Future<int> migrateLegacy() async {
+    if (!await dir.exists()) return 0;
+    var moved = 0;
+    final plain = <File>[];
+    await for (final e in dir.list(followLinks: false)) {
+      if (e is! File) continue;
+      final p = e.path;
+      if (p.endsWith(FileVault.extension) || p.endsWith('${FileVault.extension}$_part') || p.endsWith(_doomed)) continue;
+      plain.add(e);
+    }
+    for (final f in plain) {
+      final fileName = f.uri.pathSegments.last;
+      if (fileName.endsWith(_part)) {
+        await _wipeAndDelete(f.path);
+        continue;
+      }
+      try {
+        await importAs(f.path, _randomId(), name: fileName.replaceFirst(_legacyPrefix, ''));
+        await _wipeAndDelete(f.path);
+        moved++;
+      } catch (_) {
+        // не вышло зашифровать — открытый файл остаётся до следующего входа (не удаляем единственную копию)
+      }
+    }
+    return moved;
   }
 }

@@ -1,7 +1,9 @@
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import '../crypto/file_vault.dart';
 import '../crypto/vault_keys.dart';
 import 'storage_service.dart';
+import 'vault_bytes_cache.dart';
 import 'vault_backend.dart';
 
 /// Закрытая среда приложения: пароль (и, по желанию, секретные слова) → ключ данных → зашифрованная база.
@@ -12,6 +14,7 @@ class VaultService extends ChangeNotifier {
 
   final VaultBackend backend = DeviceVaultBackend();
   VaultKeys? _keys;
+  FileVault? _files;
 
   bool get unlocked => _keys?.unlocked ?? false;
 
@@ -30,8 +33,11 @@ class VaultService extends ChangeNotifier {
 
   Future<void> _open(VaultKeys k) async {
     try {
+      StorageService.setSecureKey(await k.subKey('secure'));
+      await StorageService.wrapExistingSecureValues();
       await StorageService.openEncrypted(await k.subKey('db'));
     } catch (e) {
+      StorageService.setSecureKey(null);
       k.lock();
       rethrow;
     }
@@ -46,14 +52,29 @@ class VaultService extends ChangeNotifier {
     return k.subKey(purpose);
   }
 
+  /// Шифрование файлов хранилища ключом этого сеанса; пока заблокировано — ошибка. Ключ стирается при блокировке.
+  Future<FileVault> files() async {
+    var f = _files;
+    if (f != null) return f;
+    final k = _keys;
+    if (k == null) throw StateError('хранилище заблокировано');
+    return _files = FileVault.withKey(await k.subKey('files'));
+  }
+
   /// Блокировка: база закрывается, ключ стирается из памяти.
   Future<void> lock() async {
     await StorageService.closeDb();
-    StorageService.dropSecureCache();
+    StorageService.setSecureKey(null);
+    _files?.dispose();
+    _files = null;
+    VaultBytesCache.clear();
     _keys?.lock();
     _keys = null;
     notifyListeners();
   }
+
+  /// Проверить пароль, не открывая ничего (подтверждение опасных действий). Неверные попытки считаются и замедляются, как при входе.
+  Future<void> verifyPassword(String password) async => (await VaultKeys.unlock(backend, password)).lock();
 
   Future<void> changePassword(String oldPassword, String newPassword) async {
     final k = _keys;
@@ -63,6 +84,8 @@ class VaultService extends ChangeNotifier {
 
   /// Удалить всё: ключи, база, файлы, секреты. После этого приложение как после установки.
   Future<void> eraseEverything() async {
+    _files?.dispose();
+    _files = null;
     _keys?.lock();
     _keys = null;
     await VaultKeys.destroy(backend);
