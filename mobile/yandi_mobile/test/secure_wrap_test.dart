@@ -108,6 +108,15 @@ void main() {
       expect(await mk().claim('new|id|2', soon), isTrue);
       expect(f.readAsStringSync(), startsWith('e1:'));
       expect(await mk().claim('old|id|1', soon), isFalse, reason: 'старая запись не потерялась');
+
+      // и без новых сообщений: при входе старый открытый журнал шифруется сразу
+      f.writeAsStringSync('{"legacy|id|9": ${soon + 50000}}');
+      await mk().reseal();
+      expect(f.readAsStringSync(), startsWith('e1:'));
+      expect(await mk().claim('legacy|id|9', soon), isFalse, reason: 'запись не потерялась');
+      final sealed = f.readAsStringSync();
+      await mk().reseal();   // уже зашифрован — не трогается
+      expect(f.readAsStringSync(), sealed);
     } finally {
       dir.deleteSync(recursive: true);
     }

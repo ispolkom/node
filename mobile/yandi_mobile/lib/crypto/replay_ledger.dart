@@ -13,6 +13,28 @@ class ReplayLedger {
   ReplayLedger(this.file, {this.seal, this.open});
   static Future<void> _tail = Future.value();
 
+  /// Переписать файл в зашифрованном виде (старый открытый журнал шифруется сразу при входе, а не при следующем сообщении).
+  Future<void> reseal() {
+    final result = Completer<void>();
+    _tail = _tail.then((_) async {
+      try {
+        if (seal != null && open != null && await file.exists()) {
+          final text = await file.readAsString();
+          final json = await open!(text);
+          if (json == text) {   // был открытым
+            final temp = File('${file.path}.tmp');
+            await temp.writeAsString(await seal!(json), flush: true);
+            await temp.rename(file.path);
+          }
+        }
+        result.complete();
+      } catch (e, st) {
+        result.completeError(e, st);
+      }
+    });
+    return result.future;
+  }
+
   Future<bool> claim(String id, int expiresMs, {int? nowMs}) {
     final result = Completer<bool>();
     _tail = _tail.then((_) async {

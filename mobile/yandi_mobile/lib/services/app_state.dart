@@ -115,6 +115,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     avatars = av;
 
     unawaited(_filesHousekeeping());
+    unawaited(StorageService.replayLedger?.reseal().catchError((_) {}) ?? Future<void>.value());   // старый открытый журнал повторов — в зашифрованный вид
 
     // 2. Ключи пользователя (генерируются один раз и навсегда)
     identity = await Identity.loadOrGenerate();

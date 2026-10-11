@@ -12,6 +12,11 @@
 # Свои классы, которые вызываются из Flutter по каналам и из манифеста.
 -keep class com.yandi.yandi_mobile.** { *; }
 
+# Зашифрованная база SQLCipher: нативный код вызывает Java-классы по именам (библиотека приносит и свои правила — это запас).
+-keep class net.zetetic.database.** { *; }
+-dontwarn net.zetetic.database.**
+-keep class com.davidmartos96.sqflite_sqlcipher.** { *; }
+
 # Защищённое хранилище (EncryptedSharedPreferences / Tink).
 -keep class com.google.crypto.tink.** { *; }
 -dontwarn com.google.crypto.tink.**
