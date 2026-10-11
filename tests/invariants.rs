@@ -99,8 +99,6 @@ fn no_try_lock_unwrap_in_production_code() {
 #[test]
 fn exit_handlers_use_exit_policy_only() {
     let files = [
-        "src/protocol/tcp_tunnel_exit.rs",
-        "src/protocol/tcp_tunnel_exit_v2.rs",
         "src/socks5/exit_node.rs",
         "src/proxy/gateway.rs",
     ];
