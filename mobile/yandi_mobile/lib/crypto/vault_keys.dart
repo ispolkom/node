@@ -1,0 +1,329 @@
+import 'dart:convert';
+import 'dart:isolate';
+import 'dart:math';
+import 'dart:typed_data';
+import 'package:cryptography/cryptography.dart';
+
+/// Ядро «закрытой среды»: один случайный ключ данных (DK), которым шифруется всё содержимое приложения (база, файлы).
+/// Сам DK на диск не попадает, лежит только в обёрнутом виде, под двумя независимыми замками:
+///   • замок «пароль»: Argon2id(пароль, соль) вместе с секретом, хранящимся в Android Keystore (`hw`): файл, унесённый с телефона,
+///     без этого секрета не открывается, а перебор короткого пароля возможен только на самом телефоне;
+///   • замок «фраза» (необязательный): Argon2id(позиционная фраза, соль), только для восстановления забытого пароля.
+/// Проверка пароля — это проверка метки AES-GCM при раскрытии DK: неверный пароль не даёт ключа, а не «похожий» ключ.
+/// Неверные попытки считаются ДО проверки (убить процесс посреди попытки не помогает) и замедляются: после третьей — паузы.
+
+/// Что хранит ядро вне себя: один файл с обёрнутыми ключами и значения защищённого хранилища (Keystore).
+abstract class VaultBackend {
+  Future<String?> readBlob();
+  Future<void> writeBlob(String text);
+  Future<String?> secureRead(String key);
+  Future<void> secureWrite(String key, String value);
+  Future<void> secureDelete(String key);
+  int nowMs();
+}
+
+/// Для тестов и временных сред: всё в памяти, часы подставляются.
+class MemoryVaultBackend implements VaultBackend {
+  String? blob;
+  final Map<String, String> secure = {};
+  int now = 1000000;
+  @override
+  Future<String?> readBlob() async => blob;
+  @override
+  Future<void> writeBlob(String text) async => blob = text;
+  @override
+  Future<String?> secureRead(String key) async => secure[key];
+  @override
+  Future<void> secureWrite(String key, String value) async => secure[key] = value;
+  @override
+  Future<void> secureDelete(String key) async => secure.remove(key);
+  @override
+  int nowMs() => now;
+}
+
+/// Параметры Argon2id (хранятся в файле: потом их можно усилить, не ломая прежних хранилищ).
+class VaultKdf {
+  final int memoryKiB, iterations, parallelism;
+  const VaultKdf(this.memoryKiB, this.iterations, this.parallelism);
+  Map<String, dynamic> toJson() => {'m': memoryKiB, 't': iterations, 'p': parallelism};
+  factory VaultKdf.fromJson(Map<String, dynamic> j) => VaultKdf(j['m'] as int, j['t'] as int, j['p'] as int);
+
+  /// Пароль вводят при каждом запуске: быстрее, но за ним ещё и секрет Keystore.
+  static const password = VaultKdf(32768, 3, 2);
+  /// Фразу вводят при создании и восстановлении: тяжелее, она единственная защита замка «фраза».
+  static const phrase = VaultKdf(65536, 4, 2);
+  /// Только для тестов.
+  static const test = VaultKdf(8, 1, 1);
+}
+
+/// Пароль короче минимума или фраза слишком слабая.
+class VaultPolicyError implements Exception {
+  final String message;
+  VaultPolicyError(this.message);
+  @override
+  String toString() => message;
+}
+
+/// Пароль или фраза не подошли; [failures] — подряд неверных попыток.
+class VaultWrongSecret implements Exception {
+  final int failures;
+  VaultWrongSecret(this.failures);
+  @override
+  String toString() => 'Неверный пароль или фраза (попыток подряд: $failures)';
+}
+
+/// Слишком много неверных попыток: подождать.
+class VaultThrottled implements Exception {
+  final Duration wait;
+  VaultThrottled(this.wait);
+  @override
+  String toString() => 'Слишком много попыток, подождите ${wait.inSeconds} с';
+}
+
+/// Фразу при создании не вводили: забытый пароль восстановить нельзя.
+class VaultNoRecovery implements Exception {
+  @override
+  String toString() => 'Фраза восстановления не задана';
+}
+
+/// Файл ключей повреждён или не наш: не перезаписываем его, а сообщаем.
+class VaultCorrupt implements Exception {
+  final String why;
+  VaultCorrupt(this.why);
+  @override
+  String toString() => 'Хранилище ключей повреждено: $why';
+}
+
+class VaultKeys {
+  VaultKeys._(this._b);
+  final VaultBackend _b;
+  Uint8List? _dk;
+
+  static const minPasswordLength = 6;
+  /// Фраза слабее — отвергается: достаточно 5 непустых полей ИЛИ 25 знаков всего.
+  static const minPhraseFields = 5;
+  static const minPhraseChars = 25;
+  /// Позиций в фразе (как на экране создания аккаунта).
+  static const phraseFieldCount = 20;
+  /// После скольких подряд неверных попыток начинаются паузы.
+  static const freeAttempts = 3;
+
+  static const _kHw = 'vault_hw';
+  static const _kFail = 'vault_fail_pw';
+  static const _kFailPh = 'vault_fail_ph';
+  static const _kNext = 'vault_next_pw';
+  static const _kNextPh = 'vault_next_ph';
+
+  bool get unlocked => _dk != null;
+
+  /// Подключ для конкретной цели (ключ базы, ключ файлов …): из DK одним HKDF, чтобы сам DK нигде не использовался напрямую.
+  Future<Uint8List> subKey(String purpose) async {
+    final dk = _dk;
+    if (dk == null) throw StateError('хранилище заблокировано');
+    final k = await Hkdf(hmac: Hmac.sha256(), outputLength: 32)
+        .deriveKey(secretKey: SecretKey(dk), nonce: utf8.encode('yandi-vault-sub:v1'), info: utf8.encode(purpose));
+    return Uint8List.fromList(await k.extractBytes());
+  }
+
+  /// Стереть ключ из памяти (блокировка экрана, уход в фон).
+  void lock() {
+    final dk = _dk;
+    if (dk != null) {
+      dk.fillRange(0, dk.length, 0);
+      _dk = null;
+    }
+  }
+
+  // ── Создание, открытие, восстановление ────────────────────────────────────────────────────────────────────────────
+
+  static Future<bool> exists(VaultBackend b) async => (await b.readBlob()) != null;
+
+  /// Создать хранилище: пароль обязателен (≥ 6 знаков), фраза — по желанию (null или пустые поля — без восстановления).
+  /// Существующее хранилище не перезаписывается.
+  static Future<VaultKeys> create(
+    VaultBackend b, {
+    required String password,
+    List<String>? phraseFields,
+    VaultKdf pwKdf = VaultKdf.password,
+    VaultKdf phKdf = VaultKdf.phrase,
+  }) async {
+    if (await exists(b)) throw StateError('хранилище уже создано');
+    if (password.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    final phrase = phraseFields == null ? null : normalizePhrase(phraseFields);
+    final hasPhrase = phrase != null && phrase.replaceAll('|', '').isNotEmpty;
+    if (hasPhrase && !phraseStrongEnough(phraseFields!)) {
+      throw VaultPolicyError('Фраза слишком короткая: минимум $minPhraseFields полей или $minPhraseChars знаков');
+    }
+    final rnd = Random.secure();
+    Uint8List rb(int n) => Uint8List.fromList(List.generate(n, (_) => rnd.nextInt(256)));
+    final dk = rb(32);
+    final hw = rb(32);
+    await b.secureWrite(_kHw, base64.encode(hw));
+    final saltPw = rb(16), saltPh = rb(16);
+    final kekPw = await _kekPassword(password, saltPw, pwKdf, hw);
+    final wrapPw = await _wrap(dk, kekPw, 'pw');
+    Uint8List? wrapPh;
+    if (hasPhrase) wrapPh = await _wrap(dk, await _kekPhrase(phrase, saltPh, phKdf), 'ph');
+    await b.writeBlob(jsonEncode({
+      'v': 1,
+      'pw': {'kdf': pwKdf.toJson(), 'salt': base64.encode(saltPw), 'wrap': base64.encode(wrapPw)},
+      'ph': hasPhrase ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!)} : null,
+    }));
+    await _resetCounters(b);
+    return VaultKeys._(b).._dk = dk;
+  }
+
+  /// Открыть паролем. [VaultWrongSecret] — не подошёл, [VaultThrottled] — рано.
+  static Future<VaultKeys> unlock(VaultBackend b, String password) async {
+    final f = await _readFile(b);
+    await _gate(b, _kFail, _kNext);
+    final failures = await _bump(b, _kFail, _kNext);   // считаем ДО проверки
+    final hw = await b.secureRead(_kHw);
+    final pw = f['pw'] as Map<String, dynamic>;
+    Uint8List? dk;
+    if (hw != null) {
+      final kek = await _kekPassword(password, base64.decode(pw['salt'] as String), VaultKdf.fromJson(pw['kdf'] as Map<String, dynamic>), base64.decode(hw));
+      dk = await _unwrap(base64.decode(pw['wrap'] as String), kek, 'pw');
+    }
+    if (dk == null) throw VaultWrongSecret(failures);
+    await _resetCounters(b);
+    return VaultKeys._(b).._dk = dk;
+  }
+
+  /// Забыли пароль: открыть фразой и сразу задать новый пароль.
+  static Future<VaultKeys> recoverWithPhrase(VaultBackend b, List<String> phraseFields, String newPassword) async {
+    final f = await _readFile(b);
+    final ph = f['ph'] as Map<String, dynamic>?;
+    if (ph == null) throw VaultNoRecovery();
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    await _gate(b, _kFailPh, _kNextPh);
+    final failures = await _bump(b, _kFailPh, _kNextPh);
+    final kek = await _kekPhrase(normalizePhrase(phraseFields), base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
+    final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
+    if (dk == null) throw VaultWrongSecret(failures);
+    await _setPassword(b, f, dk, newPassword);
+    await _resetCounters(b);
+    return VaultKeys._(b).._dk = dk;
+  }
+
+  /// Сменить пароль (хранилище должно быть открыто; старый пароль проверяется заново).
+  Future<void> changePassword(String oldPassword, String newPassword) async {
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    final dk = _dk;
+    if (dk == null) throw StateError('хранилище заблокировано');
+    final check = await VaultKeys.unlock(_b, oldPassword);   // неверный старый — те же счётчики и паузы
+    check.lock();
+    await _setPassword(_b, await _readFile(_b), dk, newPassword);
+  }
+
+  /// Удалить все ключи (кнопка «Удалить всё»): после этого данные нечитаемы навсегда.
+  static Future<void> destroy(VaultBackend b) async {
+    await b.writeBlob('');
+    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh]) {
+      await b.secureDelete(k);
+    }
+  }
+
+  // ── Фраза ──────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  /// Каждое поле: обрезать, привести к нижнему регистру, «ё» → «е», пробелы внутри схлопнуть; позиция сохраняется (`|` между полями).
+  /// Так опечатки в регистре и «ё/е» не лишают человека данных.
+  static String normalizePhrase(List<String> fields) {
+    final f = List<String>.generate(phraseFieldCount, (i) => i < fields.length ? fields[i] : '');
+    return f.map((s) => s.trim().toLowerCase().replaceAll('ё', 'е').replaceAll(RegExp(r'\s+'), ' ')).join('|');
+  }
+
+  static bool phraseStrongEnough(List<String> fields) {
+    final parts = normalizePhrase(fields).split('|').where((s) => s.isNotEmpty).toList();
+    final chars = parts.fold<int>(0, (a, s) => a + s.runes.length);
+    return parts.length >= minPhraseFields || chars >= minPhraseChars;
+  }
+
+  // ── Внутреннее ─────────────────────────────────────────────────────────────────────────────────────────────────────
+
+  static Future<Map<String, dynamic>> _readFile(VaultBackend b) async {
+    final t = await b.readBlob();
+    if (t == null || t.isEmpty) throw VaultCorrupt('файла нет');
+    try {
+      final m = jsonDecode(t) as Map<String, dynamic>;
+      if (m['v'] != 1 || m['pw'] is! Map) throw VaultCorrupt('неизвестный формат');
+      return m;
+    } catch (e) {
+      if (e is VaultCorrupt) rethrow;
+      throw VaultCorrupt('не читается');
+    }
+  }
+
+  static Future<void> _setPassword(VaultBackend b, Map<String, dynamic> f, Uint8List dk, String password) async {
+    final rnd = Random.secure();
+    final salt = Uint8List.fromList(List.generate(16, (_) => rnd.nextInt(256)));
+    final hw = await b.secureRead(_kHw);
+    final hwBytes = hw != null ? base64.decode(hw) : Uint8List.fromList(List.generate(32, (_) => rnd.nextInt(256)));
+    if (hw == null) await b.secureWrite(_kHw, base64.encode(hwBytes));   // восстановление на другом телефоне: свой секрет Keystore
+    final kdf = VaultKdf.fromJson((f['pw'] as Map<String, dynamic>)['kdf'] as Map<String, dynamic>);
+    final kek = await _kekPassword(password, salt, kdf, hwBytes);
+    f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
+    await b.writeBlob(jsonEncode(f));
+  }
+
+  static Future<void> _gate(VaultBackend b, String kFail, String kNext) async {
+    final next = int.tryParse(await b.secureRead(kNext) ?? '') ?? 0;
+    final left = next - b.nowMs();
+    if (left > 0) throw VaultThrottled(Duration(milliseconds: left));
+  }
+
+  /// Подряд неверных попыток после этой; ставит паузу, если пора.
+  static Future<int> _bump(VaultBackend b, String kFail, String kNext) async {
+    final n = (int.tryParse(await b.secureRead(kFail) ?? '') ?? 0) + 1;
+    await b.secureWrite(kFail, '$n');
+    if (n > freeAttempts) {
+      final sec = min(900, 5 * (1 << min(n - freeAttempts - 1, 10)));   // 5, 10, 20 … до 15 минут
+      await b.secureWrite(kNext, '${b.nowMs() + sec * 1000}');
+    }
+    return n;
+  }
+
+  static Future<void> _resetCounters(VaultBackend b) async {
+    for (final k in [_kFail, _kFailPh, _kNext, _kNextPh]) {
+      await b.secureDelete(k);
+    }
+  }
+
+  static Future<SecretKey> _kekPassword(String password, Uint8List salt, VaultKdf kdf, List<int> hw) async {
+    final stretched = await _argon(utf8.encode(password), salt, kdf);
+    return _hkdf([...stretched, ...hw], 'yandi-vault-pw:v1');
+  }
+
+  static Future<SecretKey> _kekPhrase(String normalized, Uint8List salt, VaultKdf kdf) async {
+    final stretched = await _argon(utf8.encode(normalized), salt, kdf);
+    return _hkdf(stretched, 'yandi-vault-ph:v1');
+  }
+
+  static Future<SecretKey> _hkdf(List<int> ikm, String info) =>
+      Hkdf(hmac: Hmac.sha256(), outputLength: 32).deriveKey(secretKey: SecretKey(ikm), nonce: utf8.encode('yandi-vault-kek'), info: utf8.encode(info));
+
+  /// Argon2id в отдельном потоке выполнения: интерфейс не замирает на секунды.
+  static Future<List<int>> _argon(List<int> secret, List<int> salt, VaultKdf kdf) =>
+      Isolate.run(() => _argonSync(secret, salt, kdf.memoryKiB, kdf.iterations, kdf.parallelism));
+
+  static Future<List<int>> _argonSync(List<int> secret, List<int> salt, int m, int t, int p) async {
+    final k = await Argon2id(memory: m, parallelism: p, iterations: t, hashLength: 32).deriveKey(secretKey: SecretKey(secret), nonce: salt);
+    return k.extractBytes();
+  }
+
+  static final _aes = AesGcm.with256bits();
+
+  static Future<Uint8List> _wrap(Uint8List dk, SecretKey kek, String slot) async {
+    final box = await _aes.encrypt(dk, secretKey: kek, aad: utf8.encode('yandi-vault:v1:$slot'));
+    return Uint8List.fromList(box.concatenation());
+  }
+
+  static Future<Uint8List?> _unwrap(List<int> wrapped, SecretKey kek, String slot) async {
+    try {
+      final box = SecretBox.fromConcatenation(wrapped, nonceLength: 12, macLength: 16);
+      return Uint8List.fromList(await _aes.decrypt(box, secretKey: kek, aad: utf8.encode('yandi-vault:v1:$slot')));
+    } catch (_) {
+      return null;
+    }
+  }
+}
