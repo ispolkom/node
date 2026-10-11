@@ -822,7 +822,7 @@ pub fn refresh_entry(gid: &str, seq: u64) {
 
 /// Фоновая задача: синхронизация по таймеру и по намёкам групп.
 pub fn spawn_background() {
-    tokio::spawn(async move {
+    crate::supervisor::supervise("groups-pc-sync", crate::supervisor::Policy::restart(), || async move {
         let mut rx = crate::mobile_groups::subscribe();
         let dev_wait = std::time::Duration::from_secs(2);
         loop {

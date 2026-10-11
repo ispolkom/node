@@ -353,68 +353,6 @@ impl P2PCli {
                 Self::handle_relay_list_command(transport).await?
             }
 
-            "tcp" => {
-                if parts.len() < 2 {
-                    println!("Использование: tcp <SHORT_ID>");
-                    println!("Пример: tcp 0021944b");
-                    println!();
-                    println!("Запускает Raw TCP Tunnel over HTTP CONNECT на 127.0.0.1:9090");
-                    println!("весь трафик будет проксироваться через указанного пира (exit node)");
-                    println!();
-                    println!("⚡ Это экспериментальная функция для максимальной скорости!");
-                    println!("   Убирает SOCKS5 и JSON слои, отправляя raw bytes в YTP wagon");
-                    println!();
-                    println!("Используйте 'peers' чтобы узнать Short ID пира");
-                    return Ok(());
-                }
-
-                let short_id_hex = parts[1];
-
-                // Парсим короткий ID
-                let short_id_bytes = hex::decode(short_id_hex)
-                    .map_err(|_| format!("Неверный формат Short ID: {}", short_id_hex))?;
-
-                if short_id_bytes.len() != 8 {
-                    return Err(format!("Short ID должен быть 8 байт (16 hex), получено: {}", short_id_bytes.len()));
-                }
-
-                // Ищем пира по короткому ID
-                let peers = transport.get_peers().await;
-                let exit_peer = peers.iter()
-                    .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-                    .ok_or_else(|| format!("Пир с Short ID {} не найден", short_id_hex))?;
-
-                println!("🚇 Запуск Raw TCP Tunnel...");
-                println!("   HTTP Proxy на 127.0.0.1:9090 → Exit Node {} ({})", exit_peer.addr, short_id_hex);
-                println!();
-
-                // Создаем TcpTunnel
-                use crate::protocol::TcpTunnel;
-
-                let transport_for_tcp = transport.clone();
-                let exit_peer_id = exit_peer.id;
-
-                let tcp_tunnel = TcpTunnel::new(
-                    std::sync::Arc::new(transport_for_tcp),
-                    exit_peer_id,
-                    9090  // Порт 9090 как в плане
-                );
-
-                println!("✅ Raw TCP Tunnel запускается на http://127.0.0.1:9090");
-                println!("📡 Configure browser: HTTP Proxy = 127.0.0.1:9090");
-                println!();
-
-                tokio::spawn(async move {
-                    if let Err(e) = tcp_tunnel.run().await {
-                        eprintln!("❌ TCP Tunnel Error: {}", e);
-                    }
-                });
-
-                println!("✅ TCP Tunnel активен!");
-                println!("⚡ Raw bytes → YTP wagon → Exit Node → Интернет");
-                println!();
-            }
-
             "tunnel" => {
                 if parts.len() < 2 {
                     println!("Использование: tunnel <start|stop|status|list>");
@@ -611,61 +549,6 @@ impl P2PCli {
                 });
 
                 println!("✅ SOCKS5 Exit Node запущен в фоне!");
-            }
-
-            "tcp-exit" => {
-                println!("🚇 Запуск TCP Tunnel Exit Handler...");
-                println!();
-                println!("   Эта нода будет принимать входящие HTTP/HTTPS CONNECT запросы");
-                println!("   от TcpTunnel клиентов и проксировать трафик в интернет.");
-                println!("   Raw TCP bytes → YTP wagons → Internet");
-                println!();
-
-                use crate::protocol::TcpTunnelExitHandler;
-
-                let transport_clone = std::sync::Arc::new(transport.clone());
-
-                println!("✅ TCP Tunnel Exit Handler запускается...");
-
-                tokio::spawn(async move {
-                    let exit_handler = TcpTunnelExitHandler::new(transport_clone).await;
-                    if let Err(e) = exit_handler.run().await {
-                        eprintln!("❌ TCP Tunnel Exit error: {}", e);
-                    }
-                });
-
-                println!("✅ TCP Tunnel Exit Handler запущен в фоне!");
-                println!("   Теперь entry nodes могут использовать эту ноду как gateway.");
-            }
-
-            "rawip-exit" => {
-                println!("🚀 Запуск RawIP Tunnel Exit Handler...");
-                println!();
-                println!("   Эта нода будет принимать сырые IP пакеты через TCP (порт 10001)");
-                println!("   от Entry Nodes и проксировать их в интернет.");
-                println!("   IP packets (RawIP protocol) → Internet");
-                println!();
-
-                use crate::netlayer::RawIpTunnel;
-
-                let transport_clone = std::sync::Arc::new(transport.clone());
-
-                println!("✅ RawIP Tunnel запускается...");
-
-                tokio::spawn(async move {
-                    let station_clone = {
-                        let station_opt = transport_clone.station.lock().await;
-                        station_opt.as_ref().unwrap().clone()
-                    };
-
-                    let rawip_tunnel = RawIpTunnel::new(station_clone, 10001);
-                    if let Err(e) = rawip_tunnel.run().await {
-                        eprintln!("❌ RawIP Tunnel error: {}", e);
-                    }
-                });
-
-                println!("✅ RawIP Tunnel запущен на порту 10001!");
-                println!("   Теперь мобильные приложения могут подключаться.");
             }
 
             "tun" => {
@@ -877,9 +760,6 @@ impl P2PCli {
                 println!("   relay-server       - включить режим relay сервера");
                 println!("   relay-connect <ID> - подключиться к пиру через relay");
                 println!("   relay-list         - показать активные relay сессии");
-                println!("   tcp <SHORT_ID>     - запустить TCP Tunnel через пира (entry node)");
-                println!("   tcp-exit           - запустить TCP Tunnel Exit Handler (gateway)");
-                println!("   rawip-exit         - запустить RawIP Tunnel (порт 10001) для мобильных приложений");
                 println!("   tunnel <CMD>       - управление P2P тоннелями (voice/video/file)");
                 println!("   tun init           - создать TUN устройства");
                 println!("   tun link <ID>      - связать TUN с exit node (entry node)");

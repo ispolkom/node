@@ -148,15 +148,18 @@ impl ClosedEnv {
     /// Фоновая проверка простоя: заперто само, если владелец давно не действовал (0 — не запирать).
     pub fn spawn_auto_lock(self: &Arc<Self>) {
         let env = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                let idle = {
-                    let i = env.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    i.vault.is_some() && !i.auto_lock.is_zero() && i.last_activity.elapsed() >= i.auto_lock
-                };
-                if idle {
-                    env.lock().await;
+        crate::supervisor::supervise("closed-env-auto-lock", crate::supervisor::Policy::restart(), move || {
+            let env = env.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    let idle = {
+                        let i = env.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        i.vault.is_some() && !i.auto_lock.is_zero() && i.last_activity.elapsed() >= i.auto_lock
+                    };
+                    if idle {
+                        env.lock().await;
+                    }
                 }
             }
         });

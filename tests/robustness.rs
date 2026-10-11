@@ -29,8 +29,6 @@ fn decoders() -> Vec<(&'static str, Probe)> {
     use yandi::p2p::packet::P2PPacket;
     use yandi::p2p_tunnel::protocol::TunnelPacket;
     use yandi::protocol::station::BatchedWagon;
-    use yandi::protocol::tcp_station::TcpWagon;
-    use yandi::protocol::tcp_transport::TcpPacketHeader;
     use yandi::protocol::wagon::Wagon;
     use yandi::socks5::proxy_protocol as pp;
     use yandi::socks5::protocol as sp;
@@ -60,8 +58,6 @@ fn decoders() -> Vec<(&'static str, Probe)> {
         d!("TunnelPacket", |b| drop(TunnelPacket::from_bytes(b))),
         d!("Wagon", |b| drop(Wagon::from_bytes(b))),
         d!("BatchedWagon", |b| drop(BatchedWagon::from_bytes(b))),
-        d!("TcpWagon", |b| drop(TcpWagon::from_bytes(b))),
-        d!("TcpPacketHeader", |b| drop(TcpPacketHeader::from_bytes(b))),
         d!("StreamHeader", |b| drop(StreamHeader::from_bytes(b))),
         d!("StreamFrame", |b| drop(StreamFrame::from_bytes(b))),
         d!("DhtQuery", |b| drop(DhtQuery::from_bytes(b))),
