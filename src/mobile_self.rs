@@ -49,6 +49,8 @@ fn unb64(s: &str) -> Option<Vec<u8>> {
 struct KeyHolder {
     master: Option<Zeroizing<[u8; 32]>>,
     keys: Option<Keys>,
+    /// узел без мастер-ключа и без закрытой среды (первый запуск): прежний открытый файл ключей, как до закрытой среды
+    plain_mode: bool,
 }
 
 impl KeyHolder {
@@ -56,6 +58,7 @@ impl KeyHolder {
         // X25519 StaticSecret и Ed25519 SigningKey стирают секреты при Drop.
         self.keys = None;
         self.master = None;
+        self.plain_mode = false;
     }
     fn replace(&mut self, master: Zeroizing<[u8; 32]>) {
         self.revoke();
@@ -75,13 +78,18 @@ impl std::ops::Deref for KeyGuard<'_> {
     fn deref(&self) -> &Keys { self.0.keys.as_ref().expect("ключи проверены под guard") }
 }
 
-fn keys_from(holder: &Mutex<KeyHolder>, load: impl FnOnce(&[u8; 32]) -> Keys) -> Option<KeyGuard<'_>> {
+fn keys_from(holder: &Mutex<KeyHolder>, load: impl FnOnce(Option<&[u8; 32]>) -> Keys) -> Option<KeyGuard<'_>> {
     let mut state = match holder.lock() {
         Ok(state) => state,
         Err(error) => { error.into_inner().revoke(); return None; }
     };
     if state.keys.is_none() {
-        let master = state.master.as_deref()?; // запертый держатель не читает и не создаёт plain файл
+        // запертый держатель не читает и не создаёт открытый файл; без мастер-ключа — только в явном plain_mode
+        let master = match state.master.as_deref() {
+            Some(m) => Some(m),
+            None if state.plain_mode => None,
+            None => return None,
+        };
         let loaded = load(master);
         state.keys = Some(loaded);
     }
@@ -89,7 +97,7 @@ fn keys_from(holder: &Mutex<KeyHolder>, load: impl FnOnce(&[u8; 32]) -> Keys) ->
 }
 
 fn keys() -> Option<KeyGuard<'static>> {
-    keys_from(key_cell(), |master| load_protected(&crate::util::data_dir::data_dir(), Some(master)))
+    keys_from(key_cell(), |master| load_protected(&crate::util::data_dir::data_dir(), master))
 }
 
 /// Перенос ключей «компьютера как собеседника» на ключ закрытой среды: из файла под прежним мастер-ключом или из открытого
@@ -157,6 +165,18 @@ pub fn lock_keys() {
 fn revoke_holder(holder: &Mutex<KeyHolder>) {
     // Panic предыдущей операции не должен препятствовать стиранию секретов.
     holder.lock().unwrap_or_else(|e| e.into_inner()).revoke();
+}
+
+/// Узел без мастер-ключа и без закрытой среды: ключи в прежнем открытом файле (как до закрытой среды). Отзыв отменяет режим.
+pub fn allow_plain_keys() {
+    match key_cell().lock() {
+        Ok(mut state) => {
+            if state.master.is_none() {
+                state.plain_mode = true;
+            }
+        }
+        Err(e) => e.into_inner().revoke(),
+    }
 }
 
 /// Переходный legacy-вход main. Парольный controller должен устанавливать сеанс
@@ -889,12 +909,12 @@ mod tests {
         let holder = Mutex::new(KeyHolder::default());
         assert!(keys_from(&holder, |_| panic!("запертый держатель не должен обращаться к диску")).is_none());
         holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
-        let old = keys_from(&holder, |master| make_keys(*master, *master)).unwrap().ed_pub;
+        let old = keys_from(&holder, |master| make_keys(*master.unwrap(), *master.unwrap())).unwrap().ed_pub;
         holder.lock().unwrap().revoke();
         assert!(keys_from(&holder, |_| panic!("отозванный ключ не должен восстанавливаться")).is_none());
         assert!(holder.lock().unwrap().master.is_none());
         holder.lock().unwrap().replace(Zeroizing::new([8; 32]));
-        let next = keys_from(&holder, |master| make_keys(*master, *master)).unwrap().ed_pub;
+        let next = keys_from(&holder, |master| make_keys(*master.unwrap(), *master.unwrap())).unwrap().ed_pub;
         assert_ne!(old, next);
     }
 
@@ -902,7 +922,7 @@ mod tests {
     fn bug_r15_mobile_revoke_waits_for_key_guard_and_then_erases_holder() {
         let holder = std::sync::Arc::new(Mutex::new(KeyHolder::default()));
         holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
-        let guard = keys_from(&holder, |master| make_keys(*master, *master)).unwrap();
+        let guard = keys_from(&holder, |master| make_keys(*master.unwrap(), *master.unwrap())).unwrap();
         let (started_tx, started_rx) = std::sync::mpsc::channel();
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let closing = holder.clone();
@@ -925,7 +945,7 @@ mod tests {
     fn bug_r15_poisoned_mobile_holder_can_still_be_revoked() {
         let holder = std::sync::Arc::new(Mutex::new(KeyHolder::default()));
         holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
-        drop(keys_from(&holder, |master| make_keys(*master, *master)).unwrap());
+        drop(keys_from(&holder, |master| make_keys(*master.unwrap(), *master.unwrap())).unwrap());
         let poisoned = holder.clone();
         assert!(std::thread::spawn(move || {
             let _guard = poisoned.lock().unwrap();
@@ -1213,5 +1233,21 @@ mod tests {
         let raw = std::fs::read(d3.path().join("mobile_self.enc")).unwrap();
         assert!(rekey(d3.path(), Some(&old), &new).is_err());
         assert_eq!(std::fs::read(d3.path().join("mobile_self.enc")).unwrap(), raw);
+    }
+
+    #[test]
+    fn plain_mode_is_explicit_and_revoked_by_lock() {
+        let holder = Mutex::new(KeyHolder::default());
+        assert!(keys_from(&holder, |_| panic!("без разрешения ключи не создаются")).is_none());
+        holder.lock().unwrap().plain_mode = true;
+        let mut asked_without_master = false;
+        let k = keys_from(&holder, |m| {
+            asked_without_master = m.is_none();
+            make_keys([1; 32], [2; 32])
+        });
+        assert!(k.is_some() && asked_without_master);
+        drop(k);
+        holder.lock().unwrap().revoke();
+        assert!(keys_from(&holder, |_| panic!("после отзыва открытый режим выключен")).is_none());
     }
 }
