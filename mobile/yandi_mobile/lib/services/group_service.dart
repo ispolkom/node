@@ -187,12 +187,27 @@ class GroupService {
   // ── журнал ───────────────────────────────────────────────────────────────
 
   Future<GroupEntry> _decode(GroupInfo g, Map<String, dynamic> e, Uint8List? key) async {
-    final seq = e['seq'] as int, ts = (e['ts'] ?? 0) as int, from = (e['from'] ?? '') as String, epoch = (e['epoch'] ?? 0) as int;
+    final seq = e['seq'] as int;
+    final ts = e['ts'] is int ? e['ts'] as int : 0, from = e['from'] is String ? e['from'] as String : '', epoch = e['epoch'] == null ? 0 : (e['epoch'] is int ? e['epoch'] as int : -1);
+    if (epoch < 0 || (e['payload_b64'] != null && e['payload_b64'] is! String)) {
+      return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: 0, kind: GroupKind.system, from: from, body: const {'op': 'bad'});
+    }
     if (e['deleted'] == true || (e['payload_b64'] ?? '') == '') {
       return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: epoch, kind: GroupKind.system, from: from, body: const {}, deleted: true);
     }
     try {
       final r = await GroupCrypto.decryptEntry(key!, _unb64(e['payload_b64'] as String), gid: g.id, epoch: epoch, from: from);
+      // подлинная запись, но поля не тех типов (текст — не строка и т. п.): показываем как повреждённую, а не роняем экран
+      for (final f in const ['t', 'name', 'n', 'f', 'h', 'k', 'i']) {
+        if (r.body.containsKey(f) && r.body[f] != null && r.body[f] is! String) {
+          return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: epoch, kind: GroupKind.system, from: from, body: const {'op': 'bad'});
+        }
+      }
+      for (final f in const ['c', 'z']) {
+        if (r.body.containsKey(f) && r.body[f] is! int) {
+          return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: epoch, kind: GroupKind.system, from: from, body: const {'op': 'bad'});
+        }
+      }
       return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: epoch, kind: r.kind, from: from, body: r.body);
     } catch (_) {
       return GroupEntry(gid: g.id, seq: seq, ts: ts, epoch: epoch, kind: GroupKind.system, from: from, body: const {'op': 'bad'});
@@ -212,8 +227,10 @@ class GroupService {
       var blocked = false;
       int? firstEpoch;
       for (final e in list) {
-        final epoch = (e['epoch'] ?? 0) as int;
-        final isDeleted = e['deleted'] == true || (e['payload_b64'] ?? '') == '';
+        if (e['seq'] is! int) { blocked = true; break; }   // без номера курсор не сдвинуть: остаток этой группы — при следующем sync
+        final badEpoch = e['epoch'] != null && e['epoch'] is! int;
+        final epoch = badEpoch ? 0 : (e['epoch'] ?? 0) as int;
+        final isDeleted = badEpoch || e['deleted'] == true || (e['payload_b64'] ?? '') == '';
         final key = isDeleted ? null : await _groupKey(g.id, epoch);
         if (!isDeleted && key == null) {
           // поколение старше всех, что хранит узел, — его конверт вытеснен навсегда: запись помечаем недоступной и читаем дальше
@@ -273,7 +290,7 @@ class GroupService {
     if (_syncing) return;
     _syncing = true;
     try {
-      final list = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+      final list = GroupInfo.listOf(await api.list());
       groups = list;
       await _trackGone(list);
       var relist = false;
@@ -295,9 +312,11 @@ class GroupService {
           if (n > 0 || del) onChanged?.call(g.id);
         } on GroupApiError {
           // одна группа недоступна (например, меня выгнали) — остальные продолжают
+        } catch (_) {
+          // кривой ответ узла по одной группе (неверные типы полей и т. п.) тоже не останавливает остальные
         }
       }
-      if (relist) groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+      if (relist) groups = GroupInfo.listOf(await api.list());
     } finally {
       _syncing = false;
     }
@@ -355,9 +374,9 @@ class GroupService {
   /// Создать группу: этот телефон — владелец, ключ и права раздаёт он. kind: `invite` или `open`.
   Future<String> createGroup(String name, String topic, String about, String kind) async {
     final gid = await api.create(name.trim(), topic.trim(), about.trim(), kind);
-    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    groups = GroupInfo.listOf(await api.list());
     await sync(only: gid);   // сразу создаёт первое поколение ключа
-    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    groups = GroupInfo.listOf(await api.list());
     return gid;
   }
 
@@ -385,7 +404,7 @@ class GroupService {
   /// Владелец меняет название, тематику и описание группы.
   Future<void> updateSettings(String gid, {String? name, String? topic, String? about}) async {
     await api.settings(gid, name: name, topic: topic, about: about);
-    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    groups = GroupInfo.listOf(await api.list());
     onChanged?.call(gid);
   }
 
@@ -462,7 +481,7 @@ class GroupService {
     final (_, pub) = await _memberKeys(gid);
     await api.join(gid, inviteCode: inviteCode, memberPub: _b64(pub));
     await store.write('grp_pubsent_$gid', '1');
-    groups = [for (final j in await api.list()) GroupInfo.fromJson(j)];
+    groups = GroupInfo.listOf(await api.list());
     // имя можно написать только когда есть ключ; его пришлёт владелец — пишем при первой же синхронизации с ключом
     await store.write('grp_wantname_$gid', displayName);
   }

@@ -387,7 +387,8 @@ class _GroupBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final time = DateFormat('HH:mm').format(DateTime.fromMillisecondsSinceEpoch(entry.ts));
-    final text = entry.body['t'] as String? ?? entry.body['name'] as String? ?? '';
+    final t = entry.body['t'], name = entry.body['name'];
+    final text = t is String ? t : (name is String ? name : '');
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(

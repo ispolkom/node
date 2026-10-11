@@ -28,8 +28,9 @@ public final class FileWipe {
                 left -= n;
             }
             raf.getFD().sync();
-        } catch (IOException ignored) {
-            // не вышло затереть — всё равно удаляем
+        } catch (IOException e) {
+            // не вышло затереть — не удаляем: иначе открытые байты останутся на диске без следа; вызывающий повторит позже
+            return false;
         }
         return f.delete();
     }

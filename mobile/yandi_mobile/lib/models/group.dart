@@ -30,6 +30,17 @@ class GroupInfo {
         pendingKeys: [for (final a in (j['pending_keys'] ?? const []) as List) a as String],
       );
 
+  /// Список групп от узла: строка с неверными полями пропускается, остальные группы остаются (одна кривая строка не ломает всё).
+  static List<GroupInfo> listOf(List raw) {
+    final out = <GroupInfo>[];
+    for (final j in raw) {
+      try {
+        out.add(GroupInfo.fromJson((j as Map).cast<String, dynamic>()));
+      } catch (_) {}
+    }
+    return out;
+  }
+
   bool get isOwner => role == 'owner';
   bool get isAdmin => role == 'admin';
   /// Владелец и админ: настройки группы, правила, роли «модератор/участник».

@@ -22,7 +22,7 @@ class SqliteGroupStore implements GroupStore {
         epoch: r['epoch'] as int,
         kind: r['kind'] as int,
         from: r['sender'] as String,
-        body: (jsonDecode(r['body'] as String) as Map).cast<String, dynamic>(),
+        body: _body(r['body']),
         deleted: (r['deleted'] as int) == 1,
       );
 
@@ -74,3 +74,11 @@ class SqliteGroupStore implements GroupStore {
   }
 }
 
+/// Тело записи из локальной базы: повреждённая строка становится пометкой «повреждено», а не исключением, которое ломает всю ленту.
+Map<String, dynamic> _body(Object? raw) {
+  try {
+    return (jsonDecode(raw as String) as Map).cast<String, dynamic>();
+  } catch (_) {
+    return const {'op': 'bad'};
+  }
+}

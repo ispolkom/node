@@ -261,8 +261,18 @@ impl MdnsBrowser {
     /// Parse service info from mDNS response
     fn parse_service_info(info: &ServiceInfo) -> Option<DiscoveredNode> {
         let hostname = info.get_hostname();
-        let short_id = Self::key_of(hostname);
+        // имя приходит от любого устройства в локальной сети: берём только шестнадцатеричный номер узла (из свойства short_id или из
+        // первой метки имени), всё прочее — не узел YANDI. Так в страницу узла не попадёт ни кавычка, ни разметка
+        let hex_id = |v: &str| (8..=64).contains(&v.len()) && v.bytes().all(|b| b.is_ascii_hexdigit());
+        let from_prop = info
+            .get_property_val("short_id")
+            .and_then(|p| p)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(str::to_string)
+            .filter(|v| hex_id(v));
+        let short_id = from_prop.or_else(|| Some(Self::key_of(hostname)).filter(|v| hex_id(v)))?;
         let short_id = short_id.as_str();
+        let hostname = if hostname.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-') { hostname } else { "" };
 
         let admin_port = info.get_port();
 
@@ -284,7 +294,7 @@ impl MdnsBrowser {
         let role = info.get_property_val("role")
             .and_then(|p| p)
             .and_then(|bytes| std::str::from_utf8(bytes).ok())
-            .map(|s| s.to_string())
+            .map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ' || *c == '-' || *c == '_').take(32).collect::<String>())
             .unwrap_or_else(|| "Unknown".to_string());
 
         Some(DiscoveredNode {
@@ -408,6 +418,21 @@ impl MdnsService {
 #[cfg(test)]
 mod key_tests {
     use super::*;
+
+    fn info(host: &str, props: &[(&str, &str)]) -> ServiceInfo {
+        let p: std::collections::HashMap<String, String> = props.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        ServiceInfo::new(YANDI_SERVICE_TYPE, "x", host, "", 9000, p).unwrap()
+    }
+
+    #[test]
+    fn only_a_hex_node_number_from_the_lan_is_taken() {
+        assert_eq!(MdnsBrowser::parse_service_info(&info("0123456789abcdef.local.", &[])).unwrap().short_id, "0123456789abcdef");
+        assert_eq!(MdnsBrowser::parse_service_info(&info("yandi.local.", &[("short_id", "a1b2c3d4e5f60718")])).unwrap().short_id, "a1b2c3d4e5f60718");
+        assert!(MdnsBrowser::parse_service_info(&info("a\" onmouseover=\"alert(7).local.", &[])).is_none(), "кавычка и разметка — не узел YANDI");
+        assert!(MdnsBrowser::parse_service_info(&info("yandi.local.", &[("short_id", "<img src=x>")])).is_none());
+        let n = MdnsBrowser::parse_service_info(&info("0123456789abcdef.local.", &[("role", "<b>x</b>\" y")])).unwrap();
+        assert!(!n.role.contains(['<', '>', '"']), "{}", n.role);
+    }
 
     #[test]
     fn a_host_name_and_its_service_name_give_the_same_table_key() {

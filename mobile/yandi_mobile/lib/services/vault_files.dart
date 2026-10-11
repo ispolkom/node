@@ -94,11 +94,14 @@ class VaultFiles {
   }
 
   Future<void> _wipeAndDelete(String path) async {
-    var done = false;
-    try { done = await (wipe?.call(path) ?? Future.value(false)); } catch (_) {}
-    if (!done) {
+    final w = wipe;
+    if (w == null) {
+      // затирать нечем (тесты, не Android): просто удаляем
       try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
+      return;
     }
+    // затереть не вышло — файл не удаляем молча: он остаётся с пометкой `.wipe` и дочищается при следующем запуске (finishPendingWipes)
+    try { await w(path); } catch (_) {}
   }
 
   Future<void> deleteAll(Iterable<String> paths) async {

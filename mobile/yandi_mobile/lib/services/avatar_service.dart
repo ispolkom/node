@@ -13,7 +13,9 @@ class AvatarService extends ChangeNotifier {
   final Directory dir;
   final Future<String?> Function() _read;
   final Future<void> Function(String) _write;
-  AvatarService({required this.dir, required Future<String?> Function() read, required Future<void> Function(String) write}) : _read = read, _write = write;
+  /// Затирание поверх байтов перед удалением (на телефоне — нативное); без него картинка просто удаляется.
+  final Future<bool> Function(String path)? wipe;
+  AvatarService({required this.dir, required Future<String?> Function() read, required Future<void> Function(String) write, this.wipe}) : _read = read, _write = write;
 
   String? _mine;
   final Map<String, String> _peers = {};
@@ -61,7 +63,12 @@ class AvatarService extends ChangeNotifier {
       await for (final e in dir.list(followLinks: false)) {
         if (e is! File) continue;
         final name = e.uri.pathSegments.last;
-        if (!name.endsWith('.png') || !used.contains(name.substring(0, name.length - 4))) await e.delete();
+        if (!name.endsWith('.png') || !used.contains(name.substring(0, name.length - 4))) {
+          final w = wipe;
+          if (w == null || !await w(e.path)) {
+            if (await e.exists()) await e.delete();
+          }
+        }
       }
     } catch (_) {}
   }

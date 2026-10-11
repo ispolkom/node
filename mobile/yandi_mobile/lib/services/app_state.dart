@@ -103,6 +103,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       dir: Directory('${docs.path}/avatars'),
       read: () => StorageService.secureRead('avatars_v1'),
       write: (s) => StorageService.secureWrite('avatars_v1', s),
+      wipe: AppState.wipeFile,
     );
     await av.load();
     av.addListener(notifyListeners);

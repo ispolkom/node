@@ -50,12 +50,16 @@ void main() {
     await v.deleteForever('${d.path}/нет_такого'); // отсутствующий файл — не ошибка
   });
 
-  test('если затирание не вышло, файл всё равно удаляется', () async {
+  test('если затирание не вышло, файл не удаляется молча: скрыт из списка и дочищается при следующем запуске', () async {
     final d = Directory('${dir.path}/yandi_downloads')..createSync();
     final f = File('${d.path}/eeeeeeee_x.bin')..writeAsStringSync('x');
     final v = VaultFiles(d, wipe: (p) async => false);
     await v.deleteForever(f.path);
     await v.idle;
+    expect(await v.list(), isEmpty, reason: 'в хранилище его уже не видно');
+    expect(d.listSync().map((e) => e.uri.pathSegments.last), ['eeeeeeee_x.bin.wipe'], reason: 'но байты не брошены открытыми без затирания');
+    final later = VaultFiles(d, wipe: (p) async { await File(p).delete(); return true; });
+    await later.finishPendingWipes();
     expect(d.listSync(), isEmpty);
     final v2 = VaultFiles(d);   // без нативного затирания вовсе
     final g = File('${d.path}/ffffffff_y.bin')..writeAsStringSync('y');

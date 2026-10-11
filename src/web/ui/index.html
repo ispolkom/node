@@ -178,11 +178,9 @@
         // === Стилизованные модалки ===
         function escapeHTML(str) {
             if (!str) return '';
-            return str.replace(/[&<>]/g, function(m) {
-                if (m === '&') return '&amp;';
-                if (m === '<') return '&lt;';
-                if (m === '>') return '&gt;';
-                return m;
+            // и кавычки: результат вставляется и в текст, и в значения атрибутов
+            return String(str).replace(/[&<>"']/g, function(m) {
+                return {'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[m];
             });
         }
 
@@ -318,20 +316,20 @@
             }
             
             container.innerHTML = nodes.map(node => `
-                <div class="node-item" data-short-id="${node.short_id}">
+                <div class="node-item" data-short-id="${escapeHTML(node.short_id)}">
                     <div class="node-avatar">
-                        <span class="avatar-initial">${node.short_id?.charAt(0).toUpperCase() || '?'}</span>
+                        <span class="avatar-initial">${escapeHTML(node.short_id?.charAt(0).toUpperCase() || '?')}</span>
                     </div>
                     <div class="node-info">
                         <h3 class="node-name">${escapeHTML(node.hostname || node.short_id)}</h3>
                         <p class="node-id">${escapeHTML(node.short_id)}</p>
                         <p class="node-role">${escapeHTML(node.role || 'P2P Peer')}</p>
                         <span class="node-badge">${node.source === 'mdns' ? 'mDNS' : 'P2P'}</span>
-                        ${node.nat_status ? `<span class="node-badge">${node.nat_status === 'Public' ? '🌐 Public' : '🔒 ' + node.nat_status}</span>` : ''}
+                        ${node.nat_status ? `<span class="node-badge">${node.nat_status === 'Public' ? '🌐 Public' : '🔒 ' + escapeHTML(node.nat_status)}</span>` : ''}
                     </div>
                     <div class="node-actions">
-                        <button class="btn btn-sm btn-primary btn-connect" data-short-id="${node.short_id}">🔗 Connect</button>
-                        <button class="btn btn-sm btn-success btn-proxy" data-short-id="${node.short_id}">🌐 Proxy</button>
+                        <button class="btn btn-sm btn-primary btn-connect" data-short-id="${escapeHTML(node.short_id)}">🔗 Connect</button>
+                        <button class="btn btn-sm btn-success btn-proxy" data-short-id="${escapeHTML(node.short_id)}">🌐 Proxy</button>
                     </div>
                 </div>
             `).join('');
