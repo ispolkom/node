@@ -23,6 +23,12 @@ if [ "$CHECK" = 1 ]; then
   [ -f "$PUB" ] && [ ! -L "$PUB" ] || { echo 'Нет закреплённого ключа; --check не создаёт его'; exit 1; }
   [ -x "$REL" ] || { echo "Сначала соберите доверенный инструмент: $REL"; exit 1; }
 else
+  if [ "$UNSIGNED" = 0 ]; then
+    mkdir -p release
+    [ ! -L release/.lock ] || { echo 'Недопустимый lock'; exit 1; }
+    exec 9>release/.lock
+    flock -x 9
+  fi
   release_build
 fi
 if [ "$UNSIGNED" = 1 ]; then
@@ -54,7 +60,7 @@ else
 fi
 if [ "$CHECK" = 1 ]; then echo "Проверка завершена без сборки и записи."; exit 0; fi
 
-SEQ=$(( $(cat "$SEQFILE" 2>/dev/null || echo 0) + 1 ))
+SEQ=$(python3 -I tools/release_seq.py release)
 release_archive
 release_check_identity
 VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT
@@ -63,7 +69,7 @@ VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT
 printf '%s\n' "$PHRASE_IN" | "$REL" sign "$OUT"
 unset PHRASE_IN
 "$REL" verify "$OUT" --pubkey "$PUBKEY" --min-seq "$SEQ"
-echo "$SEQ" > "$SEQFILE"
+ # SEQ already reserved durably; never reuse it after a failed signing.
 echo
 echo "Готово: $OUT/"
 ls -l "$OUT"

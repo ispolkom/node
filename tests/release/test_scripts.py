@@ -41,5 +41,29 @@ class Scripts(unittest.TestCase):
         self.assertFalse((self.root / 'release/SEQ').exists())
         self.assertFalse((self.root / 'dist').exists())
 
+    def test_r4_seq_is_strict_durable_and_never_reused(self):
+        (self.root / 'release').mkdir()
+        seq = self.root / 'release/SEQ'
+        for bad in ['-1', '01', '1+2', '', '18446744073709551615', '1\n2']:
+            seq.write_text(bad)
+            result = self.shell('python3 -I tools/release_seq.py release')
+            self.assertNotEqual(result.returncode, 0, bad)
+            self.assertEqual(seq.read_text(), bad)
+        seq.write_text('7\n')
+        for expected in [8, 9]:
+            result = self.shell('python3 -I tools/release_seq.py release')
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(seq.read_text(), f'{expected}\n')
+        seq.unlink()
+        seq.symlink_to(self.root / 'Cargo.toml')
+        self.assertNotEqual(self.shell('python3 -I tools/release_seq.py release').returncode, 0)
+
+    def test_r4_signing_holds_exclusive_lock(self):
+        # A stub build must see the signing lock already held.
+        env = self.root / 'tools/release_build_env.sh'
+        env.write_text(env.read_text() + '\nrelease_build() { flock -n release/.lock true && exit 99; exit 42; }\n')
+        result = self.shell('bash tools/node_release.sh')
+        self.assertEqual(result.returncode, 42, result.stderr)
+
 if __name__ == '__main__':
     unittest.main()
