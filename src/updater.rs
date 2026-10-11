@@ -34,16 +34,7 @@ fn bounded(mut r: impl Read, limit: u64) -> Result<Vec<u8>> {
     Ok(out)
 }
 fn local_file(dir: &Path, name: &str, limit: u64) -> Result<Vec<u8>> {
-    let p = dir.join(name);
-    ensure!(
-        fs::symlink_metadata(&p)?.is_file(),
-        "не обычный файл: {name}"
-    );
-    ensure!(
-        fs::metadata(&p)?.len() <= limit,
-        "файл слишком большой: {name}"
-    );
-    bounded(fs::File::open(p)?, limit)
+    Ok(ReleaseDir::open(dir)?.read(name, limit)?)
 }
 fn base_url(from: &str) -> Result<url::Url> {
     let mut u = url::Url::parse(from)?;
@@ -118,21 +109,22 @@ async fn prepare_and_install(
     } else {
         None
     };
+    let local = if remote.is_none() { Some(ReleaseDir::open(Path::new(from))?) } else { None };
     let client = client_builder().build()?;
     async fn fetch(
         client: &reqwest::Client,
         remote: &Option<url::Url>,
-        from: &str,
+        local: &Option<ReleaseDir>,
         name: &str,
         limit: u64,
     ) -> Result<Vec<u8>> {
         match remote {
             Some(u) => download(client, u, name, limit).await,
-            None => local_file(Path::new(from), name, limit),
+            None => Ok(local.as_ref().context("нет каталога")?.read(name, limit)?),
         }
     }
-    let bytes = fetch(&client, &remote, from, MANIFEST_NAME, 1 << 20).await?;
-    let sig = fetch(&client, &remote, from, SIGNATURE_NAME, 256).await?;
+    let bytes = fetch(&client, &remote, &local, MANIFEST_NAME, 1 << 20).await?;
+    let sig = fetch(&client, &remote, &local, SIGNATURE_NAME, 256).await?;
     let m = verify_manifest(&bytes, std::str::from_utf8(&sig)?, vk, min_seq)
         .map_err(|e| anyhow::anyhow!(e))?;
     let mut total = 0u64;
@@ -140,7 +132,7 @@ async fn prepare_and_install(
         ensure!(f.size <= MAX_FILE, "файл слишком большой");
         total = total.checked_add(f.size).context("размер переполнен")?;
         ensure!(total <= MAX_TOTAL, "выпуск слишком большой");
-        let data = fetch(&client, &remote, from, &f.name, f.size).await?;
+        let data = fetch(&client, &remote, &local, &f.name, f.size).await?;
         fs::write(snapshot.path().join(&f.name), data)?;
     }
     check_files(snapshot.path(), &m).map_err(|e| anyhow::anyhow!(e))?;

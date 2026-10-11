@@ -122,8 +122,13 @@ impl ReleaseDir {
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
+    let dir = ReleaseDir::open(path.parent().unwrap_or(Path::new(".")))?;
+    let mut f = dir.file(path.file_name().and_then(|n| n.to_str()).ok_or_else(|| std::io::Error::other("bad name"))?)?;
+    sha256_fd(&mut f)
+}
+
+pub fn sha256_fd(f: &mut std::fs::File) -> std::io::Result<(String, u64)> {
     use std::io::Read;
-    let mut f = std::fs::File::open(path)?;
     let mut h = Sha256::new();
     let mut buf = vec![0u8; 1 << 16];
     let mut size = 0u64;
@@ -232,13 +237,10 @@ pub fn verify_manifest(manifest: &[u8], sig_hex: &str, vk: &VerifyingKey, min_se
 
 /// Файлы выпуска в каталоге совпадают с манифестом (размер и SHA-256). Лишние файлы не ошибка (их просто никто не установит).
 pub fn check_files(dir: &Path, m: &Manifest) -> Result<(), VerifyError> {
+    let dir = ReleaseDir::open(dir).map_err(|e| VerifyError::File(e.to_string()))?;
     for f in &m.files {
-        let p = dir.join(&f.name);
-        let meta = std::fs::symlink_metadata(&p).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
-        if !meta.is_file() {
-            return Err(VerifyError::File(format!("{}: не обычный файл", f.name)));
-        }
-        let (sha, size) = sha256_file(&p).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
+        let mut fd = dir.file(&f.name).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
+        let (sha, size) = sha256_fd(&mut fd).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
         if size != f.size || sha != f.sha256 {
             return Err(VerifyError::File(format!("{}: содержимое не совпало с манифестом", f.name)));
         }
@@ -267,6 +269,24 @@ mod tests {
         let bytes = manifest_bytes(&m);
         let sig = sign(&bytes, &k);
         (bytes, sig, vk)
+    }
+
+    #[test]
+    fn r5_pinned_directory_and_fd_survive_path_replacement() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("release");
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("file"), b"verified").unwrap();
+        let dir = ReleaseDir::open(&path).unwrap();
+        let mut fd = dir.file("file").unwrap();
+        std::fs::rename(&path, root.path().join("old")).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        std::fs::write(path.join("file"), b"evil").unwrap();
+        assert_eq!(dir.read("file", 100).unwrap(), b"verified");
+        assert_eq!(sha256_fd(&mut fd).unwrap().0, hex::encode(Sha256::digest(b"verified")));
+        symlink(&path, root.path().join("link")).unwrap();
+        assert!(ReleaseDir::open(&root.path().join("link")).is_err());
     }
 
     #[test]
