@@ -43,6 +43,7 @@ class AvatarService extends ChangeNotifier {
       : _read = read,
         _write = write;
   final Map<String, Uint8List> _bytes = {};
+  int cleanupFailures = 0;
 
   String? _mine;
   final Map<String, String> _peers = {};
@@ -79,12 +80,14 @@ class AvatarService extends ChangeNotifier {
           if (await old.exists()) await old.delete();
         } else {
           await w(old.path);   // отказ затирания: открытая картинка остаётся и будет дочищена при следующем входе, а не удаляется молча
+          if (await old.exists()) cleanupFailures++;
         }
       }
     }
   }
 
   Future<void> load() async {
+    cleanupFailures = 0;
     try {
       final raw = await _read();
       if (raw != null) {
@@ -99,7 +102,7 @@ class AvatarService extends ChangeNotifier {
         // индекс прочитан: дочищаем то, что в прошлый раз не удалось затереть (при ошибке чтения неизвестные файлы не трогаем)
         await _collectGarbage();
       }
-    } catch (_) {}
+    } catch (_) { cleanupFailures++; }
     notifyListeners();
   }
 
@@ -124,10 +127,11 @@ class AvatarService extends ChangeNotifier {
             await e.delete();
           } else {
             await w(e.path);   // не вышло затереть — файл остаётся и снова попадёт в уборку при следующем запуске
+            if (await e.exists()) cleanupFailures++;
           }
         }
       }
-    } catch (_) {}
+    } catch (_) { cleanupFailures++; }
   }
 
   Future<void> _store(Uint8List png, String hash) async {

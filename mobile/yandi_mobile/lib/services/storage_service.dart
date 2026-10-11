@@ -45,6 +45,7 @@ class StorageService {
   static Future<String> ledgerOpen(String stored) async {
     final sealedBefore = (await secureRead(_kLedgerSealed)) == '1';   // из кеша при запуске: чтение хранилища по одному медленное
     if (!stored.startsWith(_wrapPrefix) && sealedBefore) throw StateError('Replay ledger downgraded to plain text');
+    if (stored.isEmpty) return '{}';   // только первый запуск: существующая метка проверена выше
     return await _unwrap('ledger:replay', stored, migrated: false) ?? (throw StateError('Corrupt replay ledger'));
   }
 
@@ -62,7 +63,7 @@ class StorageService {
     for (final d in [docs, support, cache]) {
       if (!await d.exists()) continue;
       await for (final e in d.list(recursive: true, followLinks: false)) {
-        if (e is File && !await _wipeAndDelete(e.path, encrypted: _isEncryptedName(e.path))) failed++;
+        if (e is File && !await _wipeAndDelete(e.path)) failed++;
       }
       if (failed == 0) {
         await for (final e in d.list(followLinks: false)) {
@@ -78,10 +79,8 @@ class StorageService {
     return failed == 0 ? null : 'не удалось затереть файлов: $failed (они остались на месте)';
   }
 
-  /// Файлы, содержимое которых и так зашифровано: если затереть не вышло, их можно удалить обычным способом (ключа больше нет).
-  static bool _isEncryptedName(String path) =>
-      path.endsWith('.yfe') || path.endsWith('.yav') || path.endsWith('.yfe.part') || path.endsWith('.wipe') || path.endsWith('yandi_enc.db') ||
-      path.contains('yandi_enc.db-') || path.endsWith('vault_keys.json') || path.endsWith('e2e_replay_e4.json');
+  // Имя/расширение не доказывает шифрование: старые ledger и .wipe содержали открытые данные.
+  // При отказе затирания сохраняем остаток и предупреждение, даже если имя похоже на контейнер.
 
   static bool get dbOpen => _db != null;
 
@@ -93,6 +92,7 @@ class StorageService {
 
   /// Затирание поверх байтов перед удалением (на телефоне — нативное, задаётся при старте приложения); без него файл просто удаляется.
   static Future<bool> Function(String path)? wipeHook;
+  static int cleanupFailures = 0;
 
   static const _plainName = 'yandi.db';       // прежняя нешифрованная база (только для переноса)
   static const _encName   = 'yandi_enc.db';   // зашифрованная
@@ -100,6 +100,7 @@ class StorageService {
   /// Открыть зашифрованную базу ключом данных [key] (32 байта). Прежняя нешифрованная переносится и затирается.
   /// Неверный ключ — исключение (база не открывается, не пересоздаётся и не портится).
   static Future<void> openEncrypted(List<int> key) async {
+    cleanupFailures = 0;
     if (debugOpen != null) return debugOpen!(key);
     if (_db != null) return;
     final dir = await getApplicationDocumentsDirectory();
@@ -150,12 +151,15 @@ class StorageService {
       try { await File(f).delete(); } catch (_) {}
     }
     final src = await openDatabase(plainPath, readOnly: true);
-    final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
-    final dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
+    Database? dst;
     try {
+      final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
+      dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
+      final tables = (await src.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'"))
+          .map((row) => row['name']).toSet();
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
-        List<Map<String, Object?>> rows;
-        try { rows = await src.query(t); } catch (_) { continue; }   // таблицы может не быть в очень старой базе
+        if (!tables.contains(t)) continue;   // пропускаем только действительно отсутствующую таблицу
+        final rows = await src.query(t);   // I/O и повреждение прерывают перенос; исходная БД остаётся на месте
         for (var i = 0; i < rows.length; i += 200) {
           final b = dst.batch();
           for (final r in rows.skip(i).take(200)) {
@@ -169,8 +173,7 @@ class StorageService {
       // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
       if (srcVersion > 0 && srcVersion < 5) await _onUpgrade(dst, srcVersion, 5);
     } finally {
-      await src.close();
-      await dst.close();
+      try { await src.close(); } finally { await dst?.close(); }
     }
     await File(tmp).rename(encPath);
     for (final f in [plainPath, '$plainPath-journal', '$plainPath-wal', '$plainPath-shm']) {
@@ -189,8 +192,11 @@ class StorageService {
       try { wiped = await w(path); } catch (_) {}
     }
     if (!await f.exists()) return true;
-    if (!wiped && !encrypted) return false;
-    try { await f.delete(); } catch (_) { return false; }
+    if (!wiped && !encrypted) {
+      cleanupFailures++;
+      return false;
+    }
+    try { await f.delete(); } catch (_) { cleanupFailures++; return false; }
     return true;
   }
 

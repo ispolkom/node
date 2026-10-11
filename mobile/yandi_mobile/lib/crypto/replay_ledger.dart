@@ -7,7 +7,8 @@ import 'dart:io';
 class ReplayLedger {
   final File file;
   /// Шифрование файла журнала (в нём номера собеседников): [seal] — перед записью, [open] — после чтения (может принять и старый открытый
-  /// вид, но порчу обязан отвергнуть исключением: журнал не сбрасывается и не «лечится»). Без них файл открытый (тесты).
+  /// вид, но порчу обязан отвергнуть исключением: журнал не сбрасывается и не «лечится»). Пустая строка означает отсутствие файла:
+  /// callback обязан проверить, что это первый запуск, и вернуть пустой JSON только в этом случае. Без них файл открытый (тесты).
   final Future<String> Function(String json)? seal;
   final Future<String> Function(String stored)? open;
   /// После успешной записи зашифрованного журнала (для метки «открытый вид больше не принимать»).
@@ -23,12 +24,17 @@ class ReplayLedger {
         if (seal != null && open != null && await file.exists()) {
           final text = await file.readAsString();
           final json = await open!(text);
+          final entries = jsonDecode(json) as Map<String, dynamic>;
+          if (entries.values.any((v) => v is! int)) throw StateError('Corrupt replay ledger');
           if (json == text) {   // был открытым
             final temp = File('${file.path}.tmp');
             await temp.writeAsString(await seal!(json), flush: true);
             await temp.rename(file.path);
-            await afterWrite?.call();
           }
+          // Аутентифицированный encrypted-файл мог пережить отказ записи метки: дочиниваем её и без нового reseal.
+          await afterWrite?.call();
+        } else if (!await file.exists()) {
+          await open?.call('');
         }
         result.complete();
       } catch (e, st) {
@@ -45,7 +51,7 @@ class ReplayLedger {
         final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
         final Map<String, dynamic> seen = await file.exists()
             ? jsonDecode(open != null ? await open!(await file.readAsString()) : await file.readAsString()) as Map<String, dynamic>
-            : {};
+            : (open != null ? jsonDecode(await open!('')) as Map<String, dynamic> : {});
         if (seen.values.any((v) => v is! int))
           throw StateError('Corrupt replay ledger');
         seen.removeWhere((_, v) => (v as int) < now);

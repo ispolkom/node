@@ -165,6 +165,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final res = await FilePicker.platform.pickFiles(allowMultiple: true);
     if (res == null) return;
+    try {
     for (final f in res.files) {
       final path = f.path;
       if (path == null) continue;
@@ -174,6 +175,10 @@ class _ChatScreenState extends State<ChatScreen> {
       }
       final err = await state.sendFile(widget.peerId, path, name: f.name);
       if (err != null) _snack(err);
+    }
+    } finally {
+      // В том числе файл, отвергнутый по размеру до вызова sendFile.
+      for (final f in res.files) { if (f.path != null) await state.dropPickerCopy(f.path!); }
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }

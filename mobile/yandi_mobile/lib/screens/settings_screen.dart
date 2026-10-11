@@ -35,10 +35,16 @@ class SettingsScreen extends StatelessWidget {
       await state.clearMyAvatar();
     } else if (choice == 'photo') {
       final res = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
-      final bytes = res?.files.single.bytes;
-      if (bytes == null) return;
-      err = await state.setMyAvatarFromImage(bytes);
-      try { await FilePicker.platform.clearTemporaryFiles(); } catch (_) {}
+      if (res == null) return;
+      try {
+        final bytes = res.files.single.bytes;
+        if (bytes == null) return;
+        err = await state.setMyAvatarFromImage(bytes);
+      } finally {
+        for (final file in res.files) {
+          if (file.path != null) await state.dropPickerCopy(file.path!);
+        }
+      }
     } else {
       final emoji = await showDialog<String>(
         context: context,

@@ -530,9 +530,20 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> dropPickerCopy(String path) async {
     try {
       final cache = await pp.getTemporaryDirectory();
-      if (!path.startsWith(cache.path)) return;
-      await wipeFile(path);   // отказ затирания: копия остаётся и будет затёрта при следующем входе (_sweepPickerCache), а не удалена молча
-    } catch (_) {}
+      // Проверяем границу каталога, чтобы cache-other не считался нашей копией.
+      final realCache = await cache.resolveSymbolicLinks();
+      final file = File(path);
+      if (!await file.exists()) return;
+      final realPath = await file.resolveSymbolicLinks();
+      if (!realPath.startsWith('$realCache${Platform.pathSeparator}')) return;
+      if (!await wipeFile(realPath) && await file.exists()) {
+        protectionWarning = 'Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.';
+        notifyListeners();
+      }
+    } catch (_) {
+      protectionWarning = 'Проверка временной копии выбранного файла не завершилась.';
+      notifyListeners();
+    }
   }
 
   /// Хранилище файлов (зашифрованное) с папкой `yandi_downloads`; временные расшифрованные копии — в кеше приложения.
@@ -554,8 +565,9 @@ class AppState extends ChangeNotifier implements FilesHost {
       await vf.finishPendingWipes();
       await vf.migrateLegacy(resolveId: _legacyIdFor);
       await _sweepPickerCache();
-      if (vf.migrationFailures > 0) {
-        protectionWarning = 'Не все старые файлы удалось зашифровать или затереть (${vf.migrationFailures}); попытка повторится при следующем входе.';
+      final failed = vf.migrationFailures + vf.cleanupFailures + (avatars?.cleanupFailures ?? 0) + StorageService.cleanupFailures;
+      if (failed > 0) {
+        protectionWarning = '${protectionWarning == null ? '' : '${protectionWarning!} '}Не все файлы удалось зашифровать или затереть ($failed); попытка повторится при следующем входе.';
       }
     } catch (e) {
       protectionWarning = 'Проверка защиты файлов не завершилась: $e';
@@ -592,9 +604,13 @@ class AppState extends ChangeNotifier implements FilesHost {
     final cache = await pp.getTemporaryDirectory();
     final d = Directory('${cache.path}/file_picker');
     if (!await d.exists()) return;
+    var failed = 0;
     await for (final e in d.list(recursive: true, followLinks: false)) {
-      if (e is File) await wipeFile(e.path);
+      if (e is File) {
+        try { if (!await wipeFile(e.path) && await e.exists()) failed++; } catch (_) { failed++; }
+      }
     }
+    if (failed > 0) protectionWarning = 'Не удалось затереть временных копий выбора файлов: $failed; попытка повторится при следующем входе.';
   }
 
   /// Файлы можно слать только на своё устройство: у него есть ключ для E2E.

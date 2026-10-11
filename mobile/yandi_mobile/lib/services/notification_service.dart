@@ -30,6 +30,11 @@ class NotificationService {
       onDidReceiveNotificationResponse:         _onResponse,
       onDidReceiveBackgroundNotificationResponse: _onResponse,
     );
+    final launch = await _plugin.getNotificationAppLaunchDetails();
+    if (launch?.didNotificationLaunchApp == true) {
+      final response = launch?.notificationResponse;
+      if (response != null) _onResponse(response);
+    }
 
     // Запрашиваем разрешение (Android 13+).
     await _plugin
@@ -42,6 +47,7 @@ class NotificationService {
   static void _onResponse(NotificationResponse res) {
     final peerId = res.payload;
     if (peerId == null || peerId.isEmpty) return;
+    pendingOpenPeerId = peerId;   // прежде навигации: Home может прочитать значение сразу
 
     final nav = navigatorKey.currentState;
     // пока приложение заблокировано, уведомление не открывает чат в обход входа: после ввода пароля главный экран сам откроет нужный
@@ -50,7 +56,6 @@ class NotificationService {
       nav.pushNamed('/home');
       // HomeScreen заметит pendingOpenPeerId и откроет нужный чат
     }
-    pendingOpenPeerId = peerId;
   }
 
   // ── Показать уведомление о сообщении ────────────────────────────────────────

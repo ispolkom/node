@@ -25,7 +25,7 @@ class StorageService {
 }
 '''
 code += re.sub(r'^import .*;\n', '', (APP / 'lib/services/vault_service.dart').read_text(), flags=re.M)
-tests = (APP / 'test/bug_r14_repeat_bug_r13_lifecycle.dart.inc').read_text()
+tests = (APP / 'test/r13_lifecycle_cases.dart.inc').read_text()
 # Сериализация БД требует освободить старую операцию ДО ожидания нового DB-open.
 # Assertions сохранены: старое открытие отменено, новое открыто, поздний откат его не закрывает.
 tests = tests.replace(

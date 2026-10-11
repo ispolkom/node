@@ -53,6 +53,7 @@ class FilesTabState extends State<FilesTab> {
 
   /// «+» на вкладке: взять файл из памяти телефона и положить в хранилище (чтобы переслать оттуда). Временную копию выбора сразу чистим.
   Future<void> addFiles() async {
+    final state = context.read<AppState>();
     final res = await FilePicker.platform.pickFiles(allowMultiple: true);
     if (res == null) return;
     var failed = 0;
@@ -70,7 +71,10 @@ class FilesTabState extends State<FilesTab> {
       }
     } finally {
       // открытая копия выбора не должна остаться во временном каталоге ни при какой ошибке
-      try { await FilePicker.platform.clearTemporaryFiles(); } catch (_) {}
+      for (final file in res.files) {
+        final path = file.path;
+        if (path != null) await state.dropPickerCopy(path);
+      }
     }
     if (failed > 0 && mounted) {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось добавить файлов: $failed (нет места или нет доступа)')));
