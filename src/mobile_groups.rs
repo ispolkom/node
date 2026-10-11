@@ -1265,6 +1265,10 @@ impl Store {
 
     /// Просьбы старше недели стираются на диске вместе с номером устройства заявителя (а не только скрываются в ответах).
     pub fn expire_requests(&mut self) -> R<()> {
+        if self.broken.is_some() {
+            // индекс не прочитан: уборка не выполнена (и повреждённый файл не перезаписываем), об этом надо сказать, а не молчать
+            return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено: просроченные просьбы не стёрты"));
+        }
         let now = now_ms();
         let mut changed = false;
         for g in self.groups.values_mut() {
@@ -1284,9 +1288,9 @@ impl Store {
         if role == Role::Member {
             return Err(forbidden("просьбы видят владелец и модераторы"));
         }
-        let now = now_ms();
+        // просроченные стираются на диске и здесь (иначе чтение «съедало» их только в памяти, и таймер потом не видел изменений)
+        self.expire_requests().ok();
         let g = self.get_mut(gid)?;
-        g.requests.retain(|r| now.saturating_sub(r.ts) < REQUEST_TTL_MS);
         let list: Vec<Value> = g.requests.iter().map(|r| json!({"id": r.id, "peer_id": r.peer, "name": r.name, "ts": r.ts})).collect();
         Ok(json!({"requests": list}))
     }
@@ -2031,6 +2035,19 @@ mod tests {
         let again = Store::open(d.path().join("groups"));
         assert!(again.groups[&inv].requests.is_empty(), "после перезапуска просьбы нет");
         assert!(!std::fs::read_to_string(d.path().join("groups").join("index.json")).unwrap().contains(&format!("\"peer\":\"{EVE}\"")), "номера заявителя на диске нет");
+    }
+
+    #[test]
+    fn reading_requests_wipes_expired_ones_from_disk_and_a_broken_index_reports_it() {
+        let (d, mut s) = store();
+        let inv = s.create("Клуб", "", Kind::Invite, OWNER, &[]).unwrap();
+        s.request_join(&inv, EVE, "Ева").unwrap();
+        s.groups.get_mut(&inv).unwrap().requests[0].ts = now_ms() - REQUEST_TTL_MS - 1000;
+        s.save().unwrap();
+        assert!(s.requests_of(&inv, OWNER).unwrap()["requests"].as_array().unwrap().is_empty());
+        assert!(Store::open(d.path().join("groups")).groups[&inv].requests.is_empty(), "чтение стёрло и на диске");
+        std::fs::write(d.path().join("groups").join("index.json"), b"{broken").unwrap();
+        assert!(Store::open(d.path().join("groups")).expire_requests().is_err(), "при повреждённом индексе уборка честно не выполнена");
     }
 
     #[test]

@@ -177,17 +177,28 @@ class ApiService {
     }
   }
 
+  /// Вся неподтверждённая почта, страницами (`after` — номер последнего письма страницы): письма, которые приложение не может принять
+  /// (старый формат), остаются на узле, но не загораживают новые.
   Future<List<Map<String, dynamic>>> fetchInbox(int sinceMs) async {
+    const page = 1000, maxPages = 20;
+    final out = <Map<String, dynamic>>[];
+    var after = 0;
     try {
-      final res = await _client
-          .get(_url('/mobile/inbox?since=$sinceMs&limit=1000'), headers: _headers)
-          .timeout(const Duration(seconds: 15));
-      if (res.statusCode != 200) return [];
-      final data = jsonDecode(res.body) as Map<String, dynamic>;
-      return (data['messages'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? [];
-    } catch (_) {
-      return [];
-    }
+      for (var i = 0; i < maxPages; i++) {
+        final res = await _client
+            .get(_url('/mobile/inbox?since=$sinceMs&after=$after&limit=$page'), headers: _headers)
+            .timeout(const Duration(seconds: 15));
+        if (res.statusCode != 200) break;
+        final data = jsonDecode(res.body) as Map<String, dynamic>;
+        final list = (data['messages'] as List<dynamic>?)?.cast<Map<String, dynamic>>() ?? const <Map<String, dynamic>>[];
+        out.addAll(list);
+        if (list.length < page) break;
+        final last = list.last['id'];
+        if (last is! num || last.toInt() <= after) break;
+        after = last.toInt();
+      }
+    } catch (_) {}
+    return out;
   }
 
   Future<void> ackInbox(List<int> ids) async {

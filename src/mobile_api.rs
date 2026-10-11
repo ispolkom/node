@@ -280,10 +280,15 @@ pub fn remove_device(id: &str) -> bool {
         return false;
     };
     with_devices(|d| d.retain(|x| x.peer_id() != peer));
+    after_forget(peer);
+    true
+}
+
+/// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
+fn after_forget(peer: String) {
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
     crate::mobile_groups::forget_device(&peer);
     let _ = bus().send(Event::Revoked(peer));
-    true
 }
 
 /// Полный номер устройства по его началу (не короче 8 знаков), как в списке устройств на странице узла.
@@ -416,12 +421,15 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
         name = "Телефон".to_string();
     }
     // вытесняем того, кто дольше всех молчит, а не самого давно сопряжённого: давнее, но живое устройство не должно вылетать.
-    // Вытеснение — то же «забыть устройство»: его группы, почта и открытые сокеты убираются тем же путём (вне замка списка устройств)
-    let evict = with_devices(|d| (d.len() >= MAX_DEVICES).then(|| d.iter().min_by_key(|x| x.last_activity_ms()).map(|x| x.peer_id())).flatten());
-    if let Some(peer) = evict {
-        remove_device(&peer);
-    }
+    // Выбор, удаление вытесняемого и добавление нового — одним действием под замком списка (параллельные сопряжения не дадут 17);
+    // остальное «забывание» (группы, почта, сокеты) — после, вне замка
+    let mut evicted: Option<String> = None;
     with_devices(|d| {
+        if d.len() >= MAX_DEVICES {
+            if let Some(i) = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
+                evicted = Some(d.remove(i).peer_id());
+            }
+        }
         let th = token_hash(&token);
         if d.iter()
             .any(|x| x.name == name || x.name.starts_with(&format!("{name} (")))
@@ -439,6 +447,9 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             last_seen_ms: 0,
         });
     });
+    if let Some(peer) = evicted {
+        after_forget(peer);
+    }
     Json(json!({"token": token})).into_response()
 }
 
@@ -905,13 +916,14 @@ async fn inbox(
             .map(|x| x.acked_ts)
             .unwrap_or(0)
     });
+    let after: u64 = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut out: Vec<(u64, serde_json::Value)> = Vec::new();
     for peer in st.chat.list_chats().unwrap_or_default() {
         if device_by_peer(&hex::encode(peer.0)).is_some() {
             continue; // переписка компьютера с телефоном владельца: ответы уходят телефону зашифрованной почтой, а не отсюда
         }
         for m in st.chat.load_history(&peer, 200).unwrap_or_default() {
-            if m.from != st.my_id && m.timestamp > acked {
+            if m.from != st.my_id && m.timestamp > acked && m.timestamp > after {
                 out.push((m.timestamp, json!({"id": m.timestamp, "from_peer_id": hex::encode(m.from.0), "payload_b64": base64_of(m.text.as_bytes()), "ts_ms": m.timestamp})));
             }
         }
@@ -921,10 +933,11 @@ async fn inbox(
             .find(|x| same(&x.token_hash, &dev))
             .map(|x| x.peer_id())
     }) {
-        // почта устройства — без курсора: удаляется только то, что устройство подтвердило по номеру (неподтверждённое старое не теряется)
+        // почта устройства — без курсора подтверждения: удаляется только то, что устройство подтвердило по номеру (неподтверждённое старое не
+        // теряется). `after` — листание: приложение проходит мимо писем, которые не может принять (старый формат), к новым
         for m in with_mail(|l| {
             l.iter()
-                .filter(|m| m.to == me)
+                .filter(|m| m.to == me && m.ts > after)
                 .cloned()
                 .collect::<Vec<_>>()
         }) {

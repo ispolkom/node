@@ -207,7 +207,7 @@
         // строгая проверка сигнала: версия, номер звонка — строка 8..64, время — конечное число в пределах 90 с (устаревший звонить не должен)
         if (!s || typeof s !== 'object' || s.v !== 1 || typeof s.t !== 'string') return;
         if (typeof s.cid !== 'string' || s.cid.length < 8 || s.cid.length > 64) return;
-        if (typeof s.ts !== 'number' || !isFinite(s.ts) || Math.abs(Date.now() - s.ts) > 90000) return;
+        if (!Number.isInteger(s.ts) || Math.abs(Date.now() - s.ts) > 90000) return;
         if (s.video !== undefined && typeof s.video !== 'boolean') return;
         if (typeof e.name !== 'string') e.name = 'Телефон';
         var mine = call && call.peer === e.from && call.cid === s.cid && call.phase !== 'ended';

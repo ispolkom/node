@@ -236,6 +236,11 @@ ok = got is not None and got[45:45 + struct.unpack("<I", got[41:45])[0]] == blob
 check("live message from phone 1 reaches phone 2", ok, got)
 st, c1 = req("GET", "/mobile/contacts", token=tok1)
 check("phone 2 shows online", any(x["peer_id"] == d2 and x["online"] for x in c1["contacts"]))
+st, r = req("GET", "/mobile/inbox", token=tok2)
+ids = [x["id"] for x in r["messages"] if x["from_peer_id"] == d1]
+req("POST", "/mobile/inbox/ack", {"ids": ids}, token=tok2)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+check("after ack phone 2's inbox is empty", not [x for x in r["messages"] if x["from_peer_id"] == d1], r)
 # письмо, которое телефон не смог обработать (нет ключа, старый формат), не стирается подтверждением более нового
 ws_send(s1, bytes([0x30]) + bytes.fromhex(d2) + struct.pack("<I", 9) + b"unhandled")
 time.sleep(0.3)
@@ -245,13 +250,13 @@ st, r = req("GET", "/mobile/inbox", token=tok2)
 mine = [x for x in r["messages"] if x["from_peer_id"] == d1]
 old_id = [x["id"] for x in mine if base64.b64decode(x["payload_b64"]) == b"unhandled"]
 new_id = [x["id"] for x in mine if base64.b64decode(x["payload_b64"]) == b"newer"]
+st, p1 = req("GET", "/mobile/inbox?limit=1", token=tok2)
+st, p2 = req("GET", f"/mobile/inbox?limit=1&after={p1['messages'][0]['id'] if p1['messages'] else 0}", token=tok2)
+check("paging walks past an unaccepted letter to the newer one", [x["id"] for x in p1["messages"]] == old_id and [x["id"] for x in p2["messages"]] == new_id, (p1, p2))
 req("POST", "/mobile/inbox/ack", {"ids": new_id}, token=tok2)
 st, r = req("GET", "/mobile/inbox", token=tok2)
 check("acking a newer letter keeps an older unacked one", old_id and [x for x in r["messages"] if x["id"] in old_id] and not [x for x in r["messages"] if x["id"] in new_id], r)
-ids = [x["id"] for x in r["messages"] if x["from_peer_id"] == d1]
-req("POST", "/mobile/inbox/ack", {"ids": ids}, token=tok2)
-st, r = req("GET", "/mobile/inbox", token=tok2)
-check("after ack phone 2's inbox is empty", not [x for x in r["messages"] if x["from_peer_id"] == d1], r)
+req("POST", "/mobile/inbox/ack", {"ids": old_id}, token=tok2)
 s2.close(); s1.close()
 
 # ---- internet through the PC

@@ -246,8 +246,11 @@ impl MdnsBrowser {
                 ServiceEvent::ServiceRemoved(_type, full_name) => {
                     debug!("🔍 mDNS: Service removed: {}", full_name);
                     let short_id = names.remove(&full_name).unwrap_or_else(|| Self::key_of(&full_name));
-                    let mut map = discovered.lock().await;
-                    map.remove(&short_id);
+                    // у узла может быть несколько объявлений (например, «yandi.local» и обычное): запись уходит с последним из них
+                    if !names.values().any(|v| *v == short_id) {
+                        let mut map = discovered.lock().await;
+                        map.remove(&short_id);
+                    }
                 }
                 ServiceEvent::ServiceFound(_type, full_name) => {
                     debug!("🔍 mDNS: Service found: {}", full_name);
