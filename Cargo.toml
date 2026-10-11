@@ -83,11 +83,14 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # Utilities
+flate2 = "1"
+tempfile = "3"
 hex = "0.4"
 encoding_rs = "0.8"
 regex = "1"
 subtle = "2.6"
 zeroize = "1"
+icu_normalizer = { version = "=2.2.0", default-features = false, features = ["compiled_data"] }
 num_cpus = "1.16"
 libc = "0.2.180"
 
@@ -126,7 +129,6 @@ time = "0.3"
 yandi-key-root = { path = "key_root" }
 
 [dev-dependencies]
-tempfile = "3"
 
 # QUIC for SNI spoofing and DPI evasion
 
@@ -137,6 +139,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "yandi"
 path = "src/main.rs"
+
+[[bin]]
+name = "yandi-release"
+path = "src/bin/yandi_release.rs"
 
 [[bin]]
 name = "apk_signing_key"

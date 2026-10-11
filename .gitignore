@@ -43,3 +43,8 @@ nodes/bootstrap.json
 bootstrap_cache.json
 __pycache__/
 *.pyc
+
+# Updater/reproducibility builds and evidence
+/target-updater/
+/.repro-check.*/
+/dist/
