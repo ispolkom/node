@@ -236,7 +236,18 @@ ok = got is not None and got[45:45 + struct.unpack("<I", got[41:45])[0]] == blob
 check("live message from phone 1 reaches phone 2", ok, got)
 st, c1 = req("GET", "/mobile/contacts", token=tok1)
 check("phone 2 shows online", any(x["peer_id"] == d2 and x["online"] for x in c1["contacts"]))
+# письмо, которое телефон не смог обработать (нет ключа, старый формат), не стирается подтверждением более нового
+ws_send(s1, bytes([0x30]) + bytes.fromhex(d2) + struct.pack("<I", 9) + b"unhandled")
+time.sleep(0.3)
+ws_send(s1, bytes([0x30]) + bytes.fromhex(d2) + struct.pack("<I", 5) + b"newer")
+time.sleep(0.5)
 st, r = req("GET", "/mobile/inbox", token=tok2)
+mine = [x for x in r["messages"] if x["from_peer_id"] == d1]
+old_id = [x["id"] for x in mine if base64.b64decode(x["payload_b64"]) == b"unhandled"]
+new_id = [x["id"] for x in mine if base64.b64decode(x["payload_b64"]) == b"newer"]
+req("POST", "/mobile/inbox/ack", {"ids": new_id}, token=tok2)
+st, r = req("GET", "/mobile/inbox", token=tok2)
+check("acking a newer letter keeps an older unacked one", old_id and [x for x in r["messages"] if x["id"] in old_id] and not [x for x in r["messages"] if x["id"] in new_id], r)
 ids = [x["id"] for x in r["messages"] if x["from_peer_id"] == d1]
 req("POST", "/mobile/inbox/ack", {"ids": ids}, token=tok2)
 st, r = req("GET", "/mobile/inbox", token=tok2)

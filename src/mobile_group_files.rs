@@ -262,7 +262,7 @@ pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
         Ok(v) => v,
         Err(r) => return r,
     };
-    let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(m) = load_meta(&gid, &id).await.filter(|m| !expired(m)) else { return StatusCode::NOT_FOUND.into_response() };
     if m.by != key || muted {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -302,7 +302,7 @@ pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, P
         Ok(v) => v,
         Err(r) => return r,
     };
-    let Some(mut m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(mut m) = load_meta(&gid, &id).await.filter(|m| !expired(m)) else { return StatusCode::NOT_FOUND.into_response() };
     if m.by != key {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -375,7 +375,7 @@ pub(crate) async fn pc_begin(gid: &str, device: &str, file_size: u64, total_chun
 
 pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &[u8]) -> Result<(), String> {
     let (key, _, muted) = pc_member(gid, device)?;
-    let m = load_meta(gid, id).await.ok_or("нет такой заливки")?;
+    let m = load_meta(gid, id).await.filter(|m| !expired(m)).ok_or("нет такой заливки")?;
     if m.by != key || muted || m.done || idx >= m.total_chunks || bytes.is_empty() || bytes.len() > chunk_limit(&m) {
         return Err("кусок не принят".into());
     }
@@ -391,7 +391,7 @@ pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &
 
 pub(crate) async fn pc_done(gid: &str, device: &str, id: &str) -> Result<(), String> {
     let (key, _, _) = pc_member(gid, device)?;
-    let mut m = load_meta(gid, id).await.ok_or("нет такой заливки")?;
+    let mut m = load_meta(gid, id).await.filter(|m| !expired(m)).ok_or("нет такой заливки")?;
     if m.by != key {
         return Err("чужая заливка".into());
     }

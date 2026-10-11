@@ -415,13 +415,13 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     if name.is_empty() {
         name = "Телефон".to_string();
     }
+    // вытесняем того, кто дольше всех молчит, а не самого давно сопряжённого: давнее, но живое устройство не должно вылетать.
+    // Вытеснение — то же «забыть устройство»: его группы, почта и открытые сокеты убираются тем же путём (вне замка списка устройств)
+    let evict = with_devices(|d| (d.len() >= MAX_DEVICES).then(|| d.iter().min_by_key(|x| x.last_activity_ms()).map(|x| x.peer_id())).flatten());
+    if let Some(peer) = evict {
+        remove_device(&peer);
+    }
     with_devices(|d| {
-        if d.len() >= MAX_DEVICES {
-            // вытесняем того, кто дольше всех молчит, а не самого давно сопряжённого: давнее, но живое устройство не должно вылетать
-            if let Some(i) = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
-                d.remove(i);
-            }
-        }
         let th = token_hash(&token);
         if d.iter()
             .any(|x| x.name == name || x.name.starts_with(&format!("{name} (")))
@@ -921,9 +921,10 @@ async fn inbox(
             .find(|x| same(&x.token_hash, &dev))
             .map(|x| x.peer_id())
     }) {
+        // почта устройства — без курсора: удаляется только то, что устройство подтвердило по номеру (неподтверждённое старое не теряется)
         for m in with_mail(|l| {
             l.iter()
-                .filter(|m| m.to == me && m.ts > acked)
+                .filter(|m| m.to == me)
                 .cloned()
                 .collect::<Vec<_>>()
         }) {
@@ -971,7 +972,9 @@ async fn inbox_ack(
             .find(|x| same(&x.token_hash, &dev))
             .map(|x| x.peer_id())
     }) {
-        with_mail(|l| l.retain(|m| !(m.to == me && m.ts <= max)));
+        // только подтверждённые письма: старое неподтверждённое (не расшифровалось, нет ключа, старый формат) остаётся в очереди
+        let ids: HashSet<u64> = req.ids.iter().copied().collect();
+        with_mail(|l| l.retain(|m| !(m.to == me && ids.contains(&m.ts))));
     }
     StatusCode::OK
 }

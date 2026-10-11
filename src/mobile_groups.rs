@@ -1263,6 +1263,21 @@ impl Store {
         Ok(())
     }
 
+    /// Просьбы старше недели стираются на диске вместе с номером устройства заявителя (а не только скрываются в ответах).
+    pub fn expire_requests(&mut self) -> R<()> {
+        let now = now_ms();
+        let mut changed = false;
+        for g in self.groups.values_mut() {
+            let before = g.requests.len();
+            g.requests.retain(|r| now.saturating_sub(r.ts) < REQUEST_TTL_MS);
+            changed |= g.requests.len() != before;
+        }
+        if changed {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     /// Неразобранные просьбы: видят владелец и модераторы.
     pub fn requests_of(&mut self, gid: &str, device: &str) -> R<Value> {
         let role = self.me(gid, device)?.1.role;
@@ -1397,6 +1412,13 @@ static STORE: Mutex<Option<Store>> = Mutex::new(None);
 pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, bool)> {
     let key = member_key(gid, device);
     with_store(|s| s.get(gid).ok().and_then(|g| g.member(&key).map(|m| (key.clone(), m.role, m.muted))))
+}
+
+/// Уборка по таймеру (из main): просроченные просьбы о вступлении.
+pub fn cleanup_requests() {
+    if let Err(e) = with_store(|s| s.expire_requests()) {
+        eprintln!("[groups] просроченные просьбы не стёрты: {e:?}");
+    }
 }
 
 pub(crate) fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
@@ -1996,6 +2018,19 @@ mod tests {
         s.update_settings(&gid, OWNER, None, None, Some("")).unwrap();
         assert_eq!(s.list_for(OWNER)[0]["about"], "", "описание можно очистить");
         assert_eq!(s.modlog(&gid, Some(OWNER)).unwrap()["modlog"].as_array().unwrap().last().unwrap()["action"], "settings");
+    }
+
+    #[test]
+    fn week_old_requests_are_wiped_from_disk_with_the_device_number() {
+        let (d, mut s) = store();
+        let inv = s.create("Клуб", "", Kind::Invite, OWNER, &[]).unwrap();
+        s.request_join(&inv, EVE, "Ева").unwrap();
+        s.groups.get_mut(&inv).unwrap().requests[0].ts = now_ms() - REQUEST_TTL_MS - 1000;
+        s.save().unwrap();
+        s.expire_requests().unwrap();
+        let again = Store::open(d.path().join("groups"));
+        assert!(again.groups[&inv].requests.is_empty(), "после перезапуска просьбы нет");
+        assert!(!std::fs::read_to_string(d.path().join("groups").join("index.json")).unwrap().contains(&format!("\"peer\":\"{EVE}\"")), "номера заявителя на диске нет");
     }
 
     #[test]

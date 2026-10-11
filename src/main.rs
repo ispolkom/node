@@ -270,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
         loop {
             yandi::mobile_group_files::cleanup_all().await;
             yandi::mobile_files::cleanup_expired().await; // и личных передач между устройствами
+            yandi::mobile_groups::cleanup_requests(); // просьбы о вступлении старше недели стираются с диска
             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
         }
     });

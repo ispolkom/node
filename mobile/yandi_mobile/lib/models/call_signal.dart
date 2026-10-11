@@ -29,6 +29,9 @@ class CallSignal {
     if (!text.startsWith(marker)) return null;
     try {
       final m = jsonDecode(text.substring(marker.length)) as Map<String, dynamic>;
+      // та же проверка, что на странице узла (phone-call.js): версия 1, тип — строка, время — целое число, video — bool
+      if (m['v'] != 1 || m['t'] is! String || m['ts'] is! int) return null;
+      if (m['video'] != null && m['video'] is! bool) return null;
       final cid = m['cid'] as String;
       if (cid.length < 8 || cid.length > 64) return null;
       // кандидат ICE — только с полями нужных типов: иначе обработчик звонка упал бы на приведении типов

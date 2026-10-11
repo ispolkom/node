@@ -180,7 +180,7 @@ class ApiService {
   Future<List<Map<String, dynamic>>> fetchInbox(int sinceMs) async {
     try {
       final res = await _client
-          .get(_url('/mobile/inbox?since=$sinceMs&limit=200'), headers: _headers)
+          .get(_url('/mobile/inbox?since=$sinceMs&limit=1000'), headers: _headers)
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return [];
       final data = jsonDecode(res.body) as Map<String, dynamic>;
