@@ -484,7 +484,7 @@ mod tests {
         .unwrap();
         let bytes = manifest_bytes(&m);
         fs::write(dir.join(MANIFEST_NAME), &bytes).unwrap();
-        fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &key)).unwrap();
+        fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &key).unwrap()).unwrap();
         vk
     }
     #[tokio::test]
@@ -627,7 +627,7 @@ mod tests {
         m.files[0].size = MAX_FILE + 1;
         let bytes = manifest_bytes(&m);
         fs::write(source.path().join(MANIFEST_NAME), &bytes).unwrap();
-        fs::write(source.path().join(SIGNATURE_NAME), sign(&bytes, &key)).unwrap();
+        fs::write(source.path().join(SIGNATURE_NAME), sign(&bytes, &key).unwrap()).unwrap();
         assert!(update(source.path().to_str().unwrap(), &vk, &install, 0)
             .await
             .is_err());

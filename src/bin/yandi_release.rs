@@ -122,8 +122,10 @@ async fn main() {
             );
             let bytes = ReleaseDir::open(&dir).and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
+            let m = parse_manifest(&bytes).unwrap_or_else(|e| die(&e.to_string()));
+            check_files(&dir, &m).unwrap_or_else(|e| die(&e.to_string()));
             let k = phrase_key();
-            std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k))
+            std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k).unwrap_or_else(|e| die(&e.to_string())))
                 .unwrap_or_else(|e| die(&e.to_string()));
             println!("подписано ключом {}", key_id(&k.verifying_key()));
         }

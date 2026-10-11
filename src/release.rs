@@ -172,7 +172,9 @@ pub fn build_manifest(dir: &Path, version: &str, seq: u64, created: u64, key_id:
     if files.windows(2).any(|w| w[0].name == w[1].name) {
         return Err("повторяющиеся имена файлов".into());
     }
-    Ok(Manifest { format: 1, product: "yandi-node".into(), version: version.into(), seq, created, key_id: key_id.into(), files })
+    let m = Manifest { format: 1, product: "yandi-node".into(), version: version.into(), seq, created, key_id: key_id.into(), files };
+    validate_manifest(&m).map_err(|e| e.to_string())?;
+    Ok(m)
 }
 
 pub fn manifest_bytes(m: &Manifest) -> Vec<u8> {
@@ -180,9 +182,11 @@ pub fn manifest_bytes(m: &Manifest) -> Vec<u8> {
 }
 
 /// Подпись над ТОЧНЫМИ байтами файла манифеста с доменным префиксом (никакой повторной канонизации).
-pub fn sign(manifest: &[u8], key: &SigningKey) -> String {
+pub fn sign(manifest: &[u8], key: &SigningKey) -> Result<String, VerifyError> {
+    let m = parse_manifest(manifest)?;
+    if m.key_id != key_id(&key.verifying_key()) { return Err(VerifyError::WrongKeyId); }
     let sig: Signature = key.sign(&[SIG_DOMAIN, manifest].concat());
-    hex::encode(sig.to_bytes())
+    Ok(hex::encode(sig.to_bytes()))
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -217,21 +221,37 @@ pub fn verify_manifest(manifest: &[u8], sig_hex: &str, vk: &VerifyingKey, min_se
     }
     let sig_bytes: [u8; 64] = hex::decode(sig_hex.trim()).ok().and_then(|b| b.try_into().ok()).ok_or(VerifyError::BadSignature)?;
     vk.verify(&[SIG_DOMAIN, manifest].concat(), &Signature::from_bytes(&sig_bytes)).map_err(|_| VerifyError::BadSignature)?;
-    let m: Manifest = serde_json::from_slice(manifest).map_err(|e| VerifyError::Malformed(e.to_string()))?;
-    if m.format != 1 || m.product != "yandi-node" || m.files.is_empty() || m.files.len() > MAX_FILES {
-        return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
-    }
+    let m = parse_manifest(manifest)?;
     if m.key_id != key_id(vk) {
         return Err(VerifyError::WrongKeyId);
     }
     if m.seq < min_seq {
         return Err(VerifyError::Rollback { seq: m.seq, min: min_seq });
     }
+    Ok(m)
+}
+
+fn lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+pub fn validate_manifest(m: &Manifest) -> Result<(), VerifyError> {
+    if m.format != 1 || m.product != "yandi-node" || m.seq == 0 || m.version.is_empty()
+        || m.version.len() > 200 || m.version.chars().any(char::is_control)
+        || !lower_hex(&m.key_id, 16) || m.files.is_empty() || m.files.len() > MAX_FILES {
+        return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
+    }
+    let mut seen = std::collections::HashSet::new();
     for f in &m.files {
-        if !plain_name(&f.name) || f.sha256.len() != 64 || !f.sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        if !plain_name(&f.name) || !lower_hex(&f.sha256, 64) || !seen.insert(&f.name) {
             return Err(VerifyError::Malformed(format!("недопустимая запись: {}", f.name)));
         }
     }
+    Ok(())
+}
+pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
+    if bytes.len() > MAX_MANIFEST { return Err(VerifyError::TooLarge); }
+    let m = serde_json::from_slice(bytes).map_err(|e| VerifyError::Malformed(e.to_string()))?;
+    validate_manifest(&m)?;
     Ok(m)
 }
 
@@ -267,8 +287,29 @@ mod tests {
         let vk = k.verifying_key();
         let m = build_manifest(dir, "0.2.0", seq, 1_700_000_000, &key_id(&vk), &["yandi-node-linux-x86_64.tar.gz".into(), "README.txt".into()]).unwrap();
         let bytes = manifest_bytes(&m);
-        let sig = sign(&bytes, &k);
+        let sig = sign(&bytes, &k).unwrap();
         (bytes, sig, vk)
+    }
+
+    #[test]
+    fn r9_validator_rejects_duplicates_uppercase_and_invalid_before_signing() {
+        let d = tempfile::tempdir().unwrap();
+        let (bytes, _, _) = release(d.path(), 1);
+        let good = parse_manifest(&bytes).unwrap();
+        let k = key();
+        for mode in 0..4 {
+            let mut m = good.clone();
+            match mode {
+                0 => m.files.push(m.files[0].clone()),
+                1 => m.files[0].sha256 = "A".repeat(64),
+                2 => m.seq = 0,
+                _ => m.key_id = "A".repeat(16),
+            }
+            let bytes = manifest_bytes(&m);
+            assert!(sign(&bytes, &k).is_err());
+            let sig = hex::encode(k.sign(&[SIG_DOMAIN, &bytes].concat()).to_bytes());
+            assert!(verify_manifest(&bytes, &sig, &k.verifying_key(), 0).is_err());
+        }
     }
 
     #[test]
@@ -359,7 +400,7 @@ mod tests {
         let evil = Manifest { format: 1, product: "yandi-node".into(), version: "1".into(), seq: 1, created: 0, key_id: key_id(&k.verifying_key()),
             files: vec![FileEntry { name: "../etc/passwd".into(), sha256: "0".repeat(64), size: 1 }] };
         let eb = manifest_bytes(&evil);
-        let es = sign(&eb, &k);
+        let es = hex::encode(k.sign(&[SIG_DOMAIN, &eb].concat()).to_bytes());
         assert!(matches!(verify_manifest(&eb, &es, &k.verifying_key(), 0), Err(VerifyError::Malformed(_))));
     }
 
