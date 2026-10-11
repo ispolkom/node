@@ -141,6 +141,8 @@ where
             Ok(packet) => packet,
             Err(e) => {
                 tracing::warn!("[rx] receive error: {e}");
+                // не крутить цикл вхолостую, если сокет постоянно отдаёт ошибку
+                tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 continue;
             }
         };

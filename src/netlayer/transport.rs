@@ -1747,11 +1747,14 @@ impl P2PTransport {
         // A single reader owns this physical CSocket. Retirement cancels its workers
         // as well, including workers blocked on an application channel.
         tokio::spawn(async move {
+            // один приёмный буфер на читателя: раньше на каждый пакет заново обнулялись 64 КБ
+            let rx_buf = Arc::new(tokio::sync::Mutex::new(vec![0u8; 65535]));
             let reader = super::rx_pipeline::read_datagrams(|| {
                 let socket = socket.clone();
+                let rx_buf = rx_buf.clone();
                 async move {
-                    let mut buf = [0u8; 65535];
-                    let (len, from) = socket.recv_from(&mut buf).await?;
+                    let mut buf = rx_buf.lock().await;
+                    let (len, from) = socket.recv_from(&mut buf[..]).await?;
                     Ok((buf[..len].to_vec(), from))
                 }
             }, tx, &transport.rx_bytes_counter);
