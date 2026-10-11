@@ -1,6 +1,6 @@
 # YANDI desktop — проект P2, 2026-10-11
 
-Статус: только проектирование. Исходников Dart, pubspec, сгенерированного Linux runner и сборки здесь пока нет. Основание: GUI_SPEC_2026-10-11.md и HANDOFF_desktop_shell_P1_2026-10-11.md в /mnt/ssd480/yandi_codex_audit. Полный контракт и русские строки закреплены в GUI_SPEC; документ ниже задаёт устройство будущей оболочки, а не новый wire-протокол. P1: локальный коммит 7389386. P3 не разрешена.
+Статус на завершение M1: реализованы Linux runner, Dart Unix API, startup/локальный вход, панель и закрытая среда; проверки и ограничения — в `docs/HANDOFF_desktop_shell_P2M1_2026-10-11.md`. Ниже сохранён проект всего P2, включая будущие этапы, которые M1 не реализует. Основание: GUI_SPEC_2026-10-11.md и HANDOFF_desktop_shell_P1_2026-10-11.md в /mnt/ssd480/yandi_codex_audit. Полный контракт и русские строки закреплены в GUI_SPEC; документ ниже задаёт устройство будущей оболочки, а не новый wire-протокол. P1: локальный коммит 7389386. P3 не разрешена.
 
 ## Границы
 
@@ -159,7 +159,7 @@ GUI_SPEC приложение B — каталог исходных русски
 
 В личном чате Enter отправляет только через единый guard, Shift+Enter вводит новую строку; повторное Enter при in-flight не дублирует команду. В группе сохраняются Ctrl/Meta+Enter для отправки и Enter для новой строки; Escape закрывает emoji/dialog и снимает selection без опасного действия; Tab/focus/disabled работают. Delete/clear/remove/revoke/leave/transfer требуют понятного подтверждения с конкретным объектом, StepUp там, где требует daemon. Clipboard по явной команде, секреты автоматически не копируются; гарантировать очистку общесистемного clipboard нельзя. Никакого confirm=always true и исполнения сообщения как HTML.
 
-## План проверок, который сейчас НЕ выполнен
+## План проверок полного P2 (за пределами выполненных проверок M1)
 
 После появления SDK чистые Dart/controller tests через flutter test без GTK: Unix connection factory и отмена; отсутствие TCP fallback/proxy/cookies; decoding array/null/E200/401/429/501; stale epoch/resource responses; lock wipe и поздний unlock/media response; single-flight polls/backoff; неидемпотентный retry запрещён; QR GET не повторяется; drafts peer isolation; initial notification baseline; file chunk progress/cancel/no double-send; group key не требуется; DND всех calls. Для Unix transport fake server и настоящие Unix temp sockets с fixtures ответов Rust tests, не live ключи владельца.
 
@@ -167,4 +167,4 @@ Widget tests: startup/vault gates, формы/Enter, modal confirm/StepUp, empty
 
 Linux desktop build после установки владельцем toolchain: ninja, clang, libgtk-3-dev и нужные Flutter/plugin dependencies. Установка sudo здесь не выполняется. Сборка GUI и media plugin не заменяет integrated daemon/socket проверки. По отдельной команде P3: lab TCP vs Unix full-state parity, настоящий чужой uid, 201 MiB/phone transfer, websocket upgrade/heartbeat/call families, daemon restart/setup/recovery, auto-lock timing/wipe, no plaintext shell temp/cache and logs. После прохождения и отдельного разрешения на P3 можно удалять UI/HTML-only маршруты и документацию.
 
-Не проверено в P2: ни Dart compile/flutter test, ни plugin/API SDK signatures, ни GTK runner, ни окно/виджеты, ни WebRTC/уведомления/файловые previews, ни реальные daemon/socket integration. Документ не утверждает реализованный desktop продукт.
+M1 проверен отдельной Linux debug-сборкой, flutter test, GTK-окном без демона и реальным daemon/socket RPC-прогоном; подробности в handoff M1. Полный P2 не реализован: WebRTC, уведомления, transfers/previews, чат/группы и расширенные настройки остаются будущими этапами. P3 не начиналась.
