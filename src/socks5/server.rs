@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,8 +41,8 @@ pub struct Socks5ProxyServer {
     next_request_id: Arc<RwLock<u64>>,
     /// Pending requests: request_id -> oneshot sender
     pending_requests: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
     /// Channels for responses and tunnel data
     response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -479,42 +480,20 @@ impl Socks5ProxyServer {
 
     /// Handle tunnel data from exit node
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
     ) {
-        let mut rx_opt = { tunnel_rx.lock().await.take() };
-
-        if let Some(mut rx) = rx_opt {
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
             while let Some((_source_node, tunnel_data)) = rx.recv().await {
-                let tunnel_id = tunnel_data.tunnel_id;
-
-                // Check if tunnel should be closed
-                if tunnel_data.close {
-                    debug!("🔚 Tunnel #{} closed by exit node", tunnel_id);
-                    // Remove from active tunnels
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&tunnel_id);
-                    continue;
-                }
-
-                // Get write half for this tunnel (keep lock during write!)
-                let write_result = {
-                    let mut tunnels = active_tunnels.lock().await;
-
-                    if let Some(write_half) = tunnels.get_mut(&tunnel_id) {
-                        // Write data while holding lock
-                        write_half.write_all(&tunnel_data.data).await
-                            .map_err(|e| (e.to_string()))
-                    } else {
-                        Err("No active tunnel".to_string())
+                let key = tunnel_data.tunnel_id;
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    if writer.enqueue(tunnel_data.data, tunnel_data.close).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
-                };
-
-                if let Err(e) = write_result {
-                    error!("❌ Error writing to tunnel #{}: {}", tunnel_id, e);
-                    // Remove broken tunnel
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&tunnel_id);
                 }
             }
         }
@@ -733,35 +712,33 @@ impl Socks5ProxyServer {
         debug!("🚪 Starting tunnel #{}", request_id);
 
         // 11. Разделяем клиентский stream
-        let (mut client_read, mut client_write) = client_stream.into_split();
+        let (mut client_read, client_write) = client_stream.into_split();
 
         // 12. Сохраняем write half в active_tunnels
+        let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            tunnels.insert(request_id, client_write);
+            let writer = crate::netlayer::tunnel_writer::spawn_writer(client_write, self.active_tunnels.clone(), request_id);
+            writer_closed = writer.subscribe();
+            tunnels.insert(request_id, writer);
         }
 
         // 13. Читаем данные от клиента и отправляем в туннель (в фоновом режиме!)
         let station_clone = self.station.clone();
         let exit_node_clone = exit_node;
 
+        let tunnels_for_cleanup = self.active_tunnels.clone();
         // Запускаем в фоновом режиме, чтобы handle_tunnel_data мог работать параллельно!
         tokio::spawn(async move {
             const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
             let mut buf = vec![0u8; BUFFER_SIZE];
             loop {
-                match client_read.read(&mut buf).await {
+                match tokio::select! {
+                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                    result = client_read.read(&mut buf) => result,
+                } {
                     Ok(0) => {
                         debug!("🔚 Client closed connection");
-                        // Send close message
-                        let tunnel_close = Socks5TunnelData::close(request_id);
-                        let close_bytes = tunnel_close.encode();
-                        let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, close_bytes).await
-                            .map(|_| ())
-                            .map_err(|e| anyhow!("send_train: {}", e));
-                        if let Err(e) = send_res {
-                            error!("❌ Failed to send close message: {}", e);
-                        }
                         break;
                     }
                     Ok(n) => {
@@ -771,9 +748,10 @@ impl Socks5ProxyServer {
                         let tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
                         let data_bytes = tunnel_data.encode();
 
-                        let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, data_bytes).await
-                            .map(|_| ())
-                            .map_err(|e| anyhow!("send_train: {}", e));
+                        let send_res = tokio::select! {
+                            _ = writer_closed.changed() => Err(anyhow!("tunnel writer closed")),
+                            result = station_clone.send_train(exit_node_clone, data_bytes) => result.map(|_| ()).map_err(|e| anyhow!("send_train: {}", e)),
+                        };
                         if let Err(e) = send_res {
                             error!("❌ Failed to send tunnel data: {}", e);
                             break;
@@ -785,6 +763,10 @@ impl Socks5ProxyServer {
                     }
                 }
             }
+            tunnels_for_cleanup.lock().await.remove(&request_id);
+            // Existing close codec; notification cannot keep this local socket alive indefinitely.
+            let _ = tokio::time::timeout(Duration::from_secs(2), station_clone.send_train(
+                exit_node_clone, Socks5TunnelData::close(request_id).encode())).await;
             debug!("🔚 Client-to-tunnel task finished for tunnel #{}", request_id);
         });
 

@@ -10,19 +10,11 @@ use crate::util::HashId;
 use crate::protocol::Station;
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use anyhow::{Result, Context};
 use tracing::{info, error, debug, warn};
 use reqwest::Client as HttpClient;
-
-fn is_normal_tunnel_shutdown(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::NotConnected
-    )
-}
 
 /// Helper function to send tunnel data
 async fn send_tunnel_data(
@@ -50,8 +42,8 @@ pub struct HttpProxyGateway {
     pub station: Arc<Station>,
     request_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyRequest)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
 }
 
 impl HttpProxyGateway {
@@ -230,10 +222,13 @@ impl HttpProxyGateway {
         let (mut read_half, write_half) = target_stream.into_split();
 
         // Store write_half in active_tunnels
+        let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
             // соединения разных узлов — раздельно: номер туннеля выбирает сам узел, чужой номер не даёт доступа к чужому соединению
-            tunnels.insert((source_node, tunnel_id), write_half);
+            let writer = crate::netlayer::tunnel_writer::spawn_writer(write_half, self.active_tunnels.clone(), (source_node, tunnel_id));
+            writer_closed = writer.subscribe();
+            tunnels.insert((source_node, tunnel_id), writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
 
@@ -245,7 +240,10 @@ impl HttpProxyGateway {
         tokio::spawn(async move {
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
-                match read_half.read(&mut buf).await {
+                match tokio::select! {
+                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                    result = read_half.read(&mut buf) => result,
+                } {
                     Ok(0) => {
                         info!("🚇 Tunnel #{}: Server closed connection", tunnel_id);
                         {
@@ -258,7 +256,7 @@ impl HttpProxyGateway {
                             data: Vec::new(),
                             close: true,
                         };
-                        let _ = send_tunnel_data(&station_to_client, source_node_clone, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, tunnel_data)).await;
                         break;
                     }
                     Ok(n) => {
@@ -282,7 +280,7 @@ impl HttpProxyGateway {
                                 data: Vec::new(),
                                 close: true,
                             };
-                            let _ = send_tunnel_data(&station_to_client, source_node_clone, close_data).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, close_data)).await;
                             break;
                         }
                     }
@@ -298,7 +296,7 @@ impl HttpProxyGateway {
                             data: Vec::new(),
                             close: true,
                         };
-                        let _ = send_tunnel_data(&station_to_client, source_node_clone, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, tunnel_data)).await;
                         break;
                     }
                 }
@@ -310,82 +308,23 @@ impl HttpProxyGateway {
 
     /// Handle incoming tunnel data from client (async method - same as client's)
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
     ) {
-        info!("🚇 Tunnel data handler started (gateway)");
-
-        // Get the receiver - take ownership
-        let mut rx_opt = {
-            let mut rx_lock = tunnel_rx.lock().await;
-            rx_lock.take()
-        };
-
-        let mut rx = match rx_opt {
-            Some(r) => r,
-            None => {
-                warn!("⚠️  No tunnel data channel configured!");
-                return;
-            }
-        };
-
-        // Listen for tunnel data packets
-        while let Some((source_node, tunnel_data)) = rx.recv().await {
-            let tunnel_id = tunnel_data.tunnel_id;
-            let key = (source_node, tunnel_id);
-            let data_len = tunnel_data.data.len();
-            let is_close = tunnel_data.close;
-
-            debug!("🚇 Received tunnel data #{}: {} bytes, close={}",
-                   tunnel_id, data_len, is_close);
-
-            // ✅ FIX: Используем get_mut() вместо remove() чтобы устранить race condition!
-            let mut tunnels = active_tunnels.lock().await;
-
-            if let Some(write_half) = tunnels.get_mut(&key) {
-                use tokio::io::AsyncWriteExt;
-
-                if is_close {
-                    info!("🚇 Tunnel #{}: close packet received", tunnel_id);
-                    // Close the connection to server
-                    let _ = write_half.shutdown().await;
-                    // Remove tunnel from active list
-                    tunnels.remove(&key);
-                    continue;
-                }
-
-                if !tunnel_data.data.is_empty() {
-                    if let Err(e) = write_half.write_all(&tunnel_data.data).await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: upstream side already closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error writing to server: {}", e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&key);
-                        continue;
-                    }
-
-                    debug!("✅ Tunnel #{}: wrote {} bytes to server", tunnel_id, data_len);
-
-                    // Flush to ensure data is sent
-                    if let Err(e) = write_half.flush().await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: upstream flush skipped, socket closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error flushing server tunnel #{}: {}", tunnel_id, e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&key);
-                        continue;
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                let key = (source_node, tunnel_data.tunnel_id);
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    if writer.enqueue(tunnel_data.data, tunnel_data.close).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
                 }
-            } else {
-                debug!("🚇 Tunnel #{}: data arrived after upstream close, dropping", tunnel_id);
             }
         }
-
-        warn!("⚠️  Tunnel data channel closed");
     }
 
     /// Send tunnel data packet via YTP
