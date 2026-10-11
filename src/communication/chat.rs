@@ -110,6 +110,11 @@ impl ChatManager {
         self.outbox_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
+    /// Перенос чатов и очереди на ключ закрытой среды (см. [`ChatStorage::rekey_to`]); возвращает число файлов с ошибкой.
+    pub fn rekey_to(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize> {
+        self.storage.rekey_to(old, new)
+    }
+
     pub fn is_locked(&self) -> bool {
         self.storage.is_locked()
     }

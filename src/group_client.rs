@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use x25519_dalek::{PublicKey, StaticSecret};
 
@@ -243,6 +243,80 @@ pub fn init(master: [u8; 32]) {
 
 static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Перенос файлов `groups_pc` с прежнего мастер-ключа на ключ закрытой среды. Идемпотентно: что уже открывается новым ключом, остаётся.
+/// Файл, часть которого не открывается ни одним ключом, не меняется (возвращается число таких файлов). Клиент должен быть заперт.
+pub fn rekey(old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize, String> {
+    let dir = crate::util::data_dir::data_dir().join("groups_pc");
+    rekey_dir(&dir, old, new)
+}
+
+fn rekey_dir(dir: &Path, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize, String> {
+    if !dir.exists() {
+        return Ok(0);
+    }
+    let vnew = Vault::new(dir.to_path_buf(), &new);
+    let vold = old.map(|o| Vault::new(dir.to_path_buf(), &o));
+    let mut failed = 0usize;
+    for entry in std::fs::read_dir(dir).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        // aad: у состояния «state», у ленты группы — её номер (имя файла без «.log»)
+        let (aad, per_line) = if name == "state.enc" {
+            ("state".to_string(), false)
+        } else if let Some(gid) = name.strip_suffix(".log") {
+            (gid.to_string(), true)
+        } else {
+            continue;
+        };
+        let path = entry.path();
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{name}: {e}"))?;
+        let reseal = |line: &str| -> Option<(bool, String)> {
+            if vnew.open(&aad, line).is_some() {
+                return Some((false, line.trim().to_string()));
+            }
+            let plain = vold.as_ref()?.open(&aad, line)?;
+            Some((true, vnew.seal(&aad, &plain)))
+        };
+        let mut out = Vec::new();
+        let mut changed = false;
+        let mut ok = true;
+        if per_line {
+            for l in text.lines().filter(|l| !l.trim().is_empty()) {
+                match reseal(l) {
+                    Some((c, o)) => {
+                        changed |= c;
+                        out.push(o);
+                    }
+                    None => ok = false,
+                }
+            }
+        } else {
+            match reseal(text.trim()) {
+                Some((c, o)) => {
+                    changed = c;
+                    out.push(o);
+                }
+                None => ok = false,
+            }
+        }
+        if !ok {
+            failed += 1;
+            continue;
+        }
+        if !changed {
+            continue;
+        }
+        // до замены файла: каждая строка нового вида открывается новым ключом
+        if !out.iter().all(|l| vnew.open(&aad, l).is_some()) {
+            failed += 1;
+            continue;
+        }
+        let body = if per_line { out.iter().map(|l| format!("{l}\n")).collect::<String>() } else { out.concat() };
+        vnew.write_private(&name, body.as_bytes()).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(failed)
+}
 
 /// Закрытая среда: убрать ключ и расшифрованное состояние из памяти; файлы на диске не трогаются, фоновая синхронизация ждёт.
 pub fn lock() {
@@ -1329,5 +1403,30 @@ mod tests {
         assert!(err.contains("заперта"), "{err}");
         assert!(cell().lock().unwrap_or_else(|e| e.into_inner()).is_none());
         LOCKED.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    #[test]
+    fn rekey_moves_state_and_logs_and_is_repeatable_and_refuses_foreign_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new, other) = ([1u8; 32], [2u8; 32], [3u8; 32]);
+        let v = Vault::new(dir.path().to_path_buf(), &old);
+        v.write_private("state.enc", v.seal("state", br#"{"groups":{}}"#).as_bytes()).unwrap();
+        let log = format!("{}\n{}\n", v.seal("g1", b"{\"a\":1}"), v.seal("g1", b"{\"a\":2}"));
+        v.write_private("g1.log", log.as_bytes()).unwrap();
+        // лента, которую этот ключ не открывает: файл остаётся как есть
+        let alien = Vault::new(dir.path().to_path_buf(), &other);
+        let foreign = format!("{}\n", alien.seal("g2", b"{}"));
+        alien.write_private("g2.log", foreign.as_bytes()).unwrap();
+
+        assert_eq!(rekey_dir(dir.path(), Some(old), new).unwrap(), 1);
+        let n = Vault::new(dir.path().to_path_buf(), &new);
+        assert!(n.open("state", &std::fs::read_to_string(dir.path().join("state.enc")).unwrap()).is_some());
+        let moved = std::fs::read_to_string(dir.path().join("g1.log")).unwrap();
+        assert_eq!(moved.lines().filter(|l| n.open("g1", l).is_some()).count(), 2);
+        assert!(v.open("state", &std::fs::read_to_string(dir.path().join("state.enc")).unwrap()).is_none(), "старый ключ больше не открывает");
+        assert_eq!(std::fs::read_to_string(dir.path().join("g2.log")).unwrap(), foreign);
+        // повтор ничего не ломает
+        assert_eq!(rekey_dir(dir.path(), Some(old), new).unwrap(), 1);
+        assert_eq!(std::fs::read_to_string(dir.path().join("g1.log")).unwrap(), moved);
     }
 }

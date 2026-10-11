@@ -92,6 +92,62 @@ fn keys() -> Option<KeyGuard<'static>> {
     keys_from(key_cell(), |master| load_protected(&crate::util::data_dir::data_dir(), Some(master)))
 }
 
+/// Перенос ключей «компьютера как собеседника» на ключ закрытой среды: из файла под прежним мастер-ключом или из открытого
+/// `mobile_self.json`. Идемпотентно. Прежнее содержимое заменяется только после проверки записанного; открытый файл затирается.
+pub fn rekey(dir: &std::path::Path, old: Option<&[u8; 32]>, new: &[u8; 32]) -> Result<(), String> {
+    let enc = dir.join("mobile_self.enc");
+    let plain = dir.join("mobile_self.json");
+    let open_with = |master: &[u8; 32]| -> Option<([u8; 32], [u8; 32])> {
+        let raw = std::fs::read(&enc).ok()?;
+        if raw.len() < 28 {
+            return None;
+        }
+        let key = protect_key(master);
+        let body = Aes256Gcm::new_from_slice(&key).ok()?.decrypt(Nonce::from_slice(&raw[..12]), Payload { msg: &raw[12..], aad: b"mobile_self" }).ok()?;
+        let st: Stored = serde_json::from_slice(&body).ok()?;
+        Some((unb64(&st.x25519_secret)?.try_into().ok()?, unb64(&st.ed25519_secret)?.try_into().ok()?))
+    };
+    let from_plain = || {
+        std::fs::read_to_string(&plain)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Stored>(&t).ok())
+            .and_then(|s| Some((<[u8; 32]>::try_from(unb64(&s.x25519_secret)?).ok()?, <[u8; 32]>::try_from(unb64(&s.ed25519_secret)?).ok()?)))
+    };
+    let wipe_plain = || {
+        if let Ok(meta) = std::fs::metadata(&plain) {
+            let _ = std::fs::write(&plain, vec![0u8; meta.len() as usize]);
+        }
+        let _ = std::fs::remove_file(&plain);
+    };
+    if open_with(new).is_some() {
+        if plain.exists() {
+            wipe_plain();
+        }
+        return Ok(());
+    }
+    let pair = old.and_then(|o| open_with(o)).or_else(from_plain);
+    let Some((x, e)) = pair else {
+        return if enc.exists() || plain.exists() { Err("ключи компьютера не открываются ни прежним, ни новым ключом; файлы не тронуты".into()) } else { Ok(()) };
+    };
+    let body = serde_json::to_vec(&Stored { x25519_secret: b64(&x), ed25519_secret: b64(&e) }).map_err(|e| e.to_string())?;
+    let mut nonce = [0u8; 12];
+    rand::thread_rng().fill_bytes(&mut nonce);
+    let key = protect_key(new);
+    let ct = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| e.to_string())?
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &body, aad: b"mobile_self" })
+        .map_err(|e| e.to_string())?;
+    let blob = [nonce.as_slice(), &ct].concat();
+    crate::util::private_file::write_private(&enc, &blob).map_err(|e| e.to_string())?;
+    if open_with(new) != Some((x, e)) {
+        return Err("проверка записанных ключей компьютера не прошла".into());
+    }
+    if plain.exists() {
+        wipe_plain();
+    }
+    Ok(())
+}
+
 /// Отзыв ждёт завершения операции, удерживающей guard; после возврата старых
 /// signing/X25519 ключей в держателе нет и ленивое чтение не может их воскресить.
 pub fn lock_keys() {
@@ -1132,5 +1188,30 @@ mod tests {
         let d2 = tempfile::tempdir().unwrap();
         let _ = load_protected(d2.path(), None);
         assert!(d2.path().join("mobile_self.json").exists());
+    }
+
+    #[test]
+    fn rekey_keeps_the_computers_identity_and_wipes_plain_copy() {
+        let dir = tempfile::tempdir().unwrap();
+        let (old, new) = ([4u8; 32], [5u8; 32]);
+        let before = load_protected(dir.path(), Some(&old)).ed_pub;
+        rekey(dir.path(), Some(&old), &new).unwrap();
+        assert_eq!(load_protected(dir.path(), Some(&new)).ed_pub, before, "личность компьютера не меняется");
+        rekey(dir.path(), Some(&old), &new).unwrap(); // повтор безопасен
+
+        // открытый файл прежних версий переносится и затирается
+        let d2 = tempfile::tempdir().unwrap();
+        let plain_pub = load_or_create(&d2.path().join("mobile_self.json")).ed_pub;
+        assert!(d2.path().join("mobile_self.json").exists());
+        rekey(d2.path(), None, &new).unwrap();
+        assert!(!d2.path().join("mobile_self.json").exists());
+        assert_eq!(load_protected(d2.path(), Some(&new)).ed_pub, plain_pub);
+
+        // чужой ключ: ничего не меняется, ошибка
+        let d3 = tempfile::tempdir().unwrap();
+        let _ = load_protected(d3.path(), Some(&[9u8; 32]));
+        let raw = std::fs::read(d3.path().join("mobile_self.enc")).unwrap();
+        assert!(rekey(d3.path(), Some(&old), &new).is_err());
+        assert_eq!(std::fs::read(d3.path().join("mobile_self.enc")).unwrap(), raw);
     }
 }

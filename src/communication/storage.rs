@@ -153,6 +153,116 @@ impl ChatStorage {
         }
     }
 
+    /// Ключ AES из мастер-ключа или (None) из публичного node_id, как в прежнем режиме.
+    fn key_for(&self, master: Option<&[u8; 32]>) -> [u8; 32] {
+        let mut key = [0u8; 32];
+        match master {
+            Some(mk) => {
+                Hkdf::<Sha256>::new(Some(&self.my_node_id.0), mk)
+                    .expand(b"yandi-chat-v2", &mut key)
+                    .expect("HKDF expand failed");
+            }
+            None => key.copy_from_slice(&self.my_node_id.0[..32]),
+        }
+        key
+    }
+
+    /// Открыть одну строку (nonce || шифртекст в hex) любым из ключей; возвращает открытый текст.
+    fn open_with_any(candidates: &[[u8; 32]], hex_line: &str) -> Option<(usize, Vec<u8>)> {
+        let bytes = hex::decode(hex_line.trim()).ok().filter(|b| b.len() >= 12 + 16)?;
+        candidates.iter().enumerate().find_map(|(i, k)| {
+            Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k))
+                .decrypt(Nonce::from_slice(&bytes[..12]), &bytes[12..])
+                .ok()
+                .map(|p| (i, p))
+        })
+    }
+
+    fn seal_line(key: &[u8; 32], plain: &[u8]) -> Result<String> {
+        let mut nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ct = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+            .encrypt(Nonce::from_slice(&nonce), plain)
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        Ok(hex::encode([nonce.as_slice(), &ct].concat()))
+    }
+
+    /// Перенос всех файлов чатов и очереди на ключ закрытой среды и переключение хранилища на него. Идемпотентно: строка, уже
+    /// открывающаяся новым ключом, остаётся; прочие открываются прежним мастер-ключом (`old`) или старым ключом из node_id.
+    /// Файл с неоткрываемой строкой не меняется (счёт таких файлов возвращается).
+    /// Всё под замком записи: параллельное дописывание не может вклиниться между проверкой и заменой.
+    pub fn rekey_to(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize> {
+        let _g = self.locked();
+        let candidates = {
+            let mut c = vec![self.key_for(Some(&new))];
+            if let Some(o) = old.as_ref() {
+                c.push(self.key_for(Some(o)));
+            }
+            c.push(self.key_for(None));
+            c
+        };
+        let mut failed = 0usize;
+        if self.chats_dir.exists() {
+            for entry in std::fs::read_dir(&self.chats_dir)? {
+                let entry = entry?;
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let is_chat = name.starts_with("chat_") && name.ends_with(".enc");
+                if !(is_chat || name == "outbox.enc") || !entry.file_type()?.is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                let text = match std::fs::read_to_string(&path) {
+                    Ok(t) => t,
+                    Err(_) => {
+                        failed += 1;
+                        continue;
+                    }
+                };
+                let mut changed = false;
+                let mut out = Vec::new();
+                let mut ok = true;
+                for line in text.lines().filter(|l| !l.trim().is_empty()) {
+                    match Self::open_with_any(&candidates, line) {
+                        Some((0, _)) => out.push(line.trim().to_string()),
+                        Some((_, plain)) => match Self::seal_line(&candidates[0], &plain) {
+                            Ok(l) => {
+                                changed = true;
+                                out.push(l);
+                            }
+                            Err(_) => ok = false,
+                        },
+                        None => ok = false,
+                    }
+                }
+                if !ok {
+                    failed += 1;
+                    continue;
+                }
+                if !changed {
+                    continue;
+                }
+                let tmp = path.with_extension("enc.rekey");
+                let body = out.join("\n") + "\n";
+                crate::util::private_file::write_private(&tmp, body.as_bytes())?;
+                // проверка до замены: каждая строка новой копии открывается новым ключом
+                let check = std::fs::read_to_string(&tmp)?;
+                let all_new = check
+                    .lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .all(|l| matches!(Self::open_with_any(&candidates[..1], l), Some((0, _))));
+                if !all_new || check.lines().filter(|l| !l.trim().is_empty()).count() != out.len() {
+                    let _ = std::fs::remove_file(&tmp);
+                    failed += 1;
+                    continue;
+                }
+                std::fs::rename(&tmp, &path)?;
+            }
+        }
+        // Хранилище переключается всегда: перенесённое читается только новым ключом, а неоткрываемые файлы не читались и раньше.
+        *self.key_mode.write().unwrap_or_else(|e| e.into_inner()) = KeyMode::Master(new);
+        Ok(failed)
+    }
+
     fn locked(&self) -> std::sync::MutexGuard<'_, ()> {
         // замок защищает только порядок операций с файлами; отравление (паника в другой задаче) данных не портит
         self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
@@ -604,5 +714,37 @@ mod closed_env_tests {
         // удаление «видимого» сообщения не должно потерять строку, которую этот ключ не открывает
         assert!(st.delete_message(&peer, &new.msg_id).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn rekey_moves_old_master_and_legacy_lines_and_keeps_unreadable_files() {
+        let me = HashId::new_random();
+        let (a, b) = (HashId::new_random(), HashId::new_random());
+        let d = dir("rekey");
+        let st = ChatStorage::in_dir(me, d.clone()).unwrap();
+        // legacy (ключ из node_id) и под прежним мастер-ключом, в одном файле
+        let m1 = ChatMessage::new(a, me, "старое".into());
+        st.save_incoming(&a, &m1).unwrap();
+        st.set_master([7; 32]);
+        let m2 = ChatMessage::new(a, me, "под мастером".into());
+        st.save_incoming(&a, &m2).unwrap();
+        // чужой файл (ключ неизвестен)
+        let alien = ChatStorage::in_dir(me, d.clone()).unwrap();
+        alien.set_master([8; 32]);
+        alien.save_incoming(&b, &ChatMessage::new(b, me, "чужое".into())).unwrap();
+        let foreign = d.join(format!("chat_{}.enc", hex::encode(b.0)));
+        let foreign_before = std::fs::read(&foreign).unwrap();
+
+        assert_eq!(st.rekey_to(Some([7; 32]), [1; 32]).unwrap(), 1);
+        assert_eq!(std::fs::read(&foreign).unwrap(), foreign_before);
+        assert_eq!(st.load_history(&a, 10).unwrap().len(), 2, "перенесённый файл читается новым ключом");
+        assert!(st.delete_message(&b, &HashId::new_random()).is_err(), "чужой файл не перезаписывается");
+        std::fs::remove_file(&foreign).unwrap();
+        assert_eq!(st.rekey_to(Some([7; 32]), [1; 32]).unwrap(), 0);
+        assert_eq!(st.load_history(&a, 10).unwrap().len(), 2);
+        let fresh = ChatStorage::in_dir_locked(me, d.clone()).unwrap();
+        fresh.set_master([1; 32]);
+        assert_eq!(fresh.load_history(&a, 10).unwrap().len(), 2);
+        assert_eq!(st.rekey_to(Some([7; 32]), [1; 32]).unwrap(), 0, "повтор");
     }
 }
