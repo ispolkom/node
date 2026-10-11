@@ -1272,6 +1272,14 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_TEXT + 256 || d.len() < 37 + len { continue; }
                         if HashId(id) == st.my_id {
+                            // закрытая среда заперта (после перезапуска): сообщение не принимаем и не теряем молча, телефон видит «не доставлено»
+                            #[cfg(unix)]
+                            if crate::closed_api::is_locked() {
+                                let mut f = vec![FT_PEER_OFFLINE];
+                                f.extend_from_slice(&id);
+                                if sock.send(Message::Binary(f)).await.is_err() { break; }
+                                continue;
+                            }
                             // самому компьютеру: узел — конечная точка, расшифровывает и кладёт в историю веб-чата
                             phone_to_node(&st, &me, &d[37..37 + len]);
                             continue;

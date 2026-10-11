@@ -191,6 +191,42 @@
                     </div>
                 </div>
 
+                <div class="card" id="vaultCard">
+                    <div class="card-header">
+                        <h3 class="card-title">🔒 Закрытая среда узла</h3>
+                    </div>
+                    <div class="card-body">
+                        <p class="form-help" id="vaultState">Загрузка…</p>
+                        <p class="form-help">Под паролем владельца шифруются история чата ПК, группы ПК и ключи «ПК как собеседник». После перезапуска узел работает (почта, телефоны, сеть), но это заперто, пока вы не введёте пароль; без пароля оно не читается и на другом ПК. Предел защиты: работающий и разблокированный узел отдаёт ключи из памяти любому с правами root; копии, зашифрованные прежним ключом машины, задним числом не защищены.</p>
+                        <div id="vaultSetup" style="display:none">
+                            <input type="password" id="vsPass" placeholder="Пароль (не короче 6 знаков)" autocomplete="new-password">
+                            <input type="password" id="vsPass2" placeholder="Пароль ещё раз" autocomplete="new-password">
+                            <p class="form-help">Четыре секретных слова (необязательно, каждое от 5 знаков, разные) позволят восстановить доступ, если пароль забыт. Без слов забытый пароль не восстановить.</p>
+                            <input type="text" id="vsPhrase" placeholder="Четыре слова через пробел (можно пропустить)" autocomplete="off">
+                            <button class="btn" id="vsGo">Создать закрытую среду</button>
+                        </div>
+                        <div id="vaultUnlock" style="display:none">
+                            <input type="password" id="vuPass" placeholder="Пароль владельца" autocomplete="current-password">
+                            <button class="btn" id="vuGo">Разблокировать</button>
+                            <details><summary>Забыли пароль?</summary>
+                                <input type="text" id="vrPhrase" placeholder="Четыре слова" autocomplete="off">
+                                <input type="password" id="vrPass" placeholder="Новый пароль" autocomplete="new-password">
+                                <button class="btn" id="vrGo">Восстановить словами</button>
+                            </details>
+                        </div>
+                        <div id="vaultOpen" style="display:none">
+                            <button class="btn" id="vlGo">Заблокировать сейчас</button>
+                            <details><summary>Сменить пароль</summary>
+                                <input type="password" id="vcOld" placeholder="Текущий пароль" autocomplete="current-password">
+                                <input type="password" id="vcNew" placeholder="Новый пароль" autocomplete="new-password">
+                                <button class="btn" id="vcGo">Сменить пароль</button>
+                            </details>
+                            <label class="form-help">Блокировать при простое (минут, 0 — не блокировать): <input type="number" min="0" id="vaMin" style="width:5em"> <button class="btn" id="vaGo">Сохранить</button></label>
+                        </div>
+                        <p class="form-help" id="vaultMsg" role="status"></p>
+                    </div>
+                </div>
+
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Группы телефонов</h3>
@@ -699,6 +735,47 @@
                 })
                 .catch(function () { msg.textContent = 'Нет ответа от узла'; });
         });
+    })();
+    </script>
+    <script>
+    (function () {
+        var $ = function (id) { return document.getElementById(id); };
+        if (!$('vaultCard')) return;
+        function msg(t, bad) { $('vaultMsg').textContent = t || ''; $('vaultMsg').style.color = bad ? '#c0392b' : ''; }
+        function post(url, body) {
+            return fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}) })
+                .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); });
+        }
+        function show(st) {
+            $('vaultSetup').style.display = !st.configured ? '' : 'none';
+            $('vaultUnlock').style.display = st.configured && !st.unlocked ? '' : 'none';
+            $('vaultOpen').style.display = st.configured && st.unlocked ? '' : 'none';
+            var t = !st.configured ? 'Не создана: закрытые данные сейчас защищены только ключом этой машины.'
+                : st.unlocked ? 'Открыта. Узел может читать историю и группы ПК.'
+                : 'Заперта: история и группы ПК не читаются, пока не введён пароль.';
+            if (st.migration_pending) t += ' Перенос части старых данных не завершён и повторится при входе.';
+            if (st.error) t += ' Ошибка состояния: ' + st.error;
+            $('vaultState').textContent = t;
+            $('vaMin').value = Math.round((st.auto_lock_secs || 0) / 60);
+        }
+        function load() { fetch('/api/vault/status').then(function (r) { return r.json(); }).then(show).catch(function () { $('vaultState').textContent = 'Состояние недоступно'; }); }
+        function act(url, body, okText) {
+            msg('Подождите…');
+            post(url, body).then(function (j) { msg(okText); show(j.status); }).catch(function (e) { msg(e.message, true); });
+        }
+        $('vsGo').onclick = function () {
+            if ($('vsPass').value !== $('vsPass2').value) return msg('Пароли не совпали', true);
+            var phrase = $('vsPhrase').value.trim();
+            if (!phrase && !confirm('Без секретных слов забытый пароль не восстановить. Продолжить без слов?')) return;
+            act('/api/vault/setup', { password: $('vsPass').value, phrase: phrase || null }, 'Закрытая среда создана, данные перенесены.');
+            $('vsPass').value = ''; $('vsPass2').value = '';
+        };
+        $('vuGo').onclick = function () { act('/api/vault/unlock', { password: $('vuPass').value }, 'Разблокировано.'); $('vuPass').value = ''; };
+        $('vrGo').onclick = function () { act('/api/vault/recover', { phrase: $('vrPhrase').value, new_password: $('vrPass').value }, 'Пароль заменён, доступ восстановлен.'); $('vrPass').value = ''; };
+        $('vlGo').onclick = function () { act('/api/vault/lock', {}, 'Заперто.'); };
+        $('vcGo').onclick = function () { act('/api/vault/change_password', { old_password: $('vcOld').value, new_password: $('vcNew').value }, 'Пароль сменён.'); $('vcOld').value = ''; $('vcNew').value = ''; };
+        $('vaGo').onclick = function () { act('/api/vault/auto_lock', { secs: Math.max(0, Math.round(Number($('vaMin').value) || 0)) * 60 }, 'Сохранено.'); };
+        load();
     })();
     </script>
 </body>

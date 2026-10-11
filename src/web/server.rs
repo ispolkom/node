@@ -445,6 +445,8 @@ impl WebServer {
             .route("/", get(index_handler))
             // кто может выходить в интернет через этот узел (выбор владельца)
             .merge(crate::exit_policy::router())
+            // закрытая среда узла: пароль владельца, блокировка, смена пароля
+            .merge(vault_router())
             .merge(crate::upstream_proxy::router())
             // карточки узлов и списки сети по странам
             // доверенные узлы: визитка этого узла, добавить/убрать узел
@@ -658,6 +660,16 @@ impl WebServer {
             .layer(axum::middleware::from_fn(host_guard))
             .layer(TraceLayer::new_for_http())
     }
+}
+
+#[cfg(unix)]
+fn vault_router() -> Router<AppState> {
+    crate::closed_api::router()
+}
+
+#[cfg(not(unix))]
+fn vault_router() -> Router<AppState> {
+    Router::new()
 }
 
 /// Можно ли обращаться к веб-интерфейсу под таким заголовком `Host`. Интерфейс слушает только этот компьютер;

@@ -260,10 +260,34 @@ async fn main() -> anyhow::Result<()> {
     let identity = NodeIdentity::load_or_create(discovery_port);
 
     // Группы на компьютере (узел как участник): данные закрыты мастер-ключом узла, как история чатов.
-    if let Some(mk) = auth_state.get_master_key() {
+    // Закрытая среда (пароль владельца): если создана, узел стартует с ней ЗАПЕРТОЙ — рабочий ключ машины закрытые данные
+    // больше не открывает, их ключи выдаются только после ввода пароля на странице узла.
+    #[cfg(unix)]
+    let closed_env = {
+        let dir = yandi::util::data_dir::data_dir().join("closed");
+        let auth_for_legacy = auth_state.clone();
+        match yandi::closed_env::ClosedEnv::open(&dir, Box::new(move || auth_for_legacy.get_master_key())) {
+            Ok(env) => Some(env),
+            Err(e) => {
+                // не открывается — НЕ работаем без неё: иначе закрытые данные снова оказались бы на ключе машины
+                eprintln!("🔒 Закрытая среда не открывается: {e}. Узел остановлен, файлы не тронуты.");
+                std::process::exit(2);
+            }
+        }
+    };
+    #[cfg(unix)]
+    let closed_configured = closed_env.as_ref().is_some_and(|e| e.configured());
+    #[cfg(not(unix))]
+    let closed_configured = false;
+    if closed_configured {
+        println!("🔒 Закрытая среда создана: история ПК, группы ПК и ключи собеседника заперты до ввода пароля владельца");
+        yandi::group_client::start_locked();
+        yandi::group_client::spawn_background();
+    } else if let Some(mk) = auth_state.get_master_key() {
         yandi::mobile_self::set_master(mk); // ключи «компьютера как собеседника» — в шифрованном файле
         yandi::group_client::init(mk);
         yandi::group_client::spawn_background();
+        println!("🔓 Закрытая среда не создана: данные ПК защищены только ключом этой машины. Задайте пароль владельца в настройках узла");
     }
     // срок хранения файлов групп и личных передач соблюдается по таймеру, даже если в группу больше ничего не заливают
     tokio::spawn(async {
@@ -576,7 +600,9 @@ async fn main() -> anyhow::Result<()> {
     // Создать ChatManager (использует мастер-ключ если доступен)
     let mut chat_manager = {
         let mk = auth_state.get_master_key();
-        let result = if let Some(master_key) = mk {
+        let result = if closed_configured {
+            yandi::communication::ChatManager::new_locked(identity_for_web.node_id(), p2p_transport.clone())
+        } else if let Some(master_key) = mk {
             yandi::communication::ChatManager::new_with_master_key(
                 identity_for_web.node_id(), p2p_transport.clone(), master_key,
             )
@@ -611,6 +637,14 @@ async fn main() -> anyhow::Result<()> {
     let chat_manager = std::sync::Arc::new(chat_manager);
     chat_manager.clone().spawn_delivery_timeout_task();
     yandi::mobile_api::init(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
+    #[cfg(unix)]
+    if let Some(env) = closed_env.as_ref() {
+        env.register(std::sync::Arc::new(yandi::closed_api::ChatConsumer(chat_manager.clone())));
+        env.register(std::sync::Arc::new(yandi::closed_api::GroupsConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
+        env.spawn_auto_lock();
+        yandi::closed_api::install_global(env.clone());
+    }
 
     // Spawn Chat packet handler
     let chat_manager_clone = chat_manager.clone();

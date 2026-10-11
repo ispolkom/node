@@ -32,6 +32,8 @@
 
 pub mod bootstrap;
 #[cfg(unix)]
+pub mod closed_api;
+#[cfg(unix)]
 pub mod closed_env;
 pub mod communication;
 pub mod core;
