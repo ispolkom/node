@@ -19,9 +19,9 @@ bash tools/node_release.sh --check  # только проверить фразу
 
 ## Как проверять скачанный выпуск
 ```
-yandi-release verify <каталог выпуска> --pubkey <64 hex из release/yandi-release-pubkey.hex> [--min-seq <номер установленного>]
+yandi-release verify <каталог выпуска> --pubkey <64 hex из release/yandi-release-pubkey.hex> --min-seq <номер установленного>
 ```
-Выход `ВЫПУСК ВЕРЕН` означает: подпись манифеста верна ключом, подтверждённым у вас, версия не старше установленной, каждый файл совпадает
+Выход `ВЫПУСК ВЕРЕН` означает: подпись манифеста верна ключом, подтверждённым у вас, seq не ниже указанного минимума (для проверки уже установленного архива равенство допустимо), каждый файл совпадает
 по размеру и SHA-256. Любое иное — не устанавливать.
 
 ## Что это защищает и что нет
@@ -38,8 +38,8 @@ yandi-release verify <каталог выпуска> --pubkey <64 hex из relea
 
 Из доверенного экземпляра `yandi-release`:
 ```sh
-yandi-release update --from /path/to/release --pubkey <64 hex> --install-dir "$HOME/.local/share/yandi-node"
-yandi-release update --from https://server/releases/version --pubkey <64 hex> --install-dir "$HOME/.local/share/yandi-node" [--current-seq N]
+yandi-release update --from /path/to/release --min-seq 0 --pubkey <64 hex> --install-dir "$HOME/.local/share/yandi-node"
+yandi-release update --from https://server/releases/version --pubkey <64 hex> --install-dir "$HOME/.local/share/yandi-node" --min-seq N
 yandi-release status --install-dir "$HOME/.local/share/yandi-node"
 yandi-release rollback --install-dir "$HOME/.local/share/yandi-node"
 ```
@@ -70,10 +70,12 @@ PAX/GNU long-name расширения, ссылки, устройства, по
 полностью подготовленная новая версия. После SIGKILL могут оставаться временные и
 неактивные каталоги: автоматической очистки истории нет.
 
-`--current-seq` может только повысить минимальный допустимый seq. `rollback` — явный
+`--min-seq` обязателен; 0 предназначен для первой установки. При миграции unmanaged
+установки укажите её последний seq. `--current-seq` сохранён как совместимый alias.
+Обновлятор требует seq строго больше max(указанный минимум, сохранённый max_seq). `rollback` — явный
 локальный откат владельцем к previous; наибольший принятый seq сохраняется в новой
 записи и продолжает запрещать сетевой/каталожный downgrade через `update`.
-Повторная установка того же seq разрешена. Откат тоже переключает `current` атомарно,
+Повторная установка того же seq запрещена, включая seq уже принятого выпуска после rollback. Откат тоже переключает `current` атомарно,
 сохраняя заменяемую версию как previous.
 
 Имена `yandi`, `yandi-release`, `previous` в корне должны быть свободны либо уже
@@ -91,7 +93,7 @@ PAX/GNU long-name расширения, ссылки, устройства, по
 `tools/node_release.sh` использует общую рецептуру `tools/release_build_env.sh`:
 `nice -n 15`, `CARGO_BUILD_JOBS=2`, `cargo build --release --locked --offline`, без
 proxy-переменных. `CARGO_TARGET_DIR` по умолчанию
-`/mnt/ssd480/wt/codex/target-updater`; `XDG_DATA_HOME=/tmp/codex_up_xdg`.
+`/mnt/ssd480/wt/codex/target-updater`; `XDG_DATA_HOME=/tmp/codex_rf_xdg`.
 `CARGO_ENCODED_RUSTFLAGS` устанавливается рецептурой (унаследованные flags заменяются):
 исходники, target и Cargo home отображаются через `--remap-path-prefix` на стабильные
 `/usr/src/yandi`, `/usr/src/yandi-target`, `/usr/src/cargo`.
@@ -151,3 +153,11 @@ Argon2id не изменены. Прежний `node_release.sh` уже прим
 расхождения API и скрипта. Такой нестандартный закреплённый ключ нельзя незаметно
 перепривязать; потребуется явная миграция владельцем. Боевой ключ/фраза в этой работе
 не использовались. ASCII и уже NFC-фразы сохраняют прежний результат KDF.
+
+Подписывающий скрипт держит `release/.lock` от начала сборки до конца проверки.
+`release/SEQ` — канонический десятичный u64; номер резервируется атомарным rename
+с fsync файла и каталога **до подписи**. Сбой может оставить пропуск, повтор номера
+не допускается. Удалять/откатывать SEQ вручную нельзя. После первой публикации
+сохраните SEQ вместе с закреплённым публичным ключом.
+`--check` использует готовый доверенный `$CARGO_TARGET_DIR/release/yandi-release`,
+требует существующий закреплённый ключ и ничего не собирает/записывает.

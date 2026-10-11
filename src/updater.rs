@@ -160,7 +160,7 @@ async fn prepare_and_install(
         .map(|s| s.max_seq)
         .unwrap_or(0)
         .max(min_seq);
-    ensure!(m.seq >= high, "откат seq: {} < {}", m.seq, high);
+    ensure!(m.seq > high, "повтор/откат seq: {} <= {}", m.seq, high);
     let state = State {
         version: m.version,
         seq: m.seq,
@@ -487,6 +487,25 @@ mod tests {
         fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &key).unwrap()).unwrap();
         vk
     }
+    #[tokio::test]
+    async fn r8_repeated_seq_is_refused_after_install_and_rollback() {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        archive(source.path(), "yandi", b'0', b"first");
+        let vk = signed(source.path(), 1);
+        update(source.path().to_str().unwrap(), &vk, &install, 0).await.unwrap();
+        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0).await.is_err());
+        archive(source.path(), "yandi", b'0', b"second");
+        signed(source.path(), 2);
+        update(source.path().to_str().unwrap(), &vk, &install, 1).await.unwrap();
+        rollback(&install).unwrap();
+        let state = status(&install).unwrap().unwrap();
+        assert_eq!((state.seq, state.max_seq), (1, 2));
+        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0).await.is_err());
+        assert_eq!(std::fs::read(install.join("yandi")).unwrap(), b"first");
+    }
+
     #[tokio::test]
     async fn update_repeat_rollback_and_high_water() {
         let root = tempfile::tempdir().unwrap();

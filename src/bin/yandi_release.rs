@@ -54,7 +54,7 @@ async fn main() {
             let mut install = dirs::data_local_dir()
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join("yandi-node");
-            let mut seq = 0;
+            let mut seq = None;
             let mut it = args[1..].iter();
             while let Some(arg) = it.next() {
                 let value = it.next().unwrap_or_else(|| die("нужно значение параметра"));
@@ -62,10 +62,10 @@ async fn main() {
                     "--from" if cmd == "update" => from = Some(value.clone()),
                     "--pubkey" if cmd == "update" => pubkey = Some(value.clone()),
                     "--install-dir" => install = PathBuf::from(value),
-                    "--current-seq" if cmd == "update" => {
-                        seq = value
+                    "--min-seq" | "--current-seq" if cmd == "update" => {
+                        seq = Some(value
                             .parse()
-                            .unwrap_or_else(|_| die("--current-seq: число"))
+                            .unwrap_or_else(|_| die("--current-seq: число")))
                     }
                     _ => die(&format!("неизвестный параметр: {arg}")),
                 }
@@ -74,7 +74,7 @@ async fn main() {
                 "update" => {
                     let source = from.unwrap_or_else(|| die("нужен --from"));
                     let vk = parse_pubkey(&pubkey.unwrap_or_else(|| die("нужен --pubkey")));
-                    yandi::updater::update(&source, &vk, &install, seq)
+                    yandi::updater::update(&source, &vk, &install, seq.unwrap_or_else(|| die("нужен --min-seq (0 только для первой установки)")))
                         .await
                         .map(Some)
                 }
@@ -142,21 +142,21 @@ async fn main() {
             println!("подписано ключом {}", key_id(&k.verifying_key()));
         }
         Some("verify") => {
-            // verify <каталог> --pubkey HEX [--min-seq N]
+            // verify <каталог> --pubkey HEX --min-seq N
             let dir = PathBuf::from(args.get(1).unwrap_or_else(|| {
-                die("использование: yandi-release verify <каталог> --pubkey HEX [--min-seq N]")
+                die("использование: yandi-release verify <каталог> --pubkey HEX --min-seq N")
             }));
             let mut pubkey = None;
-            let mut min_seq = 0u64;
+            let mut min_seq = None;
             let mut it = args[2..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--pubkey" => pubkey = it.next().cloned(),
                     "--min-seq" => {
-                        min_seq = it
+                        min_seq = Some(it
                             .next()
                             .and_then(|v| v.parse().ok())
-                            .unwrap_or_else(|| die("--min-seq: число"))
+                            .unwrap_or_else(|| die("--min-seq: число")))
                     }
                     other => die(&format!("неизвестный ключ: {other}")),
                 }
@@ -168,7 +168,7 @@ async fn main() {
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
             let sig = ReleaseDir::open(&dir).and_then(|d| d.read(SIGNATURE_NAME, 256)).and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
                 .unwrap_or_else(|e| die(&format!("{SIGNATURE_NAME}: {e}")));
-            let m = verify_manifest(&bytes, &sig, &vk, min_seq)
+            let m = verify_manifest(&bytes, &sig, &vk, min_seq.unwrap_or_else(|| die("нужен --min-seq")))
                 .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             check_files(&dir, &m).unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             println!(
