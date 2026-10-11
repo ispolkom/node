@@ -18,7 +18,13 @@ for a in "$@"; do case "$a" in --show) SHOW=1;; --check) CHECK=1;; --unsigned) U
 PUB=release/yandi-release-pubkey.hex
 SEQFILE=release/SEQ
 source tools/release_build_env.sh
-release_build
+if [ "$CHECK" = 1 ]; then
+  [ "$UNSIGNED" = 0 ] || { echo '--check несовместим с --unsigned'; exit 2; }
+  [ -f "$PUB" ] && [ ! -L "$PUB" ] || { echo 'Нет закреплённого ключа; --check не создаёт его'; exit 1; }
+  [ -x "$REL" ] || { echo "Сначала соберите доверенный инструмент: $REL"; exit 1; }
+else
+  release_build
+fi
 if [ "$UNSIGNED" = 1 ]; then
   release_archive
   echo "Архив без подписи: $RELEASE_OUT/$RELEASE_NAME.tar.gz"
@@ -36,7 +42,7 @@ PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2")
 unset P1 P2
 
 PUBKEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута"; exit 1; }
-mkdir -p release
+if [ "$CHECK" = 0 ]; then mkdir -p release; fi
 if [ ! -f "$PUB" ]; then
   echo "$PUBKEY" > "$PUB"
   echo "Первая подпись: создан $PUB — его нужно закоммитить (он открытый)."
@@ -46,7 +52,7 @@ elif [ "$(cat "$PUB")" != "$PUBKEY" ]; then
 else
   echo "Фраза верна: ключ совпадает с закреплённым."
 fi
-if [ "$CHECK" = 1 ]; then echo "Проверка завершена (инструмент уже собран)."; exit 0; fi
+if [ "$CHECK" = 1 ]; then echo "Проверка завершена без сборки и записи."; exit 0; fi
 
 SEQ=$(( $(cat "$SEQFILE" 2>/dev/null || echo 0) + 1 ))
 release_archive

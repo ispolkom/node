@@ -28,5 +28,18 @@ class Scripts(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Артефакт изменён', result.stderr)
 
+    def test_r3_check_never_builds_or_creates_anchor(self):
+        result = self.shell('bash tools/node_release.sh --check', 'synthetic\nsynthetic\n')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse((self.root / 'release').exists())
+        (self.root / 'release').mkdir()
+        anchor = self.root / 'release/yandi-release-pubkey.hex'
+        anchor.write_text('key\n')
+        result = self.shell('bash tools/node_release.sh --check', 'synthetic\nsynthetic\n')
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(anchor.read_text(), 'key\n')
+        self.assertFalse((self.root / 'release/SEQ').exists())
+        self.assertFalse((self.root / 'dist').exists())
+
 if __name__ == '__main__':
     unittest.main()
