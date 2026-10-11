@@ -14,7 +14,7 @@ const KEY_SALT: &[u8] = b"YANDI-NODE-RELEASE-KEY-V1";
 const SIG_DOMAIN: &[u8] = b"YANDI-RELEASE-MANIFEST-V1\0";
 pub const MANIFEST_NAME: &str = "MANIFEST.json";
 pub const SIGNATURE_NAME: &str = "MANIFEST.json.sig";
-const MAX_MANIFEST: usize = 1 << 20;
+pub const MAX_MANIFEST: usize = 1 << 20;
 const MAX_FILES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +74,51 @@ pub fn derive_signing_key(phrase: &str, params: Params) -> SigningKey {
 
 pub fn key_id(vk: &VerifyingKey) -> String {
     hex::encode(&Sha256::digest(vk.to_bytes())[..8])
+}
+
+/// Open each component without following links; all subsequent reads use this fd.
+#[cfg(unix)]
+pub struct ReleaseDir(std::fs::File);
+#[cfg(unix)]
+impl ReleaseDir {
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        use std::os::unix::{fs::OpenOptionsExt, io::{AsRawFd, FromRawFd}};
+        let mut dir = std::fs::OpenOptions::new().read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(if path.is_absolute() { "/" } else { "." })?;
+        for component in path.components() {
+            use std::path::Component;
+            let name = match component {
+                Component::RootDir | Component::CurDir => continue,
+                Component::Normal(n) => std::ffi::CString::new(n.as_encoded_bytes())?,
+                _ => return Err(std::io::Error::other("unsafe directory component")),
+            };
+            let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
+            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            dir = unsafe { std::fs::File::from_raw_fd(fd) };
+        }
+        Ok(Self(dir))
+    }
+    pub fn file(&self, name: &str) -> std::io::Result<std::fs::File> {
+        use std::os::unix::io::{AsRawFd, FromRawFd};
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+            return Err(std::io::Error::other("unsafe file name"));
+        }
+        let name = std::ffi::CString::new(name)?;
+        let fd = unsafe { libc::openat(self.0.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
+        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        let f = unsafe { std::fs::File::from_raw_fd(fd) };
+        if !f.metadata()?.is_file() { return Err(std::io::Error::other("not a regular file")); }
+        Ok(f)
+    }
+    pub fn read(&self, name: &str, limit: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let f = self.file(name)?;
+        if f.metadata()?.len() > limit { return Err(std::io::Error::other("file too large")); }
+        let mut bytes = Vec::new();
+        f.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit { return Err(std::io::Error::other("file too large")); }
+        Ok(bytes)
+    }
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
@@ -222,6 +267,24 @@ mod tests {
         let bytes = manifest_bytes(&m);
         let sig = sign(&bytes, &k);
         (bytes, sig, vk)
+    }
+
+    #[test]
+    fn r1_bounded_metadata_rejects_sparse_symlink_fifo_and_directory() {
+        use std::os::unix::fs::symlink;
+        let d = tempfile::tempdir().unwrap();
+        let dir = ReleaseDir::open(d.path()).unwrap();
+        let large = std::fs::File::create(d.path().join("large")).unwrap();
+        large.set_len(MAX_MANIFEST as u64 + 1).unwrap();
+        assert!(dir.read("large", MAX_MANIFEST as u64).is_err());
+        symlink("large", d.path().join("link")).unwrap();
+        assert!(dir.read("link", MAX_MANIFEST as u64).is_err());
+        std::fs::create_dir(d.path().join("directory")).unwrap();
+        assert!(dir.read("directory", 256).is_err());
+        let fifo = std::ffi::CString::new(d.path().join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        assert!(dir.read("fifo", 256).is_err());
+        assert!(dir.read("large", 256).is_err());
     }
 
     #[test]

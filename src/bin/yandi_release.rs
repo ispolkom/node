@@ -120,7 +120,7 @@ async fn main() {
                 args.get(1)
                     .unwrap_or_else(|| die("использование: yandi-release sign <каталог>")),
             );
-            let bytes = std::fs::read(dir.join(MANIFEST_NAME))
+            let bytes = ReleaseDir::open(&dir).and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
             let k = phrase_key();
             std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k))
@@ -150,9 +150,9 @@ async fn main() {
             let vk = parse_pubkey(
                 &pubkey.unwrap_or_else(|| die("нужен --pubkey (закреплённый открытый ключ)")),
             );
-            let bytes = std::fs::read(dir.join(MANIFEST_NAME))
+            let bytes = ReleaseDir::open(&dir).and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
-            let sig = std::fs::read_to_string(dir.join(SIGNATURE_NAME))
+            let sig = ReleaseDir::open(&dir).and_then(|d| d.read(SIGNATURE_NAME, 256)).and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
                 .unwrap_or_else(|e| die(&format!("{SIGNATURE_NAME}: {e}")));
             let m = verify_manifest(&bytes, &sig, &vk, min_seq)
                 .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
