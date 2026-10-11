@@ -37,6 +37,7 @@ import 'call_service.dart';
 import '../models/call_signal.dart';
 import '../screens/call_screen.dart';
 import 'package:flutter/material.dart' show MaterialPageRoute;
+import 'package:flutter/painting.dart' show PaintingBinding;
 
 /// Центральный state приложения.
 ///
@@ -530,10 +531,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     try {
       final cache = await pp.getTemporaryDirectory();
       if (!path.startsWith(cache.path)) return;
-      if (!await wipeFile(path)) {
-        final f = File(path);
-        if (await f.exists()) await f.delete();
-      }
+      await wipeFile(path);   // отказ затирания: копия остаётся и будет затёрта при следующем входе (_sweepPickerCache), а не удалена молча
     } catch (_) {}
   }
 
@@ -549,12 +547,54 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// После входа: остатки временных расшифрованных копий затираются, недоделанные удаления дочищаются, старые открытые файлы
   /// (до включения защиты) шифруются.
   Future<void> _filesHousekeeping() async {
+    protectionWarning = null;
     try {
       final vf = await vaultFiles();
       await vf.cleanTemp();
       await vf.finishPendingWipes();
-      await vf.migrateLegacy();
-    } catch (_) {}
+      await vf.migrateLegacy(resolveId: _legacyIdFor);
+      await _sweepPickerCache();
+      if (vf.migrationFailures > 0) {
+        protectionWarning = 'Не все старые файлы удалось зашифровать или затереть (${vf.migrationFailures}); попытка повторится при следующем входе.';
+      }
+    } catch (e) {
+      protectionWarning = 'Проверка защиты файлов не завершилась: $e';
+    }
+    notifyListeners();
+  }
+
+  /// Показывается в настройках, пока что-то из защиты не доведено до конца (открытые остатки старых файлов и т. п.).
+  String? protectionWarning;
+
+  /// Старый открытый файл был скачан в чате или группе: ищем номер передачи, чтобы после шифрования сообщение нашло свой файл.
+  Future<String?> _legacyIdFor(String path, String fileName) async {
+    try {
+      for (final k in await StorageService.secureKeys()) {
+        if (k.startsWith('grp_dl_') && await StorageService.secureRead(k) == path) return k.substring(7);   // группа: номер файла на узле
+      }
+      final m = RegExp(r'^([0-9a-f]{8})_(.*)$').firstMatch(fileName);
+      if (m == null) return null;
+      final rows = await StorageService.db.query('messages', columns: ['text'], where: 'text LIKE ?', whereArgs: ['%yandi-file:%']);
+      final tids = <String>{};
+      for (final r in rows) {
+        final o = FileOffer.tryParse(r['text'] as String);
+        if (o != null && o.tid.startsWith(m.group(1)!) && FileTransferService.safeName(o.name) == m.group(2)) tids.add(o.tid);
+      }
+      return tids.length == 1 ? tids.single : null;   // неоднозначно (одинаковые первые 8 знаков) — не угадываем
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Остатки выбора файлов (копии, которые делает системный выбор файлов в кеше) затираются: открытые копии не должны жить после
+  /// сеанса, даже если отправка не состоялась или приложение убили.
+  Future<void> _sweepPickerCache() async {
+    final cache = await pp.getTemporaryDirectory();
+    final d = Directory('${cache.path}/file_picker');
+    if (!await d.exists()) return;
+    await for (final e in d.list(recursive: true, followLinks: false)) {
+      if (e is File) await wipeFile(e.path);
+    }
   }
 
   /// Файлы можно слать только на своё устройство: у него есть ключ для E2E.
@@ -566,6 +606,15 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
+    try {
+      return await _sendFile(peerId, path, name: name);
+    } finally {
+      // при любом исходе (отказ узла, ошибка, успех) открытая копия из выбора файла затирается
+      if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
+    }
+  }
+
+  Future<String?> _sendFile(String peerId, String path, {String? name}) async {
     if (_api == null || _ws == null) return 'Нет связи с узлом';
     final svc = FileTransferService(_api!, vault: await VaultService.instance.files());
     late FileOffer offer;
@@ -590,7 +639,6 @@ class AppState extends ChangeNotifier implements FilesHost {
         try { await _api!.deleteTransfer(offer.tid); } catch (_) {}
         return 'Не удалось положить файл в защищённое хранилище: $e';
       }
-      await dropPickerCopy(path);
     }
     _outgoingPaths[offer.tid] = source;
     fileStates[offer.tid] = FileState.working(0);
@@ -1121,9 +1169,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     nodeError = null;
     identity = null;
     groups = null;
+    avatars?.wipeMemory();
     avatars = null;
     _vaultFiles = null;
     VaultBytesCache.clear();
+    // картинки, уже отданные Flutter для показа (кеш изображений), тоже убираем
+    PaintingBinding.instance.imageCache.clear();
+    PaintingBinding.instance.imageCache.clearLiveImages();
+    // уведомления, показанные до блокировки, снимаются
+    unawaited(NotificationService.cancelAll());
     contacts = [];
     nodeManager.clear();
     _chats.clear();
@@ -1137,10 +1191,10 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   /// «Удалить всё»: службы останавливаются, память очищается, затем стираются ключи, база, файлы и секреты.
-  Future<void> eraseEverything() async {
+  Future<String?> eraseEverything() async {
     try { await chatBg.stop(); } catch (_) {}
-    await lockDown();
-    await VaultService.instance.eraseEverything();
+    try { await lockDown(); } catch (_) {}
+    return VaultService.instance.eraseEverything();
   }
 
   @override

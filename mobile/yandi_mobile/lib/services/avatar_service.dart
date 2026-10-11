@@ -75,8 +75,10 @@ class AvatarService extends ChangeNotifier {
       if (AvatarMsg.validPng(png) && AvatarMsg.hashOf(png) == hash) {
         await _store(png, hash);
         final w = wipe;
-        if (w == null || !await w(old.path)) {
+        if (w == null) {
           if (await old.exists()) await old.delete();
+        } else {
+          await w(old.path);   // отказ затирания: открытая картинка остаётся и будет дочищена при следующем входе, а не удаляется молча
         }
       }
     }
@@ -195,6 +197,14 @@ class AvatarService extends ChangeNotifier {
     _peers[from] = hash;
     await _save();
     return true;
+  }
+
+  /// Блокировка: расшифрованные картинки из памяти стираются (сами буферы, а не только ссылки).
+  void wipeMemory() {
+    for (final b in _bytes.values) {
+      b.fillRange(0, b.length, 0);
+    }
+    _bytes.clear();
   }
 
   Future<void> forgetPeer(String peerId) async {

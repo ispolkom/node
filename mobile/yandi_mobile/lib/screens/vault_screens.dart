@@ -162,15 +162,6 @@ abstract class _SecretFormState<T extends StatefulWidget> extends State<T> {
     return r == true;
   }
 
-  /// «Удалить всё и начать заново» — когда пароль забыт, а слов не было (или хранилище повреждено).
-  Future<void> eraseAndRestart() async {
-    final ok = await confirm('Удалить всё?', 'Все данные приложения на этом телефоне будут стёрты без возможности восстановления. Приложение начнёт с чистого листа.', 'Удалить');
-    if (!ok || !mounted) return;
-    final nav = Navigator.of(context);
-    await context.read<AppState>().eraseEverything();
-    nav.pushNamedAndRemoveUntil('/vault-setup', (_) => false);
-  }
-
   static String pwProblem(String a, String b) {
     if (a.runes.length < VaultKeys.minPasswordLength) return 'Пароль не короче ${VaultKeys.minPasswordLength} знаков';
     if (a != b) return 'Пароли не совпали';
@@ -241,9 +232,7 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
   }
 
   void _save() {
-    final a = VaultKeys.normalizePhrase(_SecretFormState.texts(_w1));
-    final b = VaultKeys.normalizePhrase(_SecretFormState.texts(_w2));
-    if (a != b) {
+    if (!VaultKeys.samePhrase(_SecretFormState.texts(_w1), _SecretFormState.texts(_w2))) {
       setState(() => _error = 'Слова не совпали. Проверьте и введите ещё раз, или вернитесь назад.');
       return;
     }
@@ -392,7 +381,7 @@ class _VaultUnlockScreenState extends _SecretFormState<VaultUnlockScreen> {
       errorText(waiting ? '${_error ?? 'Подождите'}: ещё $_waitLeft с' : _error),
       primary(_busy ? 'Проверяем…' : 'Войти', (_busy || waiting) ? null : submit),
       if (!widget.justCreated) link('Забыл пароль', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultRecoverScreen()))),
-      if (_corrupt) link('Удалить всё и начать заново', eraseAndRestart, color: Colors.redAccent),
+      if (_corrupt) info('Если резервной копии нет, данные не вернуть: приложение можно только удалить в настройках телефона и поставить заново.'),
     ]);
   }
 }
@@ -464,7 +453,7 @@ class _VaultRecoverScreenState extends _SecretFormState<VaultRecoverScreen> {
       errorText(_error),
       primary(_busy ? 'Проверяем…' : 'Восстановить', _busy ? null : submit),
       link('Назад', () => Navigator.of(context).pop()),
-      if (_noWords) link('Удалить всё и начать заново', eraseAndRestart, color: Colors.redAccent),
+      if (_noWords) info('Без пароля и без слов данные не вернуть. Удалить приложение можно в настройках телефона, потом поставить заново.'),
     ]);
   }
 }
@@ -586,7 +575,9 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
       return;
     }
     final nav = Navigator.of(context);
-    await context.read<AppState>().eraseEverything();
+    final messenger = ScaffoldMessenger.of(context);
+    final left = await context.read<AppState>().eraseEverything();
+    if (left != null) messenger.showSnackBar(SnackBar(content: Text('Стёрто не всё: $left')));
     if (uninstall) {
       try { await _ch.invokeMethod('uninstall'); } catch (_) {}
     }

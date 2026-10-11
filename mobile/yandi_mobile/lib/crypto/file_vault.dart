@@ -27,9 +27,10 @@ class FileMeta {
 }
 
 class FileVault {
-  FileVault.withKey(List<int> rootKey, {this.chunkSize = defaultChunkSize}) : _root = rootKey;
+  FileVault.withKey(List<int> rootKey, {this.chunkSize = defaultChunkSize}) : _root = Uint8List.fromList(rootKey);
 
-  final List<int> _root;
+  final Uint8List _root;
+  bool _disposed = false;
   final int chunkSize;
 
   static const defaultChunkSize = 1 << 20;
@@ -42,8 +43,15 @@ class FileVault {
 
   /// Блокировка: ключ из памяти стирается (повторное использование этого объекта даст ошибку проверки, а не данные).
   void dispose() {
-    final r = _root;
-    if (r is Uint8List) r.fillRange(0, r.length, 0);
+    _disposed = true;
+    _root.fillRange(0, _root.length, 0);
+  }
+
+  bool get disposed => _disposed;
+
+  /// Блокировка отзывает уже открытые чтения и записи: после стирания ключа они не отдают и не принимают данные.
+  void _check() {
+    if (_disposed) throw FileVaultException('хранилище заблокировано');
   }
 
   static bool isVaultPath(String path) => path.endsWith(extension);
@@ -57,14 +65,16 @@ class FileVault {
 
   /// Номер файла по пути (`…/<номер>.yfe`) — он же имя на диске.
   static String idOf(String path) {
-    final n = path.split(Platform.pathSeparator).last;
+    var n = path.split(Platform.pathSeparator).last;
+    if (n.endsWith('.part')) n = n.substring(0, n.length - 5);   // недокачанный файл несёт номер будущего
     return n.endsWith(extension) ? n.substring(0, n.length - extension.length) : n;
   }
 
   // ── Запись ───────────────────────────────────────────────────────────────────────────────────────────────────────
 
   /// Начать запись файла известного размера. Данные подаются через [VaultFileWriter.add], в конце — [VaultFileWriter.close].
-  Future<VaultFileWriter> create(File target, {required String name, required String mime, required int size, int? createdMs}) async {
+  Future<VaultFileWriter> create(File target, {required String name, required String mime, required int size, int? createdMs, String? storageId}) async {
+    _check();
     if (size < 0) throw FileVaultException('размер файла');
     final rnd = Random.secure();
     Uint8List rb(int n) => Uint8List.fromList(List.generate(n, (_) => rnd.nextInt(256)));
@@ -73,7 +83,9 @@ class FileVault {
     final metaLen = 12 + meta.length + _tag;
     if (metaLen > 0xFFFF) throw FileVaultException('имя файла слишком длинное');
     final fixed = _fixedHeader(fileId, noncePrefix, chunkSize, metaLen);
-    final key = await _fileKey(fileId);
+    final id = storageId ?? idOf(target.path);
+    final key = await _fileKey(fileId, id);
+    _check();
     final metaNonce = rb(12);
     final box = await _aes.encrypt(meta, secretKey: key, nonce: metaNonce, aad: [...fixed, ..._metaAad]);
     final sink = target.openWrite();
@@ -102,9 +114,12 @@ class FileVault {
 
   /// Только сведения о файле (имя, тип, размер): читается начало файла, содержимое не расшифровывается.
   Future<FileMeta> readMeta(File f) async {
+    _check();
     final raf = await f.open();
     try {
-      return (await _parse(raf)).meta;
+      final m = (await _parse(raf, idOf(f.path))).meta;
+      _check();
+      return m;
     } finally {
       await raf.close();
     }
@@ -112,9 +127,10 @@ class FileVault {
 
   /// Весь файл по порядку, куски по одному.
   Stream<Uint8List> read(File f) async* {
+    _check();
     final raf = await f.open();
     try {
-      final p = await _parse(raf);
+      final p = await _parse(raf, idOf(f.path));
       for (var i = 0; i < p.chunks; i++) {
         yield await _chunk(raf, p, i);
       }
@@ -125,9 +141,10 @@ class FileVault {
 
   /// Часть файла: расшифровываются только нужные куски.
   Future<Uint8List> readRange(File f, int pos, int len) async {
+    _check();
     final raf = await f.open();
     try {
-      final p = await _parse(raf);
+      final p = await _parse(raf, idOf(f.path));
       final end = min(pos + len, p.meta.size);
       if (pos < 0 || pos >= end) return Uint8List(0);
       final out = BytesBuilder(copy: false);
@@ -183,13 +200,15 @@ class FileVault {
 
   static const _metaAad = [0x6d, 0x65, 0x74, 0x61]; // "meta"
 
-  Future<SecretKey> _fileKey(List<int> fileId) =>
-      _hkdf.deriveKey(secretKey: SecretKey(_root), nonce: fileId, info: utf8.encode('yandi-file-key:v1'));
+  /// Ключ файла зависит от ключа данных, внутреннего номера и номера хранения (имя на диске без расширения): целый контейнер,
+  /// скопированный под чужое имя, не откроется — файл связан с тем вложением, под которым записан.
+  Future<SecretKey> _fileKey(List<int> fileId, String storageId) => _hkdf.deriveKey(
+      secretKey: SecretKey(_root), nonce: fileId, info: utf8.encode('yandi-file-key:v2|$storageId'));
 
   static Uint8List _fixedHeader(Uint8List fileId, Uint8List noncePrefix, int chunk, int metaLen) {
     final b = BytesBuilder();
     b.add(_magic);
-    b.addByte(1);
+    b.addByte(2);
     b.add([0, 0, 0]);
     b.add(fileId);
     b.add(noncePrefix);
@@ -202,18 +221,19 @@ class FileVault {
   static List<int> _chunkAad(List<int> fixed, int index, bool last) =>
       [...fixed, ...(ByteData(8)..setUint64(0, index)).buffer.asUint8List(), last ? 1 : 0];
 
-  Future<_Parsed> _parse(RandomAccessFile raf) async {
+  Future<_Parsed> _parse(RandomAccessFile raf, String storageId) async {
     final total = await raf.length();
     await raf.setPosition(0);
     final fixed = await raf.read(_fixedLen);
-    if (fixed.length < _fixedLen || !_listEq(fixed.sublist(0, 4), _magic) || fixed[4] != 1) throw FileVaultException('это не файл хранилища');
+    if (fixed.length < _fixedLen || !_listEq(fixed.sublist(0, 4), _magic) || fixed[4] != 2) throw FileVaultException('это не файл хранилища');
     final bd = ByteData.sublistView(fixed);
     final chunk = bd.getUint32(28);
     final metaLen = bd.getUint16(32);
     if (chunk < 1024 || chunk > (64 << 20) || metaLen < 12 + _tag) throw FileVaultException('заголовок файла повреждён');
     final blob = await raf.read(metaLen);
     if (blob.length != metaLen) throw FileVaultException('файл обрезан');
-    final key = await _fileKey(fixed.sublist(8, 24));
+    final key = await _fileKey(fixed.sublist(8, 24), storageId);
+    _check();
     FileMeta meta;
     try {
       final box = SecretBox(blob.sublist(12, metaLen - _tag), nonce: blob.sublist(0, 12), mac: Mac(blob.sublist(metaLen - _tag)));
@@ -229,13 +249,18 @@ class FileVault {
   }
 
   Future<Uint8List> _chunk(RandomAccessFile raf, _Parsed p, int i) async {
+    _check();
     final plainLen = i == p.chunks - 1 ? p.meta.size - i * p.chunk : p.chunk;
     await raf.setPosition(p.dataStart + i * (p.chunk + _tag));
     final blob = await raf.read(plainLen + _tag);
     if (blob.length != plainLen + _tag) throw FileVaultException('файл обрезан');
     try {
       final box = SecretBox(blob.sublist(0, plainLen), nonce: _nonce(p.fixed.sublist(24, 28), i), mac: Mac(blob.sublist(plainLen)));
-      return Uint8List.fromList(await _aes.decrypt(box, secretKey: p.key, aad: _chunkAad(p.fixed, i, i == p.chunks - 1)));
+      final plain = Uint8List.fromList(await _aes.decrypt(box, secretKey: p.key, aad: _chunkAad(p.fixed, i, i == p.chunks - 1)));
+      _check();   // расшифровано уже после блокировки — не отдаём
+      return plain;
+    } on FileVaultException {
+      rethrow;
     } catch (_) {
       throw FileVaultException('кусок файла не прошёл проверку: файл повреждён или подменён');
     }
@@ -260,11 +285,12 @@ class _Parsed {
 
 /// Запись зашифрованного файла известного размера. Недописанный или неполный файл не остаётся: [abort] и неверный размер его удаляют.
 class VaultFileWriter {
-  VaultFileWriter._(FileVault v, this._file, this._sink, this._key, this._fixed, this._noncePrefix, this.size)
-      : _chunk = v.chunkSize,
-        _total = size == 0 ? 0 : (size + v.chunkSize - 1) ~/ v.chunkSize,
-        _buf = Uint8List(v.chunkSize);
+  VaultFileWriter._(this._v, this._file, this._sink, this._key, this._fixed, this._noncePrefix, this.size)
+      : _chunk = _v.chunkSize,
+        _total = size == 0 ? 0 : (size + _v.chunkSize - 1) ~/ _v.chunkSize,
+        _buf = Uint8List(_v.chunkSize);
 
+  final FileVault _v;
   final File _file;
   final IOSink _sink;
   final SecretKey _key;
@@ -276,6 +302,10 @@ class VaultFileWriter {
 
   Future<void> add(List<int> data) async {
     if (_done) throw FileVaultException('запись уже закончена');
+    if (_v.disposed) {
+      await abort();
+      throw FileVaultException('хранилище заблокировано');
+    }
     var off = 0;
     while (off < data.length) {
       final n = min(_chunk - _fill, data.length - off);
@@ -294,6 +324,10 @@ class VaultFileWriter {
 
   Future<void> close() async {
     if (_done) return;
+    if (_v.disposed) {
+      await abort();
+      throw FileVaultException('хранилище заблокировано');
+    }
     if (_written != size) {
       await abort();
       throw FileVaultException('данных меньше заявленного размера');
@@ -319,6 +353,7 @@ class VaultFileWriter {
   Future<void> _flush(bool last) async {
     final plain = Uint8List.sublistView(_buf, 0, _fill);
     final box = await FileVault._aes.encrypt(plain, secretKey: _key, nonce: FileVault._nonce(_noncePrefix, _index), aad: FileVault._chunkAad(_fixed, _index, last));
+    if (_v.disposed) throw FileVaultException('хранилище заблокировано');
     _sink.add(box.cipherText);
     _sink.add(box.mac.bytes);
     _fill = 0;
@@ -398,6 +433,10 @@ class _VaultSource with _Serial implements FileSource {
     final out = BytesBuilder(copy: false);
     var p = pos;
     while (p < end) {
+      if (_v.disposed) {
+        _cached = Uint8List(0);
+        throw FileVaultException('хранилище заблокировано');
+      }
       final idx = p ~/ _chunk;
       if (idx != _cachedIndex) {
         _cached = await _v.readRange(_f, idx * _chunk, _chunk);

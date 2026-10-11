@@ -109,6 +109,16 @@ void main() {
       expect(f.readAsStringSync(), startsWith('e1:'));
       expect(await mk().claim('old|id|1', soon), isFalse, reason: 'старая запись не потерялась');
 
+      // после того как журнал записан зашифрованным, подброшенный открытый вид (например, пустой) не принимается (R12-11)
+      final marked = ReplayLedger(f, seal: StorageService.ledgerSeal, open: StorageService.ledgerOpen, afterWrite: StorageService.ledgerSealed);
+      expect(await marked.claim('mark|id|1', soon), isTrue);
+      final goodBytes = f.readAsStringSync();
+      f.writeAsStringSync('{}');
+      await expectLater(marked.claim('mark|id|1', soon), throwsStateError, reason: 'старая запись не должна стать новой');
+      f.writeAsStringSync(goodBytes);
+      expect(await marked.claim('mark|id|1', soon), isFalse);
+      await _raw.delete(key: 'vault_ledger_sealed');
+
       // и без новых сообщений: при входе старый открытый журнал шифруется сразу
       f.writeAsStringSync('{"legacy|id|9": ${soon + 50000}}');
       await mk().reseal();

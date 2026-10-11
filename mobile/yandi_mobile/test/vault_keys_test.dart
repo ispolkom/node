@@ -149,4 +149,83 @@ void main() {
     expect(VaultKeys.normalizePhrase(['а', 'б']), isNot(VaultKeys.normalizePhrase(['', 'а', 'б'])));
     expect(VaultKeys.normalizePhrase(['Ёж  Ёлка']).split('|').first, 'еж елка');
   });
+
+  test('слова с «|» внутри не сливаются с соседними полями (R12-4)', () async {
+    final a = ['alpha|bravo', 'charlie', 'delta', 'echoo'], b2 = ['alpha', 'bravo|charlie', 'delta', 'echoo'];
+    expect(VaultKeys.samePhrase(a, b2), isFalse);
+    expect(VaultKeys.canonicalPhrase(a), isNot(VaultKeys.canonicalPhrase(b2)));
+    final be = MemoryVaultBackend();
+    (await VaultKeys.create(be, password: 'пароль-6', phraseFields: a, pwKdf: _t, phKdf: _t)).lock();
+    await expectLater(VaultKeys.recoverWithPhrase(be, b2, 'новый-пароль'), throwsA(isA<VaultWrongSecret>()));
+    expect((await VaultKeys.recoverWithPhrase(be, a, 'новый-пароль')).unlocked, isTrue);
+    // не четыре поля — отказ
+    await expectLater(VaultKeys.create(MemoryVaultBackend(), password: 'пароль-6', phraseFields: ['тайный', 'первый', 'слово'], pwKdf: _t, phKdf: _t), throwsA(isA<VaultPolicyError>()));
+  });
+
+  test('хранилище со старым способом записи слов продолжает открываться (совместимость)', () async {
+    final be = MemoryVaultBackend();
+    final v = await VaultKeys.create(be, password: 'пароль-6', phraseFields: _strong, pwKdf: _t, phKdf: _t, legacyPhraseEncoding: true);
+    final key = await v.subKey('db');
+    v.lock();
+    expect(jsonDecode(be.blob!)['ph']['enc'], isNull);
+    final r = await VaultKeys.recoverWithPhrase(be, _strong, 'новый-пароль');
+    expect(await r.subKey('db'), key);
+  });
+
+  test('параллельные неверные попытки считаются по очереди, пауза включается (R12-2)', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final results = await Future.wait([
+      for (var i = 0; i < 12; i++)
+        VaultKeys.unlock(be, 'нет-$i').then<Object>((_) => 'открыто', onError: (Object e) => e),
+    ]);
+    final wrong = results.whereType<VaultWrongSecret>().map((e) => e.failures).toList()..sort();
+    expect(wrong.length + results.whereType<VaultThrottled>().length, 12);
+    expect(wrong, [1, 2, 3, 4], reason: 'после четвёртой неверной включилась пауза, остальные получили её, а не бесплатные попытки');
+    expect(be.secure['vault_fail_pw'], '4');
+  });
+
+  test('возвращённый старый файл ключей (с прежним паролем) отвергается (R12-1)', () async {
+    final be = MemoryVaultBackend();
+    final v = await _make(be);
+    final old = be.blob!;
+    await v.changePassword('пароль-6', 'новый-пароль');
+    v.lock();
+    be.blob = old;   // откат файла
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    await expectLater(VaultKeys.recoverWithPhrase(be, _strong, 'ещё-пароль'), throwsA(isA<VaultCorrupt>()));
+    // честный файл после смены открывается
+    final be2 = MemoryVaultBackend();
+    final v2 = await _make(be2);
+    await v2.changePassword('пароль-6', 'новый-пароль');
+    v2.lock();
+    expect((await VaultKeys.unlock(be2, 'новый-пароль')).unlocked, isTrue);
+  });
+
+  test('стёртый счётчик попыток не сбрасывает паузу (R12-3)', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    for (var i = 0; i < 4; i++) {
+      await expectLater(VaultKeys.unlock(be, 'нет'), throwsA(isA<VaultWrongSecret>()));
+    }
+    be.secure.remove('vault_fail_pw');
+    be.secure.remove('vault_next_pw');
+    // нет ни счётчика, ни паузы, но метка есть: это нарушение, а не новая жизнь
+    await expectLater(VaultKeys.unlock(be, 'нет'), throwsA(isA<VaultWrongSecret>().having((e) => e.failures, 'n', greaterThan(3))));
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultThrottled>()), reason: 'пауза снова есть');
+  });
+
+  test('старое хранилище без поколения и метки открывается и получает их', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final m = jsonDecode(be.blob!) as Map<String, dynamic>;
+    m.remove('gen');
+    be.blob = jsonEncode(m);
+    be.secure.remove('vault_gen');
+    be.secure.remove('vault_cnt');
+    be.secure.remove('vault_fail_pw');
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
+    expect(be.secure['vault_gen'], '0');
+    expect(be.secure['vault_cnt'], '1');
+  });
 }

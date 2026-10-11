@@ -37,7 +37,7 @@ class VaultLockObserver with WidgetsBindingObserver {
   }
 
   Future<void> lockNow() async {
-    if (_locking || !VaultService.instance.unlocked) return;
+    if (_locking || !VaultService.instance.active) return;
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
     final state = ctx.read<AppState>();
@@ -48,10 +48,11 @@ class VaultLockObserver with WidgetsBindingObserver {
     }
     _locking = true;
     try {
-      await state.lockDown();
-      await VaultService.instance.lock();
-      navigatorKey.currentState?.pushNamedAndRemoveUntil('/vault-unlock', (_) => false);
+      // что бы ни сорвалось при остановке служб, ключи стираются и открывается экран входа
+      try { await state.lockDown(); } catch (_) {}
     } finally {
+      try { await VaultService.instance.lock(); } catch (_) {}
+      navigatorKey.currentState?.pushNamedAndRemoveUntil('/vault-unlock', (_) => false);
       _locking = false;
     }
   }

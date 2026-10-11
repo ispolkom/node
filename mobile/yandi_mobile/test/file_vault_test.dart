@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
@@ -81,26 +82,27 @@ void main() {
     await expectLater(FileVault.withKey(List.filled(32, 9), chunkSize: _cs).readAll(f), throwsA(isA<FileVaultException>()));
     final raw = f.readAsBytesSync();
     for (final pos in [5, 10, 26, 30, 36, raw.length ~/ 2, raw.length - 1]) {
-      final bad = Uint8List.fromList(raw)..[pos] ^= 1;
-      final g = File('${tmp.path}/bad.yfe')..writeAsBytesSync(bad);
-      await expectLater(v.readAll(g), throwsA(isA<FileVaultException>()), reason: 'байт $pos');
+      f.writeAsBytesSync(Uint8List.fromList(raw)..[pos] ^= 1);   // под тем же именем: ошибка именно от порчи, а не от чужого имени
+      await expectLater(v.readAll(f), throwsA(isA<FileVaultException>()), reason: 'байт $pos');
     }
+    f.writeAsBytesSync(raw);
+    expect(await v.readAll(f), d, reason: 'нетронутый файл открывается');
   });
 
   test('обрезка, дописывание и перестановка кусков обнаруживаются', () async {
     final d = _data(3 * _cs);
     final f = await put(d);
     final raw = f.readAsBytesSync();
-    File('${tmp.path}/cut.yfe').writeAsBytesSync(raw.sublist(0, raw.length - (_cs + 16)));   // без последнего куска
-    await expectLater(v.readAll(File('${tmp.path}/cut.yfe')), throwsA(isA<FileVaultException>()));
-    File('${tmp.path}/more.yfe').writeAsBytesSync([...raw, 1, 2, 3]);
-    await expectLater(v.readAll(File('${tmp.path}/more.yfe')), throwsA(isA<FileVaultException>()));
+    f.writeAsBytesSync(raw.sublist(0, raw.length - (_cs + 16)));   // без последнего куска
+    await expectLater(v.readAll(f), throwsA(isA<FileVaultException>()));
+    f.writeAsBytesSync([...raw, 1, 2, 3]);
+    await expectLater(v.readAll(f), throwsA(isA<FileVaultException>()));
     // меняем местами 1-й и 2-й куски (одинаковой длины)
     final meta = raw.length - 3 * (_cs + 16);
     final c1 = raw.sublist(meta, meta + _cs + 16), c2 = raw.sublist(meta + _cs + 16, meta + 2 * (_cs + 16));
     final sw = Uint8List.fromList(raw)..setRange(meta, meta + _cs + 16, c2)..setRange(meta + _cs + 16, meta + 2 * (_cs + 16), c1);
-    File('${tmp.path}/sw.yfe').writeAsBytesSync(sw);
-    await expectLater(v.readAll(File('${tmp.path}/sw.yfe')), throwsA(isA<FileVaultException>()));
+    f.writeAsBytesSync(sw);
+    await expectLater(v.readAll(f), throwsA(isA<FileVaultException>()));
   });
 
   test('неверный размер при записи: файл не остаётся', () async {
@@ -149,5 +151,50 @@ void main() {
       await src.close();
     }
     await expectLater(FileSource.open(enc.path), throwsA(isA<FileVaultException>()), reason: 'без ключа зашифрованный не открыть');
+  });
+
+  test('контейнер привязан к своему номеру хранения: целиком скопированный под чужое имя не открывается (R12-20)', () async {
+    final a = await put(_data(2000, 1), name: 'один.bin');
+    final other = File('${tmp.path}/b${'0' * 8}.yfe');
+    other.writeAsBytesSync(a.readAsBytesSync());                   // валидный контейнер, но под другим именем
+    await expectLater(v.readAll(other), throwsA(isA<FileVaultException>()));
+    await expectLater(v.readMeta(other), throwsA(isA<FileVaultException>()));
+    // недокачанный файл несёт номер будущего: после переименования открывается
+    final part = File('${tmp.path}/fin.yfe.part');
+    final w = await v.create(part, name: 'x.bin', mime: 'x', size: 10);
+    await w.add(_data(10));
+    await w.close();
+    final fin = await part.rename('${tmp.path}/fin.yfe');
+    expect((await v.readMeta(fin)).size, 10);
+  });
+
+  test('блокировка отзывает уже открытые потоки, источники и записи (R12-5)', () async {
+    final d = _data(5 * _cs);
+    final f = await put(d);
+    // поток: прочитан кусок, ключ стёрт — следующий кусок не отдаётся
+    final it = StreamIterator(v.read(f));
+    expect(await it.moveNext(), isTrue);
+    v.dispose();
+    await expectLater(() async => await it.moveNext(), throwsA(isA<FileVaultException>()));
+    // новый объект с тем же ключом (другой сеанс) читает нормально
+    final v2 = FileVault.withKey(_key, chunkSize: _cs);
+    // источник с кешем куска
+    final src = await FileSource.open(f.path, vault: v2);
+    expect((await src.readAt(0, 10)).length, 10);
+    v2.dispose();
+    await expectLater(src.readAt(0, 10), throwsA(isA<FileVaultException>()), reason: 'кеш не отдаётся после блокировки');
+    // запись: блокировка посреди — файл не остаётся
+    final v3 = FileVault.withKey(_key, chunkSize: _cs);
+    final out = File('${tmp.path}/w.yfe');
+    final w = await v3.create(out, name: 'x', mime: 'x', size: 4 * _cs);
+    await w.add(_data(_cs + 5));
+    v3.dispose();
+    await expectLater(w.add(_data(100)), throwsA(isA<FileVaultException>()));
+    expect(out.existsSync(), isFalse);
+    // ключ стёрт в самом объекте, даже если его передали обычным списком
+    final plainKey = List<int>.from(_key);
+    final v4 = FileVault.withKey(plainKey, chunkSize: _cs);
+    v4.dispose();
+    await expectLater(v4.readMeta(f), throwsA(isA<FileVaultException>()));
   });
 }

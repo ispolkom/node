@@ -135,6 +135,13 @@ class SettingsScreen extends StatelessWidget {
 
           // Защита
           _Section(title: 'Защита'),
+          if (state.protectionWarning != null)
+            ListTile(
+              tileColor: AppTheme.surface,
+              leading: const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent),
+              title: const Text('Защита доведена не до конца', style: TextStyle(color: Colors.orangeAccent)),
+              subtitle: Text(state.protectionWarning!, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            ),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.lock_outline, color: AppTheme.textSecondary),

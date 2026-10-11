@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
 import 'dart:math';
@@ -112,6 +113,26 @@ class VaultKeys {
   static const _kFailPh = 'vault_fail_ph';
   static const _kNext = 'vault_next_pw';
   static const _kNextPh = 'vault_next_ph';
+  /// Поколение файла ключей (растёт при смене пароля и восстановлении) — копия в защищённом хранилище: возвращённый старый файл
+  /// ключей (с прежним паролем) отвергается.
+  static const _kGen = 'vault_gen';
+  /// Метка «счётчики попыток заведены»: если метка есть, а счётчика нет — его стёрли, это считается нарушением и наказывается паузой.
+  static const _kCnt = 'vault_cnt';
+
+  /// Попытки пароля, восстановления и смены идут строго по очереди: параллельные вызовы не читают один и тот же счётчик и не запускают
+  /// несколько тяжёлых хэшей одновременно.
+  static Future<void> _tail = Future.value();
+  static Future<T> _serial<T>(Future<T> Function() op) {
+    final r = Completer<T>();
+    _tail = _tail.then((_) async {
+      try {
+        r.complete(await op());
+      } catch (e, st) {
+        r.completeError(e, st);
+      }
+    });
+    return r.future;
+  }
 
   bool get unlocked => _dk != null;
 
@@ -148,14 +169,16 @@ class VaultKeys {
     List<String>? phraseFields,
     VaultKdf pwKdf = VaultKdf.password,
     VaultKdf phKdf = VaultKdf.phrase,
+    /// Только для проверки совместимости: старый способ записи слов (поля через `|`, был до исправления неоднозначности).
+    bool legacyPhraseEncoding = false,
   }) async {
     if (await exists(b)) throw StateError('хранилище уже создано');
     if (password.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
-    final phrase = phraseFields == null ? null : normalizePhrase(phraseFields);
-    final hasPhrase = phrase != null && phrase.replaceAll('|', '').isNotEmpty;
-    if (hasPhrase && !phraseStrongEnough(phraseFields!)) {
+    final hasPhrase = phraseFields != null && _normalizedList(phraseFields).any((x) => x.isNotEmpty);
+    if (hasPhrase && (phraseFields.length != phraseFieldCount || !phraseStrongEnough(phraseFields))) {
       throw VaultPolicyError('Фраза: $phraseFieldCount разных слова, в каждом не меньше $minPhraseFieldChars знаков');
     }
+    final phrase = !hasPhrase ? null : (legacyPhraseEncoding ? normalizePhrase(phraseFields) : canonicalPhrase(phraseFields));
     final rnd = Random.secure();
     Uint8List rb(int n) => Uint8List.fromList(List.generate(n, (_) => rnd.nextInt(256)));
     final dk = rb(32);
@@ -165,19 +188,26 @@ class VaultKeys {
     final kekPw = await _kekPassword(password, saltPw, pwKdf, hw);
     final wrapPw = await _wrap(dk, kekPw, 'pw');
     Uint8List? wrapPh;
-    if (hasPhrase) wrapPh = await _wrap(dk, await _kekPhrase(phrase, saltPh, phKdf), 'ph');
+    if (hasPhrase) wrapPh = await _wrap(dk, await _kekPhrase(phrase!, saltPh, phKdf), 'ph');
     await b.writeBlob(jsonEncode({
       'v': 1,
+      'gen': 1,
       'pw': {'kdf': pwKdf.toJson(), 'salt': base64.encode(saltPw), 'wrap': base64.encode(wrapPw)},
-      'ph': hasPhrase ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!)} : null,
+      'ph': hasPhrase
+          ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!), if (!legacyPhraseEncoding) 'enc': 2}
+          : null,
     }));
+    await b.secureWrite(_kGen, '1');
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
 
   /// Открыть паролем. [VaultWrongSecret] — не подошёл, [VaultThrottled] — рано.
-  static Future<VaultKeys> unlock(VaultBackend b, String password) async {
+  static Future<VaultKeys> unlock(VaultBackend b, String password) => _serial(() => _unlock(b, password));
+
+  static Future<VaultKeys> _unlock(VaultBackend b, String password) async {
     final f = await _readFile(b);
+    await _checkGeneration(b, f);
     await _gate(b, _kFail, _kNext);
     final failures = await _bump(b, _kFail, _kNext);   // считаем ДО проверки
     final hw = await b.secureRead(_kHw);
@@ -193,14 +223,21 @@ class VaultKeys {
   }
 
   /// Забыли пароль: открыть фразой и сразу задать новый пароль.
-  static Future<VaultKeys> recoverWithPhrase(VaultBackend b, List<String> phraseFields, String newPassword) async {
+  static Future<VaultKeys> recoverWithPhrase(VaultBackend b, List<String> phraseFields, String newPassword) =>
+      _serial(() => _recover(b, phraseFields, newPassword));
+
+  static Future<VaultKeys> _recover(VaultBackend b, List<String> phraseFields, String newPassword) async {
     final f = await _readFile(b);
+    await _checkGeneration(b, f);
     final ph = f['ph'] as Map<String, dynamic>?;
     if (ph == null) throw VaultNoRecovery();
     if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    if (phraseFields.length != phraseFieldCount) throw VaultPolicyError('Нужно $phraseFieldCount слова');
     await _gate(b, _kFailPh, _kNextPh);
     final failures = await _bump(b, _kFailPh, _kNextPh);
-    final kek = await _kekPhrase(normalizePhrase(phraseFields), base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
+    // новые замки записывают слова однозначно (JSON); старые — как были (поля через «|»)
+    final phrase = ph['enc'] == 2 ? canonicalPhrase(phraseFields) : normalizePhrase(phraseFields);
+    final kek = await _kekPhrase(phrase, base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
     final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
     if (dk == null) throw VaultWrongSecret(failures);
     await _setPassword(b, f, dk, newPassword);
@@ -215,13 +252,13 @@ class VaultKeys {
     if (dk == null) throw StateError('хранилище заблокировано');
     final check = await VaultKeys.unlock(_b, oldPassword);   // неверный старый — те же счётчики и паузы
     check.lock();
-    await _setPassword(_b, await _readFile(_b), dk, newPassword);
+    await _serial(() async => _setPassword(_b, await _readFile(_b), dk, newPassword));
   }
 
   /// Удалить все ключи (кнопка «Удалить всё»): после этого данные нечитаемы навсегда.
   static Future<void> destroy(VaultBackend b) async {
     await b.writeBlob('');
-    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh]) {
+    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kCnt]) {
       await b.secureDelete(k);
     }
   }
@@ -236,9 +273,20 @@ class VaultKeys {
     return f.map((s) => s.trim().toLowerCase().replaceAll('ё', 'е').replaceAll(RegExp(r'\s+'), ' ')).join('|');
   }
 
+  /// Слова для ключа: JSON-массив ровно из четырёх нормализованных полей. Поля с «|» внутри (знак есть на нашей клавиатуре) не
+  /// сливаются с соседними: `["a|b","c",…]` и `["a","b|c",…]` дают разные ключи.
+  static String canonicalPhrase(List<String> fields) => jsonEncode(_normalizedList(fields));
+
+  static List<String> _normalizedList(List<String> fields) => List<String>.generate(
+      phraseFieldCount, (i) => (i < fields.length ? fields[i] : '').trim().toLowerCase().replaceAll('ё', 'е').replaceAll(RegExp(r'\s+'), ' '));
+
+  /// Одинаковые ли слова (для проверки «повторите слова»), без путаницы с «|».
+  static bool samePhrase(List<String> a, List<String> b) => canonicalPhrase(a) == canonicalPhrase(b);
+
   /// Все четыре поля заполнены, в каждом ≥ 5 знаков, и они не повторяют друг друга.
   static bool phraseStrongEnough(List<String> fields) {
-    final parts = normalizePhrase(fields).split('|');
+    if (fields.length != phraseFieldCount) return false;
+    final parts = _normalizedList(fields);
     return parts.every((s) => s.runes.length >= minPhraseFieldChars) && parts.toSet().length == parts.length;
   }
 
@@ -266,7 +314,27 @@ class VaultKeys {
     final kdf = VaultKdf.fromJson((f['pw'] as Map<String, dynamic>)['kdf'] as Map<String, dynamic>);
     final kek = await _kekPassword(password, salt, kdf, hwBytes);
     f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
-    await b.writeBlob(jsonEncode(f));
+    final gen = ((f['gen'] as int?) ?? 0) + 1;
+    f['gen'] = gen;
+    await b.writeBlob(jsonEncode(f));      // сначала файл, потом метка: оборвёт между ними — файл новее метки, это допустимо
+    await b.secureWrite(_kGen, '$gen');
+  }
+
+  /// Файл старее записанной метки поколения — его вернули из копии (с прежним паролем): отвергаем. Метки ещё нет (хранилище создано
+  /// до этой защиты или метку стёрли) — принимаем и заводим по файлу. Против root, возвращающего и метку, без аппаратной защиты
+  /// счётчика ничего не сделать (это ограничение, а не забытая проверка).
+  static Future<void> _checkGeneration(VaultBackend b, Map<String, dynamic> f) async {
+    final fg = (f['gen'] as int?) ?? 0;
+    final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
+    if (sg != null && fg < sg) throw VaultCorrupt('файл ключей старее текущего: возвращена прежняя копия');
+    if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
+  }
+
+  /// Сколько неверных подряд. Метка заведена, а счётчика нет — его стёрли: засчитываем как несколько ошибок (с паузой).
+  static Future<int> _count(VaultBackend b, String kFail) async {
+    final v = int.tryParse(await b.secureRead(kFail) ?? '');
+    if (v != null) return v;
+    return (await b.secureRead(_kCnt)) == null ? 0 : freeAttempts + 3;   // нет метки — хранилище старого вида, счёт с нуля
   }
 
   static Future<void> _gate(VaultBackend b, String kFail, String kNext) async {
@@ -277,8 +345,9 @@ class VaultKeys {
 
   /// Подряд неверных попыток после этой; ставит паузу, если пора.
   static Future<int> _bump(VaultBackend b, String kFail, String kNext) async {
-    final n = (int.tryParse(await b.secureRead(kFail) ?? '') ?? 0) + 1;
+    final n = (await _count(b, kFail)) + 1;
     await b.secureWrite(kFail, '$n');
+    await b.secureWrite(_kCnt, '1');
     if (n > freeAttempts) {
       final sec = min(900, 5 * (1 << min(n - freeAttempts - 1, 10)));   // 5, 10, 20 … до 15 минут
       await b.secureWrite(kNext, '${b.nowMs() + sec * 1000}');
@@ -287,9 +356,11 @@ class VaultKeys {
   }
 
   static Future<void> _resetCounters(VaultBackend b) async {
-    for (final k in [_kFail, _kFailPh, _kNext, _kNextPh]) {
-      await b.secureDelete(k);
-    }
+    await b.secureWrite(_kFail, '0');
+    await b.secureWrite(_kFailPh, '0');
+    await b.secureWrite(_kCnt, '1');
+    await b.secureDelete(_kNext);
+    await b.secureDelete(_kNextPh);
   }
 
   static Future<SecretKey> _kekPassword(String password, Uint8List salt, VaultKdf kdf, List<int> hw) async {

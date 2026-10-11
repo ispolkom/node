@@ -10,7 +10,9 @@ class ReplayLedger {
   /// вид, но порчу обязан отвергнуть исключением: журнал не сбрасывается и не «лечится»). Без них файл открытый (тесты).
   final Future<String> Function(String json)? seal;
   final Future<String> Function(String stored)? open;
-  ReplayLedger(this.file, {this.seal, this.open});
+  /// После успешной записи зашифрованного журнала (для метки «открытый вид больше не принимать»).
+  final Future<void> Function()? afterWrite;
+  ReplayLedger(this.file, {this.seal, this.open, this.afterWrite});
   static Future<void> _tail = Future.value();
 
   /// Переписать файл в зашифрованном виде (старый открытый журнал шифруется сразу при входе, а не при следующем сообщении).
@@ -25,6 +27,7 @@ class ReplayLedger {
             final temp = File('${file.path}.tmp');
             await temp.writeAsString(await seal!(json), flush: true);
             await temp.rename(file.path);
+            await afterWrite?.call();
           }
         }
         result.complete();
@@ -56,6 +59,7 @@ class ReplayLedger {
         final temp = File('${file.path}.tmp');
         await temp.writeAsString(seal != null ? await seal!(jsonEncode(seen)) : jsonEncode(seen), flush: true);
         await temp.rename(file.path);
+        if (seal != null) await afterWrite?.call();
         result.complete(true);
       } catch (e, st) {
         result.completeError(e, st);

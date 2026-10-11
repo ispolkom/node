@@ -1,5 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:path/path.dart' as p;
@@ -28,40 +30,66 @@ class StorageService {
   static Future<void> init() async {
     if (replayLedger != null) return;
     final dir  = await getApplicationDocumentsDirectory();
-    replayLedger = ReplayLedger(File(p.join(dir.path, 'e2e_replay_e4.json')), seal: ledgerSeal, open: ledgerOpen);
+    replayLedger = ReplayLedger(File(p.join(dir.path, 'e2e_replay_e4.json')), seal: ledgerSeal, open: ledgerOpen, afterWrite: ledgerSealed);
   }
 
   /// Журнал повторов шифруется ключом данных (в нём номера собеседников); старый открытый вид читается и при первой записи шифруется,
   /// порча и чужой ключ — ошибка (журнал не сбрасывается).
+  static const _kLedgerSealed = 'vault_ledger_sealed';
   static Future<String> ledgerSeal(String json) => _wrap('ledger:replay', json);
-  static Future<String> ledgerOpen(String stored) async =>
-      await _unwrap('ledger:replay', stored, migrated: false) ?? (throw StateError('Corrupt replay ledger'));
+
+  /// Метка «журнал уже записан зашифрованным» ставится после успешной записи. Пока она есть, открытый (подброшенный) журнал не
+  /// принимается: иначе, подменив файл пустым `{}`, можно было бы повторить ранее принятый конверт.
+  static Future<void> ledgerSealed() => secureWrite(_kLedgerSealed, '1');
+
+  static Future<String> ledgerOpen(String stored) async {
+    final sealedBefore = (await secureRead(_kLedgerSealed)) == '1';   // из кеша при запуске: чтение хранилища по одному медленное
+    if (!stored.startsWith(_wrapPrefix) && sealedBefore) throw StateError('Replay ledger downgraded to plain text');
+    return await _unwrap('ledger:replay', stored, migrated: false) ?? (throw StateError('Corrupt replay ledger'));
+  }
 
   /// «Удалить всё»: база (все её файлы), журнал повторов, скачанные файлы, аватарки и всё защищённое хранилище (ключи, токены).
   /// Каждый файл затирается (там, где есть нативное затирание) и удаляется; после этого приложение как только что установленное.
-  static Future<void> eraseAllLocalData() async {
+  /// Возвращает null, если всё стёрто, иначе описание того, что затереть не удалось (такие открытые файлы остаются на месте: их не
+  /// «удаляем молча», а показываем и дочищаем).
+  static Future<String?> eraseAllLocalData() async {
     await closeDb();
     replayLedger = null;
     final docs = await getApplicationDocumentsDirectory();
     final support = await getApplicationSupportDirectory();
     final cache = await getTemporaryDirectory();
+    var failed = 0;
     for (final d in [docs, support, cache]) {
       if (!await d.exists()) continue;
       await for (final e in d.list(recursive: true, followLinks: false)) {
-        if (e is File) await _wipeAndDelete(e.path);
+        if (e is File && !await _wipeAndDelete(e.path, encrypted: _isEncryptedName(e.path))) failed++;
       }
-      await for (final e in d.list(followLinks: false)) {
-        if (e is Directory) {
-          try { await e.delete(recursive: true); } catch (_) {}
+      if (failed == 0) {
+        await for (final e in d.list(followLinks: false)) {
+          if (e is Directory) {
+            try { await e.delete(recursive: true); } catch (_) {}
+          }
         }
       }
     }
     await _secure.deleteAll();
     _secureCache = null;
-    _secureKey = null;
+    setSecureKey(null);
+    return failed == 0 ? null : 'не удалось затереть файлов: $failed (они остались на месте)';
   }
 
+  /// Файлы, содержимое которых и так зашифровано: если затереть не вышло, их можно удалить обычным способом (ключа больше нет).
+  static bool _isEncryptedName(String path) =>
+      path.endsWith('.yfe') || path.endsWith('.yav') || path.endsWith('.yfe.part') || path.endsWith('.wipe') || path.endsWith('yandi_enc.db') ||
+      path.contains('yandi_enc.db-') || path.endsWith('vault_keys.json') || path.endsWith('e2e_replay_e4.json');
+
   static bool get dbOpen => _db != null;
+
+  /// Только для тестов: подмена открытия и закрытия базы (на компьютере нет SQLCipher).
+  @visibleForTesting
+  static Future<void> Function(List<int> key)? debugOpen;
+  @visibleForTesting
+  static Future<void> Function()? debugClose;
 
   /// Затирание поверх байтов перед удалением (на телефоне — нативное, задаётся при старте приложения); без него файл просто удаляется.
   static Future<bool> Function(String path)? wipeHook;
@@ -72,17 +100,28 @@ class StorageService {
   /// Открыть зашифрованную базу ключом данных [key] (32 байта). Прежняя нешифрованная переносится и затирается.
   /// Неверный ключ — исключение (база не открывается, не пересоздаётся и не портится).
   static Future<void> openEncrypted(List<int> key) async {
+    if (debugOpen != null) return debugOpen!(key);
     if (_db != null) return;
     final dir = await getApplicationDocumentsDirectory();
     final plainPath = p.join(dir.path, _plainName);
     final encPath   = p.join(dir.path, _encName);
     final pass = _rawKey(key);
-    if (await _isPlainSqlite(plainPath)) await _migratePlain(plainPath, encPath, pass);
+    final hasEnc = await File(encPath).exists();
+    final hasPlain = await _isPlainSqlite(plainPath);
+    if (hasPlain && !hasEnc) await _migratePlain(plainPath, encPath, pass);
     _db = await openDatabase(encPath, version: 5, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+    if (hasPlain && hasEnc) {
+      // Зашифрованная база уже есть и открылась (оборванный прежний перенос или вернувшаяся копия): открытая — устаревшая, поверх
+      // действующей её не переносим (новые записи пропали бы), а затираем.
+      for (final f in [plainPath, '$plainPath-journal', '$plainPath-wal', '$plainPath-shm']) {
+        await _wipeAndDelete(f);
+      }
+    }
   }
 
   /// Закрыть базу (блокировка приложения): после этого без пароля прочесть её нечем.
   static Future<void> closeDb() async {
+    if (debugClose != null) return debugClose!();
     final d = _db;
     _db = null;
     if (d != null) await d.close();
@@ -111,6 +150,7 @@ class StorageService {
       try { await File(f).delete(); } catch (_) {}
     }
     final src = await openDatabase(plainPath, readOnly: true);
+    final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
     final dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
     try {
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
@@ -126,6 +166,8 @@ class StorageService {
         final copied = Sqflite.firstIntValue(await dst.rawQuery('SELECT COUNT(*) FROM $t'));
         if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
       }
+      // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
+      if (srcVersion > 0 && srcVersion < 5) await _onUpgrade(dst, srcVersion, 5);
     } finally {
       await src.close();
       await dst.close();
@@ -136,16 +178,20 @@ class StorageService {
     }
   }
 
-  static Future<void> _wipeAndDelete(String path) async {
+  /// Затереть и удалить. Отказ нативного затирания открытого файла не превращается в обычное удаление: файл остаётся (false), чтобы
+  /// его дочистить. Для зашифрованных файлов (с ними ключ уничтожается отдельно) обычное удаление допустимо.
+  static Future<bool> _wipeAndDelete(String path, {bool encrypted = false}) async {
     final f = File(path);
-    if (!await f.exists()) return;
+    if (!await f.exists()) return true;
     final w = wipeHook;
+    var wiped = w == null;
     if (w != null) {
-      try { await w(path); } catch (_) {}
+      try { wiped = await w(path); } catch (_) {}
     }
-    if (await f.exists()) {
-      try { await f.delete(); } catch (_) {}
-    }
+    if (!await f.exists()) return true;
+    if (!wiped && !encrypted) return false;
+    try { await f.delete(); } catch (_) { return false; }
+    return true;
   }
 
   static Future<void> _createGroupTables(Database db) async {
@@ -257,13 +303,14 @@ class StorageService {
   static const _wrapPrefix = 'e1:';
   static const _kMigrated = 'vault_secure_wrapped';
   static final _aes = AesGcm.with256bits();
-  static List<int>? _secureKey;
+  static Uint8List? _secureKey;
 
   static bool _isRaw(String key) => key.startsWith('vault_');
 
   /// Ключ защиты значений (подключ ключа данных); null — заблокировано. Задаётся при входе, стирается при блокировке.
   static void setSecureKey(List<int>? key) {
-    _secureKey = key;
+    _secureKey?.fillRange(0, _secureKey!.length, 0);   // прежний ключ стирается, а не только забывается
+    _secureKey = key == null ? null : Uint8List.fromList(key);
     if (key == null) _secureCache = null;
   }
 

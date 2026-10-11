@@ -71,15 +71,17 @@ class NotificationService {
         color:        const Color(0xFF00E5FF),
         playSound:    false,  // звук воспроизводит AppState через audioplayers
         enableVibration: true,
-        // Группируем по отправителю — несколько сообщений в одно уведомление
-        groupKey:        'peer_$fromPeerId',
+        // Общая группа для всех: идентификатор собеседника в системные данные уведомлений не попадает
+        groupKey:        'yandi_messages',
         setAsGroupSummary: false,
       ),
     );
+    // Уведомление нейтральное: ни имени, ни текста. Всё, что попало в системные уведомления, остаётся там после блокировки приложения
+    // и видно другим программам с доступом к уведомлениям; содержимое показывается только внутри открытого приложения.
     await _plugin.show(
       _stableId(fromPeerId),
-      displayName,
-      text.length > 80 ? '${text.substring(0, 80)}…' : text,
+      'YANDI',
+      'Новое сообщение',
       details,
       payload: fromPeerId,
     );
@@ -105,8 +107,8 @@ class NotificationService {
     );
     await _plugin.show(
       _stableId('file_$fromPeerId'),
-      displayName,
-      '📎 $fileName',
+      'YANDI',
+      'Новый файл',
       details,
       payload: fromPeerId,
     );
@@ -135,7 +137,7 @@ class NotificationService {
         timeoutAfter: 45000,
       ),
     );
-    await _plugin.show(_callId, displayName, video ? 'Входящий видеозвонок' : 'Входящий звонок', details, payload: fromPeerId);
+    await _plugin.show(_callId, 'YANDI', video ? 'Входящий видеозвонок' : 'Входящий звонок', details, payload: fromPeerId);
   }
 
   static Future<void> cancelIncomingCall() async {

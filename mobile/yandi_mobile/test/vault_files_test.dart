@@ -152,4 +152,33 @@ void main() {
     expect(left, contains('$_b.yfe.part'));
     expect(await vault.migrateLegacy(), 0);
   });
+
+  test('перенос сохраняет связь с чатом и группой и не плодит копии при сбое затирания (R12-14, R12-15)', () async {
+    File('${d.path}/abcdef12_отчёт.pdf').writeAsBytesSync([1, 2, 3, 4, 5]);
+    File('${d.path}/99999999_ещё.txt').writeAsBytesSync([7, 7]);
+    const tid = 'abcdef12aaaaaaaaaaaaaaaaaaaaaaaa';
+    // затирание сначала не удаётся: оригиналы остаются, копии не размножаются
+    final stuck = mk(wipe: (p) async => false);
+    Future<String?> resolve(String path, String name) async => name.startsWith('abcdef12_') ? tid : null;
+    expect(await stuck.migrateLegacy(resolveId: resolve), 2);
+    expect(stuck.migrationFailures, 2, reason: 'оригиналы не затёрты — об этом надо сказать');
+    expect(File('${d.path}/$tid.yfe').existsSync(), isTrue, reason: 'чат найдёт файл по номеру передачи');
+    final copies1 = d.listSync().where((e) => e.path.endsWith('.yfe')).length;
+    expect(await stuck.migrateLegacy(resolveId: resolve), 0, reason: 'повтор: копия уже есть, второй не создаётся');
+    expect(d.listSync().where((e) => e.path.endsWith('.yfe')).length, copies1);
+    // затирание заработало: оригиналы уходят, копии те же
+    final ok = mk(wipe: (p) async { await File(p).delete(); return true; });
+    expect(await ok.migrateLegacy(resolveId: resolve), 0);
+    expect(ok.migrationFailures, 0);
+    expect(d.listSync().whereType<File>().where((f) => !f.path.endsWith('.yfe')), isEmpty);
+    expect((await ok.list()).map((f) => f.name).toSet(), {'отчёт.pdf', 'ещё.txt'});
+  });
+
+  test('если зашифровать не вышло, единственная открытая копия остаётся и это считается (R12-15)', () async {
+    final f = File('${d.path}/12345678_плохой.bin')..writeAsBytesSync([1, 2, 3]);
+    final broken = VaultFiles(d, vault: () async => throw StateError('нет ключа'), tempDir: Directory('${dir.path}/tmp'));
+    expect(await broken.migrateLegacy(), 0);
+    expect(broken.migrationFailures, 1);
+    expect(f.existsSync(), isTrue);
+  });
 }

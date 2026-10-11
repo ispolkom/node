@@ -121,6 +121,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _toast('Файл не отправлен: $e');
     } finally {
       if (mounted) setState(() => _progress.remove('up'));
+      // открытая копия из выбора файла затирается при любом исходе (запрет вида файла, отказ, успех)
+      try { await context.read<AppState>().dropPickerCopy(path); } catch (_) {}
     }
   }
 

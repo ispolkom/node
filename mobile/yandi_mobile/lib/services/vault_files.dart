@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'package:crypto/crypto.dart' show sha256;
 import '../crypto/file_vault.dart';
 import 'file_transfer_service.dart';
 
@@ -164,8 +166,13 @@ class VaultFiles {
   }
 
   /// Один раз после обновления: старые открытые файлы (`<8 hex>_<имя>`) шифруются, оригиналы затираются; открытые недокачанные
-  /// остатки (`….part` старого вида) удаляются. Возвращает число перенесённых файлов.
-  Future<int> migrateLegacy() async {
+  /// остатки (`….part` старого вида) удаляются. Возвращает число перенесённых файлов; неудачи считаются в [migrationFailures].
+  /// Перенос повторяемый: у каждого файла устойчивый номер назначения (по [resolveId], например номер передачи из чата, иначе по
+  /// имени), уже зашифрованная копия не создаётся второй раз — повторяется только затирание оригинала.
+  int migrationFailures = 0;
+
+  Future<int> migrateLegacy({Future<String?> Function(String legacyPath, String legacyName)? resolveId}) async {
+    migrationFailures = 0;
     if (!await dir.exists()) return 0;
     var moved = 0;
     final plain = <File>[];
@@ -179,16 +186,31 @@ class VaultFiles {
       final fileName = f.uri.pathSegments.last;
       if (fileName.endsWith(_part)) {
         await _wipeAndDelete(f.path);
+        if (await f.exists()) migrationFailures++;
         continue;
       }
       try {
-        await importAs(f.path, _randomId(), name: fileName.replaceFirst(_legacyPrefix, ''));
+        final name = fileName.replaceFirst(_legacyPrefix, '');
+        final id = FileVault.safeId((await resolveId?.call(f.path, fileName)) ?? _legacyId(fileName));
+        final target = File(pathFor(id));
+        var have = false;
+        if (await target.exists()) {
+          try {
+            have = (await (await vault()).readMeta(target)).size == await f.length();
+          } catch (_) {}
+        }
+        if (!have) {
+          await importAs(f.path, id, name: name);
+          moved++;
+        }
         await _wipeAndDelete(f.path);
-        moved++;
+        if (await f.exists()) migrationFailures++;   // зашифровано, но оригинал затереть не вышло: останется до следующего входа
       } catch (_) {
-        // не вышло зашифровать — открытый файл остаётся до следующего входа (не удаляем единственную копию)
+        migrationFailures++;   // не вышло зашифровать — открытый файл остаётся (единственную копию не удаляем)
       }
     }
     return moved;
   }
+
+  static String _legacyId(String fileName) => sha256.convert(utf8.encode('legacy|$fileName')).toString().substring(0, 32);
 }
