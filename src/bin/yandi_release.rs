@@ -13,12 +13,13 @@ fn read_phrase_key(
     mut input: impl BufRead,
     params: argon2::Params,
 ) -> Result<ed25519_dalek::SigningKey, String> {
-    let mut first = zeroize::Zeroizing::new(String::new());
-    let mut second = zeroize::Zeroizing::new(String::new());
-    input.read_line(&mut first).map_err(|e| e.to_string())?;
-    input.read_line(&mut second).map_err(|e| e.to_string())?;
-    let first = normalize(&first);
-    let second = normalize(&second);
+    fn read_normalized(input: &mut impl BufRead) -> Result<zeroize::Zeroizing<String>, String> {
+        let mut raw = zeroize::Zeroizing::new(String::new());
+        input.read_line(&mut raw).map_err(|e| e.to_string())?;
+        Ok(normalize(&raw))
+    }
+    let first = read_normalized(&mut input)?;
+    let second = read_normalized(&mut input)?;
     if first != second {
         return Err("Фразы не совпали.".into());
     }

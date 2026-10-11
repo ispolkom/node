@@ -4,7 +4,7 @@
 # Фразу вводит сам разработчик (скрыто, дважды); она не сохраняется, ключ живёт только в памяти процесса. Ключ подписи — Ed25519,
 # выводится из фразы Argon2id с собственной солью (это НЕ ключ APK, даже при той же фразе). Открытый ключ лежит в репозитории:
 # release/yandi-release-pubkey.hex (закоммитить при первой подписи); при следующих подписях фраза проверяется по нему.
-# Номер выпуска (против отката) — release/SEQ, увеличивается на единицу при каждой подписи (закоммитить).
+# Номер выпуска — release/SEQ, резервируется до подписи (закоммитить); сбой оставляет пропуск.
 #
 # Запуск из корня репозитория:  bash tools/node_release.sh
 #   --unsigned  сборка/архив без ввода фразы, подписи и изменения release/SEQ
@@ -48,15 +48,16 @@ PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2")
 unset P1 P2
 
 PUBKEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута"; exit 1; }
+if [ -f "$PUB" ] && [ "$(cat "$PUB")" != "$PUBKEY" ]; then
+  echo "Фраза не та: ключ не совпадает с release/yandi-release-pubkey.hex. Остановлено."
+  exit 1
+fi
 if [ "$CHECK" = 0 ]; then
   SEQ=$(python3 -I tools/release_seq.py release)
 fi
 if [ ! -f "$PUB" ]; then
   echo "$PUBKEY" > "$PUB"
   echo "Первая подпись: создан $PUB — его нужно закоммитить (он открытый)."
-elif [ "$(cat "$PUB")" != "$PUBKEY" ]; then
-  echo "Фраза не та: ключ не совпадает с release/yandi-release-pubkey.hex. Остановлено."
-  exit 1
 else
   echo "Фраза верна: ключ совпадает с закреплённым."
 fi
@@ -70,7 +71,7 @@ VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT
 printf '%s\n' "$PHRASE_IN" | "$REL" sign "$OUT"
 unset PHRASE_IN
 "$REL" verify "$OUT" --pubkey "$PUBKEY" --min-seq "$SEQ"
- # SEQ already reserved durably; never reuse it after a failed signing.
+# SEQ already reserved durably; never reuse it after a failed signing.
 echo
 echo "Готово: $OUT/"
 ls -l "$OUT"
