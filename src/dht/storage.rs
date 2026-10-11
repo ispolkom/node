@@ -347,9 +347,16 @@ impl DhtStorage {
     }
 
     /// Internal read (no rate limit): the stored value if it has not outlived the TTL.
-    fn peek(&self, key: &HashId) -> Option<Vec<u8>> {
+    fn peek(&mut self, key: &HashId) -> Option<Vec<u8>> {
         let rec = self.records.get(key)?;
-        (Self::now().saturating_sub(rec.timestamp) <= DHT_TTL).then(|| rec.value.clone())
+        if Self::now().saturating_sub(rec.timestamp) > DHT_TTL {
+            // просроченная запись сразу освобождает место (как и при чтении с лимитом), а не ждёт фоновой уборки
+            let size = rec.size;
+            self.records.remove(key);
+            self.storage_bytes = self.storage_bytes.saturating_sub(size);
+            return None;
+        }
+        Some(rec.value.clone())
     }
 
     /// Get value with rate limit check
@@ -698,6 +705,16 @@ mod writer_tests {
         let other = key(9);
         st.store_with_quota(other, rec.to_bytes().unwrap(), "attacker".into()).unwrap();
         assert!(st.get_node_record(&other).is_none(), "a valid record under another node's key is not that node's record");
+    }
+
+    #[test]
+    fn reading_an_expired_record_frees_its_place_at_once() {
+        let mut st = DhtStorage::new();
+        let k = key(7);
+        st.records.insert(k, DhtRecord { value: vec![1, 2, 3], timestamp: DhtStorage::now() - DHT_TTL - 10, origin: "x".into(), size: 3, access_count: 0 });
+        st.storage_bytes = 3;
+        assert!(st.get_node_record(&k).is_none());
+        assert!(st.records.is_empty() && st.storage_bytes == 0, "место освобождено, не ждём фоновой уборки");
     }
 
     #[test]

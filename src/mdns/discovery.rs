@@ -222,6 +222,9 @@ impl MdnsBrowser {
         discovered: Arc<Mutex<HashMap<String, DiscoveredNode>>>,
         service_type: &'static str,
     ) {
+        // полное имя объявления → номер узла: удаление ищет запись по тому же ключу, под которым её добавили
+        // (у объявления «yandi.local» номер берётся из свойства, а не из имени)
+        let mut names: HashMap<String, String> = HashMap::new();
         while let Ok(event) = receiver.recv_async().await {
             match event {
                 ServiceEvent::ServiceResolved(info) => {
@@ -233,14 +236,16 @@ impl MdnsBrowser {
                         let mut map = discovered.lock().await;
                         // anyone on the local network can announce names: the table has a fixed size
                         if map.len() < MAX_DISCOVERED || map.contains_key(&si.short_id) {
+                            if names.len() < MAX_DISCOVERED * 4 || names.contains_key(info.get_fullname()) {
+                                names.insert(info.get_fullname().to_string(), si.short_id.clone());
+                            }
                             map.insert(si.short_id.clone(), si);
                         }
                     }
                 }
                 ServiceEvent::ServiceRemoved(_type, full_name) => {
                     debug!("🔍 mDNS: Service removed: {}", full_name);
-                    // Extract short ID from full name
-                    let short_id = Self::key_of(&full_name);
+                    let short_id = names.remove(&full_name).unwrap_or_else(|| Self::key_of(&full_name));
                     let mut map = discovered.lock().await;
                     map.remove(&short_id);
                 }

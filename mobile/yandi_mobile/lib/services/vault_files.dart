@@ -83,7 +83,9 @@ class VaultFiles {
   Future<void> deleteForever(String path) async {
     final f = File(path);
     if (!await f.exists()) return;
-    final doomed = '$path$_doomed';
+    var doomed = '$path$_doomed';
+    // имя занято (остаток прошлого сбоя, в том числе каталог) — берём уникальное: просьба удалить не должна теряться
+    if (await FileSystemEntity.type(doomed, followLinks: false) != FileSystemEntityType.notFound) doomed = '$path.${_randomPrefix()}$_doomed';
     try {
       await f.rename(doomed);
     } catch (_) {

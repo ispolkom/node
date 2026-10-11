@@ -44,6 +44,8 @@ class AvatarService extends ChangeNotifier {
         _mine = (me != null && AvatarMsg.validHash(me)) ? me : null;
         _peers.clear();
         ((m['peers'] as Map?) ?? {}).forEach((k, v) { if (v is String && AvatarMsg.validHash(v)) _peers[k as String] = v; });
+        // индекс прочитан: дочищаем то, что в прошлый раз не удалось затереть (при ошибке чтения неизвестные файлы не трогаем)
+        await _collectGarbage();
       }
     } catch (_) {}
     notifyListeners();
