@@ -25,6 +25,31 @@ const MAX_DATA: usize = 16 * 1024 * 1024;
 const KEY_AAD: &[u8] = b"YANDI-NODE-CLOSED-KEY-V1\0";
 const DATA_AAD: &[u8] = b"YANDI-NODE-CLOSED-DATA-V1\0";
 
+static KDF_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(test)]
+static KDF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static KDF_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+static KDF_PEAK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+#[cfg(test)]
+struct KdfProbe;
+#[cfg(test)]
+impl KdfProbe {
+    fn new() -> Self {
+        use std::sync::atomic::Ordering;
+        let active = KDF_ACTIVE.fetch_add(1, Ordering::SeqCst) + 1;
+        KDF_PEAK.fetch_max(active, Ordering::SeqCst);
+        Self
+    }
+}
+#[cfg(test)]
+impl Drop for KdfProbe {
+    fn drop(&mut self) {
+        KDF_ACTIVE.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct KeyWrap {
@@ -89,6 +114,14 @@ fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
 }
 
 fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
+    // Даже внутренние синхронные примитивы не растягивают два ключа одновременно.
+    let _single = KDF_MUTEX
+        .lock()
+        .map_err(|_| anyhow!("очередь KDF остановлена после ошибки"))?;
+    #[cfg(test)]
+    KDF_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    let _probe = KdfProbe::new();
     let params = Params::new(65536, 3, 1, Some(32)).map_err(|_| anyhow!("параметры KDF"))?;
     // Обычный hash_password_into освобождает рабочие блоки без их стирания.
     // Владеем всей памятью KDF: Zeroizing очищает её и при ошибке/панике.

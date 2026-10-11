@@ -20,6 +20,8 @@ const PENDING: &str = "envelope.pending";
 const ANCHOR: &str = "anchor.json";
 const LIMIT: usize = 16384;
 
+pub mod gate;
+
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Stamp {
@@ -329,7 +331,7 @@ mod tests {
 
     // Store-тестам не нужен KDF: MAC/ревизии проверяются настоящим DK,
     // криптографические roundtrip проверяются отдельным тестом ниже.
-    fn fixture() -> (VaultEnvelope, NodeVault) {
+    pub(super) fn fixture() -> (VaultEnvelope, NodeVault) {
         let key = Zeroizing::new([7; 32]);
         let mut envelope = VaultEnvelope {
             version: 1,
@@ -351,7 +353,7 @@ mod tests {
             },
         )
     }
-    fn temp() -> tempfile::TempDir {
+    pub(super) fn temp() -> tempfile::TempDir {
         let directory = tempfile::Builder::new()
             .prefix("r15_store_")
             .tempdir()
