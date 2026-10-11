@@ -312,7 +312,8 @@ class _PairScreenState extends State<PairScreen> {
                   fit: StackFit.expand,
                   children: [
                     MobileScanner(controller: _scanner, onDetect: _onDetect, errorBuilder: _cameraError),
-                    Center(
+                    // рамка и подсказка только рисуются: нажатия проходят сквозь них (иначе рамка перекрывала кнопки «Разрешить камеру» и «Настройки»)
+                    IgnorePointer(child: Center(
                       child: FractionallySizedBox(
                         widthFactor: 0.7,
                         child: AspectRatio(
@@ -325,14 +326,14 @@ class _PairScreenState extends State<PairScreen> {
                           ),
                         ),
                       ),
-                    ),
+                    )),
                     Positioned(
                       left: 16, right: 16, bottom: 12,
-                      child: Container(
+                      child: IgnorePointer(child: Container(
                         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                         decoration: BoxDecoration(color: Colors.black54, borderRadius: BorderRadius.circular(10)),
                         child: Text(_hint, textAlign: TextAlign.center, style: const TextStyle(color: Colors.white, fontSize: 14)),
-                      ),
+                      )),
                     ),
                     if (_processing)
                       const Positioned.fill(
