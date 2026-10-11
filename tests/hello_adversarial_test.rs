@@ -83,7 +83,7 @@ async fn hostile_but_signed_hellos_do_not_kill_either_hello_listener() {
 
     std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19531");
     std::env::set_var("YANDI_P2P_DATA_PORT", "19532");
-    let net = NetTransport::with_handlers(NodeIdentity::new(), 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 19533, 19534).await.unwrap();
+    let net = NetTransport::with_handlers(NodeIdentity::new(), 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, 19533, 19534).await.unwrap();
     let p2p = P2PTransport::new(NodeIdentity::new(), 0).await.unwrap();
     let net_addr = SocketAddr::from(([127, 0, 0, 1], net.discovery_addr().port()));
     let p2p_addr = loopback_of(&p2p.discovery_addr());

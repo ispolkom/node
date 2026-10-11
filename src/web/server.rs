@@ -1516,7 +1516,6 @@ async fn api_speed(State(state): State<AppState>) -> impl IntoResponse {
         "wagon_recv_total": metrics.wagon_recv_total,
         "wagon_drop_total": metrics.wagon_drop_total,
         "wagon_checksum_failed_total": metrics.wagon_checksum_failed_total,
-        "wagon_retrans_total": metrics.wagon_retrans_total,
         "wagon_drop_crc_pct": metrics.wagon_drop_crc_pct,
         "peer_count": metrics.peer_count,
     }))

@@ -21,7 +21,7 @@ use tracing::{info, error, debug, warn};
 
 /// SOCKS5 Exit Node Handler (аналог HttpProxyGateway)
 pub struct ExitNodeHandler {
-    pub transport: Arc<P2PTransport>,  // ✅ Публичный для NACK handler
+    pub transport: Arc<P2PTransport>,  // ✅ Публичный
     pub station: Arc<Station>,
     /// Active tunnels: tunnel_id -> write half
     active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,

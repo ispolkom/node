@@ -273,22 +273,6 @@ impl Train {
     }
 
     /// 🎉 Вычислить checksum собранного поезда (для ACK)
-    pub fn calculate_checksum(&self) -> [u8; 32] {
-        use sha2::{Sha256, Digest};
-
-        let mut hasher = Sha256::new();
-
-        // Хешируем wagons по порядку
-        for i in 0..self.total_wagons {
-            if let Some(wagon) = self.wagons.get(&i) {
-                // Добавляем wagon_num и wagon data
-                hasher.update(&wagon.wagon_num.to_be_bytes());
-                hasher.update(&wagon.cargo);
-            }
-        }
-
-        hasher.finalize().into()
-    }
 
     /// ⚡ QUIC-style: собрать данные до заданного offset (partial assembly)
     pub fn assemble_up_to(&self, max_offset: u64) -> Result<Vec<u8>, TrainError> {

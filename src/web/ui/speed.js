@@ -105,7 +105,7 @@ async function loadSpeed() {
         const wagonHealthEl = document.getElementById('wagonHealth');
         if (wagonHealthEl) {
             wagonHealthEl.textContent =
-                `Retrans: ${data.wagon_retrans_total ?? 0} | RX: ${data.wagon_recv_total ?? 0}`;
+                `RX: ${data.wagon_recv_total ?? 0}`;
         }
         
         // Raw данные для отладки

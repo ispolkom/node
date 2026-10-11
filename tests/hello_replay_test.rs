@@ -71,7 +71,6 @@ async fn spawn_transport(
         None, // proxy_request_tx
         None, // proxy_response_tx
         None, // proxy_tunnel_data_tx
-        None, // nack_tx
         None, // socks5_gateway_tx
         None, // socks5_request_tx
         None, // socks5_response_tx

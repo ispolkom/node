@@ -62,20 +62,18 @@ async fn a_hostile_peer_with_a_real_session_cannot_stop_the_node() {
     let (chat_tx, mut chat_rx) = mpsc::channel(100_000);
     let (group_tx, mut group_rx) = mpsc::channel(100_000);
     let (tunnel_tx, mut tunnel_rx) = mpsc::channel(100_000);
-    let (nack_tx, mut nack_rx) = mpsc::channel(100_000);
     let (relay_req_tx, mut relay_req_rx) = mpsc::channel(100_000);
     let (relay_data_tx, mut relay_data_rx) = mpsc::channel(100_000);
     tokio::spawn(async move { while chat_rx.recv().await.is_some() {} });
     tokio::spawn(async move { while group_rx.recv().await.is_some() {} });
     tokio::spawn(async move { while tunnel_rx.recv().await.is_some() {} });
-    tokio::spawn(async move { while nack_rx.recv().await.is_some() {} });
     tokio::spawn(async move { while relay_req_rx.recv().await.is_some() {} });
     tokio::spawn(async move { while relay_data_rx.recv().await.is_some() {} });
 
     let victim_id = NodeIdentity::new();
     let victim_node_id = victim_id.node_id();
     let victim = P2PTransport::with_handlers(
-        victim_id, 0, None, None, None, None, None, Some(nack_tx), None, None, None, None, None, None, Some(tunnel_tx), Some(chat_tx), Some(group_tx), None, None, None,
+        victim_id, 0, None, None, None, None, None, None, None, None, None, None, None, Some(tunnel_tx), Some(chat_tx), Some(group_tx), None, None, None,
         Some(relay_req_tx), None, Some(relay_data_tx), 19541, 19542,
     )
     .await

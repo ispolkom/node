@@ -63,9 +63,6 @@ pub struct WagonStats {
     /// Wagons dropped (timeout, buffer full, etc.)
     pub dropped: AtomicU64,
 
-    /// Wagons retransmitted (via NACK)
-    pub retransmitted: AtomicU64,
-
     /// 🔴 Path0 wagons lost (Path1 arrived instead)
     pub path0_lost: AtomicU64,
 
@@ -84,7 +81,6 @@ impl WagonStats {
             recv_total: AtomicU64::new(0),
             checksum_failed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
-            retransmitted: AtomicU64::new(0),
             path0_lost: AtomicU64::new(0),
             duplicates_dropped: AtomicU64::new(0),
         }
@@ -102,7 +98,6 @@ impl WagonStats {
 
         let checksum_failed = self.checksum_failed.load(Ordering::Relaxed);
         let dropped = self.dropped.load(Ordering::Relaxed);
-        let retransmitted = self.retransmitted.load(Ordering::Relaxed);
         let path0_lost = self.path0_lost.load(Ordering::Relaxed);
 
         // Use signed arithmetic to handle cases where recv > sent (e.g., gateway receiving more than sending)
@@ -135,8 +130,8 @@ impl WagonStats {
 
         println!("🚂 [WAGON-STATS] Path0: sent={}, recv={}, loss={}%", sent0, recv0, loss0);
         println!("🚂 [WAGON-STATS] Path1: sent={}, recv={}, loss={}%", sent1, recv1, loss1);
-        println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, retrans={}, path0_lost={}",
-                 sent_total, recv_total, loss_total, checksum_failed, dropped, retransmitted, path0_lost);
+        println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, path0_lost={}",
+                 sent_total, recv_total, loss_total, checksum_failed, dropped, path0_lost);
     }
 }
 
@@ -183,7 +178,6 @@ pub struct WebTransportMetrics {
     pub wagon_recv_total: u64,
     pub wagon_drop_total: u64,
     pub wagon_checksum_failed_total: u64,
-    pub wagon_retrans_total: u64,
     pub wagon_drop_crc_pct: f64,
     pub peer_count: usize,
 }
@@ -4945,7 +4939,6 @@ impl P2PTransport {
         let wagon_recv_total = wagon_stats.recv_total.load(Ordering::Relaxed);
         let wagon_drop_total = wagon_stats.dropped.load(Ordering::Relaxed);
         let wagon_checksum_failed_total = wagon_stats.checksum_failed.load(Ordering::Relaxed);
-        let wagon_retrans_total = wagon_stats.retransmitted.load(Ordering::Relaxed);
         let wagon_drop_crc_pct = if wagon_recv_total + wagon_drop_total + wagon_checksum_failed_total > 0 {
             (wagon_drop_total + wagon_checksum_failed_total) as f64 * 100.0
                 / (wagon_recv_total + wagon_drop_total + wagon_checksum_failed_total) as f64
@@ -4998,7 +4991,6 @@ impl P2PTransport {
                 wagon_recv_total,
                 wagon_drop_total,
                 wagon_checksum_failed_total,
-                wagon_retrans_total,
                 wagon_drop_crc_pct,
                 peer_count: peers.len(),
                 ..Default::default()
@@ -5063,7 +5055,6 @@ impl P2PTransport {
             wagon_recv_total,
             wagon_drop_total,
             wagon_checksum_failed_total,
-            wagon_retrans_total,
             wagon_drop_crc_pct,
             peer_count: peers.len(),
         }

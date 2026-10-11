@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use super::{Train, TrainId, Wagon, WagonFlags};
-use super::express::ExpressTrain;
 use super::rate_controller::{RateController, RateAction, Pacer};
 use crate::util::HashId;
 use crate::netlayer::{P2PTransport, transport::get_wagon_stats};
@@ -416,23 +415,6 @@ impl Station {
         Ok(train_id)
     }
 
-    /// Отправить один вагон
-    async fn send_wagon(&self, dest: HashId, wagon: &Wagon) -> Result<(), StationError> {
-        // Упаковываем вагон
-        let wagon_bytes = wagon.to_bytes()
-            .map_err(|e| StationError::SerializationError(e.to_string()))?;
-
-        // Добавляем префикс YTP (0x60 = YTP wagon)
-        let mut packet = vec![0x60u8];
-        packet.extend_from_slice(&wagon_bytes);
-
-        // Отправляем через P2P transport
-        self.transport.send_encrypted(dest, &packet).await
-            .map_err(|e| StationError::SendError(e.to_string()))?;
-
-        Ok(())
-    }
-
     /// Принять вагон (вызывается из transport при получении пакета)
     pub async fn receive_wagon(&self, source_id: HashId, wagon_bytes: &[u8]) -> Result<Option<TrainId>, StationError> {
         // Десериализуем вагон
@@ -681,28 +663,6 @@ impl Station {
     }
 
     /// Отправить экспресс-поезд (высокий приоритет)
-    pub async fn send_express_train(
-        &self,
-        dest: HashId,
-        express: ExpressTrain,
-    ) -> Result<(), StationError> {
-        println!("🚄 STATION[{}] → EXPRESS TRAIN #{}-EXPRESS ({} wagons, HIGH PRIORITY) → STATION[{}]",
-                 self.id_short(),
-                 express.original_train_id,
-                 express.len(),
-                 Self::format_hash_id(dest)
-        );
-
-        for wagon in &express.wagons {
-            // Отправляем с минимальной задержкой (высокий приоритет!)
-            self.send_wagon(dest, wagon).await?;
-            println!("📦 [EXPRESS WAGON] Sent ({} KB)", wagon.cargo.len() / 1024);
-        }
-
-        println!("✅ Express train sent!");
-
-        Ok(())
-    }
 
     // ==================== ⚡ BATCHING METHODS ====================
 
@@ -1042,9 +1002,6 @@ impl Depot {
     }
 
     /// 🎉 Получить train (для ACK checksum)
-    fn get_train(&self, train_id: TrainId) -> Option<&super::Train> {
-        self.trains.get(&train_id)
-    }
 
     /// Получить прогресс сборки
     fn get_progress(&self, train_id: TrainId) -> Option<f64> {

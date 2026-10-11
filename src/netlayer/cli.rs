@@ -24,7 +24,6 @@ pub struct P2PCli {
     proxy_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
     proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
     proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-    // 🔄 NACK channel (для wagon retransmission)
     // SOCKS5 channels
     socks5_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
