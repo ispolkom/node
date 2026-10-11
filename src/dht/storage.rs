@@ -10,6 +10,9 @@ use serde::{Serialize, Deserialize};
 use crate::util::HashId;
 use crate::dht::record::NodeRecord;
 
+/// How far in the future a signed NodeRecord timestamp may be (clock skew between nodes).
+const MAX_FUTURE_SKEW_SECS: u64 = 600;
+
 /// TTL for DHT records (Kademlia recommends ≤ 24 hours)
 pub const DHT_TTL: u64 = 24 * 60 * 60;
 
@@ -304,14 +307,20 @@ impl DhtStorage {
             return Err(format!("Rejected expired NodeRecord from {}", origin));
         }
 
+        // 🔒 A record from the future (beyond clock skew) would never age out by the hard TTL
+        if record.timestamp > Self::now() + MAX_FUTURE_SKEW_SECS {
+            return Err(format!("Rejected NodeRecord from the future from {}", origin));
+        }
+
         // Serialize record for storage
         let value = record.to_bytes()?;
 
         // Store under node_name as key
         let key = HashId(record.node_name.0);
 
-        // Check for existing record with higher sequence (only a record that itself verifies counts)
-        if let Some(existing_value) = self.get(&key) {
+        // Check for existing record with higher sequence (only a record that itself verifies counts). This is an internal read: it must
+        // not go through the shared read limit, or an exhausted limit would make the newer record look absent and let an old one replace it
+        if let Some(existing_value) = self.peek(&key) {
             if let Ok(existing_record) = NodeRecord::from_bytes(&existing_value) {
                 if existing_record.verify() && existing_record.sequence >= record.sequence {
                     return Err(format!("Rejected stale NodeRecord (seq {} vs {})",
@@ -326,7 +335,7 @@ impl DhtStorage {
 
     /// Get NodeRecord by node name
     pub fn get_node_record(&mut self, node_name: &HashId) -> Option<NodeRecord> {
-        if let Some(data) = self.get(node_name) {
+        if let Some(data) = self.peek(node_name) {
             if let Ok(record) = NodeRecord::from_bytes(&data) {
                 // Verify on retrieval too — and the record must belong to the key it was asked under
                 if record.node_name.0 == node_name.0 && record.verify() && !record.is_expired() {
@@ -335,6 +344,12 @@ impl DhtStorage {
             }
         }
         None
+    }
+
+    /// Internal read (no rate limit): the stored value if it has not outlived the TTL.
+    fn peek(&self, key: &HashId) -> Option<Vec<u8>> {
+        let rec = self.records.get(key)?;
+        (Self::now().saturating_sub(rec.timestamp) <= DHT_TTL).then(|| rec.value.clone())
     }
 
     /// Get value with rate limit check
@@ -660,6 +675,18 @@ mod writer_tests {
         let newer = NodeRecord::new(&id, 6, Some("203.0.113.5:9000".into()), 1).unwrap();
         st.store_node_record(&newer, "relayer-b".into()).expect("the honest update is still accepted, from any relaying peer");
         assert_eq!(st.get_node_record(&k).unwrap().sequence, 6);
+    }
+
+    #[test]
+    fn an_old_signed_record_does_not_replace_a_newer_one_when_the_shared_read_limit_is_exhausted() {
+        let mut st = DhtStorage::new();
+        let id = NodeIdentity::new();
+        st.store_node_record(&NodeRecord::new(&id, 100, None, 0).unwrap(), "relayer-a".into()).unwrap();
+        // общий лимит чтений исчерпан (или источник временно заблокирован): внутренняя проверка версии от этого не зависит
+        st.blocked_origins.insert("legacy".into(), DhtStorage::now() + 3600);
+        let old = NodeRecord::new(&id, 1, None, 0).unwrap();
+        assert!(st.store_node_record(&old, "replayer".into()).is_err(), "seq 1 must not replace seq 100");
+        assert_eq!(st.get_node_record(&HashId(old.node_name.0)).unwrap().sequence, 100);
     }
 
     #[test]

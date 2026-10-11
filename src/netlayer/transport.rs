@@ -284,6 +284,10 @@ pub struct ProxyGatewayRequest {
 }
 
 /// A relay forwards only to public destinations (outside testnet), and one source may push this many bytes per second through it.
+/// Самое большое значение DHT, принимаемое по UDP (его JSON-ответ FIND_VALUE должен влезть в датаграмму с запасом на шифрование).
+const MAX_UDP_DHT_VALUE: usize = 12 * 1024;
+/// Самый большой открытый ответ FIND_VALUE (UDP-датаграмма IPv4 — до 65507 байт, минус служебное шифрование).
+const MAX_UDP_DHT_REPLY: usize = 60_000;
 const RELAY_BYTES_PER_SEC_PER_SOURCE: usize = 2 * 1024 * 1024;
 
 fn relay_destination_ok(addr: &str) -> bool {
@@ -3708,10 +3712,15 @@ impl P2PTransport {
                                                 // A signed node record is checked (signature, expiry, sequence) and must sit under its own name;
                                                 // any other value goes through the quota path, where a key held by another writer is protected.
                                                 let origin = hex::encode(&peer_id.0);
-                                                let stored = match crate::dht::NodeRecord::from_bytes(&value) {
+                                                // значение по UDP: ответ FIND_VALUE (JSON, до ~4 знаков на байт) должен влезать в одну датаграмму
+                                                let stored = if value.len() > MAX_UDP_DHT_VALUE {
+                                                    Err(format!("DHT value too large for the datagram transport: {} bytes", value.len()))
+                                                } else {
+                                                    match crate::dht::NodeRecord::from_bytes(&value) {
                                                     Ok(rec) if rec.node_name.0 == key.0 => dht_lock.storage.store_node_record(&rec, origin),
                                                     Ok(_) => Err("node record stored under a key that is not its own name".to_string()),
                                                     Err(_) => dht_lock.storage.store_with_quota(key, value, origin),
+                                                    }
                                                 };
                                                 if let Err(e) = stored {
                                                     println!("[dht] ⛔ STORE rejected from {}: {}", crate::util::mask_hash_id(&peer_id), e);
@@ -3809,11 +3818,14 @@ impl P2PTransport {
 
                                                     let mut resp_packet = vec![0xF7u8];
 
-                                                    let data = serde_json::to_vec(&(value, closest_nodes))
-
-                                                        .map_err(|e| println!("[transport] Failed to serialize: {}", e))
-
-                                                        .ok();
+                                                    // ответ не влезает в датаграмму — отдаём только ближайшие узлы (лучше, чем молча потерять ответ)
+                                                    let data = serde_json::to_vec(&(&value, &closest_nodes))
+                                                        .ok()
+                                                        .filter(|d| d.len() <= MAX_UDP_DHT_REPLY)
+                                                        .or_else(|| serde_json::to_vec(&(None::<Vec<u8>>, &closest_nodes)).ok());
+                                                    if data.is_none() {
+                                                        println!("[transport] Failed to serialize FIND_VALUE reply");
+                                                    }
 
                                                     if let Some(data) = data {
 

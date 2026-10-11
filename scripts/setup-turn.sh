@@ -70,6 +70,13 @@ denied-peer-ip=127.0.0.0-127.255.255.255
 denied-peer-ip=169.254.0.0-169.254.255.255
 denied-peer-ip=172.16.0.0-172.31.255.255
 denied-peer-ip=192.168.0.0-192.168.255.255
+# и то же для IPv6: петля, локальные (ULA) и канальные адреса
+denied-peer-ip=::1
+denied-peer-ip=fc00::-fdff:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+denied-peer-ip=fe80::-febf:ffff:ffff:ffff:ffff:ffff:ffff:ffff
+# собственный публичный адрес ($EXT) здесь не запрещаем: когда оба телефона идут через этот же релей, адрес собеседника — $EXT:порт релея.
+# Но службы, слушающие 0.0.0.0 на этом компьютере, релей на $EXT достаёт мимо внешнего файрвола (пакет идёт через lo). Закрывать это
+# правилом nftables на выходе: из портов релея ($RELAY_MIN-$RELAY_MAX) на $EXT — только в порты релея.
 log-file=/var/log/turnserver.log
 simple-log
 CONF

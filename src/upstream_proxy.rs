@@ -375,7 +375,11 @@ fn pick(p: &mut Pool, client: &str, now: Instant, tried: &[String]) -> Pick {
     }
     let live: Vec<&Entry> = entries.iter().filter(|e| p.available(e, now)).collect();
     if live.is_empty() {
-        // все в паузе: пробуем того, у кого она кончается раньше (так узнаём, что прокси ожил); клиента не закрепляем
+        // все в паузе: пробуем того, у кого она кончается раньше (так узнаём, что прокси ожил); клиента не закрепляем.
+        // Жёсткий лимит действует и здесь: новому клиенту без места пробу не даём
+        if !shared && p.file.strict && !p.assign.contains_key(client) && !entries.iter().any(|e| p.clients_of(&e.id) < p.cap_of(e)) {
+            return Pick::Full;
+        }
         let e = entries.iter().min_by_key(|e| p.health.get(&e.id).and_then(|h| h.cooldown_until).unwrap_or(now)).expect("entries not empty");
         return Pick::Proxy(e.id.clone());
     }
@@ -608,7 +612,8 @@ fn parse_line(line: &str, default_kind: Kind) -> Result<Settings, String> {
         kind = match scheme.to_ascii_lowercase().as_str() {
             "socks5" | "socks5h" | "socks" => Kind::Socks5,
             "http" | "https" => Kind::HttpConnect,
-            other => return Err(format!("неизвестная схема «{other}»")),
+            // саму «схему» не повторяем: при ошибке вставки там может оказаться логин и пароль
+            _ => return Err("неизвестная схема (поддерживаются socks5:// и http://)".to_string()),
         };
         rest = r.trim_end_matches('/');
     }
@@ -1295,6 +1300,23 @@ mod tests {
         assert!(e.to_string().contains("прокси"), "{e}");
         let g = cell.lock().unwrap();
         assert!(g.health["a"].cooldown_until.is_some() && g.health["b"].cooldown_until.is_some());
+    }
+
+    #[test]
+    fn a_mistyped_line_is_reported_without_repeating_the_login_or_password() {
+        let (_, errors) = parse_lines("SecretUser:SecretPass://proxy.example:1080\n", Kind::Socks5);
+        assert_eq!(errors.len(), 1);
+        assert!(!errors[0].to_lowercase().contains("secret"), "{errors:?}");
+    }
+
+    #[test]
+    fn the_strict_limit_also_holds_while_every_proxy_is_in_a_pause() {
+        let now = Instant::now();
+        let cell = Mutex::new(pool_of(&["a"], 1, true));
+        id_of(pick(&mut cell.lock().unwrap(), "phone1", now, &[]));
+        note_fail(&cell, "a", "x", now);
+        assert_eq!(pick(&mut cell.lock().unwrap(), "phone2", now, &[]), Pick::Full, "a new client gets no probe past the strict limit");
+        assert!(matches!(pick(&mut cell.lock().unwrap(), "phone1", now, &[]), Pick::Proxy(_)), "the client with a place still probes");
     }
 
     #[test]

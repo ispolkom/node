@@ -354,7 +354,9 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
         to: to.to_string(),
         payload_b64: base64_of(payload),
     };
-    let accepted = with_mail(|l| mail_accept(l, m.clone(), now_ms()));
+    // отправитель (устройство или сам узел) проверяется под замком очереди: remove_device сначала убирает устройство, потом чистит его
+    // письма, поэтому письмо забытого устройства либо не попадёт в очередь, либо будет вычищено вместе с остальными
+    let accepted = with_mail(|l| (is_node_peer(from) || device_by_peer(from).is_some()) && mail_accept(l, m.clone(), now_ms()));
     if !accepted {
         return false; // очередь переполнена этим отправителем или вообще: новое письмо не принимаем, чужие старые не трогаем
     }
@@ -1202,6 +1204,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
             },
             inc = sock.recv() => {
                 let Some(Ok(msg)) = inc else { break };
+                if device_by_peer(&me).is_none() {
+                    break; // устройство забыли, пока кадр шёл: ничего из него не исполняем
+                }
                 let Message::Binary(d) = msg else { if matches!(msg, Message::Close(_)) { break } else { continue } };
                 match d.first().copied() {
                     Some(FT_PING) => { if sock.send(Message::Binary(vec![FT_PONG])).await.is_err() { break; } }
