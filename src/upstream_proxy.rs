@@ -300,6 +300,82 @@ fn path() -> std::path::PathBuf {
     crate::util::data_dir::data_dir().join("upstream_proxy.json")
 }
 
+fn sealed_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("upstream_proxy.enc")
+}
+
+const SEAL_AAD: &str = "upstream_proxy";
+
+/// Где лежат настройки: открытый файл (как раньше), заперто (закрытая среда создана, пароль не введён) или запечатано ключом.
+#[derive(Clone, Copy)]
+enum Mode {
+    Plain,
+    Locked,
+    Sealed([u8; 32]),
+}
+
+fn mode_cell() -> &'static Mutex<Mode> {
+    static M: OnceLock<Mutex<Mode>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(Mode::Plain))
+}
+
+fn mode() -> Mode {
+    *mode_cell().lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Закрытая среда создана: до ввода пароля настройки (в них логины внешних прокси) не читаются, выход через прокси выключен.
+/// Вызывать до первого обращения к пулу.
+pub fn start_locked() {
+    *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Locked;
+}
+
+/// Заперто: настройки убираются из памяти, файл не меняется.
+pub fn lock() {
+    *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Locked;
+    *pool() = Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new() };
+}
+
+/// Выдан ключ области: настройки читаются из запечатанного файла (открытого файла в этом режиме больше нет).
+pub fn unlock(key: [u8; 32]) {
+    *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Sealed(key);
+    *pool() = load_pool();
+}
+
+/// Перенос открытого файла в запечатанный; открытая копия затирается только после проверки записанного.
+pub fn seal_existing(key: &[u8; 32]) -> Result<(), String> {
+    seal_existing_at(&path(), &sealed_path(), key)
+}
+
+fn seal_existing_at(plain: &std::path::Path, sealed: &std::path::Path, key: &[u8; 32]) -> Result<(), String> {
+    let bytes = match std::fs::read(plain) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e.to_string()),
+    };
+    if parse_file(&bytes).is_none() {
+        return Err("upstream_proxy.json не разобран; файл не тронут".into());
+    }
+    crate::util::sealed::write(sealed, key, SEAL_AAD, &bytes)?;
+    crate::util::sealed::wipe_remove(plain);
+    Ok(())
+}
+
+fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path) -> Option<PoolFile> {
+    match mode {
+        Mode::Plain => std::fs::read(plain).ok().and_then(|b| parse_file(&b)),
+        Mode::Locked => None,
+        Mode::Sealed(key) => std::fs::read(sealed)
+            .ok()
+            .and_then(|b| crate::util::sealed::open(&key, SEAL_AAD, &b))
+            .and_then(|b| parse_file(&b)),
+    }
+}
+
+fn load_pool() -> Pool {
+    let file = read_pool_file(mode(), &path(), &sealed_path());
+    Pool { file: file.unwrap_or_default(), health: HashMap::new(), assign: HashMap::new() }
+}
+
 /// Прочитать файл: новый формат (со списком) или прежний (один прокси).
 fn parse_file(bytes: &[u8]) -> Option<PoolFile> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
@@ -315,10 +391,7 @@ fn parse_file(bytes: &[u8]) -> Option<PoolFile> {
 
 fn pool_cell() -> &'static Mutex<Pool> {
     static P: OnceLock<Mutex<Pool>> = OnceLock::new();
-    P.get_or_init(|| {
-        let file = std::fs::read(path()).ok().and_then(|b| parse_file(&b)).unwrap_or_default();
-        Mutex::new(Pool { file, health: HashMap::new(), assign: HashMap::new() })
-    })
+    P.get_or_init(|| Mutex::new(load_pool()))
 }
 
 fn pool() -> std::sync::MutexGuard<'static, Pool> {
@@ -327,7 +400,11 @@ fn pool() -> std::sync::MutexGuard<'static, Pool> {
 
 fn persist(p: &Pool) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(&p.file).map_err(|e| e.to_string())?;
-    crate::util::private_file::write_private(&path(), &bytes).map_err(|e| format!("не удалось записать настройки: {e}"))
+    match mode() {
+        Mode::Plain => crate::util::private_file::write_private(&path(), &bytes).map_err(|e| format!("не удалось записать настройки: {e}")),
+        Mode::Locked => Err("закрытая среда заперта: введите пароль владельца".into()),
+        Mode::Sealed(key) => crate::util::sealed::write(&sealed_path(), &key, SEAL_AAD, &bytes).map_err(|e| format!("не удалось записать настройки: {e}")),
+    }
 }
 
 impl Pool {
@@ -1350,5 +1427,26 @@ mod tests {
         assert!(!parse_file(off).unwrap().proxies[0].enabled);
         assert!(parse_file(b"not json").is_none());
         assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "an entry that fails the check is dropped");
+    }
+
+    /// Закрытая среда: заперто — настройки не читаются; после переноса открытая копия затёрта, читается только с ключом.
+    #[test]
+    fn settings_file_moves_under_the_key_and_locked_reads_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, sealed) = (dir.path().join("upstream_proxy.json"), dir.path().join("upstream_proxy.enc"));
+        let file = br#"{"proxies":[{"id":"a","enabled":true,"kind":"socks5","host":"proxy.example","port":1080,"auth":{"type":"password","user":"u","password":"hunter2-secret"}}]}"#;
+        std::fs::write(&plain, file).unwrap();
+        assert!(parse_file(file).is_some(), "образец разбирается");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none(), "заперто: открытый файл не читается");
+        assert!(plain.exists());
+
+        let key = [3u8; 32];
+        seal_existing_at(&plain, &sealed, &key).unwrap();
+        assert!(!plain.exists(), "открытая копия затёрта");
+        assert!(!String::from_utf8_lossy(&std::fs::read(&sealed).unwrap()).contains("hunter2"));
+        assert_eq!(read_pool_file(Mode::Sealed(key), &plain, &sealed).unwrap().proxies[0].host, "proxy.example");
+        assert!(read_pool_file(Mode::Sealed([4u8; 32]), &plain, &sealed).is_none(), "чужой ключ");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none());
+        seal_existing_at(&plain, &sealed, &key).unwrap(); // повтор: файла нет — не ошибка
     }
 }

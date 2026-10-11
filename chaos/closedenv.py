@@ -25,6 +25,12 @@ plain = os.path.join(data, "mobile_self.json")
 with open(plain, "w") as f:
     json.dump({"x25519_secret": base64.b64encode(bytes([5]) * 32).decode(), "ed25519_secret": base64.b64encode(bytes([6]) * 32).decode()}, f)
 
+# внешний прокси с паролем лежит открыто (прежняя установка)
+proxy_plain = os.path.join(data, "upstream_proxy.json")
+with open(proxy_plain, "w") as f:
+    json.dump({"proxies": [{"id": "p1", "enabled": True, "kind": "socks5", "host": "proxy.example", "port": 1080,
+                            "auth": {"type": "password", "user": "u", "password": "hunter2-secret"}}]}, f)
+
 def boot():
     n.start()
     assert n.login(), "вход в веб-интерфейс"
@@ -41,6 +47,9 @@ try:
     enc = os.path.join(data, "mobile_self.enc")
     check("открытый файл ключей перенесён и убран", os.path.exists(enc) and not os.path.exists(plain))
     enc_bytes = open(enc, "rb").read() if os.path.exists(enc) else b""
+    proxy_enc = os.path.join(data, "upstream_proxy.enc")
+    check("настройки прокси перенесены и затёрты", os.path.exists(proxy_enc) and not os.path.exists(proxy_plain)
+          and b"hunter2" not in open(proxy_enc, "rb").read())
     closed = os.path.join(data, "closed")
     check("каталог закрытой среды 0700", os.path.isdir(closed) and (os.stat(closed).st_mode & 0o777) == 0o700)
     env = open(os.path.join(closed, "envelope.json"), "rb").read() if os.path.exists(os.path.join(closed, "envelope.json")) else b""

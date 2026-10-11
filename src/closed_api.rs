@@ -1,7 +1,7 @@
 //! Подключение закрытой среды к узлу: потребители ([`ChatConsumer`], [`GroupsConsumer`], [`SelfConsumer`]) и ручки владельца
 //! `/api/vault/*` (за входом в веб-интерфейс).
 
-use crate::closed_env::{ClosedEnv, Consumer, DOMAIN_CHAT, DOMAIN_GROUPS, DOMAIN_SELF};
+use crate::closed_env::{ClosedEnv, Consumer, DOMAIN_CHAT, DOMAIN_GROUPS, DOMAIN_PROXY, DOMAIN_SELF};
 use crate::communication::ChatManager;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
@@ -94,6 +94,28 @@ impl Consumer for SelfConsumer {
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::mobile_self::lock_keys() })
+    }
+}
+
+/// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
+pub struct ProxyConsumer;
+
+impl Consumer for ProxyConsumer {
+    fn domain(&self) -> &'static str {
+        DOMAIN_PROXY
+    }
+    fn migrate(&self, _old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || crate::upstream_proxy::seal_existing(&new).map(|_| 0usize))
+                .await
+                .map_err(|e| e.to_string())?
+        })
+    }
+    fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::upstream_proxy::unlock(key) })
+    }
+    fn lock(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::upstream_proxy::lock() })
     }
 }
 

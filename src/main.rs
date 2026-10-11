@@ -282,6 +282,7 @@ async fn main() -> anyhow::Result<()> {
     if closed_configured {
         println!("🔒 Закрытая среда создана: история ПК, группы ПК и ключи собеседника заперты до ввода пароля владельца");
         yandi::group_client::start_locked();
+        yandi::upstream_proxy::start_locked();
         yandi::group_client::spawn_background();
     } else if let Some(mk) = auth_state.get_master_key() {
         yandi::mobile_self::set_master(mk); // ключи «компьютера как собеседника» — в шифрованном файле
@@ -645,6 +646,7 @@ async fn main() -> anyhow::Result<()> {
         env.register(std::sync::Arc::new(yandi::closed_api::ChatConsumer(chat_manager.clone())));
         env.register(std::sync::Arc::new(yandi::closed_api::GroupsConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::ProxyConsumer));
         env.spawn_auto_lock();
         yandi::closed_api::install_global(env.clone());
     }

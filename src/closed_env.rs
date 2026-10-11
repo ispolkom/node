@@ -23,6 +23,7 @@ use zeroize::Zeroizing;
 pub const DOMAIN_CHAT: &str = "chat";
 pub const DOMAIN_GROUPS: &str = "groups_pc";
 pub const DOMAIN_SELF: &str = "mobile_self";
+pub const DOMAIN_PROXY: &str = "upstream_proxy";
 
 const MARKER: &str = "migration.pending";
 const SETTINGS: &str = "settings.json";
