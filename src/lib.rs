@@ -31,6 +31,8 @@
 //! - **util** - Common types and utilities
 
 pub mod bootstrap;
+#[cfg(unix)]
+pub mod closed_env;
 pub mod communication;
 pub mod core;
 pub mod crypto;

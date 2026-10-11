@@ -5,6 +5,7 @@ use super::EnvelopeStore;
 use crate::node_vault::{NodeVault, VaultEnvelope};
 use anyhow::{anyhow, bail, Result};
 use serde::{Deserialize, Serialize};
+use std::os::fd::AsRawFd;
 use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Semaphore;
@@ -56,6 +57,20 @@ impl EnvelopeStore {
                 next_ms: 0,
             })?,
         )
+    }
+
+    /// Откат первичной настройки, оборвавшейся до публикации envelope: счётчик, заведённый `prepare_attempts`, убирается,
+    /// чтобы настройку можно было повторить. Существующий vault не затрагивается.
+    pub fn abort_setup(&self) -> Result<()> {
+        let _lock = self.lock()?;
+        if self.load_locked()?.is_some() {
+            bail!("vault уже создан");
+        }
+        let name = std::ffi::CString::new(COUNTER)?;
+        unsafe {
+            libc::unlinkat(self.dir.as_raw_fd(), name.as_ptr(), 0);
+        }
+        Ok(())
     }
 
     fn unlock_counted(&self, secret: &str, recovery: bool) -> Result<NodeVault> {
@@ -135,6 +150,22 @@ impl EnvelopeStore {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             VaultEnvelope::create_unlocked(&password, phrase.as_ref().map(|s| s.as_str()))
+        })
+        .await?
+    }
+
+    /// Смена пароля: новый замок для того же DK. Тяжёлый KDF — в общей очереди и в blocking worker.
+    pub async fn rewrap_async(
+        envelope: VaultEnvelope,
+        vault: NodeVault,
+        password: String,
+    ) -> Result<(VaultEnvelope, NodeVault)> {
+        let password = Zeroizing::new(password);
+        let permit = queue().clone().acquire_owned().await?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let next = vault.change_password(&envelope, &password)?;
+            Ok((next, vault))
         })
         .await?
     }
