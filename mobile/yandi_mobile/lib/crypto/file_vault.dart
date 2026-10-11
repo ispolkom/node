@@ -202,8 +202,48 @@ class FileVault {
 
   /// Ключ файла зависит от ключа данных, внутреннего номера и номера хранения (имя на диске без расширения): целый контейнер,
   /// скопированный под чужое имя, не откроется — файл связан с тем вложением, под которым записан.
-  Future<SecretKey> _fileKey(List<int> fileId, String storageId) => _hkdf.deriveKey(
-      secretKey: SecretKey(_root), nonce: fileId, info: utf8.encode('yandi-file-key:v2|$storageId'));
+  Future<SecretKey> _fileKey(List<int> fileId, String storageId, {int version = 2}) => _hkdf.deriveKey(
+      secretKey: SecretKey(_root), nonce: fileId, info: utf8.encode(version == 1 ? 'yandi-file-key:v1' : 'yandi-file-key:v2|$storageId'));
+
+  /// Старый v1 читается своим ключом и переносится атомарно: единственная копия заменяется только после проверки всех кусков v2.
+  /// До переноса v1 не связан с внешним номером хранения (ограничение прежнего формата).
+  Future<bool> upgradeLegacy(File file) async {
+    _check();
+    final handle = await file.open();
+    final int version;
+    try {
+      final header = await handle.read(_fixedLen);
+      if (header.length != _fixedLen || !_listEq(header.sublist(0, 4), _magic)) throw FileVaultException('это не файл хранилища');
+      version = header[4];
+    } finally {
+      await handle.close();
+    }
+    if (version == 2) return false;
+    if (version != 1) throw FileVaultException('неизвестная версия файла');
+    final meta = await readMeta(file);
+    final staging = await Directory(file.parent.path).createTemp('.upgrade-');
+    final target = File('${staging.path}/${file.uri.pathSegments.last}');
+    VaultFileWriter? writer;
+    try {
+      writer = await create(target, name: meta.name, mime: meta.mime, size: meta.size, createdMs: meta.createdMs);
+      await for (final chunk in read(file)) {
+        await writer.add(chunk);
+      }
+      await writer.close();
+      final originalHash = await sha256.bind(read(file)).first;
+      final writtenHash = await sha256.bind(read(target)).first;
+      if (originalHash != writtenHash) throw FileVaultException('перенос файла: содержимое не совпало');
+      _check();
+      await target.rename(file.path);
+      return true;
+    } catch (_) {
+      await writer?.abort();
+      rethrow;
+    } finally {
+      // Временный каталог содержит только созданную нами зашифрованную копию.
+      if (await staging.exists()) await staging.delete(recursive: true);
+    }
+  }
 
   static Uint8List _fixedHeader(Uint8List fileId, Uint8List noncePrefix, int chunk, int metaLen) {
     final b = BytesBuilder();
@@ -225,14 +265,14 @@ class FileVault {
     final total = await raf.length();
     await raf.setPosition(0);
     final fixed = await raf.read(_fixedLen);
-    if (fixed.length < _fixedLen || !_listEq(fixed.sublist(0, 4), _magic) || fixed[4] != 2) throw FileVaultException('это не файл хранилища');
+    if (fixed.length < _fixedLen || !_listEq(fixed.sublist(0, 4), _magic) || (fixed[4] != 1 && fixed[4] != 2)) throw FileVaultException('это не файл хранилища');
     final bd = ByteData.sublistView(fixed);
     final chunk = bd.getUint32(28);
     final metaLen = bd.getUint16(32);
     if (chunk < 1024 || chunk > (64 << 20) || metaLen < 12 + _tag) throw FileVaultException('заголовок файла повреждён');
     final blob = await raf.read(metaLen);
     if (blob.length != metaLen) throw FileVaultException('файл обрезан');
-    final key = await _fileKey(fixed.sublist(8, 24), storageId);
+    final key = await _fileKey(fixed.sublist(8, 24), storageId, version: fixed[4]);
     _check();
     FileMeta meta;
     try {

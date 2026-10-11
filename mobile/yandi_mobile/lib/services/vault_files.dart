@@ -31,6 +31,7 @@ class VaultFiles {
   final Future<bool> Function(String path)? wipe;
   /// Где лежат временные расшифрованные копии (на телефоне — кеш приложения); по умолчанию рядом, в `tmp`.
   final Directory? tempDir;
+  int cleanupFailures = 0;
   VaultFiles(this.dir, {required this.vault, this.wipe, this.tempDir});
 
   /// Фоновые затирания (чтобы тест и интерфейс могли дождаться конца).
@@ -109,6 +110,7 @@ class VaultFiles {
 
   /// Остатки временных расшифрованных копий (прошлый сеанс оборвался) затираются и удаляются.
   Future<void> cleanTemp() async {
+    cleanupFailures = 0;
     final d = tempDir ?? Directory('${dir.path}/tmp');
     if (!await d.exists()) return;
     await for (final e in d.list(followLinks: false)) {
@@ -146,10 +148,12 @@ class VaultFiles {
     if (w == null) {
       // затирать нечем (тесты, не Android): просто удаляем
       try { final f = File(path); if (await f.exists()) await f.delete(); } catch (_) {}
+      if (await File(path).exists()) cleanupFailures++;
       return;
     }
     // затереть не вышло — файл не удаляем молча: он остаётся и дочищается при следующем запуске (finishPendingWipes)
     try { await w(path); } catch (_) {}
+    if (await File(path).exists()) cleanupFailures++;
   }
 
   Future<void> deleteAll(Iterable<String> paths) async {
@@ -179,7 +183,13 @@ class VaultFiles {
     await for (final e in dir.list(followLinks: false)) {
       if (e is! File) continue;
       final p = e.path;
-      if (p.endsWith(FileVault.extension) || p.endsWith('${FileVault.extension}$_part') || p.endsWith(_doomed)) continue;
+      if (p.endsWith(FileVault.extension)) {
+        try {
+          if (await (await vault()).upgradeLegacy(e)) moved++;
+        } catch (_) { migrationFailures++; }
+        continue;
+      }
+      if (p.endsWith('${FileVault.extension}$_part') || p.endsWith(_doomed)) continue;
       plain.add(e);
     }
     for (final f in plain) {
@@ -196,11 +206,25 @@ class VaultFiles {
         var have = false;
         if (await target.exists()) {
           try {
-            have = (await (await vault()).readMeta(target)).size == await f.length();
+            final v = await vault();
+            have = (await v.readMeta(target)).size == await f.length() &&
+                await sha256.bind(v.read(target)).first == await sha256.bind(f.openRead()).first;
           } catch (_) {}
         }
         if (!have) {
-          await importAs(f.path, id, name: name);
+          // Новая копия сначала целиком проверяется; неудачный перенос не портит прежний контейнер.
+          final staging = await dir.createTemp('.migrate-');
+          try {
+            final candidate = File('${staging.path}/$id${FileVault.extension}');
+            final v = await vault();
+            await v.importFile(f, candidate, name: name, mime: FileTransferService.guessMime(name));
+            if (await sha256.bind(v.read(candidate)).first != await sha256.bind(f.openRead()).first) {
+              throw StateError('перенос файла: содержимое не совпало');
+            }
+            await candidate.rename(target.path);
+          } finally {
+            await staging.delete(recursive: true);
+          }
           moved++;
         }
         await _wipeAndDelete(f.path);
