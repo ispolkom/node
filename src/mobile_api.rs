@@ -78,6 +78,8 @@ enum Event {
     Mail(Arc<Mail>),
     Live(Arc<Mail>),
     Presence(String, bool),
+    /// устройство забыто: его открытые сокеты закрываются сразу
+    Revoked(String),
 }
 
 /// Сообщение от одного телефона владельца другому: узел только передаёт байты (они могут быть зашифрованы телефоном для телефона).
@@ -280,6 +282,7 @@ pub fn remove_device(id: &str) -> bool {
     with_devices(|d| d.retain(|x| x.peer_id() != peer));
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
     crate::mobile_groups::forget_device(&peer);
+    let _ = bus().send(Event::Revoked(peer));
     true
 }
 
@@ -1147,8 +1150,15 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
     let mut groups_rx = crate::mobile_groups::subscribe();
     let mut seen: HashSet<HashId> = HashSet::new();
     loop {
+        // забытое устройство (токен отозван) не пользуется уже открытым сокетом: ни получать, ни отправлять
+        if device_by_peer(&me).is_none() {
+            break;
+        }
         tokio::select! {
             ev = rx.recv() => match ev {
+                Ok(Event::Revoked(peer)) => {
+                    if peer == me { break; }
+                }
                 Ok(Event::Node(m)) => {
                     if m.from != st.my_id && seen.insert(m.msg_id) {
                         if sock.send(Message::Binary(chat_frame(&m))).await.is_err() { break; }

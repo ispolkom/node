@@ -1665,12 +1665,23 @@ pub struct InviteReq {
     ttl_hours: Option<u64>,
 }
 
+/// Необязательное тело запроса: пустое — значения по умолчанию, а неверный JSON или неверные типы — ошибка 400 (а не тихие умолчания).
+fn optional_json<T: serde::de::DeserializeOwned + Default>(body: &[u8]) -> Result<T, Response> {
+    if body.iter().all(u8::is_ascii_whitespace) {
+        return Ok(T::default());
+    }
+    serde_json::from_slice(body).map_err(|e| (StatusCode::BAD_REQUEST, Json(json!({"error": format!("неверные данные: {e}")}))).into_response())
+}
+
 pub(crate) async fn m_invite(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
     Path(gid): Path<String>,
-    body: Option<Json<InviteReq>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    let req: InviteReq = match optional_json(&body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
     reply((|| {
         checked(&gid)?;
         let me = device(&dev)?;
@@ -1755,9 +1766,12 @@ pub struct RequestReq {
 pub(crate) async fn m_request(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
     Path(gid): Path<String>,
-    body: Option<Json<RequestReq>>,
+    body: axum::body::Bytes,
 ) -> Response {
-    let req = body.map(|b| b.0).unwrap_or_default();
+    let req: RequestReq = match optional_json(&body) {
+        Ok(r) => r,
+        Err(resp) => return resp,
+    };
     reply((|| {
         checked(&gid)?;
         let me = device(&dev)?;

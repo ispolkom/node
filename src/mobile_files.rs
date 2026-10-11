@@ -128,18 +128,22 @@ async fn stored_bytes(id: &str, except: u32) -> u64 {
     sum
 }
 
-/// Записать кусок, если с ним передача не превысит объявленного размера. Кусок пишется во временный файл вне замка, а проверка и
-/// переименование — под замком.
+/// Записать кусок, если с ним передача не превысит объявленного размера. Проверка, запись временного файла и переименование — под одним
+/// замком: на диск не попадает ни байта сверх объявленного, даже временно и при параллельных запросах.
 async fn store_chunk(m: &Meta, idx: u32, body: &[u8]) -> Result<(), (StatusCode, &'static str)> {
+    let too_big = Err((StatusCode::PAYLOAD_TOO_LARGE, "куски больше объявленного размера файла"));
+    if body.len() as u64 > reserved(m) {
+        return too_big;
+    }
     let d = dir_of(&m.id);
     let tmp = d.join(format!("{}.{:016x}.tmp", chunk_name(idx), rand::random::<u64>()));
-    if tokio::fs::write(&tmp, body).await.is_err() {
-        return Err((StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить кусок"));
-    }
     let _g = PUT.lock().await;
     if stored_bytes(&m.id, idx).await + body.len() as u64 > reserved(m) {
+        return too_big;
+    }
+    if tokio::fs::write(&tmp, body).await.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
-        return Err((StatusCode::PAYLOAD_TOO_LARGE, "куски больше объявленного размера файла"));
+        return Err((StatusCode::INTERNAL_SERVER_ERROR, "не удалось сохранить кусок"));
     }
     if tokio::fs::rename(&tmp, d.join(chunk_name(idx))).await.is_err() {
         let _ = tokio::fs::remove_file(&tmp).await;
@@ -322,7 +326,7 @@ pub async fn get_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
 /// Удалить передачу: получатель после скачивания, отправитель при отмене.
 pub async fn remove(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(id): Path<String>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
-    let Some(m) = load_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
+    let Some(m) = live_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
     if m.from != me && m.to != me {
         return StatusCode::FORBIDDEN.into_response();
     }
@@ -343,7 +347,8 @@ pub(crate) async fn ready_for(id: &str, from: &str, to: &str) -> Option<(u32, u6
 }
 
 pub(crate) async fn read_chunk(id: &str, idx: u32) -> Option<Vec<u8>> {
-    if !valid_id(id) {
+    let m = live_meta(id).await?;
+    if !m.done || idx >= m.total_chunks {
         return None;
     }
     tokio::fs::read(dir_of(id).join(chunk_name(idx))).await.ok()
@@ -394,7 +399,11 @@ pub(crate) async fn node_put(id: &str, idx: u32, bytes: &[u8]) -> Result<(), Str
 }
 
 pub(crate) async fn node_finish(id: &str) -> Result<(), String> {
-    let mut m = load_meta(id).await.ok_or("нет такой передачи")?;
+    let mut m = live_meta(id).await.ok_or("нет такой передачи")?;
+    let have = present(id).await;
+    if (0..m.total_chunks).any(|i| have.binary_search(&i).is_err()) {
+        return Err("не хватает кусков".into());
+    }
     m.done = true;
     save_meta(&m).await.map_err(|e| e.to_string())
 }

@@ -400,6 +400,28 @@ check("it is gone", st == 404, (st, _r))
 st, _r = req("GET", "/mobile/files")
 check("files need a token", st == 401, st)
 
+# ---- forgetting a device closes its already open message socket at once
+tok4 = pair_phone("YANDI Mobile 4")
+s3, line3 = ws_open(tok4)
+check("phone 4 socket upgrades", b"101" in line3, line3)
+_, info3 = req("GET", "/mobile/info", token=tok4)
+st, _r = a.api("DELETE", f"/api/mobile/devices/{info3['device_id'][:16]}")
+check("the node page forgets phone 4", st == 200, (st, _r))
+closed = False
+try:
+    while True:
+        op, _payload = ws_recv(s3, timeout=5)
+        if op == 8:  # close frame
+            closed = True
+            break
+except TimeoutError:
+    closed = False  # молчит, но открыт — это и есть ошибка
+except (EOFError, ConnectionError, ssl.SSLError, OSError):
+    closed = True
+check("its open socket is closed, not kept alive", closed)
+st, _r = req("GET", "/mobile/info", token=tok4)
+check("and its token no longer works", st == 401, (st, _r))
+
 # ---- call signalling: live-only frames between the owner's phones, never stored
 s2, line2 = ws_open(tok2)
 check("phone 2 socket for calls upgrades", b"101" in line2, line2)
