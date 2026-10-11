@@ -27,7 +27,7 @@ impl Limits {
     }
     pub fn tunnel() -> Self {
         Self {
-            items: env_limit("YANDI_TUNNEL_QUEUE_ITEMS", 100, 65536),
+            items: env_limit("YANDI_TUNNEL_QUEUE_ITEMS", 1024, 65536),
             bytes: env_limit(
                 "YANDI_TUNNEL_QUEUE_BYTES",
                 4 * 1024 * 1024,

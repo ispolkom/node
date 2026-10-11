@@ -37,8 +37,9 @@ pub(crate) fn validate(bytes: &[u8]) -> Result<(), &'static str> {
         let offset = u64::from_be_bytes(bytes[10..18].try_into().unwrap());
         if bytes.len().checked_sub(HEADER) != Some(len) {
             Err("tunnel payload length mismatch")
-        } else if bytes[18] > 1
+        } else if bytes[18] > 2
             || (bytes[18] == 1 && len != 0)
+            || (bytes[18] == 2 && len != 4)
             || offset.checked_add(len as u64).is_none()
         {
             Err("invalid tunnel block")
@@ -74,11 +75,42 @@ pub(crate) fn decode(bytes: &[u8], kind: u8) -> Option<(u64, u64, bool, &[u8])> 
         return None;
     }
     validate(bytes).ok()?;
+    if bytes[18] == 2 {
+        return None; // служебный блок окна, не данные потока
+    }
     Some((
         u64::from_be_bytes(bytes[2..10].try_into().ok()?),
         u64::from_be_bytes(bytes[10..18].try_into().ok()?),
         bytes[18] == 1,
         &bytes[HEADER..],
+    ))
+}
+
+/// Окно получателя: «в TCP выдано `consumed` байт моего входящего потока, готов принять ещё `window`».
+/// Это регулятор скорости отправителя, а не подтверждение доставки блоков и не повтор: значения монотонны, потеря сообщения
+/// восстанавливается следующим.
+pub(crate) fn encode_window(kind: u8, id: u64, consumed: u64, window: u32) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(HEADER + 4);
+    bytes.extend_from_slice(&[kind, VERSION]);
+    bytes.extend_from_slice(&id.to_be_bytes());
+    bytes.extend_from_slice(&consumed.to_be_bytes());
+    bytes.push(2);
+    bytes.extend_from_slice(&4u32.to_be_bytes());
+    bytes.extend_from_slice(&window.to_be_bytes());
+    bytes
+}
+
+/// (kind, tunnel_id, consumed, window), если это корректный блок окна.
+pub(crate) fn decode_window(bytes: &[u8]) -> Option<(u8, u64, u64, u32)> {
+    if !is_tunnel(bytes) || bytes.len() != HEADER + 4 || bytes[1] != VERSION || bytes[18] != 2 {
+        return None;
+    }
+    validate(bytes).ok()?;
+    Some((
+        bytes[0],
+        u64::from_be_bytes(bytes[2..10].try_into().ok()?),
+        u64::from_be_bytes(bytes[10..18].try_into().ok()?),
+        u32::from_be_bytes(bytes[HEADER..HEADER + 4].try_into().ok()?),
     ))
 }
 
@@ -211,6 +243,30 @@ mod tests {
         ] {
             assert!(Socks5TunnelData::parse(&wire).is_none());
             assert!(ProxyTunnelData::parse(&wire).is_none());
+        }
+    }
+
+    #[test]
+    fn window_block_roundtrip_is_not_data_and_is_validated() {
+        for kind in [SOCKS5, HTTP_CONNECT] {
+            let w = encode_window(kind, 9, 123_456, 1 << 20);
+            assert_eq!(decode_window(&w), Some((kind, 9, 123_456, 1 << 20)));
+            assert!(decode(&w, kind).is_none(), "окно не должно приниматься как данные");
+            assert!(validate(&w).is_ok());
+            // обрезанное, лишние байты, неверная длина, чужая версия
+            assert!(decode_window(&w[..w.len() - 1]).is_none());
+            let mut longer = w.clone();
+            longer.push(0);
+            assert!(decode_window(&longer).is_none());
+            let mut bad_len = w.clone();
+            bad_len[22] = 5;
+            assert!(decode_window(&bad_len).is_none());
+            let mut v2 = w.clone();
+            v2[1] = 2;
+            assert!(decode_window(&v2).is_none());
+            // обычный блок данных и close не окно
+            let data = encode(kind, 9, 0, false, &[1, 2]);
+            assert!(decode_window(&data).is_none());
         }
     }
 }

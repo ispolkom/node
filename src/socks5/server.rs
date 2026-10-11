@@ -718,7 +718,8 @@ impl Socks5ProxyServer {
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(client_write, self.active_tunnels.clone(), request_id);
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::SOCKS5, exit_node, request_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(client_write, self.active_tunnels.clone(), request_id, Some(credit));
             writer_closed = writer.subscribe();
             tunnels.insert(request_id, writer);
         }
@@ -728,6 +729,7 @@ impl Socks5ProxyServer {
         let exit_node_clone = exit_node;
 
         let tunnels_for_cleanup = self.active_tunnels.clone();
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::SOCKS5, exit_node, request_id);
         // Запускаем в фоновом режиме, чтобы handle_tunnel_data мог работать параллельно!
         tokio::spawn(async move {
             const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
@@ -747,6 +749,15 @@ impl Socks5ProxyServer {
 
                         // Send tunnel data
                         let Ok(byte_offset) = cursor.block(n) else { break; };
+                        // регулятор скорости получателя: не читаем дальше клиента, пока выход не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", request_id);
+                            break;
+                        }
                         let mut tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
                         tunnel_data.byte_offset = byte_offset;
                         let data_bytes = tunnel_data.encode();

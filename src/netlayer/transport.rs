@@ -3206,6 +3206,11 @@ impl P2PTransport {
 
 
                                                                     if super::tunnel_wire::reject_invalid(&data) { continue; }
+                                                                    // окно получателя (регулятор скорости), не данные потока
+                                                                    if let Some((k, id, c, w)) = super::tunnel_wire::decode_window(&data) {
+                                                                        super::flow::apply(k, peer_id, id, c, w);
+                                                                        continue;
+                                                                    }
 
                                                                     // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
                                                                     if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(&data) {
@@ -3379,6 +3384,10 @@ impl P2PTransport {
                                                             // Пытаемся распознать тип данных
                                                             let data = &packet.data;
                                                             if super::tunnel_wire::reject_invalid(data) { continue; }
+                                                            if let Some((k, id, c, w)) = super::tunnel_wire::decode_window(data) {
+                                                                super::flow::apply(k, peer_id, id, c, w);
+                                                                continue;
+                                                            }
 
                                                             // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
                                                             if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(data) {

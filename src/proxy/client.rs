@@ -472,13 +472,15 @@ impl HttpProxyClient {
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), tunnel_id);
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::HTTP_CONNECT, gateway_node, tunnel_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), tunnel_id, Some(credit));
             writer_closed = writer.subscribe();
             tunnels.insert(tunnel_id, writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
 
         let active_tunnels_for_reader = self.active_tunnels.clone();
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::HTTP_CONNECT, gateway_node, tunnel_id);
 
         // Task 1: Read from browser and send to gateway via YTP
         tokio::spawn(async move {
@@ -512,6 +514,16 @@ impl HttpProxyClient {
                             active_tunnels_for_reader.lock().await.remove(&tunnel_id);
                             break;
                         };
+                        // регулятор скорости получателя: не читаем дальше браузера, пока шлюз не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", tunnel_id);
+                            active_tunnels_for_reader.lock().await.remove(&tunnel_id);
+                            break;
+                        }
                         let tunnel_data = ProxyTunnelData {
                             byte_offset,
                             tunnel_id,

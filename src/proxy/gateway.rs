@@ -224,7 +224,8 @@ impl HttpProxyGateway {
         {
             let mut tunnels = self.active_tunnels.lock().await;
             // соединения разных узлов — раздельно: номер туннеля выбирает сам узел, чужой номер не даёт доступа к чужому соединению
-            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), (source_node, tunnel_id));
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::HTTP_CONNECT, source_node, tunnel_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), (source_node, tunnel_id), Some(credit));
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, tunnel_id), writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
@@ -235,6 +236,7 @@ impl HttpProxyGateway {
         // Task: Read from target and send to client via YTP
         let transport_to_client = transport.clone();
         let station_to_client = self.station.clone(); // ✅ Добавляем!
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::HTTP_CONNECT, source_node, tunnel_id);
         tokio::spawn(async move {
             let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
@@ -266,6 +268,16 @@ impl HttpProxyGateway {
                             active_tunnels_for_reader.lock().await.remove(&(source_node_clone, tunnel_id));
                             break;
                         };
+                        // регулятор скорости получателя: не читаем дальше, пока клиент не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", tunnel_id);
+                            active_tunnels_for_reader.lock().await.remove(&(source_node_clone, tunnel_id));
+                            break;
+                        }
                         let tunnel_data = ProxyTunnelData {
                             byte_offset,
                             tunnel_id,

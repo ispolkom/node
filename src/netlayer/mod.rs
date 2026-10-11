@@ -16,6 +16,7 @@ pub mod admission;
 pub mod transport;
 pub(crate) mod rx_pipeline;
 pub(crate) mod tunnel_writer;
+pub(crate) mod flow;
 pub(crate) mod stream_order;
 pub(crate) mod tunnel_wire;
 pub mod port_manager;

@@ -111,10 +111,26 @@ where
     spawn_stream_writer(writer, tunnels, key)
 }
 
+/// Сообщить отправителю, сколько байт его потока уже выдано в TCP (окно получателя). Вызывается не чаще нескольких раз в секунду.
+pub(crate) type Credit = Arc<dyn Fn(u64) + Send + Sync>;
+
 pub(crate) fn spawn_stream_writer<K, W>(
     writer: W,
     tunnels: Arc<Mutex<HashMap<K, TunnelWriter>>>,
     key: K,
+) -> TunnelWriter
+where
+    K: Eq + Hash + Clone + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
+    spawn_stream_writer_credit(writer, tunnels, key, None)
+}
+
+pub(crate) fn spawn_stream_writer_credit<K, W>(
+    writer: W,
+    tunnels: Arc<Mutex<HashMap<K, TunnelWriter>>>,
+    key: K,
+    credit: Option<Credit>,
 ) -> TunnelWriter
 where
     K: Eq + Hash + Clone + Send + 'static,
@@ -125,7 +141,7 @@ where
         30_000,
         600_000,
     ) as u64);
-    spawn_ordered_with_limits(writer, tunnels, key, Limits::tunnel(), timeout)
+    spawn_ordered_with_limits(writer, tunnels, key, Limits::tunnel(), timeout, credit)
 }
 
 #[cfg(test)]
@@ -140,7 +156,7 @@ where
     K: Eq + Hash + Clone + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
 {
-    spawn_ordered_with_limits(writer, tunnels, key, limits, timeout)
+    spawn_ordered_with_limits(writer, tunnels, key, limits, timeout, None)
 }
 
 fn spawn_ordered_with_limits<K, W>(
@@ -149,6 +165,7 @@ fn spawn_ordered_with_limits<K, W>(
     key: K,
     limits: Limits,
     timeout: Duration,
+    credit: Option<Credit>,
 ) -> TunnelWriter
 where
     K: Eq + Hash + Clone + Send + 'static,
@@ -163,20 +180,48 @@ where
     let task = tokio::spawn(async move {
         let mut reorder = super::stream_order::Reorder::configured();
         let mut gauge = ReorderGauge::default();
+        // регулятор скорости: сколько байт потока уже выдано в TCP, сообщаем отправителю
+        let mut reported = 0u64;
+        let mut reported_at = tokio::time::Instant::now();
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
+            enum Event {
+                Gap,
+                Tick,
+                Block(Option<rx_pipeline::Queued<Block>>),
+            }
+            let expires = reorder.expires();
             let incoming = async { rx.lock().await.recv().await };
-            let block = if let Some(expires) = reorder.expires() {
-                tokio::select! {
-                    biased;
-                    _ = tokio::time::sleep_until(expires) => {
-                        stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
-                        tracing::warn!("[rx] stream gap deadline; closing this tunnel");
-                        break;
+            let event = tokio::select! {
+                biased;
+                _ = async {
+                    match expires {
+                        Some(t) => tokio::time::sleep_until(t).await,
+                        None => std::future::pending::<()>().await,
                     }
-                    block = incoming => block,
+                } => Event::Gap,
+                _ = tick.tick(), if credit.is_some() => Event::Tick,
+                block = incoming => Event::Block(block),
+            };
+            let block = match event {
+                Event::Gap => {
+                    stats.tunnel_gap_closed.fetch_add(1, Ordering::Relaxed);
+                    tracing::warn!("[rx] stream gap deadline; closing this tunnel");
+                    break;
                 }
-            } else {
-                incoming.await
+                Event::Tick => {
+                    // потерянное окно перекрывается повтором последнего значения (раз в секунду, если ничего не менялось)
+                    if let Some(credit) = &credit {
+                        if reorder.next != reported || reported_at.elapsed() >= Duration::from_secs(1) {
+                            credit(reorder.next);
+                            reported = reorder.next;
+                            reported_at = tokio::time::Instant::now();
+                        }
+                    }
+                    continue;
+                }
+                Event::Block(block) => block,
             };
             let Some(block) = block else {
                 break;
@@ -247,6 +292,16 @@ where
                 }
                 tracing::warn!("[rx] tunnel write failed or timed out; closing this tunnel");
                 break;
+            }
+            if let Some(credit) = &credit {
+                let consumed = reorder.next;
+                if consumed.saturating_sub(reported) >= 64 * 1024
+                    || (consumed > reported && reported_at.elapsed() >= Duration::from_millis(100))
+                {
+                    credit(consumed);
+                    reported = consumed;
+                    reported_at = tokio::time::Instant::now();
+                }
             }
             if close {
                 break;
@@ -582,5 +637,30 @@ mod stream_tests {
         );
         assert_eq!(stats.tunnel_reorder_depth.load(Ordering::Relaxed), 0);
         assert_eq!(stats.tunnel_reorder_bytes.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn rx_pipeline_writer_reports_consumed_offset_to_the_sender() {
+        let tunnels = Arc::new(Mutex::new(HashMap::new()));
+        use tokio::io::AsyncReadExt as _;
+        let (sink, mut peer) = tokio::io::duplex(1 << 20);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::<u64>::new()));
+        let seen2 = seen.clone();
+        let credit: Credit = Arc::new(move |c| seen2.lock().unwrap().push(c));
+        {
+            let mut map = tunnels.lock().await;
+            let writer = spawn_stream_writer_credit(sink, tunnels.clone(), 1, Some(credit));
+            // блоки приходят не по порядку: второй раньше первого
+            writer.enqueue_offset(vec![2; 70_000], false, 70_000).unwrap();
+            writer.enqueue_offset(vec![1; 70_000], false, 0).unwrap();
+            map.insert(1, writer);
+        }
+        let mut got = vec![0u8; 140_000];
+        tokio::time::timeout(Duration::from_secs(2), peer.read_exact(&mut got)).await.unwrap().unwrap();
+        assert!(got[..70_000].iter().all(|b| *b == 1) && got[70_000..].iter().all(|b| *b == 2), "порядок байт по смещению");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let reported = seen.lock().unwrap().clone();
+        assert_eq!(reported.last().copied(), Some(140_000), "сообщено всё выданное: {reported:?}");
+        assert!(reported.windows(2).all(|w| w[0] <= w[1]), "значения монотонны");
     }
 }
