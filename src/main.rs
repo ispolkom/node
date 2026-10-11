@@ -20,6 +20,18 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let argv: Vec<String> = std::env::args().collect();
+        // Справка и версия НЕ запускают узел: раньше неизвестный ключ (в том числе `--help`) молча стартовал полноценный узел.
+        if argv.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "help" | "-help")) {
+            println!(
+                "YANDI v{}\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).",
+                env!("CARGO_PKG_VERSION")
+            );
+            std::process::exit(0);
+        }
+        if argv.iter().skip(1).any(|a| matches!(a.as_str(), "--version" | "-V" | "version")) {
+            println!("yandi {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         // `yandi testnet up|status|down|reset` — тренировочная сеть из нескольких копий узла на этом компьютере
         if argv.get(1).map(|a| a.as_str()) == Some("testnet") {
             let code = yandi::testnet::run_cli(argv[2..].to_vec()).await;
