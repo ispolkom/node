@@ -7,20 +7,24 @@
 # Номер выпуска (против отката) — release/SEQ, увеличивается на единицу при каждой подписи (закоммитить).
 #
 # Запуск из корня репозитория:  bash tools/node_release.sh
+#   --unsigned  сборка/архив без ввода фразы, подписи и изменения release/SEQ
 #   --check  только проверить фразу по открытому ключу, без сборки
 #   --show   вводить фразу видимо (проверить раскладку/опечатку; делать только когда никто не смотрит)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-SHOW=0; CHECK=0
-for a in "$@"; do case "$a" in --show) SHOW=1;; --check) CHECK=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
+SHOW=0; CHECK=0; UNSIGNED=0
+for a in "$@"; do case "$a" in --show) SHOW=1;; --check) CHECK=1;; --unsigned) UNSIGNED=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 
 PUB=release/yandi-release-pubkey.hex
 SEQFILE=release/SEQ
-ENV_CLEAN=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY)
-
-"${ENV_CLEAN[@]}" cargo build --release --offline --bin yandi --bin yandi-release >/dev/null 2>&1 \
-  || { echo "не собрались yandi и yandi-release"; exit 1; }
-REL=target/release/yandi-release
+source tools/release_build_env.sh
+release_build
+REL="$CARGO_TARGET_DIR/release/yandi-release"
+if [ "$UNSIGNED" = 1 ]; then
+  release_archive
+  echo "Архив без подписи: $RELEASE_OUT/$RELEASE_NAME.tar.gz"
+  exit 0
+fi
 
 echo "Фраза разработчика: не меньше 12 слов и 60 символов. Это фраза подписи ВЫПУСКОВ НОДЫ."
 if [ "$SHOW" = 1 ]; then
@@ -44,22 +48,11 @@ elif [ "$(cat "$PUB")" != "$PUBKEY" ]; then
 else
   echo "Фраза верна: ключ совпадает с закреплённым."
 fi
-if [ "$CHECK" = 1 ]; then echo "Проверка завершена, сборка не запускалась."; exit 0; fi
+if [ "$CHECK" = 1 ]; then echo "Проверка завершена (инструмент уже собран)."; exit 0; fi
 
-VERSION=$(grep -m1 '^version' Cargo.toml | sed -E 's/.*"([^"]+)".*/\1/')
 SEQ=$(( $(cat "$SEQFILE" 2>/dev/null || echo 0) + 1 ))
-ARCH=$(uname -m)
-NAME="yandi-node-${VERSION}-linux-${ARCH}"
-OUT="dist/${NAME}"
-rm -rf "$OUT"; mkdir -p "$OUT/pkg"
-install -m 0755 target/release/yandi "$OUT/pkg/yandi"
-install -m 0755 target/release/yandi-release "$OUT/pkg/yandi-release"
-cp LICENSE "$OUT/pkg/" 2>/dev/null || true
-cp deploy/yandi-node.service "$OUT/pkg/" 2>/dev/null || true
-cp "$PUB" "$OUT/pkg/yandi-release-pubkey.hex"
-# детерминированный архив: порядок, владелец, время — фиксированные (воспроизводимый хэш при тех же входах)
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime='UTC 2020-01-01' -C "$OUT/pkg" -cf - . | gzip -n -9 > "$OUT/${NAME}.tar.gz"
-rm -rf "$OUT/pkg"
+release_archive
+VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT
 
 "$REL" manifest "$OUT" "$VERSION" "$SEQ" --pubkey "$PUBKEY" "${NAME}.tar.gz"
 printf '%s\n' "$PHRASE_IN" | "$REL" sign "$OUT"

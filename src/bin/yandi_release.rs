@@ -96,10 +96,15 @@ async fn main() {
                 .parse()
                 .unwrap_or_else(|_| die("seq должен быть числом"));
             let vk = parse_pubkey(&args[5]);
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0);
+            let now = match std::env::var("SOURCE_DATE_EPOCH") {
+                Ok(v) => v
+                    .parse()
+                    .unwrap_or_else(|_| die("SOURCE_DATE_EPOCH: число")),
+                Err(_) => std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+            };
             let m = build_manifest(&dir, &args[2], seq, now, &key_id(&vk), &args[6..])
                 .unwrap_or_else(|e| die(&e));
             std::fs::write(dir.join(MANIFEST_NAME), manifest_bytes(&m))
