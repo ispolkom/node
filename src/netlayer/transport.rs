@@ -68,6 +68,9 @@ pub struct WagonStats {
 
     /// 🔴 Path0 wagons lost (Path1 arrived instead)
     pub path0_lost: AtomicU64,
+
+    /// Вторые копии датаграмм, отброшенные по счётчику сессии до расшифровки
+    pub duplicates_dropped: AtomicU64,
 }
 
 impl WagonStats {
@@ -83,6 +86,7 @@ impl WagonStats {
             dropped: AtomicU64::new(0),
             retransmitted: AtomicU64::new(0),
             path0_lost: AtomicU64::new(0),
+            duplicates_dropped: AtomicU64::new(0),
         }
     }
 
@@ -4237,6 +4241,11 @@ impl P2PTransport {
                                     }
                                 }
                             }
+                            // повтор датаграммы (вторая копия вагона): не ошибка, отбрасываем молча
+                            Err(e) if e.starts_with("REPLAY:") => {
+                                drop(enc);
+                                get_wagon_stats().duplicates_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
                             Err(e) => {
                                 println!("[transport] ❌ Decryption failed: {}", e);
                                 println!("[transport]    Possible mismatched session keys!");
@@ -4515,6 +4524,13 @@ impl P2PTransport {
     }
 
     pub async fn send_encrypted(&self, peer_id: HashId, data: &[u8]) -> Result<(), String> {
+        self.send_encrypted_copies(peer_id, data, 1).await
+    }
+
+    /// Зашифровать один раз и отправить ту же датаграмму `copies` раз подряд (избыточность против потерь без повторного шифрования).
+    /// Получатель отбрасывает повторы по счётчику сессии до расшифровки. Через реле каждая копия шифруется отдельно, как раньше.
+    pub async fn send_encrypted_copies(&self, peer_id: HashId, data: &[u8], copies: usize) -> Result<(), String> {
+        let copies = copies.max(1);
         tracing::trace!("[transport] 📤 [SEND-START] Preparing to send {} bytes to peer: {}",
                  data.len(), hex::encode(&peer_id.0[..8]));
 
@@ -4543,6 +4559,10 @@ impl P2PTransport {
                 encryption.encrypt(&peer, data)
                     .map_err(|e| format!("WS encrypt failed: {}", e))?
             };
+            for _ in 1..copies {
+                tx.send(encrypted.clone()).await
+                    .map_err(|e| format!("WS channel closed: {}", e))?;
+            }
             tx.send(encrypted).await
                 .map_err(|e| format!("WS channel closed: {}", e))?;
             return Ok(());
@@ -4554,6 +4574,9 @@ impl P2PTransport {
         // если флаг не выставлен, идём direct (как раньше).
         if peer.use_relay {
             if let Some(relay_peer) = self.pick_relay(&peer_id).await {
+                for _ in 1..copies {
+                    self.send_via_relay(&peer, &relay_peer, data).await?;
+                }
                 return self.send_via_relay(&peer, &relay_peer, data).await;
             }
             // Нет доступного relay — деградируем в direct, чтобы не падать молча.
@@ -4586,11 +4609,13 @@ impl P2PTransport {
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
 
         // Send on SEND socket (separate from recv socket!)
-        self.socket_manager.data().await.send_to(&encrypted, &data_endpoint)
-            .await
-            .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
-
-        self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
+        let socket = self.socket_manager.data().await;
+        for _ in 0..copies {
+            socket.send_to(&encrypted, &data_endpoint)
+                .await
+                .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
+            self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
+        }
 
         tracing::trace!("[transport] ✅ [SEND-COMPLETE] Sent {} bytes to {} - socket should be free now",
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));

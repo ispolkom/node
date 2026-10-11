@@ -115,6 +115,8 @@ pub struct StationConfig {
     /// 🚦 Потолок скорости отправки на провод, Мбит/с (учитывает обе копии каждого вагона). Отправитель «отправил и забыл», обратной связи нет,
     /// поэтому потолок задаётся заранее: по умолчанию 300, `YANDI_PACE_MBPS` меняет. Выше канала ставить нельзя: излишек теряется и поток рвётся.
     pub pace_mbps: u64,
+    /// Сколько раз подряд уходит одна и та же зашифрованная датаграмма вагона (1..=3; по умолчанию 2). `YANDI_WAGON_COPIES`.
+    pub wagon_copies: usize,
 }
 
 impl Default for StationConfig {
@@ -130,6 +132,7 @@ impl Default for StationConfig {
             rtt_window_size: 10,
             batch_timeout_ms: 50,  // ⚡ 50ms batching window (увеличено для лучшей агрегации)
             enable_batching: true,  // ⚡ Batching включен по умолчанию
+            wagon_copies: std::env::var("YANDI_WAGON_COPIES").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
             pace_mbps: std::env::var("YANDI_PACE_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(300),
         }
     }
@@ -331,100 +334,61 @@ impl Station {
         let current_rate = self.rate_controller.current_rate_mbps();
         let max_concurrent = self.rate_controller.concurrent_wagons_for_rate();
 
-        tracing::trace!("🔄 DUAL-PATH: {} wagons × 2 paths = {} packets (Rate: {} Mbps)",
-                 total_wagons, total_wagons * 2, current_rate);
+        tracing::trace!("🔄 {} wagons × {} copies (Rate: {} Mbps)",
+                 total_wagons, self.config.wagon_copies, current_rate);
 
         // 🔄 DUAL-PATH: semaphore для ОБЕИХ путей
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent * 2));
         let mut send_tasks = Vec::new();
         let rate_controller = self.rate_controller.clone();
 
-        // 🔄 Для каждого wagon создаём ДВА клона (Path0 и Path1)
+        // Вагон строится, сериализуется и шифруется ОДИН раз; готовая датаграмма уходит `copies` раз подряд. Получатель принимает первую
+        // дошедшую копию, остальные отбрасывает по счётчику сессии до расшифровки (окно повторов); потерю одной копии закрывает другая.
+        let copies = self.config.wagon_copies.clamp(1, 3);
         for (i, chunk) in wagons {
             let wagon_num = i as u32;
             let offset = (i * wagon_size) as u64;
             let chunk_len = chunk.len();
 
-            // 🚦 Место каждой копии в общем потоке на проводе (в каждой копии накладные расходы вагона и шифрования ~150 байт)
-            let wire_bytes = chunk_len + 150;
+            // 🚦 Место в общем потоке на проводе: каждая копия — вагон с накладными расходами вагона и шифрования ~150 байт
+            let wire_bytes = (chunk_len + 150) * copies;
 
-            // контрольная сумма считается один раз: клон для второго пути копирует готовый вагон
-            let orig_wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
-            let clone_wagon = orig_wagon.clone_for_path(1);
+            let wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
+            let dest = dest;
+            let transport = self.transport.clone();
+            let sem = semaphore.clone();
+            let wait = self.pacer.reserve(wire_bytes);
 
-            // 🔄 Path0: ОРИГИНАЛ
-            {
-                let wagon = orig_wagon;
-                let dest = dest;
-                let transport = self.transport.clone();
-                let sem = semaphore.clone();
-                let wait = self.pacer.reserve(wire_bytes);
+            let task = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
+                if wait >= std::time::Duration::from_micros(500) {
+                    tokio::time::sleep(wait).await;
+                }
 
-                let task = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
-                    if wait >= std::time::Duration::from_micros(500) {
-                        tokio::time::sleep(wait).await;
-                    }
+                let wagon_bytes = wagon.to_bytes()
+                    .map_err(|e| StationError::SerializationError(e.to_string()))?;
+                let mut packet = vec![0x60u8];
+                packet.extend_from_slice(&wagon_bytes);
 
-                    let wagon_bytes = wagon.to_bytes()
-                        .map_err(|e| StationError::SerializationError(e.to_string()))?;
-                    let mut packet = vec![0x60u8];
-                    packet.extend_from_slice(&wagon_bytes);
+                transport.send_encrypted_copies(dest, &packet, copies).await
+                    .map_err(|e| StationError::SendError(e.to_string()))?;
 
-                    transport.send_encrypted(dest, &packet).await
-                        .map_err(|e| StationError::SendError(e.to_string()))?;
+                tracing::trace!("📦 [WAGON {}/{}] sent ({} B) × {} copies",
+                         wagon_num + 1, total_wagons, chunk_len, copies);
 
-                    tracing::trace!("📦 [WAGON {}/{}] ORIG sent ({} B) → Path#0",
-                             wagon_num + 1, total_wagons, chunk_len);
+                use crate::netlayer::transport::get_wagon_stats;
+                let stats = get_wagon_stats();
+                stats.sent_total.fetch_add(copies as u64, std::sync::atomic::Ordering::Relaxed);
+                stats.sent_path0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if copies > 1 {
+                    stats.sent_path1.fetch_add(copies as u64 - 1, std::sync::atomic::Ordering::Relaxed);
+                }
 
-                    use crate::netlayer::transport::get_wagon_stats;
-                    let stats = get_wagon_stats();
-                    stats.sent_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats.sent_path0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok::<(), StationError>(())
+            });
 
-                    Ok::<(), StationError>(())
-                });
-
-                send_tasks.push(task);
-            }
-
-            // 🔄 Path1: КЛОН (тот же train_id, is_clone=true)
-            {
-                let wagon = clone_wagon;
-                let dest = dest;
-                let transport = self.transport.clone();
-                let sem = semaphore.clone();
-                let wait = self.pacer.reserve(wire_bytes);
-
-                let task = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
-                    if wait >= std::time::Duration::from_micros(500) {
-                        tokio::time::sleep(wait).await;
-                    }
-
-                    let wagon_bytes = wagon.to_bytes()
-                        .map_err(|e| StationError::SerializationError(e.to_string()))?;
-                    let mut packet = vec![0x60u8];
-                    packet.extend_from_slice(&wagon_bytes);
-
-                    transport.send_encrypted(dest, &packet).await
-                        .map_err(|e| StationError::SendError(e.to_string()))?;
-
-                    tracing::trace!("📦 [WAGON {}/{}] CLONE sent ({} B) → Path#1",
-                             wagon_num + 1, total_wagons, chunk_len);
-
-                    use crate::netlayer::transport::get_wagon_stats;
-                    let stats = get_wagon_stats();
-                    stats.sent_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats.sent_path1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    Ok::<(), StationError>(())
-                });
-
-                send_tasks.push(task);
-            }
+            send_tasks.push(task);
         }
 
         // Ждём завершения всех отправок (обоих путей)
