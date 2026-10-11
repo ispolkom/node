@@ -55,6 +55,8 @@ class Scripts(unittest.TestCase):
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(seq.read_text(), f'{expected}\n')
         seq.unlink()
+        (self.root / 'release/yandi-release-pubkey.hex').write_text('pinned')
+        self.assertNotEqual(self.shell('python3 -I tools/release_seq.py release').returncode, 0)
         seq.symlink_to(self.root / 'Cargo.toml')
         self.assertNotEqual(self.shell('python3 -I tools/release_seq.py release').returncode, 0)
 

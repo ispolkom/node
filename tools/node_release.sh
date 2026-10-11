@@ -48,7 +48,9 @@ PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2")
 unset P1 P2
 
 PUBKEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута"; exit 1; }
-if [ "$CHECK" = 0 ]; then mkdir -p release; fi
+if [ "$CHECK" = 0 ]; then
+  SEQ=$(python3 -I tools/release_seq.py release)
+fi
 if [ ! -f "$PUB" ]; then
   echo "$PUBKEY" > "$PUB"
   echo "Первая подпись: создан $PUB — его нужно закоммитить (он открытый)."
@@ -60,7 +62,6 @@ else
 fi
 if [ "$CHECK" = 1 ]; then echo "Проверка завершена без сборки и записи."; exit 0; fi
 
-SEQ=$(python3 -I tools/release_seq.py release)
 release_archive
 release_check_identity
 VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT

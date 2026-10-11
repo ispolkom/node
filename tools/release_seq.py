@@ -8,6 +8,8 @@ def reserve(directory):
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
     except FileNotFoundError:
+        if os.path.lexists(os.path.join(directory, "yandi-release-pubkey.hex")):
+            raise ValueError("SEQ отсутствует при закреплённом ключе; восстановите последний номер")
         value = 0
     else:
         with os.fdopen(fd, 'rb') as source:

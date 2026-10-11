@@ -109,7 +109,11 @@ async fn prepare_and_install(
     } else {
         None
     };
-    let local = if remote.is_none() { Some(ReleaseDir::open(Path::new(from))?) } else { None };
+    let local = if remote.is_none() {
+        Some(ReleaseDir::open(Path::new(from))?)
+    } else {
+        None
+    };
     let client = client_builder().build()?;
     async fn fetch(
         client: &reqwest::Client,
@@ -494,15 +498,23 @@ mod tests {
         let install = root.path().join("install");
         archive(source.path(), "yandi", b'0', b"first");
         let vk = signed(source.path(), 1);
-        update(source.path().to_str().unwrap(), &vk, &install, 0).await.unwrap();
-        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0).await.is_err());
+        update(source.path().to_str().unwrap(), &vk, &install, 0)
+            .await
+            .unwrap();
+        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0)
+            .await
+            .is_err());
         archive(source.path(), "yandi", b'0', b"second");
         signed(source.path(), 2);
-        update(source.path().to_str().unwrap(), &vk, &install, 1).await.unwrap();
+        update(source.path().to_str().unwrap(), &vk, &install, 1)
+            .await
+            .unwrap();
         rollback(&install).unwrap();
         let state = status(&install).unwrap().unwrap();
         assert_eq!((state.seq, state.max_seq), (1, 2));
-        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0).await.is_err());
+        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0)
+            .await
+            .is_err());
         assert_eq!(std::fs::read(install.join("yandi")).unwrap(), b"first");
     }
 
@@ -646,7 +658,11 @@ mod tests {
         m.files[0].size = MAX_FILE + 1;
         let bytes = manifest_bytes(&m);
         fs::write(source.path().join(MANIFEST_NAME), &bytes).unwrap();
-        fs::write(source.path().join(SIGNATURE_NAME), sign(&bytes, &key).unwrap()).unwrap();
+        fs::write(
+            source.path().join(SIGNATURE_NAME),
+            sign(&bytes, &key).unwrap(),
+        )
+        .unwrap();
         assert!(update(source.path().to_str().unwrap(), &vk, &install, 0)
             .await
             .is_err());

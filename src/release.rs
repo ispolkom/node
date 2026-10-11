@@ -44,10 +44,14 @@ pub struct Manifest {
 pub const PHRASE_NORMALIZATION_VERSION: u32 = 1;
 pub fn normalize(p: &str) -> Zeroizing<String> {
     let mut nfc = Zeroizing::new(String::new());
-    icu_normalizer::ComposingNormalizerBorrowed::new_nfc().normalize_to(p, &mut *nfc).expect("String write");
+    icu_normalizer::ComposingNormalizerBorrowed::new_nfc()
+        .normalize_to(p, &mut *nfc)
+        .expect("String write");
     let mut out = Zeroizing::new(String::new());
     for word in nfc.split_whitespace() {
-        if !out.is_empty() { out.push(' '); }
+        if !out.is_empty() {
+            out.push(' ');
+        }
         out.push_str(word);
     }
     out
@@ -92,9 +96,14 @@ pub struct ReleaseDir(std::fs::File);
 #[cfg(unix)]
 impl ReleaseDir {
     pub fn open(path: &Path) -> std::io::Result<Self> {
-        use std::os::unix::{fs::OpenOptionsExt, io::{AsRawFd, FromRawFd}};
-        let mut dir = std::fs::OpenOptions::new().read(true)
-            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW).open(if path.is_absolute() { "/" } else { "." })?;
+        use std::os::unix::{
+            fs::OpenOptionsExt,
+            io::{AsRawFd, FromRawFd},
+        };
+        let mut dir = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NOFOLLOW)
+            .open(if path.is_absolute() { "/" } else { "." })?;
         for component in path.components() {
             use std::path::Component;
             let name = match component {
@@ -102,38 +111,69 @@ impl ReleaseDir {
                 Component::Normal(n) => std::ffi::CString::new(n.as_encoded_bytes())?,
                 _ => return Err(std::io::Error::other("unsafe directory component")),
             };
-            let fd = unsafe { libc::openat(dir.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC) };
-            if fd < 0 { return Err(std::io::Error::last_os_error()); }
+            let fd = unsafe {
+                libc::openat(
+                    dir.as_raw_fd(),
+                    name.as_ptr(),
+                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                )
+            };
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
             dir = unsafe { std::fs::File::from_raw_fd(fd) };
         }
         Ok(Self(dir))
     }
     pub fn file(&self, name: &str) -> std::io::Result<std::fs::File> {
         use std::os::unix::io::{AsRawFd, FromRawFd};
-        if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || name == "."
+            || name == ".."
+        {
             return Err(std::io::Error::other("unsafe file name"));
         }
         let name = std::ffi::CString::new(name)?;
-        let fd = unsafe { libc::openat(self.0.as_raw_fd(), name.as_ptr(), libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC) };
-        if fd < 0 { return Err(std::io::Error::last_os_error()); }
+        let fd = unsafe {
+            libc::openat(
+                self.0.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
         let f = unsafe { std::fs::File::from_raw_fd(fd) };
-        if !f.metadata()?.is_file() { return Err(std::io::Error::other("not a regular file")); }
+        if !f.metadata()?.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
         Ok(f)
     }
     pub fn read(&self, name: &str, limit: u64) -> std::io::Result<Vec<u8>> {
         use std::io::Read;
         let f = self.file(name)?;
-        if f.metadata()?.len() > limit { return Err(std::io::Error::other("file too large")); }
+        if f.metadata()?.len() > limit {
+            return Err(std::io::Error::other("file too large"));
+        }
         let mut bytes = Vec::new();
         f.take(limit + 1).read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > limit { return Err(std::io::Error::other("file too large")); }
+        if bytes.len() as u64 > limit {
+            return Err(std::io::Error::other("file too large"));
+        }
         Ok(bytes)
     }
 }
 
 pub fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
     let dir = ReleaseDir::open(path.parent().unwrap_or(Path::new(".")))?;
-    let mut f = dir.file(path.file_name().and_then(|n| n.to_str()).ok_or_else(|| std::io::Error::other("bad name"))?)?;
+    let mut f = dir.file(
+        path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| std::io::Error::other("bad name"))?,
+    )?;
     sha256_fd(&mut f)
 }
 
@@ -166,7 +206,14 @@ fn plain_name(name: &str) -> bool {
         && !name.chars().any(|c| c.is_control())
 }
 
-pub fn build_manifest(dir: &Path, version: &str, seq: u64, created: u64, key_id: &str, names: &[String]) -> Result<Manifest, String> {
+pub fn build_manifest(
+    dir: &Path,
+    version: &str,
+    seq: u64,
+    created: u64,
+    key_id: &str,
+    names: &[String],
+) -> Result<Manifest, String> {
     if names.is_empty() || names.len() > MAX_FILES {
         return Err("нужен хотя бы один файл (не больше 256)".into());
     }
@@ -176,13 +223,22 @@ pub fn build_manifest(dir: &Path, version: &str, seq: u64, created: u64, key_id:
             return Err(format!("недопустимое имя файла: {name}"));
         }
         let (sha, size) = sha256_file(&dir.join(name)).map_err(|e| format!("{name}: {e}"))?;
-        files.push(FileEntry { name: name.clone(), sha256: sha, size });
+        files.push(FileEntry {
+            name: name.clone(),
+            sha256: sha,
+            size,
+        });
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
-    if files.windows(2).any(|w| w[0].name == w[1].name) {
-        return Err("повторяющиеся имена файлов".into());
-    }
-    let m = Manifest { format: 1, product: "yandi-node".into(), version: version.into(), seq, created, key_id: key_id.into(), files };
+    let m = Manifest {
+        format: 1,
+        product: "yandi-node".into(),
+        version: version.into(),
+        seq,
+        created,
+        key_id: key_id.into(),
+        files,
+    };
     validate_manifest(&m).map_err(|e| e.to_string())?;
     Ok(m)
 }
@@ -194,7 +250,9 @@ pub fn manifest_bytes(m: &Manifest) -> Vec<u8> {
 /// Подпись над ТОЧНЫМИ байтами файла манифеста с доменным префиксом (никакой повторной канонизации).
 pub fn sign(manifest: &[u8], key: &SigningKey) -> Result<String, VerifyError> {
     let m = parse_manifest(manifest)?;
-    if m.key_id != key_id(&key.verifying_key()) { return Err(VerifyError::WrongKeyId); }
+    if m.key_id != key_id(&key.verifying_key()) {
+        return Err(VerifyError::WrongKeyId);
+    }
     let sig: Signature = key.sign(&[SIG_DOMAIN, manifest].concat());
     Ok(hex::encode(sig.to_bytes()))
 }
@@ -218,48 +276,82 @@ impl std::fmt::Display for VerifyError {
             Self::TooLarge => write!(f, "манифест слишком большой"),
             Self::Malformed(e) => write!(f, "манифест повреждён: {e}"),
             Self::WrongKeyId => write!(f, "key_id в манифесте не совпадает с закреплённым ключом"),
-            Self::Rollback { seq, min } => write!(f, "откат: выпуск №{seq} старше уже установленного №{min}"),
+            Self::Rollback { seq, min } => {
+                write!(f, "откат: выпуск №{seq} старше уже установленного №{min}")
+            }
             Self::File(e) => write!(f, "{e}"),
         }
     }
 }
 
 /// Проверить подпись и разобрать манифест. `min_seq` — номер уже установленного выпуска (0 — не проверять).
-pub fn verify_manifest(manifest: &[u8], sig_hex: &str, vk: &VerifyingKey, min_seq: u64) -> Result<Manifest, VerifyError> {
+pub fn verify_manifest(
+    manifest: &[u8],
+    sig_hex: &str,
+    vk: &VerifyingKey,
+    min_seq: u64,
+) -> Result<Manifest, VerifyError> {
     if manifest.len() > MAX_MANIFEST {
         return Err(VerifyError::TooLarge);
     }
-    let sig_bytes: [u8; 64] = hex::decode(sig_hex.trim()).ok().and_then(|b| b.try_into().ok()).ok_or(VerifyError::BadSignature)?;
-    vk.verify(&[SIG_DOMAIN, manifest].concat(), &Signature::from_bytes(&sig_bytes)).map_err(|_| VerifyError::BadSignature)?;
+    if !lower_hex(sig_hex.trim(), 128) {
+        return Err(VerifyError::BadSignature);
+    }
+    let sig_bytes: [u8; 64] = hex::decode(sig_hex.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .ok_or(VerifyError::BadSignature)?;
+    vk.verify(
+        &[SIG_DOMAIN, manifest].concat(),
+        &Signature::from_bytes(&sig_bytes),
+    )
+    .map_err(|_| VerifyError::BadSignature)?;
     let m = parse_manifest(manifest)?;
     if m.key_id != key_id(vk) {
         return Err(VerifyError::WrongKeyId);
     }
     if m.seq < min_seq {
-        return Err(VerifyError::Rollback { seq: m.seq, min: min_seq });
+        return Err(VerifyError::Rollback {
+            seq: m.seq,
+            min: min_seq,
+        });
     }
     Ok(m)
 }
 
-fn lower_hex(s: &str, len: usize) -> bool {
-    s.len() == len && s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+pub fn lower_hex(s: &str, len: usize) -> bool {
+    s.len() == len
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 pub fn validate_manifest(m: &Manifest) -> Result<(), VerifyError> {
-    if m.format != 1 || m.product != "yandi-node" || m.seq == 0 || m.version.is_empty()
-        || m.version.len() > 200 || m.version.chars().any(char::is_control)
-        || !lower_hex(&m.key_id, 16) || m.files.is_empty() || m.files.len() > MAX_FILES {
+    if m.format != 1
+        || m.product != "yandi-node"
+        || m.seq == 0
+        || m.version.is_empty()
+        || m.version.len() > 200
+        || m.version.chars().any(char::is_control)
+        || !lower_hex(&m.key_id, 16)
+        || m.files.is_empty()
+        || m.files.len() > MAX_FILES
+    {
         return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
     }
     let mut seen = std::collections::HashSet::new();
     for f in &m.files {
         if !plain_name(&f.name) || !lower_hex(&f.sha256, 64) || !seen.insert(&f.name) {
-            return Err(VerifyError::Malformed(format!("недопустимая запись: {}", f.name)));
+            return Err(VerifyError::Malformed(format!(
+                "недопустимая запись: {}",
+                f.name
+            )));
         }
     }
     Ok(())
 }
 pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
-    if bytes.len() > MAX_MANIFEST { return Err(VerifyError::TooLarge); }
+    if bytes.len() > MAX_MANIFEST {
+        return Err(VerifyError::TooLarge);
+    }
     let m = serde_json::from_slice(bytes).map_err(|e| VerifyError::Malformed(e.to_string()))?;
     validate_manifest(&m)?;
     Ok(m)
@@ -267,12 +359,19 @@ pub fn parse_manifest(bytes: &[u8]) -> Result<Manifest, VerifyError> {
 
 /// Файлы выпуска в каталоге совпадают с манифестом (размер и SHA-256). Лишние файлы не ошибка (их просто никто не установит).
 pub fn check_files(dir: &Path, m: &Manifest) -> Result<(), VerifyError> {
+    validate_manifest(m)?;
     let dir = ReleaseDir::open(dir).map_err(|e| VerifyError::File(e.to_string()))?;
     for f in &m.files {
-        let mut fd = dir.file(&f.name).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
-        let (sha, size) = sha256_fd(&mut fd).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
+        let mut fd = dir
+            .file(&f.name)
+            .map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
+        let (sha, size) =
+            sha256_fd(&mut fd).map_err(|e| VerifyError::File(format!("{}: {e}", f.name)))?;
         if size != f.size || sha != f.sha256 {
-            return Err(VerifyError::File(format!("{}: содержимое не совпало с манифестом", f.name)));
+            return Err(VerifyError::File(format!(
+                "{}: содержимое не совпало с манифестом",
+                f.name
+            )));
         }
     }
     Ok(())
@@ -287,7 +386,10 @@ mod tests {
     }
 
     fn key() -> SigningKey {
-        derive_signing_key("один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap())
+        derive_signing_key(
+            "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать",
+            cheap(),
+        )
     }
 
     fn release(dir: &Path, seq: u64) -> (Vec<u8>, String, VerifyingKey) {
@@ -295,7 +397,15 @@ mod tests {
         std::fs::write(dir.join("README.txt"), b"readme").unwrap();
         let k = key();
         let vk = k.verifying_key();
-        let m = build_manifest(dir, "0.2.0", seq, 1_700_000_000, &key_id(&vk), &["yandi-node-linux-x86_64.tar.gz".into(), "README.txt".into()]).unwrap();
+        let m = build_manifest(
+            dir,
+            "0.2.0",
+            seq,
+            1_700_000_000,
+            &key_id(&vk),
+            &["yandi-node-linux-x86_64.tar.gz".into(), "README.txt".into()],
+        )
+        .unwrap();
         let bytes = manifest_bytes(&m);
         let sig = sign(&bytes, &k).unwrap();
         (bytes, sig, vk)
@@ -303,15 +413,24 @@ mod tests {
 
     #[test]
     fn r7_nfc_vectors_and_legacy_nfc_key_compatibility() {
-        for (input, expected) in [(" е\u{308}  и\u{306} ", "ё й"), ("Cafe\u{301}\tÅ", "Café Å"), ("A\u{30a}", "Å")] {
+        for (input, expected) in [
+            (" е\u{308}  и\u{306} ", "ё й"),
+            ("Cafe\u{301}\tÅ", "Café Å"),
+            ("A\u{30a}", "Å"),
+        ] {
             assert_eq!(&*normalize(input), expected);
-            assert_eq!(derive_signing_key(input, cheap()).to_bytes(), derive_signing_key(expected, cheap()).to_bytes());
+            assert_eq!(
+                derive_signing_key(input, cheap()).to_bytes(),
+                derive_signing_key(expected, cheap()).to_bytes()
+            );
         }
         // Exact legacy KDF for an already NFC phrase: salt and parameters unchanged.
-        let phrase = "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать";
+        let phrase =
+            "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать";
         let mut legacy = Zeroizing::new([0u8; 32]);
         Argon2::new(Algorithm::Argon2id, Version::V0x13, cheap())
-            .hash_password_into(phrase.as_bytes(), KEY_SALT, &mut *legacy).unwrap();
+            .hash_password_into(phrase.as_bytes(), KEY_SALT, &mut *legacy)
+            .unwrap();
         assert_eq!(derive_signing_key(phrase, cheap()).to_bytes(), *legacy);
     }
 
@@ -330,6 +449,15 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let (bytes, _, _) = release(d.path(), 1);
         let good = parse_manifest(&bytes).unwrap();
+        assert_eq!(
+            verify_manifest(
+                &bytes,
+                &sign(&bytes, &key()).unwrap().to_uppercase(),
+                &key().verifying_key(),
+                0
+            ),
+            Err(VerifyError::BadSignature)
+        );
         let k = key();
         for mode in 0..4 {
             let mut m = good.clone();
@@ -359,7 +487,10 @@ mod tests {
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("file"), b"evil").unwrap();
         assert_eq!(dir.read("file", 100).unwrap(), b"verified");
-        assert_eq!(sha256_fd(&mut fd).unwrap().0, hex::encode(Sha256::digest(b"verified")));
+        assert_eq!(
+            sha256_fd(&mut fd).unwrap().0,
+            hex::encode(Sha256::digest(b"verified"))
+        );
         symlink(&path, root.path().join("link")).unwrap();
         assert!(ReleaseDir::open(&root.path().join("link")).is_err());
     }
@@ -376,7 +507,8 @@ mod tests {
         assert!(dir.read("link", MAX_MANIFEST as u64).is_err());
         std::fs::create_dir(d.path().join("directory")).unwrap();
         assert!(dir.read("directory", 256).is_err());
-        let fifo = std::ffi::CString::new(d.path().join("fifo").as_os_str().as_encoded_bytes()).unwrap();
+        let fifo =
+            std::ffi::CString::new(d.path().join("fifo").as_os_str().as_encoded_bytes()).unwrap();
         assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
         assert!(dir.read("fifo", 256).is_err());
         assert!(dir.read("large", 256).is_err());
@@ -389,8 +521,22 @@ mod tests {
         let m = verify_manifest(&bytes, &sig, &vk, 7).unwrap();
         assert_eq!(m.seq, 7);
         check_files(d.path(), &m).unwrap();
-        assert_eq!(derive_signing_key("один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap()).to_bytes(), key().to_bytes());
-        assert_ne!(derive_signing_key("другая фраза совсем не такая как первая ни одним словом вообще", cheap()).to_bytes(), key().to_bytes());
+        assert_eq!(
+            derive_signing_key(
+                "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать",
+                cheap()
+            )
+            .to_bytes(),
+            key().to_bytes()
+        );
+        assert_ne!(
+            derive_signing_key(
+                "другая фраза совсем не такая как первая ни одним словом вообще",
+                cheap()
+            )
+            .to_bytes(),
+            key().to_bytes()
+        );
     }
 
     #[test]
@@ -401,41 +547,89 @@ mod tests {
         let mut bad = bytes.clone();
         let i = bad.iter().position(|b| *b == b'7').unwrap();
         bad[i] = b'8';
-        assert_eq!(verify_manifest(&bad, &sig, &vk, 0), Err(VerifyError::BadSignature));
+        assert_eq!(
+            verify_manifest(&bad, &sig, &vk, 0),
+            Err(VerifyError::BadSignature)
+        );
         // изменённая подпись и мусор вместо подписи
         let mut s = sig.clone().into_bytes();
         s[0] = if s[0] == b'0' { b'1' } else { b'0' };
-        assert_eq!(verify_manifest(&bytes, std::str::from_utf8(&s).unwrap(), &vk, 0), Err(VerifyError::BadSignature));
-        assert_eq!(verify_manifest(&bytes, "zz", &vk, 0), Err(VerifyError::BadSignature));
+        assert_eq!(
+            verify_manifest(&bytes, std::str::from_utf8(&s).unwrap(), &vk, 0),
+            Err(VerifyError::BadSignature)
+        );
+        assert_eq!(
+            verify_manifest(&bytes, "zz", &vk, 0),
+            Err(VerifyError::BadSignature)
+        );
         // чужой ключ
-        let other = derive_signing_key("совсем другая длинная фраза из многих слов для чужого ключа подписи выпусков", cheap());
-        assert_eq!(verify_manifest(&bytes, &sig, &other.verifying_key(), 0), Err(VerifyError::BadSignature));
+        let other = derive_signing_key(
+            "совсем другая длинная фраза из многих слов для чужого ключа подписи выпусков",
+            cheap(),
+        );
+        assert_eq!(
+            verify_manifest(&bytes, &sig, &other.verifying_key(), 0),
+            Err(VerifyError::BadSignature)
+        );
         // подмена файла после подписи
         let m = verify_manifest(&bytes, &sig, &vk, 0).unwrap();
-        std::fs::write(d.path().join("yandi-node-linux-x86_64.tar.gz"), b"evil bytes!").unwrap();
-        assert!(matches!(check_files(d.path(), &m), Err(VerifyError::File(_))));
+        std::fs::write(
+            d.path().join("yandi-node-linux-x86_64.tar.gz"),
+            b"evil bytes!",
+        )
+        .unwrap();
+        assert!(matches!(
+            check_files(d.path(), &m),
+            Err(VerifyError::File(_))
+        ));
         // отсутствующий файл
         std::fs::remove_file(d.path().join("README.txt")).unwrap();
-        assert!(matches!(check_files(d.path(), &m), Err(VerifyError::File(_))));
+        assert!(matches!(
+            check_files(d.path(), &m),
+            Err(VerifyError::File(_))
+        ));
     }
 
     #[test]
     fn rollback_oversize_and_bad_names_are_refused() {
         let d = tempfile::tempdir().unwrap();
         let (bytes, sig, vk) = release(d.path(), 3);
-        assert_eq!(verify_manifest(&bytes, &sig, &vk, 4), Err(VerifyError::Rollback { seq: 3, min: 4 }));
+        assert_eq!(
+            verify_manifest(&bytes, &sig, &vk, 4),
+            Err(VerifyError::Rollback { seq: 3, min: 4 })
+        );
         assert!(verify_manifest(&bytes, &sig, &vk, 3).is_ok());
-        assert_eq!(verify_manifest(&vec![b' '; MAX_MANIFEST + 1], &sig, &vk, 0), Err(VerifyError::TooLarge));
+        assert_eq!(
+            verify_manifest(&vec![b' '; MAX_MANIFEST + 1], &sig, &vk, 0),
+            Err(VerifyError::TooLarge)
+        );
         for bad in ["../evil", "a/b", "", "..", "MANIFEST.json", "x\ny"] {
-            assert!(build_manifest(d.path(), "1", 1, 0, "k", &[bad.into()]).is_err(), "{bad:?}");
+            assert!(
+                build_manifest(d.path(), "1", 1, 0, "k", &[bad.into()]).is_err(),
+                "{bad:?}"
+            );
         }
         // манифест, подписанный верно, но с «..» в имени, при проверке тоже не принимается
         let k = key();
-        let evil = Manifest { format: 1, product: "yandi-node".into(), version: "1".into(), seq: 1, created: 0, key_id: key_id(&k.verifying_key()),
-            files: vec![FileEntry { name: "../etc/passwd".into(), sha256: "0".repeat(64), size: 1 }] };
+        let evil = Manifest {
+            format: 1,
+            product: "yandi-node".into(),
+            version: "1".into(),
+            seq: 1,
+            created: 0,
+            key_id: key_id(&k.verifying_key()),
+            files: vec![FileEntry {
+                name: "../etc/passwd".into(),
+                sha256: "0".repeat(64),
+                size: 1,
+            }],
+        };
         let eb = manifest_bytes(&evil);
         let es = hex::encode(k.sign(&[SIG_DOMAIN, &eb].concat()).to_bytes());
-        assert!(matches!(verify_manifest(&eb, &es, &k.verifying_key(), 0), Err(VerifyError::Malformed(_))));
+        assert!(matches!(
+            verify_manifest(&eb, &es, &k.verifying_key(), 0),
+            Err(VerifyError::Malformed(_))
+        ));
     }
 
     #[test]
@@ -443,8 +637,14 @@ mod tests {
         assert!(weakness("слишком короткая фраза").is_some());
         assert!(weakness(&"слово ".repeat(14).trim().to_string()).is_some());
         assert_eq!(&*normalize("  а   б \t в "), "а б в");
-        let a = derive_signing_key("раз  два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap());
-        let b = derive_signing_key("раз два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap());
+        let a = derive_signing_key(
+            "раз  два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать",
+            cheap(),
+        );
+        let b = derive_signing_key(
+            "раз два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать",
+            cheap(),
+        );
         assert_eq!(a.to_bytes(), b.to_bytes());
     }
 }

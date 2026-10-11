@@ -9,15 +9,22 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-fn read_phrase_key(mut input: impl BufRead, params: argon2::Params) -> Result<ed25519_dalek::SigningKey, String> {
+fn read_phrase_key(
+    mut input: impl BufRead,
+    params: argon2::Params,
+) -> Result<ed25519_dalek::SigningKey, String> {
     let mut first = zeroize::Zeroizing::new(String::new());
     let mut second = zeroize::Zeroizing::new(String::new());
     input.read_line(&mut first).map_err(|e| e.to_string())?;
     input.read_line(&mut second).map_err(|e| e.to_string())?;
     let first = normalize(&first);
     let second = normalize(&second);
-    if first != second { return Err("Фразы не совпали.".into()); }
-    if let Some(why) = weakness(&first) { return Err(format!("Фраза слишком слабая: {why}.")); }
+    if first != second {
+        return Err("Фразы не совпали.".into());
+    }
+    if let Some(why) = weakness(&first) {
+        return Err(format!("Фраза слишком слабая: {why}."));
+    }
     Ok(derive_signing_key(&first, params))
 }
 fn phrase_key() -> ed25519_dalek::SigningKey {
@@ -30,12 +37,19 @@ mod secret_tests {
     #[test]
     fn r6_phrase_errors_return_through_zeroizing_scope() {
         let params = argon2::Params::new(64, 1, 1, Some(32)).unwrap();
-        assert!(read_phrase_key(&b"secret\nother\n"[..], params.clone()).unwrap_err().contains("совпали"));
-        assert!(read_phrase_key(&b"short\nshort\n"[..], params).unwrap_err().contains("слабая"));
+        assert!(read_phrase_key(&b"secret\nother\n"[..], params.clone())
+            .unwrap_err()
+            .contains("совпали"));
+        assert!(read_phrase_key(&b"short\nshort\n"[..], params)
+            .unwrap_err()
+            .contains("слабая"));
     }
 }
 
 fn parse_pubkey(hex_s: &str) -> VerifyingKey {
+    if !lower_hex(hex_s.trim(), 64) {
+        die("--pubkey: нужны 64 lowercase hex-символа");
+    }
     let bytes: [u8; 32] = hex::decode(hex_s.trim())
         .ok()
         .and_then(|b| b.try_into().ok())
@@ -63,9 +77,11 @@ async fn main() {
                     "--pubkey" if cmd == "update" => pubkey = Some(value.clone()),
                     "--install-dir" => install = PathBuf::from(value),
                     "--min-seq" | "--current-seq" if cmd == "update" => {
-                        seq = Some(value
-                            .parse()
-                            .unwrap_or_else(|_| die("--current-seq: число")))
+                        seq = Some(
+                            value
+                                .parse()
+                                .unwrap_or_else(|_| die("--current-seq: число")),
+                        )
                     }
                     _ => die(&format!("неизвестный параметр: {arg}")),
                 }
@@ -74,9 +90,16 @@ async fn main() {
                 "update" => {
                     let source = from.unwrap_or_else(|| die("нужен --from"));
                     let vk = parse_pubkey(&pubkey.unwrap_or_else(|| die("нужен --pubkey")));
-                    yandi::updater::update(&source, &vk, &install, seq.unwrap_or_else(|| die("нужен --min-seq (0 только для первой установки)")))
-                        .await
-                        .map(Some)
+                    yandi::updater::update(
+                        &source,
+                        &vk,
+                        &install,
+                        seq.unwrap_or_else(|| {
+                            die("нужен --min-seq (0 только для первой установки)")
+                        }),
+                    )
+                    .await
+                    .map(Some)
                 }
                 "rollback" => yandi::updater::rollback(&install).map(Some),
                 _ => yandi::updater::status(&install),
@@ -132,13 +155,17 @@ async fn main() {
                 args.get(1)
                     .unwrap_or_else(|| die("использование: yandi-release sign <каталог>")),
             );
-            let bytes = ReleaseDir::open(&dir).and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
+            let bytes = ReleaseDir::open(&dir)
+                .and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
             let m = parse_manifest(&bytes).unwrap_or_else(|e| die(&e.to_string()));
             check_files(&dir, &m).unwrap_or_else(|e| die(&e.to_string()));
             let k = phrase_key();
-            std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k).unwrap_or_else(|e| die(&e.to_string())))
-                .unwrap_or_else(|e| die(&e.to_string()));
+            std::fs::write(
+                dir.join(SIGNATURE_NAME),
+                sign(&bytes, &k).unwrap_or_else(|e| die(&e.to_string())),
+            )
+            .unwrap_or_else(|e| die(&e.to_string()));
             println!("подписано ключом {}", key_id(&k.verifying_key()));
         }
         Some("verify") => {
@@ -153,10 +180,11 @@ async fn main() {
                 match a.as_str() {
                     "--pubkey" => pubkey = it.next().cloned(),
                     "--min-seq" => {
-                        min_seq = Some(it
-                            .next()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or_else(|| die("--min-seq: число")))
+                        min_seq = Some(
+                            it.next()
+                                .and_then(|v| v.parse().ok())
+                                .unwrap_or_else(|| die("--min-seq: число")),
+                        )
                     }
                     other => die(&format!("неизвестный ключ: {other}")),
                 }
@@ -164,12 +192,20 @@ async fn main() {
             let vk = parse_pubkey(
                 &pubkey.unwrap_or_else(|| die("нужен --pubkey (закреплённый открытый ключ)")),
             );
-            let bytes = ReleaseDir::open(&dir).and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
+            let bytes = ReleaseDir::open(&dir)
+                .and_then(|d| d.read(MANIFEST_NAME, MAX_MANIFEST as u64))
                 .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
-            let sig = ReleaseDir::open(&dir).and_then(|d| d.read(SIGNATURE_NAME, 256)).and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
+            let sig = ReleaseDir::open(&dir)
+                .and_then(|d| d.read(SIGNATURE_NAME, 256))
+                .and_then(|b| String::from_utf8(b).map_err(std::io::Error::other))
                 .unwrap_or_else(|e| die(&format!("{SIGNATURE_NAME}: {e}")));
-            let m = verify_manifest(&bytes, &sig, &vk, min_seq.unwrap_or_else(|| die("нужен --min-seq")))
-                .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
+            let m = verify_manifest(
+                &bytes,
+                &sig,
+                &vk,
+                min_seq.unwrap_or_else(|| die("нужен --min-seq")),
+            )
+            .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             check_files(&dir, &m).unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             println!(
                 "ВЫПУСК ВЕРЕН: {} {} (№{}), файлов {}, ключ {}",
