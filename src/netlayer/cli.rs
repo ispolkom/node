@@ -25,7 +25,6 @@ pub struct P2PCli {
     proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
     proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
     // 🔄 NACK channel (для wagon retransmission)
-    nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     // SOCKS5 channels
     socks5_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
@@ -48,7 +47,6 @@ impl P2PCli {
             proxy_resp_rx: Arc::new(tokio::sync::Mutex::new(None)),
             proxy_req_rx: Arc::new(tokio::sync::Mutex::new(None)),
             proxy_tunnel_rx: Arc::new(tokio::sync::Mutex::new(None)),
-            nack_rx: Arc::new(tokio::sync::Mutex::new(None)), // 🔄 NACK channel
             socks5_resp_rx: Arc::new(tokio::sync::Mutex::new(None)),
             socks5_req_rx: Arc::new(tokio::sync::Mutex::new(None)),
             socks5_tunnel_rx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -74,12 +72,6 @@ impl P2PCli {
     /// Set proxy tunnel data channel (for CONNECT)
     pub fn with_proxy_tunnel_data_channel(mut self, rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>) -> Self {
         self.proxy_tunnel_rx = rx;
-        self
-    }
-
-    /// Set NACK channel (для wagon retransmission)
-    pub fn with_nack_channel(mut self, rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>) -> Self {
-        self.nack_rx = rx;
         self
     }
 
@@ -133,7 +125,6 @@ impl P2PCli {
         let proxy_resp_rx = self.proxy_resp_rx.clone();
         let proxy_req_rx = self.proxy_req_rx.clone();
         let proxy_tunnel_rx = self.proxy_tunnel_rx.clone();
-        let nack_rx = self.nack_rx.clone(); // 🔄 NACK channel
         let socks5_resp_rx = self.socks5_resp_rx.clone();
         let socks5_req_rx = self.socks5_req_rx.clone();
         let socks5_tunnel_rx = self.socks5_tunnel_rx.clone();
@@ -197,7 +188,6 @@ impl P2PCli {
                             proxy_resp_rx.clone(),
                             proxy_req_rx.clone(),
                             proxy_tunnel_rx.clone(),
-                            nack_rx.clone(), // 🔄 NACK channel
                             socks5_resp_rx.clone(),
                             socks5_req_rx.clone(),
                             socks5_tunnel_rx.clone(),
@@ -228,7 +218,6 @@ impl P2PCli {
         proxy_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
         proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
         proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-        nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>, // 🔄 NACK channel
         socks5_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
         socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
         socks5_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -336,11 +325,11 @@ impl P2PCli {
             }
 
             "proxy-gateway" => {
-                Self::handle_proxy_gateway_command(transport, proxy_req_rx, proxy_tunnel_rx.clone(), nack_rx.clone()).await?
+                Self::handle_proxy_gateway_command(transport, proxy_req_rx, proxy_tunnel_rx.clone()).await?
             }
 
             "socks5-gateway" => {
-                Self::handle_socks5_gateway_command(transport, socks5_req_rx, socks5_tunnel_rx.clone(), nack_rx.clone()).await?
+                Self::handle_socks5_gateway_command(transport, socks5_req_rx, socks5_tunnel_rx.clone()).await?
             }
 
             "relay-server" => {
@@ -1045,7 +1034,6 @@ impl P2PCli {
         transport: &P2PTransport,
         proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
         proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-        nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     ) -> Result<(), String> {
         println!("🌐 Запуск HTTP Proxy Gateway...");
         println!();
@@ -1086,24 +1074,6 @@ impl P2PCli {
             println!("⚠️  No tunnel data channel - CONNECT won't work!");
         }
 
-        // 🔄 Take the NACK receiver (для wagon retransmission)
-        let nack_rx_chan = {
-            let mut rx_lock = nack_rx.lock().await;
-            rx_lock.take()
-        };
-
-        if let Some(nack_rx) = nack_rx_chan {
-            println!("✅ NACK channel connected - wagon retransmission enabled");
-
-            // Запускаем NACK handler task
-            let gateway_clone = gateway.clone_for_handler();
-            tokio::spawn(async move {
-                Self::handle_nack_packets(gateway_clone, nack_rx).await;
-            });
-        } else {
-            println!("⚠️  No NACK channel - wagon retransmission disabled!");
-        }
-
         // Регистрируем Station в transport для обработки YTP пакетов
         transport.set_station(gateway.station.clone()).await;
         println!("🚂 YTP Station registered in transport");
@@ -1120,57 +1090,6 @@ impl P2PCli {
         println!();
 
         Ok(())
-    }
-
-    /// 🔄 Обработка NACK пакетов - повторная отправка потерянных wagon-ов
-    async fn handle_nack_packets(
-        gateway: crate::proxy::HttpProxyGateway,
-        mut nack_rx: tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>,
-    ) {
-
-        println!("🔄 NACK Handler started - listening for retransmission requests");
-
-        while let Some((source_node, nack)) = nack_rx.recv().await {
-            info!("🔄 Received NACK from {} for train #{}: {} missing wagons",
-                  hex::encode(&source_node.0[..8]), nack.train_id, nack.missing_wagons.len());
-
-            // Получаем отправленные wagons из хранилища
-            let sent_trains = gateway.sent_trains.clone();
-            let mut trains_lock = sent_trains.lock().await;
-
-            if let Some(sent_train) = trains_lock.get_mut(&nack.train_id) {
-                info!("📦 Found train #{} in storage, retransmitting {} wagons",
-                      nack.train_id, nack.missing_wagons.len());
-
-                let mut retransmitted = 0;
-                for wagon_num in &nack.missing_wagons {
-                    if let Some(wagon_bytes) = sent_train.get_wagon(*wagon_num) {
-                        // Повторно отправляем wagon
-                        let target_node = sent_train.target_node;
-                        let mut packet = vec![0x60u8]; // YTP Wagon prefix
-                        packet.extend_from_slice(wagon_bytes);
-
-                        if let Err(e) = gateway.transport.send_encrypted(source_node, &packet).await {
-                            error!("❌ Failed to retransmit wagon #{} of train #{}: {}",
-                                   wagon_num, nack.train_id, e);
-                        } else {
-                            debug!("✅ Retransmitted wagon #{} of train #{} ({} bytes)",
-                                   wagon_num, nack.train_id, wagon_bytes.len());
-                            retransmitted += 1;
-                        }
-                    } else {
-                        warn!("⚠️  Wagon #{} not found in train #{} storage",
-                              wagon_num, nack.train_id);
-                    }
-                }
-
-                info!("✅ Retransmitted {} wagons for train #{}", retransmitted, nack.train_id);
-            } else {
-                warn!("⚠️  Train #{} not found in storage (may have expired)", nack.train_id);
-            }
-        }
-
-        warn!("⚠️  NACK channel closed");
     }
 
     /// Handle socks5 command - start SOCKS5 proxy client
@@ -1387,7 +1306,6 @@ impl P2PCli {
         transport: &P2PTransport,
         socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::socks5::Socks5ProxyRequest)>>>>,
         socks5_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::socks5::Socks5TunnelData)>>>>,
-        _nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     ) -> Result<(), String> {
         println!("🧦 Запуск SOCKS5 Exit Node (Gateway)...");
         println!();

@@ -410,9 +410,6 @@ pub struct P2PTransport {
     /// SOCKS5 tunnel data sender
     socks5_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5TunnelData)>>,
 
-    /// 🔄 NACK sender (optional, for wagon retransmission) - отправляет NACK в gateway
-    nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
-
     /// YTP Station для обработки поездов
     pub station: Arc<Mutex<Option<Arc<crate::protocol::Station>>>>,
     /// RX byte counter for speed monitoring
@@ -537,7 +534,7 @@ impl P2PTransport {
     /// - 0.0.0.0:9000 for discovery (Hello)
     /// - 0.0.0.0:10000 for encrypted data
     pub async fn new(identity: NodeIdentity, capabilities: u16) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler channel
@@ -546,7 +543,7 @@ impl P2PTransport {
         capabilities: u16,
         exit_handler_tx: Option<mpsc::Sender<ExitHandlerRequest>>,
     ) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler and proxy request channels
@@ -558,7 +555,6 @@ impl P2PTransport {
         proxy_request_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyRequest)>>,
         proxy_response_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyResponse)>>,
         proxy_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyTunnelData)>>,
-        nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
         // SOCKS5 handlers (аналогично HTTP Proxy)
         socks5_gateway_tx: Option<mpsc::Sender<ProxyGatewayRequest>>,  // 🧦 SOCKS5 Gateway auto-start
         socks5_request_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5ProxyRequest)>>,
@@ -841,7 +837,6 @@ impl P2PTransport {
             socks5_request_tx: socks5_request_tx.clone(),
             socks5_response_tx: socks5_response_tx.clone(),
             socks5_tunnel_data_tx: socks5_tunnel_data_tx.clone(),
-            nack_tx: nack_tx.clone(), // 🔄 NACK channel
             station: station.clone(),
             tun_wagon_tx: tun_wagon_tx.clone(),
             tun_wagon_resp_tx: tun_wagon_resp_tx.clone(),
@@ -1681,7 +1676,6 @@ impl P2PTransport {
             let proxy_request_tx = transport.proxy_request_tx.clone();
             let proxy_response_tx = transport.proxy_response_tx.clone();
             let proxy_tunnel_data_tx = transport.proxy_tunnel_data_tx.clone();
-            let nack_tx = transport.nack_tx.clone();
             let socks5_gateway_tx = transport.socks5_gateway_tx.clone();
             let socks5_request_tx = transport.socks5_request_tx.clone();
             let socks5_response_tx = transport.socks5_response_tx.clone();
@@ -1713,7 +1707,6 @@ impl P2PTransport {
                     proxy_request_tx,
                     proxy_response_tx,
                     proxy_tunnel_data_tx,
-                    nack_tx,
                     socks5_gateway_tx,
                     socks5_request_tx,
                     socks5_response_tx,
@@ -2469,8 +2462,6 @@ impl P2PTransport {
         proxy_request_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyRequest)>>,
         proxy_response_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyResponse)>>,
         proxy_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyTunnelData)>>,
-        // 🔄 NACK handler
-        nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
         // SOCKS5 handlers
         socks5_gateway_tx: Option<mpsc::Sender<ProxyGatewayRequest>>,  // 🧦 SOCKS5 Gateway auto-start
         socks5_request_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5ProxyRequest)>>,
@@ -3120,7 +3111,7 @@ impl P2PTransport {
                                         }
                                         // YTP packets (0x60-0x6F, 0x70 BatchedWagon)
                                         0x60 | 0x61 | 0x70 => {
-                                            use crate::protocol::{Wagon, TrainAckMessage, Station, BatchedWagon};
+                                            use crate::protocol::{Wagon, Station, BatchedWagon};
 
                                             match decrypted[0] {
                                                 0x60 => {
@@ -3168,26 +3159,6 @@ impl P2PTransport {
                                                                                  train_id, data.len() / 1_000_000);
                                                                         tracing::trace!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
 
-                                                                        // ⚠️ ACK/NACK DISABLED per user directive
-                                                                        // // 🔄 ПРОВЕРЯЕМ NACK (0x62 prefix)
-                                                                        // if !data.is_empty() && data[0] == 0x62u8 {
-                                                                        //     use crate::protocol::WagonNack;
-                                                                        //
-                                                                        //     if let Ok(nack) = serde_json::from_slice::<WagonNack>(&data[1..]) {
-                                                                        //         println!("[transport] 🔄 Received NACK for train #{}: {} missing wagons",
-                                                                        //                  nack.train_id, nack.missing_wagons.len());
-                                                                        //
-                                                                        //         // Отправляем NACK в gateway для обработки
-                                                                        //         if let Some(ref tx) = nack_tx {
-                                                                        //             let peer_id_for_tx = peer_id.clone();
-                                                                        //             let _ = tx.send((peer_id, nack)).await;
-                                                                        //             println!("[transport] 📤 NACK sent to gateway for retransmission");
-                                                                        //         } else {
-                                                                        //             println!("[transport] ⚠️  NACK channel not connected! Wagon retransmission disabled!");
-                                                                        //         }
-                                                                        //         continue;
-                                                                        //     }
-                                                                        // }
 
                                                                     // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
                                                                     if let Ok(tunnel_data) = crate::proxy::ProxyTunnelData::from_bincode(&data) {
@@ -3337,34 +3308,8 @@ impl P2PTransport {
                                                         eprintln!("[transport] ❌ Failed to parse YTP Wagon");
                                                     }
                                                 }
-                                                0x61 => {
-                                                    // ⚠️ ACK/NACK DISABLED per user directive
-                                                    // YTP ACK/NACK packet
-                                                    // if let Ok(ack) = serde_json::from_slice::<TrainAckMessage>(&decrypted[1..]) {
-                                                    //     println!("[transport] 📨 YTP ACK from {}: train #{:?}",
-                                                    //              crate::util::mask_hash_id(&peer_id), ack.train_id());
-                                                    //
-                                                    //     match &ack {
-                                                    //         TrainAckMessage::Complete { .. } => {
-                                                    //             println!("[transport] ✅ Train #{} complete! ACK received from {}",
-                                                    //                      ack.train_id(), crate::util::mask_hash_id(&peer_id));
-                                                    //             // TODO: Отправить ACK в gateway для очистки sent_trains
-                                                    //         }
-                                                    //         TrainAckMessage::Missing { missing_wagons, total_wagons, .. } => {
-                                                    //             println!("[transport] ⚠️  Train #{} missing wagons: {}/{}",
-                                                    //                      ack.train_id(), missing_wagons.len(), total_wagons);
-                                                    //             // TODO: Trigger express train for missing wagons
-                                                    //         }
-                                                    //         TrainAckMessage::Progress { progress_percent, .. } => {
-                                                    //             println!("[transport] 📊 Train #{} progress: {:.1}%",
-                                                    //                      ack.train_id(), progress_percent);
-                                                    //         }
-                                                    //     }
-                                                    // } else {
-                                                    //     eprintln!("[transport] ❌ Failed to parse YTP ACK");
-                                                    // }
-                                                    println!("[transport] ⚠️ ACK/NACK disabled - ignoring 0x61 packet");
-                                                }
+                                                // 0x61: подтверждений поездов в протоколе нет; пакет старого узла игнорируется
+                                                0x61 => {}
                                                 0x70 => {
                                                     // ⚡ BatchedWagon - несколько пакетов в одном wagon
                                                     let batched_bytes = decrypted[1..].to_vec();
@@ -5306,12 +5251,6 @@ impl P2PTransport {
         // We need to modify proxy_response_tx but it's in Arc<Mutex<...>>
         // This won't work directly...
         // TODO: Need to refactor proxy_response_tx to be Arc<Mutex<Option<...>>>
-    }
-
-    /// 🔄 Set NACK channel (for Wagon Retransmission)
-    pub fn set_nack_channel(&self, tx: tokio::sync::mpsc::Sender<(HashId, crate::protocol::WagonNack)>) {
-        // We need to modify nack_tx but it's in Arc<Mutex<...>>
-        // TODO: Need to refactor nack_tx to be Arc<Mutex<Option<...>>>
     }
 
     /// Set YTP Station

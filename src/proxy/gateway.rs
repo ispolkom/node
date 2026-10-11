@@ -24,49 +24,6 @@ fn is_normal_tunnel_shutdown(error: &std::io::Error) -> bool {
     )
 }
 
-/// Хранилище отправленных wagon-ов для retransmission
-#[derive(Debug)]
-pub struct SentTrain {
-    /// ID поезда
-    train_id: u64,
-
-    /// Wagon-ы: wagon_num → wagon data (сериализованный)
-    wagons: HashMap<u16, Vec<u8>>,
-
-    /// Время отправки
-    sent_time: Instant,
-
-    /// Target node (кому отправляли)
-    pub target_node: HashId,
-}
-
-impl SentTrain {
-    /// Создать новое хранилище для поезда
-    pub fn new(train_id: u64, target_node: HashId) -> Self {
-        Self {
-            train_id,
-            wagons: HashMap::new(),
-            sent_time: Instant::now(),
-            target_node,
-        }
-    }
-
-    /// Добавить wagon (public для gateway)
-    pub fn add_wagon(&mut self, wagon_num: u16, wagon_data: Vec<u8>) {
-        self.wagons.insert(wagon_num, wagon_data);
-    }
-
-    /// Проверить устарел ли train (TTL 60 секунд)
-    fn is_expired(&self) -> bool {
-        self.sent_time.elapsed() > Duration::from_secs(60)
-    }
-
-    /// Получить wagon для переотправки
-    pub fn get_wagon(&self, wagon_num: u16) -> Option<&Vec<u8>> {
-        self.wagons.get(&wagon_num)
-    }
-}
-
 /// Helper function to send tunnel data
 async fn send_tunnel_data(
     station: &Arc<Station>,
@@ -95,8 +52,6 @@ pub struct HttpProxyGateway {
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
     /// Active tunnels: tunnel_id -> write half
     active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
-    /// Отправленные wagon-ы для retransmission: train_id → SentTrain
-    pub sent_trains: Arc<Mutex<HashMap<u64, SentTrain>>>,
 }
 
 impl HttpProxyGateway {
@@ -120,7 +75,6 @@ impl HttpProxyGateway {
             request_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
-            sent_trains: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -146,15 +100,6 @@ impl HttpProxyGateway {
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
         tokio::spawn(async move {
             Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
-        });
-
-        // Start sent trains cleanup task (удаляем устаревшие trains каждые 30 секунд)
-        let sent_trains_clone = self.sent_trains.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                Self::cleanup_expired_trains(sent_trains_clone.clone()).await;
-            }
         });
 
         // Get the receiver
@@ -197,7 +142,6 @@ impl HttpProxyGateway {
             request_rx: self.request_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
-            sent_trains: self.sent_trains.clone(),
         }
     }
 
@@ -583,29 +527,7 @@ impl HttpProxyGateway {
         headers
     }
 
-    /// Cleanup expired sent trains (вызывается каждые 30 секунд)
-    async fn cleanup_expired_trains(sent_trains: Arc<Mutex<HashMap<u64, SentTrain>>>) {
-        let mut trains = sent_trains.lock().await;
-        let before_count = trains.len();
-
-        // Удаляем устаревшие trains
-        trains.retain(|train_id, sent_train| {
-            if sent_train.is_expired() {
-                debug!("🧹 Cleaning up expired train #{}", train_id);
-                false
-            } else {
-                true
-            }
-        });
-
-        let after_count = trains.len();
-        if before_count > after_count {
-            info!("🧹 Cleaned up {} expired trains ({} → {})",
-                 before_count - after_count, before_count, after_count);
-        }
-    }
-
-    /// 🚂 Send response via YTP (DUAL-PATH с сохранением для NACK!)
+    /// 🚂 Send response via YTP (DUAL-PATH)
     async fn send_response(&self, target_node: HashId, response: ProxyResponse) -> Result<()> {
         // ⚡ Сериализуем через bincode (в 3-5 раз быстрее JSON)
         let response_bytes = response.to_bincode()
@@ -621,41 +543,9 @@ impl HttpProxyGateway {
         let mut packet = vec![0x41u8];
         packet.extend_from_slice(&response_bytes);
 
-        // 💾 СОХРАНЯЕМ packet для NACK fallback (до отправки!)
-        let packet_clone = packet.clone();
-
         // ✅ Используем station.send_train() - DUAL-PATH теперь!
         let train_id = self.station.send_train(target_node, packet).await
             .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
-
-        // 💾 СОХРАНЯЕМ wagons для NACK fallback (если оба пути потеряли!)
-        let wagon_size = crate::protocol::Wagon::PAYLOAD_SIZE;
-        let mut sent_trains = self.sent_trains.lock().await;
-        let sent_train = sent_trains.entry(train_id)
-            .or_insert_with(|| SentTrain::new(train_id, target_node));
-
-        // Разбиваем данные и сохраняем каждый wagon
-        for (i, chunk) in packet_clone.chunks(wagon_size).enumerate() {
-            // Создаём wagon для сериализации
-            // Важно: используем те же параметры что и в Station::send_train
-            let wagon = crate::protocol::Wagon::new(
-                train_id,
-                i as u32,
-                crate::protocol::Train::calculate_wagon_count(&packet_clone) as u32,
-                (i * wagon_size) as u64,
-                chunk.to_vec(),
-                0  // line_id не важен для storage, wagons одинаковые для обоих путей
-            );
-
-            match wagon.to_bytes() {
-                Ok(wagon_bytes) => {
-                    sent_train.add_wagon(i as u16, wagon_bytes);
-                }
-                Err(e) => {
-                    warn!("⚠️  Failed to serialize wagon #{} for storage: {}", i, e);
-                }
-            }
-        }
 
         info!("✅ Response sent via YTP DUAL-PATH! Train #{}", train_id);
 

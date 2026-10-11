@@ -7,10 +7,9 @@
 use crate::netlayer::P2PTransport;
 use crate::proxy::{ProxyRequest, ProxyResponse, ProxyTunnelData, ProxyConfig, UrlMapper};
 use crate::util::HashId;
-use crate::protocol::{Station, WagonNack, NackReason};
+use crate::protocol::Station;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
+use std::collections::HashMap;
 use std::io::ErrorKind;
 use tokio::sync::{Mutex, RwLock};
 use anyhow::{Result, Context};
@@ -50,169 +49,6 @@ async fn send_tunnel_data_dispatch(
     send_tunnel_data_to_gateway(station, gateway_node, tunnel_data).await
 }
 
-/// 🚂 Состояние сборки поезда на клиенте (DUAL-PATH с deduplication)
-#[derive(Debug)]
-struct TrainReassemblyState {
-    /// ID поезда
-    train_id: u64,
-
-    /// Общее количество wagon-ов
-    total_wagons: u16,
-
-    /// 📦 Wagons с Path0 (deduplication)
-    path0_wagons: HashMap<u16, Vec<u8>>,
-
-    /// 📦 Wagons с Path1 (deduplication)
-    path1_wagons: HashMap<u16, Vec<u8>>,
-
-    /// ✅ Собранные wagon-ы (уже взяты из любого пути)
-    assembled: HashSet<u16>,
-
-    /// 📦 Полный train (собранный из данных wagon-ов)
-    train_data: Vec<u8>,
-
-    /// Время получения последнего wagon-а
-    last_wagon_time: Instant,
-
-    /// NACK уже отправлен?
-    nack_sent: bool,
-
-    /// Target node (откуда получили train)
-    source_node: HashId,
-}
-
-impl TrainReassemblyState {
-    /// Создать новое состояние сборки
-    fn new(train_id: u64, total_wagons: u16, source_node: HashId) -> Self {
-        Self {
-            train_id,
-            total_wagons,
-            path0_wagons: HashMap::new(),
-            path1_wagons: HashMap::new(),
-            assembled: HashSet::new(),
-            train_data: Vec::new(),
-            last_wagon_time: Instant::now(),
-            nack_sent: false,
-            source_node,
-        }
-    }
-
-    /// 🔄 Добавить wagon из определённого пути (с deduplication)
-    fn add_wagon(&mut self, wagon_num: u16, wagon_data: Vec<u8>, path_id: u8) {
-        // Сохраняем wagon в соответствующий путь
-        match path_id {
-            0 => {
-                self.path0_wagons.insert(wagon_num, wagon_data);
-            }
-            1 => {
-                self.path1_wagons.insert(wagon_num, wagon_data);
-            }
-            _ => {
-                warn!("⚠️ Unknown path_id: {}", path_id);
-                return;
-            }
-        }
-
-        self.last_wagon_time = Instant::now();
-    }
-
-    /// 🔧 Пытается собрать train из обоих путей
-    /// Возвращает true если train собран полностью
-    fn try_assemble(&mut self) -> bool {
-        let mut complete = true;
-        let mut assembled_data = Vec::new();
-
-        for wagon_num in 0..self.total_wagons {
-            // ✅ Пропускаем уже собранные
-            if self.assembled.contains(&wagon_num) {
-                continue;
-            }
-
-            // 🔄 Priority: Path0 → Path1 → Missing
-            let wagon_data = self.path0_wagons
-                .get(&wagon_num)
-                .or_else(|| self.path1_wagons.get(&wagon_num));
-
-            if let Some(data) = wagon_data {
-                // ✅ Собрали wagon из любого пути
-                self.assembled.insert(wagon_num);
-                assembled_data.extend_from_slice(data);
-            } else {
-                // ❌ Wagon missing в обоих путях
-                complete = false;
-            }
-        }
-
-        if complete {
-            // ✅ TRAIN COMPLETE!
-            self.train_data = assembled_data;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Отметить wagon как полученный (legacy, для совместимости)
-    fn mark_received(&mut self, wagon_num: u16) {
-        self.assembled.insert(wagon_num);
-        self.last_wagon_time = Instant::now();
-    }
-
-    /// Проверить все ли wagon-ы получены
-    fn is_complete(&self) -> bool {
-        self.assembled.len() as u16 == self.total_wagons
-    }
-
-    /// Получить количество полученных wagon-ов
-    fn received_count(&self) -> usize {
-        self.assembled.len()
-    }
-
-    /// Получить список потерянных wagon-ов (нет ни в Path0, ни в Path1)
-    fn missing_wagons(&self) -> Vec<u16> {
-        let mut missing = Vec::new();
-        for i in 0..self.total_wagons {
-            if !self.assembled.contains(&i) {
-                // Проверяем есть ли в любом пути
-                let has_in_path0 = self.path0_wagons.contains_key(&i);
-                let has_in_path1 = self.path1_wagons.contains_key(&i);
-
-                if !has_in_path0 && !has_in_path1 {
-                    missing.push(i);
-                }
-            }
-        }
-        missing
-    }
-
-    /// Получить собранные данные
-    fn get_train_data(&self) -> Vec<u8> {
-        self.train_data.clone()
-    }
-
-    /// Проверить нужно ли отправлять NACK
-    fn should_send_nack(&self) -> bool {
-        if self.nack_sent {
-            return false; // Уже отправляли
-        }
-
-        let elapsed = self.last_wagon_time.elapsed();
-        let received_pct = (self.received_count() as f64 / self.total_wagons as f64) * 100.0;
-
-        // ⚡ Timeout: 1 секунда без новых wagon-ов (было 5 сек!)
-        if elapsed > Duration::from_secs(1) {
-            return true;
-        }
-
-        // ⚡ Threshold: получили 50%+ но не все (было 90%!)
-        if received_pct >= 50.0 && !self.is_complete() {
-            return true;
-        }
-
-        false
-    }
-}
-
 /// HTTP Proxy Client (runs on client node)
 ///
 /// Listens on localhost:8080 and forwards HTTP requests via P2P network
@@ -227,8 +63,6 @@ pub struct HttpProxyClient {
     /// Active tunnels: tunnel_id -> write half
     active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
     pub station: Arc<Station>,
-    /// Состояния сборки поездов: train_id -> TrainReassemblyState
-    train_reassembly: Arc<Mutex<HashMap<u64, TrainReassemblyState>>>,
 }
 
 impl HttpProxyClient {
@@ -249,7 +83,6 @@ impl HttpProxyClient {
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
             station: Arc::new(station),
-            train_reassembly: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -298,13 +131,6 @@ impl HttpProxyClient {
             Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
         });
 
-        // 🔄 Start NACK monitoring task (каждую секунду проверяет timeout)
-        let reassembly_clone = self.train_reassembly.clone();
-        let station_clone = self.station.clone(); // ✅ Передаём station вместо transport
-        tokio::spawn(async move {
-            Self::nack_monitor_task(reassembly_clone, station_clone).await;
-        });
-
         // Accept incoming connections
         loop {
             match listener.accept().await {
@@ -346,7 +172,6 @@ impl HttpProxyClient {
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
             station: self.station.clone(),
-            train_reassembly: self.train_reassembly.clone(),
         }
     }
 
@@ -867,83 +692,4 @@ impl HttpProxyClient {
         }
     }
 
-    /// 🔄 NACK Monitor Task - проверяет все собираемые поезда каждую секунду
-    /// и отправляет NACK если нужно
-    async fn nack_monitor_task(
-        train_reassembly: Arc<Mutex<HashMap<u64, TrainReassemblyState>>>,
-        station: Arc<Station>,  // ✅ Используем Station вместо Transport
-    ) {
-        use tokio::time::interval;
-        use std::time::Duration;
-
-        let mut ticker = interval(Duration::from_secs(1));
-
-        loop {
-            ticker.tick().await;
-
-            let mut reassembly = train_reassembly.lock().await;
-
-            // Проверяем каждый train
-            let mut trains_to_remove = Vec::new();
-
-            for (train_id, state) in reassembly.iter_mut() {
-                // Проверяем нужно ли отправлять NACK
-                if state.should_send_nack() {
-                    let missing = state.missing_wagons();
-
-                    if !missing.is_empty() {
-                        info!("🔄 Sending NACK for train #{}: {} missing wagons (got {}/{})",
-                             train_id,
-                             missing.len(),
-                             state.received_count(),
-                             state.total_wagons);
-
-                        // Создаём NACK
-                        let elapsed = state.last_wagon_time.elapsed();
-                        let reason = if elapsed > Duration::from_secs(1) { // ⚡ Было 5 сек!
-                            NackReason::Timeout
-                        } else {
-                            NackReason::Threshold
-                        };
-
-                        let nack = WagonNack::new(*train_id, missing.clone(), reason);
-
-                        // ✅ Используем переданную station (не создаём новую!)
-                        // Сериализуем NACK с префиксом 0x62 (NACK packet type)
-                        let nack_bytes = serde_json::to_vec(&nack).unwrap_or_default();
-                        let mut packet = vec![0x62u8]; // Префикс NACK
-                        packet.extend_from_slice(&nack_bytes);
-
-                        // Отправляем source node
-                        if let Err(e) = station.send_train(state.source_node, packet).await {
-                            error!("❌ Failed to send NACK for train #{}: {}", train_id, e);
-                        } else {
-                            info!("✅ NACK sent for train #{} (missing: {:?})", train_id,
-                                 &missing[..missing.len().min(10)]); // Показываем первые 10
-                        }
-
-                        // Помечаем что NACK отправлен
-                        state.nack_sent = true;
-                    }
-                }
-
-                // Если поезд собран полностью - удаляем через 5 секунд
-                if state.is_complete() && state.last_wagon_time.elapsed() > Duration::from_secs(5) {
-                    trains_to_remove.push(*train_id);
-                }
-
-                // Если поезд устарел (60 секунд) - удаляем
-                if state.last_wagon_time.elapsed() > Duration::from_secs(60) {
-                    warn!("⏱️  Train #{} timeout after 60s, removing", train_id);
-                    trains_to_remove.push(*train_id);
-                }
-            }
-
-            // Удаляем завершённые поезда
-            for train_id in trains_to_remove {
-                reassembly.remove(&train_id);
-                debug!("🧹 Removed completed/expired train #{}", train_id);
-            }
-        }
-    }
 }

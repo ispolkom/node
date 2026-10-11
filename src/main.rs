@@ -372,9 +372,6 @@ async fn main() -> anyhow::Result<()> {
     let (proxy_tunnel_tx, proxy_tunnel_rx) = mpsc::channel::<(yandi::util::HashId, yandi::proxy::ProxyTunnelData)>(100);
     let proxy_tunnel_rx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(proxy_tunnel_rx)));
 
-    // 8.75 Create NACK channel (для wagon retransmission на gateway)
-    let (nack_tx, nack_rx) = mpsc::channel::<(yandi::util::HashId, yandi::protocol::WagonNack)>(100);
-    let nack_rx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(nack_rx)));
 
     // 8.8 Create SOCKS5 channels (аналогично HTTP Proxy)
     let (socks5_req_tx, socks5_req_rx) = mpsc::channel::<(yandi::util::HashId, yandi::socks5::Socks5ProxyRequest)>(100);
@@ -414,7 +411,6 @@ async fn main() -> anyhow::Result<()> {
         Some(proxy_tx),
         Some(proxy_resp_tx),
         Some(proxy_tunnel_tx),
-        Some(nack_tx), // 🔄 NACK channel
         // SOCKS5 handlers
         Some(socks5_gateway_tx), // 🧦 SOCKS5 Gateway auto-start
         Some(socks5_req_tx),
@@ -752,14 +748,12 @@ async fn main() -> anyhow::Result<()> {
     let p2p_tunnel_manager_for_cli = p2p_tunnel_manager.clone();
     let proxy_rx_for_cli = proxy_rx.clone();
     let proxy_tunnel_rx_for_cli = proxy_tunnel_rx.clone();
-    let nack_rx_for_cli = nack_rx.clone();
     let socks5_req_rx_for_cli = socks5_req_rx.clone();
     let socks5_tunnel_rx_for_cli = socks5_tunnel_rx.clone();
     let cli = P2PCli::new(transport.clone())
         .with_proxy_response_channel(proxy_resp_rx)
         .with_proxy_request_channel(proxy_rx_for_cli)
         .with_proxy_tunnel_data_channel(proxy_tunnel_rx_for_cli)
-        .with_nack_channel(nack_rx_for_cli) // 🔄 NACK channel
         .with_socks5_response_channel(socks5_resp_rx)
         .with_socks5_request_channel(socks5_req_rx_for_cli)
         .with_socks5_tunnel_data_channel(socks5_tunnel_rx_for_cli)
@@ -881,7 +875,6 @@ async fn main() -> anyhow::Result<()> {
         let transport_for_proxy_gateway = transport.clone();
         let proxy_rx_clone = proxy_rx.clone();
         let proxy_tunnel_rx_clone = proxy_tunnel_rx.clone();
-        let nack_rx_clone = nack_rx.clone();
 
         tokio::spawn(async move {
             println!("🌐 Proxy Gateway Auto-Start Manager started (Gateway mode)");
@@ -894,11 +887,6 @@ async fn main() -> anyhow::Result<()> {
 
             let tunnel_rx = {
                 let mut rx_lock = proxy_tunnel_rx_clone.lock().await;
-                rx_lock.take()
-            };
-
-            let nack_rx_chan = {
-                let mut rx_lock = nack_rx_clone.lock().await;
                 rx_lock.take()
             };
 
@@ -916,11 +904,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(tunnel_rx) = tunnel_rx {
                 gateway = gateway.with_tunnel_data_channel(tunnel_rx);
             }
-
-            // TODO: NACK handler - нужен публичный метод в HttpProxyGateway
-            // if let Some(nack_rx) = nack_rx_chan {
-            //     // Запускаем NACK handler
-            // }
 
             // Регистрируем Station
             transport_for_proxy_gateway.set_station(gateway.station.clone()).await;
@@ -976,7 +959,6 @@ async fn main() -> anyhow::Result<()> {
         let transport_for_socks5_gateway = transport.clone();
         let socks5_req_rx_clone = socks5_req_rx.clone();
         let socks5_tunnel_rx_clone = socks5_tunnel_rx.clone();
-        let nack_rx_clone = nack_rx.clone();
 
         tokio::spawn(async move {
             println!("🧦 SOCKS5 Gateway Auto-Start Manager started (Gateway mode)");

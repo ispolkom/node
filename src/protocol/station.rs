@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use super::{Train, TrainId, Wagon, WagonFlags};
-use super::express::{ExpressTrain, TrainAckMessage};
+use super::express::ExpressTrain;
 use super::rate_controller::{RateController, RateAction, Pacer};
 use crate::util::HashId;
 use crate::netlayer::{P2PTransport, transport::get_wagon_stats};
@@ -500,11 +500,6 @@ impl Station {
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;
 
-            // ⚠️ ACK/NACK DISABLED per user directive
-            // // 🎉 ОТПРАВЛЯЕМ ACK source node!
-            // if let Err(e) = self.send_train_ack(source_id, train_id).await {
-            //     eprintln!("⚠️  Failed to send ACK for train #{}: {}", train_id, e);
-            // }
 
             Ok(Some(train_id))
         } else {
@@ -570,11 +565,6 @@ impl Station {
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;
 
-            // ⚠️ ACK/NACK DISABLED per user directive
-            // // 🎉 ОТПРАВЛЯЕМ ACK source node!
-            // if let Err(e) = self.send_train_ack(source_id, train_id).await {
-            //     eprintln!("⚠️  Failed to send ACK for train #{}: {}", train_id, e);
-            // }
 
             Ok(Some(train_id))
         } else {
@@ -712,54 +702,6 @@ impl Station {
         println!("✅ Express train sent!");
 
         Ok(())
-    }
-
-    /// ⚠️ DISABLED: Отправить ACK сообщение
-    #[allow(dead_code)]
-    pub async fn send_ack(
-        &self,
-        dest: HashId,
-        ack: TrainAckMessage,
-    ) -> Result<(), StationError> {
-        let ack_bytes = serde_json::to_vec(&ack)
-            .map_err(|e| StationError::SerializationError(e.to_string()))?;
-
-        // Добавляем префикс YTP ACK (0x61 = YTP ACK)
-        let mut packet = vec![0x61u8];
-        packet.extend_from_slice(&ack_bytes);
-
-        self.transport.send_encrypted(dest, &packet).await
-            .map_err(|e| StationError::SendError(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// ⚠️ DISABLED: Отправить ACK когда train полностью собран
-    #[allow(dead_code)]
-    async fn send_train_ack(&self, source: HashId, train_id: TrainId) -> Result<(), StationError> {
-        use super::TrainAckMessage;
-
-        eprintln!("🎉 [ACK] PREPARING ACK for train #{} to source {}", train_id, hex::encode(&source.0[..8]));
-
-        // Вычисляем checksum собранного train'а
-        let checksum = {
-            let depot = self.depot.lock().await;
-            let train = depot.get_train(train_id);
-            train.map(|t| {
-                eprintln!("[ACK] Got train for checksum, calculating...");
-                t.calculate_checksum()
-            })
-                .unwrap_or_else(|| {
-                    eprintln!("[ACK] ⚠️  Train #{} not found in depot!", train_id);
-                    [0u8; 32]
-                })
-        };
-
-        let ack = TrainAckMessage::complete(train_id, checksum);
-
-        println!("🎉 [ACK] Sending ACK for train #{} to source", train_id);
-
-        self.send_ack(source, ack).await
     }
 
     // ==================== ⚡ BATCHING METHODS ====================
