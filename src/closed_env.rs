@@ -295,6 +295,10 @@ impl ClosedEnv {
 }
 
 #[cfg(test)]
+#[path = "closed_env/audit_round16.rs"]
+mod audit_round16;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
