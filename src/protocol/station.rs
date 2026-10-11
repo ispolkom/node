@@ -115,7 +115,7 @@ pub struct StationConfig {
     /// 🚦 Потолок скорости отправки на провод, Мбит/с (учитывает обе копии каждого вагона). Отправитель «отправил и забыл», обратной связи нет,
     /// поэтому потолок задаётся заранее: по умолчанию 300, `YANDI_PACE_MBPS` меняет. Выше канала ставить нельзя: излишек теряется и поток рвётся.
     pub pace_mbps: u64,
-    /// Сколько раз подряд уходит одна и та же зашифрованная датаграмма вагона (1..=3; по умолчанию 2). `YANDI_WAGON_COPIES`.
+    /// Сколько раз подряд уходит одна и та же зашифрованная датаграмма вагона (2..=3; по умолчанию 2; меньше двух нельзя). `YANDI_WAGON_COPIES`.
     pub wagon_copies: usize,
 }
 
@@ -344,7 +344,8 @@ impl Station {
 
         // Вагон строится, сериализуется и шифруется ОДИН раз; готовая датаграмма уходит `copies` раз подряд. Получатель принимает первую
         // дошедшую копию, остальные отбрасывает по счётчику сессии до расшифровки (окно повторов); потерю одной копии закрывает другая.
-        let copies = self.config.wagon_copies.clamp(1, 3);
+        // полный дубль — решение владельца: меньше двух экземпляров не бывает
+        let copies = self.config.wagon_copies.clamp(2, 3);
         for (i, chunk) in wagons {
             let wagon_num = i as u32;
             let offset = (i * wagon_size) as u64;
@@ -392,10 +393,22 @@ impl Station {
         }
 
         // Ждём завершения всех отправок (обоих путей)
+        let mut failed = 0usize;
         for task in send_tasks {
-            if let Err(e) = task.await {
-                eprintln!("❌ Wagon send failed: {}", e);
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    failed += 1;
+                    eprintln!("❌ Wagon send failed: {}", e);
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("❌ Wagon send task failed: {}", e);
+                }
             }
+        }
+        if failed > 0 {
+            return Err(StationError::SendError(format!("поезд #{train_id}: не отправлено вагонов: {failed}")));
         }
 
         tracing::trace!("✅ Train #{} sent on DUAL-PATH! (Path#0 + Path#1)", train_id);
