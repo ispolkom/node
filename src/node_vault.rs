@@ -104,6 +104,10 @@ fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
     if words.len() != 4 || words.iter().any(|w| w.chars().count() < 5) {
         bail!("нужны четыре слова не короче пяти знаков");
     }
+    let mut seen = std::collections::HashSet::new();
+    if !words.iter().all(|w| seen.insert(w.to_lowercase())) {
+        bail!("слова не должны повторяться");
+    }
     // Длины сохраняют границы слов; пробелы между словами нормализуются.
     let mut encoded = Zeroizing::new(Vec::new());
     for word in words {
@@ -188,6 +192,11 @@ fn unwrap(
 impl VaultEnvelope {
     /// Только создание нового envelope, не замена существующего на диске.
     pub fn create(password: &str, recovery: Option<&str>) -> Result<Self> {
+        Ok(Self::create_unlocked(password, recovery)?.0)
+    }
+
+    /// Новый envelope и сразу открытый сеанс с тем же DK: второй KDF для первого входа не нужен.
+    pub fn create_unlocked(password: &str, recovery: Option<&str>) -> Result<(Self, NodeVault)> {
         password_ok(password)?;
         let phrase = recovery.map(phrase_secret).transpose()?;
         let id = random();
@@ -204,7 +213,10 @@ impl VaultEnvelope {
             revision: 0,
         };
         envelope.tag = envelope.mac(&key).finalize().into_bytes().into();
-        Ok(envelope)
+        let vault = NodeVault {
+            session: Some(Session { id, key }),
+        };
+        Ok((envelope, vault))
     }
 
     fn mac(&self, key: &[u8; 32]) -> Hmac<sha2::Sha256> {
@@ -315,6 +327,24 @@ impl NodeVault {
         next.password = wrap(&session.key, password.as_bytes(), &session.id, b"password")?;
         next.tag = next.mac(&session.key).finalize().into_bytes().into();
         Ok(next)
+    }
+
+    /// Отдельный 32-байтовый ключ для области данных (чаты, группы ПК, ключи «ПК как собеседник»).
+    /// Разные области не выводятся друг из друга; копию вызывающий слой стирает при блокировке.
+    pub fn subkey(&self, domain: &str) -> Result<Zeroizing<[u8; 32]>> {
+        if domain.is_empty() || domain.len() > 128 {
+            bail!("неверная область данных");
+        }
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| anyhow!("закрытая среда заперта"))?;
+        let info = [b"YANDI-NODE-CLOSED-SUBKEY-V1\0".as_slice(), session.id.as_slice(), domain.as_bytes()].concat();
+        let mut key = Zeroizing::new([0; 32]);
+        hkdf::Hkdf::<sha2::Sha256>::new(Some(DATA_AAD), session.key.as_ref())
+            .expand(&info, key.as_mut())
+            .map_err(|_| anyhow!("HKDF"))?;
+        Ok(key)
     }
 
     fn data_cipher(&self, domain: &str) -> Result<(Aes256Gcm, Vec<u8>)> {
@@ -468,5 +498,26 @@ mod tests {
         assert!(VaultEnvelope::create("password", Some("one two three four")).is_err());
         assert!(phrase_secret("abcde fghij klmno pqrst extra").is_err());
         assert!(serde_json::from_str::<VaultEnvelope>("{}").is_err());
+    }
+
+    #[test]
+    fn subkeys_are_domain_separated_and_follow_lock() {
+        let (envelope, mut vault) = VaultEnvelope::create_unlocked("owner password", None).unwrap();
+        let chat = vault.subkey("chat").unwrap();
+        assert_eq!(*chat, *vault.subkey("chat").unwrap());
+        assert_ne!(*chat, *vault.subkey("groups_pc").unwrap());
+        assert!(vault.subkey("").is_err());
+        // сеанс из create_unlocked тот же DK, что даёт вход паролем
+        let mut again = NodeVault::default();
+        again.unlock(&envelope, "owner password").unwrap();
+        assert_eq!(*chat, *again.subkey("chat").unwrap());
+        vault.lock();
+        assert!(vault.subkey("chat").is_err());
+    }
+
+    #[test]
+    fn recovery_words_must_differ() {
+        assert!(VaultEnvelope::create("owner password", Some("alpha1 alpha1 gamma3 delta4")).is_err());
+        assert!(VaultEnvelope::create("owner password", Some("Alpha1 alpha1 gamma3 delta4")).is_err());
     }
 }

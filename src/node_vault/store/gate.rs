@@ -124,6 +124,21 @@ impl EnvelopeStore {
         .await?
     }
 
+    /// Первичная настройка: envelope и открытый сеанс без повторного KDF.
+    pub async fn create_unlocked_async(
+        password: String,
+        phrase: Option<String>,
+    ) -> Result<(VaultEnvelope, NodeVault)> {
+        let password = Zeroizing::new(password);
+        let phrase = phrase.map(Zeroizing::new);
+        let permit = queue().clone().acquire_owned().await?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            VaultEnvelope::create_unlocked(&password, phrase.as_ref().map(|s| s.as_str()))
+        })
+        .await?
+    }
+
     /// Растяжение замков первичной настройки тоже не выполняется на async runtime.
     pub async fn create_envelope_async(
         password: String,
