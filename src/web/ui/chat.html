@@ -417,7 +417,7 @@
             html += '<div class="file-size">' + formatFileSize(transfer.size) + '</div>';
             html += '</div>';
             html += '<div class="upload-progress"><div class="upload-progress-bar" style="width:' + progress + '%;"></div></div>';
-            html += '<div class="upload-progress-text"><span>' + escapeHTML(statusText) + '</span><span>' + transfer.sentChunks + '/' + transfer.totalChunks + '</span></div>';
+            html += '<div class="upload-progress-text"><span>' + escapeHTML(statusText) + '</span><span>' + (Number(transfer.sentChunks) || 0) + '/' + (Number(transfer.totalChunks) || 0) + '</span></div>';
             if (transfer.text) html += '<div class="message-text">' + escapeHTML(transfer.text) + '</div>';
             html += '</div></div></div>';
             return html;

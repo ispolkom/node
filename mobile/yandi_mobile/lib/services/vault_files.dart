@@ -87,7 +87,13 @@ class VaultFiles {
     try {
       await f.rename(doomed);
     } catch (_) {
-      try { await f.delete(); } catch (_) {}
+      // переименовать не вышло: затираем на месте; без затирания (не Android) — просто удаляем, но не бросаем открытые байты
+      final w = wipe;
+      if (w == null) {
+        try { await f.delete(); } catch (_) {}
+      } else {
+        _idle = _idle.then((_) async { try { await w(path); } catch (_) {} });
+      }
       return;
     }
     _idle = _idle.then((_) => _wipeAndDelete(doomed));

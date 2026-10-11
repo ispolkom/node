@@ -756,9 +756,13 @@ pub fn push_call(from_device: &str, text: &str) {
 
 /// События после `after` для страницы: (номер, от кого, текст сигнала); и последний номер.
 pub fn poll_calls(after: u64) -> (Vec<(u64, String, String)>, u64) {
-    let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
-    q.last_poll = Some(std::time::Instant::now());
-    (q.events.iter().filter(|(s, _, _)| *s > after).cloned().collect(), q.seq)
+    let (events, last) = {
+        let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
+        q.last_poll = Some(std::time::Instant::now());
+        (q.events.iter().filter(|(s, _, _)| *s > after).cloned().collect::<Vec<_>>(), q.seq)
+    };
+    // устройство заблокировали или забыли, пока сигнал ждал в очереди: страница его не получает
+    (events.into_iter().filter(|(_, from, _)| !is_blocked_phone(from) && crate::mobile_api::is_device_peer(from)).collect(), last)
 }
 
 #[cfg(test)]

@@ -81,6 +81,9 @@ class WsService {
   Timer?              _reconnectTimer;
   int                 _reconnectDelay = 5;
   int                 _reconnectAttempts = 0;
+  bool                _lossReported = false;
+  /// 5+10+20+40+60+60 с ≈ 3 минуты без связи
+  static const        _lossAfterAttempts = 6;
   bool                _screenOn       = true;
 
   // Адаптивный интервал: 30с экран вкл, 90с экран выкл
@@ -126,6 +129,7 @@ class WsService {
   /// Переключиться на другую ноду (failover).
   void switchNode(TrustedNode node) {
     _pingTimer?.cancel();
+    _reconnectTimer?.cancel();
     _channel?.sink.close();
     _channel = null;
     _node    = node;
@@ -147,14 +151,21 @@ class WsService {
         headers: {'Authorization': 'Bearer ${node.token}'},
       );
       final ch = _channel!;
-      ch.ready.then((_) { if (identical(_channel, ch)) onOpen?.call(); }).catchError((_) {});
+      ch.ready.then((_) {
+        if (!identical(_channel, ch)) return;
+        // задержку и счёт неудач сбрасываем только когда сокет действительно открылся, а не сразу после попытки
+        _reconnectDelay = 5;
+        _reconnectAttempts = 0;
+        _lossReported = false;
+        onOpen?.call();
+      }).catchError((_) {});
+      // обратные вызовы старого сокета (после переключения узла) не трогают новое соединение
       ch.stream.listen(
         _onData,
-        onError: (_) => _scheduleReconnect(),
-        onDone:  ()  => _scheduleReconnect(),
+        onError: (_) { if (identical(_channel, ch)) _scheduleReconnect(); },
+        onDone:  ()  { if (identical(_channel, ch)) _scheduleReconnect(); },
       );
       _startPingTimer();
-      _reconnectDelay = 5;
     } catch (_) {
       _scheduleReconnect();
     }
@@ -164,6 +175,12 @@ class WsService {
     _pingTimer?.cancel();
     _channel = null;
     _reconnectTimer?.cancel();
+    _reconnectAttempts++;
+    // узел не отвечает уже несколько минут (задержка дошла до предела): один раз просим приложение перейти на другой доверенный узел
+    if (_reconnectAttempts >= _lossAfterAttempts && !_lossReported) {
+      _lossReported = true;
+      unawaited(onPermanentLoss?.call());
+    }
     _reconnectTimer = Timer(Duration(seconds: _reconnectDelay), () {
       _reconnectDelay = (_reconnectDelay * 2).clamp(5, 60);
       _tryConnect();
@@ -225,6 +242,7 @@ class WsService {
     final pLen    = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
+    if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
 
     final text = await decryptIncoming(payload, fromPeerId: from);
     if (text == null) return;
@@ -236,6 +254,9 @@ class WsService {
     ));
   }
 
+  /// Предел DateTime в Dart (±100 000 000 суток от 1970 г.).
+  static const _maxDateMs = 8640000000000000;
+
   /// [1B 0x13][32B от кого][8B время][4B длина][зашифрованный сигнал]. Открытый текст не принимаем: сигналы звонка только E2E.
   Future<void> _handleLiveMsg(Uint8List data) async {
     if (data.length < 45) return;
@@ -244,6 +265,7 @@ class WsService {
     final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
     if (data.length < 45 + pLen) return;
     final payload = data.sublist(45, 45 + pLen);
+    if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
     final text = await decryptIncoming(payload, fromPeerId: from, kind: 2);
     if (text == null) return;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
@@ -275,8 +297,7 @@ class WsService {
     buf.add(peerBytes);
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
-    _sendRaw(buf.toBytes());
-    return true;
+    return _sendRaw(buf.toBytes());
   }
 
   /// Отправить только зашифрованно. Если ключа получателя нет или сокет не подключён, не отправляет ничего и возвращает false
@@ -292,8 +313,7 @@ class WsService {
     buf.add(_hexToBytes(toPeerIdHex));
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
-    _sendRaw(buf.toBytes());
-    return true;
+    return _sendRaw(buf.toBytes());
   }
 
   /// Живой сигнал (звонок): шифруется для получателя, уходит только если он на связи, нигде не хранится.
@@ -309,8 +329,7 @@ class WsService {
     buf.add(_hexToBytes(toPeerIdHex));
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
-    _sendRaw(buf.toBytes());
-    return true;
+    return _sendRaw(buf.toBytes());
   }
 
   /// Есть ли ключ получателя (то есть это своё устройство и E2E возможен).
@@ -348,7 +367,17 @@ class WsService {
     } catch (_) { return null; }
   }
 
-  void _sendRaw(Uint8List bytes) => _channel?.sink.add(bytes);
+  /// false — сокета нет (пропал, пока шифровали) или запись в него не удалась: отправитель не должен считать сообщение ушедшим.
+  bool _sendRaw(Uint8List bytes) {
+    final ch = _channel;
+    if (ch == null) return false;
+    try {
+      ch.sink.add(bytes);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 

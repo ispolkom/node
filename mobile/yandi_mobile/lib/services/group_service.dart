@@ -530,7 +530,11 @@ class GroupService {
   }
 
   /// Запись видна читателю? Служебные и стёртые не показываются как сообщения; запрещённые правилами — скрыты.
-  bool visible(String gid, GroupEntry e) => !e.deleted && e.kind != GroupKind.system && rules(gid).allows(e.kind);
+  bool visible(String gid, GroupEntry e) =>
+      !e.deleted && (e.kind != GroupKind.system || isPlaceholder(e)) && rules(gid).allows(e.kind);
+
+  /// Повреждённая (`bad`) или недоступная (`lost`, ключ поколения вытеснен с узла) запись: показывается в ленте пометкой, а не исчезает молча.
+  static bool isPlaceholder(GroupEntry e) => e.kind == GroupKind.system && (e.body['op'] == 'bad' || e.body['op'] == 'lost');
 
   Future<List<GroupEntry>> messages(String gid, {int? kind, int limit = 200}) async {
     final all = await store.entries(gid, kind: kind, limit: limit);

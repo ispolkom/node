@@ -388,7 +388,11 @@ class _GroupBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final time = DateFormat('HH:mm').format(DateTime.fromMillisecondsSinceEpoch(entry.ts));
     final t = entry.body['t'], name = entry.body['name'];
-    final text = t is String ? t : (name is String ? name : '');
+    final text = entry.body['op'] == 'lost' && entry.kind == GroupKind.system
+        ? '🔒 Сообщение недоступно: ключ этого поколения уже удалён с узла'
+        : entry.body['op'] == 'bad' && entry.kind == GroupKind.system
+            ? '⚠ Повреждённое сообщение: не прошло проверку'
+            : (t is String ? t : (name is String ? name : ''));
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(

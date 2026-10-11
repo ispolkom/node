@@ -186,6 +186,8 @@
     </footer>
 
     <script>
+    // числа из ответов API вставляются в разметку только как числа (не строкой с разметкой)
+    function num(v) { var n = Number(v); return isFinite(n) ? Math.trunc(n) : 0; }
     (function () {
         var KIND = { open: 'открытая', invite: 'по приглашению' };
         var ROLE = { owner: 'владелец', admin: 'админ', moderator: 'модератор', member: 'участник' };
@@ -208,7 +210,7 @@
                 var act = g.kind === 'open' ? '<button class="btn btn-sm btn-primary" type="button" data-jn="' + esc(g.id) + '">Вступить</button>'
                     : (g.requested ? '<span class="mg-sub">Запрошено</span>' : '<button class="btn btn-sm" type="button" data-rq="' + esc(g.id) + '">Запросить приглашение</button>');
                 return '<div class="mg-item" style="cursor:default;margin-bottom:8px"><b>' + esc(g.name) + '</b>' + (g.topic ? '<div class="mg-sub">Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div class="mg-sub">' + esc(g.about) + '</div>' : '')
-                    + '<div style="margin-top:4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>' + st + '</span>' + act + '<span class="mg-sub">' + g.members + ' уч.</span></div></div>';
+                    + '<div style="margin-top:4px;display:flex;gap:10px;align-items:center;flex-wrap:wrap"><span>' + st + '</span>' + act + '<span class="mg-sub">' + num(g.members) + ' уч.</span></div></div>';
             }).join('');
             $('mgCatalog').innerHTML = h || '<div class="form-help">Других групп на узле пока нет.</div>';
         }
@@ -218,7 +220,7 @@
                 var badge = g.requests > 0 ? '<span class="mg-tag" style="color:#ff4001">просятся: ' + g.requests + '</span>' : '';
                 return '<div class="mg-item' + (cur === g.id ? ' sel' : '') + '" data-open="' + esc(g.id) + '"><b>' + esc(g.name) + '</b>' + badge
                     + (g.topic ? '<div class="mg-sub">Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div class="mg-sub">' + esc(g.about) + '</div>' : '')
-                    + '<div class="mg-sub">' + (KIND[g.kind] || '') + ' · ' + g.members + ' уч. · ' + ROLE[g.role] + (g.muted ? ' · заглушены' : '') + (!g.has_key && g.role !== 'owner' ? ' · ждёт ключ' : '') + '</div></div>';
+                    + '<div class="mg-sub">' + (KIND[g.kind] || '') + ' · ' + num(g.members) + ' уч. · ' + ROLE[g.role] + (g.muted ? ' · заглушены' : '') + (!g.has_key && g.role !== 'owner' ? ' · ждёт ключ' : '') + '</div></div>';
             }).join('');
             if (!h) h = '<div class="form-help">Групп пока нет. Создайте свою или вступите.</div>';
             (d.gone || []).forEach(function (g) {
@@ -262,7 +264,7 @@
                     var inner;
                     if (b.f) {
                         // вложение: узел расшифровывает и проверяет файл; картинки показываем сразу, остальное — ссылкой
-                        var url = '/api/groups/' + encodeURIComponent(gid) + '/file/' + m.seq;
+                        var url = '/api/groups/' + encodeURIComponent(gid) + '/file/' + num(m.seq);
                         var icon = { 2: '🖼', 3: '📄', 4: '🎵', 5: '🎬' }[m.kind] || '📎';
                         inner = (m.kind === 2 ? '<a href="' + url + '" target="_blank" rel="noopener"><img src="' + url + '" alt="" style="max-width:240px;max-height:240px;border-radius:8px;display:block"></a>' : '')
                             + (m.kind === 4 ? '<audio controls preload="none" src="' + url + '" style="max-width:260px"></audio>' : '')
@@ -575,7 +577,7 @@
                 var mem = g.members.map(function (m) { return esc(m.alias) + ' — ' + ROLE[m.role] + (m.muted ? ', заглушён' : ''); }).join('<br>');
                 return '<div style="border:1px solid #8884;border-radius:6px;padding:10px;margin:8px 0">'
                     + '<b>' + esc(g.name) + '</b>' + (g.topic ? '<div>Тематика: ' + esc(g.topic) + '</div>' : '') + (g.about ? '<div>' + esc(g.about) + '</div>' : '') + '<div>' + (KIND[g.kind] || esc(g.kind)) + '</div>'
-                    + '<span>участников: ' + g.members.length + ', записей: ' + g.entries + ', журнал ' + Math.round(g.journal_bytes / 1024) + ' КБ, поколение ключа ' + g.epoch
+                    + '<span>участников: ' + num((g.members || []).length) + ', записей: ' + num(g.entries) + ', журнал ' + Math.round(num(g.journal_bytes) / 1024) + ' КБ, поколение ключа ' + num(g.epoch)
                     + (g.rekey_needed ? ' · <b style="color:#e67e22">владельцу стоит сменить ключ</b>' : '') + '</span>'
                     + '<div style="margin:6px 0">' + mem + '</div>'
                     + '<button class="btn btn-sm" type="button" data-del="' + esc(g.id) + '" data-name="' + esc(g.name) + '">Удалить группу…</button>'

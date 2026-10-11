@@ -65,8 +65,10 @@ class AvatarService extends ChangeNotifier {
         final name = e.uri.pathSegments.last;
         if (!name.endsWith('.png') || !used.contains(name.substring(0, name.length - 4))) {
           final w = wipe;
-          if (w == null || !await w(e.path)) {
-            if (await e.exists()) await e.delete();
+          if (w == null) {
+            await e.delete();
+          } else {
+            await w(e.path);   // не вышло затереть — файл остаётся и снова попадёт в уборку при следующем запуске
           }
         }
       }

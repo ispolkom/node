@@ -31,6 +31,13 @@ class CallSignal {
       final m = jsonDecode(text.substring(marker.length)) as Map<String, dynamic>;
       final cid = m['cid'] as String;
       if (cid.length < 8 || cid.length > 64) return null;
+      // кандидат ICE — только с полями нужных типов: иначе обработчик звонка упал бы на приведении типов
+      final c = m['cand'];
+      if (c != null) {
+        if (c is! Map || c['candidate'] is! String || (c['sdpMid'] != null && c['sdpMid'] is! String) || (c['sdpMLineIndex'] != null && c['sdpMLineIndex'] is! int)) {
+          return null;
+        }
+      }
       return CallSignal(
         type:  m['t'] as String,
         cid:   cid,

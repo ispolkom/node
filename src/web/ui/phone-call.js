@@ -201,10 +201,15 @@
     }
 
     function onEvent(e) {
-        if (!e.text || e.text.indexOf(MARK) !== 0) return;
+        if (!e || typeof e.text !== 'string' || typeof e.from !== 'string' || e.text.indexOf(MARK) !== 0) return;
         var s;
         try { s = JSON.parse(e.text.slice(MARK.length)); } catch (x) { return; }
-        if (!s || !s.cid || Math.abs(Date.now() - (s.ts || 0)) > 90000) return; // устаревший сигнал звонить не должен
+        // строгая проверка сигнала: версия, номер звонка — строка 8..64, время — конечное число в пределах 90 с (устаревший звонить не должен)
+        if (!s || typeof s !== 'object' || s.v !== 1 || typeof s.t !== 'string') return;
+        if (typeof s.cid !== 'string' || s.cid.length < 8 || s.cid.length > 64) return;
+        if (typeof s.ts !== 'number' || !isFinite(s.ts) || Math.abs(Date.now() - s.ts) > 90000) return;
+        if (s.video !== undefined && typeof s.video !== 'boolean') return;
+        if (typeof e.name !== 'string') e.name = 'Телефон';
         var mine = call && call.peer === e.from && call.cid === s.cid && call.phase !== 'ended';
         switch (s.t) {
             case 'invite':
@@ -229,7 +234,7 @@
             .then(function (r) { return r.json(); })
             .then(function (j) {
                 if (after == null) { after = j.last || 0; return; } // при загрузке страницы старые сигналы не проигрываем
-                (j.events || []).forEach(onEvent);
+                (Array.isArray(j.events) ? j.events : []).forEach(function (ev) { try { onEvent(ev); } catch (x) { /* один кривой сигнал не прерывает остальные */ } });
                 after = Math.max(after, j.last || 0);
             })
             .catch(function () {})

@@ -191,8 +191,9 @@ void main() {
     await owner.send(node.gid, GroupKind.text, {'t': {'nested': 1}});
     await owner.send(node.gid, GroupKind.text, {'t': 'после мусора'});
     await bob.sync();
-    final texts = (await bob.messages(node.gid)).map((e) => e.body['t']).toList();
-    expect(texts, ['после мусора'], reason: 'повреждённое помечено и скрыто, лента читается дальше');
+    final shown = await bob.messages(node.gid);
+    expect(shown.map((e) => e.body['t'] ?? e.body['op']).toList(), ['bad', 'bad', 'после мусора'],
+        reason: 'повреждённое видно пометкой, а лента читается дальше');
     // список групп с одной кривой строкой: остальные группы на месте
     final list = GroupInfo.listOf([{'id': 42}, {'id': node.gid, 'name': 'Тест', 'topic': '', 'kind': 'invite', 'my_alias': 'x', 'role': 'member'}]);
     expect(list.map((g) => g.id), [node.gid]);
