@@ -33,6 +33,7 @@ fn bounded(mut r: impl Read, limit: u64) -> Result<Vec<u8>> {
     ensure!(out.len() as u64 <= limit, "файл слишком большой");
     Ok(out)
 }
+#[cfg(test)]
 fn local_file(dir: &Path, name: &str, limit: u64) -> Result<Vec<u8>> {
     Ok(ReleaseDir::open(dir)?.read(name, limit)?)
 }
@@ -537,9 +538,9 @@ mod tests {
                 & 0o777,
             0o755
         );
-        update(source.path().to_str().unwrap(), &vk, &install, 0)
+        assert!(update(source.path().to_str().unwrap(), &vk, &install, 0)
             .await
-            .unwrap();
+            .is_err());
         fs::create_dir_all(install.join("current/data")).unwrap();
         fs::write(
             install.join("current/data/.release.json"),

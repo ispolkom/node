@@ -78,12 +78,16 @@ pub fn production_params() -> Params {
     Params::new(1 << 20, 4, 1, Some(32)).expect("argon2 params")
 }
 
-pub fn derive_signing_key(phrase: &str, params: Params) -> SigningKey {
+fn derive_signing_seed(phrase: &str, params: Params) -> Zeroizing<[u8; 32]> {
     let mut seed = Zeroizing::new([0u8; 32]);
+    let normalized = normalize(phrase);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(normalize(phrase).as_bytes(), KEY_SALT, &mut *seed)
+        .hash_password_into(normalized.as_bytes(), KEY_SALT, &mut *seed)
         .expect("argon2");
-    SigningKey::from_bytes(&seed)
+    seed
+}
+pub fn derive_signing_key(phrase: &str, params: Params) -> SigningKey {
+    SigningKey::from_bytes(&derive_signing_seed(phrase, params))
 }
 
 pub fn key_id(vk: &VerifyingKey) -> String {
@@ -424,6 +428,26 @@ mod tests {
                 derive_signing_key(expected, cheap()).to_bytes()
             );
         }
+        // Independent libargon2 v0x13 vectors: m=64 KiB, t=1, p=1, 32 bytes.
+        for (phrase, expected) in [
+            (
+                "ё й",
+                "b9d2f7a2953d739fba0712d0567314ead3ca7a07479414d51b35b7f1807d11c6",
+            ),
+            (
+                "Café Å",
+                "716695edf93b61302a06064fd43e7a1ec3f740c4b00eeb6969c7bf5d39601527",
+            ),
+            (
+                "Å",
+                "d8e7911bb15a707acb7709f089ebed88c0203b7ec8fed4731530b5ea2f1c44c9",
+            ),
+        ] {
+            assert_eq!(
+                hex::encode(&*derive_signing_seed(phrase, cheap())),
+                expected
+            );
+        }
         // Exact legacy KDF for an already NFC phrase: salt and parameters unchanged.
         let phrase =
             "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать";
@@ -438,7 +462,7 @@ mod tests {
     fn r6_normalized_phrase_is_zeroizing() {
         let phrase: Zeroizing<String> = normalize("  secret   words ");
         assert_eq!(&*phrase, "secret words");
-        let mut seed = Zeroizing::new([7u8; 32]);
+        let mut seed: Zeroizing<[u8; 32]> = derive_signing_seed(&phrase, cheap());
         use zeroize::Zeroize;
         seed.zeroize();
         assert_eq!(*seed, [0; 32]);
