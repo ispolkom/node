@@ -63,6 +63,7 @@ pub mod protocol;
 pub mod proxy;
 pub mod reachability;
 pub mod reciprocity;
+pub mod release;
 pub mod relay_net;
 pub mod route_rules;
 pub mod socks5;

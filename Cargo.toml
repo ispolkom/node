@@ -139,6 +139,10 @@ name = "yandi"
 path = "src/main.rs"
 
 [[bin]]
+name = "yandi-release"
+path = "src/bin/yandi_release.rs"
+
+[[bin]]
 name = "apk_signing_key"
 path = "src/bin/apk_signing_key.rs"
 
