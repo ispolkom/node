@@ -99,6 +99,7 @@ class VaultKeys {
   VaultKeys._(this._b);
   final VaultBackend _b;
   Uint8List? _dk;
+  int _generation = 0;
 
   static const minPasswordLength = 6;
   /// Фраза: ровно 4 поля, в каждом не короче 5 знаков, поля разные. Это частная переписка, а не оборона государства: слов хватает,
@@ -147,6 +148,7 @@ class VaultKeys {
 
   /// Стереть ключ из памяти (блокировка экрана, уход в фон).
   void lock() {
+    _generation++;
     final dk = _dk;
     if (dk != null) {
       dk.fillRange(0, dk.length, 0);
@@ -223,10 +225,10 @@ class VaultKeys {
   }
 
   /// Забыли пароль: открыть фразой и сразу задать новый пароль.
-  static Future<VaultKeys> recoverWithPhrase(VaultBackend b, List<String> phraseFields, String newPassword) =>
-      _serial(() => _recover(b, phraseFields, newPassword));
+  static Future<VaultKeys> recoverWithPhrase(VaultBackend b, List<String> phraseFields, String newPassword, {void Function()? beforeCommit}) =>
+      _serial(() => _recover(b, phraseFields, newPassword, beforeCommit: beforeCommit));
 
-  static Future<VaultKeys> _recover(VaultBackend b, List<String> phraseFields, String newPassword) async {
+  static Future<VaultKeys> _recover(VaultBackend b, List<String> phraseFields, String newPassword, {void Function()? beforeCommit}) async {
     final f = await _readFile(b);
     await _checkGeneration(b, f);
     final ph = f['ph'] as Map<String, dynamic>?;
@@ -240,28 +242,45 @@ class VaultKeys {
     final kek = await _kekPhrase(phrase, base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
     final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
     if (dk == null) throw VaultWrongSecret(failures);
-    await _setPassword(b, f, dk, newPassword);
-    await _resetCounters(b);
-    return VaultKeys._(b).._dk = dk;
+    try {
+      beforeCommit?.call();
+      await _setPassword(b, f, dk, newPassword, beforeCommit: beforeCommit);
+      await _resetCounters(b);
+      return VaultKeys._(b).._dk = dk;
+    } catch (_) {
+      dk.fillRange(0, dk.length, 0);
+      rethrow;
+    }
   }
 
   /// Сменить пароль (хранилище должно быть открыто; старый пароль проверяется заново).
   Future<void> changePassword(String oldPassword, String newPassword) async {
     if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
-    final dk = _dk;
-    if (dk == null) throw StateError('хранилище заблокировано');
-    final check = await VaultKeys.unlock(_b, oldPassword);   // неверный старый — те же счётчики и паузы
-    check.lock();
-    await _serial(() async => _setPassword(_b, await _readFile(_b), dk, newPassword));
+    final generation = _generation;
+    void alive() {
+      if (_dk == null || generation != _generation) throw StateError('смена пароля прервана блокировкой');
+    }
+    alive();
+    await _serial(() async {
+      alive();
+      // Проверенный ключ принадлежит этой операции: блокировка сеанса не превращает его в нули.
+      final check = await _unlock(_b, oldPassword);
+      try {
+        alive();
+        await _setPassword(_b, await _readFile(_b), check._dk!, newPassword, beforeCommit: alive);
+      } finally {
+        check.lock();
+      }
+    });
   }
 
   /// Удалить все ключи (кнопка «Удалить всё»): после этого данные нечитаемы навсегда.
-  static Future<void> destroy(VaultBackend b) async {
+  static Future<void> destroy(VaultBackend b) => _serial(() async {
     await b.writeBlob('');
     for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kCnt]) {
       await b.secureDelete(k);
     }
-  }
+  });
 
   // ── Фраза ──────────────────────────────────────────────────────────────────────────────────────────────────────────
 
@@ -305,17 +324,19 @@ class VaultKeys {
     }
   }
 
-  static Future<void> _setPassword(VaultBackend b, Map<String, dynamic> f, Uint8List dk, String password) async {
+  static Future<void> _setPassword(VaultBackend b, Map<String, dynamic> f, Uint8List dk, String password, {void Function()? beforeCommit}) async {
     final rnd = Random.secure();
     final salt = Uint8List.fromList(List.generate(16, (_) => rnd.nextInt(256)));
     final hw = await b.secureRead(_kHw);
     final hwBytes = hw != null ? base64.decode(hw) : Uint8List.fromList(List.generate(32, (_) => rnd.nextInt(256)));
+    beforeCommit?.call();
     if (hw == null) await b.secureWrite(_kHw, base64.encode(hwBytes));   // восстановление на другом телефоне: свой секрет Keystore
     final kdf = VaultKdf.fromJson((f['pw'] as Map<String, dynamic>)['kdf'] as Map<String, dynamic>);
     final kek = await _kekPassword(password, salt, kdf, hwBytes);
     f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
     final gen = ((f['gen'] as int?) ?? 0) + 1;
     f['gen'] = gen;
+    beforeCommit?.call();   // после всех вычислений, непосредственно перед записью нового замка
     await b.writeBlob(jsonEncode(f));      // сначала файл, потом метка: оборвёт между ними — файл новее метки, это допустимо
     await b.secureWrite(_kGen, '$gen');
   }
@@ -338,7 +359,23 @@ class VaultKeys {
   }
 
   static Future<void> _gate(VaultBackend b, String kFail, String kNext) async {
-    final next = int.tryParse(await b.secureRead(kNext) ?? '') ?? 0;
+    if (await b.secureRead(_kCnt) == null) {
+      // Старый формат или восстановление на новом устройстве: заводим ОБА счётчика до первой попытки.
+      await _resetCounters(b);
+      return;
+    }
+    final count = int.tryParse(await b.secureRead(kFail) ?? '');
+    final storedNext = int.tryParse(await b.secureRead(kNext) ?? '');
+    if (await b.secureRead(_kCnt) != null &&
+        (count == null || count < 0 || (count > freeAttempts && (storedNext == null || storedNext <= 0)))) {
+      // Повреждение или оборванная запись счётчиков обнаруживаются ДО KDF; эта попытка не проверяет секрет.
+      final n = max(freeAttempts + 3, count ?? 0);
+      await b.secureWrite(kFail, '$n');
+      final wait = Duration(seconds: min(900, 5 * (1 << min(n - freeAttempts - 1, 10))));
+      await b.secureWrite(kNext, '${b.nowMs() + wait.inMilliseconds}');
+      throw VaultThrottled(wait);
+    }
+    final next = storedNext ?? 0;
     final left = next - b.nowMs();
     if (left > 0) throw VaultThrottled(Duration(milliseconds: left));
   }

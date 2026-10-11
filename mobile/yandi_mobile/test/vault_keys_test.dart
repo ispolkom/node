@@ -211,7 +211,7 @@ void main() {
     be.secure.remove('vault_fail_pw');
     be.secure.remove('vault_next_pw');
     // нет ни счётчика, ни паузы, но метка есть: это нарушение, а не новая жизнь
-    await expectLater(VaultKeys.unlock(be, 'нет'), throwsA(isA<VaultWrongSecret>().having((e) => e.failures, 'n', greaterThan(3))));
+    await expectLater(VaultKeys.unlock(be, 'нет'), throwsA(isA<VaultThrottled>()));
     await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultThrottled>()), reason: 'пауза снова есть');
   });
 
