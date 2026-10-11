@@ -86,13 +86,36 @@ impl ChatManager {
         Self::new_inner(my_node_id, transport, storage)
     }
 
-    fn new_inner(
-        my_node_id: HashId,
-        transport: Arc<P2PTransport>,
-        storage: ChatStorage,
-    ) -> Result<Self> {
-        let (incoming_tx, _incoming_rx) = mpsc::unbounded_channel();
+    /// Закрытая среда: чаты не читаются и не пишутся, пока владелец не введёт пароль ([`ChatManager::unlock`]).
+    pub fn new_locked(my_node_id: HashId, transport: Arc<P2PTransport>) -> Result<Self> {
+        let storage = ChatStorage::new_locked(my_node_id)?;
+        Self::new_inner(my_node_id, transport, storage)
+    }
 
+    /// Выдать ключ закрытой среды и поднять очередь неподтверждённых сообщений с диска.
+    pub async fn unlock(&self, master_key: [u8; 32]) {
+        self.storage.set_master(master_key);
+        let restored = Self::restore_outbox(&self.storage);
+        let mut pending = self.pending_acks.lock().await;
+        for (id, p) in restored {
+            pending.entry(id).or_insert(p);
+        }
+    }
+
+    /// Отозвать ключ. Очередь сначала записывается (пока ключ есть), затем ключ и расшифрованные копии в памяти стираются.
+    pub async fn lock(&self) {
+        self.persist_outbox_if_dirty().await;
+        self.storage.lock();
+        self.pending_acks.lock().await.clear();
+        self.outbox_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    pub fn is_locked(&self) -> bool {
+        self.storage.is_locked()
+    }
+
+    /// messages that were still waiting for their recipients when the node last stopped
+    fn restore_outbox(storage: &ChatStorage) -> HashMap<HashId, PendingAck> {
         // messages that were still waiting for their recipients when the node last stopped
         let mut restored = HashMap::new();
         for e in storage.load_outbox() {
@@ -113,6 +136,17 @@ impl ChatManager {
                 );
             }
         }
+        restored
+    }
+
+    fn new_inner(
+        my_node_id: HashId,
+        transport: Arc<P2PTransport>,
+        storage: ChatStorage,
+    ) -> Result<Self> {
+        let (incoming_tx, _incoming_rx) = mpsc::unbounded_channel();
+
+        let restored = Self::restore_outbox(&storage);
         if !restored.is_empty() {
             info!(
                 "📮 {} unconfirmed messages restored from the outgoing queue",
@@ -386,7 +420,13 @@ impl ChatManager {
         msg.status = MessageStatus::Delivered;
 
         // 5. Сохранить у себя (incoming)
-        self.storage.save_incoming(&from, &msg)?;
+        if let Err(e) = self.storage.save_incoming(&from, &msg) {
+            // не сохранили (например, закрытая среда заперта): без подтверждения отправитель повторит, а повтор не должен считаться дублем
+            let mut seen = self.seen_incoming.lock().await;
+            seen.0.remove(&msg.msg_id);
+            seen.1.retain(|id| *id != msg.msg_id);
+            return Err(e);
+        }
 
         info!("✅ Message saved from {}", hex::encode(&from.0[..8]));
 
@@ -952,6 +992,31 @@ mod tests {
             1,
             "a resend is not stored twice"
         );
+    }
+
+    /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn locked_chat_does_not_swallow_incoming_and_keeps_outbox() {
+        let cm = test_chat_manager().await;
+        cm.storage.set_master([9; 32]);
+        let peer = crate::util::HashId::new_random();
+        let queued = ChatMessage::new(cm.my_node_id, peer, "в очереди".to_string());
+        cm.storage
+            .save_outbox(&[super::super::storage::OutboxEntry { peer, msg: queued.clone(), first_sent: unix_now() }])
+            .unwrap();
+        cm.lock().await;
+        assert!(cm.is_locked());
+
+        let from = crate::util::HashId::new_random();
+        let incoming = ChatMessage::new(from, cm.my_node_id, "пока заперто".to_string());
+        let bytes = serde_json::to_vec(&incoming).unwrap();
+        assert!(cm.handle_incoming_message(from, bytes.clone()).await.is_err());
+        assert!(cm.storage.save_outbox(&[]).is_err(), "пустая очередь не стирает файл у запертого хранилища");
+
+        cm.unlock([9; 32]).await;
+        assert_eq!(cm.pending_acks.lock().await.len(), 1, "очередь поднята с диска после разблокировки");
+        let _ = cm.handle_incoming_message(from, bytes).await;
+        assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 1, "повтор после отказа сохранён, а не принят за дубль");
     }
 
     #[test]
