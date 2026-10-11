@@ -11,7 +11,8 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use std::sync::OnceLock;
+use std::sync::{Mutex, MutexGuard, OnceLock};
+use zeroize::Zeroizing;
 use x25519_dalek::{PublicKey, StaticSecret};
 
 /// E4 header + AES-GCM ciphertext/tag + Ed25519 signature; see docs/CLIENT_WIRE.md.
@@ -44,17 +45,73 @@ fn unb64(s: &str) -> Option<Vec<u8>> {
     base64::engine::general_purpose::STANDARD.decode(s).ok()
 }
 
-fn keys() -> &'static Keys {
-    static K: OnceLock<Keys> = OnceLock::new();
-    K.get_or_init(|| load_protected(&crate::util::data_dir::data_dir(), MASTER.get()))
+#[derive(Default)]
+struct KeyHolder {
+    master: Option<Zeroizing<[u8; 32]>>,
+    keys: Option<Keys>,
 }
 
-/// Мастер-ключ узла: им закрыт файл ключей «компьютера как собеседника» на диске (как история чатов и группы ПК).
-static MASTER: OnceLock<[u8; 32]> = OnceLock::new();
+impl KeyHolder {
+    fn revoke(&mut self) {
+        // X25519 StaticSecret и Ed25519 SigningKey стирают секреты при Drop.
+        self.keys = None;
+        self.master = None;
+    }
+    fn replace(&mut self, master: Zeroizing<[u8; 32]>) {
+        self.revoke();
+        self.master = Some(master);
+    }
+}
 
-/// Задаётся при запуске, до первого обращения к ключам.
+fn key_cell() -> &'static Mutex<KeyHolder> {
+    // OnceLock хранит только адрес изменяемого держателя, не ключ или сеанс.
+    static CELL: OnceLock<Mutex<KeyHolder>> = OnceLock::new();
+    CELL.get_or_init(|| Mutex::new(KeyHolder::default()))
+}
+
+struct KeyGuard<'a>(MutexGuard<'a, KeyHolder>);
+impl std::ops::Deref for KeyGuard<'_> {
+    type Target = Keys;
+    fn deref(&self) -> &Keys { self.0.keys.as_ref().expect("ключи проверены под guard") }
+}
+
+fn keys_from(holder: &Mutex<KeyHolder>, load: impl FnOnce(&[u8; 32]) -> Keys) -> Option<KeyGuard<'_>> {
+    let mut state = match holder.lock() {
+        Ok(state) => state,
+        Err(error) => { error.into_inner().revoke(); return None; }
+    };
+    if state.keys.is_none() {
+        let master = state.master.as_deref()?; // запертый держатель не читает и не создаёт plain файл
+        let loaded = load(master);
+        state.keys = Some(loaded);
+    }
+    Some(KeyGuard(state))
+}
+
+fn keys() -> Option<KeyGuard<'static>> {
+    keys_from(key_cell(), |master| load_protected(&crate::util::data_dir::data_dir(), Some(master)))
+}
+
+/// Отзыв ждёт завершения операции, удерживающей guard; после возврата старых
+/// signing/X25519 ключей в держателе нет и ленивое чтение не может их воскресить.
+pub fn lock_keys() {
+    revoke_holder(key_cell());
+}
+
+fn revoke_holder(holder: &Mutex<KeyHolder>) {
+    // Panic предыдущей операции не должен препятствовать стиранию секретов.
+    holder.lock().unwrap_or_else(|e| e.into_inner()).revoke();
+}
+
+/// Переходный legacy-вход main. Парольный controller должен устанавливать сеанс
+/// только после проверки поколения/миграции; автоматическая загрузка root в main
+/// пока остаётся отдельной незавершённой интеграцией, а не защитой новой среды.
 pub fn set_master(mk: [u8; 32]) {
-    let _ = MASTER.set(mk);
+    let master = Zeroizing::new(mk);
+    match key_cell().lock() {
+        Ok(mut state) => state.replace(master),
+        Err(e) => e.into_inner().revoke(), // после panic остаёмся запертыми
+    }
 }
 
 fn protect_key(master: &[u8; 32]) -> [u8; 32] {
@@ -203,7 +260,7 @@ fn make_keys(x: [u8; 32], e: [u8; 32]) -> Keys {
 
 /// Подписанная связка ключей узла для `/mobile/pubkey/<номер узла>` (тот же вид, что у телефонов).
 pub fn bundle_json() -> serde_json::Value {
-    let k = keys();
+    let Some(k) = keys() else { return serde_json::json!({"error":"vault_locked"}); };
     serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)})
 }
 
@@ -226,7 +283,8 @@ fn derived_key(shared: &[u8], header: &[u8]) -> Option<[u8; 32]> {
 
 /// Зашифровать текст для телефона (его открытый x25519 из подписанной связки).
 pub fn seal(text: &str, recipient_x25519: &[u8; 32], from: &str, to: &str, kind: u8) -> Result<Vec<u8>, String> {
-    seal_with(keys(), text, recipient_x25519, from, to, kind, now_ms())
+    let k = keys().ok_or("закрытая среда заперта")?;
+    seal_with(&k, text, recipient_x25519, from, to, kind, now_ms())
 }
 
 fn seal_with(sender: &Keys, text: &str, recipient_x25519: &[u8; 32], from: &str, to: &str, kind: u8, ts: u64) -> Result<Vec<u8>, String> {
@@ -254,7 +312,8 @@ fn seal_with(sender: &Keys, text: &str, recipient_x25519: &[u8; 32], from: &str,
 
 /// Authenticated E4 only; context mismatch, tampering, replay or persistence error -> None.
 pub fn open(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -> Option<String> {
-    let text = open_with(&keys().x_secret, blob, from, to, kind, sender_ed, now_ms())?;
+    let k = keys()?;
+    let text = open_with(&k.x_secret, blob, from, to, kind, sender_ed, now_ms())?;
     let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
     claim_replay(&path, blob, now_ms()).ok().filter(|v| *v)?;
     Some(text)
@@ -768,6 +827,60 @@ pub fn poll_calls(after: u64) -> (Vec<(u64, String, String)>, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bug_r15_mobile_key_holder_revokes_without_lazy_plain_reopen() {
+        let holder = Mutex::new(KeyHolder::default());
+        assert!(keys_from(&holder, |_| panic!("запертый держатель не должен обращаться к диску")).is_none());
+        holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
+        let old = keys_from(&holder, |master| make_keys(*master, *master)).unwrap().ed_pub;
+        holder.lock().unwrap().revoke();
+        assert!(keys_from(&holder, |_| panic!("отозванный ключ не должен восстанавливаться")).is_none());
+        assert!(holder.lock().unwrap().master.is_none());
+        holder.lock().unwrap().replace(Zeroizing::new([8; 32]));
+        let next = keys_from(&holder, |master| make_keys(*master, *master)).unwrap().ed_pub;
+        assert_ne!(old, next);
+    }
+
+    #[test]
+    fn bug_r15_mobile_revoke_waits_for_key_guard_and_then_erases_holder() {
+        let holder = std::sync::Arc::new(Mutex::new(KeyHolder::default()));
+        holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
+        let guard = keys_from(&holder, |master| make_keys(*master, *master)).unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let closing = holder.clone();
+        let closer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            closing.lock().unwrap().revoke();
+            done_tx.send(()).unwrap();
+        });
+        started_rx.recv().unwrap();
+        assert!(done_rx.try_recv().is_err());
+        assert!(holder.try_lock().is_err());
+        drop(guard);
+        done_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        closer.join().unwrap();
+        let state = holder.lock().unwrap();
+        assert!(state.keys.is_none() && state.master.is_none());
+    }
+
+    #[test]
+    fn bug_r15_poisoned_mobile_holder_can_still_be_revoked() {
+        let holder = std::sync::Arc::new(Mutex::new(KeyHolder::default()));
+        holder.lock().unwrap().replace(Zeroizing::new([7; 32]));
+        drop(keys_from(&holder, |master| make_keys(*master, *master)).unwrap());
+        let poisoned = holder.clone();
+        assert!(std::thread::spawn(move || {
+            let _guard = poisoned.lock().unwrap();
+            panic!("отказ операции");
+        }).join().is_err());
+        assert!(keys_from(&holder, |_| panic!("после panic не открываем ключи")).is_none());
+        let state = match holder.lock() { Err(e) => e.into_inner(), Ok(_) => panic!("замок должен быть отравлен") };
+        assert!(state.keys.is_none() && state.master.is_none());
+        drop(state);
+        revoke_holder(&holder); // повторная явная блокировка тоже не падает
+    }
 
     #[test]
     fn mobile_e4_independent_python_vector() {
