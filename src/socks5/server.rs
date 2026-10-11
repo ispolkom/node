@@ -490,7 +490,7 @@ impl Socks5ProxyServer {
                 let mut tunnels = active_tunnels.lock().await;
                 if let Some(writer) = tunnels.get(&key) {
                     // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
-                    if writer.enqueue(tunnel_data.data, tunnel_data.close).is_err() {
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
                         warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
                         tunnels.remove(&key); // abort writer and wake paired reader
                     }
@@ -715,10 +715,11 @@ impl Socks5ProxyServer {
         let (mut client_read, client_write) = client_stream.into_split();
 
         // 12. Сохраняем write half в active_tunnels
+        let ordered = self.transport.peer_stream_offsets(exit_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_writer(client_write, self.active_tunnels.clone(), request_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(client_write, self.active_tunnels.clone(), request_id, ordered);
             writer_closed = writer.subscribe();
             tunnels.insert(request_id, writer);
         }
@@ -731,6 +732,7 @@ impl Socks5ProxyServer {
         // Запускаем в фоновом режиме, чтобы handle_tunnel_data мог работать параллельно!
         tokio::spawn(async move {
             const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
+            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
             let mut buf = vec![0u8; BUFFER_SIZE];
             loop {
                 match tokio::select! {
@@ -745,7 +747,9 @@ impl Socks5ProxyServer {
                         debug!("📤 Read {} bytes from client, sending to tunnel #{}", n, request_id);
 
                         // Send tunnel data
-                        let tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
+                        let Ok(byte_offset) = cursor.block(n) else { break; };
+                        let mut tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
+                        tunnel_data.byte_offset = byte_offset;
                         let data_bytes = tunnel_data.encode();
 
                         let send_res = tokio::select! {
@@ -765,8 +769,10 @@ impl Socks5ProxyServer {
             }
             tunnels_for_cleanup.lock().await.remove(&request_id);
             // Existing close codec; notification cannot keep this local socket alive indefinitely.
+            let mut close = Socks5TunnelData::close(request_id);
+            close.byte_offset = cursor.end();
             let _ = tokio::time::timeout(Duration::from_secs(2), station_clone.send_train(
-                exit_node_clone, Socks5TunnelData::close(request_id).encode())).await;
+                exit_node_clone, close.encode())).await;
             debug!("🔚 Client-to-tunnel task finished for tunnel #{}", request_id);
         });
 

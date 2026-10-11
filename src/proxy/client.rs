@@ -471,10 +471,11 @@ impl HttpProxyClient {
         let (mut read_half, write_half) = stream.into_split();
 
         // Store write_half in active_tunnels
+        let ordered = self.transport.peer_stream_offsets(self.gateway_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            let writer = crate::netlayer::tunnel_writer::spawn_writer(write_half, self.active_tunnels.clone(), tunnel_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(write_half, self.active_tunnels.clone(), tunnel_id, ordered);
             writer_closed = writer.subscribe();
             tunnels.insert(tunnel_id, writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
@@ -484,6 +485,7 @@ impl HttpProxyClient {
 
         // Task 1: Read from browser and send to gateway via YTP
         tokio::spawn(async move {
+            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
                 match tokio::select! {
@@ -501,6 +503,7 @@ impl HttpProxyClient {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
                         let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data)).await;
                         break;
@@ -508,7 +511,12 @@ impl HttpProxyClient {
                     Ok(n) => {
                         debug!("🚇 Tunnel #{}: Read {} bytes from browser", tunnel_id, n);
 
+                        let Ok(byte_offset) = cursor.block(n) else {
+                            active_tunnels_for_reader.lock().await.remove(&tunnel_id);
+                            break;
+                        };
                         let tunnel_data = ProxyTunnelData {
+                            byte_offset,
                             tunnel_id,
                             data: buf[..n].to_vec(),
                             close: false,
@@ -528,6 +536,7 @@ impl HttpProxyClient {
                                 tunnel_id,
                                 data: Vec::new(),
                                 close: true,
+                                byte_offset: cursor.end(),
                             };
                             let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, close_data)).await;
                             break;
@@ -544,6 +553,7 @@ impl HttpProxyClient {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
                         let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data)).await;
                         break;
@@ -577,7 +587,7 @@ impl HttpProxyClient {
                 let mut tunnels = active_tunnels.lock().await;
                 if let Some(writer) = tunnels.get(&key) {
                     // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
-                    if writer.enqueue(tunnel_data.data, tunnel_data.close).is_err() {
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
                         warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
                         tunnels.remove(&key); // abort writer and wake paired reader
                     }

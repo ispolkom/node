@@ -80,6 +80,14 @@ pub struct WagonStats {
     pub tunnel_queue_bytes: AtomicU64,
     pub tunnel_queue_overflow: AtomicU64,
     pub tunnel_write_failed: AtomicU64,
+    pub tunnel_reordered: AtomicU64,
+    pub tunnel_reorder_depth: AtomicU64,
+    pub tunnel_reorder_bytes: AtomicU64,
+    pub tunnel_gap_closed: AtomicU64,
+    pub tunnel_stream_overflow: AtomicU64,
+    pub tunnel_stream_duplicates: AtomicU64,
+    pub tunnel_stream_invalid: AtomicU64,
+
     /// Вторые копии датаграмм, отброшенные по счётчику сессии до расшифровки
     pub duplicates_dropped: AtomicU64,
 }
@@ -106,6 +114,14 @@ impl WagonStats {
             tunnel_queue_bytes: AtomicU64::new(0),
             tunnel_queue_overflow: AtomicU64::new(0),
             tunnel_write_failed: AtomicU64::new(0),
+            tunnel_reordered: AtomicU64::new(0),
+            tunnel_reorder_depth: AtomicU64::new(0),
+            tunnel_reorder_bytes: AtomicU64::new(0),
+            tunnel_gap_closed: AtomicU64::new(0),
+            tunnel_stream_overflow: AtomicU64::new(0),
+            tunnel_stream_duplicates: AtomicU64::new(0),
+            tunnel_stream_invalid: AtomicU64::new(0),
+
             duplicates_dropped: AtomicU64::new(0),
         }
     }
@@ -158,6 +174,11 @@ impl WagonStats {
             self.rx_queue_wait_ns.load(Ordering::Relaxed), self.rx_worker_dequeued.load(Ordering::Relaxed), self.tunnel_queue_depth.load(Ordering::Relaxed),
             self.tunnel_queue_bytes.load(Ordering::Relaxed), self.tunnel_queue_overflow.load(Ordering::Relaxed),
             self.tunnel_write_failed.load(Ordering::Relaxed));
+        println!("[STREAM-STATS] reordered={} depth={} bytes={} gap_closed={} overflow={} duplicates={} invalid={}",
+            self.tunnel_reordered.load(Ordering::Relaxed), self.tunnel_reorder_depth.load(Ordering::Relaxed),
+            self.tunnel_reorder_bytes.load(Ordering::Relaxed), self.tunnel_gap_closed.load(Ordering::Relaxed),
+            self.tunnel_stream_overflow.load(Ordering::Relaxed), self.tunnel_stream_duplicates.load(Ordering::Relaxed),
+            self.tunnel_stream_invalid.load(Ordering::Relaxed));
         println!("🚂 [WAGON-STATS] Path0: sent={}, recv={}, loss={}%", sent0, recv0, loss0);
         println!("🚂 [WAGON-STATS] Path1: sent={}, recv={}, loss={}%", sent1, recv1, loss1);
         println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, path0_lost={}",
@@ -610,6 +631,7 @@ impl P2PTransport {
         discovery_port: u16,
         data_port: u16,
     ) -> Result<Arc<Self>, String> {
+        let capabilities = capabilities | crate::netlayer::packet::hello_caps::STREAM_OFFSET;
         println!("[transport] Initializing P2P transport");
 
         // ⚠️ Hardening — sysctl preflight: проверяем что kernel позволит наш SO_RCVBUF.
@@ -4750,6 +4772,7 @@ impl P2PTransport {
 
         // Регистрируем anchor как peer и проставляем ws_outgoing.
         let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
+        peer.verified_signing_pubkey = Some(ack.public_key);
         peer.caps_bits = ack.capabilities;
         peer.jurisdiction = ack.jurisdiction.clone();
         peer.touch();
@@ -5277,6 +5300,16 @@ impl P2PTransport {
     }
 
     /// Get peer info
+    /// Only authenticated Hello capabilities stored in the peer table enable the new codec.
+    pub async fn peer_stream_offsets(&self, peer_id: HashId) -> bool {
+        Self::peer_has_stream_offsets(self.get_peer(peer_id).await.as_ref())
+    }
+
+    fn peer_has_stream_offsets(peer: Option<&PeerInfo>) -> bool {
+        peer.is_some_and(|p| p.verified_signing_pubkey.is_some()
+            && crate::netlayer::packet::hello_caps::supports_stream_offsets(p.caps_bits))
+    }
+
     pub async fn get_peer(&self, peer_id: HashId) -> Option<PeerInfo> {
         let peers = self.peers.lock().await;
         peers.get(&peer_id).cloned()
@@ -6600,5 +6633,21 @@ mod own_record_sequence_tests {
         assert!(b > a);
         // «прежний процесс» опубликовал маленький номер (старая схема 0, 1, 2…) — новый всегда больше
         assert!(a > 1_000_000_000_000, "номер от времени, а не с нуля");
+    }
+}
+
+#[cfg(test)]
+mod stream_order_capability_tests {
+    use super::*;
+    #[test]
+    fn only_verified_hello_can_enable_stream_offsets() {
+        assert!(!P2PTransport::peer_has_stream_offsets(None));
+        let mut peer = PeerInfo::new(HashId([7;32]), "127.0.0.1:9998");
+        peer.caps_bits = crate::netlayer::packet::hello_caps::STREAM_OFFSET;
+        assert!(!P2PTransport::peer_has_stream_offsets(Some(&peer)));
+        peer.verified_signing_pubkey = Some([8;32]);
+        assert!(P2PTransport::peer_has_stream_offsets(Some(&peer)));
+        peer.caps_bits = crate::netlayer::packet::hello_caps::TELESCOPING_HANDSHAKE;
+        assert!(!P2PTransport::peer_has_stream_offsets(Some(&peer)));
     }
 }

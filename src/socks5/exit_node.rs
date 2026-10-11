@@ -188,6 +188,7 @@ impl ExitNodeHandler {
         let (mut target_read, target_write) = target_stream.into_split();
 
         // Store write half in active_tunnels
+        let ordered = self.transport.peer_stream_offsets(source_node).await;
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
@@ -196,7 +197,7 @@ impl ExitNodeHandler {
                 return Err(anyhow!("tunnel limit reached"));
             }
             // соединения разных узлов — раздельно (номер туннеля выбирает сам узел)
-            let writer = crate::netlayer::tunnel_writer::spawn_writer(target_write, self.active_tunnels.clone(), (source_node, request.request_id));
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer(target_write, self.active_tunnels.clone(), (source_node, request.request_id), ordered);
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, request.request_id), writer);
         }
@@ -208,42 +209,46 @@ impl ExitNodeHandler {
 
         let tunnels_for_cleanup = self.active_tunnels.clone();
         let station_for_close = station_clone.clone();
-        let target_to_client = async move {
-            const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
-            let mut buf = vec![0u8; BUFFER_SIZE];
-            loop {
-                let n = tokio::select! {
-                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
-                    result = target_read.read(&mut buf) => result,
-                }?;
-                crate::reciprocity::record_served(&source_node_clone.0, n);
-                if n == 0 {
-                    debug!("🔚 Target closed connection");
-                    break;
-                }
-
-                debug!("📤 Read {} bytes from target, sending to tunnel #{}", n, tunnel_id);
-
-                // Send tunnel data
-                let tunnel_data = Socks5TunnelData::new(tunnel_id, buf[..n].to_vec());
-                let data_bytes = tunnel_data.encode();
-                tokio::select! {
-                    _ = writer_closed.changed() => return Err(anyhow!("tunnel writer closed")),
-                    result = station_clone.send_train(source_node_clone, data_bytes) => result?,
-                };
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-
-        // Run tunnel in background (так же как в HTTP Proxy gateway!)
         tokio::spawn(async move {
+            let mut cursor = crate::netlayer::stream_order::Cursor::new(ordered);
+            let target_to_client = async {
+                const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
+                let mut buf = vec![0u8; BUFFER_SIZE];
+                loop {
+                    let n = tokio::select! {
+                        _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                        result = target_read.read(&mut buf) => result,
+                    }?;
+                    crate::reciprocity::record_served(&source_node_clone.0, n);
+                    if n == 0 {
+                        debug!("🔚 Target closed connection");
+                        break;
+                    }
+
+                    debug!("📤 Read {} bytes from target, sending to tunnel #{}", n, tunnel_id);
+
+                    // Send tunnel data
+                    let byte_offset = cursor.block(n).map_err(|_| anyhow!("stream offset exhausted"))?;
+                    let mut tunnel_data = Socks5TunnelData::new(tunnel_id, buf[..n].to_vec());
+                    tunnel_data.byte_offset = byte_offset;
+                    let data_bytes = tunnel_data.encode();
+                    tokio::select! {
+                        _ = writer_closed.changed() => return Err(anyhow!("tunnel writer closed")),
+                        result = station_clone.send_train(source_node_clone, data_bytes) => result?,
+                    };
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+
             if let Err(e) = target_to_client.await {
                 error!("❌ Tunnel #{} error: {}", tunnel_id, e);
             }
             // туннель закончился (цель закрылась или ошибка) — освободить место в таблице
             tunnels_for_cleanup.lock().await.remove(&(source_node_clone, tunnel_id));
+            let mut close = Socks5TunnelData::close(tunnel_id);
+            close.byte_offset = cursor.end();
             let _ = tokio::time::timeout(Duration::from_secs(2), station_for_close.send_train(
-                source_node_clone, Socks5TunnelData::close(tunnel_id).encode())).await;
+                source_node_clone, close.encode())).await;
             debug!("🔚 Target-to-client task finished for tunnel #{}", tunnel_id);
         });
 
@@ -265,7 +270,7 @@ impl ExitNodeHandler {
                 if let Some(writer) = tunnels.get(&key) {
                     // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
                     crate::reciprocity::record_served(&source_node.0, tunnel_data.data.len());
-                    if writer.enqueue(tunnel_data.data, tunnel_data.close).is_err() {
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
                         warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
                         tunnels.remove(&key); // abort writer and wake paired reader
                     }
