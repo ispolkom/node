@@ -4,8 +4,10 @@ export SOURCE_DATE_EPOCH="${SOURCE_DATE_EPOCH:-1577836800}"
 [[ "$SOURCE_DATE_EPOCH" =~ ^[0-9]+$ ]] || { echo 'SOURCE_DATE_EPOCH должен быть числом' >&2; exit 2; }
 export CARGO_BUILD_JOBS=2
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/mnt/ssd480/wt/codex/target-updater}"
-export XDG_DATA_HOME=/tmp/codex_up_xdg
+export XDG_DATA_HOME=/tmp/codex_rf_xdg
 export TZ=UTC LC_ALL=C
+RELEASE_BIN_DIR="$CARGO_TARGET_DIR/release"
+REL="$RELEASE_BIN_DIR/yandi-release"
 release_root=$(pwd -P)
 release_cargo_home=${CARGO_HOME:-$HOME/.cargo}
 # Encoded flags avoid whitespace splitting in paths. Replace inherited flags for a fixed recipe.
@@ -23,8 +25,8 @@ release_archive() {
   mkdir -p "$out"
   local pkg
   pkg=$(mktemp -d "$out/.pkg.XXXXXX")
-  install -m 0755 "$CARGO_TARGET_DIR/release/yandi" "$pkg/yandi"
-  install -m 0755 "$CARGO_TARGET_DIR/release/yandi-release" "$pkg/yandi-release"
+  install -m 0755 "$RELEASE_BIN_DIR/yandi" "$pkg/yandi"
+  install -m 0755 "$REL" "$pkg/yandi-release"
   for file in LICENSE deploy/yandi-node.service release/yandi-release-pubkey.hex; do
     if [ -f "$file" ]; then install -m 0644 "$file" "$pkg/$(basename "$file")"; fi
   done
@@ -32,4 +34,16 @@ release_archive() {
   tar --format=ustar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$SOURCE_DATE_EPOCH" -C "$pkg" -cf - . | gzip -n -9 > "$out/$name.tar.gz"
   rm -rf "$pkg"
   RELEASE_VERSION=$version RELEASE_NAME=$name RELEASE_OUT=$out
+}
+
+# Compare the exact packaged programs to those built and used to sign.
+release_check_identity() {
+  local file packed built
+  for file in yandi yandi-release; do
+    built=$(sha256sum "$RELEASE_BIN_DIR/$file")
+    built=${built%% *}
+    packed=$(tar -xOf "$RELEASE_OUT/$RELEASE_NAME.tar.gz" "./$file" | sha256sum)
+    packed=${packed%% *}
+    [[ "$built" = "$packed" ]] || { echo "Артефакт изменён: $file" >&2; return 1; }
+  done
 }

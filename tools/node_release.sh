@@ -19,7 +19,6 @@ PUB=release/yandi-release-pubkey.hex
 SEQFILE=release/SEQ
 source tools/release_build_env.sh
 release_build
-REL="$CARGO_TARGET_DIR/release/yandi-release"
 if [ "$UNSIGNED" = 1 ]; then
   release_archive
   echo "Архив без подписи: $RELEASE_OUT/$RELEASE_NAME.tar.gz"
@@ -33,8 +32,7 @@ else
   read -rs -p "Фраза: " P1; echo
   read -rs -p "Ещё раз: " P2; echo
 fi
-NFC() { python3 -I -c 'import sys, unicodedata; sys.stdout.write("".join(unicodedata.normalize("NFC", l) for l in sys.stdin))'; }
-PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2" | NFC)
+PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2")
 unset P1 P2
 
 PUBKEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута"; exit 1; }
@@ -52,6 +50,7 @@ if [ "$CHECK" = 1 ]; then echo "Проверка завершена (инстр�
 
 SEQ=$(( $(cat "$SEQFILE" 2>/dev/null || echo 0) + 1 ))
 release_archive
+release_check_identity
 VERSION=$RELEASE_VERSION NAME=$RELEASE_NAME OUT=$RELEASE_OUT
 
 "$REL" manifest "$OUT" "$VERSION" "$SEQ" --pubkey "$PUBKEY" "${NAME}.tar.gz"
