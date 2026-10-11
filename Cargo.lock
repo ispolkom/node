@@ -4433,6 +4433,7 @@ dependencies = [
  "hkdf",
  "hmac",
  "hound",
+ "http-body-util",
  "hyper",
  "hyper-util",
  "image",

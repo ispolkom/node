@@ -11,6 +11,7 @@ use axum::response::{Html, IntoResponse, Redirect, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::Deserialize;
+use std::future::IntoFuture;
 use std::sync::{Arc, Mutex};
 use tokio::sync::oneshot;
 
@@ -34,6 +35,10 @@ struct SetupBody {
 }
 
 async fn host_guard(State(sh): State<Shared>, headers: HeaderMap, req: axum::extract::Request, next: Next) -> Response {
+    #[cfg(target_os = "linux")]
+    if super::ui_socket::is_local(&req) {
+        return next.run(req).await;
+    }
     let host = headers.get(header::HOST).and_then(|v| v.to_str().ok()).unwrap_or("");
     let ok = host == format!("127.0.0.1:{}", sh.port) || host == format!("localhost:{}", sh.port);
     if !ok {
@@ -68,6 +73,9 @@ fn router(sh: Shared) -> Router {
         .route("/", get(|| async { Redirect::to("/setup") }))
         .route("/setup", get(page))
         .route("/api/auth/setup", post(setup))
+        .route("/api/auth/state", get(|State(sh): State<Shared>| async move {
+            crate::web::auth::ui_auth_state(&sh.auth)
+        }))
         .layer(middleware::from_fn_with_state(sh.clone(), host_guard))
         .with_state(sh)
 }
@@ -82,19 +90,31 @@ pub async fn run(auth: AuthState, port: u16) -> Result<(), String> {
 
 async fn run_with(auth: AuthState, port: u16, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>) -> Result<(), String> {
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("порт {port} занят или недоступен: {e}"))?;
-    serve(listener, auth, make_keys).await
+    serve(listener, auth, make_keys, crate::util::data_dir::data_dir()).await
 }
 
-async fn serve(listener: tokio::net::TcpListener, auth: AuthState, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>) -> Result<(), String> {
+async fn serve(listener: tokio::net::TcpListener, auth: AuthState, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>, socket_dir: std::path::PathBuf) -> Result<(), String> {
     let port = listener.local_addr().map_err(|e| e.to_string())?.port();
     let (tx, rx) = oneshot::channel::<()>();
     let sh = Shared { auth, done: Arc::new(Mutex::new(Some(tx))), port, make_keys };
-    axum::serve(listener, router(sh))
+    let app = router(sh);
+    #[cfg(target_os = "linux")]
+    let socket = super::ui_socket::Endpoint::bind(&socket_dir)
+        .map_err(|_| "Cannot start setup UI socket: unsafe permissions or occupied socket".to_string())?;
+    let tcp = axum::serve(listener, app.clone())
         .with_graceful_shutdown(async move {
             let _ = rx.await;
         })
-        .await
-        .map_err(|e| e.to_string())
+        .into_future();
+    #[cfg(target_os = "linux")]
+    {
+        tokio::select! {
+            result = tcp => result.map_err(|e| e.to_string()),
+            result = socket.serve(app) => result.map_err(|_| "Setup UI socket listener stopped".to_string()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    tcp.await.map_err(|e| e.to_string())
 }
 
 #[cfg(test)]
@@ -105,11 +125,41 @@ mod tests {
     async fn start(make: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>) -> (u16, tokio::task::JoinHandle<Result<(), String>>) {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        (port, tokio::spawn(serve(listener, AuthState::default(), make)))
+        let dir = tempfile::tempdir().unwrap();
+        let socket_dir = dir.path().join("data");
+        (port, tokio::spawn(async move {
+            let _dir = dir;
+            serve(listener, AuthState::default(), make, socket_dir).await
+        }))
     }
 
     fn client() -> reqwest::Client {
         reqwest::Client::builder().no_proxy().build().unwrap()
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn setup_over_socket_finishes_and_releases_the_endpoint_for_the_daemon() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint_path = data.join("run/yandi-ui.sock");
+        let handle = tokio::spawn(serve(listener, AuthState::default(), Arc::new(|_, _| Ok(())), data.clone()));
+        for _ in 0..100 {
+            if endpoint_path.exists() { break; }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        let mut socket = tokio::net::UnixStream::connect(&endpoint_path).await.unwrap();
+        let body = r#"{"login_password":"test-login","master_password":"test-master"}"#;
+        socket.write_all(format!("POST /api/auth/setup HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        let mut raw = Vec::new();
+        tokio::time::timeout(std::time::Duration::from_secs(3), socket.read_to_end(&mut raw)).await.unwrap().unwrap();
+        assert!(String::from_utf8_lossy(&raw).starts_with("HTTP/1.1 200"));
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(3), handle).await.unwrap().unwrap().is_ok());
+        assert!(!endpoint_path.exists());
+        let daemon_endpoint = super::super::ui_socket::Endpoint::bind(&data).unwrap();
+        drop(daemon_endpoint);
     }
 
     #[tokio::test]

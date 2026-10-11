@@ -336,6 +336,16 @@ pub fn auth_file_path() -> PathBuf {
         .join("auth.json")
 }
 
+/// Non-secret startup state for the native UI (also during first setup).
+/// It neither creates a cookie session nor releases any key.
+pub(super) fn ui_auth_state(auth: &AuthState) -> axum::Json<serde_json::Value> {
+    use std::sync::atomic::Ordering;
+    axum::Json(serde_json::json!({
+        "setup_required": !auth.is_setup.load(Ordering::Relaxed),
+        "recovery_required": auth.needs_rebind.load(Ordering::Relaxed),
+    }))
+}
+
 // ── Public API ─────────────────────────────────────────────────────────────
 
 /// Try to load auth from disk and auto-decrypt master_key.
