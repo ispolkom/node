@@ -865,6 +865,33 @@ mod tests {
         ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager")
     }
 
+    #[tokio::test]
+    #[ignore = "R16-10: lock не должен терять очередь, если её запись отказала"]
+    async fn bug_r16_lock_preserves_outbox_when_persist_fails() {
+        let dir = tempfile::Builder::new().prefix("r16_outbox_io_").tempdir().unwrap();
+        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
+        std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
+        let identity = NodeIdentity::new();
+        let me = identity.node_id();
+        let transport = P2PTransport::new(identity, 0).await.unwrap();
+        let storage = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        storage.set_master([7; 32]);
+        let cm = ChatManager::new_inner(me, transport, storage).unwrap();
+        let peer = HashId([2; 32]);
+        let msg = ChatMessage::new(me, peer, "очередь должна пережить ошибку диска".into());
+        cm.storage.save_outgoing(&peer, &msg).unwrap();
+        cm.pending_acks.lock().await.insert(msg.msg_id, pending(peer, msg.clone(), Duration::ZERO, Duration::from_secs(3600)));
+        cm.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Самодостаточная ошибка rename: файл outbox заменить непустым каталогом невозможно.
+        let outbox = dir.path().join("outbox.enc");
+        std::fs::create_dir(&outbox).unwrap();
+        std::fs::write(outbox.join("occupied"), b"test").unwrap();
+        cm.lock().await;
+        assert!(cm.is_locked());
+        cm.unlock([7; 32]).await;
+        assert!(cm.pending_acks.lock().await.contains_key(&msg.msg_id), "lock уничтожил единственную очередь повторной доставки после ошибки записи");
+    }
+
     fn pending(peer: HashId, msg: ChatMessage, age: Duration, due_in: Duration) -> PendingAck {
         PendingAck {
             peer,

@@ -571,6 +571,102 @@ mod concurrency_tests {
     use crate::communication::MessageStatus;
     use std::sync::Arc;
 
+    #[test]
+    #[ignore = "R16-5: Locked не должен разрешать удаление истории"]
+    fn bug_r16_locked_clear_history_preserves_ciphertext() {
+        let dir = tempfile::Builder::new().prefix("r16_clear_peer_").tempdir().unwrap();
+        let st = ChatStorage::in_dir(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
+        let peer = HashId([2; 32]);
+        st.set_master([3; 32]);
+        st.save_incoming(&peer, &ChatMessage::new(peer, HashId([1; 32]), "единственная копия".into())).unwrap();
+        let file = st.chat_file_path_enc(&peer);
+        let before = std::fs::read(&file).unwrap();
+        st.lock();
+        let result = st.clear_history(&peer);
+        assert_eq!(std::fs::read(&file).ok(), Some(before), "запертая история была удалена");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[ignore = "R16-5: Locked не должен разрешать удаление всех чатов и outbox"]
+    fn bug_r16_locked_clear_all_preserves_ciphertext() {
+        let dir = tempfile::Builder::new().prefix("r16_clear_all_").tempdir().unwrap();
+        let chats = dir.path().join("chats");
+        let st = ChatStorage::in_dir(HashId([1; 32]), chats.clone()).unwrap();
+        st.set_master([3; 32]);
+        std::fs::write(chats.join("outbox.enc"), "единственная зашифрованная очередь".as_bytes()).unwrap();
+        st.lock();
+        let result = st.clear_all();
+        assert!(chats.join("outbox.enc").exists(), "очередь удалена, несмотря на Locked");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    #[ignore = "R16-6: Locked не должен раскрывать список собеседников"]
+    fn bug_r16_locked_list_chats_refuses_metadata() {
+        let dir = tempfile::Builder::new().prefix("r16_list_locked_").tempdir().unwrap();
+        let st = ChatStorage::in_dir(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
+        st.set_master([3; 32]);
+        let peer = HashId([2; 32]);
+        st.save_incoming(&peer, &ChatMessage::new(peer, HashId([1; 32]), "секрет".into())).unwrap();
+        st.lock();
+        let result = st.list_chats();
+        assert!(result.is_err(), "список собеседников доступен без ключа: {result:?}");
+    }
+
+    #[test]
+    #[ignore = "R16-7: миграция сама не должна снимать Locked"]
+    fn bug_r16_rekey_does_not_unlock_storage() {
+        let dir = tempfile::Builder::new().prefix("r16_rekey_lock_").tempdir().unwrap();
+        let st = ChatStorage::in_dir_locked(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
+        assert_eq!(st.rekey_to(None, [3; 32]).unwrap(), 0);
+        assert!(st.is_locked(), "migrate вернул потребителю ключ до разрешения install");
+    }
+
+    #[test]
+    #[ignore = "R16-3: после неполного переноса outbox нельзя стирать единственную старую копию"]
+    fn bug_r16_failed_outbox_migration_preserves_source_on_save() {
+        let dir = tempfile::Builder::new().prefix("r16_outbox_migration_").tempdir().unwrap();
+        let me = HashId([1; 32]);
+        let peer = HashId([2; 32]);
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        st.set_master([7; 32]);
+        let entry = OutboxEntry { peer, msg: ChatMessage::new(me, peer, "не доставлено".into()), first_sent: 1 };
+        st.save_outbox(&[entry]).unwrap();
+        let path = dir.path().join("outbox.enc");
+        let before = std::fs::read(&path).unwrap();
+        st.lock();
+        assert_eq!(st.rekey_to(None, [8; 32]).unwrap(), 1, "старый мастер недоступен, перенос очереди не состоялся");
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        let result = st.save_outbox(&[]);
+        assert_eq!(std::fs::read(&path).ok(), Some(before), "пустая очередь под новым ключом уничтожила старую");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn audit_r16_rekey_without_old_master_preserves_source_and_retry_recovers() {
+        let dir = tempfile::Builder::new().prefix("r16_rekey_retry_").tempdir().unwrap();
+        let me = HashId([1; 32]);
+        let peer = HashId([2; 32]);
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        st.set_master([7; 32]);
+        let msg = ChatMessage::new(peer, me, "единственная история".into());
+        st.save_incoming(&peer, &msg).unwrap();
+        let path = st.chat_file_path_enc(&peer);
+        let before = std::fs::read(&path).unwrap();
+        st.lock();
+        assert_eq!(st.rekey_to(None, [8; 32]).unwrap(), 1);
+        assert_eq!(std::fs::read(&path).unwrap(), before, "неоткрываемая история сама миграцией не затёрта");
+        assert_eq!(st.rekey_to(Some([7; 32]), [8; 32]).unwrap(), 0);
+        let history = st.load_history(&peer, 10).unwrap();
+        assert_eq!(history.len(), 1);
+        assert_eq!(history[0].msg_id, msg.msg_id);
+        assert_eq!(history[0].text, msg.text);
+        let after = std::fs::read(&path).unwrap();
+        assert_eq!(st.rekey_to(Some([7; 32]), [8; 32]).unwrap(), 0);
+        assert_eq!(std::fs::read(&path).unwrap(), after, "повтор не меняет перенесённый файл");
+    }
+
     /// Найдено на живой сети: подтверждения доставки (приходят дублями) меняют статус через «прочитать всё, удалить файл, записать заново»;
     /// сообщение, дописанное в этот момент, пропадало из истории (в журнале «сохранено», в истории нет).
     #[test]
