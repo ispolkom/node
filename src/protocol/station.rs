@@ -331,7 +331,7 @@ impl Station {
         let current_rate = self.rate_controller.current_rate_mbps();
         let max_concurrent = self.rate_controller.concurrent_wagons_for_rate();
 
-        println!("🔄 DUAL-PATH: {} wagons × 2 paths = {} packets (Rate: {} Mbps)",
+        tracing::trace!("🔄 DUAL-PATH: {} wagons × 2 paths = {} packets (Rate: {} Mbps)",
                  total_wagons, total_wagons * 2, current_rate);
 
         // 🔄 DUAL-PATH: semaphore для ОБЕИХ путей
@@ -348,9 +348,13 @@ impl Station {
             // 🚦 Место каждой копии в общем потоке на проводе (в каждой копии накладные расходы вагона и шифрования ~150 байт)
             let wire_bytes = chunk_len + 150;
 
+            // контрольная сумма считается один раз: клон для второго пути копирует готовый вагон
+            let orig_wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
+            let clone_wagon = orig_wagon.clone_for_path(1);
+
             // 🔄 Path0: ОРИГИНАЛ
             {
-                let wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
+                let wagon = orig_wagon;
                 let dest = dest;
                 let transport = self.transport.clone();
                 let sem = semaphore.clone();
@@ -387,15 +391,7 @@ impl Station {
 
             // 🔄 Path1: КЛОН (тот же train_id, is_clone=true)
             {
-                let wagon = Wagon::with_clone(
-                    train_id,  // ⭐ ТОТ ЖЕ train_id!
-                    true,      // ⭐ is_clone=true
-                    wagon_num,
-                    total_wagons,
-                    offset,
-                    chunk.to_vec(),
-                    1
-                );
+                let wagon = clone_wagon;
                 let dest = dest;
                 let transport = self.transport.clone();
                 let sem = semaphore.clone();
@@ -1092,7 +1088,7 @@ impl Depot {
                 .ok_or(StationError::TrainNotFound)?;
             self.current_bytes = self.current_bytes.saturating_sub(train_size);
             self.total_evicted_trains += 1;
-            println!("🗑️  Evicted oldest train #{} ({} bytes)", id, train_size);
+            tracing::trace!("🗑️  Evicted oldest train #{} ({} bytes)", id, train_size);
         }
         Ok(())
     }

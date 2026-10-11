@@ -226,7 +226,7 @@ impl Train {
         }
     }
     pub fn assemble(&self) -> Result<Vec<u8>, TrainError> {
-        eprintln!("[TRAIN] assemble() called: state={:?}, orig={}/{}, clone={}/{}, total={}",
+        tracing::trace!("[TRAIN] assemble() called: state={:?}, orig={}/{}, clone={}/{}, total={}",
                  self.state,
                  self.wagons.len(), self.total_wagons,
                  self.wagons_clone.len(), self.total_wagons,
@@ -243,12 +243,12 @@ impl Train {
         for i in 0..self.total_wagons {
             // Сначала ищем в оригиналах
             let wagon = if let Some(w) = self.wagons.get(&i) {
-                eprintln!("[TRAIN] wagon #{} from ORIG", i);
+                tracing::trace!("[TRAIN] wagon #{} from ORIG", i);
                 w
             }
             // Если нет в оригиналах - берём из клонов
             else if let Some(w) = self.wagons_clone.get(&i) {
-                eprintln!("[TRAIN] wagon #{} from CLONE (backup!)", i);
+                tracing::trace!("[TRAIN] wagon #{} from CLONE (backup!)", i);
                 w
             }
             // Нет ни там ни там - ошибка
@@ -266,7 +266,7 @@ impl Train {
             data.extend_from_slice(&wagon.cargo);
         }
 
-        eprintln!("[TRAIN] ✅ Assembled {} wagons, {} bytes ({} orig + {} clone used)",
+        tracing::trace!("[TRAIN] ✅ Assembled {} wagons, {} bytes ({} orig + {} clone used)",
                  self.total_wagons, data.len(),
                  self.wagons.len(), self.wagons_clone.len());
         Ok(data)

@@ -3153,16 +3153,16 @@ impl P2PTransport {
                                                             if let Some(ref st) = *station_guard {
                                                                 match st.receive_wagon_parsed(peer_id, wagon).await {
                                                                 Ok(Some(train_id)) => {
-                                                                    println!("[transport] ✅ Train #{} assembled!", train_id);
+                                                                    tracing::trace!("[transport] ✅ Train #{} assembled!", train_id);
 
                                                                     // 🔍 DEBUG: Пытаемся получить train
-                                                                    eprintln!("[transport] 🔍 Calling get_train for #{}", train_id);
+                                                                    tracing::trace!("[transport] 🔍 Calling get_train for #{}", train_id);
 
                                                                     // Получаем собранные данные
                                                                     if let Some(data) = st.get_train(train_id).await {
-                                                                        println!("[transport] 📦 Train #{} delivered: {} MB",
+                                                                        tracing::trace!("[transport] 📦 Train #{} delivered: {} MB",
                                                                                  train_id, data.len() / 1_000_000);
-                                                                        eprintln!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
+                                                                        tracing::trace!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
 
                                                                         // ⚠️ ACK/NACK DISABLED per user directive
                                                                         // // 🔄 ПРОВЕРЯЕМ NACK (0x62 prefix)
@@ -3212,7 +3212,7 @@ impl P2PTransport {
                                                                             if let Some(ref tx) = socks5_tunnel_data_tx {
                                                                                 let peer_id_for_tx = peer_id.clone();
                                                                                 let _ = tx.send((peer_id, socks5_tunnel)).await;
-                                                                                println!("[transport] 📤 SOCKS5 Tunnel data #{} sent to handler", tunnel_id);
+                                                                                tracing::trace!("[transport] 📤 SOCKS5 Tunnel data #{} sent to handler", tunnel_id);
                                                                             } else {
                                                                                 println!("[transport] ⚠️  SOCKS5 Tunnel data channel not connected!");
                                                                             }

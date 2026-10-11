@@ -120,6 +120,15 @@ impl Wagon {
         Self::with_clone(train_id, false, wagon_num, total_wagons, offset, cargo, line_id)
     }
 
+    /// Копия вагона для второго пути: тот же груз и та же контрольная сумма (она считается только от груза),
+    /// поэтому SHA-256 не вычисляется второй раз.
+    pub fn clone_for_path(&self, line_id: u8) -> Self {
+        let mut copy = self.clone();
+        copy.is_clone = true;
+        copy.line_id = line_id;
+        copy
+    }
+
     /// 🔄 Создать вагон с флагом is_clone
     pub fn with_clone(
         train_id: u64,
@@ -315,5 +324,16 @@ mod tests {
             assert!(size >= Wagon::MIN_CARGO_SIZE);
             assert!(size <= Wagon::MAX_CARGO_SIZE);
         }
+    }
+
+    #[test]
+    fn clone_for_path_equals_a_wagon_built_from_scratch_as_a_clone() {
+        let cargo: Vec<u8> = (0..1200u32).map(|i| (i % 251) as u8).collect();
+        let orig = Wagon::new(7, 3, 9, 3600, cargo.clone(), 0);
+        let fresh = Wagon::with_clone(7, true, 3, 9, 3600, cargo, 1);
+        let copy = orig.clone_for_path(1);
+        assert_eq!(bincode::serialize(&copy).unwrap(), bincode::serialize(&fresh).unwrap());
+        assert!(copy.is_clone && !orig.is_clone);
+        assert!(copy.verify());
     }
 }
