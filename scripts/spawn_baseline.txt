@@ -27,6 +27,7 @@ src/reachability.rs:2
 src/socks5/exit_node.rs:3
 src/socks5/server.rs:8
 src/supervisor.rs:2
+src/updater.rs:1
 src/web/first_setup.rs:1
 src/web/media_api.rs:1
 src/web/peers.rs:2
