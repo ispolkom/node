@@ -4428,6 +4428,7 @@ dependencies = [
  "dirs",
  "ed25519-dalek",
  "encoding_rs",
+ "flate2",
  "futures-util",
  "hex",
  "hkdf",

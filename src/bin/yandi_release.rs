@@ -24,13 +24,64 @@ fn phrase_key() -> ed25519_dalek::SigningKey {
 }
 
 fn parse_pubkey(hex_s: &str) -> VerifyingKey {
-    let bytes: [u8; 32] = hex::decode(hex_s.trim()).ok().and_then(|b| b.try_into().ok()).unwrap_or_else(|| die("--pubkey: нужно 64 hex-символа"));
+    let bytes: [u8; 32] = hex::decode(hex_s.trim())
+        .ok()
+        .and_then(|b| b.try_into().ok())
+        .unwrap_or_else(|| die("--pubkey: нужно 64 hex-символа"));
     VerifyingKey::from_bytes(&bytes).unwrap_or_else(|_| die("--pubkey: непригодный ключ"))
 }
 
-fn main() {
+#[tokio::main]
+async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(String::as_str) {
+        #[cfg(target_os = "linux")]
+        Some(cmd @ ("update" | "rollback" | "status")) => {
+            let mut from = None;
+            let mut pubkey = None;
+            let mut install = dirs::data_local_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("yandi-node");
+            let mut seq = 0;
+            let mut it = args[1..].iter();
+            while let Some(arg) = it.next() {
+                let value = it.next().unwrap_or_else(|| die("нужно значение параметра"));
+                match arg.as_str() {
+                    "--from" if cmd == "update" => from = Some(value.clone()),
+                    "--pubkey" if cmd == "update" => pubkey = Some(value.clone()),
+                    "--install-dir" => install = PathBuf::from(value),
+                    "--current-seq" if cmd == "update" => {
+                        seq = value
+                            .parse()
+                            .unwrap_or_else(|_| die("--current-seq: число"))
+                    }
+                    _ => die(&format!("неизвестный параметр: {arg}")),
+                }
+            }
+            let result = match cmd {
+                "update" => {
+                    let source = from.unwrap_or_else(|| die("нужен --from"));
+                    let vk = parse_pubkey(&pubkey.unwrap_or_else(|| die("нужен --pubkey")));
+                    yandi::updater::update(&source, &vk, &install, seq)
+                        .await
+                        .map(Some)
+                }
+                "rollback" => yandi::updater::rollback(&install).map(Some),
+                _ => yandi::updater::status(&install),
+            }
+            .unwrap_or_else(|e| die(&format!("ОШИБКА: {e:#}")));
+            if let Some(s) = result {
+                println!(
+                    "{} (№{}), максимум seq {}, ключ {}",
+                    s.version, s.seq, s.max_seq, s.key_id
+                );
+                if cmd != "status" {
+                    println!("Установлено в {}. Перезапуск выполняет владелец: sudo systemctl restart yandi-node", install.display());
+                }
+            } else {
+                println!("выпуск ещё не установлен");
+            }
+        }
         Some("pubkey") => {
             let k = phrase_key();
             println!("{}", hex::encode(k.verifying_key().to_bytes()));
@@ -41,40 +92,75 @@ fn main() {
                 die("использование: yandi-release manifest <каталог> <версия> <seq> --pubkey HEX <файл>...");
             }
             let dir = PathBuf::from(&args[1]);
-            let seq: u64 = args[3].parse().unwrap_or_else(|_| die("seq должен быть числом"));
+            let seq: u64 = args[3]
+                .parse()
+                .unwrap_or_else(|_| die("seq должен быть числом"));
             let vk = parse_pubkey(&args[5]);
-            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            let m = build_manifest(&dir, &args[2], seq, now, &key_id(&vk), &args[6..]).unwrap_or_else(|e| die(&e));
-            std::fs::write(dir.join(MANIFEST_NAME), manifest_bytes(&m)).unwrap_or_else(|e| die(&e.to_string()));
-            println!("манифест записан: {} файлов, выпуск №{}", m.files.len(), m.seq);
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            let m = build_manifest(&dir, &args[2], seq, now, &key_id(&vk), &args[6..])
+                .unwrap_or_else(|e| die(&e));
+            std::fs::write(dir.join(MANIFEST_NAME), manifest_bytes(&m))
+                .unwrap_or_else(|e| die(&e.to_string()));
+            println!(
+                "манифест записан: {} файлов, выпуск №{}",
+                m.files.len(),
+                m.seq
+            );
         }
         Some("sign") => {
-            let dir = PathBuf::from(args.get(1).unwrap_or_else(|| die("использование: yandi-release sign <каталог>")));
-            let bytes = std::fs::read(dir.join(MANIFEST_NAME)).unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
+            let dir = PathBuf::from(
+                args.get(1)
+                    .unwrap_or_else(|| die("использование: yandi-release sign <каталог>")),
+            );
+            let bytes = std::fs::read(dir.join(MANIFEST_NAME))
+                .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
             let k = phrase_key();
-            std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k)).unwrap_or_else(|e| die(&e.to_string()));
+            std::fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &k))
+                .unwrap_or_else(|e| die(&e.to_string()));
             println!("подписано ключом {}", key_id(&k.verifying_key()));
         }
         Some("verify") => {
             // verify <каталог> --pubkey HEX [--min-seq N]
-            let dir = PathBuf::from(args.get(1).unwrap_or_else(|| die("использование: yandi-release verify <каталог> --pubkey HEX [--min-seq N]")));
+            let dir = PathBuf::from(args.get(1).unwrap_or_else(|| {
+                die("использование: yandi-release verify <каталог> --pubkey HEX [--min-seq N]")
+            }));
             let mut pubkey = None;
             let mut min_seq = 0u64;
             let mut it = args[2..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "--pubkey" => pubkey = it.next().cloned(),
-                    "--min-seq" => min_seq = it.next().and_then(|v| v.parse().ok()).unwrap_or_else(|| die("--min-seq: число")),
+                    "--min-seq" => {
+                        min_seq = it
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or_else(|| die("--min-seq: число"))
+                    }
                     other => die(&format!("неизвестный ключ: {other}")),
                 }
             }
-            let vk = parse_pubkey(&pubkey.unwrap_or_else(|| die("нужен --pubkey (закреплённый открытый ключ)")));
-            let bytes = std::fs::read(dir.join(MANIFEST_NAME)).unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
-            let sig = std::fs::read_to_string(dir.join(SIGNATURE_NAME)).unwrap_or_else(|e| die(&format!("{SIGNATURE_NAME}: {e}")));
-            let m = verify_manifest(&bytes, &sig, &vk, min_seq).unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
+            let vk = parse_pubkey(
+                &pubkey.unwrap_or_else(|| die("нужен --pubkey (закреплённый открытый ключ)")),
+            );
+            let bytes = std::fs::read(dir.join(MANIFEST_NAME))
+                .unwrap_or_else(|e| die(&format!("{MANIFEST_NAME}: {e}")));
+            let sig = std::fs::read_to_string(dir.join(SIGNATURE_NAME))
+                .unwrap_or_else(|e| die(&format!("{SIGNATURE_NAME}: {e}")));
+            let m = verify_manifest(&bytes, &sig, &vk, min_seq)
+                .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             check_files(&dir, &m).unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
-            println!("ВЫПУСК ВЕРЕН: {} {} (№{}), файлов {}, ключ {}", m.product, m.version, m.seq, m.files.len(), m.key_id);
+            println!(
+                "ВЫПУСК ВЕРЕН: {} {} (№{}), файлов {}, ключ {}",
+                m.product,
+                m.version,
+                m.seq,
+                m.files.len(),
+                m.key_id
+            );
         }
-        _ => die("команды: pubkey | manifest | sign | verify"),
+        _ => die("команды: pubkey | manifest | sign | verify | update | rollback | status"),
     }
 }
