@@ -931,6 +931,16 @@ pub fn request_invite(gid: &str, name: &str) -> Result<(), String> {
     with_store(|st| st.request_join(gid, &dev, name)).map_err(fail)
 }
 
+fn ui_body(body: &Value) -> Value {
+    let mut public = body.clone();
+    // File decryption belongs to the daemon. Neither browser nor desktop needs
+    // the attachment key; download_file reads the original internal log body.
+    if let Some(object) = public.as_object_mut() {
+        object.remove("k");
+    }
+    public
+}
+
 /// Лента группы: видимые записи (стёртые, служебные и запрещённые правилами не показываются) и сведения о группе.
 pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
     let dev = pc_device()?;
@@ -943,7 +953,7 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
         let items: Vec<Value> = log
             .iter()
             .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && !deny.contains(&e.kind))
-            .map(|e| json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": e.body}))
+            .map(|e| json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": ui_body(&e.body)}))
             .collect();
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
         Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items}))
@@ -1258,6 +1268,16 @@ pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn desktop_file_view_does_not_export_decryption_keys_or_mutate_daemon_log() {
+        let original = json!({"f": "file-id", "n": "photo.png", "z": 10, "c": 1, "k": "secret-file-key", "h": "hash", "i": "message-id"});
+        let view = ui_body(&original);
+        assert!(view.get("k").is_none());
+        for field in ["f", "n", "z", "c", "h", "i"] { assert_eq!(view[field], original[field]); }
+        assert_eq!(original["k"], "secret-file-key", "daemon download retains its key");
+        assert_eq!(ui_body(&json!({"t": "hello"})), json!({"t": "hello"}));
+    }
 
     fn vector() -> Value {
         serde_json::from_str(include_str!("../tests/data/group_vector.json")).unwrap()

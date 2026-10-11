@@ -14,6 +14,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
@@ -193,6 +194,10 @@ pub struct WebServer {
 impl WebServer {
     /// Создать новый веб-сервер (standalone режим)
     pub fn new(port: u16) -> Self {
+        Self::new_with_auth(port, crate::web::auth::load_auth_state())
+    }
+
+    fn new_with_auth(port: u16, auth_state: crate::web::auth::AuthState) -> Self {
         let (media_signal_bus, _) = tokio::sync::broadcast::channel(256);
         Self {
             port,
@@ -217,7 +222,7 @@ impl WebServer {
                 media_signal_bus,
                 incoming_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 incoming_video_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                auth_state: crate::web::auth::load_auth_state(),
+                auth_state,
             },
         }
     }
@@ -426,14 +431,26 @@ impl WebServer {
             .await
             .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
 
-        axum::serve(listener, app)
+        #[cfg(target_os = "linux")]
+        let socket = super::ui_socket::Endpoint::bind(&crate::util::data_dir::data_dir())
+            .map_err(|_| "Cannot start UI socket: unsafe permissions, occupied socket, or unavailable data directory".to_string())?;
+
+        let tcp = axum::serve(listener, app.clone())
             .with_graceful_shutdown(async {
                 tokio::signal::ctrl_c()
                     .await
                     .expect("failed to install CTRL+C handler");
             })
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+            .into_future();
+        #[cfg(target_os = "linux")]
+        {
+            tokio::select! {
+                result = tcp => result.map_err(|e| format!("Server error: {e}"))?,
+                result = socket.serve(app) => result.map_err(|_| "UI socket listener stopped".to_string())?,
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        tcp.await.map_err(|e| format!("Server error: {e}"))?;
 
         Ok(())
     }
@@ -653,6 +670,9 @@ impl WebServer {
             .route("/login", get(login_page_handler))
             .route("/setup", get(setup_page_handler))
             .route("/api/auth/login", post(api_auth_login))
+            .route("/api/auth/state", get(|State(state): State<AppState>| async move {
+                crate::web::auth::ui_auth_state(&state.auth_state)
+            }))
             .route("/api/auth/setup", post(api_auth_setup))
             .route("/api/auth/logout", get(api_auth_logout))
             .route("/api/auth/rebind", post(api_auth_rebind))
@@ -884,6 +904,12 @@ async fn auth_middleware(
     use std::sync::atomic::Ordering;
 
     let auth = &state.auth_state;
+
+    #[cfg(target_os = "linux")]
+    if super::ui_socket::is_local(&req) {
+        // Local owner authorisation does not unlock the vault or bypass StepUp.
+        return next.run(req).await;
+    }
 
     // First run — redirect to setup
     if !auth.is_setup.load(Ordering::Relaxed) {
@@ -5664,5 +5690,54 @@ mod served_file_tests {
     fn the_download_name_cannot_inject_header_syntax() {
         let d = served_disposition("application/octet-stream", "a\"; b=\r\nX: y.zip");
         assert!(!d.contains('\r') && !d.contains('\n') && d.matches('"').count() == 2, "{d}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ui_socket_parity_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn real_handlers_match_tcp_without_weakening_tcp_auth_or_step_up() {
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cookie = format!("yandi_session={}", auth.create_session(false));
+        let web = WebServer::new_with_auth(0, auth.clone());
+        let app = web.create_router(web.state.clone()).with_state(web.state.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let endpoint = crate::web::ui_socket::Endpoint::bind(&data).unwrap();
+        let unix = tokio::spawn(endpoint.serve(app.clone()));
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp_listener.local_addr().unwrap();
+        let tcp = tokio::spawn(axum::serve(tcp_listener, app).into_future());
+        let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let base = format!("http://{addr}");
+        assert_eq!(client.get(format!("{base}/api/status")).send().await.unwrap().status(), StatusCode::SEE_OTHER);
+        // A caller-supplied header is not the connection capability.
+        assert_eq!(client.get(format!("{base}/api/status")).header("x-yandi-local-owner", "true").send().await.unwrap().status(), StatusCode::SEE_OTHER);
+        assert_eq!(client.post(format!("{base}/api/node/start")).header("cookie", &cookie).header("origin", "http://evil.example").send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        for (method, path, body) in [("GET", "/api/auth/state", ""), ("GET", "/api/status", ""), ("GET", "/api/speed", ""), ("GET", "/api/relay/status", ""), ("GET", "/api/vault/status", ""), ("POST", "/api/node/start", ""), ("POST", "/api/mobile/groups/0123456789abcdef0123456789abcdef/delete", "{\"password\":\"wrong\"}")] {
+            if path.ends_with("/delete") {
+                // Exercise the actual StepUp backoff without reading the owner's key files.
+                for _ in 0..10 { auth.record_login_failure(); }
+            }
+            let response = client.request(method.parse().unwrap(), format!("{base}{path}")).header("cookie", &cookie).header("content-type", "application/json").body(body).send().await.unwrap();
+            let expected_status = response.status().as_u16();
+            let expected: serde_json::Value = response.json().await.unwrap();
+            let mut stream = tokio::net::UnixStream::connect(data.join("run/yandi-ui.sock")).await.unwrap();
+            let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut raw = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(3), stream.read_to_end(&mut raw)).await.unwrap().unwrap();
+            let text = String::from_utf8(raw).unwrap();
+            let (head, payload) = text.split_once("\r\n\r\n").unwrap();
+            assert!(head.starts_with(&format!("HTTP/1.1 {expected_status}")), "{path}: {head}");
+            assert_eq!(serde_json::from_str::<serde_json::Value>(payload).unwrap(), expected, "{path}");
+            if path.ends_with("/delete") { assert_eq!(expected_status, 429, "peer credentials must not bypass StepUp backoff"); }
+        }
+        unix.abort(); tcp.abort();
+        let _ = unix.await; let _ = tcp.await;
     }
 }

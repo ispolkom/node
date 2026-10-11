@@ -15,3 +15,6 @@ pub mod media_api;
 
 #[cfg(unix)]
 pub mod first_setup;
+
+#[cfg(target_os = "linux")]
+mod ui_socket;
