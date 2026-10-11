@@ -294,6 +294,11 @@ impl EnvelopeStore {
         {
             bail!("ключ другого vault");
         }
+        if let Some(existing) = &current {
+            // Совпадение публичного id не доказывает совпадение DK. Новый замок
+            // не должен незаметно сменить ключ данных и сделать историю нечитаемой.
+            existing.envelope.verify(&session.key)?;
+        }
         let mut envelope = envelope.clone();
         envelope.revision = current
             .as_ref()
@@ -490,6 +495,26 @@ mod tests {
             .sum::<usize>();
         assert_eq!(succeeded, 1);
         assert_eq!(store.load().unwrap().unwrap().revision(), 2);
+    }
+
+    #[test]
+    fn bug_r15_same_id_but_different_data_key_cannot_replace_existing_envelope() {
+        let d = temp();
+        let store = EnvelopeStore::open(d.path()).unwrap();
+        let (mut env, vault) = fixture();
+        let old = store.save(None, &env, &vault).unwrap();
+        let bytes = std::fs::read(d.path().join(ENVELOPE)).unwrap();
+        let other_key = Zeroizing::new([8; 32]);
+        env.tag = env.mac(&other_key).finalize().into_bytes().into();
+        let other = NodeVault {
+            session: Some(super::super::Session {
+                id: env.id,
+                key: other_key,
+            }),
+        };
+        assert!(store.save(Some(&old), &env, &other).is_err());
+        assert_eq!(std::fs::read(d.path().join(ENVELOPE)).unwrap(), bytes);
+        assert_eq!(store.load().unwrap().unwrap().revision(), 1);
     }
 
     #[test]
