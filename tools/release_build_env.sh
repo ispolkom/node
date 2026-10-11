@@ -14,9 +14,17 @@ release_cargo_home=${CARGO_HOME:-$HOME/.cargo}
 export CARGO_ENCODED_RUSTFLAGS="--remap-path-prefix=${release_root}=/usr/src/yandi"$'\x1f'"--remap-path-prefix=${CARGO_TARGET_DIR}=/usr/src/yandi-target"$'\x1f'"--remap-path-prefix=${release_cargo_home}=/usr/src/cargo"
 ENV_CLEAN=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY -u no_proxy -u NO_PROXY)
 release_build() {
-  "${ENV_CLEAN[@]}" nice -n 15 cargo build --release --locked --offline --bin yandi --bin yandi-release
+  "${ENV_CLEAN[@]}" nice -n 15 cargo build --release --locked --offline --message-format=json --bin yandi --bin yandi-release | python3 -I tools/release_artifacts.py "$RELEASE_BIN_DIR"
+  release_record_identity
+}
+release_record_identity() {
+  RELEASE_IDENTITIES=$(sha256sum "$RELEASE_BIN_DIR/yandi" "$REL")
+}
+release_check_built() {
+  printf '%s\n' "$RELEASE_IDENTITIES" | sha256sum --check --status || { echo "Артефакт изменён после сборки" >&2; return 1; }
 }
 release_archive() {
+  release_check_built
   local version arch name out
   version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
   arch=$(uname -m)
@@ -38,6 +46,7 @@ release_archive() {
 
 # Compare the exact packaged programs to those built and used to sign.
 release_check_identity() {
+  release_check_built
   local file packed built
   for file in yandi yandi-release; do
     built=$(sha256sum "$RELEASE_BIN_DIR/$file")

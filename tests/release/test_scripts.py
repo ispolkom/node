@@ -24,7 +24,7 @@ class Scripts(unittest.TestCase):
                               input=input, text=True, capture_output=True)
 
     def test_r2_packaged_identity_is_checked(self):
-        result = self.shell('source tools/release_build_env.sh\nrelease_archive\nrelease_check_identity\nprintf evil > "$RELEASE_BIN_DIR/yandi"\nrelease_check_identity')
+        result = self.shell('source tools/release_build_env.sh\nrelease_record_identity\nrelease_archive\nrelease_check_identity\nprintf evil > "$RELEASE_BIN_DIR/yandi"\nrelease_check_identity')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Артефакт изменён', result.stderr)
 
@@ -66,6 +66,15 @@ class Scripts(unittest.TestCase):
         env.write_text(env.read_text() + '\nrelease_build() { flock -n release/.lock true && exit 99; exit 42; }\n')
         result = self.shell('bash tools/node_release.sh')
         self.assertEqual(result.returncode, 42, result.stderr)
+
+    def test_r2_actual_cargo_outputs_cannot_be_stale_other_directory(self):
+        import json
+        messages = ''.join(json.dumps({'reason': 'compiler-artifact', 'target': {'name': name},
+                                      'executable': str(self.root / 'other/release' / name)}) + '\n'
+                           for name in ['yandi', 'yandi-release'])
+        result = self.shell('python3 -I tools/release_artifacts.py "$CARGO_TARGET_DIR/release"', messages)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('directory mismatch', result.stderr)
 
 if __name__ == '__main__':
     unittest.main()
