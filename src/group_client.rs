@@ -132,6 +132,12 @@ struct Vault {
     key: [u8; 32],
 }
 
+impl Drop for Vault {
+    fn drop(&mut self) {
+        self.key.fill(0);
+    }
+}
+
 impl Vault {
     fn new(dir: PathBuf, master: &[u8; 32]) -> Vault {
         let hk = Hkdf::<Sha256>::new(Some(b"yandi-groups-pc-vault:v1"), master);
@@ -230,12 +236,31 @@ pub fn init(master: [u8; 32]) {
             // существующее состояние не открывается — НЕ начинаем с пустого (иначе новые ключи участника и перезапись): группы на ПК
             // выключены до восстановления, файлы не тронуты
             eprintln!("[groups-pc] ⚠️  {e}");
-            let _ = INIT_ERROR.set(e);
+            *INIT_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
         }
     }
 }
 
-static INIT_ERROR: OnceLock<String> = OnceLock::new();
+static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
+static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Закрытая среда: убрать ключ и расшифрованное состояние из памяти; файлы на диске не трогаются, фоновая синхронизация ждёт.
+pub fn lock() {
+    LOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+    *cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Выдать ключ области после разблокировки: состояние загружается заново.
+pub fn unlock(master: [u8; 32]) {
+    *INIT_ERROR.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    init(master);
+    LOCKED.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Явно «запертое» начальное состояние (закрытая среда ещё не открыта после запуска).
+pub fn start_locked() {
+    LOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
 
 /// Состояние хранилища: нет файла — пустое; файл есть, но не открывается (повреждён, другой мастер-ключ, ошибка чтения) — ошибка.
 fn load_state(vault: &Vault) -> Result<State, String> {
@@ -254,7 +279,8 @@ fn with_client<T>(f: impl FnOnce(&mut Client) -> Result<T, String>) -> Result<T,
     let mut g = cell().lock().unwrap_or_else(|e| e.into_inner());
     match g.as_mut() {
         Some(c) => f(c),
-        None => Err(INIT_ERROR.get().cloned().unwrap_or_else(|| "группы на компьютере недоступны: нет мастер-ключа узла".into())),
+        None if LOCKED.load(std::sync::atomic::Ordering::SeqCst) => Err("закрытая среда заперта: введите пароль владельца".into()),
+        None => Err(INIT_ERROR.lock().unwrap_or_else(|e| e.into_inner()).clone().unwrap_or_else(|| "группы на компьютере недоступны: нет мастер-ключа узла".into())),
     }
 }
 
@@ -1294,5 +1320,14 @@ mod tests {
         assert_eq!(a.open("gid", &sealed).unwrap(), b"secret message");
         assert!(b.open("gid", &sealed).is_none(), "чужой мастер-ключ");
         assert!(a.open("other", &sealed).is_none(), "строка привязана к своей группе");
+    }
+
+    #[test]
+    fn locked_client_refuses_with_a_clear_reason_and_keeps_nothing() {
+        lock();
+        let err = with_client(|_| Ok(())).unwrap_err();
+        assert!(err.contains("заперта"), "{err}");
+        assert!(cell().lock().unwrap_or_else(|e| e.into_inner()).is_none());
+        LOCKED.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
