@@ -66,6 +66,20 @@ pub struct WagonStats {
     /// 🔴 Path0 wagons lost (Path1 arrived instead)
     pub path0_lost: AtomicU64,
 
+    /// Aggregate queued datagrams across physical receive sockets.
+    pub rx_queue_depth: AtomicU64,
+    pub rx_queue_bytes: AtomicU64,
+    pub rx_queue_dropped: AtomicU64,
+    /// Worker input wait, including idle time and contention between workers.
+    pub rx_worker_wait_ns: AtomicU64,
+    /// Datagram residence time until a worker starts processing it.
+    pub rx_queue_wait_ns: AtomicU64,
+    pub rx_worker_dequeued: AtomicU64,
+    /// Aggregate admitted blocks, including each writer's in-flight write.
+    pub tunnel_queue_depth: AtomicU64,
+    pub tunnel_queue_bytes: AtomicU64,
+    pub tunnel_queue_overflow: AtomicU64,
+    pub tunnel_write_failed: AtomicU64,
     /// Вторые копии датаграмм, отброшенные по счётчику сессии до расшифровки
     pub duplicates_dropped: AtomicU64,
 }
@@ -82,6 +96,16 @@ impl WagonStats {
             checksum_failed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
             path0_lost: AtomicU64::new(0),
+            rx_queue_depth: AtomicU64::new(0),
+            rx_queue_bytes: AtomicU64::new(0),
+            rx_queue_dropped: AtomicU64::new(0),
+            rx_worker_wait_ns: AtomicU64::new(0),
+            rx_queue_wait_ns: AtomicU64::new(0),
+            rx_worker_dequeued: AtomicU64::new(0),
+            tunnel_queue_depth: AtomicU64::new(0),
+            tunnel_queue_bytes: AtomicU64::new(0),
+            tunnel_queue_overflow: AtomicU64::new(0),
+            tunnel_write_failed: AtomicU64::new(0),
             duplicates_dropped: AtomicU64::new(0),
         }
     }
@@ -128,6 +152,12 @@ impl WagonStats {
             0
         };
 
+        println!("[RX-STATS] depth={} bytes={} dropped={} worker_wait_ns={} queue_wait_ns={} dequeued={} tunnel_depth={} tunnel_bytes={} tunnel_overflow={} write_failed={}",
+            self.rx_queue_depth.load(Ordering::Relaxed), self.rx_queue_bytes.load(Ordering::Relaxed),
+            self.rx_queue_dropped.load(Ordering::Relaxed), self.rx_worker_wait_ns.load(Ordering::Relaxed),
+            self.rx_queue_wait_ns.load(Ordering::Relaxed), self.rx_worker_dequeued.load(Ordering::Relaxed), self.tunnel_queue_depth.load(Ordering::Relaxed),
+            self.tunnel_queue_bytes.load(Ordering::Relaxed), self.tunnel_queue_overflow.load(Ordering::Relaxed),
+            self.tunnel_write_failed.load(Ordering::Relaxed));
         println!("🚂 [WAGON-STATS] Path0: sent={}, recv={}, loss={}%", sent0, recv0, loss0);
         println!("🚂 [WAGON-STATS] Path1: sent={}, recv={}, loss={}%", sent1, recv1, loss1);
         println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, path0_lost={}",
@@ -1636,12 +1666,9 @@ impl P2PTransport {
         });
     }
 
-    /// How many tasks read one data socket at the same time. EXPERIMENT, off by default (1): the kernel hands each datagram to exactly one reader, so
-    /// the receive path can run on several cores, but in the lab four readers made uploads through an exit stall at ceilings where one reader
-    /// was stable (wagons of one stream handled at the same moment end up in the wrong order or half-built). Until that is understood, keep 1.
-    /// `YANDI_DATA_WORKERS` changes it.
+    /// N>1 may reorder completed trains: stream offsets are migration step 2.
     fn data_workers() -> usize {
-        std::env::var("YANDI_DATA_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(1)
+        super::rx_pipeline::env_limit("YANDI_RX_WORKERS", 1, 16)
     }
 
     fn spawn_data_listener_task(
@@ -1649,16 +1676,17 @@ impl P2PTransport {
         socket: Arc<CSocket>,
         mut shutdown: Option<oneshot::Receiver<()>>,
     ) {
-        // the extra readers stop together with the first one (when its socket is retired or the node stops)
-        let mut extra_stops: Vec<oneshot::Sender<()>> = Vec::new();
-        let mut extra_shutdowns: Vec<oneshot::Receiver<()>> = Vec::new();
-        for _ in 1..Self::data_workers() {
-            let (tx, rx) = oneshot::channel();
-            extra_stops.push(tx);
-            extra_shutdowns.push(rx);
+        let stats = get_wagon_stats();
+        let (tx, queue) = super::rx_pipeline::queue(super::rx_pipeline::Limits::rx(),
+            &stats.rx_queue_depth, &stats.rx_queue_bytes);
+        let workers = Self::data_workers();
+        if workers > 1 {
+            tracing::warn!("YANDI_RX_WORKERS={workers}: UNSAFE stream order across trains until migration step 2");
         }
-        for worker in 0..Self::data_workers() {
+        let mut tasks = Vec::new();
+        for _ in 0..workers {
             let socket = socket.clone();
+            let queue = queue.clone();
             let peers = transport.peers.clone();
             let encryption = transport.encryption.clone();
             let tunnels = transport.tunnels.clone();
@@ -1684,9 +1712,7 @@ impl P2PTransport {
             let relay_response_tx = transport.relay_response_tx.clone();
             let relay_data_tx = transport.relay_data_tx.clone();
             let transport_for_listener = transport.clone();
-            let (my_shutdown, stops) = if worker == 0 { (shutdown.take(), std::mem::take(&mut extra_stops)) } else { (extra_shutdowns.pop(), Vec::new()) };
-
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 Self::data_listener(
                     transport_for_listener,
                     socket,
@@ -1714,13 +1740,26 @@ impl P2PTransport {
                     relay_request_tx,
                     relay_response_tx,
                     relay_data_tx,
-                    my_shutdown,
+                    queue,
                 ).await;
-                for tx in stops {
-                    let _ = tx.send(());
-                }
-            });
+            }));
         }
+        // A single reader owns this physical CSocket. Retirement cancels its workers
+        // as well, including workers blocked on an application channel.
+        tokio::spawn(async move {
+            let reader = super::rx_pipeline::read_datagrams(|| {
+                let socket = socket.clone();
+                async move {
+                    let mut buf = [0u8; 65535];
+                    let (len, from) = socket.recv_from(&mut buf).await?;
+                    Ok((buf[..len].to_vec(), from))
+                }
+            }, tx, &transport.rx_bytes_counter);
+            if let Some(stop) = shutdown.as_mut() {
+                tokio::select! { _ = stop => {}, _ = reader => {} }
+            } else { reader.await; }
+            for task in tasks { task.abort(); }
+        });
     }
 
     fn rewrite_unspecified_endpoint(endpoint: &str, actual_ip: &std::net::IpAddr) -> String {
@@ -2474,7 +2513,7 @@ impl P2PTransport {
         relay_request_tx: Option<mpsc::Sender<(HashId, HashId)>>,
         relay_response_tx: Option<mpsc::Sender<(HashId, crate::netlayer::packet::RelayConnectResponse)>>,
         relay_data_tx: Option<mpsc::Sender<(HashId, HashId, Vec<u8>)>>,
-        mut shutdown: Option<oneshot::Receiver<()>>,
+        queue: super::rx_pipeline::Receiver<super::rx_pipeline::Datagram>,
     ) {
         let local_addr = socket.local_addr().ok();
         let listener_role = local_addr
@@ -2487,34 +2526,22 @@ impl P2PTransport {
             })
             .unwrap_or("unknown");
         println!(
-            "[transport] 🔒 Starting {} data listener on {:?}",
+            "[transport] 🔒 Starting {} RX worker on {:?}",
             listener_role, local_addr
         );
 
-        let mut buf = [0u8; 65535];
-
         loop {
-            let recv_result = if let Some(stop_rx) = shutdown.as_mut() {
-                tokio::select! {
-                    _ = stop_rx => {
-                        println!(
-                            "[transport] 📴 {} data listener stopped on {:?}",
-                            listener_role, local_addr
-                        );
-                        break;
-                    }
-                    result = socket.recv_from(&mut buf) => result,
-                }
-            } else {
-                socket.recv_from(&mut buf).await
-            };
-
-            match recv_result {
-                Ok((len, from)) => {
-                    let data = buf[..len].to_vec();
-                    // Update RX byte counter for speed monitoring
-                    transport.rx_bytes_counter.fetch_add(len as u64, Ordering::Relaxed);
-
+            let started = Instant::now();
+            let packet = queue.lock().await.recv().await;
+            get_wagon_stats().rx_worker_wait_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            let Some(mut packet) = packet else { break };
+            get_wagon_stats().rx_queue_wait_ns.fetch_add(packet.enqueued_at.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            let from = packet.value.from;
+            let data = std::mem::take(&mut packet.value.data);
+            let _untrusted_sender = packet.value.sender;
+            drop(packet); // release queue budget before decrypt/assembly/dispatch
+            get_wagon_stats().rx_worker_dequeued.fetch_add(1, Ordering::Relaxed);
+            {
                     // НОВЫЙ ФОРМАТ: [peer_id:32][nonce:12][encrypted_data][tag:16]
                     // peer_id PLAINTEXT - позволяет найти peer БЕЗ дешифровки
                     let mut enc = encryption.lock().await;
@@ -3138,8 +3165,8 @@ impl P2PTransport {
 
                                                         // Передаём в station для сборки (УЖЕ ДЕСЕРИАЛИЗОВАННЫЙ!)
                                                         if let Some(ref station_lock) = station {
-                                                            let station_guard = station_lock.lock().await;
-                                                            if let Some(ref st) = *station_guard {
+                                                            let st = station_lock.lock().await.clone();
+                                                            if let Some(ref st) = st {
                                                                 match st.receive_wagon_parsed(peer_id, wagon).await {
                                                                 Ok(Some(train_id)) => {
                                                                     tracing::trace!("[transport] ✅ Train #{} assembled!", train_id);
@@ -4199,11 +4226,6 @@ impl P2PTransport {
                             }
                         }
                 }
-                Err(e) => {
-                    println!("[transport] ❌ Socket error: {}", e);
-                    continue;
-                }
-            }
         }
     }
 

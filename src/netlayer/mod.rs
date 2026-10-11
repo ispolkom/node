@@ -14,6 +14,8 @@ pub mod tunnel;
 pub mod bootstrap;
 pub mod admission;
 pub mod transport;
+pub(crate) mod rx_pipeline;
+pub(crate) mod tunnel_writer;
 pub mod port_manager;
 pub mod socket_manager;
 pub mod tcp_carrier;
