@@ -1,0 +1,11 @@
+.dart_tool/
+build/
+.idea/
+*.iml
+.metadata
+.flutter-plugins
+.flutter-plugins-dependencies
+linux/flutter/ephemeral/
+linux/flutter/generated_plugin_registrant.*
+linux/flutter/generated_plugins.cmake
+pubspec.lock
