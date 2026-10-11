@@ -9,6 +9,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
+use zeroize::Zeroizing;
 
 const KEY_SALT: &[u8] = b"YANDI-NODE-RELEASE-KEY-V1";
 const SIG_DOMAIN: &[u8] = b"YANDI-RELEASE-MANIFEST-V1\0";
@@ -39,8 +40,13 @@ pub struct Manifest {
     pub files: Vec<FileEntry>,
 }
 
-pub fn normalize(p: &str) -> String {
-    p.split_whitespace().collect::<Vec<_>>().join(" ")
+pub fn normalize(p: &str) -> Zeroizing<String> {
+    let mut out = Zeroizing::new(String::new());
+    for word in p.split_whitespace() {
+        if !out.is_empty() { out.push(' '); }
+        out.push_str(word);
+    }
+    out
 }
 
 /// Почему фраза слишком слабая (None — годится). Открытый ключ публичен, слабую фразу подберут офлайн.
@@ -65,9 +71,9 @@ pub fn production_params() -> Params {
 }
 
 pub fn derive_signing_key(phrase: &str, params: Params) -> SigningKey {
-    let mut seed = [0u8; 32];
+    let mut seed = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
-        .hash_password_into(normalize(phrase).as_bytes(), KEY_SALT, &mut seed)
+        .hash_password_into(normalize(phrase).as_bytes(), KEY_SALT, &mut *seed)
         .expect("argon2");
     SigningKey::from_bytes(&seed)
 }
@@ -292,6 +298,16 @@ mod tests {
     }
 
     #[test]
+    fn r6_normalized_phrase_is_zeroizing() {
+        let phrase: Zeroizing<String> = normalize("  secret   words ");
+        assert_eq!(&*phrase, "secret words");
+        let mut seed = Zeroizing::new([7u8; 32]);
+        use zeroize::Zeroize;
+        seed.zeroize();
+        assert_eq!(*seed, [0; 32]);
+    }
+
+    #[test]
     fn r9_validator_rejects_duplicates_uppercase_and_invalid_before_signing() {
         let d = tempfile::tempdir().unwrap();
         let (bytes, _, _) = release(d.path(), 1);
@@ -408,7 +424,7 @@ mod tests {
     fn weak_phrases_are_refused_and_spaces_do_not_change_the_key() {
         assert!(weakness("слишком короткая фраза").is_some());
         assert!(weakness(&"слово ".repeat(14).trim().to_string()).is_some());
-        assert_eq!(normalize("  а   б \t в "), "а б в");
+        assert_eq!(&*normalize("  а   б \t в "), "а б в");
         let a = derive_signing_key("раз  два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap());
         let b = derive_signing_key("раз два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать", cheap());
         assert_eq!(a.to_bytes(), b.to_bytes());

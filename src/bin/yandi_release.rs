@@ -9,18 +9,30 @@ fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
+fn read_phrase_key(mut input: impl BufRead, params: argon2::Params) -> Result<ed25519_dalek::SigningKey, String> {
+    let mut first = zeroize::Zeroizing::new(String::new());
+    let mut second = zeroize::Zeroizing::new(String::new());
+    input.read_line(&mut first).map_err(|e| e.to_string())?;
+    input.read_line(&mut second).map_err(|e| e.to_string())?;
+    let first = normalize(&first);
+    let second = normalize(&second);
+    if first != second { return Err("Фразы не совпали.".into()); }
+    if let Some(why) = weakness(&first) { return Err(format!("Фраза слишком слабая: {why}.")); }
+    Ok(derive_signing_key(&first, params))
+}
 fn phrase_key() -> ed25519_dalek::SigningKey {
-    let stdin = std::io::stdin();
-    let mut lines = stdin.lock().lines();
-    let first = normalize(&lines.next().and_then(|l| l.ok()).unwrap_or_default());
-    let second = normalize(&lines.next().and_then(|l| l.ok()).unwrap_or_default());
-    if first != second {
-        die("Фразы не совпали.");
+    read_phrase_key(std::io::stdin().lock(), production_params()).unwrap_or_else(|e| die(&e))
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+    #[test]
+    fn r6_phrase_errors_return_through_zeroizing_scope() {
+        let params = argon2::Params::new(64, 1, 1, Some(32)).unwrap();
+        assert!(read_phrase_key(&b"secret\nother\n"[..], params.clone()).unwrap_err().contains("совпали"));
+        assert!(read_phrase_key(&b"short\nshort\n"[..], params).unwrap_err().contains("слабая"));
     }
-    if let Some(why) = weakness(&first) {
-        die(&format!("Фраза слишком слабая: {why}."));
-    }
-    derive_signing_key(&first, production_params())
 }
 
 fn parse_pubkey(hex_s: &str) -> VerifyingKey {
