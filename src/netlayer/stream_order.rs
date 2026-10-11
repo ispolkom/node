@@ -38,7 +38,7 @@ pub(crate) enum Error {
 
 pub(crate) struct Reorder<T> {
     pub next: u64,
-    pending: BTreeMap<u64, T>,
+    pending: BTreeMap<u64, (T, bool)>,
     pub bytes: usize,
     final_offset: Option<u64>,
     gap_since: Option<Instant>,
@@ -95,7 +95,7 @@ impl<T: Chunk> Reorder<T> {
                 || self
                     .pending
                     .iter()
-                    .any(|(&o, b)| o.checked_add(b.len() as u64).is_none_or(|e| e > start))
+                    .any(|(&o, b)| o.checked_add(b.0.len() as u64).is_none_or(|e| e > start))
             {
                 return Err(Error::Invalid);
             }
@@ -112,11 +112,11 @@ impl<T: Chunk> Reorder<T> {
         }
         if let Some(old) = self.pending.get(&start) {
             // An equal start with a longer suffix must not silently lose new bytes.
-            if old.len() >= block.len() {
+            if old.0.len() >= block.len() {
                 return Ok((false, true));
             }
         }
-        let old_len = self.pending.get(&start).map_or(0, |b| b.len());
+        let old_len = self.pending.get(&start).map_or(0, |b| b.0.len());
         let bytes = self
             .bytes
             .checked_sub(old_len)
@@ -128,16 +128,16 @@ impl<T: Chunk> Reorder<T> {
         let duplicate = start < self.next || old_len > 0;
         let reordered = start > self.next;
         self.bytes = bytes;
-        self.pending.insert(start, block);
+        self.pending.insert(start, (block, duplicate));
         self.update_gap(now);
         Ok((reordered, duplicate))
     }
-    pub fn pop(&mut self, now: Instant) -> Option<(T, usize)> {
+    pub fn pop(&mut self, now: Instant) -> Option<(T, usize, bool)> {
         let (&start, _) = self.pending.first_key_value()?;
         if start > self.next {
             return None;
         }
-        let block = self.pending.remove(&start).unwrap();
+        let (block, counted_duplicate) = self.pending.remove(&start).unwrap();
         self.bytes -= block.len();
         let skip = (self.next - start).min(block.len() as u64) as usize;
         if skip < block.len() {
@@ -145,7 +145,7 @@ impl<T: Chunk> Reorder<T> {
             self.gap_since = None; // progress starts a new gap deadline
         }
         self.update_gap(now);
-        Some((block, skip))
+        Some((block, skip, counted_duplicate))
     }
     pub fn finished(&self) -> bool {
         self.final_offset == Some(self.next) && self.pending.is_empty()
@@ -191,7 +191,7 @@ mod tests {
     }
     fn drain(r: &mut Reorder<B>, now: Instant) -> Vec<u8> {
         let mut out = Vec::new();
-        while let Some((b, skip)) = r.pop(now) {
+        while let Some((b, skip, _)) = r.pop(now) {
             out.extend_from_slice(&b.1[skip..]);
         }
         out

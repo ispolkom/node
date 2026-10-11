@@ -1703,7 +1703,7 @@ impl P2PTransport {
             &stats.rx_queue_depth, &stats.rx_queue_bytes);
         let workers = Self::data_workers();
         if workers > 1 {
-            tracing::warn!("YANDI_RX_WORKERS={workers}: UNSAFE stream order across trains until migration step 2");
+            tracing::warn!("YANDI_RX_WORKERS={workers}: negotiated SOCKS5/CONNECT offsets preserve byte order; legacy tunnel streams remain UNSAFE across trains");
         }
         let mut tasks = Vec::new();
         for _ in 0..workers {

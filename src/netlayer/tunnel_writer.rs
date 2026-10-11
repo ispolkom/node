@@ -230,8 +230,10 @@ where
                     }
                 }
                 gauge.set(reorder.size(), reorder.bytes);
-                while let Some((block, skip)) = reorder.pop(tokio::time::Instant::now()) {
-                    if skip > 0 {
+                while let Some((block, skip, counted_duplicate)) =
+                    reorder.pop(tokio::time::Instant::now())
+                {
+                    if skip > 0 && !counted_duplicate {
                         stats
                             .tunnel_stream_duplicates
                             .fetch_add(1, Ordering::Relaxed);
@@ -468,6 +470,65 @@ mod stream_tests {
     #[tokio::test]
     async fn http_connect_reverse_blocks_to_tcp_in_order() {
         reversed_tcp(true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn four_completion_workers_preserve_tcp_bytes_for_both_codecs() {
+        for http in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let mut peer = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .unwrap();
+            let (socket, _) = listener.accept().await.unwrap();
+            let tunnels = Arc::new(Mutex::new(HashMap::new()));
+            {
+                let mut map = tunnels.lock().await;
+                map.insert(1, spawn_stream_writer(socket, tunnels.clone(), 1, true));
+                map[&1].enqueue_offset(vec![], true, Some(64)).unwrap();
+            }
+            let barrier = Arc::new(tokio::sync::Barrier::new(4));
+            let mut workers = Vec::new();
+            for worker in 0..4u64 {
+                let tunnels = tunnels.clone();
+                let barrier = barrier.clone();
+                workers.push(tokio::spawn(async move {
+                    barrier.wait().await;
+                    for group in (0..16u64).rev() {
+                        let offset = group * 4 + worker;
+                        let (data, offset) = if http {
+                            let block = ProxyTunnelData {
+                                tunnel_id: 1,
+                                data: vec![offset as u8],
+                                close: false,
+                                byte_offset: Some(offset),
+                            };
+                            let parsed =
+                                ProxyTunnelData::from_bincode(&block.to_bincode().unwrap())
+                                    .unwrap();
+                            (parsed.data, parsed.byte_offset)
+                        } else {
+                            let mut block = Socks5TunnelData::new(1, vec![offset as u8]);
+                            block.byte_offset = Some(offset);
+                            let parsed = Socks5TunnelData::parse(&block.encode()).unwrap();
+                            (parsed.data, parsed.byte_offset)
+                        };
+                        tunnels.lock().await[&1]
+                            .enqueue_offset(data, false, offset)
+                            .unwrap();
+                        tokio::task::yield_now().await;
+                    }
+                }));
+            }
+            for worker in workers {
+                worker.await.unwrap();
+            }
+            let mut received = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), peer.read_to_end(&mut received))
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(received, (0..64u8).collect::<Vec<_>>());
+        }
     }
 
     #[tokio::test]
