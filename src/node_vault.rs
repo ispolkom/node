@@ -16,6 +16,9 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
+#[cfg(unix)]
+pub mod store;
+
 const FORMAT: u32 = 1;
 const MAX_SECRET: usize = 1024;
 const MAX_DATA: usize = 16 * 1024 * 1024;
@@ -40,6 +43,8 @@ pub struct VaultEnvelope {
     password: KeyWrap,
     recovery: Option<KeyWrap>,
     tag: [u8; 32],
+    #[serde(default)]
+    revision: u64,
 }
 
 /// Каждый новый экземпляр заперт. Секреты не реализуют Debug/Clone/Serialize.
@@ -163,6 +168,7 @@ impl VaultEnvelope {
                 .map(|s| wrap(&key, s, &id, b"recovery"))
                 .transpose()?,
             tag: [0; 32],
+            revision: 0,
         };
         envelope.tag = envelope.mac(&key).finalize().into_bytes().into();
         Ok(envelope)
@@ -181,6 +187,11 @@ impl VaultEnvelope {
             mac.update(&wrapped.salt);
             mac.update(&wrapped.nonce);
             mac.update(&wrapped.ciphertext);
+        }
+        // revision=0 сохраняет совместимость с envelope криптоосновы раунда 14.
+        if self.revision != 0 {
+            mac.update(b"storage-revision\0");
+            mac.update(&self.revision.to_be_bytes());
         }
         mac
     }
