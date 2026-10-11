@@ -604,6 +604,12 @@ class AppState extends ChangeNotifier implements FilesHost {
     final cache = await pp.getTemporaryDirectory();
     final d = Directory('${cache.path}/file_picker');
     if (!await d.exists()) return;
+    final realCache = await cache.resolveSymbolicLinks();
+    final realPicker = await d.resolveSymbolicLinks();
+    if (!realPicker.startsWith('$realCache${Platform.pathSeparator}')) {
+      protectionWarning = 'Каталог временных копий выходит за пределы кеша; затирание отменено.';
+      return;
+    }
     var failed = 0;
     await for (final e in d.list(recursive: true, followLinks: false)) {
       if (e is File) {

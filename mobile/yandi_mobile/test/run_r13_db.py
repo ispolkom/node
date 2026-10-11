@@ -1,5 +1,5 @@
-"""Run actual migration bodies using real Python SQLite on temporary databases.
-SQLCipher password/native plugin is deliberately NOT emulated or tested.
+"""Проверка настоящих методов миграции на временных БД через Python SQLite.
+Пароль SQLCipher и нативный плагин здесь не имитируются и не проверяются.
 """
 import json,re,subprocess,tempfile
 from pathlib import Path

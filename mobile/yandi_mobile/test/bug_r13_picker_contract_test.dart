@@ -8,8 +8,9 @@ void main() {
       final source = File('lib/screens/$screen.dart').readAsStringSync();
       expect(source, isNot(contains('clearTemporaryFiles(')), reason: screen);
       expect(source, contains('finally {'), reason: screen);
-      expect(source, contains('dropPickerCopy('), reason: screen);
-      expect(source.indexOf('dropPickerCopy('), greaterThan(source.indexOf('finally {')), reason: screen);
+      expect(source, screen == 'files_tab' ? contains('context.read<AppState>().dropPickerCopy') : contains('dropPickerCopy('), reason: screen);
+      final cleanup = source.substring(source.indexOf('finally {'));
+      expect(cleanup, screen == 'files_tab' ? contains('await cleanup(path)') : contains('dropPickerCopy('), reason: screen);
     }
   });
 }

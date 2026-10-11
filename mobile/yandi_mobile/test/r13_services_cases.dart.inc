@@ -23,7 +23,7 @@ Future<void> main()async{
   await test('bug_r13_ledger_marker_write_crash_must_not_leave_downgrade_window',()async{
    final f=File('${tmp.path}/ledger-fault');final l=ReplayLedger(f,seal:StorageService.ledgerSeal,open:StorageService.ledgerOpen,afterWrite:StorageService.ledgerSealed);
    f.writeAsStringSync('{"old":5000}');StorageService._secure.failWrite='vault_ledger_sealed';check(await error(l.reseal())!=null,'fault missing');check(f.readAsStringSync().startsWith('e1:'),'file not committed');
-   // Restart and honest reseal of existing encrypted file should establish missing marker.
+   // Перезапуск и reseal существующего контейнера должны восстановить недостающую метку.
    StorageService.dropSecureCache();await l.reseal();f.writeAsStringSync('{}');
    check(await error(l.claim('old',5000,nowMs:1000))!=null,'after encrypted-file commit and marker failure, restart still accepts plaintext replay');
   });
@@ -65,6 +65,17 @@ Future<void> main()async{
    check(vf.cleanupFailures>0&&File('${tempDir.path}/temporary.txt').existsSync(),'temp cleanup refusal not counted/preserved');
    check(s.protectionWarning!=null,'database cleanup failure hidden');
    StorageService.cleanupFailures=0;
+  });
+  await test('r14_picker_sweep_and_cleanup_do_not_wipe_outside_cache',()async{
+   final cache=Directory('${tmp.path}/safe-cache')..createSync();pp.cache=cache;
+   final outside=Directory('${tmp.path}/safe-cache-other')..createSync();
+   final precious=File('${outside.path}/private.txt')..writeAsStringSync('must stay');
+   final touched=<String>[];AppState.hook=(p)async{touched.add(p);await File(p).delete();return true;};
+   final s=AppState();await s.dropPickerCopy(precious.path);
+   Link('${cache.path}/file_picker').createSync(outside.path);
+   await s._sweepPickerCache();
+   check(touched.isEmpty&&precious.existsSync(),'sweep followed picker directory outside cache');
+   check(s.protectionWarning!=null,'unsafe picker directory not reported');
   });
  }finally{await tmp.delete(recursive:true);}
  print('RESULT $good PASS / $bad FAIL');if(bad>0)exitCode=1;

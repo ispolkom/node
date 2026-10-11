@@ -16,7 +16,8 @@ class FilesTab extends StatefulWidget {
   /// Для тестов: готовое хранилище вместо папки приложения.
   final VaultFiles? vault;
   final FilesHost? host;
-  const FilesTab({super.key, this.vault, this.host});
+  final Future<void> Function(String)? dropPickerCopy;
+  const FilesTab({super.key, this.vault, this.host, this.dropPickerCopy});
   @override
   State<FilesTab> createState() => FilesTabState();
 }
@@ -53,7 +54,7 @@ class FilesTabState extends State<FilesTab> {
 
   /// «+» на вкладке: взять файл из памяти телефона и положить в хранилище (чтобы переслать оттуда). Временную копию выбора сразу чистим.
   Future<void> addFiles() async {
-    final state = context.read<AppState>();
+    final cleanup = widget.dropPickerCopy ?? context.read<AppState>().dropPickerCopy;
     final res = await FilePicker.platform.pickFiles(allowMultiple: true);
     if (res == null) return;
     var failed = 0;
@@ -73,7 +74,7 @@ class FilesTabState extends State<FilesTab> {
       // открытая копия выбора не должна остаться во временном каталоге ни при какой ошибке
       for (final file in res.files) {
         final path = file.path;
-        if (path != null) await state.dropPickerCopy(path);
+        if (path != null) await cleanup(path);
       }
     }
     if (failed > 0 && mounted) {

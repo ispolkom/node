@@ -1,5 +1,5 @@
-"""Execute current service bodies with memory secure storage and deterministic IO adapters.
-No Flutter, Android Keystore, SQLCipher, rendering or physical wipe result is claimed.
+"""Исполняются текущие методы сервисов с хранилищем в памяти и управляемым IO.
+Это не проверка Flutter UI, Android Keystore, SQLCipher и физического wipe.
 """
 import json,re,subprocess,tempfile
 from pathlib import Path
@@ -28,7 +28,7 @@ class StorageService {
 code+=' static final db=FakeDb();\n'
 code+=storage[storage.index('  static const _wrapPrefix'):storage.index('  // ── Ноды')]
 code+=method(storage,'  static Future<String> ledgerSeal') if False else '  static Future<String> ledgerSeal(String json) => _wrap(\'ledger:replay\', json);\n'
-# Expression bodies copied together from source.
+# Выражения и соседние методы копируются из актуального исходника вместе.
 start=storage.index('  static const _kLedgerSealed');end=storage.index('  /// «Удалить всё»',start)
 code=code[:code.rfind('  static Future<String> ledgerSeal')]+storage[start:end]+'\n}\n'
 code+=strip(src('services/vault_files.dart'))+strip(src('services/avatar_service.dart'))
