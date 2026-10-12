@@ -5,6 +5,7 @@ import 'domain/shell_repository.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
 import 'groups.dart';
+import 'network.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -42,7 +43,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   void initState() {
     super.initState();
-    if (widget.page == 'Группы') return;
+    if (const ['Группы', 'Шлюзы', 'Relay'].contains(widget.page)) return;
     refresh();
     if (widget.page != 'Настройки') {
       timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
@@ -383,7 +384,16 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   );
 
   @override
-  Widget build(BuildContext context) => widget.page == 'Группы'
+  Widget build(BuildContext context) =>
+      const ['Шлюзы', 'Relay'].contains(widget.page)
+      ? NetworkFeature(
+          api: widget.api,
+          page: widget.page,
+          isActive: widget.isActive,
+          onFailure: widget.onFailure,
+          onLocked: widget.onLocked,
+        )
+      : widget.page == 'Группы'
       ? GroupsFeature(
           api: widget.api,
           isActive: widget.isActive,

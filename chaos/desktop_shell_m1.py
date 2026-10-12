@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real desktop Dart client / daemon M1 + M2 chat/groups smoke; isolated HOME and offline network.
+"""Real desktop Dart client / daemon M1 + M2 chat/groups + M3 network smoke; isolated HOME and offline network.
 Usage: python3 chaos/desktop_shell_m1.py /absolute/path/to/yandi [flutter-sdk]
 The fixture directory is newly allocated under /tmp and deleted on exit.
 """
@@ -65,12 +65,13 @@ def main():
                         raise RuntimeError('second socket did not appear within 120s')
                     chat_probe = probe.with_name('chat_probe.dart')
                     subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(chat_probe), str(sock), str(second_sock)], env=env, check=True, timeout=420)
+                    subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(probe.with_name('network_probe.dart')), str(sock), str(second_sock)], env=env, check=True, timeout=180)
                 n.kill()
                 time.sleep(.5)
         finally:
             second.kill()
             n.kill()
-    print('PASS: desktop M1 + M2 chat/groups real Unix daemon smoke; temporary data removed')
+    print('PASS: desktop M1 + M2 chat/groups + M3 network real Unix daemon smoke; temporary data removed')
 
 
 if __name__ == '__main__':
