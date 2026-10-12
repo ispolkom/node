@@ -484,12 +484,21 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
             return;
         }
         crate::mobile_self::Envelope::Ignored => return,
-        crate::mobile_self::Envelope::Message { cmid, text } => {
+        crate::mobile_self::Envelope::Message { cmid, text, reply } => {
             // сообщение с номером: в историю под выведенным номером, телефону сразу «доставлено», «прочитано» — когда откроют страницу
             let local = crate::mobile_self::incoming_id(from_device, &cmid);
             let mut msg = ChatMessage::new(device, st.my_id, text);
             msg.msg_id = local;
             msg.encrypted = true;
+            msg.reply_to = reply.and_then(|(id, quote)| {
+                // якорь: номер сообщения на узле; свои сообщения телефон называет своим номером (cmid) — выводим тот же номер, что при приёме
+                let anchor = if id.len() == 64 && id.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    id
+                } else {
+                    hex::encode(crate::mobile_self::incoming_id(from_device, &id).0)
+                };
+                crate::communication::ReplyRef { msg_id: anchor, text: quote }.sanitized()
+            });
             msg.mark_delivered();
             let _ = st.chat.store_local_incoming(&device, &msg);
             crate::mobile_self::remember_unread(&local, from_device, &cmid);
@@ -711,6 +720,11 @@ pub fn file_taken(tid: &str) {
 
 /// Ответ со страницы узла телефону владельца: шифруется ключом телефона из его подписанной связки и ложится в его очередь.
 pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, String> {
+    pc_send_to_device_reply(peer, text, None).await
+}
+
+/// То же с ответом-цитатой: телефон получает в конверте номер сообщения на узле и выдержку.
+pub async fn pc_send_to_device_reply(peer: &str, text: String, reply: Option<crate::communication::ReplyRef>) -> Result<ChatMessage, String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
     if crate::mobile_self::is_blocked_phone(peer) {
         return Err("устройство заблокировано".into());
@@ -723,8 +737,10 @@ pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, 
     let to = HashId(hex32(peer).ok_or("неверный номер устройства")?);
     let mut msg = ChatMessage::new(st.my_id, to, text);
     msg.encrypted = true;
+    msg.reply_to = reply.and_then(|r| r.sanitized());
     // конверт с номером (cmid = msg_id): телефон пришлёт «доставлено» и «прочитано»; до того — одна серая галка
-    let blob = crate::mobile_self::seal(&crate::mobile_self::wrap_message(&hex::encode(msg.msg_id.0), &msg.text), &x, &hex::encode(st.my_id.0), peer, 1)?;
+    let envelope = crate::mobile_self::wrap_message_reply(&hex::encode(msg.msg_id.0), &msg.text, msg.reply_to.as_ref().map(|r| (r.msg_id.as_str(), r.text.as_str())));
+    let blob = crate::mobile_self::seal(&envelope, &x, &hex::encode(st.my_id.0), peer, 1)?;
     if !deliver_mail(&hex::encode(st.my_id.0), peer, &blob) {
         return Err("не удалось положить сообщение в очередь телефона".into());
     }
@@ -833,7 +849,11 @@ async fn contacts(
 }
 
 fn msg_json(m: &ChatMessage) -> serde_json::Value {
-    json!({"id": hex::encode(m.msg_id.0), "from_peer_id": hex::encode(m.from.0), "text": m.text, "ts_ms": m.timestamp})
+    let mut j = json!({"id": hex::encode(m.msg_id.0), "from_peer_id": hex::encode(m.from.0), "text": m.text, "ts_ms": m.timestamp});
+    if let Some(r) = &m.reply_to {
+        j["reply_to"] = json!({"id": r.msg_id, "text": r.text});
+    }
+    j
 }
 
 async fn history(
@@ -860,6 +880,15 @@ async fn history(
 
 #[derive(Deserialize)]
 struct SendReq {
+    text: String,
+    #[serde(default)]
+    reply_to: Option<ReplyIn>,
+}
+
+/// Ответ-цитата в запросе: `id` — номер сообщения (hex, 64), `text` — выдержка.
+#[derive(Deserialize)]
+struct ReplyIn {
+    id: String,
     text: String,
 }
 
@@ -889,7 +918,8 @@ async fn send(
     let Some(h) = resolve_hex(&st, &peer).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    match st.chat.send_message(h, req.text).await {
+    let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.id, text: r.text });
+    match st.chat.send_message_full(h, req.text, None, reply).await {
         Ok(m) => Json(json!({"id": hex::encode(m.msg_id.0), "ts_ms": m.timestamp})).into_response(),
         Err(e) => (
             StatusCode::BAD_GATEWAY,
@@ -924,7 +954,11 @@ async fn inbox(
         }
         for m in st.chat.load_history(&peer, 200).unwrap_or_default() {
             if m.from != st.my_id && m.timestamp > acked && m.timestamp > after {
-                out.push((m.timestamp, json!({"id": m.timestamp, "from_peer_id": hex::encode(m.from.0), "payload_b64": base64_of(m.text.as_bytes()), "ts_ms": m.timestamp})));
+                let mut j = json!({"id": m.timestamp, "from_peer_id": hex::encode(m.from.0), "payload_b64": base64_of(m.text.as_bytes()), "ts_ms": m.timestamp, "msg_id": hex::encode(m.msg_id.0)});
+                if let Some(r) = &m.reply_to {
+                    j["reply_to"] = json!({"id": r.msg_id, "text": r.text});
+                }
+                out.push((m.timestamp, j));
             }
         }
     }

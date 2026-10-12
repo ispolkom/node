@@ -604,7 +604,7 @@ const EDIT_MARKER: &str = "\u{1}yandi-edit:";
 
 pub enum Envelope {
     /// сообщение с номером отправителя
-    Message { cmid: String, text: String },
+    Message { cmid: String, text: String, reply: Option<(String, String)> },
     /// квитанция: «delivered» или «read» по номерам наших сообщений
     Receipt { read: bool, ids: Vec<String> },
     /// правка ранее присланного сообщения
@@ -623,6 +623,13 @@ pub fn classify(text: String) -> Envelope {
     struct M {
         cmid: String,
         text: String,
+        #[serde(default)]
+        reply: Option<Rp>,
+    }
+    #[derive(Deserialize)]
+    struct Rp {
+        id: String,
+        text: String,
     }
     #[derive(Deserialize)]
     struct R {
@@ -632,7 +639,7 @@ pub fn classify(text: String) -> Envelope {
     if let Some(j) = text.strip_prefix(MSG_MARKER) {
         if let Ok(m) = serde_json::from_str::<M>(j) {
             if !m.cmid.is_empty() {
-                return Envelope::Message { cmid: m.cmid, text: m.text };
+                return Envelope::Message { cmid: m.cmid, text: m.text, reply: m.reply.map(|r| (r.id, r.text)) };
             }
         }
     } else if let Some(j) = text.strip_prefix(RCPT_MARKER) {
@@ -656,7 +663,16 @@ pub fn classify(text: String) -> Envelope {
 }
 
 pub fn wrap_message(cmid: &str, text: &str) -> String {
-    format!("{MSG_MARKER}{}", serde_json::json!({"v": 1, "cmid": cmid, "text": text}))
+    wrap_message_reply(cmid, text, None)
+}
+
+/// Сообщение с ответом-цитатой: `reply` = (номер сообщения на узле, выдержка его текста).
+pub fn wrap_message_reply(cmid: &str, text: &str, reply: Option<(&str, &str)>) -> String {
+    let mut j = serde_json::json!({"v": 1, "cmid": cmid, "text": text});
+    if let Some((id, quote)) = reply {
+        j["reply"] = serde_json::json!({"id": id, "text": quote});
+    }
+    format!("{MSG_MARKER}{j}")
 }
 
 pub fn receipt(read: bool, ids: &[String]) -> String {
@@ -1052,7 +1068,11 @@ mod tests {
 
     #[test]
     fn service_envelopes_round_trip_like_the_app_writes_them() {
-        assert!(matches!(classify(wrap_message("12", "hi")), Envelope::Message { cmid, text } if cmid == "12" && text == "hi"));
+        assert!(matches!(classify(wrap_message("12", "hi")), Envelope::Message { cmid, text, .. } if cmid == "12" && text == "hi"));
+        assert!(matches!(
+            classify(wrap_message_reply("13", "ok", Some(("abc", "было")))),
+            Envelope::Message { cmid, text, reply: Some((id, q)) } if cmid == "13" && text == "ok" && id == "abc" && q == "было"
+        ));
         assert!(matches!(classify(receipt(true, &["a".into()])), Envelope::Receipt { read: true, ids } if ids == ["a"]));
         assert!(matches!(classify(edit("7", "new")), Envelope::Edit { cmid, text } if cmid == "7" && text == "new"));
         assert!(matches!(classify(cap_ping()), Envelope::CapPing));
@@ -1110,7 +1130,7 @@ mod tests {
         let to = hex::encode([25;32]);
         let wire = seal_with(&phone, &wrap_message(&cmid, &offer), &phone.x_pub, &from, &to, 1, now_ms()).unwrap();
         assert!(matches!(classify(open_with(&phone.x_secret, &wire, &from, &to, 1, &phone.ed_pub, now_ms()).unwrap()),
-            Envelope::Message { cmid: id, text } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
+            Envelope::Message { cmid: id, text, .. } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
 
         let received = receive_file("receipt-test-pc", &device, &offer).await.unwrap();
         assert_eq!(received.receipt_id, format!("file_{tid}"));

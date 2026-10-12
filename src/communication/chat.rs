@@ -324,11 +324,23 @@ impl ChatManager {
         text: String,
         attachment: Option<crate::communication::FileAttachment>,
     ) -> Result<ChatMessage> {
+        self.send_message_full(to, text, attachment, None).await
+    }
+
+    /// Отправить сообщение с вложением и/или ответом-цитатой
+    pub async fn send_message_full(
+        &self,
+        to: HashId,
+        text: String,
+        attachment: Option<crate::communication::FileAttachment>,
+        reply_to: Option<crate::communication::ReplyRef>,
+    ) -> Result<ChatMessage> {
         info!("📤 Sending chat message to {}", hex::encode(&to.0[..8]));
 
         // 1. Создать сообщение
         let mut msg = ChatMessage::new(self.my_node_id, to, text.clone());
         msg.status = MessageStatus::Shipping;
+        msg.reply_to = reply_to.and_then(|r| r.sanitized());
 
         // Добавить attachment если есть
         if let Some(att) = attachment {
@@ -398,6 +410,7 @@ impl ChatManager {
         // 1. Расшифровать
         // 2. Десериализовать
         let mut msg: ChatMessage = serde_json::from_slice(&data)?;
+        msg.reply_to = msg.reply_to.take().and_then(|r| r.sanitized());
 
         // 3. Проверить: нам ли, от того ли, чьим ключом расшифровано, и в пределах размеров
         if let Err(why) = check_incoming(&msg, from, self.my_node_id) {
@@ -827,6 +840,7 @@ mod tests {
             edited: false,
             edit_timestamp: None,
             attachment: None,
+            reply_to: None,
         }
     }
 

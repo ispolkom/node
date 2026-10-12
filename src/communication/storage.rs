@@ -67,6 +67,28 @@ struct StoredAttachment {
     file_ref: Option<StoredRef>,
 }
 
+/// Запись версии 2 (без ответа-цитаты): читается как раньше.
+#[derive(Serialize, Deserialize)]
+struct StoredMessageV2 {
+    msg_id: HashId,
+    from: HashId,
+    to: HashId,
+    timestamp: u64,
+    text: String,
+    encrypted: bool,
+    status: crate::communication::MessageStatus,
+    edited: bool,
+    edit_timestamp: Option<u64>,
+    attachment: Option<StoredAttachment>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredReply {
+    msg_id: String,
+    text: String,
+}
+
+/// Запись версии 3: версия 2 и ответ-цитата.
 #[derive(Serialize, Deserialize)]
 struct StoredMessage {
     msg_id: HashId,
@@ -79,6 +101,7 @@ struct StoredMessage {
     edited: bool,
     edit_timestamp: Option<u64>,
     attachment: Option<StoredAttachment>,
+    reply: Option<StoredReply>,
 }
 
 /// Хранилище чатов (локальное для каждой ноды) с AES-256-GCM шифрованием
@@ -243,18 +266,18 @@ impl ChatStorage {
                     local_name: r.local_name.clone(),
                 }),
             }),
+            reply: msg.reply_to.as_ref().map(|r| StoredReply {
+                msg_id: r.msg_id.clone(),
+                text: r.text.clone(),
+            }),
         };
-        let mut out = vec![2u8];
+        let mut out = vec![3u8];
         out.extend(bincode::serialize(&stored)?);
         Ok(out)
     }
 
     fn decode_message(plain: &[u8]) -> Option<ChatMessage> {
-        if plain.first() != Some(&2u8) {
-            return serde_json::from_slice::<ChatMessage>(plain).ok();
-        }
-        let m: StoredMessage = bincode::deserialize(&plain[1..]).ok()?;
-        Some(ChatMessage {
+        let stored = |m: StoredMessage| ChatMessage {
             msg_id: m.msg_id,
             from: m.from,
             to: m.to,
@@ -275,7 +298,31 @@ impl ChatStorage {
                     local_name: r.local_name,
                 }),
             }),
-        })
+            reply_to: m.reply.map(|r| crate::communication::ReplyRef {
+                msg_id: r.msg_id,
+                text: r.text,
+            }),
+        };
+        match plain.first() {
+            Some(3u8) => bincode::deserialize::<StoredMessage>(&plain[1..]).ok().map(stored),
+            Some(2u8) => {
+                let m: StoredMessageV2 = bincode::deserialize(&plain[1..]).ok()?;
+                Some(stored(StoredMessage {
+                    msg_id: m.msg_id,
+                    from: m.from,
+                    to: m.to,
+                    timestamp: m.timestamp,
+                    text: m.text,
+                    encrypted: m.encrypted,
+                    status: m.status,
+                    edited: m.edited,
+                    edit_timestamp: m.edit_timestamp,
+                    attachment: m.attachment,
+                    reply: None,
+                }))
+            }
+            _ => serde_json::from_slice::<ChatMessage>(plain).ok(),
+        }
     }
 
     /// Формат файла чата: признак `YCH2`, дальше записи `[длина u32 BE][nonce 12 | шифртекст]`. Файл без признака — прежний
@@ -831,6 +878,46 @@ mod concurrency_tests {
         let _ = st.load_history(&c, 10);
         assert!(dir.path().join(format!("chat_{}.enc", hex::encode(c.0))).exists());
         assert!(!dir.path().join(format!("chat_{}.enc", hex::encode(&c.0[..8]))).exists());
+    }
+
+    #[test]
+    fn a_reply_quote_survives_storage_and_a_version_2_record_is_still_read() {
+        use crate::communication::ReplyRef;
+        let dir = tempfile::tempdir().unwrap();
+        let (me, peer) = (HashId([1; 32]), HashId([2; 32]));
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let mut m = ChatMessage::new(me, peer, "ответ".into());
+        m.reply_to = Some(ReplyRef { msg_id: "ab".repeat(32), text: "исходное".into() });
+        st.save_outgoing(&peer, &m).unwrap();
+        let got = st.load_history(&peer, 10).unwrap();
+        assert_eq!(got[0].reply_to, m.reply_to);
+        // запись версии 2 (без цитаты) читается, цитаты нет
+        let old = StoredMessageV2 {
+            msg_id: HashId([9; 32]),
+            from: peer,
+            to: me,
+            timestamp: 5,
+            text: "старое".into(),
+            encrypted: true,
+            status: crate::communication::MessageStatus::Delivered,
+            edited: false,
+            edit_timestamp: None,
+            attachment: None,
+        };
+        let mut plain = vec![2u8];
+        plain.extend(bincode::serialize(&old).unwrap());
+        let back = ChatStorage::decode_message(&plain).unwrap();
+        assert_eq!(back.text, "старое");
+        assert!(back.reply_to.is_none());
+    }
+
+    #[test]
+    fn a_reply_quote_is_cut_to_the_limit_and_a_bad_anchor_is_dropped() {
+        use crate::communication::ReplyRef;
+        let long = ReplyRef { msg_id: "AB".repeat(32), text: "я".repeat(500) }.sanitized().unwrap();
+        assert_eq!(long.msg_id, "ab".repeat(32));
+        assert_eq!(long.text.chars().count(), ReplyRef::MAX_TEXT_CHARS);
+        assert!(ReplyRef { msg_id: "zz".into(), text: "x".into() }.sanitized().is_none());
     }
 
     #[test]

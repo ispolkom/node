@@ -3072,7 +3072,8 @@ async fn api_chat_send(
                 Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
             };
         }
-        return match crate::mobile_api::pc_send_to_device(&peer_id, req.text).await {
+        let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.msg_id, text: r.text });
+        return match crate::mobile_api::pc_send_to_device_reply(&peer_id, req.text, reply).await {
             Ok(msg) => Json(serde_json::json!({"status": "success", "message": "Message sent", "msg_id": hex::encode(&msg.msg_id.0[..8]), "timestamp": msg.timestamp})),
             Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
         };
@@ -3119,8 +3120,9 @@ async fn api_chat_send(
         });
 
     // Отправить сообщение
+    let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.msg_id, text: r.text });
     match chat_manager
-        .send_message_with_attachment(peer_hash, req.text, attachment)
+        .send_message_full(peer_hash, req.text, attachment, reply)
         .await
     {
         Ok(msg) => Json(serde_json::json!({
@@ -3203,7 +3205,8 @@ async fn api_chat_history(
                         "status": format!("{:?}", msg.status),
                         "edited": msg.edited,
                         "edit_timestamp": msg.edit_timestamp,
-                        "attachment": msg.attachment
+                        "attachment": msg.attachment,
+                        "reply_to": msg.reply_to
                     })
                 })
                 .collect();
@@ -3480,8 +3483,17 @@ async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct SendMessageRequest {
     text: String,
+    /// ответ-цитата: на какое сообщение отвечают
+    #[serde(default)]
+    reply_to: Option<ReplyToRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment: Option<MessageAttachment>,
+}
+
+#[derive(Deserialize)]
+struct ReplyToRequest {
+    msg_id: String,
+    text: String,
 }
 
 /// Attachment в запросе
