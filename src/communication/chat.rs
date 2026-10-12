@@ -177,9 +177,23 @@ impl ChatManager {
     pub fn spawn_delivery_timeout_task(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
+            let mut last_prune = Instant::now() - Duration::from_secs(24 * 3600);
             loop {
                 interval.tick().await;
                 self.sweep_expired_acks().await;
+                // история одного чата — максимум год: раз в сутки (и при старте) удаляем более старое
+                if last_prune.elapsed() >= Duration::from_secs(24 * 3600) && !self.storage.is_locked() {
+                    last_prune = Instant::now();
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    if let Ok(n) = self.storage.prune_expired(now_ms) {
+                        if n > 0 {
+                            println!("💬 История: удалено сообщений старше года: {n}");
+                        }
+                    }
+                }
             }
         });
     }

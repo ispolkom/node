@@ -532,6 +532,27 @@ impl ChatStorage {
         self.rewrite_all_messages(peer_id, &filtered)
     }
 
+    /// Срок хранения истории чата: год (с запасом на високосный). Старше этого сообщения с узла удаляются.
+    pub const RETENTION_MS: u64 = 366 * 24 * 60 * 60 * 1000;
+
+    /// Удаляет из всех чатов сообщения старше срока хранения; возвращает, сколько удалено.
+    /// Чат с записью, которая не открывается этим ключом, не трогается (как и при других перезаписях).
+    pub fn prune_expired(&self, now_ms: u64) -> Result<usize> {
+        let cutoff = now_ms.saturating_sub(Self::RETENTION_MS);
+        let mut removed = 0usize;
+        for peer in self.list_chats()? {
+            let _g = self.locked();
+            let Ok(messages) = self.load_history_strict(&peer) else { continue };
+            let total = messages.len();
+            let kept: Vec<ChatMessage> = messages.into_iter().filter(|m| m.timestamp >= cutoff).collect();
+            if kept.len() < total {
+                self.rewrite_all_messages(&peer, &kept)?;
+                removed += total - kept.len();
+            }
+        }
+        Ok(removed)
+    }
+
     /// Получить список всех peer, с которыми был чат
     pub fn list_chats(&self) -> Result<Vec<HashId>> {
         let mut peers = Vec::new();
@@ -673,6 +694,30 @@ mod closed_env_tests {
         let d = std::env::temp_dir().join(format!("yandi-closed-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    #[test]
+    fn history_older_than_a_year_is_removed_and_newer_kept_in_order() {
+        let d = tempfile::tempdir().unwrap();
+        let me = HashId([7u8; 32]);
+        let st = ChatStorage::in_dir(me, d.path().to_path_buf()).unwrap();
+        let peer = HashId([9u8; 32]);
+        let now: u64 = 2_000_000_000_000;
+        let day = 24 * 60 * 60 * 1000u64;
+        let mut ids = Vec::new();
+        for (i, age_days) in [400u64, 370, 200, 1].iter().enumerate() {
+            let mut m = ChatMessage::new(peer, me, format!("m{i}"));
+            m.timestamp = now - age_days * day;
+            ids.push(m.msg_id);
+            st.save_incoming(&peer, &m).unwrap();
+        }
+        assert_eq!(st.prune_expired(now).unwrap(), 2);
+        let left = st.load_history(&peer, 10).unwrap();
+        assert_eq!(left.len(), 2);
+        // сначала новые (load_history отдаёт с конца), порядок сохранён
+        assert_eq!(left[0].msg_id, ids[3]);
+        assert_eq!(left[1].msg_id, ids[2]);
+        assert_eq!(st.prune_expired(now).unwrap(), 0);
     }
 
     #[test]
