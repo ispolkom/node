@@ -2,11 +2,29 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/file_vault.dart';
+import 'package:yandi_mobile/models/contact.dart';
 import 'package:yandi_mobile/models/file_offer.dart';
+import 'package:yandi_mobile/services/files_host.dart';
 import 'package:yandi_mobile/screens/chat_files_screen.dart';
 import 'package:yandi_mobile/services/file_transfer_service.dart';
 import 'package:yandi_mobile/services/vault_files.dart';
 import 'package:yandi_mobile/theme.dart';
+
+class FakeHost extends ChangeNotifier implements FilesHost {
+  @override
+  List<Contact> contacts = [
+    for (var i = 0; i < 25; i++)
+      Contact(peerId: 'p${i.toString().padLeft(2, '0')}', displayName: 'Друг $i', online: i.isEven, isManual: false, saved: true),
+  ];
+  @override
+  int transferCount = 0;
+  final sent = <String>[];
+  @override
+  Future<String?> sendFile(String peerId, String path, {String? name}) async {
+    sent.add('$peerId:${name ?? path}');
+    return null;
+  }
+}
 
 final _key = List<int>.generate(32, (i) => i + 3);
 FileVault _fv() => FileVault.withKey(_key, chunkSize: 1024);
@@ -45,17 +63,28 @@ void main() {
     return offers;
   }
 
-  Future<void> pump(WidgetTester t, List<FileOffer> offers) async {
+  Future<void> pump(WidgetTester t, List<FileOffer> offers, {FakeHost? host, int maxPerFile = 20}) async {
     await t.pumpWidget(MaterialApp(
       theme: AppTheme.dark,
       home: ChatFilesScreen(
         title: 'Алиса',
         shortId: 'abcdef12',
         offers: offers,
+        host: host ?? FakeHost(),
+        maxPerFile: maxPerFile,
         vault: VaultFiles(dir, vault: () async => _fv(), tempDir: Directory('${dir.path}/tmp')),
       ),
     ));
     await io(t);
+  }
+
+  /// Строка получателя: список ленивый, часть строк за пределами экрана — выбираем напрямую, как это сделал бы тап.
+  Future<void> rcpt(WidgetTester t, int n) async {
+    final k = ValueKey('rcpt-p${n.toString().padLeft(2, '0')}');
+    final f = find.byKey(k, skipOffstage: false);
+    if (f.evaluate().isEmpty) fail('нет строки $k');
+    t.widget<CheckboxListTile>(f).onChanged!(true);
+    await t.pump();
   }
 
   test('file kinds by mime and extension', () {
@@ -84,7 +113,9 @@ void main() {
     final offers = await seed(t);
     await pump(t, offers);
     await t.longPress(find.text('отчёт.pdf'));
-    await t.pump();
+    await t.pumpAndSettle();
+    await t.tap(find.text('Выбрать'));
+    await t.pumpAndSettle();
     await t.tap(find.text('песня.mp3'));
     await t.pump();
     expect(find.text('Выбрано: 2'), findsOneWidget);
@@ -118,5 +149,86 @@ void main() {
     await t.tap(find.text('Да'));
     await io(t);
     expect(find.textContaining('пока нет файлов'), findsOneWidget);
+  });
+
+  testWidgets('удержание файла: меню Переслать / Выбрать / Удалить, удаление с подтверждением', (t) async {
+    final offers = await seed(t);
+    await pump(t, offers);
+    await t.longPress(find.text('фото.png'));
+    await t.pumpAndSettle();
+    expect(find.text('Переслать'), findsOneWidget);
+    expect(find.text('Выбрать'), findsOneWidget);
+    expect(find.text('Удалить'), findsOneWidget);
+    await t.tap(find.text('Удалить'));
+    await t.pumpAndSettle();
+    expect(find.text('Удалить файл?'), findsOneWidget);
+    await t.tap(find.text('Нет'));
+    await t.pumpAndSettle();
+    expect(find.text('фото.png'), findsOneWidget);
+    await t.longPress(find.text('фото.png'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Удалить'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Да'));
+    await io(t);
+    expect(find.text('фото.png'), findsNothing);
+  });
+
+  testWidgets('переслать из меню: список с прокруткой, до 5 получателей за раз', (t) async {
+    final offers = await seed(t);
+    final host = FakeHost();
+    await t.binding.setSurfaceSize(const Size(800, 3200));
+    addTearDown(() => t.binding.setSurfaceSize(null));
+    await pump(t, offers, host: host);
+    await t.longPress(find.text('отчёт.pdf'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('Переслать'));
+    await t.pumpAndSettle();
+    expect(find.text('Переслать «отчёт.pdf»'), findsOneWidget);
+    for (final n in [0, 10, 12, 14, 16]) {
+      await rcpt(t, n);
+    }
+    // шестого выбрать нельзя
+    await rcpt(t, 18);
+    expect(find.text('Не больше 5 получателей за раз'), findsOneWidget);
+    expect(find.text('Отправить (5)'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('rcpt-send')));
+    await t.pumpAndSettle();
+    expect(host.sent.length, 5);
+    expect(host.sent.first.endsWith(':отчёт.pdf'), true);
+  });
+
+  testWidgets('несколько файлов конвертом, предел получателей на файл', (t) async {
+    final offers = await seed(t);
+    final host = FakeHost();
+    await pump(t, offers, host: host, maxPerFile: 7);
+    Future<void> selectBoth() async {
+      await t.longPress(find.text('отчёт.pdf'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('Выбрать'));
+      await t.pumpAndSettle();
+      await t.tap(find.text('песня.mp3'));
+      await t.pump();
+    }
+    await selectBoth();
+    await t.tap(find.byKey(const ValueKey('files-forward-selected')));
+    await t.pumpAndSettle();
+    for (final n in [0, 10, 12, 14, 16]) {
+      await rcpt(t, n);
+    }
+    await t.tap(find.byKey(const ValueKey('rcpt-send')));
+    await t.pumpAndSettle();
+    expect(host.sent.length, 5 * 2);
+    // ещё трое новых: всего 8 > 7 — отказ, ничего не отправлено
+    await selectBoth();
+    await t.tap(find.byKey(const ValueKey('files-forward-selected')));
+    await t.pumpAndSettle();
+    for (final n in [18, 2, 20]) {
+      await rcpt(t, n);
+    }
+    await t.tap(find.byKey(const ValueKey('rcpt-send')));
+    await t.pumpAndSettle();
+    expect(host.sent.length, 10);
+    expect(find.textContaining('не больше 7 получателей'), findsOneWidget);
   });
 }

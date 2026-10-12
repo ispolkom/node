@@ -786,9 +786,10 @@ class _FileCard extends StatelessWidget {
         ] else if (outgoing) ...[
           Text(failed ? 'Не отправлено' : 'Отправлено',
               style: TextStyle(color: failed ? Colors.redAccent : AppTheme.textSecondary, fontSize: 11)),
-          if (local != null && !failed) Wrap(children: _openActions(context, state, local)),
+          if (local != null && !failed && !inlineAudio && !inlineVideo) Wrap(children: _openActions(context, state, local)),
         ] else if (local != null) ...[
-          Wrap(children: _openActions(context, state, local)),
+          // у звука и видео своё воспроизведение прямо в сообщении: «Открыть» лишнее
+          if (!inlineAudio && !inlineVideo) Wrap(children: _openActions(context, state, local)),
         ] else ...[
           _Action(icon: Icons.download, label: 'Скачать', onTap: () => state.downloadFile(offer)),
         ],

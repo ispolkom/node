@@ -133,7 +133,8 @@ class _VideoSurfaceState extends State<VideoSurface> {
         Positioned(
           left: 0,
           right: 0,
-          bottom: 0,
+          // поднято над системной панелью навигации: иначе при вертикальном экране полосу перемотки не достать
+          bottom: MediaQuery.of(context).viewPadding.bottom + 16,
           child: Container(
             padding: const EdgeInsets.fromLTRB(12, 0, 4, 0),
             decoration: BoxDecoration(

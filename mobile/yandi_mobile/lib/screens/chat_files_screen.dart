@@ -3,8 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
+import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/file_transfer_service.dart';
+import '../services/files_host.dart';
 import '../services/vault_files.dart';
 import '../theme.dart';
 import 'file_viewer_screen.dart';
@@ -50,7 +52,15 @@ class ChatFilesScreen extends StatefulWidget {
   final List<FileOffer> offers;
   /// Для тестов: готовое хранилище вместо папки приложения.
   final VaultFiles? vault;
-  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault});
+  /// Для тестов: хозяин передач (контакты и отправка) вместо AppState.
+  final FilesHost? host;
+  /// Предел получателей на один файл за сеанс (по умолчанию 20; параметр — для тестов).
+  final int maxPerFile;
+  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile});
+
+  /// За один раз — не больше стольких получателей; суммарно на один файл — не больше defaultMaxPerFile.
+  static const maxPerBatch = 5;
+  static const defaultMaxPerFile = 20;
 
   @override
   State<ChatFilesScreen> createState() => ChatFilesScreenState();
@@ -60,6 +70,8 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
   VaultFiles? _vault;
   List<VaultFile> _files = [];
   final Set<String> _selected = {};
+  /// Кому уже пересылали файл в этом сеансе (путь файла → получатели): предел на один файл.
+  final Map<String, Set<String>> _sentTo = {};
   bool _loading = true;
 
   @override
@@ -163,6 +175,132 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     if (choice == 'clear') await _clearFolder();
   }
 
+  /// Список контактов с прокруткой: отметить можно до 5 получателей за раз.
+  Future<List<Contact>?> _pickRecipients(List<VaultFile> files, List<Contact> contacts) {
+    final chosen = <String>{};
+    return showModalBottomSheet<List<Contact>>(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      isScrollControlled: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setSheet) => SafeArea(
+          child: ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
+                child: Text(files.length == 1 ? 'Переслать «${files.first.name}»' : 'Переслать файлы (${files.length})',
+                    style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+              ),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Text('Выберите до ${ChatFilesScreen.maxPerBatch} получателей. Файл уходит зашифрованным, ход виден в чате с ними.',
+                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              ),
+              Flexible(
+                child: ListView(shrinkWrap: true, children: [
+                  for (final c in contacts)
+                    CheckboxListTile(
+                      key: ValueKey('rcpt-${c.peerId}'),
+                      value: chosen.contains(c.peerId),
+                      activeColor: AppTheme.accent,
+                      controlAffinity: ListTileControlAffinity.trailing,
+                      secondary: Icon(Icons.person_outline, color: c.online ? AppTheme.accent : AppTheme.textSecondary),
+                      title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
+                      subtitle: Text(c.online ? 'в сети' : 'не в сети', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                      onChanged: (v) {
+                        if (v == true && chosen.length >= ChatFilesScreen.maxPerBatch) {
+                          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Не больше 5 получателей за раз')));
+                          return;
+                        }
+                        setSheet(() => v == true ? chosen.add(c.peerId) : chosen.remove(c.peerId));
+                      },
+                    ),
+                ]),
+              ),
+              Padding(
+                padding: const EdgeInsets.all(12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    key: const ValueKey('rcpt-send'),
+                    style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
+                    onPressed: chosen.isEmpty ? null : () => Navigator.pop(ctx, contacts.where((c) => chosen.contains(c.peerId)).toList()),
+                    child: Text(chosen.isEmpty ? 'Выберите получателей' : 'Отправить (${chosen.length})'),
+                  ),
+                ),
+              ),
+            ]),
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _forward(List<VaultFile> files) async {
+    if (files.isEmpty) return;
+    final FilesHost host = widget.host ?? context.read<AppState>();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final contacts = host.contacts.where((c) => c.saved || !c.isStale(now)).toList()
+      ..sort((a, b) => a.saved != b.saved ? (a.saved ? -1 : 1) : a.online != b.online ? (a.online ? -1 : 1) : a.displayName.compareTo(b.displayName));
+    if (contacts.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Некому отправлять: в списке нет контактов')));
+      return;
+    }
+    final to = await _pickRecipients(files, contacts);
+    if (to == null || to.isEmpty || !mounted) return;
+    // предел на файл: всего не больше 20 разных получателей
+    for (final f in files) {
+      final all = {...?_sentTo[f.path], ...to.map((c) => c.peerId)};
+      if (all.length > widget.maxPerFile) {
+        ScaffoldMessenger.of(context).clearSnackBars();
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('«${f.name}»: не больше ${widget.maxPerFile} получателей на файл (уже ${_sentTo[f.path]?.length ?? 0})')));
+        return;
+      }
+    }
+    final names = to.map((c) => c.displayName).join(', ');
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправка → $names. Ход — в чатах с ними.')));
+    for (final f in files) {
+      _sentTo.putIfAbsent(f.path, () => {}).addAll(to.map((c) => c.peerId));
+      for (final c in to) {
+        host.sendFile(c.peerId, f.path, name: f.name).then((err) {
+          if (err != null && mounted) {
+            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${f.name} → ${c.displayName}: $err')));
+          }
+        });
+      }
+    }
+    setState(_selected.clear);
+  }
+
+  /// Удержание файла: Переслать, Выбрать (несколько), Удалить.
+  Future<void> _fileMenu(VaultFile f, Offset at) async {
+    final size = MediaQuery.of(context).size;
+    final choice = await showMenu<String>(
+      context: context,
+      color: AppTheme.surface,
+      position: RelativeRect.fromLTRB(at.dx, at.dy, size.width - at.dx, size.height - at.dy),
+      items: const [
+        PopupMenuItem(value: 'forward', height: 44, child: Text('Переслать', style: TextStyle(color: AppTheme.text, fontSize: 15))),
+        PopupMenuItem(value: 'select', height: 44, child: Text('Выбрать', style: TextStyle(color: AppTheme.text, fontSize: 15))),
+        PopupMenuItem(value: 'delete', height: 44, child: Text('Удалить', style: TextStyle(color: Colors.redAccent, fontSize: 15))),
+      ],
+    );
+    if (!mounted) return;
+    switch (choice) {
+      case 'forward':
+        await _forward([f]);
+      case 'select':
+        setState(() => _selected.add(f.path));
+      case 'delete':
+        setState(() => _selected..clear()..add(f.path));
+        await _deleteSelected();
+        // отказ в подтверждении не должен оставлять файл выбранным
+        if (mounted) setState(_selected.clear);
+    }
+  }
+
   Future<void> _open(VaultFile f) async {
     await Navigator.push(context, MaterialPageRoute(
       builder: (_) => FileViewerScreen(file: f, onDelete: () async { await _vault?.deleteForever(f.path); }),
@@ -190,6 +328,13 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                     overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
               ]),
         actions: [
+          if (selecting)
+            IconButton(
+              key: const ValueKey('files-forward-selected'),
+              tooltip: 'Переслать выбранные',
+              icon: const Icon(Icons.forward_to_inbox_outlined),
+              onPressed: () => _forward(_files.where((f) => _selected.contains(f.path)).toList()),
+            ),
           if (selecting)
             IconButton(
               key: const ValueKey('files-delete-selected'),
@@ -226,23 +371,31 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                               style: const TextStyle(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.bold)),
                         ),
                         for (final f in groups[kind]!)
-                          ListTile(
+                          GestureDetector(
                             key: ValueKey('file-${f.id}'),
-                            selected: _selected.contains(f.path),
-                            selectedTileColor: AppTheme.accent.withValues(alpha: 0.15),
-                            leading: Icon(_selected.contains(f.path) ? Icons.check_circle : _icon(kind),
-                                color: _selected.contains(f.path) ? AppTheme.accent : AppTheme.textSecondary),
-                            title: Text(f.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
-                            subtitle: Text('${_size(f.size)} · ${DateFormat('dd.MM.yyyy HH:mm').format(f.modified)}',
-                                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                            onTap: () {
+                            onLongPressStart: (d) {
                               if (selecting) {
                                 setState(() => _selected.contains(f.path) ? _selected.remove(f.path) : _selected.add(f.path));
                               } else {
-                                _open(f);
+                                _fileMenu(f, d.globalPosition);
                               }
                             },
-                            onLongPress: () => setState(() => _selected.contains(f.path) ? _selected.remove(f.path) : _selected.add(f.path)),
+                            child: ListTile(
+                              selected: _selected.contains(f.path),
+                              selectedTileColor: AppTheme.accent.withValues(alpha: 0.15),
+                              leading: Icon(_selected.contains(f.path) ? Icons.check_circle : _icon(kind),
+                                  color: _selected.contains(f.path) ? AppTheme.accent : AppTheme.textSecondary),
+                              title: Text(f.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
+                              subtitle: Text('${_size(f.size)} · ${DateFormat('dd.MM.yyyy HH:mm').format(f.modified)}',
+                                  style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                              onTap: () {
+                                if (selecting) {
+                                  setState(() => _selected.contains(f.path) ? _selected.remove(f.path) : _selected.add(f.path));
+                                } else {
+                                  _open(f);
+                                }
+                              },
+                            ),
                           ),
                       ],
                   ],
