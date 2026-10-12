@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'app.dart';
+import 'theme.dart';
 import 'transport/api.dart';
 
 void main(List<String> args) {
@@ -10,8 +11,14 @@ void main(List<String> args) {
   } on FormatException catch (e) {
     runApp(
       MaterialApp(
+        theme: Icq.theme,
         home: Scaffold(
-          body: Center(child: Text('Ошибка запуска: ${e.message}')),
+          body: Center(
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 500),
+              child: NoticePanel('Ошибка запуска: ${e.message}', error: true),
+            ),
+          ),
         ),
       ),
     );

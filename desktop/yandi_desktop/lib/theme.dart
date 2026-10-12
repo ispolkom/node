@@ -70,14 +70,16 @@ abstract final class Icq {
       ),
       minimumSize: const WidgetStatePropertyAll(Size(28, 30)),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      textStyle: const WidgetStatePropertyAll(TextStyle(fontSize: 13)),
+      textStyle: const WidgetStatePropertyAll(
+        TextStyle(fontSize: 13, fontFamily: 'Tahoma'),
+      ),
     );
     const outline = OutlineInputBorder(
       borderRadius: BorderRadius.all(Radius.circular(2)),
       borderSide: BorderSide(color: border),
     );
     return base.copyWith(
-      textTheme: textTheme,
+      textTheme: textTheme.apply(fontFamily: 'Tahoma'),
       filledButtonTheme: FilledButtonThemeData(
         style: buttonStyle(header, Colors.white),
       ),
@@ -329,7 +331,18 @@ class PanelStack extends StatelessWidget {
             title: heading,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: body,
+              children: [
+                for (final child in body)
+                  if (child is TextField || child is DropdownButton)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: child,
+                    )
+                  else if (child is ButtonStyleButton)
+                    Align(alignment: Alignment.centerLeft, child: child)
+                  else
+                    child,
+              ],
             ),
           ),
         ),

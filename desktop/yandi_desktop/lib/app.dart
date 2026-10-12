@@ -626,6 +626,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           UiText('Новых чатов: ${background.unread.length}'),
         const UiText(
           'Выход из оболочки не запирает закрытую среду. Используйте «Запереть».',
+          style: TextStyle(fontSize: 11, color: Icq.dark),
         ),
         if (lockUnconfirmed) ...[
           const UiText('Состояние блокировки не подтверждено'),
@@ -641,6 +642,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               title: 'Настройки оболочки',
               children: [
                 CheckboxListTile(
+                  controlAffinity: ListTileControlAffinity.leading,
                   title: const UiText('Язык / Language'),
                   subtitle: UiText(preferences.english ? 'English' : 'Русский'),
                   value: preferences.english,
@@ -653,6 +655,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   'Язык применяется ко всем формам и состояниям оболочки. Пользовательский текст не переводится.',
                 ),
                 CheckboxListTile(
+                  controlAffinity: ListTileControlAffinity.leading,
                   title: const UiText('Фоновые оповещения узловых чатов'),
                   value: preferences.background,
                   onChanged: (v) {
@@ -662,6 +665,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                 ),
                 CheckboxListTile(
+                  controlAffinity: ListTileControlAffinity.leading,
                   title: const UiText('Системный звук'),
                   value: preferences.sound,
                   onChanged: (value) {
@@ -670,6 +674,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                 ),
                 CheckboxListTile(
+                  controlAffinity: ListTileControlAffinity.leading,
                   title: const UiText('Уведомления ОС'),
                   value: preferences.notifications,
                   onChanged: (value) {
@@ -678,6 +683,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                 ),
                 CheckboxListTile(
+                  controlAffinity: ListTileControlAffinity.leading,
                   title: const UiText('Не беспокоить'),
                   value: preferences.dnd,
                   onChanged: (value) {
