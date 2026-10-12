@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -93,14 +94,13 @@ class _CallsFeatureState extends State<CallsFeature> {
     child: UiText(title),
   );
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => PanelStack(
     children: [
       const UiText('Звонки', style: TextStyle(fontSize: 22)),
       const UiText('Входящие проверяются, пока открыт этот экран.'),
       UiText(label),
       if (coordinator.error != null)
-        UiText(coordinator.error!, style: const TextStyle(color: Colors.red)),
+        NoticePanel(coordinator.error!, error: true),
       if (coordinator.call != null)
         SelectableText(
           '${coordinator.call!.name} · ${coordinator.call!.peer} · ${tr(context, coordinator.call!.video ? 'видео' : 'голос')}',

@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'preferences.dart';
@@ -159,8 +160,7 @@ class _DevicesPanelState extends State<DevicesPanel> {
     'unblock': 'Разблокировать устройство',
   };
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => PanelStack(
     children: [
       UiText(
         widget.paired ? 'Сопряжённые устройства' : 'Другие устройства узла',

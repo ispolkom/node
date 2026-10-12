@@ -70,13 +70,13 @@ void main() {
   ) async {
     final api = m2.FeatureApi();
     await m2.open(t, api, 'Настройки');
-    final sound = find.widgetWithText(SwitchListTile, 'Системный звук');
-    expect(t.widget<SwitchListTile>(sound).value, false);
+    final sound = find.widgetWithText(CheckboxListTile, 'Системный звук');
+    expect(t.widget<CheckboxListTile>(sound).value, false);
     await t.ensureVisible(sound);
     await t.tap(sound);
     await t.pumpAndSettle();
-    expect(t.widget<SwitchListTile>(sound).value, true);
-    final language = find.widgetWithText(SwitchListTile, 'Язык / Language');
+    expect(t.widget<CheckboxListTile>(sound).value, true);
+    final language = find.widgetWithText(CheckboxListTile, 'Язык / Language');
     await t.ensureVisible(language);
     await t.tap(language);
     await t.pumpAndSettle();

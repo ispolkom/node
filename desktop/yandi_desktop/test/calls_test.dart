@@ -439,7 +439,7 @@ void main() {
       await click(t, 'Войти');
       await click(t, 'Звонки');
       await t.enterText(find.byType(TextField).first, peer);
-      await click(t, 'Панель');
+      await click(t, 'Главная');
       await click(t, 'Звонки');
       expect(
         (t.widget<TextField>(find.byType(TextField).first)).controller!.text,

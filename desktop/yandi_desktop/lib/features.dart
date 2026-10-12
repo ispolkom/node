@@ -822,22 +822,22 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (error != null) NoticePanel(error!, error: true),
             if (notice != null) NoticePanel(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
-            if (widget.page == 'Настройки')
+            if (widget.page == 'Настройки') ...[
+              AdvancedSettings(
+                api: widget.api,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
+              DevicesPanel(
+                api: widget.api,
+                paired: true,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
               PanelStack(
                 children: [
-                  AdvancedSettings(
-                    api: widget.api,
-                    busy: sending,
-                    isActive: () => active,
-                    mutate: (a) => mutate(a),
-                  ),
-                  DevicesPanel(
-                    api: widget.api,
-                    paired: true,
-                    busy: sending,
-                    isActive: () => active,
-                    mutate: (a) => mutate(a),
-                  ),
                   const UiText('Профиль', style: TextStyle(fontSize: 22)),
                   ProfilePanel(
                     api: widget.api,
@@ -854,8 +854,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     child: const UiText('Сохранить профиль'),
                   ),
                 ],
-              )
-            else ...[
+              ),
+            ] else ...[
               if (widget.page == 'Контакты') ...[
                 const UiText(
                   'Карточка собственного узла',

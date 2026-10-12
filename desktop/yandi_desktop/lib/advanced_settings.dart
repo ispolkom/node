@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'package:flutter/material.dart';
 import 'transport/api.dart';
 import 'domain/states.dart';
@@ -167,8 +168,7 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
     child: UiText(text),
   );
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => PanelStack(
     children: [
       const UiText('Расширенные настройки', style: TextStyle(fontSize: 22)),
       if (loading) const LinearProgressIndicator(),
@@ -221,7 +221,8 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
       ),
       button('Добавить внешний прокси', createProxy),
       if (pool != null) ...[
-        SwitchListTile(
+        CheckboxListTile(
+          controlAffinity: ListTileControlAffinity.leading,
           title: const UiText('Включить пул'),
           value: pool!['enabled'] == true,
           onChanged: widget.busy
@@ -229,11 +230,12 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
               : (v) => sealedAction(() async {
                   await widget.api.request(
                     '/api/upstream-proxies/settings',
-                    body: {'enabled': v},
+                    body: {'enabled': v!},
                   );
                 }),
         ),
-        SwitchListTile(
+        CheckboxListTile(
+          controlAffinity: ListTileControlAffinity.leading,
           title: const UiText('Строго соблюдать лимит клиентов'),
           value: pool!['strict'] == true,
           onChanged: widget.busy
@@ -241,7 +243,7 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
               : (v) => sealedAction(() async {
                   await widget.api.request(
                     '/api/upstream-proxies/settings',
-                    body: {'strict': v},
+                    body: {'strict': v!},
                   );
                 }),
         ),
@@ -415,8 +417,7 @@ class _ProxyFormState extends State<ProxyForm> {
 class AboutPanel extends StatelessWidget {
   const AboutPanel({super.key});
   @override
-  Widget build(BuildContext context) => const Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => const PanelStack(
     children: [
       UiText('О приложении', style: TextStyle(fontSize: 24)),
       UiText('YANDI Desktop · 0.1.0'),
