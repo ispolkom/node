@@ -51,6 +51,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
     sessions = [];
     peers = [];
     http = socks = relay = null;
+    notice = error = editing = null;
     super.dispose();
   }
 

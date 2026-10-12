@@ -71,6 +71,7 @@ class UnixApi implements Api {
   final Duration timeout;
   final int maxResponseBytes;
   final Set<HttpClient> _active = {};
+  final Set<WebSocket> _sockets = {};
   UnixApi(
     this.socketPath, {
     this.timeout = const Duration(seconds: 15),
@@ -83,7 +84,10 @@ class UnixApi implements Api {
     Map<String, dynamic>? body,
     String? method,
   }) async {
-    if (!RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path) ||
+    final events = RegExp(
+      r'^/api/mobile/call/events\?after=[0-9]{1,20}$',
+    ).hasMatch(path);
+    if ((!RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path) && !events) ||
         (method != null &&
             !const ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].contains(method)))
       throw const ApiFailure('protocol');
@@ -110,7 +114,7 @@ class UnixApi implements Api {
       return await (() async {
         final req = await client.openUrl(
           method ?? (body == null ? 'GET' : 'POST'),
-          Uri(scheme: 'http', host: 'localhost', path: path),
+          Uri.parse('http://localhost$path'),
         );
         req.followRedirects = false;
         req.headers.set(HttpHeaders.acceptHeader, 'application/json');
@@ -140,9 +144,15 @@ class UnixApi implements Api {
             buffer.setRange(length, length + chunk.length, chunk);
             length += chunk.length;
           }
-          final value = jsonDecode(
+          var value = jsonDecode(
             utf8.decode(Uint8List.sublistView(buffer, 0, length)),
           );
+          if (value == null &&
+              const [
+                '/api/media/incoming-call',
+                '/api/media/video/incoming-call',
+              ].contains(path))
+            value = <String, dynamic>{'incoming': null};
           if (value is! Map<String, dynamic>)
             throw const ApiFailure('protocol');
           if (response.statusCode < 200 || response.statusCode >= 300)
@@ -181,8 +191,69 @@ class UnixApi implements Api {
     }
   }
 
+  /// WebSocket upgrade over the same owner-only Unix socket. No TCP fallback.
+  Future<WebSocket> openMediaSocket(String peer) async {
+    if (!RegExp(r'^[a-fA-F0-9]{16}([a-fA-F0-9]{48})?$').hasMatch(peer)) {
+      throw const ApiFailure('protocol');
+    }
+    if (_active.length >= 6) throw const ApiFailure('busy');
+    final client = HttpClient()
+      ..findProxy = ((_) => 'DIRECT')
+      ..connectionTimeout = timeout;
+    _active.add(client);
+    client.connectionFactory = (uri, proxyHost, proxyPort) async {
+      if (await FileSystemEntity.type(socketPath, followLinks: false) !=
+          FileSystemEntityType.unixDomainSock) {
+        throw const ApiFailure('disconnected');
+      }
+      return Socket.startConnect(
+        InternetAddress(socketPath, type: InternetAddressType.unix),
+        0,
+      );
+    };
+    var expired = false;
+    final future = WebSocket.connect(
+      'ws://localhost/api/media/ws/$peer',
+      customClient: client,
+    );
+    // A handshake completing after timeout/cancel must never escape cleanup.
+    future.then((socket) {
+      if (expired || !_active.contains(client)) {
+        socket.close();
+      } else {
+        _sockets.add(socket);
+        socket.done.whenComplete(() {
+          _sockets.remove(socket);
+          client.close(force: true);
+          _active.remove(client);
+        });
+      }
+    }, onError: (Object _) {});
+    try {
+      final socket = await future.timeout(timeout);
+      if (!_active.contains(client)) {
+        await socket.close();
+        throw const ApiFailure('disconnected');
+      }
+      socket.pingInterval = const Duration(seconds: 20);
+      return socket;
+    } catch (e) {
+      expired = true;
+      client.close(force: true);
+      _active.remove(client);
+      if (e is WebSocketException && e.httpStatusCode != null)
+        throw ApiFailure('http', e.httpStatusCode);
+      if (e is TimeoutException) throw const ApiFailure('timeout');
+      throw const ApiFailure('disconnected');
+    }
+  }
+
   @override
   void cancel() {
+    for (final socket in _sockets.toList()) {
+      socket.close();
+    }
+    _sockets.clear();
     for (final client in _active) {
       client.close(force: true);
     }

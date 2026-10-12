@@ -303,7 +303,6 @@ impl Endpoint {
                 let service = hyper_util::service::TowerToHyperService::new(app);
                 let mut builder = hyper::server::conn::http1::Builder::new();
                 builder
-                    .keep_alive(false)
                     .max_headers(64)
                     .max_buf_size(32 * 1024)
                     .timer(hyper_util::rt::TokioTimer::new())
@@ -345,10 +344,19 @@ async fn socket_request(mut req: axum::extract::Request, next: Next) -> Response
     }
     let body = std::mem::replace(req.body_mut(), Body::empty());
     *req.body_mut() = Body::new(http_body_util::Limited::new(body, BODY_LIMIT));
-    match tokio::time::timeout(REQUEST, next.run(req)).await {
+    let mut response = match tokio::time::timeout(REQUEST, next.run(req)).await {
         Ok(response) => response,
         Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    };
+    // Hyper keep_alive(false) overwrites Connection: Upgrade even for HTTP 101.
+    // Close ordinary RPC connections individually, preserving genuine upgrades.
+    if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+        response.headers_mut().insert(
+            axum::http::header::CONNECTION,
+            axum::http::HeaderValue::from_static("close"),
+        );
     }
+    response
 }
 
 struct BoundedIo {
@@ -442,6 +450,68 @@ mod tests {
         assert!(uid_matches(owner, owner));
         assert!(!uid_matches(owner.wrapping_add(1), owner));
         assert!(!uid_matches(0, 1000));
+    }
+
+    #[tokio::test]
+    async fn websocket_upgrade_preserves_connection_header_and_rpc_still_closes() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let endpoint = Endpoint::bind(&data).unwrap();
+        let app = Router::new()
+            .route(
+                "/api/echo",
+                axum::routing::get(|ws: axum::extract::WebSocketUpgrade| async {
+                    ws.on_upgrade(|mut socket| async move {
+                        if let Some(Ok(message)) = socket.recv().await {
+                            socket.send(message).await.unwrap();
+                        }
+                    })
+                }),
+            )
+            .route("/api/status", axum::routing::get(|| async { "ok" }));
+        let task = tokio::spawn(endpoint.serve(app));
+        let path = data.join("run").join(NAME);
+        let mut rpc = UnixStream::connect(&path).await.unwrap();
+        rpc.write_all(b"GET /api/status HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut ordinary = Vec::new();
+        tokio::time::timeout(Duration::from_secs(5), rpc.read_to_end(&mut ordinary))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(String::from_utf8(ordinary)
+            .unwrap()
+            .to_lowercase()
+            .contains("connection: close"));
+        let mut ws = UnixStream::connect(path).await.unwrap();
+        ws.write_all(b"GET /api/echo HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n").await.unwrap();
+        let mut header = Vec::new();
+        while !header.ends_with(b"\r\n\r\n") {
+            header.push(
+                tokio::time::timeout(Duration::from_secs(5), ws.read_u8())
+                    .await
+                    .unwrap()
+                    .unwrap(),
+            );
+            assert!(header.len() < 4096);
+        }
+        let header = String::from_utf8(header).unwrap().to_lowercase();
+        assert!(header.starts_with("http/1.1 101"));
+        assert!(header.contains("connection: upgrade"));
+        assert!(!header.contains("connection: close"));
+        ws.write_all(&[0x81, 0x82, 1, 2, 3, 4, b'n', b'i'])
+            .await
+            .unwrap();
+        let mut echo = [0; 4];
+        tokio::time::timeout(Duration::from_secs(5), ws.read_exact(&mut echo))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(echo, [0x81, 2, b'o', b'k']);
+        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]

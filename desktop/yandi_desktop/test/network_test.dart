@@ -6,7 +6,11 @@ import 'widget_test.dart' show FakeApi, start, click, stop;
 
 class NetworkApi extends FakeApi {
   final gateways = <Map<String, dynamic>>[];
-  bool relay = false, proxy = false, stopFails = false, saveFails = false;
+  bool relay = false,
+      proxy = false,
+      socks = false,
+      stopFails = false,
+      saveFails = false;
   Completer<Map<String, dynamic>>? late;
   @override
   Future<Map<String, dynamic>> request(
@@ -35,7 +39,29 @@ class NetworkApi extends FakeApi {
               ]
             : [],
       };
-    if (path == '/api/socks5/status') return {'active': false, 'proxies': []};
+    if (path == '/api/socks5/status')
+      return {
+        'active': socks,
+        'proxies': socks
+            ? [
+                {'short_id': '0123456789abcdef', 'local_port': 12345},
+              ]
+            : [],
+      };
+    if (path.contains('/socks5/start/')) {
+      calls.add(path);
+      socks = true;
+      return {
+        'listen_addr': '127.0.0.1:12345',
+        'username': 'yandi',
+        'password': 'ephemeral-fixture-password',
+      };
+    }
+    if (path.contains('/socks5/stop/')) {
+      calls.add(path);
+      socks = false;
+      return {'ok': true};
+    }
     if (path.contains('/proxy/start/')) {
       calls.add(path);
       proxy = true;
@@ -109,7 +135,10 @@ void main() {
     api.stopFails = true;
     await click(t, 'Стоп HTTP');
     expect(api.proxy, true);
-    expect(find.textContaining('Действие не реализовано демоном'), findsOneWidget);
+    expect(
+      find.textContaining('Действие не реализовано демоном'),
+      findsOneWidget,
+    );
     api.stopFails = false;
     await click(t, 'Стоп HTTP');
     expect(
@@ -124,6 +153,35 @@ void main() {
     await t.tap(find.widgetWithText(FilledButton, 'Удалить'));
     await t.pumpAndSettle();
     expect(api.gateways, isEmpty);
+    await stop(t);
+  });
+  testWidgets('SOCKS credential stays ephemeral and navigation clears it', (
+    t,
+  ) async {
+    final api = NetworkApi();
+    api.gateways.add({
+      'id': 'g1',
+      'name': 'gateway',
+      'short_id': '0123456789abcdef',
+      'country': 'RU',
+      'connected': true,
+    });
+    await start(t, api);
+    await click(t, 'Войти');
+    await click(t, 'Шлюзы');
+    await click(t, 'Старт SOCKS5');
+    expect(find.textContaining('ephemeral-fixture-password'), findsOneWidget);
+    final startButton = t.widget<OutlinedButton>(
+      find.widgetWithText(OutlinedButton, 'Старт HTTP'),
+    );
+    expect(startButton.onPressed, isNull);
+    await click(t, 'Стоп SOCKS5');
+    expect(api.socks, false);
+    expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
+    await click(t, 'Старт SOCKS5');
+    await click(t, 'Панель');
+    await click(t, 'Шлюзы');
+    expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await stop(t);
   });
   testWidgets('relay status sessions actions and late response wipe', (
