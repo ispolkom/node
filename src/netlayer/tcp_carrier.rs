@@ -552,7 +552,18 @@ mod tests {
     use super::*;
 
     async fn node(mode: Mode, name: &str) -> (Arc<Carrier>, Arc<CSocket>, SocketAddr) {
-        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        // порт UDP должен быть пригоден и для TCP (на Windows часть портов закрыта правилами: WSAEACCES 10013) — берём другой
+        let udp = {
+            let mut tries = 0;
+            loop {
+                let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let port = udp.local_addr().unwrap().port();
+                if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() || tries >= 100 {
+                    break Arc::new(udp);
+                }
+                tries += 1;
+            }
+        };
         let addr = udp.local_addr().unwrap();
         let carrier = Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode, node_hex: name.to_string(), next_id: AtomicU64::new(1), handshakes: Default::default() });
         let sock = CSocket::new(udp, carrier.clone()).unwrap();
