@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
+import 'package:video_player/video_player.dart';
+import '../services/loopback_media.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/vault_bytes_cache.dart';
@@ -24,6 +26,9 @@ class FileViewerScreen extends StatefulWidget {
 
 class _FileViewerScreenState extends State<FileViewerScreen> {
   AudioPlayer? _player;
+  VideoPlayerController? _video;
+  LoopbackMedia? _media;
+  String? _videoError;
   Duration _pos = Duration.zero, _dur = Duration.zero;
   bool _playing = false;
   final _subs = <StreamSubscription<dynamic>>[];
@@ -33,6 +38,9 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   @override
   void initState() {
     super.initState();
+    if (f.isVideo) {
+      _openVideo();
+    }
     if (f.isAudio) {
       final p = AudioPlayer();
       _player = p;
@@ -42,8 +50,33 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
     }
   }
 
+  /// Видео внутри защищённого пространства: файл расшифровывается в памяти и отдаётся плееру по 127.0.0.1 под неугадываемым путём
+  /// (с Range для перемотки). Открытой копии на диске нет; после закрытия экрана память затирается.
+  Future<void> _openVideo() async {
+    try {
+      if (f.size > 200 * 1024 * 1024) {
+        setState(() => _videoError = 'Видео больше 200 МБ внутри приложения не воспроизводится');
+        return;
+      }
+      final bytes = await (await VaultService.instance.files()).readAll(File(f.path));
+      final m = LoopbackMedia(bytes, f.mime);
+      _media = m;
+      final url = await m.start();
+      final c = VideoPlayerController.networkUrl(url);
+      _video = c;
+      await c.initialize();
+      c.addListener(() { if (mounted) setState(() {}); });
+      if (mounted) setState(() {});
+      await c.play();
+    } catch (_) {
+      if (mounted) setState(() => _videoError = 'Не удалось воспроизвести: файл повреждён или формат не поддерживается');
+    }
+  }
+
   @override
   void dispose() {
+    _video?.dispose();
+    _media?.stop();
     for (final s in _subs) { s.cancel(); }
     _player?.dispose();
     super.dispose();
@@ -135,6 +168,24 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
           ]),
         ),
       );
+    }
+    if (f.isVideo) {
+      final c = _video;
+      if (_videoError != null) return _info(_videoError!);
+      if (c == null || !c.value.isInitialized) return const Center(child: CircularProgressIndicator());
+      return Column(children: [
+        Expanded(child: Center(child: AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c)))),
+        VideoProgressIndicator(c, allowScrubbing: true, colors: VideoProgressColors(playedColor: AppTheme.accent)),
+        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
+          IconButton(
+            iconSize: 48,
+            color: AppTheme.accent,
+            icon: Icon(c.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
+            onPressed: () => c.value.isPlaying ? c.pause() : c.play(),
+          ),
+        ]),
+        const SizedBox(height: 12),
+      ]);
     }
     return _info(f.isVideo
         ? 'Видео внутри приложения пока не воспроизводится. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.'
