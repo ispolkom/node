@@ -268,6 +268,51 @@ impl ChatStorage {
         self.write_lock.lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Журнал статусов чата: дописываемый файл рядом с историей. Смена статуса — одна короткая строка, история не переписывается;
+    /// при чтении последний статус сообщения накладывается на историю, при любой перезаписи истории журнал сворачивается в неё.
+    fn status_log_path(&self, peer_id: &HashId) -> PathBuf {
+        self.chat_file_path_enc(peer_id).with_extension("status.enc")
+    }
+
+    /// Журнал свёртывается в историю, когда вырастает больше этого (около 270 смен статуса).
+    const STATUS_LOG_FOLD_BYTES: u64 = 64 * 1024;
+
+    fn append_status(&self, peer_id: &HashId, msg_id: &HashId, status: &crate::communication::MessageStatus) -> Result<()> {
+        use std::io::Write;
+        let key = self.get_encryption_key()?;
+        let plain = serde_json::to_vec(&(msg_id, status))?;
+        let line = Self::seal_line(&key, &plain)?;
+        let mut file = std::fs::OpenOptions::new().create(true).append(true).open(self.status_log_path(peer_id))?;
+        writeln!(file, "{line}")?;
+        Ok(())
+    }
+
+    /// Последний статус каждого сообщения из журнала. `strict`: строка, которая не открывается, — ошибка (чтобы не потерять её при перезаписи).
+    fn read_status_log(
+        &self,
+        peer_id: &HashId,
+        key: &[u8; 32],
+        strict: bool,
+    ) -> Result<std::collections::HashMap<HashId, crate::communication::MessageStatus>> {
+        let mut out = std::collections::HashMap::new();
+        let path = self.status_log_path(peer_id);
+        if !path.exists() {
+            return Ok(out);
+        }
+        for line in std::fs::read_to_string(path)?.lines().filter(|l| !l.trim().is_empty()) {
+            let parsed = Self::open_with_any(std::slice::from_ref(key), line)
+                .and_then(|(_, p)| serde_json::from_slice::<(HashId, crate::communication::MessageStatus)>(&p).ok());
+            match parsed {
+                Some((id, st)) => {
+                    out.insert(id, st);
+                }
+                None if strict => return Err(anyhow::anyhow!("в журнале статусов есть записи, которые не открываются этим ключом; файл не изменён")),
+                None => {}
+            }
+        }
+        Ok(out)
+    }
+
     /// Получить путь к зашифрованному файлу чата
     /// The file is named by the FULL node id: with only a prefix, a peer whose id starts like another contact's would write into
     /// that contact's history. A history made under the old short name is adopted by the first peer that asks for it.
@@ -412,10 +457,18 @@ impl ChatStorage {
             }
         }
 
+        let statuses = self.read_status_log(peer_id, &key_bytes, strict)?;
+        if !statuses.is_empty() {
+            for m in messages.iter_mut() {
+                if let Some(st) = statuses.get(&m.msg_id) {
+                    m.status = st.clone();
+                }
+            }
+        }
         Ok(messages)
     }
 
-    /// Обновить статус сообщения (перезаписывает весь файл с шифрованием)
+    /// Обновить статус сообщения: дописывается строка в журнал статусов (история не перезаписывается)
     pub fn update_message_status(
         &self,
         peer_id: &HashId,
@@ -424,29 +477,18 @@ impl ChatStorage {
     ) -> Result<()> {
         let _g = self.locked();
         let chat_file = self.chat_file_path_enc(peer_id);
-        
+
         if !chat_file.exists() {
             return Ok(());
         }
 
-        let mut messages = self.load_history_strict(peer_id)?;
-        let mut updated = false;
-        
-        for msg in messages.iter_mut() {
-            if msg.msg_id == *msg_id {
-                if msg.status == status {
-                    return Ok(()); // nothing changes: no need to rewrite the whole history
-                }
-                msg.status = status;
-                updated = true;
-                break;
-            }
-        }
-
-        if updated {
+        self.append_status(peer_id, msg_id, &status)?;
+        let big = std::fs::metadata(self.status_log_path(peer_id)).map_or(false, |m| m.len() > Self::STATUS_LOG_FOLD_BYTES);
+        if big {
+            // свёртка: история с наложенными статусами переписывается один раз, журнал после этого удаляется
+            let messages = self.load_history_strict(peer_id)?;
             self.rewrite_all_messages(peer_id, &messages)?;
         }
-
         Ok(())
     }
 
@@ -466,9 +508,12 @@ impl ChatStorage {
             if chat_file.exists() {
                 std::fs::remove_file(&chat_file)?;
             }
+            let _ = std::fs::remove_file(self.status_log_path(peer_id));
             return Ok(());
         }
         std::fs::rename(&tmp, &chat_file)?;
+        // статусы уже внутри новой истории; если выключится питание здесь, журнал при чтении наложит те же значения
+        let _ = std::fs::remove_file(self.status_log_path(peer_id));
         Ok(())
     }
 
@@ -479,6 +524,7 @@ impl ChatStorage {
         if chat_file.exists() {
             std::fs::remove_file(chat_file)?;
         }
+        let _ = std::fs::remove_file(self.status_log_path(peer_id));
         Ok(())
     }
 
@@ -646,6 +692,51 @@ mod concurrency_tests {
         let stamp = std::fs::metadata(&file).unwrap().modified().unwrap();
         st.update_message_status(&peer, &msgs[2].msg_id, MessageStatus::Read).unwrap();
         assert_eq!(std::fs::metadata(&file).unwrap().modified().unwrap(), stamp, "an unchanged status does not rewrite the file");
+    }
+
+    #[test]
+    fn a_status_goes_to_the_log_not_into_the_history_and_the_log_folds_when_it_grows() {
+        let dir = tempfile::tempdir().unwrap();
+        let (me, peer) = (HashId([1; 32]), HashId([2; 32]));
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let msgs: Vec<ChatMessage> = (0..20).map(|i| ChatMessage::new(me, peer, format!("m{i}"))).collect();
+        for m in &msgs {
+            st.save_outgoing(&peer, m).unwrap();
+        }
+        let file = dir.path().join(format!("chat_{}.enc", hex::encode(peer.0)));
+        let log = dir.path().join(format!("chat_{}.status.enc", hex::encode(peer.0)));
+        let main_before = std::fs::read(&file).unwrap();
+
+        st.update_message_status(&peer, &msgs[3].msg_id, MessageStatus::Delivered).unwrap();
+        st.update_message_status(&peer, &msgs[3].msg_id, MessageStatus::Read).unwrap();
+        st.update_message_status(&peer, &msgs[7].msg_id, MessageStatus::Failed).unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), main_before, "история не переписывалась");
+        assert!(log.exists());
+        let shown = st.load_history(&peer, usize::MAX).unwrap();
+        let status_of = |id: &HashId| shown.iter().find(|m| m.msg_id == *id).unwrap().status.clone();
+        assert_eq!(status_of(&msgs[3].msg_id), MessageStatus::Read);
+        assert_eq!(status_of(&msgs[7].msg_id), MessageStatus::Failed);
+        assert_eq!(shown.len(), 20);
+
+        // растущий журнал сворачивается в историю: журнала нет, статусы на месте, порядок прежний
+        for i in 0..2000 {
+            let id = &msgs[i % 20].msg_id;
+            let status = if i % 2 == 0 { MessageStatus::Delivered } else { MessageStatus::Read };
+            st.update_message_status(&peer, id, status).unwrap();
+        }
+        assert!(!log.exists() || std::fs::metadata(&log).unwrap().len() <= 64 * 1024 + 1024);
+        let after = st.load_history(&peer, usize::MAX).unwrap();
+        assert_eq!(after.len(), 20);
+        let texts: Vec<_> = after.iter().rev().map(|m| m.text.clone()).collect();
+        assert_eq!(texts, (0..20).map(|i| format!("m{i}")).collect::<Vec<_>>());
+        // удаление и очистка убирают журнал вместе с историей
+        st.update_message_status(&peer, &msgs[1].msg_id, MessageStatus::Read).unwrap();
+        assert!(log.exists());
+        st.delete_message(&peer, &msgs[0].msg_id).unwrap();
+        assert!(!log.exists(), "перезапись истории свернула журнал");
+        st.update_message_status(&peer, &msgs[2].msg_id, MessageStatus::Read).unwrap();
+        st.clear_history(&peer).unwrap();
+        assert!(!log.exists() && !file.exists());
     }
 
     #[test]
