@@ -109,6 +109,8 @@ pub struct AppState {
     pub p2p_transport: Option<Arc<crate::p2p::P2PTransport>>,
     /// Список активных proxy подключений
     pub active_proxies: Arc<Mutex<std::collections::HashMap<String, ProxyInfo>>>,
+    /// Задачи работающих прокси (слушатель и перекачка каналов): остановка прекращает их, а не только стирает запись
+    pub proxy_tasks: Arc<Mutex<std::collections::HashMap<String, Vec<tokio::task::AbortHandle>>>>,
     /// Кэш обнаруженных нод (обновляется в фоне)
     pub discovered_nodes: Arc<Mutex<Vec<DiscoveredNode>>>,
     /// Информация о текущей ноде
@@ -206,6 +208,7 @@ impl WebServer {
                 transport: None,
                 p2p_transport: None,
                 active_proxies: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                proxy_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 discovered_nodes: Arc::new(Mutex::new(Vec::new())),
                 node_info: NodeInfo::default_standalone(),
                 node_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -237,6 +240,7 @@ impl WebServer {
                 transport: Some(transport),
                 p2p_transport: None,
                 active_proxies: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                proxy_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 discovered_nodes: Arc::new(Mutex::new(Vec::new())),
                 node_info: NodeInfo::default(),
                 node_running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -1717,23 +1721,16 @@ async fn api_proxy_start(
         }));
     }
 
-    // Берём receivers
-    let resp_rx = {
-        let mut rx_lock = state.proxy_resp_rx.lock().await;
-        rx_lock.take()
-    };
-
-    let tunnel_rx = {
-        let mut rx_lock = state.proxy_tunnel_rx.lock().await;
-        rx_lock.take()
-    };
-
-    if resp_rx.is_none() || tunnel_rx.is_none() {
+    // Приёмники остаются в состоянии узла; прокси получает каналы-перекачки (после остановки можно запустить снова)
+    let channels_present = state.proxy_resp_rx.lock().await.is_some() && state.proxy_tunnel_rx.lock().await.is_some();
+    if !channels_present {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Proxy channels not available. May be already in use by CLI?"
         }));
     }
+    let (resp_rx, resp_pump) = pump_channel(state.proxy_resp_rx.clone());
+    let (tunnel_rx, tunnel_pump) = pump_channel(state.proxy_tunnel_rx.clone());
 
     // Создаём HttpProxyClient
     use crate::proxy::HttpProxyClient;
@@ -1744,18 +1741,23 @@ async fn api_proxy_start(
     let http_proxy =
         HttpProxyClient::new(transport.clone(), gateway_peer.id.clone()).with_config(proxy_config);
 
-    let http_proxy = http_proxy.with_response_channel(resp_rx.unwrap());
-    let http_proxy = http_proxy.with_tunnel_data_channel(tunnel_rx.unwrap());
+    let http_proxy = http_proxy.with_response_channel(resp_rx);
+    let http_proxy = http_proxy.with_tunnel_data_channel(tunnel_rx);
 
     // Регистрируем Station
     transport.set_station(http_proxy.station.clone()).await;
 
     // Запускаем прокси в фоне
-    tokio::spawn(async move {
+    let listener_task = tokio::spawn(async move {
         if let Err(e) = http_proxy.start().await {
             eprintln!("❌ HTTP Proxy error: {}", e);
         }
     });
+    state
+        .proxy_tasks
+        .lock()
+        .await
+        .insert(short_id.clone(), vec![listener_task.abort_handle(), resp_pump, tunnel_pump]);
 
     // 🚨 ОТПРАВЛЯЕМ 0x30 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА!
     info!(
@@ -1765,6 +1767,7 @@ async fn api_proxy_start(
     let cmd_bytes = vec![0x30u8]; // StartProxyGateway
 
     if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
+        abort_proxy_tasks(&state, &short_id).await;
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to send StartProxyGateway command: {}", e)
@@ -1798,9 +1801,46 @@ async fn api_proxy_start(
     Json(serde_json::json!({
         "status": "success",
         "message": format!("Proxy started through {}", short_id),
-        "local_port": 8080,
+        "local_port": http_port,
         "gateway": short_id
     }))
+}
+
+/// Передаёт сообщения из общего приёмника узла в канал, который забирает прокси. Приёмник остаётся в состоянии,
+/// поэтому после остановки прокси его можно запустить снова (раньше приёмник уходил в прокси навсегда).
+fn pump_channel<T: Send + 'static>(
+    src: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<T>>>>,
+) -> (tokio::sync::mpsc::Receiver<T>, tokio::task::AbortHandle) {
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        loop {
+            let item = {
+                let mut guard = src.lock().await;
+                match guard.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => None,
+                }
+            };
+            match item {
+                Some(v) => {
+                    if tx.send(v).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    });
+    (rx, task.abort_handle())
+}
+
+/// Прекратить задачи прокси этого шлюза (слушатель закрывается, порт освобождается).
+async fn abort_proxy_tasks(state: &AppState, short_id: &str) {
+    if let Some(handles) = state.proxy_tasks.lock().await.remove(short_id) {
+        for h in handles {
+            h.abort();
+        }
+    }
 }
 
 /// Остановить proxy
@@ -1808,7 +1848,8 @@ async fn api_proxy_stop(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
-    // Удаляем из active_proxies
+    // Прекращаем слушатель и перекачку каналов, затем стираем запись
+    abort_proxy_tasks(&state, &short_id).await;
     let removed = state.active_proxies.lock().await.remove(&short_id);
 
     if removed.is_some() {
@@ -1929,23 +1970,16 @@ async fn api_socks5_start(
         }));
     }
 
-    // Берём receivers
-    let resp_rx = {
-        let mut rx_lock = state.socks5_resp_rx.lock().await;
-        rx_lock.take()
-    };
-
-    let tunnel_rx = {
-        let mut rx_lock = state.socks5_tunnel_rx.lock().await;
-        rx_lock.take()
-    };
-
-    if resp_rx.is_none() || tunnel_rx.is_none() {
+    // Приёмники остаются в состоянии узла; прокси получает каналы-перекачки (после остановки можно запустить снова)
+    let channels_present = state.socks5_resp_rx.lock().await.is_some() && state.socks5_tunnel_rx.lock().await.is_some();
+    if !channels_present {
         return Json(serde_json::json!({
             "status": "error",
             "message": "SOCKS5 channels not available. May be already in use by CLI?"
         }));
     }
+    let (resp_rx, resp_pump) = pump_channel(state.socks5_resp_rx.clone());
+    let (tunnel_rx, tunnel_pump) = pump_channel(state.socks5_tunnel_rx.clone());
 
     // Прокси для браузера — ТОЛЬКО на этом компьютере и со своим паролем узла. Раньше он открывался на внешнем адресе с общим для
     // всех паролем «yandi123»: любой в интернете мог гнать через него свой трафик в чужой выход.
@@ -1986,8 +2020,8 @@ async fn api_socks5_start(
     let socks5_proxy = Socks5ProxyServer::new(socks5_config, transport.clone());
 
     let socks5_proxy = socks5_proxy
-        .with_response_channel(resp_rx.unwrap())
-        .with_tunnel_data_channel(tunnel_rx.unwrap());
+        .with_response_channel(resp_rx)
+        .with_tunnel_data_channel(tunnel_rx);
     let socks5_proxy = match (&gateway_peer, &auto_country) {
         (Some(gw), _) => socks5_proxy.with_exit_node(gw.id.clone()),
         (None, Some(c)) => {
@@ -2016,11 +2050,16 @@ async fn api_socks5_start(
     transport.set_station(socks5_proxy.station.clone()).await;
 
     // Запускаем прокси в фоне (переменная перемещается в spawn)
-    tokio::spawn(async move {
+    let listener_task = tokio::spawn(async move {
         if let Err(e) = socks5_proxy.run().await {
             eprintln!("❌ SOCKS5 Proxy error: {}", e);
         }
     });
+    state
+        .proxy_tasks
+        .lock()
+        .await
+        .insert(short_id.clone(), vec![listener_task.abort_handle(), resp_pump, tunnel_pump]);
 
     // 🚨 ОТПРАВЛЯЕМ 0x34 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА SOCKS5 EXIT NODE! (в режиме auto это делает очередь выходов)
     if let Some(gateway_peer) = &gateway_peer {
@@ -2031,6 +2070,7 @@ async fn api_socks5_start(
         let cmd_bytes = vec![0x34u8]; // StartSocks5Gateway
 
         if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
+            abort_proxy_tasks(&state, &short_id).await;
             return Json(serde_json::json!({
                 "status": "error",
                 "message": format!("Failed to send StartSocks5Gateway command: {}", e)
@@ -2166,11 +2206,12 @@ async fn api_socks5_personal(
         enable_udp: false,
     };
     let proxy = Socks5ProxyServer::new(cfg, transport.clone()).with_personal(path, secret);
-    tokio::spawn(async move {
+    let personal_task = tokio::spawn(async move {
         if let Err(e) = proxy.run().await {
             eprintln!("❌ SOCKS5 Proxy error: {}", e);
         }
     });
+    state.proxy_tasks.lock().await.insert("personal".to_string(), vec![personal_task.abort_handle()]);
     state.active_proxies.lock().await.insert(
         "personal".to_string(),
         ProxyInfo {
@@ -2192,7 +2233,8 @@ async fn api_socks5_stop(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
-    // Удаляем из active_proxies
+    // Прекращаем слушатель и перекачку каналов, затем стираем запись
+    abort_proxy_tasks(&state, &short_id).await;
     let removed = state.active_proxies.lock().await.remove(&short_id);
 
     // Очищаем active_socks5_proxy
