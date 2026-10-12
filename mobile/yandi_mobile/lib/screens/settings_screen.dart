@@ -34,6 +34,23 @@ class SettingsScreen extends StatelessWidget {
     if (choice == 'clear') {
       await state.clearMyAvatar();
     } else if (choice == 'photo') {
+      // личное фото может раскрыть, кто вы: просим подтвердить осознанно
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.surface,
+          title: const Text('Личное фото — риск', style: TextStyle(color: AppTheme.text)),
+          content: const Text(
+              'Личное фото может вас скомпрометировать: по лицу и обстановке вас могут узнать. Надёжнее выбрать эмодзи или нейтральную картинку.\n\n'
+              'Метаданные снимка (место, время, модель телефона) будут удалены, картинка пересоберётся заново и сохранится зашифрованной.',
+              style: TextStyle(color: AppTheme.textSecondary)),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Всё равно выбрать фото', style: TextStyle(color: Colors.redAccent))),
+          ],
+        ),
+      );
+      if (go != true) return;
       final res = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
       if (res == null) return;
       try {

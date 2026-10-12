@@ -2143,6 +2143,28 @@ mod tests {
     }
 
     #[test]
+    fn invitations_are_issued_by_staff_only() {
+        let (_d, mut s) = store();
+        let gid = s
+            .create("Закрытая", "", Kind::Invite, OWNER, &[BOB.into(), EVE.into(), "cc".into()])
+            .unwrap();
+        let alias = |s: &Store, dev: &str| s.list_for(dev)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, eve) = (alias(&s, BOB), alias(&s, EVE));
+        s.moderate(&gid, OWNER, "make_admin", Some(&bob), None, None).unwrap();
+        s.moderate(&gid, OWNER, "promote", Some(&eve), None, None).unwrap();
+        assert!(s.invite(&gid, OWNER, 1, None).is_ok(), "владелец");
+        assert!(s.invite(&gid, BOB, 1, None).is_ok(), "админ");
+        assert!(s.invite(&gid, EVE, 1, None).is_ok(), "модератор выдаёт приглашение по просьбе");
+        assert!(s.invite(&gid, "cc", 1, None).is_err(), "рядовой не выдаёт");
+        // модератор: стирает записи рядового, банит и исключает рядового; админа не трогает
+        let seq = s.append(&gid, "cc", 0, &b64(b"x")).unwrap();
+        assert!(s.moderate(&gid, EVE, "delete_entry", None, Some(seq), None).is_ok());
+        let cc = alias(&s, "cc");
+        assert!(s.moderate(&gid, EVE, "ban", Some(&cc), None, None).is_ok());
+        assert!(s.moderate(&gid, EVE, "kick", Some(&bob), None, None).is_err());
+    }
+
+    #[test]
     fn moderation_rules_and_log() {
         let (_d, mut s) = store();
         let gid = s

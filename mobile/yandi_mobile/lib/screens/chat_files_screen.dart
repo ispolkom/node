@@ -56,7 +56,9 @@ class ChatFilesScreen extends StatefulWidget {
   final FilesHost? host;
   /// Предел получателей на один файл за сеанс (по умолчанию 20; параметр — для тестов).
   final int maxPerFile;
-  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile});
+  /// Подсказка пустой папки (для группы своя).
+  final String? emptyHint;
+  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile, this.emptyHint});
 
   /// За один раз — не больше стольких получателей; суммарно на один файл — не больше defaultMaxPerFile.
   static const maxPerBatch = 5;
@@ -291,11 +293,11 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : _files.isEmpty
-              ? const Center(
+              ? Center(
                   child: Padding(
-                    padding: EdgeInsets.all(32),
-                    child: Text('В этой папке пока нет файлов. Файлы, которые вы получаете и отправляете в этом чате, появятся здесь.',
-                        textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary)),
+                    padding: const EdgeInsets.all(32),
+                    child: Text(widget.emptyHint ?? 'В этой папке пока нет файлов. Файлы, которые вы получаете и отправляете в этом чате, появятся здесь.',
+                        textAlign: TextAlign.center, style: const TextStyle(color: AppTheme.textSecondary)),
                   ),
                 )
               : ListView(

@@ -884,7 +884,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ],
         ),
         // Просьбы вступить — служебные карточки в ленте, видны управляющим.
-        if (manager && settingsFor != selected)
+        if (staff && settingsFor != selected)
           for (final r in rows(info, 'requests')) requestCard(r),
         if (section != null &&
             !rows(feed, 'messages').any((m) => m['kind'] == section))

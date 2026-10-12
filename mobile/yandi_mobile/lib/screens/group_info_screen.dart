@@ -416,6 +416,18 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             child: Text('Запрещено в группе: ${rules.deny.map((k) => _kindLabels[k] ?? '').where((s) => s.isNotEmpty).join(', ')}', style: const TextStyle(color: AppTheme.textSecondary)),
           ),
         const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Участники', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+        if (g.canModerate)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
+            child: Text(
+              g.isOwner
+                  ? 'Нажмите на участника: назначить админа или модератора, разжаловать, заглушить, выгнать. Роли — только участникам этой группы.'
+                  : g.isAdmin
+                      ? 'Нажмите на участника: назначить или снять модератора, заглушить, выгнать. Админов назначает только владелец.'
+                      : 'Нажмите на участника: заглушить, выгнать, запретить вход. Роли назначают владелец и админы.',
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+          ),
         if (_error != null) Padding(padding: const EdgeInsets.all(16), child: Text(_error!, style: const TextStyle(color: AppTheme.incoming))),
         // участники: список с прокруткой; нажатие на участника открывает окно действий
         ConstrainedBox(
@@ -426,7 +438,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                 dense: true,
                 leading: Icon(m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.admin_panel_settings_outlined : m.role == 'moderator' ? Icons.shield_outlined : Icons.person_outline, color: m.role == 'member' ? AppTheme.textSecondary : AppTheme.accent),
                 title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? ' (вы)' : ''), style: const TextStyle(color: AppTheme.text)),
-                subtitle: Text('${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                subtitle: Text('${_roleName(m.role)} · ${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                trailing: g.canModerate && _canActOn(g, m) ? const Icon(Icons.chevron_right, color: AppTheme.textSecondary, size: 18) : null,
                 onTap: g.canModerate && _canActOn(g, m) ? () => _memberMenu(g, m) : null,
               ),
           ]),

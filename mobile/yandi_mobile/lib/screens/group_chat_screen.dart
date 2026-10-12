@@ -19,6 +19,13 @@ import 'package:flutter/services.dart';
 import 'dart:convert';
 import '../services/storage_service.dart';
 import 'group_info_screen.dart';
+import 'chat_files_screen.dart';
+import '../models/file_offer.dart';
+import '../services/file_transfer_service.dart';
+import '../services/voice_recorder.dart';
+import '../widgets/inline_media.dart';
+import '../widgets/recipients_sheet.dart';
+import 'package:path_provider/path_provider.dart' as pp;
 
 /// Разделы-фильтры группы: вид записи → подпись.
 const groupSections = <(int?, String)>[
@@ -53,6 +60,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   GroupEntry? _replyTo;                         // запись, на которую отвечаем
   Set<String> _hidden = {};                     // псевдонимы, чьи сообщения скрыты у меня (только на этом устройстве)
   final Map<int, GlobalKey> _anchors = {};
+  final Set<int> _selected = {};                // выбранные записи (номера)
+  final Map<int, Set<String>> _fwdTo = {};      // кому уже переслана запись в этом сеансе (предел 20)
+  bool get _selecting => _selected.isNotEmpty;
+  late final VoiceRecording _rec = VoiceRecording(
+    voiceBackendFactory(),
+    () async => '${(await pp.getTemporaryDirectory()).path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+  )..addListener(() { if (mounted) setState(() {}); });
+  bool _sendingVoice = false;
 
   @override
   void initState() {
@@ -67,6 +82,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   @override
   void dispose() {
+    final app = context.read<AppState>();
+    _rec.stop().then((r) { if (r.$1 != null) app.dropPickerCopy(r.$1!); }).whenComplete(_rec.dispose);
     _ctrl.dispose();
     _focus.dispose();
     _scroll.dispose();
@@ -99,6 +116,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
     if (!mounted) return;
     setState(() { _entries = list; _requests = reqs; });
+    // какие файлы уже лежат у меня: для них в сообщении показывается плеер/превью, а не «скачать»
+    for (final e in list) {
+      if (e.body['f'] is String && !_paths.containsKey(e.body['f'])) {
+        _localPath(e.body).then((p) { if (p != null && mounted) setState(() {}); });
+      }
+    }
     if (list.length != _shownCount) {
       _shownCount = list.length;
       WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -110,11 +133,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   String _fmtSize(int b) => b >= 1 << 20 ? '${(b / (1 << 20)).toStringAsFixed(1)} МБ' : '${(b / 1024).ceil()} КБ';
 
   Future<void> _attach() async {
-    final svc = _svc!;
     final r = await FilePicker.platform.pickFiles(allowMultiple: false);
     final path = r?.files.single.path;
     if (path == null) return;
-    final name = r!.files.single.name;
+    await _sendFilePath(path, r!.files.single.name);
+  }
+
+  /// Отправить файл в группу (выбранный или записанное голосовое); открытая копия затирается при любом исходе.
+  Future<void> _sendFilePath(String path, String name) async {
+    final svc = _svc!;
     final kind = GroupFiles.kindForName(name);
     if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
     setState(() => _progress['up'] = 0);
@@ -178,6 +205,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _paths[fid] = out.path;
       path = out.path;
     }
+    final k = GroupFiles.kindForName('${d['n'] ?? ''}');
+    if (k == GroupKind.audio || k == GroupKind.video) {
+      if (mounted) setState(() {});   // у звука и видео своё воспроизведение прямо в сообщении
+      return;
+    }
     final v = await (await context.read<AppState>().vaultFiles()).describe(path);
     if (!mounted) return;
     await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
@@ -210,17 +242,29 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return raw.runes.length <= 200 ? raw : String.fromCharCodes(raw.runes.take(200));
   }
 
-  /// Меню слов по нажатию на запись: Ответить, Копировать, Скрыть сообщения этого пользователя, а по правам — Стереть у всех, Заглушить.
+  /// Роль автора записи по псевдониму (владелец, админ, модератор, участник; null — неизвестна).
+  String? _authorRole(GroupInfo g, GroupEntry e) {
+    if (e.from == g.myAlias) return g.role;
+    return _svc?.roleOf(g.id, e.from);
+  }
+
+  bool _canDelete(GroupInfo g, GroupEntry e) => g.canDeleteEntryOf(_authorRole(g, e), mine: e.from == g.myAlias);
+
+  /// Меню слов по нажатию или удержанию записи: сверху «Ответить», затем «Копировать», «Переслать», «Выбрать»; рядовой вместо
+  /// удаления может «Скрыть сообщения этого пользователя»; удаляют владелец, админ и модератор — по матрице ролей.
   Future<void> _entryCommands(GroupInfo g, GroupEntry e, Offset at) async {
     final mine = e.from == g.myAlias;
     final hasText = e.body['t'] is String;
+    final isFile = e.body['f'] is String;
+    final role = _authorRole(g, e);
     final choice = await showMessageMenu(context, at, [
       cmdReply,
       if (hasText) cmdCopy,
-      if (hasText) cmdShare,
+      if (hasText || isFile) cmdShare,
+      cmdSelect,
       if (!mine) cmdHideAuthor,
-      if (g.canModerate) cmdEraseAll,
-      if (g.canModerate && !mine) cmdMute,
+      if (_canDelete(g, e)) cmdDelete,
+      if (!mine && role != null && g.canActOnRole(role) && g.canModerate) cmdMute,
     ]);
     if (!mounted || choice == null) return;
     switch (choice) {
@@ -230,37 +274,106 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       case cmdCopy:
         await Clipboard.setData(ClipboardData(text: '${e.body['t']}'));
       case cmdShare:
-        await _share('${e.body['t']}');
+        await _forwardEntries(g, [e]);
+      case cmdSelect:
+        setState(() => _selected.add(e.seq));
       case cmdHideAuthor:
         setState(() => _hidden.add(e.from));
         await _saveHidden();
-      case cmdEraseAll:
-        try { await _svc!.moderate(g.id, 'delete_entry', seq: e.seq); await _load(); } catch (err) { _toast('$err'); }
+      case cmdDelete:
+        await _deleteEntries(g, [e]);
       case cmdMute:
         try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast('Заглушён'); } catch (err) { _toast('$err'); }
     }
   }
 
-  /// Поделиться: переслать текст в чат или в другую группу внутри приложения.
-  Future<void> _share(String text) async {
-    final state = context.read<AppState>();
-    final targets = <ShareTarget>[
-      for (final c in state.contacts)
-        if (c.saved) ShareTarget.contact(c.peerId, c.displayName),
-      for (final g in _svc!.groups)
-        if (g.id != widget.gid) ShareTarget.group(g.id, g.name),
-    ];
-    final to = await pickShareTarget(context, targets);
-    if (to == null || !mounted) return;
+  /// Стереть записи у всех участников группы (только по правам): с подтверждением.
+  Future<void> _deleteEntries(GroupInfo g, List<GroupEntry> list) async {
+    final allowed = list.where((e) => _canDelete(g, e)).toList();
+    if (allowed.isEmpty) { _toast('Эти сообщения вам удалять нельзя'); return; }
+    final n = allowed.length;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: Text(n == 1 ? 'Удалить сообщение?' : 'Удалить сообщения ($n)?', style: const TextStyle(color: AppTheme.text)),
+        content: const Text('Сообщение исчезнет у всех участников группы.', style: TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
     try {
-      if (to.group) {
-        await _svc!.send(to.id, kindOfText(text), {'t': text});
-      } else {
-        await state.sendMessage(to.id, text);
+      for (final e in allowed) { await _svc!.moderate(g.id, 'delete_entry', seq: e.seq); }
+    } catch (err) {
+      _toast('$err');
+    }
+    if (mounted) setState(_selected.clear);
+    await _load();
+  }
+
+  /// Переслать записи (текст и файлы, что уже лежат у меня) до 5 контактам за раз; в группу-источник не пересылаем.
+  Future<void> _forwardEntries(GroupInfo g, List<GroupEntry> list) async {
+    if (list.isEmpty) return;
+    final state = context.read<AppState>();
+    final to = await pickRecipients(context,
+        title: list.length == 1 ? 'Переслать сообщение' : 'Переслать сообщения (${list.length})',
+        contacts: forwardCandidates(state.contacts));
+    if (to == null || to.isEmpty || !mounted) return;
+    for (final e in list) {
+      if ({...?_fwdTo[e.seq], ...to.map((c) => c.peerId)}.length > 20) {
+        _toast('Одно сообщение — не больше 20 получателей');
+        return;
       }
-      _toast('Отправлено: ${to.title}');
-    } catch (e) {
-      _toast('Не отправлено: $e');
+    }
+    var skipped = 0;
+    for (final e in [...list]..sort((a, b) => a.seq.compareTo(b.seq))) {
+      final fid = e.body['f'];
+      String? local;
+      if (fid is String) {
+        local = await _localPath(e.body);
+        if (local == null) { skipped++; continue; }
+      }
+      _fwdTo.putIfAbsent(e.seq, () => {}).addAll(to.map((c) => c.peerId));
+      for (final c in to) {
+        if (local != null) {
+          state.sendFile(c.peerId, local, name: '${e.body['n'] ?? 'файл'}').then((err) { if (err != null && mounted) _toast('${e.body['n']} → ${c.displayName}: $err'); });
+        } else {
+          state.sendMessage(c.peerId, '${e.body['t'] ?? ''}');
+        }
+      }
+    }
+    if (mounted) {
+      setState(_selected.clear);
+      _toast('Отправка → ${to.map((c) => c.displayName).join(', ')}${skipped > 0 ? '. Не скачанных файлов пропущено: $skipped' : ''}');
+    }
+  }
+
+  /// Записать и отправить голосовое сообщение: файлом m4a в группу, как обычное вложение.
+  Future<void> _startVoice() async {
+    final err = await _rec.start();
+    if (err != null) _toast(err);
+    _rec.onLimit = () => _finishVoice(send: true);
+  }
+
+  Future<void> _finishVoice({required bool send}) async {
+    if (!_rec.active || _sendingVoice) return;
+    _sendingVoice = true;
+    final state = context.read<AppState>();
+    final (path, seconds) = await _rec.stop();
+    try {
+      if (send && path != null && seconds >= 1) {
+        final now = DateTime.now();
+        String two(int n) => n.toString().padLeft(2, '0');
+        await _sendFilePath(path, 'Голосовое_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}.m4a');
+      } else if (send) {
+        _toast('Запись слишком короткая');
+      }
+    } finally {
+      if (path != null) await state.dropPickerCopy(path);
+      _sendingVoice = false;
     }
   }
 
@@ -294,8 +407,33 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       return Scaffold(appBar: AppBar(title: const Text('Группа')), body: const Center(child: Text('Группа недоступна', style: TextStyle(color: AppTheme.textSecondary))));
     }
     final noKey = !state.groups!.hasProblem(g.id) && g.epoch == 0;
+    final selectedEntries = _entries.where((e) => _selected.contains(e.seq)).toList();
+    final canDeleteAll = selectedEntries.isNotEmpty && selectedEntries.every((e) => _canDelete(g, e));
     return Scaffold(
-      appBar: AppBar(
+      appBar: _selecting
+          ? AppBar(
+              backgroundColor: AppTheme.surface,
+              elevation: 0,
+              leading: IconButton(icon: const Icon(Icons.close), onPressed: () => setState(_selected.clear)),
+              title: Text('Выбрано: ${_selected.length}', style: const TextStyle(fontSize: 16)),
+              actions: [
+                IconButton(
+                  key: const ValueKey('group-forward-selected'),
+                  tooltip: 'Переслать',
+                  icon: const Icon(Icons.forward_to_inbox_outlined),
+                  onPressed: () => _forwardEntries(g, selectedEntries),
+                ),
+                // рядовой участник стереть не может — только владелец, админ и модератор (по ролям авторов)
+                if (canDeleteAll)
+                  IconButton(
+                    key: const ValueKey('group-delete-selected'),
+                    tooltip: 'Удалить',
+                    icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                    onPressed: () => _deleteEntries(g, selectedEntries),
+                  ),
+              ],
+            )
+          : AppBar(
         title: InkWell(
           onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
@@ -306,6 +444,39 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         actions: [IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Настройки группы', onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))))],
       ),
       body: Column(children: [
+        // навигационная строка: «Файлы группы» — папка только этой группы (то, что уже у меня; наружу не выносится)
+        InkWell(
+          key: const ValueKey('group-files-link'),
+          onTap: () {
+            final offers = <FileOffer>[
+              for (final e in _entries)
+                if (e.body['f'] is String)
+                  FileOffer(
+                    tid: e.body['f'] as String,
+                    name: '${e.body['n'] ?? 'файл'}',
+                    size: e.body['z'] is int ? e.body['z'] as int : 0,
+                    chunks: e.body['c'] is int ? e.body['c'] as int : 0,
+                    mime: FileTransferService.guessMime('${e.body['n'] ?? ''}'),
+                    key: '',
+                  ),
+            ];
+            Navigator.push(context, MaterialPageRoute(
+              builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.'),
+            ));
+          },
+          child: Container(
+            width: double.infinity,
+            color: AppTheme.surface,
+            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+            child: Row(children: const [
+              Icon(Icons.folder_outlined, size: 18, color: AppTheme.accent),
+              SizedBox(width: 8),
+              Text('Файлы группы', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+              Spacer(),
+              Icon(Icons.chevron_right, size: 18, color: AppTheme.textSecondary),
+            ]),
+          ),
+        ),
         SizedBox(
           height: 44,
           child: ListView(
@@ -355,7 +526,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       quote: r is Map && r['t'] is String ? (r['a'] is String ? r['a'] as String : '', r['t'] as String, r['s'] is int ? r['s'] as int : null) : null,
                       onQuoteTap: r is Map && r['s'] is int ? () => _jumpToSeq(r['s'] as int) : null,
                       onTapDown: (d) => tapAt = d.globalPosition,
-                      onTap: () => _entryCommands(g, e, tapAt),
+                      onTap: _selecting
+                          ? () => setState(() => _selected.contains(e.seq) ? _selected.remove(e.seq) : _selected.add(e.seq))
+                          : () => _entryCommands(g, e, tapAt),
+                      // удержание — тот же список слов, что и по нажатию; при уже выбранных — переключает выбор
+                      onLongPressStart: (d) => _selecting
+                          ? setState(() => _selected.contains(e.seq) ? _selected.remove(e.seq) : _selected.add(e.seq))
+                          : _entryCommands(g, e, d.globalPosition),
+                      selected: _selected.contains(e.seq),
+                      localPath: e.body['f'] is String ? _paths[e.body['f']] : null,
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),
@@ -391,6 +570,38 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   Widget _input(GroupInfo g, AppState state) {
     final denied = g.muted;
+    String mmss(int s) => '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
+    if (_rec.active) {
+      return Container(
+        color: AppTheme.surface,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        child: SafeArea(
+          top: false,
+          child: Row(children: [
+            IconButton(
+              key: const ValueKey('voice-cancel'),
+              tooltip: 'Отменить запись',
+              icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              onPressed: () => _finishVoice(send: false),
+            ),
+            const Icon(Icons.fiber_manual_record, color: Colors.redAccent, size: 14),
+            const SizedBox(width: 8),
+            Text(mmss(_rec.seconds), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+            const SizedBox(width: 12),
+            const Expanded(child: Text('Идёт запись…', style: TextStyle(color: AppTheme.textSecondary))),
+            GestureDetector(
+              key: const ValueKey('voice-send'),
+              onTap: () => _finishVoice(send: true),
+              child: Container(
+                width: 44, height: 44,
+                decoration: const BoxDecoration(shape: BoxShape.circle, color: AppTheme.accent),
+                child: const Icon(Icons.send, color: Colors.white, size: 20),
+              ),
+            ),
+          ]),
+        ),
+      );
+    }
     return Container(
       color: AppTheme.surface,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
@@ -423,7 +634,18 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               ),
             ),
           ),
-          IconButton(icon: const Icon(Icons.send, color: AppTheme.accent), onPressed: denied ? null : _send),
+          // пока строка пуста — микрофон (голосовое сообщение), с текстом — «отправить»
+          ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _ctrl,
+            builder: (_, v, __) {
+              final empty = v.text.trim().isEmpty;
+              return IconButton(
+                key: ValueKey(empty ? 'voice-mic' : 'send-text'),
+                icon: Icon(empty ? Icons.mic : Icons.send, color: AppTheme.accent),
+                onPressed: denied ? null : (empty ? _startVoice : _send),
+              );
+            },
+          ),
         ]),
       ),
     );
@@ -480,7 +702,11 @@ class _GroupBubble extends StatelessWidget {
   final double? progress;
   final (String, String, int?)? quote;   // (автор, выдержка, номер записи)
   final VoidCallback? onQuoteTap;
-  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap});
+  final void Function(LongPressStartDetails)? onLongPressStart;
+  final bool selected;
+  /// Где файл лежит у меня (если уже скачан): для звука и видео — плеер прямо в сообщении.
+  final String? localPath;
+  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.localPath});
 
   @override
   Widget build(BuildContext context) {
@@ -496,7 +722,9 @@ class _GroupBubble extends StatelessWidget {
       child: GestureDetector(
         onTap: onTap,
         onTapDown: onTapDown,
+        onLongPressStart: onLongPressStart,
         child: Container(
+          foregroundDecoration: selected ? BoxDecoration(color: AppTheme.accent.withOpacity(0.18), borderRadius: BorderRadius.circular(16)) : null,
           margin: const EdgeInsets.symmetric(vertical: 3),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
@@ -508,7 +736,21 @@ class _GroupBubble extends StatelessWidget {
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             if (!mine) Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold)),
             if (quote != null) QuoteBox(author: quote!.$1, text: quote!.$2, onTap: onQuoteTap),
-            if (entry.body['f'] is String)
+            if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.audio && entry.body['z'] is int && (entry.body['z'] as int) <= InlineAudio.maxInline)
+              InlineAudio(
+                key: ValueKey('ga-${entry.body['f']}'),
+                path: localPath!,
+                size: entry.body['z'] as int,
+                caption: '${entry.body['n'] ?? ''}'.startsWith('Голосовое_') ? null : '${entry.body['n'] ?? ''}',
+              )
+            else if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.video && entry.body['z'] is int)
+              InlineVideo(
+                key: ValueKey('gv-${entry.body['f']}'),
+                path: localPath!,
+                size: entry.body['z'] as int,
+                mime: FileTransferService.guessMime('${entry.body['n'] ?? ''}'),
+              )
+            else if (entry.body['f'] is String)
               InkWell(
                 onTap: progress == null ? onOpen : null,
                 child: Row(mainAxisSize: MainAxisSize.min, children: [

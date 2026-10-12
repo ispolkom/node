@@ -46,6 +46,28 @@ class GroupInfo {
   /// Владелец и админ: настройки группы, правила, роли «модератор/участник».
   bool get canManage => role == 'owner' || role == 'admin';
   bool get canModerate => role == 'owner' || role == 'admin' || role == 'moderator';
+
+  /// Может ли стереть запись автора с ролью [authorRole] (null — автор ушёл или не рядовой известен как участник).
+  /// Матрица узла: модератор — записи рядовых и свои; админ — рядовых, модераторов и свои; владелец — любые, кроме чужих владельца
+  /// (владелец один). Рядовой участник стирать не может: он только скрывает автора у себя.
+  bool canDeleteEntryOf(String? authorRole, {required bool mine}) {
+    if (!canModerate) return false;
+    if (mine) return true;
+    return switch (authorRole) {
+      null || 'member' => true,
+      'moderator' => role == 'owner' || role == 'admin',
+      'admin' => role == 'owner',
+      _ => false,
+    };
+  }
+
+  /// Может ли применить к автору [authorRole] «заглушить / выгнать / запретить вход»: тем же правилам, что и стирание.
+  bool canActOnRole(String authorRole) => switch (authorRole) {
+        'owner' => false,
+        'admin' => role == 'owner',
+        'moderator' => role == 'owner' || role == 'admin',
+        _ => canModerate,
+      };
 }
 
 class GroupMember {

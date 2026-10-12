@@ -28,6 +28,7 @@ class GroupService {
   List<GroupInfo> groups = const [];
   final Map<String, GroupRules> _rules = {};
   final Map<String, Map<String, String>> _names = {};       // группа → псевдоним → имя, которое человек назвал при вступлении
+  final Map<String, Map<String, String>> _roles = {};       // группа → псевдоним → роль (для проверки «кого я могу стереть»)
   final Set<String> _problems = {};                         // группы, где ключ владельца не совпал с закреплённым
   bool _syncing = false;
 
@@ -37,6 +38,8 @@ class GroupService {
   GroupRules rules(String gid) => _rules[gid] ?? const GroupRules();
   String displayName(String gid, String alias) => _names[gid]?[alias] ?? alias;
   bool hasProblem(String gid) => _problems.contains(gid);
+  /// Роль участника по псевдониму (null — не знаем или ушёл из группы).
+  String? roleOf(String gid, String alias) => _roles[gid]?[alias];
 
   static String _b64(List<int> b) => base64.encode(b);
   static Uint8List _unb64(String s) => Uint8List.fromList(base64.decode(s));
@@ -268,10 +271,13 @@ class GroupService {
     final managers = <String>{if (g.canManage) g.myAlias};
     try {
       final m = await api.members(g.id);
+      final roles = <String, String>{};
       for (final x in (m['members'] as List? ?? const [])) {
         final r = (x as Map)['role'];
+        if (x['alias'] is String && r is String) roles[x['alias'] as String] = r;
         if (r == 'owner' || r == 'admin') managers.add(x['alias'] as String);
       }
+      _roles[g.id] = roles;
     } catch (_) {}
     for (final e in sys) {
       if (e.deleted) continue;
