@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'background_alerts.dart';
 import 'dart:async';
@@ -301,10 +302,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   Widget button(String label, VoidCallback action) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
-    child: FilledButton(onPressed: busy ? null : action, child: UiText(label)),
+    child: BevelButton(
+      label: label,
+      onPressed: busy ? null : action,
+      primary: true,
+      danger: label.startsWith('Остановить'),
+    ),
   );
-  Widget dashboard() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget dashboard() => PanelStack(
     children: [
       const UiText('Статус узла', style: TextStyle(fontSize: 22)),
       if (status == null)
@@ -327,10 +332,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           'web_port': 'Веб-порт',
           'active_proxies': 'Активные прокси',
         }.entries)
-          SelectableText(
-            '${tr(context, item.value)}: ${status![item.key] ?? '—'}',
-          ),
+          StatusRow(item.value, status![item.key] ?? '—'),
       ],
+      const UiText('Управление', style: TextStyle(fontSize: 22)),
       Wrap(
         spacing: 12,
         children: [
@@ -357,7 +361,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           'evictions_delta': 'Вытеснения за интервал',
           'evictions_total': 'Вытеснения всего',
         }.entries)
-          UiText('${tr(context, item.value)}: ${speed![item.key] ?? '—'}'),
+          StatusRow(item.value, speed![item.key] ?? '—'),
       const Divider(),
       const UiText('Узлы', style: TextStyle(fontSize: 22)),
       if (nodes.isEmpty) const UiText('Обнаруженных узлов нет.'),
@@ -400,8 +404,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             ? 'Состояние блокировки не подтверждено'
             : 'Проверка закрытой среды…',
       );
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return PanelStack(
       children: [
         const UiText('Закрытая среда', style: TextStyle(fontSize: 22)),
         UiText(v.label),
@@ -619,46 +622,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Wrap(
-          spacing: 12,
-          children: [
-            for (final label in const [
-              'Панель',
-              'Контакты',
-              'Чат',
-              'Группы',
-              'Шлюзы',
-              'Relay',
-              'Звонки',
-              'Настройки',
-              'О приложении',
-              'Закрытая среда',
-            ])
-              OutlinedButton(
-                onPressed: busy
-                    ? null
-                    : () {
-                        setState(() {
-                          epoch++;
-                          preferences.reset();
-                          background.openPeer = null;
-                          widget.api.cancel();
-                          page = label;
-                          formVersion++;
-                        });
-                        poll(force: true);
-                      },
-                child: UiText(label),
-              ),
-            button('Выйти из оболочки', () {
-              setState(() {
-                wipe();
-                entered = false;
-                notice = error = null;
-              });
-            }),
-          ],
-        ),
         if (background.unread.isNotEmpty)
           UiText('Новых чатов: ${background.unread.length}'),
         const UiText(
@@ -674,50 +637,51 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         else if (page == 'Настройки') ...[
           AnimatedBuilder(
             animation: preferences,
-            builder: (context, _) => Column(
+            builder: (context, _) => PanelStack(
+              title: 'Настройки оболочки',
               children: [
-                SwitchListTile(
+                CheckboxListTile(
                   title: const UiText('Язык / Language'),
                   subtitle: UiText(preferences.english ? 'English' : 'Русский'),
                   value: preferences.english,
                   onChanged: (value) {
-                    preferences.english = value;
+                    preferences.english = value!;
                     preferences.changed();
                   },
                 ),
                 const UiText(
                   'Язык применяется ко всем формам и состояниям оболочки. Пользовательский текст не переводится.',
                 ),
-                SwitchListTile(
+                CheckboxListTile(
                   title: const UiText('Фоновые оповещения узловых чатов'),
                   value: preferences.background,
                   onChanged: (v) {
-                    preferences.background = v;
+                    preferences.background = v!;
                     background.reset();
                     preferences.changed();
                   },
                 ),
-                SwitchListTile(
+                CheckboxListTile(
                   title: const UiText('Системный звук'),
                   value: preferences.sound,
                   onChanged: (value) {
-                    preferences.sound = value;
+                    preferences.sound = value!;
                     preferences.changed();
                   },
                 ),
-                SwitchListTile(
+                CheckboxListTile(
                   title: const UiText('Уведомления ОС'),
                   value: preferences.notifications,
                   onChanged: (value) {
-                    preferences.notifications = value;
+                    preferences.notifications = value!;
                     preferences.changed();
                   },
                 ),
-                SwitchListTile(
+                CheckboxListTile(
                   title: const UiText('Не беспокоить'),
                   value: preferences.dnd,
                   onChanged: (value) {
-                    preferences.dnd = value;
+                    preferences.dnd = value!;
                     preferences.changed();
                   },
                 ),
@@ -766,6 +730,117 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     );
   }
 
+  Widget shellHeader() => Container(
+    decoration: const BoxDecoration(
+      gradient: LinearGradient(
+        begin: Alignment.topCenter,
+        end: Alignment.bottomCenter,
+        colors: [Icq.headerLight, Icq.header],
+      ),
+      border: Border(bottom: BorderSide(color: Icq.light, width: 2)),
+    ),
+    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    child: HeaderLayout(
+      children: [
+        Image.asset('assets/logo.png', width: 38, height: 38),
+        const SizedBox(width: 16),
+        Expanded(
+          child: entered && connected
+              ? TabStrip(
+                  labels: const [
+                    'Главная',
+                    'Чат',
+                    'Группы',
+                    'Шлюзы',
+                    'Relay',
+                    'Настройки',
+                    'Контакты',
+                    'Звонки',
+                    'О приложении',
+                    'Закрытая среда',
+                  ],
+                  selected: page == 'Панель' ? 'Главная' : page,
+                  onSelected: busy
+                      ? null
+                      : (label) {
+                          setState(() {
+                            epoch++;
+                            preferences.reset();
+                            background.openPeer = null;
+                            widget.api.cancel();
+                            page = label == 'Главная' ? 'Панель' : label;
+                            formVersion++;
+                          });
+                          poll(force: true);
+                        },
+                )
+              : const UiText(
+                  'YANDI · локальная оболочка',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+        ),
+        const SizedBox(width: 8),
+        Wrap(
+          spacing: 4,
+          runSpacing: 4,
+          children: [
+            BevelButton(
+              label: 'EN / RU',
+              onPressed: () {
+                preferences.english = !preferences.english;
+                preferences.changed();
+              },
+            ),
+            IconButton(
+              tooltip: preferences.english ? 'System sound' : 'Системный звук',
+              icon: Icon(
+                preferences.sound
+                    ? Icons.volume_up_outlined
+                    : Icons.volume_off_outlined,
+                size: 18,
+              ),
+              onPressed: () {
+                preferences.sound = !preferences.sound;
+                preferences.changed();
+              },
+            ),
+            IconButton(
+              tooltip: preferences.english
+                  ? 'OS notifications'
+                  : 'Уведомления ОС',
+              icon: Icon(
+                preferences.notifications
+                    ? Icons.notifications_active_outlined
+                    : Icons.notifications_none,
+                size: 18,
+              ),
+              onPressed: () {
+                preferences.notifications = !preferences.notifications;
+                preferences.changed();
+              },
+            ),
+            if (entered)
+              BevelButton(
+                label: 'Выйти из оболочки',
+                onPressed: busy
+                    ? null
+                    : () {
+                        setState(() {
+                          wipe();
+                          entered = false;
+                          notice = error = null;
+                        });
+                      },
+              ),
+          ],
+        ),
+      ],
+    ),
+  );
+
   Widget features() {
     final own = epoch;
     return ShellFeatures(
@@ -804,41 +879,67 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       navigatorKey: navigator,
       title: 'YANDI',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff278654)),
-        useMaterial3: true,
-      ),
+      theme: Icq.theme,
       home: Scaffold(
-        appBar: AppBar(title: const UiText('YANDI · локальная оболочка')),
         body: SafeArea(
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24),
-            child: Align(
-              alignment: Alignment.topCenter,
-              child: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 960),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    if (busy) const LinearProgressIndicator(),
-                    if (error != null)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 16),
-                        child: UiText(
-                          error!,
-                          style: const TextStyle(color: Colors.red),
-                        ),
+          child: Column(
+            children: [
+              shellHeader(),
+              Expanded(
+                child: SingleChildScrollView(
+                  padding: const EdgeInsets.all(12),
+                  child: Align(
+                    alignment: Alignment.topCenter,
+                    child: ConstrainedBox(
+                      constraints: BoxConstraints(
+                        maxWidth: !entered && connected ? 500 : 1400,
                       ),
-                    if (notice != null)
-                      Padding(
-                        padding: const EdgeInsets.only(bottom: 16),
-                        child: UiText(notice!),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          if (busy) const LinearProgressIndicator(),
+                          if (error != null && connected)
+                            NoticePanel(error!, error: true),
+                          if (notice != null) NoticePanel(notice!),
+                          if (!connected)
+                            Panel(
+                              title: 'Нет связи с демоном',
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  if (error != null) UiText(error!),
+                                  const SizedBox(height: 8),
+                                  const UiText(
+                                    'Запустите YANDI под вашим пользователем. Оболочка подключается только к локальному Unix-сокету; интернет для этого не нужен.',
+                                  ),
+                                  if (lockUnconfirmed)
+                                    const UiText(
+                                      'Состояние блокировки не подтверждено',
+                                    ),
+                                  const SizedBox(height: 12),
+                                  button(
+                                    'Повторить подключение',
+                                    () => checkAuth(),
+                                  ),
+                                ],
+                              ),
+                            )
+                          else if (!entered ||
+                              auth == AuthStage.setup ||
+                              auth == AuthStage.recovery)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 36),
+                              child: Panel(title: 'YANDI', child: content()),
+                            )
+                          else
+                            content(),
+                        ],
                       ),
-                    content(),
-                  ],
+                    ),
+                  ),
                 ),
               ),
-            ),
+            ],
           ),
         ),
       ),
@@ -917,37 +1018,38 @@ class _SecretFormState extends State<SecretForm> {
 
   @override
   Widget build(BuildContext context) => Padding(
-    padding: const EdgeInsets.symmetric(vertical: 16),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        UiText(widget.title, style: const TextStyle(fontSize: 20)),
-        if (widget.description != null) UiText(widget.description!),
-        for (var i = 0; i < fields.length; i++)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
-            child: TextField(
-              controller: fields[i],
-              obscureText: true,
-              enableSuggestions: false,
-              autocorrect: false,
-              autofillHints: const [],
-              enableIMEPersonalizedLearning: false,
-              enabled: !sending && !widget.busy,
-              decoration: InputDecoration(
-                labelText: tr(context, widget.labels[i]),
-                border: const OutlineInputBorder(),
+    padding: const EdgeInsets.symmetric(vertical: 12),
+    child: Panel(
+      title: widget.title,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (widget.description != null) UiText(widget.description!),
+          for (var i = 0; i < fields.length; i++)
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: TextField(
+                controller: fields[i],
+                obscureText: true,
+                enableSuggestions: false,
+                autocorrect: false,
+                autofillHints: const [],
+                enableIMEPersonalizedLearning: false,
+                enabled: !sending && !widget.busy,
+                decoration: InputDecoration(
+                  labelText: tr(context, widget.labels[i]),
+                  border: const OutlineInputBorder(),
+                ),
+                onSubmitted: (_) => send(),
               ),
-              onSubmitted: (_) => send(),
             ),
+          if (error != null) NoticePanel(error!, error: true),
+          FilledButton(
+            onPressed: sending || widget.busy ? null : send,
+            child: UiText(sending ? 'Подождите…' : widget.title),
           ),
-        if (error != null)
-          UiText(error!, style: const TextStyle(color: Colors.red)),
-        FilledButton(
-          onPressed: sending || widget.busy ? null : send,
-          child: UiText(sending ? 'Подождите…' : widget.title),
-        ),
-      ],
+        ],
+      ),
     ),
   );
 }
