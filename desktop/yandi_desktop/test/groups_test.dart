@@ -142,7 +142,10 @@ Future<void> open(
   await m1.start(t, api);
   await m1.click(t, 'Войти');
   await m1.click(t, 'Группы');
-  if (conversation) await m1.click(t, 'Семья · ${russianStates[api.role]}');
+  if (conversation) {
+    await m1.click(t, 'Семья · ${russianStates[api.role]}');
+    await m1.click(t, 'Настройки группы');
+  }
 }
 
 void main() {
@@ -203,6 +206,7 @@ void main() {
         api.bodies.any((b) => b['name'] == 'Новая' && b['kind'] == 'invite'),
         true,
       );
+      await m1.click(t, 'Настройки группы');
       expect(find.text('Участники'), findsOneWidget);
       await m1.stop(t);
     },

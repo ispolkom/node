@@ -14,7 +14,9 @@ abstract final class Icq {
       text = Color(0xff1a3a1a),
       online = Color(0xff00aa00),
       danger = Color(0xffaa0000),
-      sent = Color(0xffe0f0e0);
+      sent = Color(0xffe0f0e0),
+      peer = Color(0xffff4001),
+      mine = Color(0xff00d4aa);
   static const bevel = Border(
     top: BorderSide(color: light),
     left: BorderSide(color: light),
@@ -49,11 +51,11 @@ abstract final class Icq {
     final textTheme = base.textTheme
         .apply(bodyColor: text, displayColor: text)
         .copyWith(
-          bodyMedium: const TextStyle(fontSize: 13, color: text),
-          bodyLarge: const TextStyle(fontSize: 13, color: text),
-          bodySmall: const TextStyle(fontSize: 11, color: dark),
-          titleMedium: const TextStyle(fontSize: 14, color: text),
-          labelLarge: const TextStyle(fontSize: 13, color: text),
+          bodyMedium: const TextStyle(fontSize: 15, color: text),
+          bodyLarge: const TextStyle(fontSize: 15, color: text),
+          bodySmall: const TextStyle(fontSize: 12, color: dark),
+          titleMedium: const TextStyle(fontSize: 16, color: text),
+          labelLarge: const TextStyle(fontSize: 14, color: text),
         );
     ButtonStyle buttonStyle(Color color, Color foreground) => ButtonStyle(
       backgroundColor: WidgetStateProperty.resolveWith(
@@ -66,12 +68,12 @@ abstract final class Icq {
       elevation: const WidgetStatePropertyAll(0),
       shadowColor: const WidgetStatePropertyAll(Colors.transparent),
       padding: const WidgetStatePropertyAll(
-        EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        EdgeInsets.symmetric(horizontal: 14, vertical: 7),
       ),
       minimumSize: const WidgetStatePropertyAll(Size(28, 30)),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       textStyle: const WidgetStatePropertyAll(
-        TextStyle(fontSize: 13, fontFamily: 'Tahoma'),
+        TextStyle(fontSize: 14, fontFamily: 'Tahoma'),
       ),
     );
     const outline = OutlineInputBorder(
@@ -286,23 +288,40 @@ class TabStrip extends StatelessWidget {
   final List<String> labels;
   final String selected;
   final ValueChanged<String>? onSelected;
+
+  /// Header variant: light active tab on green (the web nav); otherwise the
+  /// page variant: green active button among grey ones (the web `.btn-primary`).
+  final bool header;
   const TabStrip({
     super.key,
     required this.labels,
     required this.selected,
     required this.onSelected,
+    this.header = false,
   });
   @override
   Widget build(BuildContext context) => Wrap(
-    spacing: 4,
+    spacing: header ? 4 : 6,
     runSpacing: 4,
     children: [
       for (final label in labels)
         OutlinedButton(
           style: OutlinedButton.styleFrom(
-            backgroundColor: selected == label ? Icq.light : Icq.headerLight,
-            foregroundColor: selected == label ? Icq.header : Colors.white,
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+            backgroundColor: header
+                ? (selected == label ? Icq.light : Icq.headerLight)
+                : (selected == label ? Icq.header : Icq.button),
+            foregroundColor: header
+                ? (selected == label ? Icq.header : Colors.white)
+                : (selected == label ? Colors.white : Icq.text),
+            padding: EdgeInsets.symmetric(
+              horizontal: header ? 10 : 14,
+              vertical: header ? 6 : 8,
+            ),
+            textStyle: TextStyle(
+              fontSize: header ? 13 : 14,
+              fontFamily: 'Tahoma',
+            ),
+            minimumSize: const Size(0, 30),
           ),
           onPressed: onSelected == null ? null : () => onSelected!(label),
           child: UiText(label),
@@ -400,10 +419,7 @@ class HeaderLayout extends StatelessWidget {
           children[1],
           Expanded(child: tabs),
           children[3],
-          SizedBox(
-            width: 300,
-            child: Align(alignment: Alignment.centerRight, child: children[4]),
-          ),
+          children[4],
         ],
       );
     },

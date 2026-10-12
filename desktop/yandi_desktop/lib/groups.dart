@@ -305,10 +305,68 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       feed!['problem'] != true &&
       feed!['damaged'] != true &&
       group['muted'] != true;
-  Widget button(String label, VoidCallback callback) => TextButton(
-    onPressed: busy || loading ? null : callback,
-    child: UiText(label),
-  );
+  Widget button(String label, VoidCallback callback, {bool primary = false}) =>
+      TextButton(
+        style: primary
+            ? TextButton.styleFrom(
+                backgroundColor: Icq.header,
+                foregroundColor: Colors.white,
+              )
+            : null,
+        onPressed: busy || loading ? null : callback,
+        child: UiText(label),
+      );
+  String? settingsFor;
+  Widget groupItem(Map<String, dynamic> g) {
+    final id = '${g['id']}', current = selected == id;
+    final members = g['members'] is List
+        ? (g['members'] as List).length
+        : g['members'];
+    final kind = g['kind'] == 'open' ? 'открытая' : 'по приглашению';
+    final small = const TextStyle(fontSize: 12, color: Icq.dark);
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: TextButton(
+        style: TextButton.styleFrom(
+          backgroundColor: Icq.light,
+          foregroundColor: Icq.text,
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.all(10),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(2),
+            side: BorderSide(
+              color: current ? Icq.header : Icq.border,
+              width: current ? 2 : 1,
+            ),
+          ),
+        ),
+        onPressed: busy || loading ? null : () => choose(id),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${g['name']} · ${stateLabel(context, g['role'])}',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
+            if ('${g['topic'] ?? ''}'.isNotEmpty)
+              Text('${tr(context, 'Тематика')}: ${g['topic']}', style: small),
+            if ('${g['about'] ?? ''}'.isNotEmpty)
+              Text('${g['about']}', style: small),
+            Text(
+              [
+                tr(context, kind),
+                if (members != null) '$members ${tr(context, 'уч.')}',
+                if (g['muted'] == true) tr(context, 'заглушены'),
+                if ((g['requests'] ?? 0) is num && (g['requests'] ?? 0) > 0)
+                  '${tr(context, 'просятся')}: ${g['requests']}',
+              ].join(' · '),
+              style: small,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
   static const labels = {
     'mute': 'Запретить писать',
     'unmute': 'Разрешить писать',
@@ -520,15 +578,123 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     });
   }
 
+  Widget bubble(Map<String, dynamic> m) {
+    final own = m['mine'] == true;
+    final ts = DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt())
+        .toLocal();
+    final hm =
+        '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
+    return Align(
+      alignment: own ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+          decoration: BoxDecoration(
+            color: own ? Icq.sent : Colors.white,
+            border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!own)
+                Text(
+                  '${m['author']}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Icq.peer,
+                  ),
+                ),
+              if (m['attachment'] is Map)
+                AttachmentView(
+                  key: ValueKey('$selected-${m['seq']}'),
+                  api: widget.api,
+                  attachment: {
+                    ...Map<String, dynamic>.from(m['attachment']),
+                    'mime_type': FileRepository.mime(
+                      '${m['attachment']['filename']}',
+                    ),
+                  },
+                  contentPath: repo.path(selected!, 'file/${m['seq']}'),
+                  isActive: () => active,
+                  mutate: (a) => mutate(a),
+                  busy: busy,
+                )
+              else
+                SelectableText(
+                  m['text'] == null
+                      ? tr(context, 'Вложение (недоступно)')
+                      : '${m['text']}',
+                ),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  if (canDelete(m))
+                    TextButton(
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(0, 22),
+                        padding: const EdgeInsets.symmetric(horizontal: 6),
+                        textStyle: const TextStyle(fontSize: 11, fontFamily: 'Tahoma'),
+                      ),
+                      onPressed: busy ? null : () => deleteMessage(m),
+                      child: UiText('Удалить сообщение №${m['seq']}'),
+                    ),
+                  const SizedBox(width: 6),
+                  Text(
+                    hm,
+                    style: const TextStyle(fontSize: 11, color: Icq.dark),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget conversation({bool wide = false}) {
     final history = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        UiText(
-          '${group['name'] ?? 'Загрузка группы…'}',
-          style: const TextStyle(fontSize: 22),
+        Wrap(
+          spacing: 10,
+          runSpacing: 4,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            Text(
+              '${group['name'] ?? tr(context, 'Загрузка группы…')}',
+              style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
+            ),
+            if (group['kind'] != null)
+              UiText(
+                group['kind'] == 'open' ? 'открытая' : 'по приглашению',
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
+            if (group['my_alias'] != null)
+              UiText(
+                '${tr(context, 'вы')}: ${group['my_alias']} · ${stateLabel(context, group['role'])}',
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
+            if (info != null)
+              button(
+                settingsFor == selected ? 'Закрыть настройки' : 'Настройки группы',
+                () => setState(
+                  () => settingsFor = settingsFor == selected ? null : selected,
+                ),
+              ),
+          ],
         ),
-        const UiText('История не старше календарного года.'),
+        const UiText(
+          'История не старше календарного года.',
+          style: TextStyle(fontSize: 12, color: Icq.dark),
+        ),
+        const SizedBox(height: 8),
         if (feed?['damaged'] == true)
           const UiText('Повреждена лента на диске.'),
         if (feed?['problem'] == true)
@@ -542,50 +708,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ),
         if (feed != null && rows(feed, 'messages').isEmpty)
           const UiText('История пуста.'),
-        for (final m in rows(feed, 'messages'))
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    m['mine'] == true ? tr(context, 'Вы') : '${m['author']}',
-                  ),
-                  if (m['attachment'] is Map)
-                    AttachmentView(
-                      key: ValueKey('$selected-${m['seq']}'),
-                      api: widget.api,
-                      attachment: {
-                        ...Map<String, dynamic>.from(m['attachment']),
-                        'mime_type': FileRepository.mime(
-                          '${m['attachment']['filename']}',
-                        ),
-                      },
-                      contentPath: repo.path(selected!, 'file/${m['seq']}'),
-                      isActive: () => active,
-                      mutate: (a) => mutate(a),
-                      busy: busy,
-                    )
-                  else
-                    SelectableText(
-                      m['text'] == null
-                          ? tr(context, 'Вложение (недоступно)')
-                          : '${m['text']}',
-                    ),
-                  UiText(
-                    '${DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt()).toLocal()} · №${m['seq']}',
-                  ),
-                  if (canDelete(m))
-                    button(
-                      'Удалить сообщение №${m['seq']}',
-                      () => deleteMessage(m),
-                    ),
-                ],
-              ),
-            ),
-          ),
-        if (info != null) ...[
+        for (final m in rows(feed, 'messages')) bubble(m),
+        if (info != null && settingsFor == selected) ...[
           participants(),
           if (manager) ...[
             button('Изменить настройки группы', () async {
@@ -639,41 +763,60 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         ],
       ],
     );
+    final field = Focus(
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.enter &&
+            (HardwareKeyboard.instance.isControlPressed ||
+                HardwareKeyboard.instance.isMetaPressed)) {
+          send();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: TextField(
+        controller: composer,
+        enabled: !busy && canSend,
+        minLines: 2,
+        maxLines: 6,
+        decoration: InputDecoration(
+          hintText: tr(context, 'Сообщение группе'),
+          helperText: tr(context, 'Ctrl+Enter — отправить'),
+        ),
+      ),
+    );
+    final sendButton = FilledButton(
+      onPressed: !busy && canSend ? send : null,
+      child: const UiText('Отправить группе'),
+    );
+    final attach = TextButton(
+      onPressed: busy || choosing || !canSend ? null : pickFile,
+      child: const UiText('Выбрать файл'),
+    );
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Focus(
-          onKeyEvent: (_, event) {
-            if (event is KeyDownEvent &&
-                event.logicalKey == LogicalKeyboardKey.enter &&
-                (HardwareKeyboard.instance.isControlPressed ||
-                    HardwareKeyboard.instance.isMetaPressed)) {
-              send();
-              return KeyEventResult.handled;
-            }
-            return KeyEventResult.ignored;
-          },
-          child: TextField(
-            controller: composer,
-            enabled: !busy && canSend,
-            minLines: 2,
-            maxLines: 6,
-            decoration: InputDecoration(
-              labelText: tr(context, 'Сообщение группе'),
-            ),
-          ),
+        LayoutBuilder(
+          builder: (context, box) => box.maxWidth < 520
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [field, Wrap(children: [attach, sendButton])],
+                )
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    attach,
+                    const SizedBox(width: 6),
+                    Expanded(child: field),
+                    const SizedBox(width: 6),
+                    sendButton,
+                  ],
+                ),
         ),
-        FilledButton(
-          onPressed: !busy && canSend ? send : null,
-          child: const UiText('Отправить группе'),
-        ),
-        Wrap(
-          children: [
-            TextButton(
-              onPressed: busy || choosing || !canSend ? null : pickFile,
-              child: const UiText('Выбрать файл'),
-            ),
-            if (picked != null) ...[
+        if (picked != null)
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
               Text(picked!.uri.pathSegments.last),
               TextButton(
                 onPressed: busy ? null : () => setState(() => picked = null),
@@ -684,8 +827,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                 child: const UiText('Отправить файл'),
               ),
             ],
-          ],
-        ),
+          ),
         if (fileSize > 0) ...[
           LinearProgressIndicator(value: sentBytes / fileSize),
           UiText(
@@ -719,19 +861,19 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     crossAxisAlignment: CrossAxisAlignment.stretch,
     children: [
       Wrap(
+        spacing: 6,
+        runSpacing: 6,
         children: [
-          button('Создать группу', create),
+          button('Создать группу', create, primary: true),
           button('Вступить по приглашению', () => join()),
+          button('Обновить группы', refresh),
         ],
       ),
+      const SizedBox(height: 10),
       if (tab == 'Свои группы') ...[
         if (!loading && mine.isEmpty)
           const UiText('Вы ещё не состоите в группах.'),
-        for (final g in mine)
-          button(
-            '${g['name']} · ${stateLabel(context, g['role'])}',
-            () => choose('${g['id']}'),
-          ),
+        for (final g in mine) groupItem(g),
         for (final g in gone)
           ListTile(
             title: UiText('${g['name']}: удалена или вы исключены'),
@@ -841,18 +983,38 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             padding: const EdgeInsets.all(10),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: [button('Обновить группы', refresh), groupList()],
+              children: [groupList()],
+            ),
+          );
+          final wideList = Container(
+            decoration: const BoxDecoration(color: Icq.panel, border: Icq.frame),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                const PageHeader('Группы'),
+                Expanded(
+                  child: SingleChildScrollView(
+                    padding: const EdgeInsets.all(10),
+                    child: groupList(),
+                  ),
+                ),
+              ],
             ),
           );
           final empty = Panel(
             color: Colors.white,
             child: SizedBox(
-              height:
-                  (MediaQuery.sizeOf(context).height - 280).clamp(
-                    350.0,
-                    800.0,
-                  ) -
-                  34,
+              height: size.maxWidth < 700
+                  ? (MediaQuery.sizeOf(context).height - 280).clamp(
+                          350.0,
+                          800.0,
+                        ) -
+                        34
+                  : (MediaQuery.sizeOf(context).height - 280).clamp(
+                          350.0,
+                          800.0,
+                        ) -
+                        34,
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
@@ -892,7 +1054,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               children: [
                 SizedBox(
                   width: size.maxWidth < 1000 ? 260 : 320,
-                  child: SingleChildScrollView(child: list),
+                  child: wideList,
                 ),
                 const SizedBox(width: 12),
                 Expanded(

@@ -624,10 +624,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       children: [
         if (background.unread.isNotEmpty)
           UiText('Новых чатов: ${background.unread.length}'),
-        const UiText(
-          'Выход из оболочки не запирает закрытую среду. Используйте «Запереть».',
-          style: TextStyle(fontSize: 11, color: Icq.dark),
-        ),
         if (lockUnconfirmed) ...[
           const UiText('Состояние блокировки не подтверждено'),
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
@@ -753,6 +749,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         Expanded(
           child: entered && connected
               ? TabStrip(
+                  header: true,
                   labels: const [
                     'Главная',
                     'Чат',
@@ -789,9 +786,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 ),
         ),
         const SizedBox(width: 8),
-        Wrap(
-          spacing: 4,
-          runSpacing: 4,
+        Row(
+          mainAxisSize: MainAxisSize.min,
           children: [
             BevelButton(
               label: 'EN / RU',
@@ -829,8 +825,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               },
             ),
             if (entered)
-              BevelButton(
-                label: 'Выйти из оболочки',
+              IconButton(
+                tooltip: preferences.english
+                    ? 'Exit shell (does not lock the vault)'
+                    : 'Выйти из оболочки (закрытую среду не запирает)',
+                icon: const Icon(Icons.logout, size: 18),
                 onPressed: busy
                     ? null
                     : () {
