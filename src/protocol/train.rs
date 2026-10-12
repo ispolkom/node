@@ -257,12 +257,6 @@ impl Train {
                 return Err(TrainError::MissingWagon(i));
             };
 
-            // Проверяем checksum
-            if !wagon.verify() {
-                eprintln!("[TRAIN] ❌ Checksum failed for wagon #{}", i);
-                return Err(TrainError::ChecksumFailed(i));
-            }
-
             data.extend_from_slice(&wagon.cargo);
         }
 
@@ -271,8 +265,6 @@ impl Train {
                  self.wagons.len(), self.wagons_clone.len());
         Ok(data)
     }
-
-    /// 🎉 Вычислить checksum собранного поезда (для ACK)
 
     /// ⚡ QUIC-style: собрать данные до заданного offset (partial assembly)
     pub fn assemble_up_to(&self, max_offset: u64) -> Result<Vec<u8>, TrainError> {
@@ -296,11 +288,6 @@ impl Train {
             if offset > current_offset {
                 // Обнаружен пропуск: current_offset..offset
                 return Err(TrainError::MissingRange(current_offset, offset));
-            }
-
-            // Проверяем checksum
-            if !wagon.verify() {
-                return Err(TrainError::ChecksumFailedAtOffset(offset));
             }
 
             // Добавляем данные
@@ -426,19 +413,12 @@ pub enum TrainError {
     #[error("Отсутствует вагон #{0}")]
     MissingWagon(u32),
 
-    #[error("Checksum failed для вагона #{0}")]
-    ChecksumFailed(u32),
-
     #[error("Таймаут сборки поезда")]
     Timeout,
 
     /// ⚡ QUIC-style: отсутствует диапазон данных
     #[error("Отсутствует диапазон данных: {0}..{1}")]
     MissingRange(u64, u64),
-
-    /// ⚡ QUIC-style: checksum failed на offset
-    #[error("Checksum failed на offset {0}")]
-    ChecksumFailedAtOffset(u64),
 }
 
 #[cfg(test)]
