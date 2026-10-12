@@ -178,7 +178,17 @@ class _DevicesPanelState extends State<DevicesPanel> {
           child: const UiText('Создать код сопряжения'),
         ),
       if (text != null && expires != null) ...[
-        if (qr != null) CustomPaint(size: const Size(280, 280), painter: qr),
+        if (qr != null)
+          // Align снимает «растяжение» колонки: QR остаётся квадратом 280×280.
+          Align(
+            alignment: Alignment.centerLeft,
+            child: SizedBox(
+              key: const ValueKey('pairing-qr'),
+              width: 280,
+              height: 280,
+              child: CustomPaint(painter: qr),
+            ),
+          ),
         SelectableText(text!),
         UiText('Код действует ещё ${remaining.clamp(0, 300)} с'),
         TextButton(

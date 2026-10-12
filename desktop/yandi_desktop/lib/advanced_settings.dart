@@ -193,16 +193,22 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         const UiText('Нужен перезапуск узла для применения настроек.'),
       button('Обновить настройки', refresh),
       for (var i = 0; i < fields.length; i++)
-        TextField(
-          controller: fields[i],
-          enabled: !widget.busy && !loading,
-          decoration: InputDecoration(
-            labelText: i < 6
-                ? tr(context, portLabels[i])
-                : tr(context, 'Адрес bind'),
-            helperText: i < 6
-                ? '${tr(context, portHelp[i])} (${ports[i]})'
-                : null,
+        Align(
+          alignment: Alignment.centerLeft,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: TextField(
+              controller: fields[i],
+              enabled: !widget.busy && !loading,
+              decoration: InputDecoration(
+                labelText: i < 6
+                    ? tr(context, portLabels[i])
+                    : tr(context, 'Адрес bind'),
+                helperText: i < 6
+                    ? '${tr(context, portHelp[i])} (${ports[i]})'
+                    : null,
+              ),
+            ),
           ),
         ),
       DropdownButton<String>(

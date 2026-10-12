@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/devices.dart';
 import 'shell_m2_test.dart' as m2;
@@ -57,6 +58,15 @@ void main() {
     await m1.click(t, 'Отозвать устройство');
     await m1.click(t, 'Подтвердить');
     expect(api.calls.contains('/api/mobile/devices/${'d' * 64}'), true);
+    await m1.stop(t);
+  });
+  testWidgets('pairing QR stays a 280x280 square', (t) async {
+    final api = DeviceApi();
+    await m2.open(t, api, 'Настройки');
+    await t.ensureVisible(find.text('Создать код сопряжения'));
+    await m1.click(t, 'Создать код сопряжения');
+    final size = t.getSize(find.byKey(const ValueKey('pairing-qr')));
+    expect(size, const Size(280, 280));
     await m1.stop(t);
   });
   testWidgets('late pairing is discarded on navigation', (t) async {
