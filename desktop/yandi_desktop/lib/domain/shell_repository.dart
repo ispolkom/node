@@ -89,6 +89,35 @@ class ShellRepository {
     await api.request('/api/chat/send/${segment(peer)}', body: {'text': text});
   }
 
+  Future<void> edit(String peer, String id, String text) async {
+    await api.request(
+      '/api/chat/edit/${segment(peer)}',
+      method: 'PATCH',
+      body: {'msg_id': id, 'text': text},
+    );
+  }
+
+  Future<void> deleteMessage(String peer, String id) async {
+    await api.request(
+      '/api/chat/delete/${segment(peer)}',
+      method: 'DELETE',
+      body: {'msg_id': id, 'for_everyone': false},
+    );
+  }
+
+  Future<void> clearHistory(String peer) async {
+    await api.request('/api/chat/clear/${segment(peer)}', method: 'POST');
+  }
+
+  static String delivery(dynamic status) => switch (status) {
+    'Sent' => 'Отправлено',
+    'Delivered' => 'Доставлено',
+    'Read' => 'Прочитано',
+    'Pending' => 'Ожидает отправки',
+    'Failed' => 'Ошибка отправки',
+    _ => 'Статус демона: ${status ?? "неизвестен"}',
+  };
+
   Future<Map<String, dynamic>> profile() async {
     final result = await api.request('/api/profile/me');
     if (result['profile'] is! Map<String, dynamic>) {

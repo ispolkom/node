@@ -268,6 +268,62 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     await mutate(() => repo.rename(contact, value));
   }
 
+  Future<bool> confirm(String title, String explanation) async {
+    final rev = revision;
+    final answer = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text(title),
+        content: Text(explanation),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Отмена'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Подтвердить'),
+          ),
+        ],
+      ),
+    );
+    return active && rev == revision && answer == true;
+  }
+
+  Future<void> editMessage(Map<String, dynamic> message) async {
+    final rev = revision, target = peer(selected!);
+    final value = await showDialog<String>(
+      context: context,
+      builder: (_) => ContactNameDialog(
+        initial: '${message['text'] ?? ''}',
+        editingMessage: true,
+      ),
+    );
+    if (!active || rev != revision || value == null || value.trim().isEmpty)
+      return;
+    await mutate(() => repo.edit(target, '${message['msg_id']}', value));
+  }
+
+  Future<void> deleteMessage(Map<String, dynamic> message) async {
+    final target = peer(selected!);
+    if (await confirm(
+      'Удалить сообщение?',
+      'Сообщение будет удалено только в вашей истории.',
+    )) {
+      await mutate(() => repo.deleteMessage(target, '${message['msg_id']}'));
+    }
+  }
+
+  Future<void> clearHistory() async {
+    final target = peer(selected!);
+    if (await confirm(
+      'Очистить историю чата?',
+      'Будет очищена ваша история выбранного чата.',
+    )) {
+      await mutate(() => repo.clearHistory(target));
+    }
+  }
+
   Widget field(
     TextEditingController controller,
     String label, {
@@ -341,6 +397,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         const Text('Выберите контакт для переписки.')
       else ...[
         Text('Чат: ${selected!['name']}', style: const TextStyle(fontSize: 22)),
+        TextButton(
+          onPressed: sending ? null : clearHistory,
+          child: const Text('Очистить историю'),
+        ),
         const Text('Показаны последние 100 сообщений не старше года.'),
         if (!loading && messages.isEmpty && error == null)
           const Text('История пуста.'),
@@ -356,10 +416,24 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 children: [
                   Text(m['from'] == ownId ? 'Вы' : '${selected!['name']}'),
                   SelectableText('${m['text'] ?? ''}'),
+                  if (m['from'] == ownId)
+                    Wrap(
+                      children: [
+                        if (m['attachment'] == null)
+                          TextButton(
+                            onPressed: sending ? null : () => editMessage(m),
+                            child: const Text('Изменить сообщение'),
+                          ),
+                        TextButton(
+                          onPressed: sending ? null : () => deleteMessage(m),
+                          child: const Text('Удалить сообщение'),
+                        ),
+                      ],
+                    ),
                   if (m['attachment'] is Map)
                     const Text('Вложение (открытие файлов пока недоступно)'),
                   Text(
-                    '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${m['status'] ?? 'Неизвестный статус'}${m['edited'] == true ? ' · изменено' : ''}',
+                    '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${ShellRepository.delivery(m['status'])}${m['edited'] == true ? ' · изменено' : ''}',
                   ),
                 ],
               ),
@@ -483,7 +557,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
 
 class ContactNameDialog extends StatefulWidget {
   final String initial;
-  const ContactNameDialog({super.key, required this.initial});
+  final bool editingMessage;
+  const ContactNameDialog({
+    super.key,
+    required this.initial,
+    this.editingMessage = false,
+  });
   @override
   State<ContactNameDialog> createState() => _ContactNameDialogState();
 }
@@ -499,11 +578,16 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Переименовать контакт'),
+    title: Text(
+      widget.editingMessage ? 'Изменить сообщение' : 'Переименовать контакт',
+    ),
     content: TextField(
       controller: field,
-      maxLength: 64,
-      decoration: const InputDecoration(labelText: 'Имя'),
+      maxLength: widget.editingMessage ? null : 64,
+      maxLines: widget.editingMessage ? 6 : 1,
+      decoration: InputDecoration(
+        labelText: widget.editingMessage ? 'Текст сообщения' : 'Имя',
+      ),
     ),
     actions: [
       TextButton(
