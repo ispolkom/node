@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'domain/file_repository.dart';
+import 'media_player.dart';
 import 'message_actions.dart';
 import 'platform_files.dart';
 import 'theme.dart';
@@ -51,6 +52,8 @@ class _AttachmentViewState extends State<AttachmentView> {
   @override
   void dispose() {
     watch?.cancel();
+    player?.kill();
+    media?.stop();
     image?.evict();
     preview?.fillRange(0, preview!.length, 0);
     preview = null;
@@ -102,6 +105,69 @@ class _AttachmentViewState extends State<AttachmentView> {
         image = MemoryImage(bytes);
       });
     });
+  }
+
+  LoopbackMedia? media;
+  Process? player;
+  bool playing = false;
+
+  Future<void> stopPlayback() async {
+    player?.kill();
+    player = null;
+    final m = media;
+    media = null;
+    await m?.stop();
+    if (mounted) setState(() => playing = false);
+  }
+
+  /// Play inside the closed environment: decrypted bytes live in memory and are
+  /// served to the player over loopback; no plaintext file is written.
+  Future<void> play() async {
+    if (playing) return;
+    final size = widget.attachment['size'];
+    if (size is! num || size <= 0 || size > 256 * 1024 * 1024) {
+      setState(() => error = 'Файл слишком большой для воспроизведения.');
+      return;
+    }
+    setState(() {
+      playing = true;
+      error = null;
+    });
+    await widget.mutate(() async {
+      final bytes = await repo.binary.bytes(
+        widget.contentPath ?? repo.path(widget.attachment, 'content'),
+        limit: size.toInt(),
+      );
+      if (!active) {
+        bytes.fillRange(0, bytes.length, 0);
+        return;
+      }
+      final m = LoopbackMedia(
+        bytes,
+        FileRepository.mime('${widget.attachment['filename']}'),
+      );
+      media = m;
+      final url = await m.start();
+      final p = await MediaPlayerLauncher.launcher(
+        url,
+        '${widget.attachment['filename']}',
+      );
+      if (p == null) {
+        await stopPlayback();
+        if (active) {
+          setState(
+            () => error =
+                'Не найден проигрыватель (mpv, ffplay или vlc). Установите один из них.',
+          );
+        }
+        return;
+      }
+      player = p;
+      p.exitCode.then((_) => stopPlayback());
+    });
+    if (mounted && player == null && media == null) {
+      setState(() => playing = false);
+    }
   }
 
   Future<void> save(bool open) async {
@@ -233,6 +299,14 @@ class _AttachmentViewState extends State<AttachmentView> {
                   'Предпросмотр',
                   onTap: widget.busy ? null : showPreview,
                 ),
+              if (ready &&
+                  (type.startsWith('audio/') || type.startsWith('video/')))
+                playing
+                    ? CommandText('Остановить', onTap: stopPlayback)
+                    : CommandText(
+                        type.startsWith('video/') ? 'Смотреть' : 'Слушать',
+                        onTap: widget.busy ? null : play,
+                      ),
               if (ready &&
                   (type.startsWith('image/') ||
                       type.startsWith('audio/') ||

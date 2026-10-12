@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/domain/file_repository.dart';
+import 'package:yandi_desktop/media_player.dart';
 import 'package:yandi_desktop/platform_files.dart';
 import 'package:yandi_desktop/transport/api.dart';
 import 'shell_m2_test.dart' as m2;
@@ -291,5 +292,35 @@ void main() {
     await t.pump(const Duration(seconds: 1));
     await t.pumpAndSettle();
     expect(find.text('focus.bin'), findsOneWidget);
+  });
+  testWidgets('audio plays through loopback in memory, no player is reported', (
+    t,
+  ) async {
+    final api = FileApi()..exists = true;
+    api.historyRows.first['attachment'] = {
+      'filename': 'song.mp3',
+      'size': png.length,
+      'mime_type': 'audio/mpeg',
+      'file_ref': {'file_id': 'file_2', 'total_chunks': 1},
+    };
+    Uri? seen;
+    final saved = MediaPlayerLauncher.launcher;
+    MediaPlayerLauncher.launcher = (url, title) async {
+      seen = url;
+      return null;
+    };
+    addTearDown(() => MediaPlayerLauncher.launcher = saved);
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await t.ensureVisible(find.text('Слушать'));
+    await t.runAsync(() async {
+      await t.tap(find.text('Слушать'));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await t.pump();
+    await t.pump();
+    expect(seen?.host, '127.0.0.1');
+    expect(find.textContaining('Не найден проигрыватель'), findsOneWidget);
+    await m1.stop(t);
   });
 }
