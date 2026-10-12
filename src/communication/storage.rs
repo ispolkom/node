@@ -187,6 +187,111 @@ impl ChatStorage {
         Ok(hex::encode([nonce.as_slice(), &ct].concat()))
     }
 
+    /// Формат файла чата: признак `YCH2`, дальше записи `[длина u32 BE][nonce 12 | шифртекст]`. Файл без признака — прежний
+    /// текстовый (hex в строке); он читается как раньше, дописывается в том же виде и становится новым при перезаписи истории.
+    const MAGIC: &'static [u8; 4] = b"YCH2";
+    const MAX_RECORD: usize = 16 * 1024 * 1024;
+
+    fn seal_blob(key: &[u8; 32], plain: &[u8]) -> Result<Vec<u8>> {
+        let mut nonce = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce);
+        let ct = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(key))
+            .encrypt(Nonce::from_slice(&nonce), plain)
+            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
+        Ok([nonce.as_slice(), &ct].concat())
+    }
+
+    fn open_blob(candidates: &[[u8; 32]], blob: &[u8]) -> Option<(usize, Vec<u8>)> {
+        if blob.len() < 12 + 16 {
+            return None;
+        }
+        candidates.iter().enumerate().find_map(|(i, k)| {
+            Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(k))
+                .decrypt(Nonce::from_slice(&blob[..12]), &blob[12..])
+                .ok()
+                .map(|p| (i, p))
+        })
+    }
+
+    /// Записи файла по порядку и признак «новый формат». Непрочитанная строка/хвост даёт пустую запись (она не откроется,
+    /// как и раньше: пропускается, а при строгом чтении — ошибка).
+    fn read_blobs(path: &std::path::Path) -> Result<(Vec<Vec<u8>>, bool)> {
+        let raw = std::fs::read(path)?;
+        if raw.starts_with(Self::MAGIC) {
+            let mut blobs = Vec::new();
+            let mut at = Self::MAGIC.len();
+            while at < raw.len() {
+                if at + 4 > raw.len() {
+                    blobs.push(Vec::new());
+                    break;
+                }
+                let len = u32::from_be_bytes(raw[at..at + 4].try_into().unwrap()) as usize;
+                at += 4;
+                if len > Self::MAX_RECORD || at + len > raw.len() {
+                    blobs.push(Vec::new());
+                    break;
+                }
+                blobs.push(raw[at..at + len].to_vec());
+                at += len;
+            }
+            return Ok((blobs, true));
+        }
+        let text = String::from_utf8_lossy(&raw);
+        let blobs = text
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(|l| hex::decode(l).unwrap_or_default())
+            .collect();
+        Ok((blobs, false))
+    }
+
+    fn encode_blobs(blobs: &[Vec<u8>], binary: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if binary {
+            out.extend_from_slice(Self::MAGIC);
+            for b in blobs {
+                out.extend_from_slice(&(b.len() as u32).to_be_bytes());
+                out.extend_from_slice(b);
+            }
+        } else {
+            for b in blobs {
+                out.extend_from_slice(hex::encode(b).as_bytes());
+                out.push(b'\n');
+            }
+        }
+        out
+    }
+
+    /// Дописать запись: в новый файл — в новом формате, в существующий — в его формате.
+    fn append_blob(path: &std::path::Path, blob: &[u8]) -> Result<()> {
+        use std::io::{Read, Write};
+        let mut file = std::fs::OpenOptions::new().create(true).read(true).append(true).open(path)?;
+        let len = file.metadata()?.len();
+        let binary = if len == 0 {
+            true
+        } else {
+            let mut head = [0u8; 4];
+            let mut reader = std::fs::File::open(path)?;
+            reader.read_exact(&mut head).ok();
+            &head == Self::MAGIC
+        };
+        let mut chunk = Vec::new();
+        if len == 0 {
+            chunk.extend_from_slice(Self::MAGIC);
+        }
+        if binary {
+            chunk.extend_from_slice(&(blob.len() as u32).to_be_bytes());
+            chunk.extend_from_slice(blob);
+        } else {
+            chunk.extend_from_slice(hex::encode(blob).as_bytes());
+            chunk.push(b'\n');
+        }
+        // одной записью: оборванное питанием дописывание оставляет не больше одного неполного хвоста
+        file.write_all(&chunk)?;
+        Ok(())
+    }
+
     /// Перенос всех файлов чатов и очереди на ключ закрытой среды и переключение хранилища на него. Идемпотентно: строка, уже
     /// открывающаяся новым ключом, остаётся; прочие открываются прежним мастер-ключом (`old`) или старым ключом из node_id.
     /// Файл с неоткрываемой строкой не меняется (счёт таких файлов возвращается).
@@ -211,23 +316,23 @@ impl ChatStorage {
                     continue;
                 }
                 let path = entry.path();
-                let text = match std::fs::read_to_string(&path) {
-                    Ok(t) => t,
+                let (blobs, binary) = match Self::read_blobs(&path) {
+                    Ok(v) => v,
                     Err(_) => {
                         failed += 1;
                         continue;
                     }
                 };
                 let mut changed = false;
-                let mut out = Vec::new();
+                let mut out: Vec<Vec<u8>> = Vec::new();
                 let mut ok = true;
-                for line in text.lines().filter(|l| !l.trim().is_empty()) {
-                    match Self::open_with_any(&candidates, line) {
-                        Some((0, _)) => out.push(line.trim().to_string()),
-                        Some((_, plain)) => match Self::seal_line(&candidates[0], &plain) {
-                            Ok(l) => {
+                for blob in blobs.iter() {
+                    match Self::open_blob(&candidates, blob) {
+                        Some((0, _)) => out.push(blob.clone()),
+                        Some((_, plain)) => match Self::seal_blob(&candidates[0], &plain) {
+                            Ok(b) => {
                                 changed = true;
-                                out.push(l);
+                                out.push(b);
                             }
                             Err(_) => ok = false,
                         },
@@ -242,15 +347,17 @@ impl ChatStorage {
                     continue;
                 }
                 let tmp = path.with_extension("enc.rekey");
-                let body = out.join("\n") + "\n";
-                crate::util::private_file::write_private(&tmp, body.as_bytes())?;
-                // проверка до замены: каждая строка новой копии открывается новым ключом
-                let check = std::fs::read_to_string(&tmp)?;
-                let all_new = check
-                    .lines()
-                    .filter(|l| !l.trim().is_empty())
-                    .all(|l| matches!(Self::open_with_any(&candidates[..1], l), Some((0, _))));
-                if !all_new || check.lines().filter(|l| !l.trim().is_empty()).count() != out.len() {
+                // формат файла сохраняется: очередь (outbox) остаётся текстовой, история — какой была
+                crate::util::private_file::write_private(&tmp, &Self::encode_blobs(&out, binary))?;
+                // проверка до замены: каждая запись новой копии открывается новым ключом
+                let ok_new = match Self::read_blobs(&tmp) {
+                    Ok((check, _)) => {
+                        check.len() == out.len()
+                            && check.iter().all(|b| matches!(Self::open_blob(&candidates[..1], b), Some((0, _))))
+                    }
+                    Err(_) => false,
+                };
+                if !ok_new {
                     let _ = std::fs::remove_file(&tmp);
                     failed += 1;
                     continue;
@@ -347,30 +454,10 @@ impl ChatStorage {
 
     /// Добавить зашифрованное сообщение в файл
     fn append_encrypted_message(&self, chat_file: &PathBuf, msg: &ChatMessage) -> Result<()> {
-        use std::fs::OpenOptions;
-        use std::io::Write;
-
-        let plaintext = serde_json::to_string(msg)?;
+        let plaintext = serde_json::to_vec(msg)?;
         let key_bytes = self.get_encryption_key()?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
-
-        let mut nonce_bytes = [0u8; 12];
-        rand::thread_rng().fill_bytes(&mut nonce_bytes);
-        let nonce = Nonce::from_slice(&nonce_bytes);
-
-        let ciphertext = cipher.encrypt(nonce, plaintext.as_bytes())
-            .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
-
-        let mut encrypted_data = nonce_bytes.to_vec();
-        encrypted_data.extend_from_slice(&ciphertext);
-
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(chat_file)?;
-
-        writeln!(file, "{}", hex::encode(encrypted_data))?;
-        Ok(())
+        let blob = Self::seal_blob(&key_bytes, &plaintext)?;
+        Self::append_blob(chat_file, &blob)
     }
 
     /// The outgoing queue (messages not yet confirmed by their recipients), kept encrypted in one file so that it survives a restart.
@@ -432,20 +519,13 @@ impl ChatStorage {
             return Ok(Vec::new());
         }
 
-        let content = std::fs::read_to_string(chat_file)?;
-        let cipher = Aes256Gcm::new(Key::<Aes256Gcm>::from_slice(&key_bytes));
+        let (blobs, _) = Self::read_blobs(&chat_file)?;
+        let keys = [key_bytes];
 
         let mut messages = Vec::new();
-        for line in content.lines().rev().take(limit) {
-            let encrypted_hex = line.trim();
-            if encrypted_hex.is_empty() {
-                continue;
-            }
-            let opened = hex::decode(encrypted_hex)
-                .ok()
-                .filter(|b| b.len() >= 12)
-                .and_then(|b| cipher.decrypt(Nonce::from_slice(&b[0..12]), &b[12..]).ok())
-                .and_then(|p| serde_json::from_slice::<ChatMessage>(&p).ok());
+        for blob in blobs.iter().rev().take(limit) {
+            let opened = Self::open_blob(&keys, blob)
+                .and_then(|(_, p)| serde_json::from_slice::<ChatMessage>(&p).ok());
             match opened {
                 Some(msg) => messages.push(msg),
                 None if strict => {
@@ -737,6 +817,57 @@ mod concurrency_tests {
         st.update_message_status(&peer, &msgs[2].msg_id, MessageStatus::Read).unwrap();
         st.clear_history(&peer).unwrap();
         assert!(!log.exists() && !file.exists());
+    }
+
+    #[test]
+    fn a_new_history_is_binary_an_old_text_one_is_read_appended_in_kind_and_converted_on_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let (me, peer) = (HashId([1; 32]), HashId([2; 32]));
+        let st = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        let file = dir.path().join(format!("chat_{}.enc", hex::encode(peer.0)));
+
+        // новая история: признак формата, записи читаются
+        let a = ChatMessage::new(peer, me, "a".into());
+        st.save_incoming(&peer, &a).unwrap();
+        assert!(std::fs::read(&file).unwrap().starts_with(b"YCH2"));
+        st.save_incoming(&peer, &ChatMessage::new(peer, me, "b".into())).unwrap();
+        assert_eq!(st.load_history(&peer, 10).unwrap().len(), 2);
+
+        // оборванный дописыванием хвост не мешает прочитать целые записи
+        let mut raw = std::fs::read(&file).unwrap();
+        let whole = raw.len();
+        raw.extend_from_slice(&[0, 0, 1, 0, 9, 9]);
+        std::fs::write(&file, &raw).unwrap();
+        assert_eq!(st.load_history(&peer, 10).unwrap().len(), 2);
+        assert!(st.delete_message(&peer, &a.msg_id).is_err(), "строгая перезапись не теряет неразобранный хвост молча");
+        std::fs::write(&file, &raw[..whole]).unwrap();
+
+        // старый текстовый файл: читается, дописывается текстом, при перезаписи становится новым
+        let other = HashId([3; 32]);
+        let old = dir.path().join(format!("chat_{}.enc", hex::encode(other.0)));
+        let key = st.get_encryption_key().unwrap();
+        let m1 = ChatMessage::new(other, me, "old1".into());
+        let line = ChatStorage::seal_line(&key, &serde_json::to_vec(&m1).unwrap()).unwrap();
+        std::fs::write(&old, format!("{line}\n")).unwrap();
+        assert_eq!(st.load_history(&other, 10).unwrap().len(), 1);
+        let m2 = ChatMessage::new(other, me, "old2".into());
+        st.save_incoming(&other, &m2).unwrap();
+        let text = std::fs::read_to_string(&old).expect("остался текстовым");
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(st.load_history(&other, 10).unwrap().len(), 2);
+        let m3 = ChatMessage::new(other, me, "old3".into());
+        st.save_incoming(&other, &m3).unwrap();
+        st.delete_message(&other, &m1.msg_id).unwrap();
+        assert!(std::fs::read(&old).unwrap().starts_with(b"YCH2"), "перезапись перевела в новый формат");
+        let left: Vec<_> = st.load_history(&other, 10).unwrap().into_iter().map(|m| m.text).collect();
+        assert_eq!(left, vec!["old3".to_string(), "old2".to_string()]);
+
+        // размер: запись вдвое меньше текстовой (нет hex); остальное — JSON, его заменит бинарный формат
+        let big = "x".repeat(2000);
+        let third = HashId([4; 32]);
+        st.save_incoming(&third, &ChatMessage::new(third, me, big)).unwrap();
+        let bin = std::fs::metadata(dir.path().join(format!("chat_{}.enc", hex::encode(third.0)))).unwrap().len();
+        assert!(bin < 2600, "запись {} Б (текстовая была бы около 4800)", bin);
     }
 
     #[test]
