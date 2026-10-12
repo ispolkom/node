@@ -5,7 +5,10 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:video_player/video_player.dart';
 import '../services/loopback_media.dart';
+import '../widgets/video_surface.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import '../services/vault_bytes_cache.dart';
 import '../services/vault_files.dart';
@@ -29,6 +32,8 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   VideoPlayerController? _video;
   LoopbackMedia? _media;
   String? _videoError;
+  final _videoValue = ValueNotifier<VideoPlayerValue>(const VideoPlayerValue(duration: Duration.zero));
+  bool _immersive = false;
   Duration _pos = Duration.zero, _dur = Duration.zero;
   bool _playing = false;
   final _subs = <StreamSubscription<dynamic>>[];
@@ -39,6 +44,12 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   void initState() {
     super.initState();
     if (f.isVideo) {
+      // Пока открыто видео, экран поворачивается по датчику (приложение в остальных местах только вертикальное).
+      SystemChrome.setPreferredOrientations(const [
+        DeviceOrientation.portraitUp,
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
       _openVideo();
     }
     if (f.isAudio) {
@@ -63,7 +74,8 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       final c = VideoPlayerController.networkUrl(url);
       _video = c;
       await c.initialize();
-      c.addListener(() { if (mounted) setState(() {}); });
+      c.addListener(() { _videoValue.value = c.value; });
+      _videoValue.value = c.value;
       if (mounted) setState(() {});
       await c.play();
     } catch (_) {
@@ -71,8 +83,28 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
     }
   }
 
+  /// Значок «на весь экран»: из вертикального — в горизонтальный и обратно; затем снова разрешаем поворот по датчику.
+  Future<void> _toggleFullscreen() async {
+    final landscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    await SystemChrome.setPreferredOrientations(landscape
+        ? const [DeviceOrientation.portraitUp]
+        : const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight]);
+    await Future<void>.delayed(const Duration(milliseconds: 800));
+    if (!mounted) return;
+    await SystemChrome.setPreferredOrientations(const [
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.landscapeRight,
+    ]);
+  }
+
   @override
   void dispose() {
+    if (f.isVideo) {
+      SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+      SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    }
+    _videoValue.dispose();
     _video?.dispose();
     _media?.stop();
     for (final s in _subs) { s.cancel(); }
@@ -171,19 +203,15 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       final c = _video;
       if (_videoError != null) return _info(_videoError!);
       if (c == null || !c.value.isInitialized) return const Center(child: CircularProgressIndicator());
-      return Column(children: [
-        Expanded(child: Center(child: AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c)))),
-        VideoProgressIndicator(c, allowScrubbing: true, colors: VideoProgressColors(playedColor: AppTheme.accent)),
-        Row(mainAxisAlignment: MainAxisAlignment.center, children: [
-          IconButton(
-            iconSize: 48,
-            color: AppTheme.accent,
-            icon: Icon(c.value.isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled),
-            onPressed: () => c.value.isPlaying ? c.pause() : c.play(),
-          ),
-        ]),
-        const SizedBox(height: 12),
-      ]);
+      return VideoSurface(
+        video: AspectRatio(aspectRatio: c.value.aspectRatio, child: VideoPlayer(c)),
+        value: _videoValue,
+        fullscreen: MediaQuery.of(context).orientation == Orientation.landscape,
+        onPlay: () => c.play(),
+        onPause: () => c.pause(),
+        onSeek: (d) => c.seekTo(d),
+        onToggleFullscreen: _toggleFullscreen,
+      );
     }
     return _info(f.isVideo
         ? 'Видео внутри приложения пока не воспроизводится. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.'
@@ -224,8 +252,18 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-        appBar: AppBar(
+  Widget build(BuildContext context) {
+    // Видео в горизонтальном положении — на весь экран: без заголовка и системных панелей.
+    final full = f.isVideo && MediaQuery.of(context).orientation == Orientation.landscape;
+    if (full != _immersive) {
+      _immersive = full;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        SystemChrome.setEnabledSystemUIMode(full ? SystemUiMode.immersiveSticky : SystemUiMode.edgeToEdge);
+      });
+    }
+    return Scaffold(
+        backgroundColor: full ? Colors.black : null,
+        appBar: full ? null : AppBar(
           title: Text(f.name, overflow: TextOverflow.ellipsis),
           actions: [
             if (widget.onShare != null) IconButton(tooltip: 'Переслать контакту', icon: const Icon(Icons.share_outlined), onPressed: widget.onShare),
@@ -234,4 +272,5 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
         ),
         body: _body(),
       );
+  }
 }
