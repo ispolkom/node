@@ -421,6 +421,10 @@ pub struct P2PTransport {
     /// получателя. Разные исходные порты — разные потоки для сети, свои буферы отправки; получателю ничего знать не нужно.
     /// Если порт занять не удалось, это тот же сокет, что и основной (обе копии с одного порта, как раньше).
     second_src: Arc<CSocket>,
+    /// Путь B подтверждён получателем (прислал PATH_B_CONFIRM после пакета с порта B): пока подтверждение свежее, копии идут с порта B.
+    path_b_ok: Arc<std::sync::Mutex<HashMap<HashId, Instant>>>,
+    /// Порт B пира, объявленный им самим (PATH_B_ANNOUNCE): подтверждаем только пакеты, пришедшие именно с него.
+    path_b_peer_port: Arc<std::sync::Mutex<HashMap<HashId, u16>>>,
     /// Port rotation notification channel
     port_rotation_tx: tokio::sync::watch::Sender<SocketPair>,
     /// Currently active rotated listeners that should be retired on next rotation
@@ -963,6 +967,8 @@ impl P2PTransport {
             adaptive_controller: adaptive_controller.clone(),
             socket_manager: socket_manager.clone(),
             second_src,
+            path_b_ok: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            path_b_peer_port: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rx_bytes_counter: Arc::new(AtomicU64::new(0)),
             tx_bytes_counter: Arc::new(AtomicU64::new(0)),
             last_rx_bytes: Arc::new(tokio::sync::Mutex::new(0)),
@@ -1570,9 +1576,11 @@ impl P2PTransport {
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         let mut seq_counter: u64 = 0;
+        let mut path_b_tick: u64 = 0;
 
         loop {
             interval.tick().await;
+            path_b_tick = path_b_tick.wrapping_add(1);
             // Update control plane (adaptive behavior)
             transport.update_control_plane().await;
             // Calculate RX speed
@@ -1692,6 +1700,9 @@ impl P2PTransport {
                                          crate::util::mask_ipv4(&addr), e);
                             }
                         }
+                        if path_b_tick % 3 == 0 {
+                            transport.path_b_start(peer_id, peer.clone()).await;
+                        }
                     }
                 }
             }
@@ -1740,6 +1751,102 @@ impl P2PTransport {
         static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
         let ms = *MS.get_or_init(|| std::env::var("YANDI_COPY_SPACING_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v <= 50).unwrap_or(3));
         std::time::Duration::from_millis(ms)
+    }
+
+    /// Служебные сообщения согласования второго пути (путь B): объявление порта, пробой, подтверждение.
+    const PKT_PATH_B_ANNOUNCE: u8 = 0x90;
+    const PKT_PATH_B_PROBE: u8 = 0x91;
+    const PKT_PATH_B_CONFIRM: u8 = 0x92;
+    /// Подтверждение живо столько; announce/probe повторяются каждые 15 с.
+    const PATH_B_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+
+    fn path_b_active(&self, peer_id: &HashId) -> bool {
+        self.path_b_ok.lock().ok()
+            .and_then(|m| m.get(peer_id).map(|t| t.elapsed() < Self::PATH_B_TTL))
+            .unwrap_or(false)
+    }
+
+    /// Раз в 15 с на пира: объявляем свой порт B обычным путём, затем шлём пробу именно с порта B.
+    /// Получатель пробивает NAT к порту B, видит пробу с объявленного порта и подтверждает; до подтверждения копии идут с основного порта.
+    async fn path_b_start(self: &Arc<Self>, peer_id: HashId, peer: PeerInfo) {
+        let Ok(second) = self.second_src.local_addr() else { return };
+        let primary = self.socket_manager.data().await;
+        if Arc::ptr_eq(&self.second_src, &primary) {
+            return;
+        }
+        let transport = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut announce = vec![Self::PKT_PATH_B_ANNOUNCE];
+            announce.extend_from_slice(&second.port().to_be_bytes());
+            if transport.send_encrypted(peer_id, &announce).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let endpoint = if let Some(ref addr) = peer.data_addr {
+                addr.clone()
+            } else {
+                let ip = peer.addr.split(':').next().unwrap_or(&peer.addr);
+                format!("{}:{}", ip, peer.remote_data_port)
+            };
+            let probe = {
+                let enc = transport.encryption.lock().await;
+                enc.encrypt(&peer, &[Self::PKT_PATH_B_PROBE])
+            };
+            if let Ok(probe) = probe {
+                for _ in 0..2 {
+                    let _ = transport.second_src.send_to(&probe, &endpoint).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        });
+    }
+
+    /// Обработка сообщений пути B; true — сообщение наше.
+    async fn on_path_b_packet(self: &Arc<Self>, sender: HashId, plaintext: &[u8], source: &WagonSource) -> bool {
+        let from = match source {
+            WagonSource::Udp { peer_addr } => peer_addr.parse::<std::net::SocketAddr>().ok(),
+            WagonSource::Ws => None,
+        };
+        match plaintext[0] {
+            Self::PKT_PATH_B_ANNOUNCE if plaintext.len() == 3 => {
+                let port = u16::from_be_bytes([plaintext[1], plaintext[2]]);
+                if let (Some(from), true) = (from, port != 0) {
+                    if let Ok(mut m) = self.path_b_peer_port.lock() {
+                        if m.len() < 4096 || m.contains_key(&sender) {
+                            m.insert(sender, port);
+                        }
+                    }
+                    println!("[path-b] пир {} объявил порт B {}", hex::encode(&sender.0[..8]), port);
+                    // пробиваем свой NAT к порту B отправителя: пакет без смысла, нужен только след в таблице соединений
+                    let target = std::net::SocketAddr::new(from.ip(), port);
+                    let socket = self.socket_manager.data().await;
+                    for _ in 0..2 {
+                        let _ = socket.send_to(&[Self::PKT_PATH_B_PROBE], &target.to_string()).await;
+                    }
+                }
+                true
+            }
+            Self::PKT_PATH_B_PROBE if plaintext.len() == 1 => {
+                let expected = self.path_b_peer_port.lock().ok().and_then(|m| m.get(&sender).copied());
+                if let (Some(from), Some(port)) = (from, expected) {
+                    if from.port() == port {
+                        let _ = self.send_encrypted(sender, &[Self::PKT_PATH_B_CONFIRM]).await;
+                    }
+                }
+                true
+            }
+            Self::PKT_PATH_B_CONFIRM if plaintext.len() == 1 => {
+                if let Ok(mut m) = self.path_b_ok.lock() {
+                    if m.len() < 4096 || m.contains_key(&sender) {
+                        if m.insert(sender, Instant::now()).map_or(true, |t| t.elapsed() >= Self::PATH_B_TTL) {
+                            println!("[path-b] второй путь к {} подтверждён", hex::encode(&sender.0[..8]));
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     fn data_workers() -> usize {
@@ -4656,12 +4763,18 @@ impl P2PTransport {
         // Первая копия — с основного порта, вторая — с соседнего (другой исходный порт), через короткий промежуток: потеря пачкой
         // на одном такте не бьёт обе копии. Остальные (третья) — с основного.
         let socket = self.socket_manager.data().await;
-        let spacing = Self::copy_spacing();
         // Со второго порта копия доходит не везде: NAT/файервол получателя пропускает только пакеты от адреса и порта, куда он сам слал.
-        // Пока путь B не согласован (часть B), он включается явно: YANDI_SECOND_PATH=1 (лаборатория, публичные получатели).
-        static SECOND_PATH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let second_path = *SECOND_PATH.get_or_init(|| std::env::var("YANDI_SECOND_PATH").map(|v| v == "1").unwrap_or(false));
+        // Поэтому путь B включается только после подтверждения получателя (см. path_b_start); YANDI_SECOND_PATH=1 включает всегда,
+        // =0 выключает совсем.
+        static SECOND_PATH: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+        let forced = *SECOND_PATH.get_or_init(|| match std::env::var("YANDI_SECOND_PATH").ok().as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        });
+        let second_path = forced.unwrap_or_else(|| self.path_b_active(&peer_id));
         let separate = second_path && !Arc::ptr_eq(&self.second_src, &socket);
+        let spacing = Self::copy_spacing();
         for i in 0..copies {
             if i == 1 && separate {
                 get_wagon_stats().tx_second_path.fetch_add(1, Ordering::Relaxed);
@@ -5466,6 +5579,10 @@ impl P2PTransport {
                 let _ = source;
                 crate::hops_net::on_packet(&sender.0, plaintext);
                 true
+            }
+            // Согласование второго пути (0x90..0x92).
+            Self::PKT_PATH_B_ANNOUNCE | Self::PKT_PATH_B_PROBE | Self::PKT_PATH_B_CONFIRM => {
+                self.on_path_b_packet(sender, plaintext, &source).await
             }
             // Записи «узел доступен через ретрансляторы» (0xDD).
             crate::relay_net::PKT_VIA => {
