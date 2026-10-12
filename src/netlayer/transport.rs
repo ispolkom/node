@@ -80,6 +80,8 @@ pub struct WagonStats {
     pub tunnel_queue_bytes: AtomicU64,
     pub tunnel_queue_overflow: AtomicU64,
     pub tunnel_write_failed: AtomicU64,
+    /// Копии вагонов, отправленные со второго исходного порта
+    pub tx_second_path: AtomicU64,
     pub tunnel_reordered: AtomicU64,
     pub tunnel_reorder_depth: AtomicU64,
     pub tunnel_reorder_bytes: AtomicU64,
@@ -115,6 +117,7 @@ impl WagonStats {
             tunnel_queue_bytes: AtomicU64::new(0),
             tunnel_queue_overflow: AtomicU64::new(0),
             tunnel_write_failed: AtomicU64::new(0),
+            tx_second_path: AtomicU64::new(0),
             tunnel_reordered: AtomicU64::new(0),
             tunnel_reorder_depth: AtomicU64::new(0),
             tunnel_reorder_bytes: AtomicU64::new(0),
@@ -414,6 +417,10 @@ pub struct P2PTransport {
     data_send_socket: Arc<CSocket>,
     /// Socket manager for port rotation
     socket_manager: Arc<SocketManager>,
+    /// Второй путь: копия вагона уходит с ДРУГОГО исходного порта (соседний с портом данных, иначе любой свободный) на тот же адрес
+    /// получателя. Разные исходные порты — разные потоки для сети, свои буферы отправки; получателю ничего знать не нужно.
+    /// Если порт занять не удалось, это тот же сокет, что и основной (обе копии с одного порта, как раньше).
+    second_src: Arc<CSocket>,
     /// Port rotation notification channel
     port_rotation_tx: tokio::sync::watch::Sender<SocketPair>,
     /// Currently active rotated listeners that should be retired on next rotation
@@ -721,6 +728,42 @@ impl P2PTransport {
             .map_err(|e| format!("Failed to wrap data socket: {}", e))?;
         let data_send_socket = Arc::clone(&data_recv_socket);
 
+        // Второй исходный порт для копии вагона (см. поле `second_src`).
+        let second_src: Arc<CSocket> = {
+            // Порт data+1 занят другими службами узла (обнаружение, шлюзы), поэтому порт даёт система.
+            let bind = UdpSocket::bind("0.0.0.0:0").await.ok();
+            match bind.map(|s| s.into_std()) {
+                Some(Ok(std_socket)) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        let size: i32 = 4 * 1024 * 1024;
+                        unsafe {
+                            libc::setsockopt(std_socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
+                                &size as *const i32 as *const _, std::mem::size_of::<i32>() as u32);
+                        }
+                    }
+                    match tokio::net::UdpSocket::from_std(std_socket)
+                        .map_err(|e| e.to_string())
+                        .and_then(|u| CSocket::new(Arc::new(u), carrier.clone()).map_err(|e| e.to_string()))
+                    {
+                        Ok(sock) => {
+                            println!("[transport] 🛣️  Второй исходный порт для копий вагонов: {:?}", sock.local_addr().ok());
+                            sock
+                        }
+                        Err(e) => {
+                            eprintln!("[transport] ⚠️  второй исходный порт недоступен ({e}); копии идут с основного");
+                            data_recv_socket.clone()
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("[transport] ⚠️  второй исходный порт недоступен; копии идут с основного");
+                    data_recv_socket.clone()
+                }
+            }
+        };
+
         println!(
             "[transport] 🔒 Fallback data socket bound to 0.0.0.0:{}",
             data_port
@@ -919,6 +962,7 @@ impl P2PTransport {
             port_manager: port_manager.clone(),
             adaptive_controller: adaptive_controller.clone(),
             socket_manager: socket_manager.clone(),
+            second_src,
             rx_bytes_counter: Arc::new(AtomicU64::new(0)),
             tx_bytes_counter: Arc::new(AtomicU64::new(0)),
             last_rx_bytes: Arc::new(tokio::sync::Mutex::new(0)),
@@ -1691,6 +1735,13 @@ impl P2PTransport {
 
     /// Offset reassembly preserves tunnel order across completion workers.
     /// Losing both full copies leaves a gap and fails that stream.
+    /// Промежуток перед второй копией, мс: `YANDI_COPY_SPACING_MS` (0..=50, по умолчанию 3).
+    fn copy_spacing() -> std::time::Duration {
+        static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let ms = *MS.get_or_init(|| std::env::var("YANDI_COPY_SPACING_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v <= 50).unwrap_or(3));
+        std::time::Duration::from_millis(ms)
+    }
+
     fn data_workers() -> usize {
         super::rx_pipeline::env_limit("YANDI_RX_WORKERS", 1, 16)
     }
@@ -4514,7 +4565,10 @@ impl P2PTransport {
     }
 
     pub async fn send_encrypted(&self, peer_id: HashId, data: &[u8]) -> Result<(), String> {
-        self.send_encrypted_copies(peer_id, data, 1).await
+        // Любой трафик идёт оригиналом и копией (решение владельца); повтор отбрасывает окно повторов получателя.
+        static COPIES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let copies = *COPIES.get_or_init(|| std::env::var("YANDI_WAGON_COPIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).clamp(2, 3));
+        self.send_encrypted_copies(peer_id, data, copies).await
     }
 
     /// Зашифровать один раз и отправить ту же датаграмму `copies` раз подряд (избыточность против потерь без повторного шифрования).
@@ -4599,11 +4653,37 @@ impl P2PTransport {
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
 
         // Send on SEND socket (separate from recv socket!)
+        // Первая копия — с основного порта, вторая — с соседнего (другой исходный порт), через короткий промежуток: потеря пачкой
+        // на одном такте не бьёт обе копии. Остальные (третья) — с основного.
         let socket = self.socket_manager.data().await;
-        for _ in 0..copies {
-            socket.send_to(&encrypted, &data_endpoint)
-                .await
-                .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
+        let spacing = Self::copy_spacing();
+        // Со второго порта копия доходит не везде: NAT/файервол получателя пропускает только пакеты от адреса и порта, куда он сам слал.
+        // Пока путь B не согласован (часть B), он включается явно: YANDI_SECOND_PATH=1 (лаборатория, публичные получатели).
+        static SECOND_PATH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let second_path = *SECOND_PATH.get_or_init(|| std::env::var("YANDI_SECOND_PATH").map(|v| v == "1").unwrap_or(false));
+        let separate = second_path && !Arc::ptr_eq(&self.second_src, &socket);
+        for i in 0..copies {
+            if i == 1 && separate {
+                get_wagon_stats().tx_second_path.fetch_add(1, Ordering::Relaxed);
+                if spacing.is_zero() {
+                    self.second_src.send_to(&encrypted, &data_endpoint)
+                        .await
+                        .map_err(|e| format!("Failed to send encrypted data (second path): {}", e))?;
+                } else {
+                    // Отправку не задерживаем: вторая копия уходит отдельной задачей через промежуток.
+                    let second = Arc::clone(&self.second_src);
+                    let datagram = encrypted.clone();
+                    let endpoint = data_endpoint.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(spacing).await;
+                        let _ = second.send_to(&datagram, &endpoint).await;
+                    });
+                }
+            } else {
+                socket.send_to(&encrypted, &data_endpoint)
+                    .await
+                    .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
+            }
             self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
         }
 
