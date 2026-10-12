@@ -158,26 +158,3 @@ impl GroupControlPacket {
     }
 }
 
-/// Групповое сообщение для передачи через P2P
-#[derive(Debug, Clone)]
-pub struct GroupPacket {
-    pub packet_type: GroupControlPacket,
-    pub data: Vec<u8>,
-}
-
-impl GroupPacket {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        let mut bytes = vec![self.packet_type.as_byte()];
-        bytes.extend_from_slice(&self.data);
-        bytes
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
-        if bytes.is_empty() {
-            return None;
-        }
-        let packet_type = GroupControlPacket::from_byte(bytes[0])?;
-        let data = bytes[1..].to_vec();
-        Some(Self { packet_type, data })
-    }
-}

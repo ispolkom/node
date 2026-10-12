@@ -491,8 +491,6 @@ pub struct P2PTransport {
 
     /// Chat packet sender (optional, for chat manager)
     chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    /// Group packet sender (optional, for group chat manager)
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
 
 
 
@@ -592,7 +590,7 @@ impl P2PTransport {
     /// - 0.0.0.0:9000 for discovery (Hello)
     /// - 0.0.0.0:10000 for encrypted data
     pub async fn new(identity: NodeIdentity, capabilities: u16) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler channel
@@ -601,7 +599,7 @@ impl P2PTransport {
         capabilities: u16,
         exit_handler_tx: Option<mpsc::Sender<ExitHandlerRequest>>,
     ) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler and proxy request channels
@@ -625,7 +623,6 @@ impl P2PTransport {
         p2p_tunnel_tx: Option<mpsc::Sender<(HashId, Vec<u8>)>>,
         // Chat handler
         chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
         // New peer notification (for P2P transport sync)
         new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
         external_ip: Option<String>,
@@ -936,7 +933,6 @@ impl P2PTransport {
             tun_wagon_resp_tx: tun_wagon_resp_tx.clone(),
             p2p_tunnel_tx: p2p_tunnel_tx.clone(),
             chat_packet_tx: chat_packet_tx.clone(),
-            group_packet_tx: group_packet_tx.clone(),
             new_peer_tx: new_peer_tx.clone(),
             external_ip: Arc::new(tokio::sync::RwLock::new(external_ip.clone())),
             local_nat_mapping: Arc::new(tokio::sync::RwLock::new(MappingBehavior::Unknown)),
@@ -1885,7 +1881,6 @@ impl P2PTransport {
             let tun_wagon_resp_tx = transport.tun_wagon_resp_tx.clone();
             let p2p_tunnel_tx = transport.p2p_tunnel_tx.clone();
             let chat_packet_tx = transport.chat_packet_tx.clone();
-            let group_packet_tx = transport.group_packet_tx.clone();
             let station = Some(transport.station.clone());
             let relay_request_tx = transport.relay_request_tx.clone();
             let relay_response_tx = transport.relay_response_tx.clone();
@@ -1914,7 +1909,6 @@ impl P2PTransport {
                     tun_wagon_resp_tx,
                     p2p_tunnel_tx,
                     chat_packet_tx,
-                    group_packet_tx,
                     station,
                     relay_request_tx,
                     relay_response_tx,
@@ -2689,7 +2683,6 @@ impl P2PTransport {
         p2p_tunnel_tx: Option<mpsc::Sender<(HashId, Vec<u8>)>>,
         // Chat handler
         chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
         station: Option<Arc<Mutex<Option<Arc<crate::protocol::Station>>>>>,
         // Relay handlers
         relay_request_tx: Option<mpsc::Sender<(HashId, HashId)>>,

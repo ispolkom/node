@@ -18,7 +18,7 @@ fn probe<F: Fn(&[u8]) + 'static>(f: F) -> Probe {
 }
 
 fn decoders() -> Vec<(&'static str, Probe)> {
-    use yandi::communication::protocol::{CommPacket, GroupPacket};
+    use yandi::communication::protocol::CommPacket;
     use yandi::dataplane::stream::{StreamFrame, StreamHeader};
     use yandi::dht::messages::{DhtQuery, DhtResponse};
     use yandi::dht::record::NodeRecord;
@@ -54,7 +54,6 @@ fn decoders() -> Vec<(&'static str, Probe)> {
         d!("P2PPacket", |b| drop(P2PPacket::from_bytes(b))),
         d!("P2PHelloPacket", |b| drop(P2PHelloPacket::from_bytes(b))),
         d!("CommPacket", |b| drop(CommPacket::from_bytes(b))),
-        d!("GroupPacket", |b| drop(GroupPacket::from_bytes(b))),
         d!("TunnelPacket", |b| drop(TunnelPacket::from_bytes(b))),
         d!("Wagon", |b| drop(Wagon::from_bytes(b))),
         d!("BatchedWagon", |b| drop(BatchedWagon::from_bytes(b))),

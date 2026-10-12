@@ -409,12 +409,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 8.12 Create Chat packet channel (для чата)
     let (chat_packet_tx, mut chat_packet_rx) = mpsc::channel::<(yandi::util::HashId, yandi::communication::CommPacket)>(10000);
-    let (group_packet_tx, mut group_packet_rx) = mpsc::channel::<(yandi::util::HashId, yandi::communication::GroupPacket)>(10000);
     let (media_signal_tx, mut media_signal_rx) = mpsc::channel::<(yandi::util::HashId, yandi::p2p::P2PPacketType, Vec<u8>)>(1024);
 
     // Клонируем каналы для второго транспорта
     let chat_packet_tx_for_p2p = chat_packet_tx.clone();
-    let group_packet_tx_for_p2p = group_packet_tx.clone();
     let p2p_tunnel_tx_for_p2p = p2p_tunnel_tx.clone();
 
     // 9. Create P2P Transport with exit handler and proxy channels
@@ -438,7 +436,6 @@ async fn main() -> anyhow::Result<()> {
         Some(p2p_tunnel_tx),
         // Chat handler
         Some(chat_packet_tx),
-        Some(group_packet_tx),
         // P2P communication transport is independent from netlayer
         None,
         None,  // external_ip

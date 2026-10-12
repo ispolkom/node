@@ -26,7 +26,7 @@ fn signed_hello(identity: &NodeIdentity) -> Vec<u8> {
 
 async fn spawn_transport(discovery_port: u16, data_port: u16) -> std::sync::Arc<P2PTransport> {
     P2PTransport::with_handlers(
-        NodeIdentity::new(), 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, discovery_port, data_port,
+        NodeIdentity::new(), 0, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, discovery_port, data_port,
     )
     .await
     .expect("start transport")

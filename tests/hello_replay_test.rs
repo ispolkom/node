@@ -79,7 +79,6 @@ async fn spawn_transport(
         None, // tun_wagon_resp_tx
         None, // p2p_tunnel_tx
         None, // chat_packet_tx
-        None, // group_packet_tx
         None, // new_peer_tx
         None, // external_ip
         None, // topology
