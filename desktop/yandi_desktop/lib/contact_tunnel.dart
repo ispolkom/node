@@ -98,11 +98,11 @@ class _ContactTunnelState extends State<ContactTunnel> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (tunnel != null)
-        Text(
+        UiText(
           'Туннель: ${tunnel!['tunnel_status']} · ${tunnel!['tunnel_type']} · ↑${tunnel!['bytes_sent']} / ↓${tunnel!['bytes_received']} байт',
         ),
-      if (error != null) Text(error!),
-      if (notice != null) Text(notice!),
+      if (error != null) UiText(error!),
+      if (notice != null) UiText(notice!),
       Wrap(
         children: [
           TextButton(

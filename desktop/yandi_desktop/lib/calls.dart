@@ -90,7 +90,7 @@ class _CallsFeatureState extends State<CallsFeature> {
     bool allowBusy = false,
   }) => OutlinedButton(
     onPressed: enabled && (allowBusy || !coordinator.busy) ? action : null,
-    child: Text(title),
+    child: UiText(title),
   );
   @override
   Widget build(BuildContext context) => Column(
@@ -98,18 +98,18 @@ class _CallsFeatureState extends State<CallsFeature> {
     children: [
       const UiText('Звонки', style: TextStyle(fontSize: 22)),
       const UiText('Входящие проверяются, пока открыт этот экран.'),
-      Text(label),
+      UiText(label),
       if (coordinator.error != null)
-        Text(coordinator.error!, style: const TextStyle(color: Colors.red)),
+        UiText(coordinator.error!, style: const TextStyle(color: Colors.red)),
       if (coordinator.call != null)
         SelectableText(
-          '${coordinator.call!.name} · ${coordinator.call!.peer} · ${coordinator.call!.video ? 'видео' : 'голос'}',
+          '${coordinator.call!.name} · ${coordinator.call!.peer} · ${tr(context, coordinator.call!.video ? 'видео' : 'голос')}',
         ),
       if (coordinator.microphoneLevel != null) ...[
         const UiText('Уровень микрофона'),
         LinearProgressIndicator(value: coordinator.microphoneLevel),
       ],
-      if (coordinator.mediaNote != null) Text(coordinator.mediaNote!),
+      if (coordinator.mediaNote != null) UiText(coordinator.mediaNote!),
       if (coordinator.media case final WebRtcCallMedia media)
         if (coordinator.call?.video == true)
           Padding(
@@ -134,9 +134,10 @@ class _CallsFeatureState extends State<CallsFeature> {
         TextField(
           controller: peer,
           decoration: InputDecoration(
-            labelText: phone
-                ? 'ID телефона (64 hex)'
-                : 'ID собеседника (16 или 64 hex)',
+            labelText: tr(
+              context,
+              phone ? 'ID телефона (64 hex)' : 'ID собеседника (16 или 64 hex)',
+            ),
           ),
         ),
         CheckboxListTile(
@@ -170,7 +171,7 @@ class _CallsFeatureState extends State<CallsFeature> {
           allowBusy: true,
         ),
       if (coordinator.phase == CallPhase.active) ...[
-        Text(
+        UiText(
           'Длительность: ${coordinator.seconds ~/ 60}:${(coordinator.seconds % 60).toString().padLeft(2, '0')}',
         ),
         Wrap(

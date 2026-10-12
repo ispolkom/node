@@ -22,6 +22,8 @@ class ShellFeatures extends StatefulWidget {
   final Api api;
   final String page;
   final AppPreferences? preferences;
+  final void Function(String)? onChatOpened;
+  final void Function(String)? onGroupOpened;
   final void Function(ApiFailure) onFailure;
   final VoidCallback onLocked;
   final bool Function() isActive;
@@ -30,6 +32,8 @@ class ShellFeatures extends StatefulWidget {
     required this.api,
     required this.page,
     this.preferences,
+    this.onChatOpened,
+    this.onGroupOpened,
     required this.onFailure,
     required this.onLocked,
     required this.isActive,
@@ -151,7 +155,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         });
         if (currentPeer != null && selected != null) {
           final history = await repo.history(currentPeer);
-          if (!active || rev != revision) return;
+          if (!active ||
+              rev != revision ||
+              selected == null ||
+              peer(selected!) != currentPeer)
+            return;
           setState(() {
             messages = history;
           });
@@ -220,6 +228,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   }
 
   Future<void> choose(Map<String, dynamic> contact) async {
+    widget.onChatOpened?.call(peer(contact));
     if (!active || sending) return;
     if (selected != null) drafts[peer(selected!)] = composer.text;
     revision++;
@@ -302,7 +311,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final answer = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text('Удалить контакт «${contact['name']}»?'),
+        title: UiText('Удалить контакт «${contact['name']}»?'),
         content: const UiText(
           'Удаляется запись контакта. Доверие карточке и доступ телефона сохраняются.',
         ),
@@ -387,8 +396,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final answer = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: Text(title),
-        content: Text(explanation),
+        title: UiText(title),
+        content: UiText(explanation),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
@@ -450,7 +459,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       minLines: lines,
       maxLines: lines == 1 ? 1 : 6,
       decoration: InputDecoration(
-        labelText: label,
+        labelText: tr(context, label),
         border: const OutlineInputBorder(),
       ),
     ),
@@ -462,7 +471,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       TextField(
         controller: search,
         onChanged: (_) => setState(() {}),
-        decoration: const InputDecoration(labelText: 'Поиск по имени или ID'),
+        decoration: InputDecoration(
+          labelText: tr(context, 'Поиск по имени или ID'),
+        ),
       ),
       if (widget.page == 'Чат')
         DevicesPanel(
@@ -484,8 +495,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '${c['name']} · ${c['online'] == true ? 'В сети' : 'Не в сети'}',
+                UiText(
+                  '${c['name']} · ${tr(context, c['online'] == true ? 'В сети' : 'Не в сети')}',
                 ),
                 SelectableText('${c['short_id']}'),
                 Wrap(
@@ -526,7 +537,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                                       composer.clear();
                                       drafts.clear();
                                       pickedFile = null;
-                                      revision++;
                                     },
                                   );
                                 },
@@ -558,7 +568,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (selected == null)
         const UiText('Выберите контакт для переписки.')
       else ...[
-        Text('Чат: ${selected!['name']}', style: const TextStyle(fontSize: 22)),
+        UiText(
+          'Чат: ${selected!['name']}',
+          style: const TextStyle(fontSize: 22),
+        ),
         if (selected!['is_phone'] != true)
           ContactTunnel(
             key: ValueKey('tunnel:${selected!['short_id']}'),
@@ -593,7 +606,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(m['from'] == ownId ? 'Вы' : '${selected!['name']}'),
+                  Text(
+                    m['from'] == ownId
+                        ? tr(context, 'Вы')
+                        : '${selected!['name']}',
+                  ),
                   SelectableText('${m['text'] ?? ''}'),
                   if (m['from'] == ownId)
                     Wrap(
@@ -620,8 +637,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       mutate: (action) => mutate(action),
                       busy: sending,
                     ),
-                  Text(
-                    '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${ShellRepository.delivery(m['status'])}${m['edited'] == true ? ' · изменено' : ''}',
+                  UiText(
+                    '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · изменено' : ''}',
                   ),
                 ],
               ),
@@ -664,7 +681,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         ),
         if (transferSize > 0) ...[
           LinearProgressIndicator(value: transferred / transferSize),
-          Text(
+          UiText(
             'Передано демону: $transferred / $transferSize байт. Доставка подтверждается отдельно.',
           ),
         ],
@@ -697,6 +714,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       : widget.page == 'Группы'
       ? GroupsFeature(
           api: widget.api,
+          onOpened: widget.onGroupOpened,
           isActive: widget.isActive,
           onFailure: widget.onFailure,
           onLocked: widget.onLocked,
@@ -706,8 +724,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           children: [
             if (loading || sending) const LinearProgressIndicator(),
             if (error != null)
-              Text(error!, style: const TextStyle(color: Colors.red)),
-            if (notice != null) Text(notice!),
+              UiText(error!, style: const TextStyle(color: Colors.red)),
+            if (notice != null) UiText(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
             if (widget.page == 'Настройки') ...[
               AdvancedSettings(
@@ -839,7 +857,7 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(
+    title: UiText(
       widget.editingMessage ? 'Изменить сообщение' : 'Переименовать контакт',
     ),
     content: TextField(
@@ -847,7 +865,10 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
       maxLength: widget.editingMessage ? null : 64,
       maxLines: widget.editingMessage ? 6 : 1,
       decoration: InputDecoration(
-        labelText: widget.editingMessage ? 'Текст сообщения' : 'Имя',
+        labelText: tr(
+          context,
+          widget.editingMessage ? 'Текст сообщения' : 'Имя',
+        ),
       ),
     ),
     actions: [

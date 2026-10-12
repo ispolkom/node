@@ -84,7 +84,7 @@ void main() {
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('System sound'), findsOneWidget);
     expect(
-      find.textContaining('English translation is partial'),
+      find.textContaining('Language applies to all shell forms and states'),
       findsOneWidget,
     );
     await m1.click(t, 'Contacts');

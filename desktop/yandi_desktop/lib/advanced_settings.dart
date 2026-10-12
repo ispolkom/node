@@ -188,7 +188,7 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         value: level,
         items: [
           for (final v in ['error', 'warn', 'info', 'debug', 'trace'])
-            DropdownMenuItem(value: v, child: Text(v)),
+            DropdownMenuItem(value: v, child: UiText(v)),
         ],
         onChanged: widget.busy ? null : (v) => setState(() => level = v!),
       ),
@@ -270,9 +270,9 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${p['kind']} · ${p['host']}:${p['port']}'),
+                UiText('${p['kind']} · ${p['host']}:${p['port']}'),
                 UiText(
-                  '${p['state']} · Клиентов: ${p['clients']} / ${p['cap']}',
+                  '${stateLabel(context, p['state'])} · Клиентов: ${p['clients']} / ${p['cap']}',
                 ),
                 UiText(
                   p['has_password'] == true
@@ -348,7 +348,7 @@ class _ProxyFormState extends State<ProxyForm> {
             value: kind,
             items: [
               for (final k in ['socks5', 'http_connect'])
-                DropdownMenuItem(value: k, child: Text(k)),
+                DropdownMenuItem(value: k, child: UiText(k)),
             ],
             onChanged: (v) => setState(() => kind = v!),
           ),

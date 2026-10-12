@@ -13,12 +13,14 @@ import 'transport/api.dart';
 
 class GroupsFeature extends StatefulWidget {
   final Api api;
+  final void Function(String)? onOpened;
   final bool Function() isActive;
   final void Function(ApiFailure) onFailure;
   final VoidCallback onLocked;
   const GroupsFeature({
     super.key,
     required this.api,
+    this.onOpened,
     required this.isActive,
     required this.onFailure,
     required this.onLocked,
@@ -137,6 +139,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
 
   Future<void> choose(String? id, {String? nextTab}) async {
     if (!active || busy) return;
+    if (id != null) widget.onOpened?.call(id);
     if (selected != null) drafts[selected!] = composer.text;
     revision++;
     setState(() {
@@ -303,7 +306,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       group['muted'] != true;
   Widget button(String label, VoidCallback callback) => TextButton(
     onPressed: busy || loading ? null : callback,
-    child: Text(label),
+    child: UiText(label),
   );
   static const labels = {
     'mute': 'Запретить писать',
@@ -327,8 +330,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(
-                  '${m['name']} · ${m['role']}${m['muted'] == true ? ' · писать запрещено' : ''}',
+                UiText(
+                  '${m['name']} · ${stateLabel(context, m['role'])}${m['muted'] == true ? tr(context, ' · писать запрещено') : ''}',
                 ),
                 SelectableText('${m['alias']}'),
                 Wrap(
@@ -412,7 +415,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         }),
         for (final r in rows(info, 'requests'))
           ListTile(
-            title: Text('Просьба: ${r['name']}'),
+            title: UiText('Просьба: ${r['name']}'),
             subtitle: Wrap(
               children: [
                 for (final answer in [
@@ -436,7 +439,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         for (final b in rows(info, 'banned'))
           button('Снять блокировку ${b['alias']}', () => mod('unban', b)),
         for (final log in rows(info, 'modlog').reversed.take(20))
-          Text('${log['ts']} · ${log['action']} · ${log['target'] ?? ''}'),
+          UiText('${log['ts']} · ${log['action']} · ${log['target'] ?? ''}'),
       ],
     ],
   );
@@ -519,7 +522,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   Widget conversation() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(
+      UiText(
         '${group['name'] ?? 'Загрузка группы…'}',
         style: const TextStyle(fontSize: 22),
       ),
@@ -531,7 +534,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         const UiText('Ждём ключ группы.'),
       if (group['muted'] == true) const UiText('Вам запрещено писать.'),
       if (feed?['deny'] is List && (feed!['deny'] as List).isNotEmpty)
-        Text(
+        UiText(
           'Запрещено: ${(feed!['deny'] as List).map((k) => const {2: 'изображения', 3: 'файлы', 4: 'аудио', 5: 'видео', 6: 'ссылки'}[k] ?? '$k').join(', ')}',
         ),
       if (feed != null && rows(feed, 'messages').isEmpty)
@@ -543,7 +546,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(m['mine'] == true ? 'Вы' : '${m['author']}'),
+                Text(m['mine'] == true ? tr(context, 'Вы') : '${m['author']}'),
                 if (m['attachment'] is Map)
                   AttachmentView(
                     key: ValueKey('$selected-${m['seq']}'),
@@ -565,7 +568,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                         ? tr(context, 'Вложение (недоступно)')
                         : '${m['text']}',
                   ),
-                Text(
+                UiText(
                   '${DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt()).toLocal()} · №${m['seq']}',
                 ),
                 if (canDelete(m))
@@ -593,7 +596,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           enabled: !busy && canSend,
           minLines: 2,
           maxLines: 6,
-          decoration: const InputDecoration(labelText: 'Сообщение группе'),
+          decoration: InputDecoration(
+            labelText: tr(context, 'Сообщение группе'),
+          ),
         ),
       ),
       FilledButton(
@@ -685,7 +690,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     children: [
       if (loading || busy) const LinearProgressIndicator(),
       if (error != null)
-        Text(error!, style: const TextStyle(color: Colors.red)),
+        UiText(error!, style: const TextStyle(color: Colors.red)),
       Wrap(
         children: [
           for (final label in ['Свои группы', 'Каталог', 'Управление узла'])
@@ -703,10 +708,13 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         if (!loading && mine.isEmpty)
           const UiText('Вы ещё не состоите в группах.'),
         for (final g in mine)
-          button('${g['name']} · ${g['role']}', () => choose('${g['id']}')),
+          button(
+            '${g['name']} · ${stateLabel(context, g['role'])}',
+            () => choose('${g['id']}'),
+          ),
         for (final g in gone)
           ListTile(
-            title: Text('${g['name']}: удалена или вы исключены'),
+            title: UiText('${g['name']}: удалена или вы исключены'),
             subtitle: button('Забыть ${g['name']}', () async {
               final id = '${g['id']}';
               if (!await confirm('Забыть группу?')) return;
@@ -747,7 +755,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         for (final g in admin)
           Card(
             child: ListTile(
-              title: Text(
+              title: UiText(
                 '${g['name']} · ${g['members'] is List ? (g['members'] as List).length : g['members']} участников',
               ),
               subtitle: button('Удалить группу ${g['name']}', () async {
@@ -829,7 +837,7 @@ class _GroupFormState extends State<GroupForm> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.title),
+    title: UiText(widget.title),
     content: SingleChildScrollView(
       child: Column(
         mainAxisSize: MainAxisSize.min,
@@ -844,7 +852,9 @@ class _GroupFormState extends State<GroupForm> {
               obscureText: widget.secret,
               autocorrect: !widget.secret,
               enableSuggestions: !widget.secret,
-              decoration: InputDecoration(labelText: widget.labels[i]),
+              decoration: InputDecoration(
+                labelText: tr(context, widget.labels[i]),
+              ),
             ),
           if (widget.creating)
             DropdownButton<String>(
@@ -852,13 +862,13 @@ class _GroupFormState extends State<GroupForm> {
               items: const [
                 DropdownMenuItem(
                   value: 'invite',
-                  child: Text('По приглашению'),
+                  child: UiText('По приглашению'),
                 ),
-                DropdownMenuItem(value: 'open', child: Text('Открытая')),
+                DropdownMenuItem(value: 'open', child: UiText('Открытая')),
               ],
               onChanged: (v) => setState(() => kind = v!),
             ),
-          if (error != null) Text(error!),
+          if (error != null) UiText(error!),
         ],
       ),
     ),
@@ -869,7 +879,7 @@ class _GroupFormState extends State<GroupForm> {
       ),
       FilledButton(
         onPressed: submit,
-        child: Text(widget.secret ? 'Удалить навсегда' : 'Подтвердить'),
+        child: UiText(widget.secret ? 'Удалить навсегда' : 'Подтвердить'),
       ),
     ],
   );
@@ -913,8 +923,8 @@ class _GroupConfirmState extends State<GroupConfirm> {
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: Text(widget.title),
-    content: Text(widget.detail ?? 'Подтвердите действие.'),
+    title: UiText(widget.title),
+    content: UiText(widget.detail ?? 'Подтвердите действие.'),
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context, false),
@@ -922,7 +932,7 @@ class _GroupConfirmState extends State<GroupConfirm> {
       ),
       FilledButton(
         onPressed: seconds > 0 ? null : () => Navigator.pop(context, true),
-        child: Text(seconds > 0 ? 'Подождите $seconds с' : 'Подтвердить'),
+        child: UiText(seconds > 0 ? 'Подождите $seconds с' : 'Подтвердить'),
       ),
     ],
   );
@@ -951,7 +961,7 @@ class _GroupRulesState extends State<GroupRules> {
           6: 'Ссылки',
         }.entries)
           CheckboxListTile(
-            title: Text('Запретить ${e.value}'),
+            title: UiText('Запретить ${e.value}'),
             value: deny.contains(e.key),
             onChanged: (v) => setState(() {
               if (v == true) {

@@ -1,4 +1,5 @@
 import 'preferences.dart';
+import 'background_alerts.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/states.dart';
@@ -14,6 +15,11 @@ class DesktopApp extends StatefulWidget {
 
 class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   final preferences = AppPreferences();
+  late final background = BackgroundAlerts(
+    widget.api,
+    preferences,
+    () => mounted && entered && connected && !lockUnconfirmed && !busy,
+  );
   final navigator = GlobalKey<NavigatorState>();
   AuthStage? auth;
   VaultState? vault;
@@ -30,8 +36,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    background;
+    preferences.addListener(preferenceChanged);
     checkAuth();
     startTimer();
+  }
+
+  void preferenceChanged() {
+    if (mounted) setState(() {});
   }
 
   void startTimer() {
@@ -42,6 +54,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   void wipe() {
     preferences.reset();
+    background.reset();
     epoch++;
     formVersion++;
     navigator.currentState?.popUntil((route) => route.isFirst);
@@ -73,6 +86,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   void dispose() {
     timer?.cancel();
     preferences.reset();
+    background.dispose();
+    preferences.removeListener(preferenceChanged);
     preferences.dispose();
     WidgetsBinding.instance.removeObserver(this);
     widget.api.cancel();
@@ -121,6 +136,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             !vault!.hasError && next.hasError)) {
       epoch++;
       preferences.reset();
+      background.reset();
       widget.api.cancel();
       formVersion++;
       navigator.currentState?.popUntil((route) => route.isFirst);
@@ -311,7 +327,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           'web_port': 'Веб-порт',
           'active_proxies': 'Активные прокси',
         }.entries)
-          SelectableText('${item.value}: ${status![item.key] ?? '—'}'),
+          SelectableText(
+            '${tr(context, item.value)}: ${status![item.key] ?? '—'}',
+          ),
       ],
       Wrap(
         spacing: 12,
@@ -339,7 +357,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           'evictions_delta': 'Вытеснения за интервал',
           'evictions_total': 'Вытеснения всего',
         }.entries)
-          Text('${item.value}: ${speed![item.key] ?? '—'}'),
+          UiText('${tr(context, item.value)}: ${speed![item.key] ?? '—'}'),
       const Divider(),
       const UiText('Узлы', style: TextStyle(fontSize: 22)),
       if (nodes.isEmpty) const UiText('Обнаруженных узлов нет.'),
@@ -363,7 +381,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   'data_port': 'Порт данных',
                 }.entries)
                   if (node.containsKey(entry.key))
-                    SelectableText('${entry.value}: ${node[entry.key]}'),
+                    SelectableText(
+                      '${tr(context, entry.value)}: ${node[entry.key]}',
+                    ),
                 const UiText('Подключение узла в текущем API — заглушка.'),
               ],
             ),
@@ -375,7 +395,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   Widget vaultPanel() {
     final v = vault;
     if (v == null)
-      return Text(
+      return UiText(
         lockUnconfirmed
             ? 'Состояние блокировки не подтверждено'
             : 'Проверка закрытой среды…',
@@ -384,7 +404,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         const UiText('Закрытая среда', style: TextStyle(fontSize: 22)),
-        Text(v.label),
+        UiText(v.label),
         if (v.migrationPending)
           const UiText(
             'Перенос части старых данных не завершён и повторится при входе.',
@@ -490,7 +510,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             },
           ),
         ],
-        Text(
+        UiText(
           'Автоблокировка: ${v.autoLockSecs} с. Таймером управляет демон; опрос не считается активностью.',
         ),
         TimeoutForm(
@@ -560,7 +580,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
+          UiText(
             auth == AuthStage.recovery
                 ? 'Требуется восстановление'
                 : 'Доступ к ноде',
@@ -621,6 +641,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                         setState(() {
                           epoch++;
                           preferences.reset();
+                          background.openPeer = null;
                           widget.api.cancel();
                           page = label;
                           formVersion++;
@@ -638,6 +659,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             }),
           ],
         ),
+        if (background.unread.isNotEmpty)
+          UiText('Новых чатов: ${background.unread.length}'),
         const UiText(
           'Выход из оболочки не запирает закрытую среду. Используйте «Запереть».',
         ),
@@ -655,7 +678,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               children: [
                 SwitchListTile(
                   title: const UiText('Язык / Language'),
-                  subtitle: Text(preferences.english ? 'English' : 'Русский'),
+                  subtitle: UiText(preferences.english ? 'English' : 'Русский'),
                   value: preferences.english,
                   onChanged: (value) {
                     preferences.english = value;
@@ -663,7 +686,16 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                 ),
                 const UiText(
-                  'Английский перевод частичный: меню и основные кнопки. Формы и подробные состояния пока на русском.',
+                  'Язык применяется ко всем формам и состояниям оболочки. Пользовательский текст не переводится.',
+                ),
+                SwitchListTile(
+                  title: const UiText('Фоновые оповещения узловых чатов'),
+                  value: preferences.background,
+                  onChanged: (v) {
+                    preferences.background = v;
+                    background.reset();
+                    preferences.changed();
+                  },
                 ),
                 SwitchListTile(
                   title: const UiText('Системный звук'),
@@ -690,9 +722,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                 ),
                 const UiText(
-                  'Оповещения только о новых сообщениях открытого чата. Содержимое и имя в ОС не передаются. Настройки действуют до закрытия оболочки.',
+                  'Оповещения не передают содержимое и имя в ОС. Фоновый опрос: до 32 доверенных узловых контактов и 8 групп. Для телефонов нужен отдельный API непрочитанных. Настройки действуют до закрытия оболочки.',
                 ),
-                if (preferences.failure != null) Text(preferences.failure!),
+                if (preferences.failure != null) UiText(preferences.failure!),
               ],
             ),
           ),
@@ -740,6 +772,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       key: ValueKey('$page-$formVersion'),
       api: widget.api,
       preferences: preferences,
+      onChatOpened: background.opened,
+      onGroupOpened: (id) => background.opened('group:$id'),
       page: page,
       isActive: () =>
           visible &&
@@ -790,7 +824,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     if (error != null)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: Text(
+                        child: UiText(
                           error!,
                           style: const TextStyle(color: Colors.red),
                         ),
@@ -798,7 +832,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     if (notice != null)
                       Padding(
                         padding: const EdgeInsets.only(bottom: 16),
-                        child: Text(notice!),
+                        child: UiText(notice!),
                       ),
                     content(),
                   ],
@@ -887,8 +921,8 @@ class _SecretFormState extends State<SecretForm> {
     child: Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(widget.title, style: const TextStyle(fontSize: 20)),
-        if (widget.description != null) Text(widget.description!),
+        UiText(widget.title, style: const TextStyle(fontSize: 20)),
+        if (widget.description != null) UiText(widget.description!),
         for (var i = 0; i < fields.length; i++)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -901,17 +935,17 @@ class _SecretFormState extends State<SecretForm> {
               enableIMEPersonalizedLearning: false,
               enabled: !sending && !widget.busy,
               decoration: InputDecoration(
-                labelText: widget.labels[i],
+                labelText: tr(context, widget.labels[i]),
                 border: const OutlineInputBorder(),
               ),
               onSubmitted: (_) => send(),
             ),
           ),
         if (error != null)
-          Text(error!, style: const TextStyle(color: Colors.red)),
+          UiText(error!, style: const TextStyle(color: Colors.red)),
         FilledButton(
           onPressed: sending || widget.busy ? null : send,
-          child: Text(sending ? 'Подождите…' : widget.title),
+          child: UiText(sending ? 'Подождите…' : widget.title),
         ),
       ],
     ),
@@ -948,12 +982,14 @@ class _TimeoutFormState extends State<TimeoutForm> {
       TextField(
         controller: field,
         keyboardType: TextInputType.number,
-        decoration: const InputDecoration(
-          labelText:
-              'Автоблокировка, секунды (0 — отключена, максимум 2592000)',
+        decoration: InputDecoration(
+          labelText: tr(
+            context,
+            'Автоблокировка, секунды (0 — отключена, максимум 2592000)',
+          ),
         ),
       ),
-      if (error != null) Text(error!),
+      if (error != null) UiText(error!),
       FilledButton(
         onPressed: widget.busy
             ? null

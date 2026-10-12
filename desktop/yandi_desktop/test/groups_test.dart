@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/domain/group_repository.dart';
 import 'package:yandi_desktop/transport/api.dart';
+import 'package:yandi_desktop/preferences.dart';
 import 'widget_test.dart' as m1;
 
 final gid = 'a' * 32, other = 'b' * 32;
@@ -141,7 +142,7 @@ Future<void> open(
   await m1.start(t, api);
   await m1.click(t, 'Войти');
   await m1.click(t, 'Группы');
-  if (conversation) await m1.click(t, 'Семья · ${api.role}');
+  if (conversation) await m1.click(t, 'Семья · ${russianStates[api.role]}');
 }
 
 void main() {
@@ -191,7 +192,7 @@ void main() {
     (t) async {
       final api = GroupApi();
       await open(t, api);
-      expect(find.text('Работа · owner'), findsOneWidget);
+      expect(find.text('Работа · владелец'), findsOneWidget);
       await m1.click(t, 'Создать группу');
       await t.enterText(field('Название'), 'Новая');
       await m1.click(t, 'Подтвердить');
@@ -275,9 +276,9 @@ void main() {
     final api = GroupApi();
     await open(t, api, conversation: true);
     await t.enterText(field('Сообщение группе'), 'Семейный черновик');
-    await m1.click(t, 'Работа · owner');
+    await m1.click(t, 'Работа · владелец');
     expect(t.widget<TextField>(field('Сообщение группе')).controller!.text, '');
-    await m1.click(t, 'Семья · owner');
+    await m1.click(t, 'Семья · владелец');
     expect(
       t.widget<TextField>(field('Сообщение группе')).controller!.text,
       'Семейный черновик',
@@ -403,8 +404,8 @@ void main() {
     api.pendingFeed = Completer();
     await t.pump(const Duration(seconds: 4));
     await t.pump();
-    await t.ensureVisible(find.text('Работа · owner'));
-    await t.tap(find.text('Работа · owner'));
+    await t.ensureVisible(find.text('Работа · владелец'));
+    await t.tap(find.text('Работа · владелец'));
     await t.pump();
     api.pendingFeed!.complete({
       'group': api.group(gid),

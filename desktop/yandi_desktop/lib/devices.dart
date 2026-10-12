@@ -180,9 +180,7 @@ class _DevicesPanelState extends State<DevicesPanel> {
       if (text != null && expires != null) ...[
         if (qr != null) CustomPaint(size: const Size(280, 280), painter: qr),
         SelectableText(text!),
-        UiText(
-          'Код действует ещё ${expires!.difference(DateTime.now()).inSeconds.clamp(0, 300)} с',
-        ),
+        UiText('Код действует ещё ${remaining.clamp(0, 300)} с'),
         TextButton(
           onPressed: () => setState(clear),
           child: const UiText('Скрыть код'),
@@ -203,7 +201,7 @@ class _DevicesPanelState extends State<DevicesPanel> {
                   UiText(
                     'Соединений: ${d['connections']} · Последний контакт: ${d['last_seen_ms']}',
                   ),
-                if (!widget.paired) UiText('${d['status']}'),
+                if (!widget.paired) UiText(stateLabel(context, d['status'])),
                 Wrap(
                   children: [
                     for (final a

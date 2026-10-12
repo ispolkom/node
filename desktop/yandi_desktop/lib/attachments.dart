@@ -137,11 +137,11 @@ class _AttachmentViewState extends State<AttachmentView> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
+        UiText(
           '${widget.attachment['filename']} · ${widget.attachment['size']} байт',
         ),
-        Text(ready ? 'Файл доступен на узле' : 'Файл ещё не получен'),
-        if (error != null) Text(error!),
+        UiText(ready ? 'Файл доступен на узле' : 'Файл ещё не получен'),
+        if (error != null) UiText(error!),
         if (image != null)
           Image(
             image: image!,

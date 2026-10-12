@@ -1,5 +1,6 @@
 // Only run against disposable chaos fixtures.
 import '../lib/transport/api.dart';
+import 'dart:io';
 import '../lib/domain/shell_repository.dart';
 
 Future<void> main(List<String> args) async {
@@ -44,6 +45,14 @@ Future<void> main(List<String> args) async {
         'password': 'm5-proxy-secret',
       },
     );
+    final fixtureData = File(args[0]).parent.parent;
+    final sealed = File('${fixtureData.path}/upstream_proxy.enc');
+    if (!await sealed.exists() ||
+        await File('${fixtureData.path}/upstream_proxy.json').exists() ||
+        String.fromCharCodes(
+          await sealed.readAsBytes(),
+        ).contains('m5-proxy-secret'))
+      throw StateError('proxy fixture must be sealed');
     final pool = await api.request('/api/upstream-proxies');
     if (pool.toString().contains('m5-proxy-secret'))
       throw StateError('password leaked');
@@ -53,7 +62,9 @@ Future<void> main(List<String> args) async {
       body: {'enabled': false, 'max_clients': 2},
     );
     await api.request('/api/upstream-proxies/${p['id']}', method: 'DELETE');
-    print('PASS: M5 device list and invalid-action rejection via Unix');
+    print(
+      'PASS: M5 device list/rejection, ports/restart, exit policy, sealed proxy pool CRUD via Unix',
+    );
   } finally {
     api.cancel();
   }

@@ -141,13 +141,13 @@ class _NetworkFeatureState extends State<NetworkFeature> {
   Widget button(String label, VoidCallback action, {bool enabled = true}) =>
       OutlinedButton(
         onPressed: busy || refreshing || !enabled ? null : action,
-        child: Text(label),
+        child: UiText(label),
       );
   Future<bool> confirm(String title) async =>
       await showDialog<bool>(
         context: context,
         builder: (c) => AlertDialog(
-          title: Text(title),
+          title: UiText(title),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(c, false),
@@ -182,7 +182,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
     setState(
       () => notice = action == 'stop'
           ? 'Демон удалил запись прокси. Закрытие слушающего сокета API не подтверждает.'
-          : 'Демон принял запуск: ${result['listen_addr'] ?? result['local_port'] ?? 'адрес неизвестен'}${result['password'] is String ? ' · пользователь: ${result['username']} · пароль: ${result['password']}' : ''}',
+          : 'Демон принял запуск: ${result['listen_addr'] ?? result['local_port'] ?? tr(context, 'адрес неизвестен')}${result['password'] is String ? tr(context, ' · пользователь: ${result['username']} · пароль: ${result['password']}') : ''}',
     );
   });
   Widget proxyStatus(
@@ -192,19 +192,19 @@ class _NetworkFeatureState extends State<NetworkFeature> {
   ) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(
+      UiText(
         '$title: ${value == null
-            ? 'статус неизвестен'
+            ? tr(context, 'статус неизвестен')
             : value['active'] == true
-            ? 'есть запись активного прокси'
-            : 'активных записей нет'}',
+            ? tr(context, 'есть запись активного прокси')
+            : tr(context, 'активных записей нет')}',
       ),
       if (value != null)
         for (final p in (value['proxies'] as List).cast<Map<String, dynamic>>())
           Wrap(
             spacing: 8,
             children: [
-              SelectableText(
+              UiSelectableText(
                 '${p['short_id']} · порт ${p['local_port'] ?? '—'} · ${p['started_at'] ?? ''}',
               ),
               button(
@@ -214,18 +214,18 @@ class _NetworkFeatureState extends State<NetworkFeature> {
             ],
           ),
       if (value?['listen_addr'] != null)
-        Text('Адрес: ${value!['listen_addr']}'),
+        UiText('Адрес: ${value!['listen_addr']}'),
     ],
   );
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(widget.page, style: const TextStyle(fontSize: 22)),
+      UiText(widget.page, style: const TextStyle(fontSize: 22)),
       if (busy) const LinearProgressIndicator(),
       if (error != null)
-        Text(error!, style: const TextStyle(color: Colors.red)),
-      if (notice != null) SelectableText(notice!),
+        UiText(error!, style: const TextStyle(color: Colors.red)),
+      if (notice != null) UiSelectableText(notice!),
       button('Обновить', () => refresh(nodes: true)),
       if (gateways) ...[
         proxyStatus('HTTP', http, 'proxy'),
@@ -235,17 +235,17 @@ class _NetworkFeatureState extends State<NetworkFeature> {
         ),
         TextField(
           controller: name,
-          decoration: const InputDecoration(labelText: 'Имя шлюза'),
+          decoration: InputDecoration(labelText: tr(context, 'Имя шлюза')),
         ),
         TextField(
           controller: id,
-          decoration: const InputDecoration(labelText: 'Short ID шлюза'),
+          decoration: InputDecoration(labelText: tr(context, 'Short ID шлюза')),
         ),
         DropdownButton<String>(
           value: country,
           items: [
             for (final c in const ['RU', 'US', 'NL', 'DE', 'FR', 'GB'])
-              DropdownMenuItem(value: c, child: Text(c)),
+              DropdownMenuItem(value: c, child: UiText(c)),
           ],
           onChanged: busy ? null : (v) => setState(() => country = v!),
         ),
@@ -269,10 +269,10 @@ class _NetworkFeatureState extends State<NetworkFeature> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SelectableText(
+                  UiSelectableText(
                     '${r['name']} · ${r['short_id']} · ${r['country']}',
                   ),
-                  Text(
+                  UiText(
                     'Соединение: ${r['connected'] == true ? 'есть' : 'нет'} · прокси по данным демона: ${r['proxy_active'] == true ? 'активен' : 'нет'} · задержка: —',
                   ),
                   Wrap(
@@ -320,16 +320,16 @@ class _NetworkFeatureState extends State<NetworkFeature> {
             ),
           ),
       ] else ...[
-        Text(
+        UiText(
           'Сервер: ${relay == null
-              ? 'статус неизвестен'
+              ? tr(context, 'статус неизвестен')
               : relay!['relay_server'] == true
               ? 'включён'
               : 'выключен'}',
         ),
         if (relay != null) ...[
-          Text('Сессий: ${relay!['active_sessions']}'),
-          Text(
+          UiText('Сессий: ${relay!['active_sessions']}'),
+          UiText(
             'Передано: ${relay!['total_bytes_forwarded']} Б · пакетов ${relay!['total_packets_forwarded']}',
           ),
         ],
@@ -355,7 +355,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
           Card(
             child: Padding(
               padding: const EdgeInsets.all(12),
-              child: SelectableText(
+              child: UiSelectableText(
                 '${s['session_id']} · ${s['source_peer']} → ${s['target_peer']}\n${s['status']} · ${s['bytes_forwarded']} Б · ${s['packets_forwarded']} пакетов · простой ${s['idle_time_secs']} с',
               ),
             ),
@@ -364,7 +364,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
           Wrap(
             spacing: 8,
             children: [
-              Text('${p['hostname'] ?? ''} · ${p['short_id']}'),
+              UiText('${p['hostname'] ?? ''} · ${p['short_id']}'),
               button(
                 'Подключить',
                 () => act(() async {

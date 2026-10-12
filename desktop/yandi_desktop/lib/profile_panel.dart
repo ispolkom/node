@@ -196,7 +196,7 @@ class _ProfilePanelState extends State<ProfilePanel> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      Text(
+      UiText(
         own ? 'Мой аватар' : 'Профиль собеседника',
         style: const TextStyle(fontSize: 18),
       ),
@@ -204,9 +204,9 @@ class _ProfilePanelState extends State<ProfilePanel> {
       if (profile != null) ...[
         if (!own) Text('${profile!['display_name'] ?? widget.peer}'),
         SelectableText('${profile!['short_id'] ?? widget.peer ?? ''}'),
-        if (!own) Text(profile!['online'] == true ? 'В сети' : 'Не в сети'),
+        if (!own) UiText(profile!['online'] == true ? 'В сети' : 'Не в сети'),
       ],
-      if (error != null) Text(error!),
+      if (error != null) UiText(error!),
       if (image != null)
         Image(
           image: image!,

@@ -1,9 +1,14 @@
 import 'package:flutter/material.dart';
 import 'platform_files.dart';
+import 'translations.dart';
 
 /// Session-only preferences and bounded message baseline. No localStorage/files.
 class AppPreferences extends ChangeNotifier {
-  bool english = false, sound = false, notifications = false, dnd = false;
+  bool english = false,
+      sound = false,
+      notifications = false,
+      dnd = false,
+      background = false;
   String? failure;
   String? _peer;
   Set<String>? _seen;
@@ -15,6 +20,10 @@ class AppPreferences extends ChangeNotifier {
     disposed = true;
     generation++;
     super.dispose();
+  }
+
+  void update() {
+    if (!disposed) notifyListeners();
   }
 
   void changed() {
@@ -38,7 +47,6 @@ class AppPreferences extends ChangeNotifier {
     List<Map<String, dynamic>> messages,
   ) async {
     if (disposed) return;
-    final ownGeneration = generation;
     final samePeer = _peer == peer;
     final cutoff = samePeer ? _latest : 0;
     final ids = messages.map((m) => '${m['msg_id']}').toSet();
@@ -61,7 +69,13 @@ class AppPreferences extends ChangeNotifier {
     }
     _peer = peer;
     _seen = ids;
-    if (!fresh || dnd || !sound && !notifications) return;
+    if (!fresh) return;
+    await alert();
+  }
+
+  Future<void> alert() async {
+    final ownGeneration = generation;
+    if (disposed || dnd || !sound && !notifications) return;
     try {
       await PlatformFiles.channel.invokeMethod<void>('messageAlert', {
         'sound': sound,
@@ -86,10 +100,69 @@ class PreferencesScope extends InheritedNotifier<AppPreferences> {
       context.dependOnInheritedWidgetOfExactType<PreferencesScope>()?.notifier;
 }
 
-String tr(BuildContext context, String text) =>
+const russianStates = <String, String>{
+  'owner': 'владелец',
+  'admin': 'админ',
+  'moderator': 'модератор',
+  'member': 'участник',
+  'new': 'новое устройство',
+  'hidden': 'скрыто',
+  'blocked': 'заблокировано',
+  'unknown': 'неизвестно',
+  'disabled': 'выключено',
+  'cooldown': 'пауза',
+  'ok': 'работает',
+};
+String stateLabel(BuildContext context, dynamic value) =>
     PreferencesScope.of(context)?.english == true
-    ? englishLabels[text] ?? text
-    : text;
+    ? '$value'
+    : russianStates['$value'] ?? '$value';
+
+String tr(BuildContext context, String text) =>
+    translate(text, english: PreferencesScope.of(context)?.english == true);
+
+final sortedEnglishTemplates = englishTemplates.entries.toList()
+  ..sort(
+    (a, b) => b.key
+        .replaceAll(RegExp(r'\{[0-9]+\}'), '')
+        .length
+        .compareTo(a.key.replaceAll(RegExp(r'\{[0-9]+\}'), '').length),
+  );
+
+String translate(String text, {required bool english}) {
+  if (!english) return text;
+  final exact = englishLabels[text];
+  if (exact != null) return exact;
+  for (final e in sortedEnglishTemplates) {
+    final markers = RegExp(r'\{([0-9]+)\}').allMatches(e.key).toList();
+    var pattern = '^', pos = 0;
+    for (final m in markers) {
+      pattern += RegExp.escape(e.key.substring(pos, m.start)) + '(.*?)';
+      pos = m.end;
+    }
+    pattern += RegExp.escape(e.key.substring(pos)) + r'$';
+    final match = RegExp(pattern, dotAll: true).firstMatch(text);
+    if (match == null) continue;
+    return e.value.replaceAllMapped(RegExp(r'\{([0-9]+)\}'), (m) {
+      final index = int.parse(m[1]!);
+      final value = match.group(index + 1) ?? '';
+      // Translate only known state/label slots; names and message text stay verbatim.
+      final stateSlot =
+          e.key == 'Запретить {0}' ||
+          e.key == 'Подтвердить: {0}?' ||
+          e.key == 'Статус демона: {0}' ||
+          e.key == 'Сервер: {0}' ||
+          e.key == 'Запрещено: {0}' ||
+          e.key ==
+              'Соединение: {0} · прокси по данным демона: {1} · задержка: —' ||
+          e.key == '{0} · {1} · изменено' && index == 1;
+      if (stateSlot)
+        return value.split(', ').map((v) => englishLabels[v] ?? v).join(', ');
+      return value;
+    });
+  }
+  return text;
+}
 
 class UiText extends StatelessWidget {
   final String text;
@@ -99,7 +172,15 @@ class UiText extends StatelessWidget {
   Widget build(BuildContext context) => Text(tr(context, text), style: style);
 }
 
+class UiSelectableText extends StatelessWidget {
+  final String text;
+  const UiSelectableText(this.text, {super.key});
+  @override
+  Widget build(BuildContext context) => SelectableText(tr(context, text));
+}
+
 const englishLabels = <String, String>{
+  ...moreEnglishLabels,
   'Панель': 'Dashboard',
   'Контакты': 'Contacts',
   'Чат': 'Chat',
