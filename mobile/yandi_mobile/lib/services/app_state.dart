@@ -363,10 +363,9 @@ class AppState extends ChangeNotifier implements FilesHost {
     unawaited(avatars?.forgetPeer(peerId) ?? Future<void>.value());   // не в контактах — картинку не показываем и не храним
     _avatarAnnounced.remove(peerId);
     final c = contactFor(peerId);
-    if (c != null && !c.isManual) {
+    // удалённый уходит со вкладки «Контакты» на вкладку поиска («не в контактах»), а не пропадает совсем
+    if (c != null) {
       contacts[contacts.indexOf(c)] = c.copyWith(saved: false);
-    } else {
-      contacts.removeWhere((x) => x.peerId == peerId);
     }
     notifyListeners();
   }
@@ -417,9 +416,10 @@ class AppState extends ChangeNotifier implements FilesHost {
       for (final c in fromNode) {
         seen.add(c.peerId);
         final name = saved[c.peerId];
+        // имя, которое человек задал в приложении (в том числе при переименовании), сильнее имени с узла
         merged.add(name == null || name.isEmpty
             ? c
-            : Contact(peerId: c.peerId, displayName: c.isManual ? c.displayName : name, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs));
+            : Contact(peerId: c.peerId, displayName: name, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs));
       }
       for (final e in saved.entries) {
         if (seen.contains(e.key)) continue;

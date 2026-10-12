@@ -3,12 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
-import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/file_transfer_service.dart';
 import '../services/files_host.dart';
 import '../services/vault_files.dart';
 import '../theme.dart';
+import '../widgets/recipients_sheet.dart';
 import 'file_viewer_screen.dart';
 
 /// Вид файла для раздела папки.
@@ -175,79 +175,16 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     if (choice == 'clear') await _clearFolder();
   }
 
-  /// Список контактов с прокруткой: отметить можно до 5 получателей за раз.
-  Future<List<Contact>?> _pickRecipients(List<VaultFile> files, List<Contact> contacts) {
-    final chosen = <String>{};
-    return showModalBottomSheet<List<Contact>>(
-      context: context,
-      backgroundColor: AppTheme.surface,
-      isScrollControlled: true,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setSheet) => SafeArea(
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.75),
-            child: Column(mainAxisSize: MainAxisSize.min, children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 16, 16, 4),
-                child: Text(files.length == 1 ? 'Переслать «${files.first.name}»' : 'Переслать файлы (${files.length})',
-                    style: const TextStyle(color: AppTheme.text, fontSize: 16)),
-              ),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-                child: Text('Выберите до ${ChatFilesScreen.maxPerBatch} получателей. Файл уходит зашифрованным, ход виден в чате с ними.',
-                    style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-              ),
-              Flexible(
-                child: ListView(shrinkWrap: true, children: [
-                  for (final c in contacts)
-                    CheckboxListTile(
-                      key: ValueKey('rcpt-${c.peerId}'),
-                      value: chosen.contains(c.peerId),
-                      activeColor: AppTheme.accent,
-                      controlAffinity: ListTileControlAffinity.trailing,
-                      secondary: Icon(Icons.person_outline, color: c.online ? AppTheme.accent : AppTheme.textSecondary),
-                      title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
-                      subtitle: Text(c.online ? 'в сети' : 'не в сети', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                      onChanged: (v) {
-                        if (v == true && chosen.length >= ChatFilesScreen.maxPerBatch) {
-                          ScaffoldMessenger.of(ctx).showSnackBar(const SnackBar(content: Text('Не больше 5 получателей за раз')));
-                          return;
-                        }
-                        setSheet(() => v == true ? chosen.add(c.peerId) : chosen.remove(c.peerId));
-                      },
-                    ),
-                ]),
-              ),
-              Padding(
-                padding: const EdgeInsets.all(12),
-                child: SizedBox(
-                  width: double.infinity,
-                  child: FilledButton(
-                    key: const ValueKey('rcpt-send'),
-                    style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
-                    onPressed: chosen.isEmpty ? null : () => Navigator.pop(ctx, contacts.where((c) => chosen.contains(c.peerId)).toList()),
-                    child: Text(chosen.isEmpty ? 'Выберите получателей' : 'Отправить (${chosen.length})'),
-                  ),
-                ),
-              ),
-            ]),
-          ),
-        ),
-      ),
-    );
-  }
-
   Future<void> _forward(List<VaultFile> files) async {
     if (files.isEmpty) return;
     final FilesHost host = widget.host ?? context.read<AppState>();
-    final now = DateTime.now().millisecondsSinceEpoch;
-    final contacts = host.contacts.where((c) => c.saved || !c.isStale(now)).toList()
-      ..sort((a, b) => a.saved != b.saved ? (a.saved ? -1 : 1) : a.online != b.online ? (a.online ? -1 : 1) : a.displayName.compareTo(b.displayName));
+    final contacts = forwardCandidates(host.contacts);
     if (contacts.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Некому отправлять: в списке нет контактов')));
       return;
     }
-    final to = await _pickRecipients(files, contacts);
+    final to = await pickRecipients(context,
+        title: files.length == 1 ? 'Переслать «${files.first.name}»' : 'Переслать файлы (${files.length})', contacts: contacts);
     if (to == null || to.isEmpty || !mounted) return;
     // предел на файл: всего не больше 20 разных получателей
     for (final f in files) {

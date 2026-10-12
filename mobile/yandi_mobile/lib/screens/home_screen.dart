@@ -89,6 +89,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               title: const Text('Открыть чат', style: TextStyle(color: AppTheme.text)),
               onTap: () { Navigator.pop(ctx); _openChat(context, c); },
             ),
+            if (c.saved)
+              ListTile(
+                leading: const Icon(Icons.edit_outlined, color: AppTheme.text),
+                title: const Text('Переименовать', style: TextStyle(color: AppTheme.text)),
+                onTap: () { Navigator.pop(ctx); _renameContact(context, state, c); },
+              ),
             ListTile(
               leading: const Icon(Icons.cleaning_services_outlined, color: AppTheme.text),
               title: const Text('Очистить чат', style: TextStyle(color: AppTheme.text)),
@@ -106,7 +112,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               onTap: () async {
                 Navigator.pop(ctx);
                 final ok = await _confirm(context, 'Удалить контакт?', '«${c.displayName}» уйдёт из контактов (переписка останется, собеседник появится в разделе «не в контактах»).', 'Удалить');
-                if (ok) await state.removeManualContact(c.peerId);
+                if (ok) {
+                  await state.removeManualContact(c.peerId);
+                  if (context.mounted) {
+                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('«${c.displayName}» перенесён в поиск (не в контактах)')));
+                  }
+                }
               },
             ),
             ListTile(
@@ -123,6 +134,37 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         ),
       ),
     );
+  }
+
+  /// Переименовать контакт: имя хранится на телефоне и сильнее имени с узла.
+  Future<void> _renameContact(BuildContext context, AppState state, Contact c) async {
+    final ctrl = TextEditingController(text: c.displayName.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim());
+    final name = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Переименовать контакт', style: TextStyle(color: AppTheme.text)),
+        content: TextField(
+          key: const ValueKey('rename-field'),
+          controller: ctrl,
+          autofocus: true,
+          maxLength: 64,
+          style: const TextStyle(color: AppTheme.text),
+          decoration: const InputDecoration(hintText: 'Имя контакта', hintStyle: TextStyle(color: AppTheme.textSecondary)),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(
+            key: const ValueKey('rename-ok'),
+            onPressed: () => Navigator.pop(ctx, ctrl.text.trim()),
+            child: const Text('Сохранить', style: TextStyle(color: AppTheme.accent)),
+          ),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    if (name == null || name.isEmpty) return;
+    await state.addManualContact(c.peerId, name);
   }
 
   Future<bool> _confirm(BuildContext context, String title, String body, String action) async {
@@ -294,7 +336,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _contactsBody(BuildContext context, AppState state) {
-    if (state.contacts.isEmpty) {
+    // на вкладке «Контакты» — только добавленные; остальные устройства и люди — на вкладке поиска
+    final mine = state.contacts.where((c) => c.saved).toList();
+    if (mine.isEmpty) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -302,6 +346,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             const Icon(Icons.people_outline, color: AppTheme.textSecondary, size: 64),
             const SizedBox(height: 16),
             const Text('Нет контактов', style: TextStyle(color: AppTheme.textSecondary)),
+            const SizedBox(height: 4),
+            const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 32),
+              child: Text('Другие устройства и те, кто писал вам, — на вкладке поиска (лупа).',
+                  textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            ),
             const SizedBox(height: 8),
             TextButton.icon(
               onPressed: () => state.refreshContacts(),
@@ -317,7 +367,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       backgroundColor: AppTheme.surface,
       onRefresh: () => state.refreshContacts(),
       child: _ContactList(
-        contacts: state.contacts,
+        contacts: mine,
         onOpen: (c) => _openChat(context, c),
         onTapUnsaved: (c) => _showContactSheet(context, state, c),
         onDelete: (c) => state.removeManualContact(c.peerId),
@@ -329,8 +379,9 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   Widget _searchBody(BuildContext context, AppState state) {
     final q = _query.trim().toLowerCase();
     String plain(String n) => n.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim().toLowerCase();
+    // без запроса — все, кого нет в контактах (с прокруткой); с запросом — поиск по всем
     final found = q.isEmpty
-        ? <Contact>[]
+        ? state.contacts.where((c) => !c.saved).toList()
         : state.contacts.where((c) => plain(c.displayName).contains(q) || c.peerId.toLowerCase().contains(q)).toList();
     return Column(
       children: [
@@ -354,17 +405,21 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
         ),
         Expanded(
-          child: q.isEmpty
-              ? const Center(child: Text('Начните вводить имя', style: TextStyle(color: AppTheme.textSecondary)))
-              : found.isEmpty
-                  ? const Center(child: Text('Ничего не найдено', style: TextStyle(color: AppTheme.textSecondary)))
-                  : _ContactList(
+          child: found.isEmpty
+              ? Center(child: Text(q.isEmpty ? 'Здесь появятся те, кого нет в контактах' : 'Ничего не найдено',
+                  style: const TextStyle(color: AppTheme.textSecondary)))
+              : RefreshIndicator(
+                  color: AppTheme.accent,
+                  backgroundColor: AppTheme.surface,
+                  onRefresh: () => state.refreshContacts(),
+                  child: _ContactList(
                       contacts: found,
                       onOpen: (c) => _openChat(context, c),
                       onTapUnsaved: (c) => _showContactSheet(context, state, c),
                       onDelete: (c) => state.removeManualContact(c.peerId),
                       onMenu: (c) => _showContactMenu(context, state, c),
                     ),
+                ),
         ),
       ],
     );

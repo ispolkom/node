@@ -7,13 +7,13 @@ import 'package:flutter/material.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
 import '../models/group_invite.dart';
-import '../models/group.dart';
 import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
 import 'chat_files_screen.dart';
 import '../services/voice_recorder.dart';
 import '../widgets/inline_media.dart';
+import '../widgets/recipients_sheet.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -72,25 +72,45 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
-  /// Поделиться: переслать текст в другой чат или группу внутри приложения.
-  Future<void> _share(String text) async {
+  /// Кому уже переслано сообщение в этом сеансе (id → получатели): предел 20 на сообщение.
+  final Map<String, Set<String>> _fwdTo = {};
+  static const _maxPerMessage = 20;
+
+  /// Переслать выбранные сообщения (текст и файлы) до 5 контактам за раз; в чат-источник не пересылаем.
+  Future<void> _forwardMessages(List<ChatMessage> msgs) async {
+    if (msgs.isEmpty) return;
     final state = context.read<AppState>();
-    final targets = <ShareTarget>[
-      for (final c in state.contacts)
-        if (c.saved && c.peerId != widget.peerId) ShareTarget.contact(c.peerId, c.displayName),
-      for (final g in state.groups?.groups ?? const <GroupInfo>[]) ShareTarget.group(g.id, g.name),
-    ];
-    final to = await pickShareTarget(context, targets);
-    if (to == null || !mounted) return;
-    try {
-      if (to.group) {
-        await state.groups!.send(to.id, kindOfText(text), {'t': text});
-      } else {
-        await state.sendMessage(to.id, text);
+    final contacts = forwardCandidates(state.contacts, exclude: widget.peerId);
+    final to = await pickRecipients(context,
+        title: msgs.length == 1 ? 'Переслать сообщение' : 'Переслать сообщения (${msgs.length})', contacts: contacts);
+    if (to == null || to.isEmpty || !mounted) return;
+    for (final m in msgs) {
+      final all = {...?_fwdTo[m.id], ...to.map((c) => c.peerId)};
+      if (all.length > _maxPerMessage) {
+        _snack('Одно сообщение — не больше $_maxPerMessage получателей (уже ${_fwdTo[m.id]?.length ?? 0})');
+        return;
       }
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправлено: ${to.title}')));
-    } catch (e) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не отправлено: $e')));
+    }
+    final ordered = [...msgs]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    var skipped = 0;
+    for (final m in ordered) {
+      final offer = FileOffer.tryParse(m.text);
+      final local = offer == null ? null : state.localPathFor(offer);
+      if (offer != null && local == null) { skipped++; continue; }
+      _fwdTo.putIfAbsent(m.id, () => {}).addAll(to.map((c) => c.peerId));
+      for (final c in to) {
+        if (offer != null) {
+          state.sendFile(c.peerId, local!, name: offer.name).then((err) { if (err != null && mounted) _snack('${offer.name} → ${c.displayName}: $err'); });
+        } else {
+          state.sendMessage(c.peerId, m.text);
+        }
+      }
+    }
+    if (mounted) {
+      setState(() => _selected.clear());
+      _snack(skipped > 0
+          ? 'Отправка → ${to.map((c) => c.displayName).join(', ')}. Файлов без копии на телефоне пропущено: $skipped'
+          : 'Отправка → ${to.map((c) => c.displayName).join(', ')}');
     }
   }
 
@@ -101,11 +121,13 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Меню слов по нажатию на сообщение: Изменить, Ответить, Копировать, Удалить.
   Future<void> _messageMenu(ChatMessage m, Offset at) async {
     final plain = FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null;
+    final isFile = FileOffer.tryParse(m.text) != null;
     final choice = await showMessageMenu(context, at, [
+      cmdReply,                              // «Ответить» — самое верхнее
       if (m.outgoing && plain) cmdEdit,
-      cmdReply,
       if (plain) cmdCopy,
-      if (plain) cmdShare,
+      if (plain || isFile) cmdShare,         // «Переслать»
+      cmdSelect,
       cmdDelete,
     ]);
     if (!mounted || choice == null) return;
@@ -118,7 +140,9 @@ class _ChatScreenState extends State<ChatScreen> {
       case cmdCopy:
         await Clipboard.setData(ClipboardData(text: m.text));
       case cmdShare:
-        await _share(m.text);
+        await _forwardMessages([m]);
+      case cmdSelect:
+        setState(() => _selected.add(m.id));
       case cmdDelete:
         setState(() => _selected..clear()..add(m.id));
         await _deleteSelected();
@@ -352,6 +376,15 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
                 IconButton(
+                  key: const ValueKey('chat-forward-selected'),
+                  tooltip: 'Переслать',
+                  icon: const Icon(Icons.forward_to_inbox_outlined, color: AppTheme.text),
+                  onPressed: () {
+                    final all = context.read<AppState>().messagesFor(widget.peerId);
+                    _forwardMessages(all.where((x) => _selected.contains(x.id)).toList());
+                  },
+                ),
+                IconButton(
                   tooltip: 'Удалить',
                   icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                   onPressed: _deleteSelected,
@@ -462,7 +495,8 @@ class _ChatScreenState extends State<ChatScreen> {
                       var tapAt = Offset.zero;
                       return GestureDetector(
                         key: _anchors.putIfAbsent(m.id, () => GlobalKey()),
-                        onLongPress: () => _toggleSelect(m.id),
+                        // удержание — тот же список слов, что и по нажатию; при уже выбранных — переключает выбор
+                        onLongPressStart: (d) => _selecting ? _toggleSelect(m.id) : _messageMenu(m, d.globalPosition),
                         onTapDown: (d) => tapAt = d.globalPosition,
                         onTap: _selecting ? () => _toggleSelect(m.id) : () => _messageMenu(m, tapAt),
                         child: Container(
