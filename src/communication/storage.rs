@@ -5,6 +5,7 @@ use crate::communication::ChatMessage;
 use crate::util::HashId;
 use std::path::PathBuf;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce, Key
@@ -47,6 +48,37 @@ impl Drop for ChatStorage {
     fn drop(&mut self) {
         self.lock();
     }
+}
+
+/// Представление сообщения на диске (bincode не терпит `skip_serializing_if`, поэтому отдельные структуры без него).
+#[derive(Serialize, Deserialize)]
+struct StoredRef {
+    file_id: String,
+    total_chunks: u32,
+    local_name: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredAttachment {
+    filename: String,
+    size: u64,
+    mime_type: String,
+    data: Option<String>,
+    file_ref: Option<StoredRef>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct StoredMessage {
+    msg_id: HashId,
+    from: HashId,
+    to: HashId,
+    timestamp: u64,
+    text: String,
+    encrypted: bool,
+    status: crate::communication::MessageStatus,
+    edited: bool,
+    edit_timestamp: Option<u64>,
+    attachment: Option<StoredAttachment>,
 }
 
 /// Хранилище чатов (локальное для каждой ноды) с AES-256-GCM шифрованием
@@ -185,6 +217,65 @@ impl ChatStorage {
             .encrypt(Nonce::from_slice(&nonce), plain)
             .map_err(|e| anyhow::anyhow!("Encryption failed: {}", e))?;
         Ok(hex::encode([nonce.as_slice(), &ct].concat()))
+    }
+
+    /// Запись сообщения в истории: байт версии 2 и компактное бинарное представление (JSON на тех же сообщениях
+    /// раздувал запись: каждый идентификатор — список из 32 чисел). Запись, начинающаяся с `{`, — прежний JSON, читается как раньше.
+    fn encode_message(msg: &ChatMessage) -> Result<Vec<u8>> {
+        let stored = StoredMessage {
+            msg_id: msg.msg_id,
+            from: msg.from,
+            to: msg.to,
+            timestamp: msg.timestamp,
+            text: msg.text.clone(),
+            encrypted: msg.encrypted,
+            status: msg.status.clone(),
+            edited: msg.edited,
+            edit_timestamp: msg.edit_timestamp,
+            attachment: msg.attachment.as_ref().map(|a| StoredAttachment {
+                filename: a.filename.clone(),
+                size: a.size,
+                mime_type: a.mime_type.clone(),
+                data: a.data.clone(),
+                file_ref: a.file_ref.as_ref().map(|r| StoredRef {
+                    file_id: r.file_id.clone(),
+                    total_chunks: r.total_chunks,
+                    local_name: r.local_name.clone(),
+                }),
+            }),
+        };
+        let mut out = vec![2u8];
+        out.extend(bincode::serialize(&stored)?);
+        Ok(out)
+    }
+
+    fn decode_message(plain: &[u8]) -> Option<ChatMessage> {
+        if plain.first() != Some(&2u8) {
+            return serde_json::from_slice::<ChatMessage>(plain).ok();
+        }
+        let m: StoredMessage = bincode::deserialize(&plain[1..]).ok()?;
+        Some(ChatMessage {
+            msg_id: m.msg_id,
+            from: m.from,
+            to: m.to,
+            timestamp: m.timestamp,
+            text: m.text,
+            encrypted: m.encrypted,
+            status: m.status,
+            edited: m.edited,
+            edit_timestamp: m.edit_timestamp,
+            attachment: m.attachment.map(|a| crate::communication::FileAttachment {
+                filename: a.filename,
+                size: a.size,
+                mime_type: a.mime_type,
+                data: a.data,
+                file_ref: a.file_ref.map(|r| crate::communication::FileReference {
+                    file_id: r.file_id,
+                    total_chunks: r.total_chunks,
+                    local_name: r.local_name,
+                }),
+            }),
+        })
     }
 
     /// Формат файла чата: признак `YCH2`, дальше записи `[длина u32 BE][nonce 12 | шифртекст]`. Файл без признака — прежний
@@ -454,7 +545,7 @@ impl ChatStorage {
 
     /// Добавить зашифрованное сообщение в файл
     fn append_encrypted_message(&self, chat_file: &PathBuf, msg: &ChatMessage) -> Result<()> {
-        let plaintext = serde_json::to_vec(msg)?;
+        let plaintext = Self::encode_message(msg)?;
         let key_bytes = self.get_encryption_key()?;
         let blob = Self::seal_blob(&key_bytes, &plaintext)?;
         Self::append_blob(chat_file, &blob)
@@ -525,7 +616,7 @@ impl ChatStorage {
         let mut messages = Vec::new();
         for blob in blobs.iter().rev().take(limit) {
             let opened = Self::open_blob(&keys, blob)
-                .and_then(|(_, p)| serde_json::from_slice::<ChatMessage>(&p).ok());
+                .and_then(|(_, p)| Self::decode_message(&p));
             match opened {
                 Some(msg) => messages.push(msg),
                 None if strict => {
@@ -867,7 +958,25 @@ mod concurrency_tests {
         let third = HashId([4; 32]);
         st.save_incoming(&third, &ChatMessage::new(third, me, big)).unwrap();
         let bin = std::fs::metadata(dir.path().join(format!("chat_{}.enc", hex::encode(third.0)))).unwrap().len();
-        assert!(bin < 2600, "запись {} Б (текстовая была бы около 4800)", bin);
+        assert!(bin < 2200, "запись {} Б (текстовая была бы около 4800)", bin);
+        // вложение и правка проходят туда и обратно
+        let mut att = ChatMessage::new(third, me, "с файлом".into());
+        att.edited = true;
+        att.edit_timestamp = Some(5);
+        att.attachment = Some(crate::communication::FileAttachment {
+            filename: "a.png".into(),
+            size: 7,
+            mime_type: "image/png".into(),
+            data: Some("QUJD".into()),
+            file_ref: Some(crate::communication::FileReference { file_id: "f1".into(), total_chunks: 3, local_name: Some("x".into()) }),
+        });
+        st.save_incoming(&third, &att).unwrap();
+        let got = st.load_history(&third, 1).unwrap().remove(0);
+        assert_eq!(got.msg_id, att.msg_id);
+        assert!(got.edited && got.edit_timestamp == Some(5));
+        let a = got.attachment.unwrap();
+        assert_eq!((a.filename.as_str(), a.size, a.data.as_deref()), ("a.png", 7, Some("QUJD")));
+        assert_eq!(a.file_ref.unwrap().total_chunks, 3);
     }
 
     #[test]
