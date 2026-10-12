@@ -38,16 +38,11 @@ fn r8_cli_requires_explicit_minimum_for_verify_and_update() {
         sign(&bytes, &key).unwrap(),
     )
     .unwrap();
-    for args in [
-        vec!["verify", root.path().to_str().unwrap(), "--pubkey", &public],
-        vec![
-            "update",
-            "--from",
-            root.path().to_str().unwrap(),
-            "--pubkey",
-            &public,
-        ],
-    ] {
+    let mut cases = vec![vec!["verify", root.path().to_str().unwrap(), "--pubkey", &public]];
+    // обновление есть только на Linux
+    #[cfg(target_os = "linux")]
+    cases.push(vec!["update", "--from", root.path().to_str().unwrap(), "--pubkey", &public]);
+    for args in cases {
         let output = cli(&args);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("нужен --min-seq"));
