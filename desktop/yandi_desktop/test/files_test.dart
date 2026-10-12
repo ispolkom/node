@@ -1,6 +1,8 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/domain/file_repository.dart';
 import 'package:yandi_desktop/platform_files.dart';
@@ -256,4 +258,36 @@ void main() {
       );
     },
   );
+  testWidgets('system file dialog focus loss does not wipe the chat', (
+    t,
+  ) async {
+    final file = (await t.runAsync(
+      () => File('${temp.path}/focus.bin').writeAsBytes([1]),
+    ))!;
+    final gate = Completer<String?>();
+    t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+      PlatformFiles.channel,
+      (call) async => call.method == 'choose' ? gate.future : null,
+    );
+    addTearDown(
+      () => t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
+        PlatformFiles.channel,
+        null,
+      ),
+    );
+    final api = FileApi();
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await t.tap(find.text('Выбрать файл'));
+    await t.pump();
+    // Диалог забрал фокус: окно «неактивно», но содержимое остаётся.
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump();
+    gate.complete(file.path);
+    await t.pump();
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pump(const Duration(seconds: 1));
+    await t.pumpAndSettle();
+    expect(find.text('focus.bin'), findsOneWidget);
+  });
 }

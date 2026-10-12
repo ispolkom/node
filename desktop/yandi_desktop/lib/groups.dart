@@ -867,9 +867,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       onPressed: !busy && canSend ? send : null,
       child: const UiText('Отправить группе'),
     );
-    final attach = TextButton(
+    final attach = TextButton.icon(
       onPressed: busy || choosing || !canSend ? null : pickFile,
-      child: const UiText('Выбрать файл'),
+      icon: const Icon(Icons.attach_file, size: 18),
+      label: const UiText('Выбрать файл'),
     );
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

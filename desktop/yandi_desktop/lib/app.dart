@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
 import 'features.dart';
+import 'platform_files.dart';
 
 class DesktopApp extends StatefulWidget {
   final Api api;
@@ -32,11 +33,25 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   Map<String, dynamic>? status, speed;
   List<dynamic> nodes = [];
   Timer? timer;
+  bool blurIgnored = false;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // После закрытия диалога фокус возвращается не мгновенно: если окно так и
+    // не стало активным (ушли в другое приложение), содержимое стираем.
+    PlatformFiles.onClosed = () {
+      Timer(const Duration(milliseconds: 500), () {
+        final st = WidgetsBinding.instance.lifecycleState;
+        if (mounted &&
+            !PlatformFiles.choosing &&
+            st != null &&
+            st != AppLifecycleState.resumed) {
+          didChangeAppLifecycleState(st);
+        }
+      });
+    };
     background;
     preferences.addListener(preferenceChanged);
     checkAuth();
@@ -73,6 +88,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Системный диалог выбора файла забирает фокус: не стираем содержимое.
+    if (PlatformFiles.choosing) {
+      blurIgnored = state != AppLifecycleState.resumed;
+      return;
+    }
+    // Возврат фокуса из диалога не должен стирать только что выбранный файл.
+    if (blurIgnored && state == AppLifecycleState.resumed) {
+      blurIgnored = false;
+      return;
+    }
+    blurIgnored = false;
     visible = state == AppLifecycleState.resumed;
     timer?.cancel();
     wipe();
@@ -91,6 +117,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     preferences.removeListener(preferenceChanged);
     preferences.dispose();
     WidgetsBinding.instance.removeObserver(this);
+    PlatformFiles.onClosed = null;
     widget.api.cancel();
     super.dispose();
   }
