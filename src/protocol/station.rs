@@ -421,9 +421,9 @@ impl Station {
         let wagon: Wagon = Wagon::from_bytes(wagon_bytes)
             .map_err(|e| StationError::DeserializationError(e.to_string()))?;
 
-        // Проверяем checksum
+        // Проверяем формат вагона (целостность груза обеспечивает AEAD сессии)
         if !wagon.verify() {
-            println!("⚠️  Wagon {}/{} has invalid checksum! Dropping.",
+            println!("⚠️  Wagon {}/{}: неизвестный формат вагона, отброшен.",
                      wagon.wagon_num, wagon.total_wagons);
             return Ok(None);
         }

@@ -302,9 +302,9 @@ loop {
     let wagon_bytes = udp_socket.recv().await?;
     let wagon: Wagon = Wagon::from_bytes(&wagon_bytes)?;
 
-    // Verify checksum
+    // Check the wagon format version (payload integrity is the session AEAD's job)
     if !wagon.verify() {
-        warn!("Wagon checksum invalid! Dropping.");
+        warn!("Unknown wagon format! Dropping.");
         continue;
     }
 
@@ -427,7 +427,7 @@ let station = Station::new(node_id, transport, config);
 
 ### Overhead
 
-- **Fragmentation overhead:** ~5% (wagon headers, checksums)
+- **Fragmentation overhead:** ~5% (wagon headers)
 - **Adaptive delay overhead:** ~0ms (fast network) to 1s (100 wagons, slow network)
 - **Memory overhead:** ~10% (depot storage)
 
