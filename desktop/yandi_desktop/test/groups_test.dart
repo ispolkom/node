@@ -488,4 +488,25 @@ void main() {
     expect(t.takeException(), isNull);
     await m1.stop(t);
   });
+  testWidgets('sections filter the feed and requests are cards in it', (
+    t,
+  ) async {
+    final api = GroupApi();
+    await open(t, api, conversation: true);
+    await m1.click(t, 'Закрыть настройки');
+    expect(
+      find.text('просит добавить его в группу или прислать приглашение'),
+      findsOneWidget,
+    );
+    expect(find.text('<script>текст</script>'), findsOneWidget);
+    await t.ensureVisible(find.text('Картинки'));
+    await t.tap(find.text('Картинки'));
+    await t.pumpAndSettle();
+    expect(find.text('<script>текст</script>'), findsNothing);
+    expect(find.text('В этом разделе пусто'), findsOneWidget);
+    await t.tap(find.text('Все'));
+    await t.pumpAndSettle();
+    expect(find.text('<script>текст</script>'), findsOneWidget);
+    await m1.stop(t);
+  });
 }

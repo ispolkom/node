@@ -12,11 +12,10 @@ void main() {
     await m1.click(t, 'Открыть чат');
     expect(find.byTooltip('Отправлено'), findsOneWidget);
     await m1.command(t, '<b>Текст</b>', 'Изменить');
-    await t.enterText(
-      find.widgetWithText(TextField, 'Текст сообщения'),
-      'правка',
-    );
-    await m1.click(t, 'Сохранить');
+    expect(find.text('Редактирование сообщения'), findsOneWidget);
+    await t.enterText(find.widgetWithText(TextField, 'Сообщение'), 'правка');
+    await m1.click(t, 'Отправить');
+    expect(find.text('Редактирование сообщения'), findsNothing);
     expect(api.methods.contains('PATCH'), true);
     expect(api.bodies.last, {'msg_id': 'new', 'text': 'правка'});
     await m1.command(t, '<b>Текст</b>', 'Удалить');
@@ -25,7 +24,7 @@ void main() {
     await m1.command(t, '<b>Текст</b>', 'Удалить');
     await m1.click(t, 'Подтвердить');
     expect(api.bodies.last, {'msg_id': 'new', 'for_everyone': false});
-    await m1.click(t, 'Очистить историю');
+    await m1.word(t, 'Очистить историю');
     expect(api.calls.where((p) => p.contains('/clear/')), isEmpty);
     await m1.click(t, 'Подтвердить');
     expect(api.calls.where((p) => p.contains('/clear/')).length, 1);
@@ -67,4 +66,43 @@ void main() {
       await m1.stop(t);
     },
   );
+  testWidgets('select several messages and delete them together', (t) async {
+    final api = m2.FeatureApi();
+    api.historyRows.add({
+      'msg_id': 'second',
+      'from': m2.alice,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'text': 'вторая',
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await m1.command(t, '<b>Текст</b>', 'Выбрать');
+    expect(find.text('Выбрано: 1'), findsOneWidget);
+    await t.tap(find.text('вторая'));
+    await t.pumpAndSettle();
+    expect(find.text('Выбрано: 2'), findsOneWidget);
+    await m1.word(t, 'Удалить выбранные');
+    await m1.click(t, 'Подтвердить');
+    expect(api.methods.where((m) => m == 'DELETE').length, 2);
+    await m1.stop(t);
+  });
+  testWidgets('chat header has call words and a group invite is a card', (
+    t,
+  ) async {
+    final api = m2.FeatureApi();
+    api.historyRows.add({
+      'msg_id': 'inv',
+      'from': m2.alice,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'text':
+          '\u0001yandi-gi:{"g":"${'a' * 32}","c":"abcdefgh12345678","n":"Клуб"}',
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    expect(find.text('Позвонить'), findsOneWidget);
+    expect(find.text('Видеозвонок'), findsOneWidget);
+    expect(find.textContaining('«Клуб»'), findsOneWidget);
+    expect(find.text('Вступить в группу'), findsWidgets);
+    await m1.stop(t);
+  });
 }

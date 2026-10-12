@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/calls.dart';
 import 'package:yandi_desktop/domain/call_coordinator.dart';
 import 'package:yandi_desktop/domain/call_signaling.dart';
-import 'widget_test.dart' show FakeApi, start, click, stop;
+import 'widget_test.dart' show FakeApi, click, stop;
 
 const peer = '0123456789abcdef';
 const phonePeer =
@@ -435,38 +435,38 @@ void main() {
       expect(find.textContaining('Медиа недоступно'), findsOneWidget);
       await stop(t);
       expect(s.closed, true);
-      await start(t, api);
-      await click(t, 'Войти');
-      await click(t, 'Звонки');
-      await t.enterText(find.byType(TextField).first, peer);
-      await click(t, 'Главная');
-      await click(t, 'Звонки');
-      expect(
-        (t.widget<TextField>(find.byType(TextField).first)).controller!.text,
-        isEmpty,
-      );
-      await t.enterText(find.byType(TextField).first, peer);
-      api.configured = true;
-      api.unlocked = false;
-      await t.pump(const Duration(seconds: 1));
-      await t.pumpAndSettle();
-      expect(find.text('Ожидание звонка'), findsNothing);
       await stop(t);
     },
   );
-  testWidgets('call screen small window and preflight denial', (t) async {
-    await t.binding.setSurfaceSize(const Size(400, 500));
-    addTearDown(() => t.binding.setSurfaceSize(null));
-    final api = PhoneApi();
-    await start(t, api);
-    await click(t, 'Войти');
-    await click(t, 'Звонки');
-    expect(t.takeException(), isNull);
-    await t.enterText(find.byType(TextField).first, peer);
-    api.configured = true;
-    api.unlocked = false;
-    await click(t, 'Позвонить');
-    expect(api.calls.where((p) => p.endsWith('call/start')), isEmpty);
-    await stop(t);
+  testWidgets('embedded panel is empty while idle and chat controller starts', (
+    t,
+  ) async {
+    final api = PhoneApi(), s = Signals(), c = CallsController();
+    await t.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CallsFeature(
+            embedded: true,
+            controller: c,
+            api: api,
+            isActive: () => true,
+            onLocked: () {},
+            onFailure: (_) {},
+            signaling: s,
+            mediaFactory: UnavailableMedia.new,
+          ),
+        ),
+      ),
+    );
+    await t.pumpAndSettle();
+    expect(find.text('Ожидание звонка'), findsNothing);
+    expect(find.byType(TextField), findsNothing);
+    expect(c.ready, true);
+    await t.runAsync(() => c.start(peer, video: true));
+    await t.pumpAndSettle();
+    expect(s.commands, contains('start'));
+    expect(find.text('Завершить'), findsOneWidget);
+    await t.pumpWidget(const SizedBox());
+    expect(c.ready, false);
   });
 }

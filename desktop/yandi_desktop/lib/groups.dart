@@ -323,6 +323,16 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   String? settingsFor;
   Map<String, dynamic>? replyTo;
   final hiddenAuthors = <String, Set<String>>{};
+  // Раздел-фильтр ленты, как в мобильном чате: вид записи или null — все.
+  int? section;
+  static const sections = <(int?, String)>[
+    (null, 'Все'),
+    (2, 'Картинки'),
+    (3, 'Файлы'),
+    (4, 'Аудио'),
+    (5, 'Видео'),
+    (6, 'Ссылки'),
+  ];
   final anchors = <String, GlobalKey>{};
   Widget groupItem(Map<String, dynamic> g) {
     final id = '${g['id']}', current = selected == id;
@@ -654,13 +664,20 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (!own)
-                  Text(
-                    '${m['author']}',
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Icq.peer,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InitialBadge('${m['author']}', size: 20),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${m['author']}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: Icq.peer,
+                        ),
+                      ),
+                    ],
                   ),
                 if (reply != null)
                   QuoteCard(
@@ -712,6 +729,66 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       ),
     );
   }
+
+  Widget requestCard(Map<String, dynamic> r) => Container(
+    margin: const EdgeInsets.symmetric(vertical: 4),
+    padding: const EdgeInsets.all(10),
+    decoration: BoxDecoration(
+      color: Icq.peer.withValues(alpha: 0.10),
+      border: Border.all(color: Icq.peer.withValues(alpha: 0.7)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.how_to_reg_outlined, size: 18, color: Icq.peer),
+            const SizedBox(width: 6),
+            Flexible(
+              child: Text(
+                '${r['name'] ?? tr(context, 'Новая просьба')}',
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: Icq.peer,
+                ),
+              ),
+            ),
+          ],
+        ),
+        const UiText('просит добавить его в группу или прислать приглашение'),
+        const UiText(
+          'служебное: видят владелец и модераторы',
+          style: TextStyle(fontSize: 11, color: Icq.dark),
+        ),
+        Wrap(
+          spacing: 14,
+          children: [
+            for (final answer in [
+              'Пригласить',
+              'Пропустить',
+              'Больше не напоминать',
+            ])
+              CommandText(
+                answer,
+                onTap: busy
+                    ? null
+                    : () async {
+                        final id = selected!;
+                        await mutate(() async {
+                          await repo.act(id, 'answer', {
+                            'rid': r['id'],
+                            'accept': answer == 'Пригласить',
+                            'never': answer == 'Больше не напоминать',
+                          });
+                        });
+                      },
+              ),
+          ],
+        ),
+      ],
+    ),
+  );
 
   Widget conversation({bool wide = false}) {
     final history = Column(
@@ -781,10 +858,42 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               ),
             ],
           ),
+        Wrap(
+          spacing: 14,
+          children: [
+            for (final (kind, label) in sections)
+              InkWell(
+                onTap: () => setState(() => section = kind),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 2),
+                  child: UiText(
+                    label,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: section == kind
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                      color: section == kind ? Icq.active : Icq.header,
+                      decoration: section == kind
+                          ? TextDecoration.none
+                          : TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ),
+          ],
+        ),
+        // Просьбы вступить — служебные карточки в ленте, видны управляющим.
+        if (manager && settingsFor != selected)
+          for (final r in rows(info, 'requests')) requestCard(r),
+        if (section != null &&
+            !rows(feed, 'messages').any((m) => m['kind'] == section))
+          const UiText('В этом разделе пусто'),
         for (final m in rows(feed, 'messages'))
           if (!(hiddenAuthors[selected] ?? const <String>{}).contains(
-            '${m['from']}',
-          ))
+                '${m['from']}',
+              ) &&
+              (section == null || m['kind'] == section))
             bubble(m),
         if (info != null && settingsFor == selected) ...[
           participants(),

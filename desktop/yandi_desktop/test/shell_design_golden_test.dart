@@ -46,7 +46,6 @@ void main() {
       'Шлюзы',
       'Relay',
       'Настройки',
-      'Звонки',
     ]) {
       testWidgets('$scene ${size.width.toInt()}x${size.height.toInt()}', (
         t,

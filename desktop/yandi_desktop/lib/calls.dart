@@ -9,7 +9,18 @@ import 'domain/call_signaling.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
 
+/// Lets the chat start a call through the app-wide call panel.
+class CallsController {
+  Future<void> Function(String peer, bool video, bool phone)? _start;
+  bool get ready => _start != null;
+  Future<void> start(String peer, {bool video = false, bool phone = false}) =>
+      _start?.call(peer, video, phone) ?? Future.value();
+}
+
 class CallsFeature extends StatefulWidget {
+  /// Embedded: lives under the header on every page, shows nothing while idle.
+  final bool embedded;
+  final CallsController? controller;
   final Api api;
   final bool Function() isActive;
   final VoidCallback onLocked;
@@ -18,6 +29,8 @@ class CallsFeature extends StatefulWidget {
   final CallMedia Function()? mediaFactory;
   const CallsFeature({
     super.key,
+    this.embedded = false,
+    this.controller,
     required this.api,
     required this.isActive,
     required this.onLocked,
@@ -54,6 +67,10 @@ class _CallsFeatureState extends State<CallsFeature> {
       },
     );
     coordinator.addListener(update);
+    widget.controller?._start = (peer, video, phone) async {
+      if (coordinator.phase != CallPhase.idle || coordinator.busy) return;
+      await coordinator.start(peer, video: video, phone: phone);
+    };
     coordinator.poll();
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (widget.isActive()) coordinator.poll();
@@ -66,6 +83,7 @@ class _CallsFeatureState extends State<CallsFeature> {
 
   @override
   void dispose() {
+    widget.controller?._start = null;
     timer?.cancel();
     coordinator.removeListener(update);
     coordinator.dispose();
@@ -94,10 +112,16 @@ class _CallsFeatureState extends State<CallsFeature> {
     child: UiText(title),
   );
   @override
-  Widget build(BuildContext context) => PanelStack(
+  Widget build(BuildContext context) => widget.embedded &&
+          coordinator.phase == CallPhase.idle &&
+          coordinator.error == null
+      ? const SizedBox.shrink()
+      : PanelStack(
     children: [
-      const UiText('Звонки', style: TextStyle(fontSize: 22)),
-      const UiText('Входящие проверяются, пока открыт этот экран.'),
+      if (!widget.embedded) ...[
+        const UiText('Звонки', style: TextStyle(fontSize: 22)),
+        const UiText('Входящие проверяются, пока открыт этот экран.'),
+      ],
       UiText(label),
       if (coordinator.error != null)
         NoticePanel(coordinator.error!, error: true),
@@ -130,7 +154,7 @@ class _CallsFeatureState extends State<CallsFeature> {
               ],
             ),
           ),
-      if (coordinator.phase == CallPhase.idle) ...[
+      if (coordinator.phase == CallPhase.idle && !widget.embedded) ...[
         TextField(
           controller: peer,
           decoration: InputDecoration(

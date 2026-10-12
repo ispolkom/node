@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'domain/shell_repository.dart';
 import 'preferences.dart';
@@ -8,7 +9,8 @@ const commandEdit = 'Изменить',
     commandReply = 'Ответить',
     commandCopy = 'Копировать',
     commandDelete = 'Удалить',
-    commandHideAuthor = 'Скрыть сообщения этого пользователя';
+    commandHideAuthor = 'Скрыть сообщения этого пользователя',
+    commandSelect = 'Выбрать';
 
 Future<String?> showMessageMenu(
   BuildContext context,
@@ -179,6 +181,103 @@ class DeliveryMark extends StatelessWidget {
           ),
         ],
       ],
+    );
+  }
+}
+
+/// Group invitation sent in a private chat by the phone app (see CLIENT_WIRE).
+class GroupInviteMessage {
+  static const marker = '\u0001yandi-gi:';
+  final String gid, code, name;
+  const GroupInviteMessage(this.gid, this.code, this.name);
+  static GroupInviteMessage? tryParse(String text) {
+    if (!text.startsWith(marker)) return null;
+    try {
+      final j = jsonDecode(text.substring(marker.length));
+      if (j is! Map) return null;
+      final gid = '${j['g'] ?? ''}'.toLowerCase(), code = '${j['c'] ?? ''}';
+      if (!RegExp(r'^[0-9a-f]{32}$').hasMatch(gid)) return null;
+      if (code.isNotEmpty && !RegExp(r'^[0-9A-Za-z_-]{8,128}$').hasMatch(code)) {
+        return null;
+      }
+      final n = '${j['n'] ?? ''}'.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+      return GroupInviteMessage(gid, code, n.length > 64 ? n.substring(0, 64) : n);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+class GroupInviteCard extends StatelessWidget {
+  final GroupInviteMessage invite;
+  final bool outgoing;
+  final VoidCallback? onJoin;
+  const GroupInviteCard({
+    super.key,
+    required this.invite,
+    required this.outgoing,
+    this.onJoin,
+  });
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.symmetric(vertical: 4),
+    padding: const EdgeInsets.all(8),
+    decoration: BoxDecoration(
+      color: const Color(0x14000000),
+      border: Border.all(color: Icq.dark.withValues(alpha: 0.35)),
+    ),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.group_add_outlined, color: Icq.header),
+            const SizedBox(width: 8),
+            Flexible(
+              child: Text(
+                '${tr(context, 'Приглашение в группу')}${invite.name.isEmpty ? '' : ' «${invite.name}»'}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 4),
+        if (outgoing)
+          const UiText(
+            'Приглашение отправлено (действует сутки, один раз)',
+            style: TextStyle(fontSize: 12, color: Icq.dark),
+          )
+        else
+          CommandText('Вступить в группу', onTap: onJoin),
+      ],
+    ),
+  );
+}
+
+/// Round initial badge next to authors, as the phone app's avatar circle.
+class InitialBadge extends StatelessWidget {
+  final String name;
+  final double size;
+  const InitialBadge(this.name, {super.key, this.size = 22});
+  @override
+  Widget build(BuildContext context) {
+    final t = name.trim();
+    return Container(
+      width: size,
+      height: size,
+      alignment: Alignment.center,
+      decoration: const BoxDecoration(color: Icq.header, shape: BoxShape.circle),
+      child: Text(
+        t.isEmpty ? '?' : t.characters.first.toUpperCase(),
+        style: TextStyle(
+          color: Colors.white,
+          fontSize: size * 0.55,
+          fontWeight: FontWeight.bold,
+          fontFamily: 'Tahoma',
+        ),
+      ),
     );
   }
 }

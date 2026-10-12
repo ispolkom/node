@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
+import 'calls.dart';
 import 'features.dart';
 import 'platform_files.dart';
 
@@ -34,6 +35,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   List<dynamic> nodes = [];
   Timer? timer;
   bool blurIgnored = false;
+  final callsController = CallsController();
 
   @override
   void initState() {
@@ -785,7 +787,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     'Relay',
                     'Настройки',
                     'Контакты',
-                    'Звонки',
                     'О приложении',
                     'Закрытая среда',
                   ],
@@ -873,34 +874,56 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     ),
   );
 
+  bool Function() activeFor(int own) => () =>
+      visible &&
+      connected &&
+      entered &&
+      own == epoch &&
+      vault != null &&
+      !vault!.hasError &&
+      (!vault!.configured || vault!.unlocked);
+
+  void lockedByCalls() {
+    if (mounted) {
+      setState(() {
+        wipe();
+      });
+      poll(force: true);
+    }
+  }
+
+  /// Calls live under the header on every page: incoming rings anywhere, the
+  /// chat starts outgoing ones with the words «Позвонить» / «Видеозвонок».
+  Widget callPanel() {
+    final own = epoch;
+    return CallsFeature(
+      key: ValueKey('calls-$own-$formVersion'),
+      embedded: true,
+      controller: callsController,
+      api: widget.api,
+      isActive: activeFor(own),
+      onLocked: lockedByCalls,
+      onFailure: (failure) {
+        if (mounted) setState(() => disconnect(failure));
+      },
+    );
+  }
+
   Widget features() {
     final own = epoch;
     return ShellFeatures(
       key: ValueKey('$page-$formVersion'),
       api: widget.api,
       preferences: preferences,
+      calls: callsController,
       onChatOpened: background.opened,
       onGroupOpened: (id) => background.opened('group:$id'),
       page: page,
-      isActive: () =>
-          visible &&
-          connected &&
-          entered &&
-          own == epoch &&
-          vault != null &&
-          !vault!.hasError &&
-          (!vault!.configured || vault!.unlocked),
+      isActive: activeFor(own),
       onFailure: (failure) {
         if (mounted) setState(() => disconnect(failure));
       },
-      onLocked: () {
-        if (mounted) {
-          setState(() {
-            wipe();
-          });
-          poll(force: true);
-        }
-      },
+      onLocked: lockedByCalls,
     );
   }
 
@@ -933,6 +956,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                           if (error != null && connected)
                             NoticePanel(error!, error: true),
                           if (notice != null) NoticePanel(notice!),
+                          if (entered &&
+                              connected &&
+                              visible &&
+                              vault != null &&
+                              !vault!.hasError &&
+                              (!vault!.configured || vault!.unlocked))
+                            callPanel(),
                           if (!connected)
                             Panel(
                               title: 'Нет связи с демоном',

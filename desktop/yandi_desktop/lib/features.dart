@@ -24,6 +24,7 @@ class ShellFeatures extends StatefulWidget {
   final Api api;
   final String page;
   final AppPreferences? preferences;
+  final CallsController? calls;
   final void Function(String)? onChatOpened;
   final void Function(String)? onGroupOpened;
   final void Function(ApiFailure) onFailure;
@@ -34,6 +35,7 @@ class ShellFeatures extends StatefulWidget {
     required this.api,
     required this.page,
     this.preferences,
+    this.calls,
     this.onChatOpened,
     this.onGroupOpened,
     required this.onFailure,
@@ -59,6 +61,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   File? pickedFile;
   int transferred = 0, transferSize = 0;
   bool choosingFile = false;
+  String? editingId;
+  final picked = <String>{};
   bool refreshError = false;
   bool addingContact = false;
   Timer? timer;
@@ -71,7 +75,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       'Группы',
       'Шлюзы',
       'Relay',
-      'Звонки',
       'О приложении',
     ].contains(widget.page))
       return;
@@ -240,6 +243,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     setState(() {
       pickedFile = null;
       replyTo = null;
+      editingId = null;
+      picked.clear();
       transferred = transferSize = 0;
       selected = contact;
       messages = [];
@@ -258,12 +263,16 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final contact = selected;
     if (contact == null || composer.text.trim().isEmpty || sending) return;
     final target = peer(contact), text = composer.text, quote = replyTo;
+    final editing = editingId;
     await mutate(
-      () => repo.send(target, text, replyTo: quote),
+      () => editing != null
+          ? repo.edit(target, editing, text)
+          : repo.send(target, text, replyTo: quote),
       success: () {
         composer.clear();
         drafts.remove(target);
         replyTo = null;
+        editingId = null;
       },
     );
   }
@@ -420,18 +429,50 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     return active && rev == revision && answer == true;
   }
 
-  Future<void> editMessage(Map<String, dynamic> message) async {
-    final rev = revision, target = peer(selected!);
+  Future<void> joinInvited(GroupInviteMessage inv) async {
+    final rev = revision;
     final value = await showDialog<String>(
       context: context,
-      builder: (_) => ContactNameDialog(
-        initial: '${message['text'] ?? ''}',
-        editingMessage: true,
-      ),
+      builder: (_) => const ContactNameDialog(initial: '', joiningGroup: true),
     );
-    if (!active || rev != revision || value == null || value.trim().isEmpty)
+    if (!active || rev != revision || value == null || value.isEmpty) return;
+    await mutate(() async {
+      await widget.api.request(
+        '/api/groups/${inv.gid}/join',
+        body: {'name': value, if (inv.code.isNotEmpty) 'code': inv.code},
+      );
+    });
+  }
+
+  void editMessage(Map<String, dynamic> message) {
+    // Правка в строке ввода с плашкой «Редактирование сообщения», как в телефоне.
+    setState(() {
+      editingId = '${message['msg_id']}';
+      replyTo = null;
+      composer.text = '${message['text'] ?? ''}';
+      composer.selection = TextSelection.collapsed(
+        offset: composer.text.length,
+      );
+    });
+  }
+
+  Future<void> deleteSelected() async {
+    final target = peer(selected!), ids = picked.toList();
+    if (ids.isEmpty) return;
+    if (!await confirm(
+      'Удалить выбранные сообщения (${ids.length})?',
+      'Сообщения будут удалены только в вашей истории.',
+    )) {
       return;
-    await mutate(() => repo.edit(target, '${message['msg_id']}', value));
+    }
+    await mutate(
+      () async {
+        for (final id in ids) {
+          await repo.deleteMessage(target, id);
+        }
+      },
+      success: () => picked.clear(),
+    );
   }
 
   Future<void> deleteMessage(Map<String, dynamic> message) async {
@@ -710,15 +751,19 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (own && m['attachment'] == null) commandEdit,
       commandReply,
       if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      commandSelect,
       if (own) commandDelete,
     ];
     final choice = await showMessageMenu(context, at, commands);
     if (!mounted || choice == null) return;
     switch (choice) {
       case commandEdit:
-        await editMessage(m);
+        editMessage(m);
+      case commandSelect:
+        setState(() => picked.add('${m['msg_id']}'));
       case commandReply:
         setState(() {
+          editingId = null;
           replyTo = {
             'msg_id': '${m['msg_id']}',
             'text': quoteExcerpt(
@@ -765,26 +810,47 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => tapAt = d.globalPosition,
-          onTap: () => messageMenu(m, tapAt),
+          onTap: () {
+            if (picked.isEmpty) {
+              messageMenu(m, tapAt);
+            } else {
+              setState(() {
+                final id = '${m['msg_id']}';
+                if (!picked.remove(id)) picked.add(id);
+              });
+            }
+          },
           child: Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
             decoration: BoxDecoration(
               color: own ? Icq.sent : Colors.white,
-              border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+              border: Border.all(
+                color: picked.contains('${m['msg_id']}')
+                    ? const Color(0xFF2E86DE)
+                    : (own ? Icq.mine : Icq.peer),
+                width: picked.contains('${m['msg_id']}') ? 3 : 1.5,
+              ),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (!own)
-                  Text(
-                    '${selected!['name']}',
-                    style: const TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                      color: Icq.peer,
-                    ),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      InitialBadge('${selected!['name']}', size: 20),
+                      const SizedBox(width: 6),
+                      Text(
+                        '${selected!['name']}',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          color: Icq.peer,
+                        ),
+                      ),
+                    ],
                   ),
                 if (reply != null)
                   QuoteCard(
@@ -800,7 +866,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       }
                     },
                   ),
-                Text('${m['text'] ?? ''}'),
+                if (GroupInviteMessage.tryParse('${m['text'] ?? ''}')
+                    case final inv?)
+                  GroupInviteCard(
+                    invite: inv,
+                    outgoing: own,
+                    onJoin: () => joinInvited(inv),
+                  )
+                else
+                  Text('${m['text'] ?? ''}'),
                 if (m['attachment'] is Map)
                   AttachmentView(
                     key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
@@ -851,11 +925,28 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         ),
         Wrap(
           crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 10,
+          spacing: 14,
           children: [
-            TextButton(
-              onPressed: sending ? null : clearHistory,
-              child: const UiText('Очистить историю'),
+            if (widget.calls != null) ...[
+              CommandText(
+                'Позвонить',
+                onTap: () => widget.calls!.start(
+                  peer(selected!),
+                  phone: selected!['is_phone'] == true,
+                ),
+              ),
+              CommandText(
+                'Видеозвонок',
+                onTap: () => widget.calls!.start(
+                  peer(selected!),
+                  video: true,
+                  phone: selected!['is_phone'] == true,
+                ),
+              ),
+            ],
+            CommandText(
+              'Очистить историю',
+              onTap: sending ? null : clearHistory,
             ),
             const UiText(
               'Показаны последние 100 сообщений не старше года.',
@@ -863,6 +954,25 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             ),
           ],
         ),
+        if (picked.isNotEmpty)
+          Wrap(
+            spacing: 14,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              UiText(
+                'Выбрано: ${picked.length}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              CommandText(
+                'Удалить выбранные',
+                onTap: sending ? null : deleteSelected,
+              ),
+              CommandText(
+                'Снять выбор',
+                onTap: () => setState(picked.clear),
+              ),
+            ],
+          ),
         if (!loading && messages.isEmpty && error == null)
           const UiText('История пуста.'),
         for (final m in messages) bubble(m),
@@ -892,6 +1002,29 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (editingId != null)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 6),
+            child: Row(
+              children: [
+                const Icon(Icons.edit_outlined, size: 16, color: Icq.header),
+                const SizedBox(width: 6),
+                const Expanded(
+                  child: UiText(
+                    'Редактирование сообщения',
+                    style: TextStyle(color: Icq.header),
+                  ),
+                ),
+                CommandText(
+                  'Отмена',
+                  onTap: () => setState(() {
+                    editingId = null;
+                    composer.clear();
+                  }),
+                ),
+              ],
+            ),
+          ),
         if (replyTo != null)
           QuoteCard(
             author: quoteAuthor('${replyTo!['msg_id']}'),
@@ -988,13 +1121,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   Widget build(BuildContext context) => widget.page == 'О приложении'
       ? const AboutPanel()
-      : widget.page == 'Звонки'
-      ? CallsFeature(
-          api: widget.api,
-          isActive: widget.isActive,
-          onLocked: widget.onLocked,
-          onFailure: widget.onFailure,
-        )
       : const ['Шлюзы', 'Relay'].contains(widget.page)
       ? NetworkFeature(
           api: widget.api,
@@ -1142,10 +1268,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
 class ContactNameDialog extends StatefulWidget {
   final String initial;
   final bool editingMessage;
+  final bool joiningGroup;
   const ContactNameDialog({
     super.key,
     required this.initial,
     this.editingMessage = false,
+    this.joiningGroup = false,
   });
   @override
   State<ContactNameDialog> createState() => _ContactNameDialogState();
@@ -1163,7 +1291,11 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: UiText(
-      widget.editingMessage ? 'Изменить сообщение' : 'Переименовать контакт',
+      widget.joiningGroup
+          ? 'Вступить в группу'
+          : widget.editingMessage
+          ? 'Изменить сообщение'
+          : 'Переименовать контакт',
     ),
     content: TextField(
       controller: field,
