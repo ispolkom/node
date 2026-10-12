@@ -13,6 +13,7 @@ class AttachmentView extends StatefulWidget {
   final bool Function() isActive;
   final Future<void> Function(Future<void> Function()) mutate;
   final bool busy;
+  final String? contentPath;
   const AttachmentView({
     super.key,
     required this.api,
@@ -20,6 +21,7 @@ class AttachmentView extends StatefulWidget {
     required this.isActive,
     required this.mutate,
     required this.busy,
+    this.contentPath,
   });
   @override
   State<AttachmentView> createState() => _AttachmentViewState();
@@ -37,7 +39,11 @@ class _AttachmentViewState extends State<AttachmentView> {
   @override
   void initState() {
     super.initState();
-    check();
+    if (widget.contentPath != null) {
+      ready = true;
+    } else {
+      check();
+    }
   }
 
   @override
@@ -79,7 +85,7 @@ class _AttachmentViewState extends State<AttachmentView> {
   Future<void> showPreview() async {
     await widget.mutate(() async {
       final bytes = await repo.binary.bytes(
-        repo.path(widget.attachment, 'content'),
+        widget.contentPath ?? repo.path(widget.attachment, 'content'),
       );
       if (!active) {
         bytes.fillRange(0, bytes.length, 0);
@@ -116,7 +122,7 @@ class _AttachmentViewState extends State<AttachmentView> {
       if (size is! num || size < 0 || size > 1024 * 1024 * 1024)
         throw const ApiFailure('protocol');
       await repo.binary.download(
-        repo.path(widget.attachment, 'content'),
+        widget.contentPath ?? repo.path(widget.attachment, 'content'),
         File(path!),
         limit: size.toInt(),
         isActive: () => active,

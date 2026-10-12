@@ -148,6 +148,18 @@ Future<void> main(List<String> args) async {
       ),
       'group text',
     );
+    await a.request('/api/groups/devices');
+    final groupTemp = await Directory.systemTemp.createTemp('m5-group-');
+    try {
+    final groupFile = File('${groupTemp.path}/группа файл.bin');
+    final groupBytes = Uint8List.fromList(List.generate(1537, (i) => i % 251));
+    await groupFile.writeAsBytes(groupBytes);
+    final uploadedGroup = await a.uploadGroup('/api/groups/$gid/upload?name=${Uri.encodeComponent('группа файл.bin')}', groupFile, isActive: () => true, progress: (_, _) {});
+    final downloadedGroup = await a.bytes('/api/groups/$gid/file/${uploadedGroup['seq']}');
+    if (base64Encode(downloadedGroup) != base64Encode(groupBytes)) throw StateError('group file bytes');
+    final safeFeed = (await groups.feed(gid)).toString();
+    if (safeFeed.contains("'k':") || !safeFeed.contains('группа файл.bin')) throw StateError('group file display');
+    } finally { await groupTemp.delete(recursive: true); }
     final info = await groups.info(gid);
     if ((info['group'] as Map)['role'] != 'owner' ||
         (info['members'] as List).isEmpty)

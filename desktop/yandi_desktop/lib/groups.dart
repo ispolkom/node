@@ -1,4 +1,8 @@
 import 'preferences.dart';
+import 'dart:io';
+import 'attachments.dart';
+import 'platform_files.dart';
+import 'domain/file_repository.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -34,6 +38,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   bool loading = true, refreshing = false, busy = false;
   int revision = 0;
   Timer? timer;
+  File? picked;
+  int sentBytes = 0, fileSize = 0;
+  bool choosing = false;
   bool get active => mounted && widget.isActive();
   Map<String, dynamic> get group =>
       (info?['group'] ?? feed?['group'] ?? <String, dynamic>{})
@@ -54,6 +61,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   @override
   void dispose() {
     revision++;
+    picked = null;
+    PlatformFiles.cancel().catchError((Object _) {});
     timer?.cancel();
     composer.clear();
     composer.dispose();
@@ -131,6 +140,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     if (selected != null) drafts[selected!] = composer.text;
     revision++;
     setState(() {
+      picked = null;
+      sentBytes = fileSize = 0;
       selected = id;
       tab = nextTab ?? tab;
       composer.text = drafts[id] ?? '';
@@ -365,16 +376,19 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         if (invitation != null) SelectableText(invitation!),
         button('Пригласить телефон', () async {
           final id = selected!;
-          final value = await form('Пригласить телефон', [
-            'Полный ID телефона',
-          ]);
-          if (value == null) return;
-          if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(value[0].trim())) {
-            setState(() => error = 'Нужен полный ID телефона (64 hex).');
-            return;
-          }
+          final rev = revision;
+          List<Map<String, dynamic>>? devices;
+          await mutate(() async { devices = ShellRepository.list(await widget.api.request('/api/groups/devices'), 'devices'); });
+          if (!active || revision != rev || devices == null) return;
+          final peer = await showDialog<String>(context: context, builder: (ctx) => SimpleDialog(title: const UiText('Пригласить телефон'), children: [
+            if (devices!.isEmpty) const UiText('Устройств нет.'),
+            for (final d in devices!) SimpleDialogOption(onPressed: () => Navigator.pop(ctx, d['id']), child: Text('${d['name']}')),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const UiText('Отмена')),
+          ]));
+          if (!active || rev != revision || peer == null) return;
           await mutate(() async {
-            await repo.act(id, 'invite-device', {'peer': value[0].trim()});
+            if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(peer)) throw const ApiFailure('protocol');
+            await repo.act(id, 'invite-device', {'peer': peer});
           });
         }),
         for (final r in rows(info, 'requests'))
@@ -407,6 +421,56 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       ],
     ],
   );
+  Future<void> pickFile() async {
+    final rev = revision;
+    choosing = true;
+    try {
+      final path = await PlatformFiles.choose();
+      if (active && rev == revision && path != null)
+        setState(() {
+          picked = File(path);
+          sentBytes = fileSize = 0;
+        });
+    } catch (_) {
+      if (active)
+        setState(() => error = 'Не удалось открыть диалог выбора файла.');
+    } finally {
+      if (mounted) setState(() => choosing = false);
+    }
+  }
+
+  Future<void> sendFile() async {
+    final file = picked, id = selected, rev = revision;
+    if (file == null || id == null || busy || !canSend) return;
+    final kind = switch (FileRepository.mime(file.path).split('/').first) {
+      'image' => 2,
+      'audio' => 4,
+      'video' => 5,
+      _ => 3,
+    };
+    if ((feed?['deny'] as List? ?? []).contains(kind)) {
+      setState(() => error = 'В этой группе запрещён такой вид файлов.');
+      return;
+    }
+    await mutate(() async {
+      if (widget.api is! GroupFileApi) throw const ApiFailure('protocol');
+      final result = await (widget.api as GroupFileApi).uploadGroup(
+        '${repo.path(id, 'upload')}?name=${Uri.encodeComponent(file.uri.pathSegments.last)}',
+        file,
+        isActive: () => active && revision == rev,
+        progress: (sent, size) {
+          if (active && revision == rev)
+            setState(() {
+              sentBytes = sent;
+              fileSize = size;
+            });
+        },
+      );
+      if (result['seq'] is! int || result['seq'] <= 0)
+        throw const ApiFailure('protocol');
+    }, success: () => picked = null);
+  }
+
   bool canDelete(Map<String, dynamic> message) {
     if (!staff) return false;
     if (message['from'] == group['my_alias']) return true;
@@ -440,9 +504,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         '${group['name'] ?? 'Загрузка группы…'}',
         style: const TextStyle(fontSize: 22),
       ),
-      const UiText(
-        'История не старше календарного года. Файлы и звонки не поддерживаются.',
-      ),
+      const UiText('История не старше календарного года.'),
       if (feed?['damaged'] == true) const UiText('Повреждена лента на диске.'),
       if (feed?['problem'] == true)
         const UiText('Ключ владельца изменился: доверие не подтверждено.'),
@@ -463,9 +525,27 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(m['mine'] == true ? 'Вы' : '${m['author']}'),
-                SelectableText(
-                  m['text'] == null ? 'Вложение (недоступно)' : '${m['text']}',
-                ),
+                if (m['attachment'] is Map)
+                  AttachmentView(
+                    key: ValueKey('$selected-${m['seq']}'),
+                    api: widget.api,
+                    attachment: {
+                      ...Map<String, dynamic>.from(m['attachment']),
+                      'mime_type': FileRepository.mime(
+                        '${m['attachment']['filename']}',
+                      ),
+                    },
+                    contentPath: repo.path(selected!, 'file/${m['seq']}'),
+                    isActive: () => active,
+                    mutate: (a) => mutate(a),
+                    busy: busy,
+                  )
+                else
+                  SelectableText(
+                    m['text'] == null
+                        ? tr(context, 'Вложение (недоступно)')
+                        : '${m['text']}',
+                  ),
                 Text(
                   '${DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt()).toLocal()} · №${m['seq']}',
                 ),
@@ -501,6 +581,31 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         onPressed: !busy && canSend ? send : null,
         child: const UiText('Отправить группе'),
       ),
+      Wrap(
+        children: [
+          TextButton(
+            onPressed: busy || choosing || !canSend ? null : pickFile,
+            child: const UiText('Выбрать файл'),
+          ),
+          if (picked != null) ...[
+            Text(picked!.uri.pathSegments.last),
+            TextButton(
+              onPressed: busy ? null : () => setState(() => picked = null),
+              child: const UiText('Убрать файл'),
+            ),
+            FilledButton(
+              onPressed: busy || !canSend ? null : sendFile,
+              child: const UiText('Отправить файл'),
+            ),
+          ],
+        ],
+      ),
+      if (fileSize > 0) ...[
+        LinearProgressIndicator(value: sentBytes / fileSize),
+        UiText(
+          'Передано демону: $sentBytes / $fileSize байт. Доставка подтверждается отдельно.',
+        ),
+      ],
       if (info != null) ...[
         participants(),
         if (manager) ...[
@@ -768,6 +873,9 @@ class GroupConfirm extends StatefulWidget {
 class _GroupConfirmState extends State<GroupConfirm> {
   late int seconds = widget.countdown;
   Timer? timer;
+  File? picked;
+  int sentBytes = 0, fileSize = 0;
+  bool choosing = false;
   @override
   void initState() {
     super.initState();

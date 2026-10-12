@@ -97,7 +97,30 @@ abstract class BinaryApi {
   });
 }
 
+abstract class GroupFileApi {
+  Future<Map<String, dynamic>> uploadGroup(
+    String path,
+    File file, {
+    required bool Function() isActive,
+    required void Function(int, int) progress,
+  });
+}
+
 bool validApiPath(String path) {
+  final upload = RegExp(
+    r'^/api/groups/[a-f0-9]{32}/upload\?name=([^/?#]+)$',
+  ).firstMatch(path);
+  if (upload != null) {
+    try {
+      final name = Uri.decodeComponent(upload[1]!);
+      return name.isNotEmpty &&
+          name.length <= 255 &&
+          !name.contains(RegExp(r'[/\\\x00-\x1f\x7f]')) &&
+          Uri.encodeComponent(name) == upload[1];
+    } catch (_) {
+      return false;
+    }
+  }
   if (RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path)) return true;
   if (RegExp(r'^/api/mobile/call/events\?after=[0-9]{1,20}$').hasMatch(path))
     return true;
@@ -120,7 +143,7 @@ bool validApiPath(String path) {
 
 /// A short-lived, non-cookie client per RPC lets a deadline forcibly close IO.
 /// There is no TCP fallback, proxy, redirect, persistence or automatic POST retry.
-class UnixApi implements Api, BinaryApi {
+class UnixApi implements Api, BinaryApi, GroupFileApi {
   final String socketPath;
   final Duration timeout;
   final int maxResponseBytes;
@@ -147,6 +170,8 @@ class UnixApi implements Api, BinaryApi {
     Map<String, dynamic>? body,
     String? method,
     Uint8List? multipartBody,
+    File? rawFile,
+    void Function(int, int)? progress,
     String? boundary,
     int? binaryLimit,
     File? destination,
@@ -186,7 +211,7 @@ class UnixApi implements Api, BinaryApi {
         encoded = Uint8List.fromList(utf8.encode(jsonEncode(body)));
       return await (() async {
         final req = await client.openUrl(
-          method ?? (body == null ? 'GET' : 'POST'),
+          method ?? (body == null && rawFile == null ? 'GET' : 'POST'),
           Uri.parse('http://localhost$path'),
         );
         req.followRedirects = false;
@@ -205,6 +230,32 @@ class UnixApi implements Api, BinaryApi {
           await req.flush();
           payload.fillRange(0, payload.length, 0);
           encoded = null;
+        }
+        if (rawFile != null) {
+          final handle = await rawFile.open();
+          try {
+            final size = await handle.length();
+            if (size <= 0) throw const ApiFailure('empty_file');
+            if (size > 200 * 1024 * 1024) throw const ApiFailure('file_limit');
+            req.headers.contentType = ContentType.binary;
+            req.contentLength = size;
+            var sent = 0;
+            while (sent < size) {
+              if (isActive?.call() != true) throw const ApiFailure('cancelled');
+              final chunk = await handle.read((size - sent).clamp(0, 65536));
+              if (chunk.isEmpty) throw const ApiFailure('protocol');
+              try {
+                req.add(chunk);
+                await req.flush();
+                sent += chunk.length;
+                progress?.call(sent, size);
+              } finally {
+                chunk.fillRange(0, chunk.length, 0);
+              }
+            }
+          } finally {
+            await handle.close();
+          }
         }
         final response = await req.close();
         if (response.isRedirect)
@@ -271,6 +322,8 @@ class UnixApi implements Api, BinaryApi {
                 '/api/media/video/incoming-call',
               ].contains(path))
             value = <String, dynamic>{'incoming': null};
+          if (path == '/api/groups/devices' && value is List)
+            value = <String, dynamic>{'devices': value};
           if (value is! Map<String, dynamic>)
             throw const ApiFailure('protocol');
           if (response.statusCode < 200 || response.statusCode >= 300)
@@ -311,6 +364,21 @@ class UnixApi implements Api, BinaryApi {
       client.close(force: true);
     }
   }
+
+  @override
+  Future<Map<String, dynamic>> uploadGroup(
+    String path,
+    File file, {
+    required bool Function() isActive,
+    required void Function(int, int) progress,
+  }) async =>
+      await _exchange(
+            path,
+            rawFile: file,
+            isActive: isActive,
+            progress: progress,
+          )
+          as Map<String, dynamic>;
 
   @override
   Future<Map<String, dynamic>> multipart(

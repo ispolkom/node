@@ -108,6 +108,14 @@ class GroupRepository {
             'author': m['author'],
             'mine': m['mine'],
             'kind': m['kind'],
+            if (const [2, 3, 4, 5].contains(m['kind']) &&
+                m['body'] is Map &&
+                m['body']['n'] is String &&
+                m['body']['z'] is num)
+              'attachment': {
+                'filename': m['body']['n'],
+                'size': m['body']['z'],
+              },
             'text': m['kind'] == 1 || m['kind'] == 6
                 ? (m['body'] is Map ? m['body']['t'] : '')
                 : null,
