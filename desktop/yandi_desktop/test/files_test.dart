@@ -9,7 +9,7 @@ import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
 
 final png = base64Decode(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==',
 );
 
 class FileApi extends m2.FeatureApi implements BinaryApi {

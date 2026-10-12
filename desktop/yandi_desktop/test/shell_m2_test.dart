@@ -38,6 +38,15 @@ class FeatureApi extends m1.FakeApi {
     Map<String, dynamic>? body,
     String? method,
   }) async {
+    if (path.startsWith('/api/profile/') && path != '/api/profile/me') {
+      return {
+        'profile': {
+          'display_name': 'Алиса',
+          'short_id': path.split('/').last,
+          'online': true,
+        },
+      };
+    }
     if (path == '/api/status') return {'node_id': 'c' * 64, 'short_id': 'abc'};
     if (path == '/api/contacts' ||
         path == '/api/peers/trusted' ||

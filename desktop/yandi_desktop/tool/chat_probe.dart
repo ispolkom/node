@@ -1,5 +1,6 @@
 // Destructive fixtures only: sockets belong to two freshly allocated /tmp nodes.
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import '../lib/domain/file_repository.dart';
@@ -199,6 +200,14 @@ Future<void> main(List<String> args) async {
     await ra.rename(contact, 'Узел Б новое имя');
     if (!(await ra.contacts()).any((c) => c['name'] == 'Узел Б новое имя'))
       throw StateError('rename');
+    final avatar = base64Decode('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==');
+    await a.multipart('/api/profile/avatar', {}, 'avatar', 'avatar.png', avatar);
+    final avatarPath = (await ra.profile())['avatar'] as String;
+    if ((await a.bytes(avatarPath)).length != avatar.length) throw StateError('avatar upload/view');
+    await a.request('/api/profile/me', method: 'PUT', body: {'avatar': ''});
+    if ((await ra.profile())['avatar'] != '') throw StateError('avatar removal');
+    final peerProfile = await a.request('/api/profile/${idB.substring(0, 16)}');
+    if (peerProfile['profile'] is! Map) throw StateError('peer profile');
     await ra.saveProfile('Профиль оболочки');
     if ((await ra.profile())['display_name'] != 'Профиль оболочки')
       throw StateError('profile');

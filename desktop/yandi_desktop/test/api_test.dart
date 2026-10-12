@@ -167,26 +167,49 @@ void main() {
       throwsA(isA<ApiFailure>()),
     );
   });
-  test('binary Unix download refuses overwrite and cleans partial cancellation', () async {
-    var active = true;
-    server.listen((req) async {
-      req.response.add([1, 2, 3]);
-      await req.response.close();
-    });
-    final target = File('${temp.path}/received');
-    await api.download('/api/files/content/file_1/name', target,
-        limit: 3, isActive: () => active);
-    expect(await target.readAsBytes(), [1, 2, 3]);
-    await expectLater(api.download('/api/files/content/file_1/name', target,
-        limit: 3, isActive: () => active), throwsA(isA<ApiFailure>()));
-    active = false;
-    final cancelled = File('${temp.path}/cancelled');
-    await expectLater(api.download('/api/files/content/file_1/name', cancelled,
-        limit: 3, isActive: () => active), throwsA(isA<ApiFailure>()));
-    expect(await cancelled.exists(), false);
-    await expectLater(api.bytes('/api/files/content/file_1/name', limit: 2),
-        throwsA(isA<ApiFailure>().having((e) => e.kind, 'kind', 'large')));
-  });
+  test(
+    'binary Unix download refuses overwrite and cleans partial cancellation',
+    () async {
+      var active = true;
+      server.listen((req) async {
+        req.response.add([1, 2, 3]);
+        await req.response.close();
+      });
+      final target = File('${temp.path}/received');
+      await api.download(
+        '/api/files/content/file_1/name',
+        target,
+        limit: 3,
+        isActive: () => active,
+      );
+      expect(await target.readAsBytes(), [1, 2, 3]);
+      await expectLater(
+        api.download(
+          '/api/files/content/file_1/name',
+          target,
+          limit: 3,
+          isActive: () => active,
+        ),
+        throwsA(isA<ApiFailure>()),
+      );
+      active = false;
+      final cancelled = File('${temp.path}/cancelled');
+      await expectLater(
+        api.download(
+          '/api/files/content/file_1/name',
+          cancelled,
+          limit: 3,
+          isActive: () => active,
+        ),
+        throwsA(isA<ApiFailure>()),
+      );
+      expect(await cancelled.exists(), false);
+      await expectLater(
+        api.bytes('/api/files/content/file_1/name', limit: 2),
+        throwsA(isA<ApiFailure>().having((e) => e.kind, 'kind', 'large')),
+      );
+    },
+  );
   test('mutable secret is zeroed', () {
     final secret = SecretBytes('секрет');
     secret.clear();

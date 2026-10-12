@@ -11,6 +11,7 @@ import 'calls.dart';
 import 'attachments.dart';
 import 'domain/file_repository.dart';
 import 'platform_files.dart';
+import 'profile_panel.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -453,6 +454,14 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         const Text('Выберите контакт для переписки.')
       else ...[
         Text('Чат: ${selected!['name']}', style: const TextStyle(fontSize: 22)),
+        ProfilePanel(
+          key: ValueKey('profile:${selected!['short_id']}'),
+          api: widget.api,
+          peer: '${selected!['short_id']}',
+          busy: sending,
+          isActive: () => active,
+          mutate: (action) => mutate(action),
+        ),
         TextButton(
           onPressed: sending ? null : clearHistory,
           child: const Text('Очистить историю'),
@@ -586,6 +595,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (refreshError) const Text('Данные не обновлены.'),
             if (widget.page == 'Настройки') ...[
               const Text('Профиль', style: TextStyle(fontSize: 22)),
+              ProfilePanel(
+                api: widget.api,
+                busy: sending,
+                isActive: () => active,
+                mutate: (action) => mutate(action),
+              ),
               field(name, 'Имя профиля'),
               FilledButton(
                 onPressed: sending || loading
