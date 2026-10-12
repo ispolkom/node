@@ -3,16 +3,46 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/devices.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
+
 class DeviceApi extends m2.FeatureApi {
   Completer<Map<String, dynamic>>? pairing;
   @override
-  Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) async {
-    if (path == '/api/mobile/pairing') return pairing?.future ?? {'qr_text': 'daemon-secret', 'expires_in_secs': 3, 'qr_svg': '<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h1v1H4V4"/></svg>'};
-    if (path == '/api/mobile/devices' || path == '/api/mobile/other-devices') return {'devices': [{'name': 'Phone', 'peer_id': 'd' * 64, 'online': true, 'status': 'hidden', 'connections': 1, 'last_seen_ms': 0}]};
-    if (path.startsWith('/api/mobile/')) { calls.add(path); methods.add(method ?? 'POST'); if (body != null) bodies.add(body); return {'ok': true}; }
+  Future<Map<String, dynamic>> request(
+    String path, {
+    Map<String, dynamic>? body,
+    String? method,
+  }) async {
+    if (path == '/api/mobile/pairing')
+      return pairing?.future ??
+          {
+            'qr_text': 'daemon-secret',
+            'expires_in_secs': 3,
+            'qr_svg':
+                '<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h1v1H4V4"/></svg>',
+          };
+    if (path == '/api/mobile/devices' || path == '/api/mobile/other-devices')
+      return {
+        'devices': [
+          {
+            'name': 'Phone',
+            'peer_id': 'd' * 64,
+            'online': true,
+            'status': 'hidden',
+            'connections': 1,
+            'last_seen_ms': 0,
+          },
+        ],
+      };
+    if (path.startsWith('/api/mobile/')) {
+      calls.add(path);
+      methods.add(method ?? 'POST');
+      if (body != null) bodies.add(body);
+      return {'ok': true};
+    }
     return super.request(path, body: body, method: method);
   }
 }
+
 void main() {
   testWidgets('pairing TTL, confirmation and full ID revoke', (t) async {
     final api = DeviceApi();
@@ -49,7 +79,17 @@ void main() {
     await m1.stop(t);
   });
   test('QR accepts only rectangles and rejects bounds', () {
-    expect(QrSquares.parse('<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h1v1H4V4"/></svg>').squares.length, 1);
-    expect(() => QrSquares.parse('<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h99v1H4V4"/></svg>'), throwsA(anything));
+    expect(
+      QrSquares.parse(
+        '<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h1v1H4V4"/></svg>',
+      ).squares.length,
+      1,
+    );
+    expect(
+      () => QrSquares.parse(
+        '<svg viewBox="0 0 21 21"><path fill="#000" d="M4 4h99v1H4V4"/></svg>',
+      ),
+      throwsA(anything),
+    );
   });
 }

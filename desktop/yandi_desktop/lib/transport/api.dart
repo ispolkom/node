@@ -9,6 +9,8 @@ class ApiFailure implements Exception {
   final int? status;
   const ApiFailure(this.kind, [this.status]);
   String get message => switch (kind) {
+    'sealed_required' =>
+      'Создайте и откройте закрытую среду перед изменением пула прокси.',
     'timeout' => 'Демон не ответил вовремя. Повторите вручную.',
     'large' => 'Ответ демона превышает допустимый размер.',
     'protocol' => 'Ответ демона не соответствует протоколу JSON.',

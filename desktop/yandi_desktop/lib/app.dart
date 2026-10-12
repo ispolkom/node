@@ -611,6 +611,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               'Relay',
               'Звонки',
               'Настройки',
+              'О приложении',
               'Закрытая среда',
             ])
               OutlinedButton(

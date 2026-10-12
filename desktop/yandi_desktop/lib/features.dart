@@ -15,6 +15,7 @@ import 'platform_files.dart';
 import 'profile_panel.dart';
 import 'contact_tunnel.dart';
 import 'devices.dart';
+import 'advanced_settings.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -57,7 +58,13 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   void initState() {
     super.initState();
-    if (const ['Группы', 'Шлюзы', 'Relay', 'Звонки'].contains(widget.page))
+    if (const [
+      'Группы',
+      'Шлюзы',
+      'Relay',
+      'Звонки',
+      'О приложении',
+    ].contains(widget.page))
       return;
     refresh();
     if (widget.page != 'Настройки') {
@@ -670,7 +677,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   );
 
   @override
-  Widget build(BuildContext context) => widget.page == 'Звонки'
+  Widget build(BuildContext context) => widget.page == 'О приложении'
+      ? const AboutPanel()
+      : widget.page == 'Звонки'
       ? CallsFeature(
           api: widget.api,
           isActive: widget.isActive,
@@ -701,6 +710,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (notice != null) Text(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
             if (widget.page == 'Настройки') ...[
+              AdvancedSettings(
+                api: widget.api,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
               DevicesPanel(
                 api: widget.api,
                 paired: true,

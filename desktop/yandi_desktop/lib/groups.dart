@@ -378,16 +378,35 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           final id = selected!;
           final rev = revision;
           List<Map<String, dynamic>>? devices;
-          await mutate(() async { devices = ShellRepository.list(await widget.api.request('/api/groups/devices'), 'devices'); });
+          await mutate(() async {
+            devices = ShellRepository.list(
+              await widget.api.request('/api/groups/devices'),
+              'devices',
+            );
+          });
           if (!active || revision != rev || devices == null) return;
-          final peer = await showDialog<String>(context: context, builder: (ctx) => SimpleDialog(title: const UiText('Пригласить телефон'), children: [
-            if (devices!.isEmpty) const UiText('Устройств нет.'),
-            for (final d in devices!) SimpleDialogOption(onPressed: () => Navigator.pop(ctx, d['id']), child: Text('${d['name']}')),
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const UiText('Отмена')),
-          ]));
+          final peer = await showDialog<String>(
+            context: context,
+            builder: (ctx) => SimpleDialog(
+              title: const UiText('Пригласить телефон'),
+              children: [
+                if (devices!.isEmpty) const UiText('Устройств нет.'),
+                for (final d in devices!)
+                  SimpleDialogOption(
+                    onPressed: () => Navigator.pop(ctx, d['id']),
+                    child: Text('${d['name']}'),
+                  ),
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const UiText('Отмена'),
+                ),
+              ],
+            ),
+          );
           if (!active || rev != revision || peer == null) return;
           await mutate(() async {
-            if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(peer)) throw const ApiFailure('protocol');
+            if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(peer))
+              throw const ApiFailure('protocol');
             await repo.act(id, 'invite-device', {'peer': peer});
           });
         }),
