@@ -1,3 +1,4 @@
+import 'message_actions.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -45,6 +46,8 @@ class ShellFeatures extends StatefulWidget {
 
 class _ShellFeaturesState extends State<ShellFeatures> {
   late final repo = ShellRepository(widget.api);
+  Map<String, dynamic>? replyTo;
+  final anchors = <String, GlobalKey>{};
   final card = TextEditingController(), name = TextEditingController();
   final search = TextEditingController(), composer = TextEditingController();
   final drafts = <String, String>{};
@@ -236,6 +239,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     revision++;
     setState(() {
       pickedFile = null;
+      replyTo = null;
       transferred = transferSize = 0;
       selected = contact;
       messages = [];
@@ -253,12 +257,13 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   Future<void> send() async {
     final contact = selected;
     if (contact == null || composer.text.trim().isEmpty || sending) return;
-    final target = peer(contact), text = composer.text;
+    final target = peer(contact), text = composer.text, quote = replyTo;
     await mutate(
-      () => repo.send(target, text),
+      () => repo.send(target, text, replyTo: quote),
       success: () {
         composer.clear();
         drafts.remove(target);
+        replyTo = null;
       },
     );
   }
@@ -698,6 +703,51 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     ),
   );
 
+  Future<void> messageMenu(Map<String, dynamic> m, Offset at) async {
+    if (sending || selected == null) return;
+    final own = m['from'] == ownId;
+    final commands = [
+      if (own && m['attachment'] == null) commandEdit,
+      commandReply,
+      if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      if (own) commandDelete,
+    ];
+    final choice = await showMessageMenu(context, at, commands);
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case commandEdit:
+        await editMessage(m);
+      case commandReply:
+        setState(() {
+          replyTo = {
+            'msg_id': '${m['msg_id']}',
+            'text': quoteExcerpt(
+              '${m['text'] ?? ''}'.isEmpty
+                  ? (m['attachment'] is Map
+                        ? (m['attachment'] as Map)['filename']
+                        : '')
+                  : m['text'],
+            ),
+          };
+        });
+      case commandCopy:
+        await Clipboard.setData(ClipboardData(text: '${m['text'] ?? ''}'));
+      case commandDelete:
+        await deleteMessage(m);
+    }
+  }
+
+  String quoteAuthor(String id) {
+    for (final m in messages) {
+      if ('${m['msg_id']}' == id) {
+        return m['from'] == ownId
+            ? tr(context, 'Вы')
+            : '${selected?['name'] ?? ''}';
+      }
+    }
+    return '';
+  }
+
   Widget bubble(Map<String, dynamic> m) {
     final own = m['from'] == ownId;
     final ts = DateTime.fromMillisecondsSinceEpoch(
@@ -705,73 +755,72 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     ).toLocal();
     final hm =
         '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
-    const link = TextStyle(fontSize: 11, fontFamily: 'Tahoma');
-    final small = TextButton.styleFrom(
-      minimumSize: const Size(0, 22),
-      padding: const EdgeInsets.symmetric(horizontal: 6),
-      textStyle: link,
-    );
+    final reply = m['reply_to'] is Map ? m['reply_to'] as Map : null;
+    var tapAt = Offset.zero;
     return Align(
+      key: anchors.putIfAbsent('${m['msg_id']}', () => GlobalKey()),
       alignment: own ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
-          decoration: BoxDecoration(
-            color: own ? Icq.sent : Colors.white,
-            border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!own)
-                Text(
-                  '${selected!['name']}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Icq.peer,
-                  ),
-                ),
-              SelectableText('${m['text'] ?? ''}'),
-              if (m['attachment'] is Map)
-                AttachmentView(
-                  key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
-                  api: widget.api,
-                  attachment: Map<String, dynamic>.from(m['attachment'] as Map),
-                  isActive: () => active,
-                  mutate: (action) => mutate(action),
-                  busy: sending,
-                ),
-              Wrap(
-                alignment: WrapAlignment.end,
-                crossAxisAlignment: WrapCrossAlignment.center,
-                children: [
-                  if (own) ...[
-                    if (m['attachment'] == null)
-                      TextButton(
-                        style: small,
-                        onPressed: sending ? null : () => editMessage(m),
-                        child: const UiText('Изменить сообщение'),
-                      ),
-                    TextButton(
-                      style: small,
-                      onPressed: sending ? null : () => deleteMessage(m),
-                      child: const UiText('Удалить сообщение'),
-                    ),
-                  ],
-                  Padding(
-                    padding: const EdgeInsets.only(left: 6),
-                    child: Text(
-                      '$hm · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · ${tr(context, 'изменено')}' : ''}',
-                      style: const TextStyle(fontSize: 11, color: Icq.dark),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) => tapAt = d.globalPosition,
+          onTap: () => messageMenu(m, tapAt),
+          child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+            decoration: BoxDecoration(
+              color: own ? Icq.sent : Colors.white,
+              border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!own)
+                  Text(
+                    '${selected!['name']}',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: Icq.peer,
                     ),
                   ),
-                ],
-              ),
-            ],
+                if (reply != null)
+                  QuoteCard(
+                    author: quoteAuthor('${reply['msg_id']}'),
+                    text: '${reply['text'] ?? ''}',
+                    onTap: () {
+                      final ctx = anchors['${reply['msg_id']}']?.currentContext;
+                      if (ctx != null) {
+                        Scrollable.ensureVisible(
+                          ctx,
+                          duration: const Duration(milliseconds: 200),
+                        );
+                      }
+                    },
+                  ),
+                Text('${m['text'] ?? ''}'),
+                if (m['attachment'] is Map)
+                  AttachmentView(
+                    key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
+                    api: widget.api,
+                    attachment: Map<String, dynamic>.from(
+                      m['attachment'] as Map,
+                    ),
+                    isActive: () => active,
+                    mutate: (action) => mutate(action),
+                    busy: sending,
+                  ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    '$hm · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · ${tr(context, 'изменено')}' : ''}',
+                    style: const TextStyle(fontSize: 11, color: Icq.dark),
+                  ),
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -840,6 +889,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (replyTo != null)
+          QuoteCard(
+            author: quoteAuthor('${replyTo!['msg_id']}'),
+            text: '${replyTo!['text']}',
+            trailing: CommandText(
+              'Отмена',
+              onTap: () => setState(() => replyTo = null),
+            ),
+          ),
         LayoutBuilder(
           builder: (context, box) => box.maxWidth < 520
               ? Column(

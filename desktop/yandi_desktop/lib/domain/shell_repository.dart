@@ -85,8 +85,15 @@ class ShellRepository {
     return messages;
   }
 
-  Future<void> send(String peer, String text) async {
-    await api.request('/api/chat/send/${segment(peer)}', body: {'text': text});
+  Future<void> send(
+    String peer,
+    String text, {
+    Map<String, dynamic>? replyTo,
+  }) async {
+    await api.request(
+      '/api/chat/send/${segment(peer)}',
+      body: {'text': text, if (replyTo != null) 'reply_to': replyTo},
+    );
   }
 
   Future<void> edit(String peer, String id, String text) async {

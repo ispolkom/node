@@ -1,3 +1,4 @@
+import 'message_actions.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -145,6 +146,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     revision++;
     setState(() {
       picked = null;
+      replyTo = null;
       sentBytes = fileSize = 0;
       selected = id;
       tab = nextTab ?? tab;
@@ -290,11 +292,13 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     final id = selected;
     if (id == null || busy || !canSend || composer.text.trim().isEmpty) return;
     final text = composer.text;
+    final quote = replyTo;
     await mutate(
-      () => repo.send(id, text),
+      () => repo.send(id, text, reply: quote),
       success: () {
         composer.clear();
         drafts.remove(id);
+        replyTo = null;
       },
     );
   }
@@ -317,6 +321,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         child: UiText(label),
       );
   String? settingsFor;
+  Map<String, dynamic>? replyTo;
+  final hiddenAuthors = <String, Set<String>>{};
+  final anchors = <String, GlobalKey>{};
   Widget groupItem(Map<String, dynamic> g) {
     final id = '${g['id']}', current = selected == id;
     final members = g['members'] is List
@@ -579,6 +586,44 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     });
   }
 
+  Future<void> messageMenu(Map<String, dynamic> m, Offset at) async {
+    if (busy || selected == null) return;
+    final id = selected!;
+    final own = m['mine'] == true;
+    final commands = [
+      commandReply,
+      if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      if (!own) commandHideAuthor,
+      if (canDelete(m)) commandDelete,
+    ];
+    final choice = await showMessageMenu(context, at, commands);
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case commandReply:
+        setState(() {
+          replyTo = {
+            'seq': m['seq'],
+            'author': own ? tr(context, 'Вы') : '${m['author']}',
+            'text': quoteExcerpt(
+              '${m['text'] ?? ''}'.isEmpty
+                  ? (m['attachment'] is Map
+                        ? (m['attachment'] as Map)['filename']
+                        : '')
+                  : m['text'],
+            ),
+          };
+        });
+      case commandCopy:
+        await Clipboard.setData(ClipboardData(text: '${m['text'] ?? ''}'));
+      case commandHideAuthor:
+        setState(() {
+          (hiddenAuthors[id] ??= <String>{}).add('${m['from']}');
+        });
+      case commandDelete:
+        await deleteMessage(m);
+    }
+  }
+
   Widget bubble(Map<String, dynamic> m) {
     final own = m['mine'] == true;
     final ts = DateTime.fromMillisecondsSinceEpoch(
@@ -586,77 +631,83 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     ).toLocal();
     final hm =
         '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
+    final reply = m['reply'] is Map ? m['reply'] as Map : null;
+    var tapAt = Offset.zero;
     return Align(
+      key: anchors.putIfAbsent('${selected}:${m['seq']}', () => GlobalKey()),
       alignment: own ? Alignment.centerRight : Alignment.centerLeft,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxWidth: 560),
-        child: Container(
-          margin: const EdgeInsets.symmetric(vertical: 4),
-          padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
-          decoration: BoxDecoration(
-            color: own ? Icq.sent : Colors.white,
-            border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              if (!own)
-                Text(
-                  '${m['author']}',
-                  style: const TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                    color: Icq.peer,
-                  ),
-                ),
-              if (m['attachment'] is Map)
-                AttachmentView(
-                  key: ValueKey('$selected-${m['seq']}'),
-                  api: widget.api,
-                  attachment: {
-                    ...Map<String, dynamic>.from(m['attachment']),
-                    'mime_type': FileRepository.mime(
-                      '${m['attachment']['filename']}',
-                    ),
-                  },
-                  contentPath: repo.path(selected!, 'file/${m['seq']}'),
-                  isActive: () => active,
-                  mutate: (a) => mutate(a),
-                  busy: busy,
-                )
-              else
-                SelectableText(
-                  m['text'] == null
-                      ? tr(context, 'Вложение (недоступно)')
-                      : '${m['text']}',
-                ),
-              Row(
-                mainAxisSize: MainAxisSize.min,
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  if (canDelete(m))
-                    TextButton(
-                      style: TextButton.styleFrom(
-                        minimumSize: const Size(0, 22),
-                        padding: const EdgeInsets.symmetric(horizontal: 6),
-                        textStyle: const TextStyle(
-                          fontSize: 11,
-                          fontFamily: 'Tahoma',
-                        ),
-                      ),
-                      onPressed: busy ? null : () => deleteMessage(m),
-                      child: UiText('Удалить сообщение №${m['seq']}'),
-                    ),
-                  const SizedBox(width: 6),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (d) => tapAt = d.globalPosition,
+          onTap: () => messageMenu(m, tapAt),
+          child: Container(
+            margin: const EdgeInsets.symmetric(vertical: 4),
+            padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+            decoration: BoxDecoration(
+              color: own ? Icq.sent : Colors.white,
+              border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (!own)
                   Text(
+                    '${m['author']}',
+                    style: const TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.bold,
+                      color: Icq.peer,
+                    ),
+                  ),
+                if (reply != null)
+                  QuoteCard(
+                    author: '${reply['author']}',
+                    text: '${reply['text'] ?? ''}',
+                    onTap: () {
+                      final ctx = anchors['${selected}:${reply['seq']}']
+                          ?.currentContext;
+                      if (ctx != null) {
+                        Scrollable.ensureVisible(
+                          ctx,
+                          duration: const Duration(milliseconds: 200),
+                        );
+                      }
+                    },
+                  ),
+                if (m['attachment'] is Map)
+                  AttachmentView(
+                    key: ValueKey('$selected-${m['seq']}'),
+                    api: widget.api,
+                    attachment: {
+                      ...Map<String, dynamic>.from(m['attachment']),
+                      'mime_type': FileRepository.mime(
+                        '${m['attachment']['filename']}',
+                      ),
+                    },
+                    contentPath: repo.path(selected!, 'file/${m['seq']}'),
+                    isActive: () => active,
+                    mutate: (a) => mutate(a),
+                    busy: busy,
+                  )
+                else
+                  Text(
+                    m['text'] == null
+                        ? tr(context, 'Вложение (недоступно)')
+                        : '${m['text']}',
+                  ),
+                Align(
+                  alignment: Alignment.centerRight,
+                  child: Text(
                     hm,
                     style: const TextStyle(fontSize: 11, color: Icq.dark),
                   ),
-                ],
-              ),
-            ],
+                ),
+              ],
+            ),
           ),
         ),
       ),
@@ -715,7 +766,27 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ),
         if (feed != null && rows(feed, 'messages').isEmpty)
           const UiText('История пуста.'),
-        for (final m in rows(feed, 'messages')) bubble(m),
+        if ((hiddenAuthors[selected] ?? const <String>{}).isNotEmpty)
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            children: [
+              UiText(
+                'Скрыто пользователей: ${hiddenAuthors[selected]!.length}',
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
+              const SizedBox(width: 8),
+              CommandText(
+                'Показать скрытых',
+                onTap: () => setState(() => hiddenAuthors.remove(selected)),
+              ),
+            ],
+          ),
+        for (final m in rows(feed, 'messages'))
+          if (!(hiddenAuthors[selected] ?? const <String>{}).contains(
+            '${m['from']}',
+          ))
+            bubble(m),
         if (info != null && settingsFor == selected) ...[
           participants(),
           if (manager) ...[
@@ -803,6 +874,15 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        if (replyTo != null)
+          QuoteCard(
+            author: '${replyTo!['author']}',
+            text: '${replyTo!['text']}',
+            trailing: CommandText(
+              'Отмена',
+              onTap: () => setState(() => replyTo = null),
+            ),
+          ),
         LayoutBuilder(
           builder: (context, box) => box.maxWidth < 520
               ? Column(

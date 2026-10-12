@@ -998,6 +998,18 @@ async fn api_groups_messages(axum::extract::Path(gid): axum::extract::Path<Strin
 #[derive(Deserialize)]
 struct MyGroupSend {
     text: String,
+    /// ответ-цитата: номер записи группы, псевдоним автора и выдержка текста
+    #[serde(default)]
+    reply: Option<MyGroupReply>,
+}
+
+#[derive(Deserialize)]
+struct MyGroupReply {
+    seq: u64,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    text: String,
 }
 
 async fn api_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSend>) -> Response {
@@ -1011,7 +1023,16 @@ async fn api_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, 
         l.contains("http://") || l.contains("https://") || l.contains("www.")
     };
     let kind = if is_link { crate::group_client::KIND_LINK } else { crate::group_client::KIND_TEXT };
-    grp_reply(crate::group_client::send(&gid, kind, serde_json::json!({"t": text})).map(|seq| serde_json::json!({"seq": seq})))
+    let mut body = serde_json::json!({"t": text});
+    if let Some(r) = b.reply {
+        // поле «r» в записи группы: s — номер цитируемой записи, a — автор, t — выдержка (не длиннее 200 знаков)
+        body["r"] = serde_json::json!({
+            "s": r.seq,
+            "a": r.author.chars().take(64).collect::<String>(),
+            "t": r.text.chars().take(200).collect::<String>(),
+        });
+    }
+    grp_reply(crate::group_client::send(&gid, kind, body).map(|seq| serde_json::json!({"seq": seq})))
 }
 
 #[derive(Deserialize)]

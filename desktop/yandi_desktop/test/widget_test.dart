@@ -70,6 +70,15 @@ Future<void> click(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+/// Message commands are words in a popup menu: tap the message, then the word.
+Future<void> command(WidgetTester tester, String message, String label) async {
+  await tester.ensureVisible(find.text(message).first);
+  await tester.tap(find.text(message).first);
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
+}
+
 Future<void> vaultPage(WidgetTester tester) async {
   await click(tester, 'Войти');
   await click(tester, 'Закрытая среда');

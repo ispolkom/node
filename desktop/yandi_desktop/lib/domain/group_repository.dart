@@ -58,11 +58,15 @@ class GroupRepository {
     return id;
   }
 
-  Future<void> send(String id, String text) async {
+  Future<void> send(
+    String id,
+    String text, {
+    Map<String, dynamic>? reply,
+  }) async {
     if (text.trim().isEmpty || utf8.encode(text.trim()).length > 8000) {
       throw const ApiFailure('business');
     }
-    await act(id, 'send', {'text': text});
+    await act(id, 'send', {'text': text, if (reply != null) 'reply': reply});
   }
 
   // No cursor: a complete snapshot removes deleted/denied entries.
@@ -119,6 +123,14 @@ class GroupRepository {
             'text': m['kind'] == 1 || m['kind'] == 6
                 ? (m['body'] is Map ? m['body']['t'] : '')
                 : null,
+            if (m['body'] is Map &&
+                m['body']['r'] is Map &&
+                m['body']['r']['s'] is num)
+              'reply': {
+                'seq': m['body']['r']['s'],
+                'author': '${m['body']['r']['a'] ?? ''}',
+                'text': '${m['body']['r']['t'] ?? ''}',
+              },
           },
         )
         .toList();

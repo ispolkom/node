@@ -293,12 +293,46 @@ void main() {
     expect(find.text('<script>текст</script>'), findsNothing);
     await m1.stop(t);
   });
+  testWidgets('reply quotes the message, hide user keeps the others', (
+    t,
+  ) async {
+    final api = GroupApi();
+    api.messages.add({
+      'seq': 5,
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'from': 'mod',
+      'author': 'Модератор',
+      'kind': 1,
+      'body': {
+        't': 'ответ',
+        'r': {'s': 2, 'a': 'Боб', 't': 'цитата'},
+      },
+    });
+    await open(t, api, conversation: true);
+    expect(find.text('цитата'), findsOneWidget);
+    await m1.command(t, '<script>текст</script>', 'Ответить');
+    await t.enterText(field('Сообщение группе'), 'мой ответ');
+    await m1.click(t, 'Отправить группе');
+    final sent = api.bodies.lastWhere((b) => b['text'] == 'мой ответ');
+    expect(sent['reply']['seq'], 2);
+    expect(sent['reply']['author'], '<b>Боб</b>');
+    expect(sent['reply']['text'], '<script>текст</script>');
+    await m1.command(
+      t,
+      '<script>текст</script>',
+      'Скрыть сообщения этого пользователя',
+    );
+    expect(find.text('<script>текст</script>'), findsNothing);
+    expect(find.text('ответ'), findsOneWidget);
+    expect(find.textContaining('Скрыто пользователей: 1'), findsOneWidget);
+    await m1.stop(t);
+  });
   testWidgets('delete entry confirmation and mutation preflight lock', (
     t,
   ) async {
     final api = GroupApi();
     await open(t, api, conversation: true);
-    await m1.click(t, 'Удалить сообщение №2');
+    await m1.command(t, '<script>текст</script>', 'Удалить');
     await m1.click(t, 'Подтвердить');
     expect(find.text('<script>текст</script>'), findsNothing);
     await t.enterText(field('Сообщение группе'), 'Не отправлять');
