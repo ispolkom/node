@@ -128,55 +128,69 @@ class _VideoSurfaceState extends State<VideoSurface> {
               ),
             ),
           ),
-          Positioned(
-            left: 0,
-            right: 0,
-            bottom: 0,
-            child: Container(
-              padding: const EdgeInsets.fromLTRB(12, 0, 4, 4),
-              decoration: const BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.bottomCenter,
-                  end: Alignment.topCenter,
-                  colors: [Color(0xAA000000), Color(0x00000000)],
-                ),
-              ),
-              child: Row(children: [
-                Text(_mmss(v.position), style: const TextStyle(color: Colors.white, fontSize: 12)),
-                Expanded(
-                  child: SliderTheme(
-                    data: SliderTheme.of(context).copyWith(
-                      trackHeight: 2.5,
-                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                      activeTrackColor: AppTheme.accent,
-                      thumbColor: AppTheme.accent,
-                      inactiveTrackColor: Colors.white30,
-                    ),
-                    child: Slider(
-                      value: pos,
-                      max: dur == 0 ? 1 : dur.toDouble(),
-                      onChanged: dur == 0 ? null : (x) => widget.onSeek(Duration(milliseconds: x.round())),
-                      onChangeStart: (_) => _hide?.cancel(),
-                      onChangeEnd: (_) {
-                        if (widget.value.value.isPlaying) _armHide();
-                      },
-                    ),
+        ],
+        // Полоса перемотки видна всегда, в том числе когда управление скрыто: можно тронуть и мотнуть, например, на середину.
+        Positioned(
+          left: 0,
+          right: 0,
+          bottom: 0,
+          child: Container(
+            padding: const EdgeInsets.fromLTRB(12, 0, 4, 0),
+            decoration: BoxDecoration(
+              gradient: showControls
+                  ? const LinearGradient(
+                      begin: Alignment.bottomCenter,
+                      end: Alignment.topCenter,
+                      colors: [Color(0xAA000000), Color(0x00000000)],
+                    )
+                  : null,
+            ),
+            child: Column(mainAxisSize: MainAxisSize.min, children: [
+              if (showControls)
+                Row(children: [
+                  Text(_mmss(v.position), style: const TextStyle(color: Colors.white, fontSize: 12)),
+                  const SizedBox(width: 6),
+                  Text('/ ${_mmss(v.duration)}', style: const TextStyle(color: Colors.white70, fontSize: 12)),
+                  const Spacer(),
+                  IconButton(
+                    key: const ValueKey('video-fullscreen'),
+                    tooltip: widget.fullscreen ? 'Свернуть' : 'На весь экран',
+                    icon: Icon(widget.fullscreen ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.white),
+                    onPressed: () {
+                      widget.onToggleFullscreen();
+                      if (widget.value.value.isPlaying) _armHide();
+                    },
+                  ),
+                ]),
+              SizedBox(
+                height: 30,
+                child: SliderTheme(
+                  data: SliderTheme.of(context).copyWith(
+                    trackHeight: showControls ? 3.5 : 3,
+                    thumbShape: RoundSliderThumbShape(enabledThumbRadius: showControls ? 7 : 4),
+                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                    activeTrackColor: AppTheme.accent,
+                    thumbColor: AppTheme.accent,
+                    inactiveTrackColor: Colors.white38,
+                  ),
+                  child: Slider(
+                    key: const ValueKey('video-seek'),
+                    value: pos,
+                    max: dur == 0 ? 1 : dur.toDouble(),
+                    onChanged: dur == 0 ? null : (x) => widget.onSeek(Duration(milliseconds: x.round())),
+                    onChangeStart: (_) {
+                      _hide?.cancel();
+                      if (!_visible) setState(() => _visible = true);
+                    },
+                    onChangeEnd: (_) {
+                      if (widget.value.value.isPlaying) _armHide();
+                    },
                   ),
                 ),
-                Text(_mmss(v.duration), style: const TextStyle(color: Colors.white, fontSize: 12)),
-                IconButton(
-                  key: const ValueKey('video-fullscreen'),
-                  tooltip: widget.fullscreen ? 'Свернуть' : 'На весь экран',
-                  icon: Icon(widget.fullscreen ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.white),
-                  onPressed: () {
-                    widget.onToggleFullscreen();
-                    if (widget.value.value.isPlaying) _armHide();
-                  },
-                ),
-              ]),
-            ),
+              ),
+            ]),
           ),
-        ],
+        ),
       ]),
     );
   }

@@ -3,6 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:video_player/video_player.dart';
 import 'package:yandi_mobile/widgets/video_surface.dart';
 
+List<Duration>? seekLog;
+
 void main() {
   testWidgets('tap plays, controls hide, tap shows then pauses, fullscreen icon', (t) async {
     final value = ValueNotifier(const VideoPlayerValue(duration: Duration(minutes: 2), isInitialized: true));
@@ -20,7 +22,7 @@ void main() {
             pauses++;
             value.value = value.value.copyWith(isPlaying: false);
           },
-          onSeek: (_) {},
+          onSeek: (d) => seekLog?.add(d),
           onToggleFullscreen: () => full++,
         ),
       ),
@@ -35,6 +37,18 @@ void main() {
     await t.pump(const Duration(seconds: 5));
     expect(find.byKey(const ValueKey('video-fullscreen')), findsNothing);
     expect(find.byKey(const ValueKey('video-pause')), findsNothing);
+    // полоса перемотки остаётся и работает при скрытом управлении
+    expect(find.byKey(const ValueKey('video-seek')), findsOneWidget);
+    final seeks = <Duration>[];
+    seekLog = seeks;
+    await t.tapAt(t.getCenter(find.byKey(const ValueKey('video-seek'))));
+    await t.pump();
+    expect(seeks, isNotEmpty);
+    expect(seeks.last.inSeconds, inInclusiveRange(40, 80));
+    seekLog = null;
+    // касание полосы показывает управление и оно снова скрывается само
+    await t.pump(const Duration(seconds: 5));
+    expect(find.byKey(const ValueKey('video-fullscreen')), findsNothing);
     // тап показывает управление, второй — пауза
     await t.tap(find.byKey(const ValueKey('video-tap')));
     await t.pump();
