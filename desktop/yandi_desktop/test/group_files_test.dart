@@ -91,7 +91,7 @@ void main() {
       'k': 'SECRET',
     };
     await g.open(t, api, conversation: true);
-    await m1.click(t, 'Предпросмотр');
+    await m1.word(t, 'Предпросмотр');
     await m1.click(t, 'Пригласить телефон');
     await t.tap(find.text('Picker phone'));
     await t.pumpAndSettle();

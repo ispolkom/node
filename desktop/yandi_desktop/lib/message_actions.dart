@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'domain/shell_repository.dart';
 import 'preferences.dart';
 import 'theme.dart';
 
@@ -120,4 +121,64 @@ class QuoteCard extends StatelessWidget {
 String quoteExcerpt(Object? text) {
   final t = '${text ?? ''}'.replaceAll(RegExp(r'\s+'), ' ').trim();
   return t.runes.length <= 200 ? t : String.fromCharCodes(t.runes.take(200));
+}
+
+/// Time and delivery state as in the phone app: one tick sent, two delivered,
+/// two orange read, cross failed. The word status stays as a tooltip/semantics.
+class DeliveryMark extends StatelessWidget {
+  final String time;
+  final dynamic status;
+  final bool own;
+  final bool edited;
+  const DeliveryMark({
+    super.key,
+    required this.time,
+    required this.status,
+    required this.own,
+    this.edited = false,
+  });
+  @override
+  Widget build(BuildContext context) {
+    final word = tr(context, ShellRepository.delivery(status));
+    final (glyph, color) = switch (status) {
+      'Read' => ('✓✓', Icq.peer),
+      'Delivered' => ('✓✓', Icq.dark),
+      'Sent' => ('✓', Icq.dark),
+      'Failed' => ('✗', const Color(0xFFC62828)),
+      _ => ('…', Icq.dark),
+    };
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (edited)
+          UiText(
+            'изменено',
+            style: const TextStyle(
+              fontSize: 11,
+              color: Icq.dark,
+              fontStyle: FontStyle.italic,
+            ),
+          ),
+        if (edited) const SizedBox(width: 6),
+        Text(time, style: const TextStyle(fontSize: 11, color: Icq.dark)),
+        if (own) ...[
+          const SizedBox(width: 4),
+          Tooltip(
+            message: word,
+            child: Semantics(
+              label: word,
+              child: Text(
+                glyph,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: color,
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
 }

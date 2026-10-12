@@ -10,7 +10,7 @@ void main() {
     final api = m2.FeatureApi();
     await m2.open(t, api, 'Чат');
     await m1.click(t, 'Открыть чат');
-    expect(find.textContaining('Отправлено'), findsOneWidget);
+    expect(find.byTooltip('Отправлено'), findsOneWidget);
     await m1.command(t, '<b>Текст</b>', 'Изменить');
     await t.enterText(
       find.widgetWithText(TextField, 'Текст сообщения'),

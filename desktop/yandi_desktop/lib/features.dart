@@ -814,9 +814,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                   ),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: Text(
-                    '$hm · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · ${tr(context, 'изменено')}' : ''}',
-                    style: const TextStyle(fontSize: 11, color: Icq.dark),
+                  child: DeliveryMark(
+                    time: hm,
+                    status: m['status'],
+                    own: own,
+                    edited: m['edited'] == true,
                   ),
                 ),
               ],

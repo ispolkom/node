@@ -4,7 +4,9 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'domain/file_repository.dart';
+import 'message_actions.dart';
 import 'platform_files.dart';
+import 'theme.dart';
 import 'transport/api.dart';
 
 class AttachmentView extends StatefulWidget {
@@ -131,59 +133,118 @@ class _AttachmentViewState extends State<AttachmentView> {
     });
   }
 
+  static String humanSize(num n) {
+    if (n < 1024) return '${n.toInt()} Б';
+    if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} КБ';
+    if (n < 1024 * 1024 * 1024) {
+      return '${(n / 1024 / 1024).toStringAsFixed(1)} МБ';
+    }
+    return '${(n / 1024 / 1024 / 1024).toStringAsFixed(1)} ГБ';
+  }
+
+  static IconData iconFor(String mime) => mime.startsWith('image/')
+      ? Icons.image_outlined
+      : mime.startsWith('audio/')
+      ? Icons.music_note
+      : mime.startsWith('video/')
+      ? Icons.movie_outlined
+      : Icons.insert_drive_file_outlined;
+
   @override
   Widget build(BuildContext context) {
     final type = FileRepository.mime('${widget.attachment['filename']}');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        UiText(
-          '${widget.attachment['filename']} · ${widget.attachment['size']} байт',
-        ),
-        UiText(ready ? 'Файл доступен на узле' : 'Файл ещё не получен'),
-        if (error != null) UiText(error!),
-        if (image != null)
-          Image(
-            image: image!,
-            width: 260,
-            height: 200,
-            fit: BoxFit.contain,
-            errorBuilder: (_, _, _) =>
-                const UiText('Не удалось показать картинку'),
+    final size = widget.attachment['size'];
+    // Карточка файла как в мобильном чате: значок, имя, «размер · зашифровано»,
+    // состояние и слова-команды вместо кнопок.
+    return Container(
+      margin: const EdgeInsets.only(top: 4, bottom: 4),
+      padding: const EdgeInsets.all(8),
+      decoration: BoxDecoration(
+        color: const Color(0x14000000),
+        border: Border.all(color: Icq.dark.withValues(alpha: 0.35)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(iconFor(type), size: 28, color: Icq.header),
+              const SizedBox(width: 10),
+              Flexible(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    UiText(
+                      '${widget.attachment['filename']}',
+                      style: const TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    UiText(
+                      '${size is num ? humanSize(size) : size} · зашифровано',
+                      style: const TextStyle(fontSize: 12, color: Icq.dark),
+                    ),
+                  ],
+                ),
+              ),
+            ],
           ),
-        Wrap(
-          children: [
-            if (!ready)
-              TextButton(
-                onPressed: checking
-                    ? null
-                    : () {
-                        attempts = 0;
-                        check();
-                      },
-                child: const UiText('Проверить файл'),
+          const SizedBox(height: 6),
+          UiText(
+            ready ? 'Файл доступен на узле' : 'Файл ещё не получен',
+            style: const TextStyle(fontSize: 12, color: Icq.dark),
+          ),
+          if (error != null)
+            UiText(
+              error!,
+              style: const TextStyle(fontSize: 12, color: Color(0xFFC62828)),
+            ),
+          if (image != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Image(
+                image: image!,
+                width: 260,
+                height: 200,
+                fit: BoxFit.contain,
+                errorBuilder: (_, _, _) =>
+                    const UiText('Не удалось показать картинку'),
               ),
-            if (ready)
-              TextButton(
-                onPressed: widget.busy ? null : () => save(false),
-                child: const UiText('Скачать'),
-              ),
-            if (ready && type.startsWith('image/') && image == null)
-              TextButton(
-                onPressed: widget.busy ? null : showPreview,
-                child: const UiText('Предпросмотр'),
-              ),
-            if (ready &&
-                (type.startsWith('image/') ||
-                    type.startsWith('audio/') ||
-                    type.startsWith('video/')))
-              TextButton(
-                onPressed: widget.busy ? null : () => save(true),
-                child: const UiText('Сохранить и открыть'),
-              ),
-          ],
-        ),
-      ],
+            ),
+          Wrap(
+            spacing: 12,
+            children: [
+              if (!ready)
+                CommandText(
+                  'Проверить файл',
+                  onTap: checking
+                      ? null
+                      : () {
+                          attempts = 0;
+                          check();
+                        },
+                ),
+              if (ready)
+                CommandText(
+                  'Скачать',
+                  onTap: widget.busy ? null : () => save(false),
+                ),
+              if (ready && type.startsWith('image/') && image == null)
+                CommandText(
+                  'Предпросмотр',
+                  onTap: widget.busy ? null : showPreview,
+                ),
+              if (ready &&
+                  (type.startsWith('image/') ||
+                      type.startsWith('audio/') ||
+                      type.startsWith('video/')))
+                CommandText(
+                  'Сохранить и открыть',
+                  onTap: widget.busy ? null : () => save(true),
+                ),
+            ],
+          ),
+        ],
+      ),
     );
   }
 }

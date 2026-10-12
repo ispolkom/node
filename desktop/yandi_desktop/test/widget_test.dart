@@ -79,6 +79,13 @@ Future<void> command(WidgetTester tester, String message, String label) async {
   await tester.pumpAndSettle();
 }
 
+/// Words-as-commands (attachment actions): tap the word itself.
+Future<void> word(WidgetTester tester, String label) async {
+  await tester.ensureVisible(find.text(label).first);
+  await tester.tap(find.text(label).first);
+  await tester.pumpAndSettle();
+}
+
 Future<void> vaultPage(WidgetTester tester) async {
   await click(tester, 'Войти');
   await click(tester, 'Закрытая среда');

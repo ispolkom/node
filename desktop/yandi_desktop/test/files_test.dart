@@ -222,8 +222,8 @@ void main() {
       expect(find.text('Файл ещё не получен'), findsOneWidget);
       expect(find.text('Изменить сообщение'), findsNothing);
       api.exists = true;
-      await m1.click(t, 'Проверить файл');
-      await m1.click(t, 'Предпросмотр');
+      await m1.word(t, 'Проверить файл');
+      await m1.word(t, 'Предпросмотр');
       expect(find.text('Файл доступен на узле'), findsOneWidget);
       await t.ensureVisible(find.text('Скачать'));
       await t.runAsync(() async {

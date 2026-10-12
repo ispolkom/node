@@ -648,7 +648,6 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             decoration: BoxDecoration(
               color: own ? Icq.sent : Colors.white,
               border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
-              borderRadius: BorderRadius.circular(12),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
