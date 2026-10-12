@@ -13,8 +13,12 @@ class MsgChannel {
   static const String editMarker = '\u0001yandi-edit:';  // {cmid, text} — правка ранее отправленного сообщения
 
   /// Завернуть текст с его локальным id (cmid), чтобы получатель мог сослаться на него в квитанции.
-  static String wrapMessage(String cmid, String text) =>
-      msgMarker + jsonEncode({'v': 1, 'cmid': cmid, 'text': text});
+  static String wrapMessage(String cmid, String text, {String? replyId, String? replyText}) =>
+      msgMarker + jsonEncode({
+        'v': 1, 'cmid': cmid, 'text': text,
+        // ответ-цитата: id цитируемого сообщения (cmid у собеседника / номер на узле) и выдержка текста
+        if (replyText != null && replyText.isNotEmpty) 'reply': {'id': replyId ?? '', 'text': replyText},
+      });
 
   static String capPing() => '${capMarker}1';
 
@@ -55,6 +59,25 @@ class MsgChannel {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Конверт сообщения с ответом-цитатой: (cmid, text, replyId, replyText); replyText == null — ответа нет.
+  static (String, String, String?, String?)? parseMessageFull(String t) {
+    final base = parseMessage(t);
+    if (base == null) return null;
+    try {
+      final m = jsonDecode(t.substring(msgMarker.length)) as Map<String, dynamic>;
+      final r = m['reply'];
+      if (r is Map) {
+        final text = r['text'];
+        final id = r['id'];
+        if (text is String && text.isNotEmpty) {
+          final cut = text.runes.length > 200 ? String.fromCharCodes(text.runes.take(200)) : text;
+          return (base.$1, base.$2, id is String ? id : '', cut);
+        }
+      }
+    } catch (_) {}
+    return (base.$1, base.$2, null, null);
   }
 
   /// Разобрать квитанцию: (kind, ids). kind — "delivered" или "read".

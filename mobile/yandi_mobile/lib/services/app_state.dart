@@ -297,6 +297,8 @@ class AppState extends ChangeNotifier implements FilesHost {
           timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs),
           status:    MessageStatus.delivered,
           remoteId:  remoteId,
+          replyId:   res.$3,
+          replyText: res.$4,
         );
         // ConflictAlgorithm.ignore в saveMessage гарантирует идемпотентность
         await StorageService.saveMessage(msg);
@@ -765,6 +767,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   ChatMessage _withText(ChatMessage m, String text) => ChatMessage(
     id: m.id, peerId: m.peerId, outgoing: m.outgoing, text: text,
     timestamp: m.timestamp, status: m.status, remoteId: m.remoteId,
+    replyId: m.replyId, replyText: m.replyText,
   );
 
   /// Изменить своё отправленное сообщение. Текст меняется и у вас, и у получателя (у него помечается «изменено»).
@@ -945,7 +948,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Разобрать входящий текст. Служебное (квитанция/пинг) обрабатываем здесь и возвращаем null; обычное сообщение —
   /// (текст для показа, remoteId|null). remoteId не null, если пришёл конверт с id (значит собеседник ждёт квитанций).
-  (String, String?)? _classifyIncoming(String from, String rawText) {
+  (String, String?, String?, String?)? _classifyIncoming(String from, String rawText) {
     final av = AvatarMsg.tryParse(rawText);
     if (av != null) { unawaited(_onAvatarMsg(from, av)); return null; }
     if (AvatarMsg.isAvatar(rawText)) return null;   // повреждённый служебный конверт аватарки — не показываем как текст
@@ -954,9 +957,9 @@ class AppState extends ChangeNotifier implements FilesHost {
     final edit = MsgChannel.parseEdit(rawText);
     if (edit != null) { _applyEdit(from, edit.$1, edit.$2); return null; }
     if (MsgChannel.isCapPing(rawText)) { _receiptCapable.add(from); return null; }
-    final env = MsgChannel.parseMessage(rawText);
-    if (env != null) { _receiptCapable.add(from); return (env.$2, env.$1); } // (cmid, text) -> (text, cmid)
-    return (rawText, null);
+    final env = MsgChannel.parseMessageFull(rawText);
+    if (env != null) { _receiptCapable.add(from); return (env.$2, env.$1, env.$3, env.$4); } // (cmid, text, rid, rtext) -> (text, cmid, rid, rtext)
+    return (rawText, null, null, null);
   }
 
   void _applyReceipt(String from, String kind, List<String> ids) {
@@ -1021,13 +1024,36 @@ class AppState extends ChangeNotifier implements FilesHost {
     notifyListeners();
   }
 
-  Future<void> sendMessage(String peerId, String text) async {
+  /// Ответ-цитата на сообщение: id в понимании собеседника — наш номер (он его знает как cmid) для своих, его cmid (remoteId) для чужих.
+  static String? replyIdFor(ChatMessage m) => m.outgoing ? m.id : m.remoteId;
+
+  /// Найти в чате сообщение, на которое ответили: по id, затем по выдержке текста (узел называет сообщения телефона своими номерами).
+  ChatMessage? findReplyTarget(String peerId, ChatMessage m) {
+    final text = m.replyText;
+    if (text == null) return null;
+    final list = _chats[peerId] ?? const <ChatMessage>[];
+    final id = m.replyId ?? '';
+    if (id.isNotEmpty) {
+      for (final x in list) {
+        if (x.id == id && x.outgoing) return x;
+        if (!x.outgoing && x.remoteId == id) return x;
+      }
+    }
+    for (final x in list) {
+      if (x.id != m.id && x.text.isNotEmpty && x.text.startsWith(text)) return x;
+    }
+    return null;
+  }
+
+  Future<void> sendMessage(String peerId, String text, {ChatMessage? replyTo}) async {
     if (isBlocked(peerId)) return;   // двусторонний блок: заблокированному не отправляем
     final id = DateTime.now().millisecondsSinceEpoch.toString();
     // Всегда конверт с id: получатель по нему отвечает «доставлено/прочитано». Раньше обёртка зависела от того, успел ли собеседник ответить
     // на пинг поддержки в этом сеансе: после запуска приложения это знание пусто, и всё отправленное в это окно уходило без номера — без галочек.
     // Шифровать мы можем только устройствам со связкой ключей E4, то есть новым сборкам, а они квитанции умеют.
-    final payload = MsgChannel.wrapMessage(id, text);
+    final replyText = replyTo == null ? null : _excerpt(FileOffer.tryParse(replyTo.text)?.name ?? replyTo.text);
+    final replyId = replyTo == null ? null : replyIdFor(replyTo);
+    final payload = MsgChannel.wrapMessage(id, text, replyId: replyId, replyText: replyText);
     final sent = await (_ws?.sendMessage(peerId, payload) ?? Future<bool>.value(false));
 
     final msg = ChatMessage(
@@ -1037,10 +1063,17 @@ class AppState extends ChangeNotifier implements FilesHost {
       text:      text,
       timestamp: DateTime.now(),
       status:    sent ? MessageStatus.pending : MessageStatus.failed,
+      replyId:   replyId,
+      replyText: replyText,
     );
     _chats.putIfAbsent(peerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
     notifyListeners();
+  }
+
+  static String _excerpt(String t) {
+    final s = t.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return s.runes.length <= 200 ? s : String.fromCharCodes(s.runes.take(200));
   }
 
   /// Последний запрос о прокси узла не удался (узла нет на связи): тогда «не запущен» говорить нельзя.
@@ -1121,6 +1154,8 @@ class AppState extends ChangeNotifier implements FilesHost {
       timestamp: e.timestamp,
       status:    MessageStatus.delivered,
       remoteId:  remoteId,
+      replyId:   res.$3,
+      replyText: res.$4,
     );
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
     await StorageService.saveMessage(msg);

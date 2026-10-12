@@ -110,7 +110,7 @@ class StorageService {
     final hasEnc = await File(encPath).exists();
     final hasPlain = await _isPlainSqlite(plainPath);
     if (hasPlain && !hasEnc) await _migratePlain(plainPath, encPath, pass);
-    _db = await openDatabase(encPath, version: 5, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+    _db = await openDatabase(encPath, version: 6, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
     if (hasPlain && hasEnc) {
       // Зашифрованная база уже есть и открылась (оборванный прежний перенос или вернувшаяся копия): открытая — устаревшая, поверх
       // действующей её не переносим (новые записи пропали бы), а затираем.
@@ -154,7 +154,7 @@ class StorageService {
     Database? dst;
     try {
       final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
-      dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
+      dst = await openDatabase(tmp, version: 6, onCreate: _createTables, password: pass);
       final tables = (await src.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'"))
           .map((row) => row['name']).toSet();
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
@@ -171,7 +171,7 @@ class StorageService {
         if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
       }
       // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
-      if (srcVersion > 0 && srcVersion < 5) await _onUpgrade(dst, srcVersion, 5);
+      if (srcVersion > 0 && srcVersion < 6) await _onUpgrade(dst, srcVersion, 6);
     } finally {
       try { await src.close(); } finally { await dst?.close(); }
     }
@@ -218,6 +218,11 @@ class StorageService {
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 6) {
+      for (final c in const ['reply_id', 'reply_text']) {
+        try { await db.execute('ALTER TABLE messages ADD COLUMN $c TEXT'); } catch (_) {}
+      }
+    }
     if (oldVersion < 5) await _createGroupTables(db);
     if (oldVersion < 4) {
       // Ключи собеседников, закэшированные до подписанных связок, ничем не проверены: стираем, их перезапросят с проверкой подписи.
@@ -276,7 +281,9 @@ class StorageService {
         outgoing  INTEGER NOT NULL,
         text      TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
-        status    TEXT NOT NULL DEFAULT 'pending'
+        status    TEXT NOT NULL DEFAULT 'pending',
+        reply_id  TEXT,
+        reply_text TEXT
       )
     ''');
 
@@ -503,6 +510,8 @@ class StorageService {
               text:      r['text']     as String,
               timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
               status:    _parseStatus(r['status'] as String),
+              replyId:   r['reply_id']   as String?,
+              replyText: r['reply_text'] as String?,
             ))
         .toList();
   }
@@ -517,6 +526,8 @@ class StorageService {
         'text':      msg.text,
         'timestamp': msg.timestamp.millisecondsSinceEpoch,
         'status':    msg.status.name,
+        'reply_id':  msg.replyId,
+        'reply_text': msg.replyText,
       },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );

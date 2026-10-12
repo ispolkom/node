@@ -15,6 +15,8 @@ import '../models/message.dart';
 import '../services/app_state.dart';
 import '../services/file_transfer_service.dart' show FileTransferService, maxFileSize;
 import '../widgets/vault_image.dart';
+import '../widgets/message_menu.dart';
+import 'package:flutter/services.dart';
 import '../theme.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 
@@ -33,6 +35,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _inputFocus = FocusNode();
   final Set<String> _selected = {};
   String? _editingId;   // id редактируемого сообщения (null — обычная отправка)
+  ChatMessage? _replyTo;   // сообщение, на которое отвечаем (цитата над ответом)
+  final Map<String, GlobalKey> _anchors = {};
 
   bool get _selecting => _selected.isNotEmpty;
 
@@ -64,6 +68,47 @@ class _ChatScreenState extends State<ChatScreen> {
 
   void _cancelEdit() {
     setState(() { _editingId = null; _inputCtrl.clear(); });
+  }
+
+  /// Меню слов по нажатию на сообщение: Изменить, Ответить, Копировать, Удалить.
+  Future<void> _messageMenu(ChatMessage m, Offset at) async {
+    final plain = FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null;
+    final choice = await showMessageMenu(context, at, [
+      if (m.outgoing && plain) cmdEdit,
+      cmdReply,
+      if (plain) cmdCopy,
+      cmdDelete,
+    ]);
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case cmdEdit:
+        _startEdit(m);
+      case cmdReply:
+        setState(() => _replyTo = m);
+        _inputFocus.requestFocus();
+      case cmdCopy:
+        await Clipboard.setData(ClipboardData(text: m.text));
+      case cmdDelete:
+        setState(() => _selected..clear()..add(m.id));
+        await _deleteSelected();
+    }
+  }
+
+  /// Якорь: прокрутить к сообщению, на которое ответили (если оно уже построено; иначе — примерно, затем точно).
+  void _jumpTo(ChatMessage target, List<ChatMessage> all) {
+    final ctx = _anchors[target.id]?.currentContext;
+    if (ctx != null) {
+      Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 250), alignment: 0.3);
+      return;
+    }
+    final i = all.indexWhere((x) => x.id == target.id);
+    if (i < 0 || !_scrollCtrl.hasClients) return;
+    final frac = all.length <= 1 ? 0.0 : i / (all.length - 1);
+    _scrollCtrl.jumpTo((_scrollCtrl.position.maxScrollExtent * frac).clamp(0.0, _scrollCtrl.position.maxScrollExtent));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final c = _anchors[target.id]?.currentContext;
+      if (c != null) Scrollable.ensureVisible(c, duration: const Duration(milliseconds: 150), alignment: 0.3);
+    });
   }
 
   void _toggleSelect(String id) {
@@ -140,7 +185,9 @@ class _ChatScreenState extends State<ChatScreen> {
       setState(() => _editingId = null);
       return;
     }
-    context.read<AppState>().sendMessage(widget.peerId, text);
+    final quote = _replyTo;
+    setState(() => _replyTo = null);
+    context.read<AppState>().sendMessage(widget.peerId, text, replyTo: quote);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
@@ -307,12 +354,21 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount: messages.length,
                     itemBuilder: (_, i) {
                       final m = messages[i];
+                      final target = m.replyText == null ? null : state.findReplyTarget(widget.peerId, m);
+                      var tapAt = Offset.zero;
                       return GestureDetector(
+                        key: _anchors.putIfAbsent(m.id, () => GlobalKey()),
                         onLongPress: () => _toggleSelect(m.id),
-                        onTap: _selecting ? () => _toggleSelect(m.id) : null,
+                        onTapDown: (d) => tapAt = d.globalPosition,
+                        onTap: _selecting ? () => _toggleSelect(m.id) : () => _messageMenu(m, tapAt),
                         child: Container(
                           color: _selected.contains(m.id) ? AppTheme.accent.withOpacity(0.18) : null,
-                          child: _MessageBubble(msg: m, edited: state.isEdited(m.id)),
+                          child: _MessageBubble(
+                            msg: m,
+                            edited: state.isEdited(m.id),
+                            quoteAuthor: target == null ? null : (target.outgoing ? 'Вы' : title),
+                            onQuoteTap: target == null ? null : () => _jumpTo(target, messages),
+                          ),
                         ),
                       );
                     },
@@ -328,6 +384,16 @@ class _ChatScreenState extends State<ChatScreen> {
                 const Expanded(child: Text('Редактирование сообщения', style: TextStyle(color: AppTheme.accent, fontSize: 13))),
                 IconButton(icon: const Icon(Icons.close, size: 18, color: AppTheme.textSecondary), onPressed: _cancelEdit),
               ]),
+            ),
+          if (_replyTo != null)
+            Container(
+              color: AppTheme.surface,
+              padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+              child: QuoteBox(
+                author: _replyTo!.outgoing ? 'Вы' : title,
+                text: FileOffer.tryParse(_replyTo!.text)?.name ?? _replyTo!.text,
+                onClose: () => setState(() => _replyTo = null),
+              ),
             ),
           _InputBar(
             controller: _inputCtrl,
@@ -347,7 +413,9 @@ class _ChatScreenState extends State<ChatScreen> {
 class _MessageBubble extends StatelessWidget {
   final ChatMessage msg;
   final bool edited;
-  const _MessageBubble({required this.msg, this.edited = false});
+  final String? quoteAuthor;
+  final VoidCallback? onQuoteTap;
+  const _MessageBubble({required this.msg, this.edited = false, this.quoteAuthor, this.onQuoteTap});
 
   @override
   Widget build(BuildContext context) {
@@ -376,6 +444,8 @@ class _MessageBubble extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.end,
           children: [
+            if (msg.replyText != null)
+              Align(alignment: Alignment.centerLeft, child: QuoteBox(author: quoteAuthor, text: msg.replyText!, onTap: onQuoteTap)),
             if (offer != null)
               _FileCard(offer: offer, outgoing: isOut, failed: msg.status == MessageStatus.failed)
             else if (GroupInviteMsg.tryParse(msg.text) case final inv?)

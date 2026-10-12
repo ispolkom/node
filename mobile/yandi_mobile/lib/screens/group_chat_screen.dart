@@ -14,6 +14,10 @@ import '../services/vault_service.dart';
 import 'file_viewer_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_keyboard.dart';
+import '../widgets/message_menu.dart';
+import 'package:flutter/services.dart';
+import 'dart:convert';
+import '../services/storage_service.dart';
 import 'group_info_screen.dart';
 
 /// Разделы-фильтры группы: вид записи → подпись.
@@ -46,11 +50,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   final Map<String, String> _paths = {};       // номер файла на узле → где лежит у меня
   List<JoinRequest> _requests = const [];     // просьбы вступить (видят владелец и модераторы)
   final Map<String, double> _progress = {};    // номер файла (или 'up') → доля
+  GroupEntry? _replyTo;                         // запись, на которую отвечаем
+  Set<String> _hidden = {};                     // псевдонимы, чьи сообщения скрыты у меня (только на этом устройстве)
+  final Map<int, GlobalKey> _anchors = {};
 
   @override
   void initState() {
     super.initState();
     _focus.addListener(() => setState(() {}));
+    _loadHidden();
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       await context.read<AppState>().syncGroups();
       await _load();
@@ -63,6 +71,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     _focus.dispose();
     _scroll.dispose();
     super.dispose();
+  }
+
+  String get _hiddenKey => 'group_hidden:${widget.gid}';
+
+  Future<void> _loadHidden() async {
+    try {
+      final raw = await StorageService.secureRead(_hiddenKey);
+      if (raw != null && raw.isNotEmpty && mounted) setState(() => _hidden = (jsonDecode(raw) as List).map((e) => '$e').toSet());
+    } catch (_) {}
+  }
+
+  Future<void> _saveHidden() async {
+    try { await StorageService.secureWrite(_hiddenKey, jsonEncode(_hidden.toList())); } catch (_) {}
   }
 
   GroupService? get _svc => context.read<AppState>().groups;
@@ -167,8 +188,14 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (text.isEmpty) return;
     final svc = _svc!;
     try {
-      await svc.send(widget.gid, kindOfText(text), {'t': text});
+      final q = _replyTo;
+      await svc.send(widget.gid, kindOfText(text), {
+        't': text,
+        // ответ-цитата: s — номер записи, a — автор, t — выдержка (как у узла и оболочки)
+        if (q != null) 'r': {'s': q.seq, 'a': svc.displayName(widget.gid, q.from), 't': _excerpt(q)},
+      });
       _ctrl.clear();
+      _replyTo = null;
       await svc.sync(only: widget.gid);
       await _load();
     } on GroupSendRefused catch (e) {
@@ -176,6 +203,52 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     } catch (e) {
       _toast('Не отправлено: $e');
     }
+  }
+
+  static String _excerpt(GroupEntry e) {
+    final raw = '${e.body['t'] ?? e.body['n'] ?? ''}'.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return raw.runes.length <= 200 ? raw : String.fromCharCodes(raw.runes.take(200));
+  }
+
+  /// Меню слов по нажатию на запись: Ответить, Копировать, Скрыть сообщения этого пользователя, а по правам — Стереть у всех, Заглушить.
+  Future<void> _entryCommands(GroupInfo g, GroupEntry e, Offset at) async {
+    final mine = e.from == g.myAlias;
+    final hasText = e.body['t'] is String;
+    final choice = await showMessageMenu(context, at, [
+      cmdReply,
+      if (hasText) cmdCopy,
+      if (!mine) cmdHideAuthor,
+      if (g.canModerate) cmdEraseAll,
+      if (g.canModerate && !mine) cmdMute,
+    ]);
+    if (!mounted || choice == null) return;
+    switch (choice) {
+      case cmdReply:
+        setState(() => _replyTo = e);
+        _focus.requestFocus();
+      case cmdCopy:
+        await Clipboard.setData(ClipboardData(text: '${e.body['t']}'));
+      case cmdHideAuthor:
+        setState(() => _hidden.add(e.from));
+        await _saveHidden();
+      case cmdEraseAll:
+        try { await _svc!.moderate(g.id, 'delete_entry', seq: e.seq); await _load(); } catch (err) { _toast('$err'); }
+      case cmdMute:
+        try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast('Заглушён'); } catch (err) { _toast('$err'); }
+    }
+  }
+
+  void _jumpToSeq(int seq) {
+    final ctx = _anchors[seq]?.currentContext;
+    if (ctx != null) { Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 250), alignment: 0.3); return; }
+    final i = _entries.indexWhere((x) => x.seq == seq);
+    if (i < 0 || !_scroll.hasClients) return;
+    final frac = _entries.length <= 1 ? 0.0 : i / (_entries.length - 1);
+    _scroll.jumpTo((_scroll.position.maxScrollExtent * frac).clamp(0.0, _scroll.position.maxScrollExtent));
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final c = _anchors[seq]?.currentContext;
+      if (c != null) Scrollable.ensureVisible(c, duration: const Duration(milliseconds: 150), alignment: 0.3);
+    });
   }
 
   void _toast(String m) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(m)));
@@ -248,18 +321,42 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     if (i >= _entries.length) return _RequestCard(request: _requests[i - _entries.length], onTap: () => _requestMenu(g, _requests[i - _entries.length]));
                     final e = _entries[i];
                     final mine = e.from == g.myAlias;
+                    if (!mine && _hidden.contains(e.from)) return const SizedBox.shrink();
+                    final r = e.body['r'];
+                    var tapAt = Offset.zero;
                     return _GroupBubble(
+                      key: _anchors.putIfAbsent(e.seq, () => GlobalKey()),
+                      quote: r is Map && r['t'] is String ? (r['a'] is String ? r['a'] as String : '', r['t'] as String, r['s'] is int ? r['s'] as int : null) : null,
+                      onQuoteTap: r is Map && r['s'] is int ? () => _jumpToSeq(r['s'] as int) : null,
+                      onTapDown: (d) => tapAt = d.globalPosition,
+                      onTap: () => _entryCommands(g, e, tapAt),
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),
                       sizeLabel: e.body['z'] is int ? _fmtSize(e.body['z'] as int) : null,
                       progress: e.body['f'] is String ? _progress[e.body['f']] : null,
                       onOpen: e.body['f'] is String ? () => _openFile(e.body) : null,
-                      onLongPress: g.canModerate || mine ? () => _entryMenu(g, e) : null,
                     );
                   },
                 ),
         ),
+        if (_hidden.isNotEmpty)
+          Container(
+            width: double.infinity, color: AppTheme.surface, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            child: Row(children: [
+              Expanded(child: Text('Скрыто пользователей: ${_hidden.length}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+              GestureDetector(
+                onTap: () async { setState(() => _hidden = {}); await _saveHidden(); },
+                child: const Text('Показать скрытых', style: TextStyle(color: AppTheme.accent, fontSize: 12, decoration: TextDecoration.underline)),
+              ),
+            ]),
+          ),
+        if (_replyTo != null)
+          Container(
+            color: AppTheme.surface,
+            padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+            child: QuoteBox(author: svc.displayName(g.id, _replyTo!.from), text: _excerpt(_replyTo!), onClose: () => setState(() => _replyTo = null)),
+          ),
         _input(g, state),
         if (state.secureKeyboard && _focus.hasFocus) SecureKeyboard(controller: _ctrl, onEnter: _send),
       ]),
@@ -344,50 +441,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       ),
     );
   }
-
-  void _entryMenu(GroupInfo g, GroupEntry e) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: AppTheme.surface,
-      builder: (ctx) => SafeArea(
-        child: Column(mainAxisSize: MainAxisSize.min, children: [
-          if (g.canModerate)
-            ListTile(
-              leading: const Icon(Icons.delete_outline, color: AppTheme.incoming),
-              title: const Text('Стереть у всех', style: TextStyle(color: AppTheme.text)),
-              subtitle: const Text('Запись удаляется с узла и у участников', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-              onTap: () async {
-                Navigator.pop(ctx);
-                try {
-                  await _svc!.moderate(g.id, 'delete_entry', seq: e.seq);
-                  await _load();
-                } catch (err) { _toast('$err'); }
-              },
-            ),
-          if (g.canModerate && e.from != g.myAlias)
-            ListTile(
-              leading: const Icon(Icons.volume_off, color: AppTheme.textSecondary),
-              title: Text('Заглушить ${_svc!.displayName(g.id, e.from)}', style: const TextStyle(color: AppTheme.text)),
-              onTap: () async {
-                Navigator.pop(ctx);
-                try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast('Заглушён'); } catch (err) { _toast('$err'); }
-              },
-            ),
-        ]),
-      ),
-    );
-  }
 }
 
 class _GroupBubble extends StatelessWidget {
   final GroupEntry entry;
   final bool mine;
   final String author;
-  final VoidCallback? onLongPress;
+  final VoidCallback? onTap;
+  final void Function(TapDownDetails)? onTapDown;
   final VoidCallback? onOpen;
   final String? sizeLabel;
   final double? progress;
-  const _GroupBubble({required this.entry, required this.mine, required this.author, this.onLongPress, this.onOpen, this.sizeLabel, this.progress});
+  final (String, String, int?)? quote;   // (автор, выдержка, номер записи)
+  final VoidCallback? onQuoteTap;
+  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap});
 
   @override
   Widget build(BuildContext context) {
@@ -401,7 +468,8 @@ class _GroupBubble extends StatelessWidget {
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
-        onLongPress: onLongPress,
+        onTap: onTap,
+        onTapDown: onTapDown,
         child: Container(
           margin: const EdgeInsets.symmetric(vertical: 3),
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -413,6 +481,7 @@ class _GroupBubble extends StatelessWidget {
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             if (!mine) Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold)),
+            if (quote != null) QuoteBox(author: quote!.$1, text: quote!.$2, onTap: onQuoteTap),
             if (entry.body['f'] is String)
               InkWell(
                 onTap: progress == null ? onOpen : null,
