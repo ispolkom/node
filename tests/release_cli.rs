@@ -12,7 +12,7 @@ fn cli(args: &[&str]) -> std::process::Output {
 
 #[test]
 fn r1_cli_bounds_manifest_before_reading_or_requesting_phrase() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tmpdir();
     std::fs::File::create(root.path().join(MANIFEST_NAME))
         .unwrap()
         .set_len(MAX_MANIFEST as u64 + 1)
@@ -25,7 +25,7 @@ fn r1_cli_bounds_manifest_before_reading_or_requesting_phrase() {
 
 #[test]
 fn r8_cli_requires_explicit_minimum_for_verify_and_update() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tmpdir();
     let key = ed25519_dalek::SigningKey::from_bytes(&[42; 32]);
     let vk = key.verifying_key();
     let public = hex::encode(vk.to_bytes());
@@ -56,10 +56,15 @@ fn r8_cli_requires_explicit_minimum_for_verify_and_update() {
 
 #[test]
 fn r9_cli_refuses_invalid_manifest_before_phrase_and_signature_write() {
-    let root = tempfile::tempdir().unwrap();
+    let root = tmpdir();
     std::fs::write(root.path().join(MANIFEST_NAME), b"{}").unwrap();
     let output = cli(&["sign", root.path().to_str().unwrap()]);
     assert!(!output.status.success());
     assert!(String::from_utf8_lossy(&output.stderr).contains("манифест повреждён"));
     assert!(!root.path().join(SIGNATURE_NAME).exists());
+}
+
+/// Настоящий путь без ссылок в звеньях (на macOS /var → /private/var).
+fn tmpdir() -> tempfile::TempDir {
+    tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
 }

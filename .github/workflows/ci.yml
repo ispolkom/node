@@ -21,7 +21,8 @@ jobs:
         if: runner.os == 'Linux'
         run: scripts/check_spawn.sh
       - run: cargo build --all-targets
-      - run: cargo test --no-fail-fast
+      # проверки считают общие счётчики (KDF и др.): тесты библиотеки идут по одному
+      - run: cargo test --no-fail-fast -- --test-threads=1
   network:
     runs-on: ubuntu-latest
     steps:
@@ -56,6 +57,9 @@ jobs:
         with:
           channel: stable
           cache: true
+      - name: flutter pub get (создаёт android/local.properties)
+        working-directory: mobile/yandi_mobile
+        run: flutter pub get
       - name: verify release signing guard
         working-directory: mobile/yandi_mobile/android
         run: ./gradlew :app:verifyReleaseSigning --no-daemon

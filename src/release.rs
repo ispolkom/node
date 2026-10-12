@@ -171,6 +171,44 @@ impl ReleaseDir {
     }
 }
 
+/// Без openat/O_NOFOLLOW (не Unix): проверяем звенья ссылок через symlink_metadata, остальное то же.
+#[cfg(not(unix))]
+pub struct ReleaseDir(std::path::PathBuf);
+#[cfg(not(unix))]
+impl ReleaseDir {
+    pub fn open(path: &Path) -> std::io::Result<Self> {
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(std::io::Error::other("unsafe directory component"));
+        }
+        Ok(Self(path.to_path_buf()))
+    }
+    pub fn file(&self, name: &str) -> std::io::Result<std::fs::File> {
+        if name.is_empty() || name.contains('/') || name.contains('\\') || name == "." || name == ".." {
+            return Err(std::io::Error::other("unsafe file name"));
+        }
+        let path = self.0.join(name);
+        let meta = std::fs::symlink_metadata(&path)?;
+        if meta.file_type().is_symlink() || !meta.is_file() {
+            return Err(std::io::Error::other("not a regular file"));
+        }
+        std::fs::File::open(path)
+    }
+    pub fn read(&self, name: &str, limit: u64) -> std::io::Result<Vec<u8>> {
+        use std::io::Read;
+        let f = self.file(name)?;
+        if f.metadata()?.len() > limit {
+            return Err(std::io::Error::other("file too large"));
+        }
+        let mut bytes = Vec::new();
+        f.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err(std::io::Error::other("file too large"));
+        }
+        Ok(bytes)
+    }
+}
+
 pub fn sha256_file(path: &Path) -> std::io::Result<(String, u64)> {
     let dir = ReleaseDir::open(path.parent().unwrap_or(Path::new(".")))?;
     let mut f = dir.file(
@@ -389,6 +427,11 @@ mod tests {
         Params::new(64, 1, 1, Some(32)).unwrap()
     }
 
+    /// Настоящий путь без ссылок в звеньях (на macOS /var → /private/var): ReleaseDir не ходит по ссылкам.
+    fn tmpdir() -> tempfile::TempDir {
+        tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap()
+    }
+
     fn key() -> SigningKey {
         derive_signing_key(
             "один два три четыре пять шесть семь восемь девять десять одиннадцать двенадцать",
@@ -470,7 +513,7 @@ mod tests {
 
     #[test]
     fn r9_validator_rejects_duplicates_uppercase_and_invalid_before_signing() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tmpdir();
         let (bytes, _, _) = release(d.path(), 1);
         let good = parse_manifest(&bytes).unwrap();
         assert_eq!(
@@ -498,10 +541,11 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn r5_pinned_directory_and_fd_survive_path_replacement() {
         use std::os::unix::fs::symlink;
-        let root = tempfile::tempdir().unwrap();
+        let root = tmpdir();
         let path = root.path().join("release");
         std::fs::create_dir(&path).unwrap();
         std::fs::write(path.join("file"), b"verified").unwrap();
@@ -519,10 +563,11 @@ mod tests {
         assert!(ReleaseDir::open(&root.path().join("link")).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn r1_bounded_metadata_rejects_sparse_symlink_fifo_and_directory() {
         use std::os::unix::fs::symlink;
-        let d = tempfile::tempdir().unwrap();
+        let d = tmpdir();
         let dir = ReleaseDir::open(d.path()).unwrap();
         let large = std::fs::File::create(d.path().join("large")).unwrap();
         large.set_len(MAX_MANIFEST as u64 + 1).unwrap();
@@ -540,7 +585,7 @@ mod tests {
 
     #[test]
     fn signed_release_verifies_and_files_match() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tmpdir();
         let (bytes, sig, vk) = release(d.path(), 7);
         let m = verify_manifest(&bytes, &sig, &vk, 7).unwrap();
         assert_eq!(m.seq, 7);
@@ -565,7 +610,7 @@ mod tests {
 
     #[test]
     fn any_change_to_manifest_signature_key_or_files_is_refused() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tmpdir();
         let (bytes, sig, vk) = release(d.path(), 7);
         // изменённый байт манифеста
         let mut bad = bytes.clone();
@@ -616,7 +661,7 @@ mod tests {
 
     #[test]
     fn rollback_oversize_and_bad_names_are_refused() {
-        let d = tempfile::tempdir().unwrap();
+        let d = tmpdir();
         let (bytes, sig, vk) = release(d.path(), 3);
         assert_eq!(
             verify_manifest(&bytes, &sig, &vk, 4),

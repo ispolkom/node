@@ -45,6 +45,9 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Каталог данных создаётся приватным раньше любых записей в него (иначе сокет оболочки откажется его принять)
+    let _ = yandi::util::data_dir::ensure_private();
+
     // Инициализируем конфигурацию
     init_config()
         .map_err(|e| anyhow::anyhow!("Failed to init config: {}", e))?;
