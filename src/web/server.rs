@@ -2619,22 +2619,15 @@ struct ContactRequest {
 }
 
 async fn api_contacts_post(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::extract::Json(payload): axum::extract::Json<ContactRequest>,
 ) -> impl IntoResponse {
-    // Загружаем текущие контакты
     let contacts_path = "contacts.json";
-    let mut contacts: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(contacts_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(contacts_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("contacts").and_then(|v| v.as_array()) {
-                    contacts = arr.clone();
-                }
-            }
-        }
-    }
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = match load_contacts_for_edit(contacts_path).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
+    };
 
     // Проверяем, это новый контакт или редактирование
     if let Some(id) = &payload.id {
@@ -2657,13 +2650,8 @@ async fn api_contacts_post(
         contacts.push(new_contact);
     }
 
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "contacts": contacts
-    });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(contacts_path, content).await;
+    if let Err(e) = save_contacts(contacts_path, &contacts).await {
+        return Json(serde_json::json!({"status": "error", "message": e}));
     }
 
     Json(serde_json::json!({
@@ -2680,25 +2668,19 @@ struct DeleteContactRequest {
 async fn api_contacts_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
-    // Загружаем текущие контакты
     let contacts_path = "contacts.json";
-    let mut contacts: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(contacts_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(contacts_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("contacts").and_then(|v| v.as_array()) {
-                    contacts = arr.clone();
-                }
-            }
-        }
-    }
 
     // телефон владельца: он не в contacts.json (список строит узел из сопряжённых устройств) — прячем из чата
     if let Some(prefix) = payload.id.strip_prefix("phone-") {
         crate::mobile_self::hide_phone(prefix);
         return Json(serde_json::json!({"status": "success", "message": "Contact deleted"}));
     }
+
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = match load_contacts_for_edit(contacts_path).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
+    };
 
     // Удаляем контакт (id в файле бывает строкой или числом)
     contacts.retain(|c| match c.get("id") {
@@ -2707,13 +2689,8 @@ async fn api_contacts_delete(
         None => true,
     });
 
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "contacts": contacts
-    });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(contacts_path, content).await;
+    if let Err(e) = save_contacts(contacts_path, &contacts).await {
+        return Json(serde_json::json!({"status": "error", "message": e}));
     }
 
     Json(serde_json::json!({
@@ -5047,6 +5024,52 @@ async fn api_profile_get(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Удалить файлы аватара своего узла (кроме расширения `keep`): иначе после смены png→jpg старый файл отдаётся первым,
+/// а «удалённый» аватар остаётся на диске.
+fn remove_avatar_files(short_id: &str, keep: Option<&str>) {
+    let Some(home) = dirs::home_dir() else { return };
+    remove_avatar_files_in(&home.join(".yandi/avatars"), short_id, keep);
+}
+
+fn remove_avatar_files_in(dir: &std::path::Path, short_id: &str, keep: Option<&str>) {
+    if short_id.is_empty() || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return;
+    }
+    for ext in ["png", "jpg", "gif"] {
+        if keep == Some(ext) {
+            continue;
+        }
+        let _ = std::fs::remove_file(dir.join(format!("{short_id}.{ext}")));
+    }
+}
+
+/// Один писатель на файл контактов: чтение–изменение–запись без потерь при одновременных запросах.
+static CONTACTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Список контактов для изменения. Нет файла — пустой список; файл есть, но не читается или не разбирается — ошибка
+/// (раньше такой файл считался пустым и затем перезаписывался одним новым контактом).
+async fn load_contacts_for_edit(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(Vec::new());
+    }
+    let content = tokio::fs::read_to_string(path).await.map_err(|e| format!("не удалось прочитать список контактов: {e}"))?;
+    let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| "файл контактов повреждён, список не менялся".to_string())?;
+    match data.get("contacts").and_then(|v| v.as_array()) {
+        Some(arr) => Ok(arr.clone()),
+        None => Err("файл контактов в неизвестном формате, список не менялся".to_string()),
+    }
+}
+
+/// Записать список контактов целиком и атомарно (временный файл и переименование), ошибка диска возвращается.
+async fn save_contacts(path: &str, contacts: &[serde_json::Value]) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "contacts": contacts })).map_err(|e| e.to_string())?;
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || crate::util::private_file::write_private(std::path::Path::new(&path), content.as_bytes()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("не удалось сохранить список контактов: {e}"))
+}
+
 /// Update current user profile
 async fn api_profile_put(
     State(state): State<AppState>,
@@ -5067,10 +5090,15 @@ async fn api_profile_put(
         _ => UserProfile::new(short_id),
     };
 
+    let avatar_cleared = avatar.as_deref() == Some("");
     profile.update(display_name, avatar);
 
     match profile.save() {
-        Ok(()) => Json(serde_json::json!({
+        Ok(()) => {
+            if avatar_cleared {
+                remove_avatar_files(&state.node_info.short_id, None);
+            }
+            Json(serde_json::json!({
             "status": "success",
             "message": "Profile updated",
             "profile": {
@@ -5079,7 +5107,8 @@ async fn api_profile_put(
                 "short_id": profile.short_id,
                 "updated_at": profile.updated_at
             }
-        })),
+        }))
+        }
         Err(e) => Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to save profile: {}", e)
@@ -5211,6 +5240,9 @@ async fn api_profile_avatar(
             "message": format!("Failed to save avatar: {}", e)
         }));
     }
+
+    // файл другого типа от прошлой загрузки отдавался бы первым — убираем
+    remove_avatar_files(&short_id, Some(file_ext.as_str()));
 
     // Update profile with avatar path
     let mut profile = match UserProfile::load() {
@@ -5781,5 +5813,53 @@ mod ui_socket_parity_tests {
         }
         unix.abort(); tcp.abort();
         let _ = unix.await; let _ = tcp.await;
+    }
+}
+
+#[cfg(test)]
+mod contacts_and_avatar_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn contacts_list_is_saved_atomically_and_a_broken_file_is_an_error_not_an_empty_list() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("contacts.json");
+        let p = path.to_str().unwrap();
+        // нет файла — пустой список
+        assert!(load_contacts_for_edit(p).await.unwrap().is_empty());
+        // запись и чтение
+        save_contacts(p, &[serde_json::json!({"id": "1", "name": "a"})]).await.unwrap();
+        assert_eq!(load_contacts_for_edit(p).await.unwrap().len(), 1);
+        // повреждённый файл: ошибка, и файл не тронут
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(load_contacts_for_edit(p).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+        // чужой формат (нет ключа contacts) — тоже ошибка
+        std::fs::write(&path, b"{\"x\": 1}").unwrap();
+        assert!(load_contacts_for_edit(p).await.is_err());
+        // ошибка диска возвращается, а не «успех»
+        let bad = d.path().join("a_file");
+        std::fs::write(&bad, b"file, not a directory").unwrap();
+        let under_file = bad.join("contacts.json");
+        assert!(save_contacts(under_file.to_str().unwrap(), &[]).await.is_err());
+    }
+
+    #[test]
+    fn avatar_files_of_other_types_and_a_cleared_avatar_are_removed() {
+        let d = tempfile::tempdir().unwrap();
+        for ext in ["png", "jpg", "gif"] {
+            std::fs::write(d.path().join(format!("abc123.{ext}")), b"x").unwrap();
+        }
+        std::fs::write(d.path().join("def456.png"), b"other node").unwrap();
+        remove_avatar_files_in(d.path(), "abc123", Some("jpg"));
+        assert!(d.path().join("abc123.jpg").exists());
+        assert!(!d.path().join("abc123.png").exists() && !d.path().join("abc123.gif").exists());
+        remove_avatar_files_in(d.path(), "abc123", None);
+        assert!(!d.path().join("abc123.jpg").exists());
+        assert!(d.path().join("def456.png").exists(), "чужой аватар не тронут");
+        // имя с путём не выводит за каталог
+        std::fs::write(d.path().join("keep.png"), b"x").unwrap();
+        remove_avatar_files_in(d.path(), "../keep", None);
+        assert!(d.path().join("keep.png").exists());
     }
 }
