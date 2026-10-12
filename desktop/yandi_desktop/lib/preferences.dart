@@ -202,6 +202,7 @@ const englishLabels = <String, String>{
   'Звонки': 'Calls',
   'Видеозвонок': 'Video call',
   'Все': 'All',
+  'Эмодзи': 'Emoji',
   'Новая просьба': 'New request',
   'просит добавить его в группу или прислать приглашение': 'asks to be added to the group or sent an invitation',
   'служебное: видят владелец и модераторы': 'service: visible to the owner and moderators',

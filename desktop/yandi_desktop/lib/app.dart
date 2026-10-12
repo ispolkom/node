@@ -44,6 +44,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     // После закрытия диалога фокус возвращается не мгновенно: если окно так и
     // не стало активным (ушли в другое приложение), содержимое стираем.
     PlatformFiles.onClosed = () {
+      final now = WidgetsBinding.instance.lifecycleState;
+      if (now == null || now == AppLifecycleState.resumed) return;
       Timer(const Duration(milliseconds: 500), () {
         final st = WidgetsBinding.instance.lifecycleState;
         if (mounted &&

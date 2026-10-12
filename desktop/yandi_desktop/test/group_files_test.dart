@@ -111,7 +111,8 @@ void main() {
       ),
     );
     await g.open(t, api, conversation: true);
-    await m1.click(t, 'Выбрать файл');
+    await t.tap(find.byTooltip('Выбрать файл'));
+    await t.pumpAndSettle();
     await m1.click(t, 'Отправить файл');
     expect(api.uploaded, '/api/groups/${g.gid}/upload?name=group%20file.bin');
     expect(find.text('group file.bin'), findsOneWidget);

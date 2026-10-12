@@ -990,10 +990,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       },
       child: field(composer, 'Сообщение', lines: 2),
     );
-    final attachButton = TextButton.icon(
-      onPressed: sending || choosingFile ? null : pickFile,
-      icon: const Icon(Icons.attach_file, size: 18),
-      label: const UiText('Выбрать файл'),
+    final attachButton = ComposerTools(
+      onAttach: sending || choosingFile ? null : pickFile,
+      controller: composer,
     );
     final sendButton = FilledButton(
       onPressed: sending ? null : send,

@@ -281,3 +281,75 @@ class InitialBadge extends StatelessWidget {
     );
   }
 }
+
+/// Same set as the phone app's own keyboard panel.
+const emojiPanel = [
+  '😀', '😂', '🥹', '😊', '😍', '🥰', '😘', '😎', '🤔', '😅', '😭', '😡', '🥳',
+  '😴', '🤯', '😱', '👍', '👎', '👏', '🙏', '💪', '👋', '🤝', '✌️', '👌', '🤞',
+  '🫡', '🙌', '❤️', '💔', '🔥', '✨', '🎉', '🎁', '☀️', '🌙', '⭐', '🌈', '🍀',
+  '🌸', '🍕', '☕', '🍺', '🎂', '🚗', '✈️', '🏠', '📞', '🐱', '🐶', '🦊', '🐼',
+  '🦁', '🐸', '🐵', '🦉', '🐧', '🐢', '🦄', '🐙', '🔑', '🛡️', '💎', '✅',
+];
+
+/// Paperclip and emoji icons of the input row, as in the phone app.
+class ComposerTools extends StatelessWidget {
+  final VoidCallback? onAttach;
+  final TextEditingController controller;
+  const ComposerTools({super.key, this.onAttach, required this.controller});
+  @override
+  Widget build(BuildContext context) => Row(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      IconButton(
+        tooltip: tr(context, 'Выбрать файл'),
+        onPressed: onAttach,
+        icon: const Icon(Icons.attach_file, color: Icq.header),
+      ),
+      IconButton(
+        tooltip: tr(context, 'Эмодзи'),
+        icon: const Icon(Icons.emoji_emotions_outlined, color: Icq.header),
+        onPressed: () async {
+          final e = await showDialog<String>(
+            context: context,
+            builder: (ctx) => AlertDialog(
+              title: UiText('Эмодзи'),
+              content: SizedBox(
+                width: 360,
+                child: Wrap(
+                  children: [
+                    for (final e in emojiPanel)
+                      InkWell(
+                        onTap: () => Navigator.pop(ctx, e),
+                        child: SizedBox(
+                          width: 40,
+                          height: 40,
+                          child: Center(
+                            child: Text(e, style: const TextStyle(fontSize: 22)),
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(ctx),
+                  child: const UiText('Закрыть'),
+                ),
+              ],
+            ),
+          );
+          if (e == null) return;
+          final v = controller.value;
+          final sel = v.selection;
+          final at = sel.isValid ? sel.start : v.text.length;
+          final end = sel.isValid ? sel.end : v.text.length;
+          controller.value = TextEditingValue(
+            text: v.text.replaceRange(at, end, e),
+            selection: TextSelection.collapsed(offset: at + e.length),
+          );
+        },
+      ),
+    ],
+  );
+}

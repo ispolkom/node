@@ -171,11 +171,13 @@ void main() {
     final api = FileApi();
     await m2.open(t, api, 'Чат');
     await m1.click(t, 'Открыть чат');
-    await m1.click(t, 'Выбрать файл');
+    await t.tap(find.byTooltip('Выбрать файл'));
+    await t.pumpAndSettle();
     expect(find.text('chosen.bin'), findsOneWidget);
     await m1.click(t, 'Убрать файл');
     expect(find.text('chosen.bin'), findsNothing);
-    await m1.click(t, 'Выбрать файл');
+    await t.tap(find.byTooltip('Выбрать файл'));
+    await t.pumpAndSettle();
     api.reject = true;
     await t.ensureVisible(find.text('Отправить файл'));
     await t.runAsync(() async {
@@ -278,7 +280,7 @@ void main() {
     final api = FileApi();
     await m2.open(t, api, 'Чат');
     await m1.click(t, 'Открыть чат');
-    await t.tap(find.text('Выбрать файл'));
+    await t.tap(find.byTooltip('Выбрать файл'));
     await t.pump();
     // Диалог забрал фокус: окно «неактивно», но содержимое остаётся.
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);

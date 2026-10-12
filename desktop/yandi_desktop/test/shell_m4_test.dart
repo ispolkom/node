@@ -105,4 +105,18 @@ void main() {
     expect(find.text('Вступить в группу'), findsWidgets);
     await m1.stop(t);
   });
+  testWidgets('emoji panel inserts into the composer in chat', (t) async {
+    final api = m2.FeatureApi();
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await t.enterText(find.widgetWithText(TextField, 'Сообщение'), 'ку');
+    await t.tap(find.byTooltip('Эмодзи'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('😀'));
+    await t.pumpAndSettle();
+    final field = t.widget<TextField>(find.widgetWithText(TextField, 'Сообщение'));
+    expect(field.controller!.text.endsWith('😀'), true);
+    expect(field.controller!.text.startsWith('ку'), true);
+    await m1.stop(t);
+  });
 }
