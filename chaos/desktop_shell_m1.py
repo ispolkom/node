@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real desktop Dart client / daemon smoke; isolated HOME and offline network.
+"""Real desktop Dart client / daemon M1 + M2 smoke; isolated HOME and offline network.
 Usage: python3 chaos/desktop_shell_m1.py /absolute/path/to/yandi [flutter-sdk]
 The fixture directory is newly allocated under /tmp and deleted on exit.
 """
@@ -26,6 +26,7 @@ def main():
     probe = Path(__file__).resolve().parents[1] / 'desktop/yandi_desktop/tool/daemon_probe.dart'
     with tempfile.TemporaryDirectory(prefix='yandi-desktop-m1-') as root:
         n = C.Node(0, root, binary, base_port=28700)
+        second = C.Node(1, root, binary, base_port=28700)
         sock = Path(n.dir) / 'home/.local/share/yandi/run/yandi-ui.sock'
         os.environ.pop('CHAOS_NOLOG', None)
         env = dict(os.environ)
@@ -47,11 +48,29 @@ def main():
                 else:
                     raise RuntimeError('socket did not appear within 120s')
                 subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(probe), str(sock), phase], env=env, check=True, timeout=180)
+                if phase == 'restart':
+                    second.start()
+                    second_sock = Path(second.dir) / 'home/.local/share/yandi/run/yandi-ui.sock'
+                    deadline = time.monotonic() + 120
+                    while time.monotonic() < deadline:
+                        if not second.alive():
+                            raise RuntimeError('second daemon stopped before socket became ready')
+                        try:
+                            with socket.socket(socket.AF_UNIX) as conn:
+                                conn.connect(str(second_sock))
+                            break
+                        except OSError:
+                            time.sleep(.25)
+                    else:
+                        raise RuntimeError('second socket did not appear within 120s')
+                    chat_probe = probe.with_name('chat_probe.dart')
+                    subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(chat_probe), str(sock), str(second_sock)], env=env, check=True, timeout=420)
                 n.kill()
                 time.sleep(.5)
         finally:
+            second.kill()
             n.kill()
-    print('PASS: desktop M1 real Unix daemon smoke; temporary data removed')
+    print('PASS: desktop M1 + M2 real Unix daemon smoke; temporary data removed')
 
 
 if __name__ == '__main__':

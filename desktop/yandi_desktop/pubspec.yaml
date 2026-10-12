@@ -1,5 +1,5 @@
 name: yandi_desktop
-description: Локальная оболочка демона YANDI, P2 M1.
+description: Локальная оболочка демона YANDI, P2 M2, срез 1.
 publish_to: none
 version: 0.1.0+1
 environment:

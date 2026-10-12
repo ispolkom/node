@@ -1,17 +1,17 @@
-# YANDI desktop · P2 M1
+# YANDI desktop · P2 M2, срез 1
 
 Нативная Linux-оболочка существующего демона, без WebView и собственного хранилища данных.
-Первичная настройка, локальный вход по uid, панель и закрытая среда. Остальные экраны P2 и удаление веб-интерфейса P3 не входят в M1.
+Первичная настройка, локальный вход по uid, панель, контакты по карточке узла, текстовый чат, профиль, пароль входа и закрытая среда. Файлы, группы, шлюзы, relay, звонки и удаление веб-интерфейса P3 в этот срез не входят.
 
 ## Офлайн-сборка и тесты
 
 Из этого каталога, Flutter 3.38.9 / Dart 3.10.8:
 
 ```bash
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter pub get --offline
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter test
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter analyze
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter build linux --debug --no-pub
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter pub get --offline
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter test --no-pub
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter analyze --no-pub
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 /home/iam/.local/flutter-sdk/bin/flutter build linux --debug --no-pub
 ```
 
 `--no-pub` после отдельного `pub get --offline` исключает сетевое разрешение пакетов.
@@ -35,11 +35,11 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 /home/i
 Из корня репозитория:
 
 ```bash
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 python3 chaos/desktop_shell_m1.py /absolute/path/to/current/yandi
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 python3 chaos/desktop_shell_m1.py /absolute/path/to/current/yandi
 ```
 
-Нужны `unshare`, `mount`, `ip`, доступные user namespaces и текущий бинарь с P1. Скрипт создаёт отдельные user/network/mount namespaces и tmpfs `/tmp`, поднимает только loopback, задаёт временные HOME/XDG через существующий лабораторный Node и запускает тот же Dart UnixApi. Проверяет setup, status/nodes/speed, vault setup/lock/unlock/change/recover/auto-lock, HTTP 501 и запертое состояние после рестарта. Временные данные удаляются. Это RPC-интеграция; GTK-формы с настоящим демоном вручную отдельно.
-Не запускайте `tool/daemon_probe.dart` на сокете владельца: он меняет тестовые пароли и настройки.
+Нужны `unshare`, `mount`, `ip`, доступные user namespaces и текущий бинарь с P1. Скрипт создаёт отдельные user/network/mount namespaces и tmpfs `/tmp`, поднимает только loopback, задаёт временные HOME/XDG через существующий лабораторный Node и запускает тот же Dart UnixApi. Проверяет setup, status/nodes/speed, vault setup/lock/unlock/change/recover/auto-lock, HTTP 501 и запертое состояние после рестарта. Дополнительно второй временный узел проверяет импорт карточек, CRUD контактов, чат в обе стороны и профиль через общий ShellRepository и UnixApi. Временные данные удаляются. Это RPC-интеграция; GTK-формы с настоящим демоном вручную отдельно.
+Не запускайте `tool/daemon_probe.dart` и `tool/chat_probe.dart` на сокете владельца: он меняет тестовые пароли и настройки.
 
 ## Память и границы
 
@@ -47,6 +47,15 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY nice -n 15 python3
 
 Опрос vault — 1 с, status — 5 с, speed — 2 с, nodes — 10 с, без наложения циклов. При скрытии/потере фокуса отменяются запросы, очищаются формы и останавливается таймер; после возврата перечитываются auth/vault. Внешняя блокировка видна при ближайшем успешном poll; задержка ответа может увеличить интервал. При неподтверждённой собственной блокировке данные не возвращаются до явного повтора. Автоблокировку выполняет демон; оболочка не меняет её политику при скрытии/выходе.
 
-Клиент не повторяет POST и не выводит серверные тела в логи/ошибки (они могут содержать секрет). Отображаются безопасный русский контекст и HTTP-код. Ошибки 401/429/501 различаются. Лимит соединений — 6, общий deadline RPC — 15 с. Проверка server SO_PEERCRED со стороны Dart не реализована; клиент использует защищённый P1 путь без symlink конечного сокета и без TCP fallback.
+Клиент не повторяет POST/PUT/PATCH/DELETE и не выводит серверные тела в логи/ошибки (они могут содержать секрет). Отображаются безопасный русский контекст и HTTP-код. Ошибки 401/429/501 различаются. Лимит соединений — 6, общий deadline RPC — 15 с. Проверка server SO_PEERCRED со стороны Dart не реализована; клиент использует защищённый P1 путь без symlink конечного сокета и без TCP fallback.
 
 Подробности проверки и непроверенное: `docs/HANDOFF_desktop_shell_P2M1_2026-10-11.md` в корне репозитория.
+
+
+## Контакты, чат и настройки M2
+
+В «Контактах» введите имя и карточку `YANDI-NODE-1:...`: демон проверяет карточку и сохраняет доверие, затем отдельным запросом сохраняется контакт. При ошибке второго шага доверие уже могло сохраниться; существующий сервер также не сообщает ошибки записи contacts.json. Переименование и удаление перечитывают список; удаление требует подтверждения и не отзывает доверие или токен телефона.
+
+«Открыть чат» выбирает конкретный контакт; история опрашивается только для выбранного разговора (GET телефону отмечает прочтение). Контакты/история — раз в 5 секунд; старше календарного года сообщения не показываются, максимум 100 из API. Полный ID из доверенной карточки позволяет запросить историю без разрешения короткого ID онлайн. Enter отправляет, Shift+Enter — новая строка. Повторная отправка во время запроса заблокирована; ошибка сохраняет черновик, POST не повторяется. Черновики раздельные для контактов в памяти текущего экрана и уничтожаются при навигации, скрытии и блокировке. Вложения показываются только как отметка, без скачивания/предпросмотра.
+
+Настройки сохраняют имя профиля через PUT без периодического перезаписывания формы. Пароль входа меняется существующим восстановлением по мастер-паролю/коду; смена мастер-пароля API не предоставляет. Управление закрытой средой доступно здесь и на отдельной вкладке. Оболочка не получает её ключ и не расшифровывает историю сама.

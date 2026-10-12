@@ -59,6 +59,7 @@ abstract class Api {
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
+    String? method,
   });
   void cancel();
 }
@@ -80,8 +81,11 @@ class UnixApi implements Api {
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
+    String? method,
   }) async {
-    if (!RegExp(r'^/api/[a-z0-9_/]+$').hasMatch(path))
+    if (!RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path) ||
+        (method != null &&
+            !const ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].contains(method)))
       throw const ApiFailure('protocol');
     if (_active.length >= 6) throw const ApiFailure('busy');
     final client = HttpClient()
@@ -105,7 +109,7 @@ class UnixApi implements Api {
         encoded = Uint8List.fromList(utf8.encode(jsonEncode(body)));
       return await (() async {
         final req = await client.openUrl(
-          body == null ? 'GET' : 'POST',
+          method ?? (body == null ? 'GET' : 'POST'),
           Uri(scheme: 'http', host: 'localhost', path: path),
         );
         req.followRedirects = false;

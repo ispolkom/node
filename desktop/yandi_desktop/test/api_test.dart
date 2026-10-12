@@ -48,6 +48,32 @@ void main() {
       true,
     );
   });
+  test('PUT PATCH DELETE use exact method and JSON body over Unix', () async {
+    final seen = <String>[];
+    server.listen((req) async {
+      seen.add(req.method);
+      expect(jsonDecode(await utf8.decoder.bind(req).join()), {'id': 'test'});
+      req.response.headers.contentType = ContentType.json;
+      req.response.write('{"ok":true}');
+      await req.response.close();
+    });
+    for (final method in ['PUT', 'PATCH', 'DELETE']) {
+      await api.request('/api/contacts', method: method, body: {'id': 'test'});
+    }
+    expect(seen, ['PUT', 'PATCH', 'DELETE']);
+    await expectLater(
+      api.request('/api/contacts', method: 'CONNECT'),
+      throwsA(isA<ApiFailure>()),
+    );
+    await expectLater(
+      api.request('/api/chat/history/%2e%2e'),
+      throwsA(isA<ApiFailure>()),
+    );
+    await expectLater(
+      api.request('/api/chat/history/a%2fb'),
+      throwsA(isA<ApiFailure>()),
+    );
+  });
   test('chunked oversized response is rejected', () async {
     server.listen((req) async {
       req.response.headers.contentType = ContentType.json;

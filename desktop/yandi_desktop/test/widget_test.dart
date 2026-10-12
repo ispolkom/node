@@ -23,6 +23,7 @@ class FakeApi implements Api {
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
+    String? method,
   }) async {
     calls.add(path);
     if (body != null) bodies.add(Map.of(body));

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
+import 'features.dart';
 
 class DesktopApp extends StatefulWidget {
   final Api api;
@@ -40,6 +41,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   void wipe() {
     epoch++;
     formVersion++;
+    navigator.currentState?.popUntil((route) => route.isFirst);
     widget.api.cancel();
     status = speed = null;
     nodes = [];
@@ -107,8 +109,15 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       await widget.api.request('/api/vault/status'),
     );
     if (!mounted || own != epoch) return;
-    if (vault?.unlocked == true && !next.unlocked) {
+    if (vault != null &&
+        ((!vault!.configured || vault!.unlocked) &&
+                next.configured &&
+                !next.unlocked ||
+            !vault!.hasError && next.hasError)) {
+      epoch++;
+      widget.api.cancel();
       formVersion++;
+      navigator.currentState?.popUntil((route) => route.isFirst);
       status = speed = null;
       nodes = [];
     }
@@ -199,6 +208,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         status = speed = null;
         nodes = [];
         vault = null;
+        navigator.currentState?.popUntil((route) => route.isFirst);
         lockUnconfirmed = true;
       }
     });
@@ -353,16 +363,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             ),
           ),
         ),
-      const Divider(),
-      const Text('Шлюз', style: TextStyle(fontSize: 22)),
-      const Text('Запуск и остановка через API пока не реализованы демоном.'),
-      Wrap(
-        spacing: 12,
-        children: [
-          button('Запустить шлюз', () => act('/api/gateway/start', {})),
-          button('Остановить шлюз', () => act('/api/gateway/stop', {})),
-        ],
-      ),
     ],
   );
 
@@ -596,12 +596,20 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         Wrap(
           spacing: 12,
           children: [
-            for (final label in const ['Панель', 'Закрытая среда'])
+            for (final label in const [
+              'Панель',
+              'Контакты',
+              'Чат',
+              'Настройки',
+              'Закрытая среда',
+            ])
               OutlinedButton(
                 onPressed: busy
                     ? null
                     : () {
                         setState(() {
+                          epoch++;
+                          widget.api.cancel();
                           page = label;
                           formVersion++;
                         });
@@ -626,9 +634,72 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
         ] else if (page == 'Панель')
           dashboard()
-        else
+        else if (page == 'Закрытая среда')
+          vaultPanel()
+        else if (page == 'Настройки') ...[
+          if (visible &&
+              vault != null &&
+              !vault!.hasError &&
+              (!vault!.configured || vault!.unlocked))
+            features(),
+          const Divider(),
+          const Text(
+            'Пароль входа меняется через мастер-пароль или код восстановления. Смена мастер-пароля в API отсутствует.',
+          ),
+          SecretForm(
+            key: ValueKey('settings-auth-$formVersion'),
+            title: 'Сменить пароль входа',
+            labels: const [
+              'Мастер-пароль или код восстановления',
+              'Новый пароль входа',
+              'Повтор нового пароля',
+            ],
+            busy: busy,
+            submit: (v) {
+              validateNew(v[1], v[2]);
+              return act('/api/auth/recover', {
+                'recovery_code': v[0],
+                'new_login_password': v[1],
+                'remember_me': false,
+              });
+            },
+          ),
           vaultPanel(),
+        ] else if (!visible || vault == null)
+          const Text('Проверка закрытой среды…')
+        else if (vault!.hasError || vault!.configured && !vault!.unlocked)
+          vaultPanel()
+        else
+          features(),
       ],
+    );
+  }
+
+  Widget features() {
+    final own = epoch;
+    return ShellFeatures(
+      key: ValueKey('$page-$formVersion'),
+      api: widget.api,
+      page: page,
+      isActive: () =>
+          visible &&
+          connected &&
+          entered &&
+          own == epoch &&
+          vault != null &&
+          !vault!.hasError &&
+          (!vault!.configured || vault!.unlocked),
+      onFailure: (failure) {
+        if (mounted) setState(() => disconnect(failure));
+      },
+      onLocked: () {
+        if (mounted) {
+          setState(() {
+            wipe();
+          });
+          poll(force: true);
+        }
+      },
     );
   }
 
@@ -638,7 +709,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     title: 'YANDI',
     debugShowCheckedModeBanner: false,
     theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff3154a0)),
+      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff278654)),
       useMaterial3: true,
     ),
     home: Scaffold(
