@@ -9,12 +9,13 @@ import '../models/group.dart';
 import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
+import 'chat_files_screen.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
 import '../models/message.dart';
 import '../services/app_state.dart';
-import '../services/file_transfer_service.dart' show FileTransferService, maxFileSize;
+import '../services/file_transfer_service.dart' show maxFileSize;
 import '../widgets/vault_image.dart';
 import '../widgets/message_menu.dart';
 import 'package:flutter/services.dart';
@@ -349,6 +350,35 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
       body: Column(
         children: [
+          // навигационная строка под шапкой: «Файлы чата» открывает папку файлов этого собеседника
+          InkWell(
+            key: const ValueKey('chat-files-link'),
+            onTap: () {
+              final offers = <FileOffer>[
+                for (final m in state.messagesFor(widget.peerId))
+                  if (FileOffer.tryParse(m.text) case final o?) o,
+              ];
+              Navigator.push(context, MaterialPageRoute(
+                builder: (_) => ChatFilesScreen(
+                  title: title,
+                  shortId: widget.peerId.substring(0, 8),
+                  offers: offers,
+                ),
+              ));
+            },
+            child: Container(
+              width: double.infinity,
+              color: AppTheme.surface,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+              child: Row(children: const [
+                Icon(Icons.folder_outlined, size: 18, color: AppTheme.accent),
+                SizedBox(width: 8),
+                Text('Файлы чата', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+                Spacer(),
+                Icon(Icons.chevron_right, size: 18, color: AppTheme.textSecondary),
+              ]),
+            ),
+          ),
           if (!saved)
             Material(
               color: AppTheme.accent.withOpacity(0.12),
@@ -658,28 +688,6 @@ class _FileCard extends StatelessWidget {
       final v = await (await state.vaultFiles()).describe(path);
       if (!context.mounted) return;
       await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
-    }),
-    // Вынести файл наружу можно только осознанно: после этого его видят другие приложения.
-    _Action(icon: Icons.save_alt, label: 'Вынести наружу', onTap: () async {
-      final ok = await showDialog<bool>(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          backgroundColor: AppTheme.surface,
-          title: const Text('Вынести из защищённого пространства?', style: TextStyle(color: AppTheme.text)),
-          content: const Text('Файл будет скопирован в «Загрузки» телефона. Там его смогут увидеть другие приложения, а по самому файлу '
-              'можно связать вас с этим собеседником. Продолжить?', style: TextStyle(color: AppTheme.textSecondary)),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Вынести', style: TextStyle(color: Colors.redAccent))),
-          ],
-        ),
-      );
-      if (ok != true) return;
-      final uri = await state.saveToDownloads(path, FileTransferService.safeName(offer.name), offer.mime);
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(uri == null ? 'Не удалось сохранить в «Загрузки»' : 'Сохранено в «Загрузки»: ${offer.name}')));
-      }
     }),
   ];
 
