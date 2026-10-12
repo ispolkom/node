@@ -420,6 +420,7 @@ void main() {
                 onLocked: () {},
                 onFailure: (_) {},
                 signaling: s,
+                mediaFactory: UnavailableMedia.new,
               ),
             ),
           ),
