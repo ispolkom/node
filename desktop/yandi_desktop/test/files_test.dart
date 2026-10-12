@@ -104,6 +104,25 @@ void main() {
       expect(api.payloads.length, 3);
     },
   );
+  test(
+    'phone upload uses one MiB chunks and one attachment after completion',
+    () async {
+      final api = FileApi();
+      final file = await File(
+        '${temp.path}/phone.bin',
+      ).writeAsBytes(Uint8List(1024 * 1024 + 1));
+      await FileRepository(api).upload(
+        m2.alice,
+        file,
+        phone: true,
+        isActive: () => true,
+        progress: (_, _) {},
+      );
+      expect(api.payloads.map((b) => b.length), [1024 * 1024, 1]);
+      expect(api.chunks.map((c) => c['total_chunks']), ['2', '2']);
+      expect(api.bodies.length, 1);
+    },
+  );
   test('empty files and navigation cancellation never send metadata', () async {
     final api = FileApi(),
         file = await File('${temp.path}/empty').writeAsBytes([]);
@@ -134,7 +153,9 @@ void main() {
   testWidgets('file picker, cancel attachment, send and daemon rejection', (
     t,
   ) async {
-    final file = (await t.runAsync(() => File('${temp.path}/chosen.bin').writeAsBytes([1, 2, 3])))!;
+    final file = (await t.runAsync(
+      () => File('${temp.path}/chosen.bin').writeAsBytes([1, 2, 3]),
+    ))!;
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       PlatformFiles.channel,
       (call) async => call.method == 'choose' ? file.path : null,

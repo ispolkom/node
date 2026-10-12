@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -161,18 +162,18 @@ class _ProfilePanelState extends State<ProfilePanel> {
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('Удалить аватар профиля?'),
-        content: const Text(
+        title: const UiText('Удалить аватар профиля?'),
+        content: const UiText(
           'Аватар перестанет отображаться в профиле. API демона сохраняет прежний файл на узле.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Отмена'),
+            child: const UiText('Отмена'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Удалить аватар'),
+            child: const UiText('Удалить аватар'),
           ),
         ],
       ),
@@ -212,32 +213,32 @@ class _ProfilePanelState extends State<ProfilePanel> {
           width: 96,
           height: 96,
           fit: BoxFit.contain,
-          errorBuilder: (_, _, _) => const Text('Не удалось показать аватар'),
+          errorBuilder: (_, _, _) => const UiText('Не удалось показать аватар'),
         ),
       Wrap(
         children: [
           TextButton(
             onPressed: widget.busy || loading ? null : load,
-            child: const Text('Обновить профиль'),
+            child: const UiText('Обновить профиль'),
           ),
           if (!own ||
               profile?['avatar'] is String &&
                   (profile!['avatar'] as String).isNotEmpty)
             TextButton(
               onPressed: widget.busy ? null : preview,
-              child: const Text('Просмотреть аватар'),
+              child: const UiText('Просмотреть аватар'),
             ),
           if (own)
             TextButton(
               onPressed: widget.busy || choosing ? null : upload,
-              child: const Text('Загрузить аватар'),
+              child: const UiText('Загрузить аватар'),
             ),
           if (own &&
               profile?['avatar'] is String &&
               (profile!['avatar'] as String).isNotEmpty)
             TextButton(
               onPressed: widget.busy ? null : remove,
-              child: const Text('Удалить аватар профиля'),
+              child: const UiText('Удалить аватар профиля'),
             ),
         ],
       ),

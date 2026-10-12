@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -307,7 +308,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   Widget participants() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      const Text('Участники', style: TextStyle(fontSize: 22)),
+      const UiText('Участники', style: TextStyle(fontSize: 22)),
       for (final m in rows(info, 'members'))
         Card(
           child: Padding(
@@ -439,21 +440,21 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         '${group['name'] ?? 'Загрузка группы…'}',
         style: const TextStyle(fontSize: 22),
       ),
-      const Text(
+      const UiText(
         'История не старше календарного года. Файлы и звонки не поддерживаются.',
       ),
-      if (feed?['damaged'] == true) const Text('Повреждена лента на диске.'),
+      if (feed?['damaged'] == true) const UiText('Повреждена лента на диске.'),
       if (feed?['problem'] == true)
-        const Text('Ключ владельца изменился: доверие не подтверждено.'),
+        const UiText('Ключ владельца изменился: доверие не подтверждено.'),
       if (feed != null && feed!['has_key'] != true)
-        const Text('Ждём ключ группы.'),
-      if (group['muted'] == true) const Text('Вам запрещено писать.'),
+        const UiText('Ждём ключ группы.'),
+      if (group['muted'] == true) const UiText('Вам запрещено писать.'),
       if (feed?['deny'] is List && (feed!['deny'] as List).isNotEmpty)
         Text(
           'Запрещено: ${(feed!['deny'] as List).map((k) => const {2: 'изображения', 3: 'файлы', 4: 'аудио', 5: 'видео', 6: 'ссылки'}[k] ?? '$k').join(', ')}',
         ),
       if (feed != null && rows(feed, 'messages').isEmpty)
-        const Text('История пуста.'),
+        const UiText('История пуста.'),
       for (final m in rows(feed, 'messages'))
         Card(
           child: Padding(
@@ -498,7 +499,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       ),
       FilledButton(
         onPressed: !busy && canSend ? send : null,
-        child: const Text('Отправить группе'),
+        child: const UiText('Отправить группе'),
       ),
       if (info != null) ...[
         participants(),
@@ -576,7 +577,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       ),
       if (tab == 'Свои группы') ...[
         if (!loading && mine.isEmpty)
-          const Text('Вы ещё не состоите в группах.'),
+          const UiText('Вы ещё не состоите в группах.'),
         for (final g in mine)
           button('${g['name']} · ${g['role']}', () => choose('${g['id']}')),
         for (final g in gone)
@@ -592,7 +593,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ),
       ],
       if (tab == 'Каталог') ...[
-        if (!loading && catalog.isEmpty) const Text('Каталог пуст.'),
+        if (!loading && catalog.isEmpty) const UiText('Каталог пуст.'),
         for (final g in catalog)
           Card(
             child: ListTile(
@@ -602,7 +603,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                 children: [
                   Text('${g['about'] ?? ''}'),
                   if (g['requested'] == true)
-                    const Text('Просьба отправлена')
+                    const UiText('Просьба отправлена')
                   else
                     button(
                       g['kind'] == 'open'
@@ -616,7 +617,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ),
       ],
       if (tab == 'Управление узла') ...[
-        const Text(
+        const UiText(
           'Метаданные всех групп узла. Содержание доступно только участникам.',
         ),
         for (final g in admin)
@@ -710,7 +711,7 @@ class _GroupFormState extends State<GroupForm> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (widget.secret)
-            const Text(
+            const UiText(
               'Будут уничтожены журнал и файлы группы для всего узла.',
             ),
           for (var i = 0; i < fields.length; i++)
@@ -740,7 +741,7 @@ class _GroupFormState extends State<GroupForm> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Отмена'),
+        child: const UiText('Отмена'),
       ),
       FilledButton(
         onPressed: submit,
@@ -790,7 +791,7 @@ class _GroupConfirmState extends State<GroupConfirm> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context, false),
-        child: const Text('Отмена'),
+        child: const UiText('Отмена'),
       ),
       FilledButton(
         onPressed: seconds > 0 ? null : () => Navigator.pop(context, true),
@@ -811,7 +812,7 @@ class _GroupRulesState extends State<GroupRules> {
   late final deny = widget.initial.toSet();
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Правила группы'),
+    title: const UiText('Правила группы'),
     content: Column(
       mainAxisSize: MainAxisSize.min,
       children: [
@@ -838,11 +839,11 @@ class _GroupRulesState extends State<GroupRules> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Отмена'),
+        child: const UiText('Отмена'),
       ),
       FilledButton(
         onPressed: () => Navigator.pop(context, deny.toList()..sort()),
-        child: const Text('Сохранить правила'),
+        child: const UiText('Сохранить правила'),
       ),
     ],
   );

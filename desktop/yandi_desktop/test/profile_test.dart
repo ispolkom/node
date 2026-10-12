@@ -62,6 +62,7 @@ void main() {
     );
     final api = ProfileApi();
     await m2.open(t, api, 'Настройки');
+    await t.enterText(m2.field('Имя профиля'), 'Несохранённое имя');
     await t.ensureVisible(find.text('Загрузить аватар'));
     await t.runAsync(() async {
       await t.tap(find.text('Загрузить аватар'));
@@ -77,6 +78,7 @@ void main() {
     await m1.click(t, 'Удалить аватар');
     expect(api.bodies.last, {'avatar': ''});
     expect(find.byType(Image), findsNothing);
+    expect(find.text('Несохранённое имя'), findsOneWidget);
     await m1.stop(t);
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       PlatformFiles.channel,

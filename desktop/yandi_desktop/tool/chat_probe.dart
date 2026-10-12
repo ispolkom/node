@@ -221,11 +221,23 @@ Future<void> main(List<String> args) async {
     await ra.saveProfile('Профиль оболочки');
     if ((await ra.profile())['display_name'] != 'Профиль оболочки')
       throw StateError('profile');
+    final exported = jsonDecode(
+      utf8.decode(await a.bytes('/api/contacts/export')),
+    );
+    if (exported is! Map || exported['contacts'] is! List)
+      throw StateError('contacts export');
+    await a.request('/api/peers/trusted/remove', body: {'id': idB});
+    if (ShellRepository.list(
+          await ra.trusted(),
+          'peers',
+        ).any((p) => p['id'] == idB) ||
+        !(await ra.contacts()).any((c) => c['id'] == contact['id']))
+      throw StateError('separate trust revocation');
     await ra.remove(contact['id'] as String);
     if ((await ra.contacts()).any((c) => c['id'] == contact['id']))
       throw StateError('remove');
     stdout.writeln(
-      'PASS: desktop M4 Unix API chat edit/delete/clear/file A→B + M2 contacts/profile/groups',
+      'PASS: desktop M4 Unix API chat edit/delete/clear/file A→B/avatar/profile/export/trust + M2 groups',
     );
   } catch (e) {
     stderr.writeln(e is ApiFailure ? e.message : 'Проверка M2 не пройдена: $e');

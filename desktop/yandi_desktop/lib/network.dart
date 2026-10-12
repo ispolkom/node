@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/network_repository.dart';
@@ -150,11 +151,11 @@ class _NetworkFeatureState extends State<NetworkFeature> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(c, false),
-              child: const Text('Отмена'),
+              child: const UiText('Отмена'),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(c, true),
-              child: const Text('Удалить'),
+              child: const UiText('Удалить'),
             ),
           ],
         ),
@@ -229,7 +230,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
       if (gateways) ...[
         proxyStatus('HTTP', http, 'proxy'),
         proxyStatus('SOCKS5', socks, 'socks5'),
-        const Text(
+        const UiText(
           'Stop меняет метаданные демона; закрытие сокета не подтверждено. Подключение/отключение узла в API — заглушка. Задержка: —.',
         ),
         TextField(
@@ -347,7 +348,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
             ),
           ],
         ),
-        const Text(
+        const UiText(
           'Запрос подключения не гарантирует публичную доступность Relay.',
         ),
         for (final s in sessions)

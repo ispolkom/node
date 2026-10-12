@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/shell_repository.dart';
@@ -106,15 +107,15 @@ class _ContactTunnelState extends State<ContactTunnel> {
         children: [
           TextButton(
             onPressed: widget.busy ? null : () => command(true),
-            child: const Text('Запустить туннель'),
+            child: const UiText('Запустить туннель'),
           ),
           TextButton(
             onPressed: widget.busy ? null : () => command(false),
-            child: const Text('Остановить туннель'),
+            child: const UiText('Остановить туннель'),
           ),
           TextButton(
             onPressed: widget.busy ? null : check,
-            child: const Text('Статус туннеля'),
+            child: const UiText('Статус туннеля'),
           ),
         ],
       ),

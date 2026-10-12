@@ -57,6 +57,22 @@ static void local_method(FlMethodChannel*, FlMethodCall* call, gpointer data) {
     g_object_set_data_full(G_OBJECT(self->chooser), "call", g_object_ref(call), g_object_unref);
     g_signal_connect(self->chooser, "response", G_CALLBACK(chooser_response), self);
     gtk_widget_show(self->chooser);
+  } else if (g_strcmp0(method, "withdrawNotification") == 0) {
+    g_application_withdraw_notification(G_APPLICATION(self), "yandi-message");
+    fl_method_call_respond_success(call, nullptr, nullptr);
+  } else if (g_strcmp0(method, "messageAlert") == 0) {
+    FlValue* args = fl_method_call_get_args(call);
+    FlValue* sound = fl_value_lookup_string(args, "sound");
+    FlValue* notify = fl_value_lookup_string(args, "notify");
+    FlValue* english = fl_value_lookup_string(args, "english");
+    if (sound && fl_value_get_bool(sound)) gdk_display_beep(gdk_display_get_default());
+    if (notify && fl_value_get_bool(notify)) {
+      g_autoptr(GNotification) notification = g_notification_new("YANDI");
+      g_notification_set_body(notification, english && fl_value_get_bool(english)
+          ? "New message" : "Новое сообщение");
+      g_application_send_notification(G_APPLICATION(self), "yandi-message", notification);
+    }
+    fl_method_call_respond_success(call, nullptr, nullptr);
   } else if (g_strcmp0(method, "open") == 0) {
     const gchar* path = fl_value_get_string(fl_method_call_get_args(call));
     g_autofree gchar* uri = g_filename_to_uri(path, nullptr, nullptr);
@@ -74,6 +90,8 @@ static void local_method(FlMethodChannel*, FlMethodCall* call, gpointer data) {
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+  // File selection must not write GTK recent-file history. GSettings is memory-only.
+  g_object_set(gtk_settings_get_default(), "gtk-recent-files-enabled", FALSE, nullptr);
   GtkWindow* window =
       GTK_WINDOW(gtk_application_window_new(GTK_APPLICATION(application)));
 

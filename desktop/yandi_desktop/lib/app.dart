@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'domain/states.dart';
@@ -12,6 +13,7 @@ class DesktopApp extends StatefulWidget {
 }
 
 class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
+  final preferences = AppPreferences();
   final navigator = GlobalKey<NavigatorState>();
   AuthStage? auth;
   VaultState? vault;
@@ -39,6 +41,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   void wipe() {
+    preferences.reset();
     epoch++;
     formVersion++;
     navigator.currentState?.popUntil((route) => route.isFirst);
@@ -69,6 +72,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     timer?.cancel();
+    preferences.reset();
+    preferences.dispose();
     WidgetsBinding.instance.removeObserver(this);
     widget.api.cancel();
     super.dispose();
@@ -115,6 +120,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 !next.unlocked ||
             !vault!.hasError && next.hasError)) {
       epoch++;
+      preferences.reset();
       widget.api.cancel();
       formVersion++;
       navigator.currentState?.popUntil((route) => route.isFirst);
@@ -279,14 +285,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   Widget button(String label, VoidCallback action) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
-    child: FilledButton(onPressed: busy ? null : action, child: Text(label)),
+    child: FilledButton(onPressed: busy ? null : action, child: UiText(label)),
   );
   Widget dashboard() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      const Text('Статус узла', style: TextStyle(fontSize: 22)),
+      const UiText('Статус узла', style: TextStyle(fontSize: 22)),
       if (status == null)
-        const Text('Загрузка статуса…')
+        const UiText('Загрузка статуса…')
       else ...[
         for (final item in const {
           'is_local': 'Локальный узел',
@@ -315,9 +321,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         ],
       ),
       const Divider(),
-      const Text('Скорость', style: TextStyle(fontSize: 22)),
+      const UiText('Скорость', style: TextStyle(fontSize: 22)),
       if (speed == null)
-        const Text('Загрузка метрик…')
+        const UiText('Загрузка метрик…')
       else
         for (final item in const {
           'rx_speed': 'Приём, Б/с',
@@ -335,8 +341,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         }.entries)
           Text('${item.value}: ${speed![item.key] ?? '—'}'),
       const Divider(),
-      const Text('Узлы', style: TextStyle(fontSize: 22)),
-      if (nodes.isEmpty) const Text('Обнаруженных узлов нет.'),
+      const UiText('Узлы', style: TextStyle(fontSize: 22)),
+      if (nodes.isEmpty) const UiText('Обнаруженных узлов нет.'),
       for (final node in nodes.whereType<Map>())
         Card(
           child: Padding(
@@ -358,7 +364,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 }.entries)
                   if (node.containsKey(entry.key))
                     SelectableText('${entry.value}: ${node[entry.key]}'),
-                const Text('Подключение узла в текущем API — заглушка.'),
+                const UiText('Подключение узла в текущем API — заглушка.'),
               ],
             ),
           ),
@@ -377,13 +383,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text('Закрытая среда', style: TextStyle(fontSize: 22)),
+        const UiText('Закрытая среда', style: TextStyle(fontSize: 22)),
         Text(v.label),
         if (v.migrationPending)
-          const Text(
+          const UiText(
             'Перенос части старых данных не завершён и повторится при входе.',
           ),
-        const Text(
+        const UiText(
           'Пароль владельца закрытой среды отличается от пароля входа и мастер-пароля.',
         ),
         if (!v.configured)
@@ -413,18 +419,18 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 final answer = await showDialog<bool>(
                   context: navigator.currentContext!,
                   builder: (context) => AlertDialog(
-                    title: const Text('Без секретных слов'),
-                    content: const Text(
+                    title: const UiText('Без секретных слов'),
+                    content: const UiText(
                       'Без секретных слов забытый пароль не восстановить. Продолжить без слов?',
                     ),
                     actions: [
                       TextButton(
                         onPressed: () => Navigator.pop(context, false),
-                        child: const Text('Отмена'),
+                        child: const UiText('Отмена'),
                       ),
                       TextButton(
                         onPressed: () => Navigator.pop(context, true),
-                        child: const Text('Продолжить'),
+                        child: const UiText('Продолжить'),
                       ),
                     ],
                   ),
@@ -508,12 +514,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          const Text('Нет связи с демоном', style: TextStyle(fontSize: 24)),
-          const Text(
+          const UiText('Нет связи с демоном', style: TextStyle(fontSize: 24)),
+          const UiText(
             'Запустите YANDI под вашим пользователем. Оболочка подключается только к локальному Unix-сокету; интернет для этого не нужен.',
           ),
           if (lockUnconfirmed)
-            const Text('Состояние блокировки не подтверждено'),
+            const UiText('Состояние блокировки не подтверждено'),
           button('Повторить подключение', () => checkAuth()),
         ],
       );
@@ -561,11 +567,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             style: const TextStyle(fontSize: 24),
           ),
           if (auth == AuthStage.recovery)
-            const Text(
+            const UiText(
               'Проблема привязки ключей к устройству. Для перепривязки используйте yandi-keys recover в терминале; оболочка не выполняет перепривязку.',
             )
           else ...[
-            const Text(
+            const UiText(
               'Локальный вход разрешён демоном по uid владельца Unix-сокета. Пароль браузерного входа здесь не требуется. Закрытая среда открывается отдельным паролем.',
             ),
             button('Войти', enter),
@@ -613,13 +619,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     : () {
                         setState(() {
                           epoch++;
+                          preferences.reset();
                           widget.api.cancel();
                           page = label;
                           formVersion++;
                         });
                         poll(force: true);
                       },
-                child: Text(label),
+                child: UiText(label),
               ),
             button('Выйти из оболочки', () {
               setState(() {
@@ -630,24 +637,71 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             }),
           ],
         ),
-        const Text(
+        const UiText(
           'Выход из оболочки не запирает закрытую среду. Используйте «Запереть».',
         ),
         if (lockUnconfirmed) ...[
-          const Text('Состояние блокировки не подтверждено'),
+          const UiText('Состояние блокировки не подтверждено'),
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
         ] else if (page == 'Панель')
           dashboard()
         else if (page == 'Закрытая среда')
           vaultPanel()
         else if (page == 'Настройки') ...[
+          AnimatedBuilder(
+            animation: preferences,
+            builder: (context, _) => Column(
+              children: [
+                SwitchListTile(
+                  title: const UiText('Язык / Language'),
+                  subtitle: Text(preferences.english ? 'English' : 'Русский'),
+                  value: preferences.english,
+                  onChanged: (value) {
+                    preferences.english = value;
+                    preferences.changed();
+                  },
+                ),
+                const UiText(
+                  'Английский перевод частичный: меню и основные кнопки. Формы и подробные состояния пока на русском.',
+                ),
+                SwitchListTile(
+                  title: const UiText('Системный звук'),
+                  value: preferences.sound,
+                  onChanged: (value) {
+                    preferences.sound = value;
+                    preferences.changed();
+                  },
+                ),
+                SwitchListTile(
+                  title: const UiText('Уведомления ОС'),
+                  value: preferences.notifications,
+                  onChanged: (value) {
+                    preferences.notifications = value;
+                    preferences.changed();
+                  },
+                ),
+                SwitchListTile(
+                  title: const UiText('Не беспокоить'),
+                  value: preferences.dnd,
+                  onChanged: (value) {
+                    preferences.dnd = value;
+                    preferences.changed();
+                  },
+                ),
+                const UiText(
+                  'Оповещения только о новых сообщениях открытого чата. Содержимое и имя в ОС не передаются. Настройки действуют до закрытия оболочки.',
+                ),
+                if (preferences.failure != null) Text(preferences.failure!),
+              ],
+            ),
+          ),
           if (visible &&
               vault != null &&
               !vault!.hasError &&
               (!vault!.configured || vault!.unlocked))
             features(),
           const Divider(),
-          const Text(
+          const UiText(
             'Пароль входа меняется через мастер-пароль или код восстановления. Смена мастер-пароля в API отсутствует.',
           ),
           SecretForm(
@@ -670,7 +724,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           ),
           vaultPanel(),
         ] else if (!visible || vault == null)
-          const Text('Проверка закрытой среды…')
+          const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)
           vaultPanel()
         else
@@ -684,6 +738,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     return ShellFeatures(
       key: ValueKey('$page-$formVersion'),
       api: widget.api,
+      preferences: preferences,
       page: page,
       isActive: () =>
           visible &&
@@ -708,42 +763,45 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   @override
-  Widget build(BuildContext context) => MaterialApp(
-    navigatorKey: navigator,
-    title: 'YANDI',
-    debugShowCheckedModeBanner: false,
-    theme: ThemeData(
-      colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff278654)),
-      useMaterial3: true,
-    ),
-    home: Scaffold(
-      appBar: AppBar(title: const Text('YANDI · локальная оболочка')),
-      body: SafeArea(
-        child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
-          child: Align(
-            alignment: Alignment.topCenter,
-            child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 960),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  if (busy) const LinearProgressIndicator(),
-                  if (error != null)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(
-                        error!,
-                        style: const TextStyle(color: Colors.red),
+  Widget build(BuildContext context) => PreferencesScope(
+    preferences: preferences,
+    child: MaterialApp(
+      navigatorKey: navigator,
+      title: 'YANDI',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: const Color(0xff278654)),
+        useMaterial3: true,
+      ),
+      home: Scaffold(
+        appBar: AppBar(title: const UiText('YANDI · локальная оболочка')),
+        body: SafeArea(
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Align(
+              alignment: Alignment.topCenter,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxWidth: 960),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    if (busy) const LinearProgressIndicator(),
+                    if (error != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Text(
+                          error!,
+                          style: const TextStyle(color: Colors.red),
+                        ),
                       ),
-                    ),
-                  if (notice != null)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 16),
-                      child: Text(notice!),
-                    ),
-                  content(),
-                ],
+                    if (notice != null)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Text(notice!),
+                      ),
+                    content(),
+                  ],
+                ),
               ),
             ),
           ),
@@ -911,7 +969,7 @@ class _TimeoutFormState extends State<TimeoutForm> {
                 });
                 widget.submit(secs);
               },
-        child: const Text('Сохранить автоблокировку'),
+        child: const UiText('Сохранить автоблокировку'),
       ),
     ],
   );

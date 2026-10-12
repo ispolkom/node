@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -18,6 +19,7 @@ import 'contact_tunnel.dart';
 class ShellFeatures extends StatefulWidget {
   final Api api;
   final String page;
+  final AppPreferences? preferences;
   final void Function(ApiFailure) onFailure;
   final VoidCallback onLocked;
   final bool Function() isActive;
@@ -25,6 +27,7 @@ class ShellFeatures extends StatefulWidget {
     super.key,
     required this.api,
     required this.page,
+    this.preferences,
     required this.onFailure,
     required this.onLocked,
     required this.isActive,
@@ -40,7 +43,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   final drafts = <String, String>{};
   List<Map<String, dynamic>> contacts = [], messages = [], trusted = [];
   Map<String, dynamic>? selected;
-  String? ownId, ownCard, error, notice;
+  String? ownId, ownCard, lastProfileName, error, notice;
   bool loading = true, refreshing = false, sending = false;
   int revision = 0;
   File? pickedFile;
@@ -70,7 +73,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     drafts.clear();
     contacts = messages = trusted = [];
     selected = null;
-    ownCard = null;
+    ownCard = lastProfileName = null;
     for (final field in [card, name, search, composer]) {
       field.clear();
       field.dispose();
@@ -111,7 +114,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (widget.page == 'Настройки') {
         final profile = await repo.profile();
         if (!active || rev != revision) return;
-        name.text = '${profile['display_name'] ?? ''}';
+        final nextName = '${profile['display_name'] ?? ''}';
+        if (loading || name.text == lastProfileName) name.text = nextName;
+        lastProfileName = nextName;
       } else {
         final list = await repo.contacts();
         if (!active || rev != revision) return;
@@ -142,6 +147,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           setState(() {
             messages = history;
           });
+          widget.preferences?.observe(currentPeer, ownId, history);
         }
       }
       if (active && rev == revision)
@@ -289,17 +295,17 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: Text('Удалить контакт «${contact['name']}»?'),
-        content: const Text(
+        content: const UiText(
           'Удаляется запись контакта. Доверие карточке и доступ телефона сохраняются.',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Отмена'),
+            child: const UiText('Отмена'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Удалить'),
+            child: const UiText('Удалить'),
           ),
         ],
       ),
@@ -320,12 +326,21 @@ class _ShellFeaturesState extends State<ShellFeatures> {
 
   Future<void> exportContacts() async {
     final rev = revision;
-    final path = await PlatformFiles.choose(save: true, name: 'contacts.json');
+    String? path;
+    try {
+      path = await PlatformFiles.choose(save: true, name: 'contacts.json');
+    } catch (_) {
+      if (active && revision == rev)
+        setState(() {
+          error = 'Не удалось открыть диалог сохранения.';
+        });
+      return;
+    }
     if (!active || revision != rev || path == null) return;
     await mutate(
       () => FileRepository(widget.api).binary.download(
         '/api/contacts/export',
-        File(path),
+        File(path!),
         limit: 1024 * 1024,
         isActive: () => active && revision == rev,
       ),
@@ -369,11 +384,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('Отмена'),
+            child: const UiText('Отмена'),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('Подтвердить'),
+            child: const UiText('Подтвердить'),
           ),
         ],
       ),
@@ -441,7 +456,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         onChanged: (_) => setState(() {}),
         decoration: const InputDecoration(labelText: 'Поиск по имени или ID'),
       ),
-      if (contacts.isEmpty && !loading) const Text('Контактов пока нет.'),
+      if (contacts.isEmpty && !loading) const UiText('Контактов пока нет.'),
       for (final c in contacts.where(
         (c) => '${c['name']} ${c['short_id']}'.toLowerCase().contains(
           search.text.toLowerCase(),
@@ -462,21 +477,21 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                   children: [
                     TextButton(
                       onPressed: sending ? null : () => choose(c),
-                      child: const Text('Открыть чат'),
+                      child: const UiText('Открыть чат'),
                     ),
                     TextButton(
                       onPressed: sending ? null : () => rename(c),
-                      child: const Text('Переименовать'),
+                      child: const UiText('Переименовать'),
                     ),
                     if (c['is_phone'] != true &&
                         trusted.any((t) => t['id'] == peer(c)))
                       TextButton(
                         onPressed: sending ? null : () => revoke(c),
-                        child: const Text('Отозвать доверие'),
+                        child: const UiText('Отозвать доверие'),
                       ),
                     TextButton(
                       onPressed: sending ? null : () => remove(c),
-                      child: const Text('Удалить контакт'),
+                      child: const UiText('Удалить контакт'),
                     ),
                   ],
                 ),
@@ -491,7 +506,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (selected == null)
-        const Text('Выберите контакт для переписки.')
+        const UiText('Выберите контакт для переписки.')
       else ...[
         Text('Чат: ${selected!['name']}', style: const TextStyle(fontSize: 22)),
         if (selected!['is_phone'] != true)
@@ -513,11 +528,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         ),
         TextButton(
           onPressed: sending ? null : clearHistory,
-          child: const Text('Очистить историю'),
+          child: const UiText('Очистить историю'),
         ),
-        const Text('Показаны последние 100 сообщений не старше года.'),
+        const UiText('Показаны последние 100 сообщений не старше года.'),
         if (!loading && messages.isEmpty && error == null)
-          const Text('История пуста.'),
+          const UiText('История пуста.'),
         for (final m in messages)
           Card(
             color: m['from'] == ownId
@@ -536,11 +551,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                         if (m['attachment'] == null)
                           TextButton(
                             onPressed: sending ? null : () => editMessage(m),
-                            child: const Text('Изменить сообщение'),
+                            child: const UiText('Изменить сообщение'),
                           ),
                         TextButton(
                           onPressed: sending ? null : () => deleteMessage(m),
-                          child: const Text('Удалить сообщение'),
+                          child: const UiText('Удалить сообщение'),
                         ),
                       ],
                     ),
@@ -578,7 +593,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           children: [
             TextButton(
               onPressed: sending || choosingFile ? null : pickFile,
-              child: const Text('Выбрать файл'),
+              child: const UiText('Выбрать файл'),
             ),
             if (pickedFile != null) ...[
               Text(pickedFile!.uri.pathSegments.last),
@@ -588,11 +603,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     : () => setState(() {
                         pickedFile = null;
                       }),
-                child: const Text('Убрать файл'),
+                child: const UiText('Убрать файл'),
               ),
               FilledButton(
                 onPressed: sending ? null : sendFile,
-                child: const Text('Отправить файл'),
+                child: const UiText('Отправить файл'),
               ),
             ],
           ],
@@ -605,7 +620,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         ],
         FilledButton(
           onPressed: sending ? null : send,
-          child: const Text('Отправить'),
+          child: const UiText('Отправить'),
         ),
       ],
     ],
@@ -641,9 +656,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (error != null)
               Text(error!, style: const TextStyle(color: Colors.red)),
             if (notice != null) Text(notice!),
-            if (refreshError) const Text('Данные не обновлены.'),
+            if (refreshError) const UiText('Данные не обновлены.'),
             if (widget.page == 'Настройки') ...[
-              const Text('Профиль', style: TextStyle(fontSize: 22)),
+              const UiText('Профиль', style: TextStyle(fontSize: 22)),
               ProfilePanel(
                 api: widget.api,
                 busy: sending,
@@ -655,11 +670,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 onPressed: sending || loading
                     ? null
                     : () => mutate(() => repo.saveProfile(name.text.trim())),
-                child: const Text('Сохранить профиль'),
+                child: const UiText('Сохранить профиль'),
               ),
             ] else ...[
               if (widget.page == 'Контакты') ...[
-                const Text(
+                const UiText(
                   'Карточка собственного узла',
                   style: TextStyle(fontSize: 22),
                 ),
@@ -674,15 +689,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                                 ClipboardData(text: ownCard!),
                               );
                             }),
-                      child: const Text('Копировать карточку'),
+                      child: const UiText('Копировать карточку'),
                     ),
                     TextButton(
                       onPressed: sending ? null : exportContacts,
-                      child: const Text('Экспорт contacts.json'),
+                      child: const UiText('Экспорт contacts.json'),
                     ),
                   ],
                 ),
-                const Text(
+                const UiText(
                   'Добавить по карточке узла',
                   style: TextStyle(fontSize: 22),
                 ),
@@ -714,7 +729,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                             },
                           );
                         },
-                  child: const Text('Добавить контакт'),
+                  child: const UiText('Добавить контакт'),
                 ),
               ],
               LayoutBuilder(
@@ -773,11 +788,11 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Отмена'),
+        child: const UiText('Отмена'),
       ),
       FilledButton(
         onPressed: () => Navigator.pop(context, field.text.trim()),
-        child: const Text('Сохранить'),
+        child: const UiText('Сохранить'),
       ),
     ],
   );

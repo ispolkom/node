@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
@@ -96,10 +97,19 @@ class _AttachmentViewState extends State<AttachmentView> {
   }
 
   Future<void> save(bool open) async {
-    final path = await PlatformFiles.choose(
-      save: true,
-      name: '${widget.attachment['filename']}',
-    );
+    String? path;
+    try {
+      path = await PlatformFiles.choose(
+        save: true,
+        name: '${widget.attachment['filename']}',
+      );
+    } catch (_) {
+      if (active)
+        setState(() {
+          error = 'Не удалось открыть диалог сохранения.';
+        });
+      return;
+    }
     if (!active || path == null) return;
     await widget.mutate(() async {
       final size = widget.attachment['size'];
@@ -107,7 +117,7 @@ class _AttachmentViewState extends State<AttachmentView> {
         throw const ApiFailure('protocol');
       await repo.binary.download(
         repo.path(widget.attachment, 'content'),
-        File(path),
+        File(path!),
         limit: size.toInt(),
         isActive: () => active,
       );
@@ -133,7 +143,7 @@ class _AttachmentViewState extends State<AttachmentView> {
             height: 200,
             fit: BoxFit.contain,
             errorBuilder: (_, _, _) =>
-                const Text('Не удалось показать картинку'),
+                const UiText('Не удалось показать картинку'),
           ),
         Wrap(
           children: [
@@ -145,17 +155,17 @@ class _AttachmentViewState extends State<AttachmentView> {
                         attempts = 0;
                         check();
                       },
-                child: const Text('Проверить файл'),
+                child: const UiText('Проверить файл'),
               ),
             if (ready)
               TextButton(
                 onPressed: widget.busy ? null : () => save(false),
-                child: const Text('Скачать'),
+                child: const UiText('Скачать'),
               ),
             if (ready && type.startsWith('image/') && image == null)
               TextButton(
                 onPressed: widget.busy ? null : showPreview,
-                child: const Text('Предпросмотр'),
+                child: const UiText('Предпросмотр'),
               ),
             if (ready &&
                 (type.startsWith('image/') ||
@@ -163,7 +173,7 @@ class _AttachmentViewState extends State<AttachmentView> {
                     type.startsWith('video/')))
               TextButton(
                 onPressed: widget.busy ? null : () => save(true),
-                child: const Text('Сохранить и открыть'),
+                child: const UiText('Сохранить и открыть'),
               ),
           ],
         ),

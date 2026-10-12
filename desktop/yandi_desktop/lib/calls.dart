@@ -1,3 +1,4 @@
+import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -95,8 +96,8 @@ class _CallsFeatureState extends State<CallsFeature> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      const Text('Звонки', style: TextStyle(fontSize: 22)),
-      const Text('Входящие проверяются, пока открыт этот экран.'),
+      const UiText('Звонки', style: TextStyle(fontSize: 22)),
+      const UiText('Входящие проверяются, пока открыт этот экран.'),
       Text(label),
       if (coordinator.error != null)
         Text(coordinator.error!, style: const TextStyle(color: Colors.red)),
@@ -105,7 +106,7 @@ class _CallsFeatureState extends State<CallsFeature> {
           '${coordinator.call!.name} · ${coordinator.call!.peer} · ${coordinator.call!.video ? 'видео' : 'голос'}',
         ),
       if (coordinator.microphoneLevel != null) ...[
-        const Text('Уровень микрофона'),
+        const UiText('Уровень микрофона'),
         LinearProgressIndicator(value: coordinator.microphoneLevel),
       ],
       if (coordinator.mediaNote != null) Text(coordinator.mediaNote!),
@@ -119,13 +120,13 @@ class _CallsFeatureState extends State<CallsFeature> {
                   aspectRatio: 16 / 9,
                   child: RTCVideoView(media.remoteRenderer),
                 ),
-                const Text('Собеседник'),
+                const UiText('Собеседник'),
                 SizedBox(
                   width: 160,
                   height: 120,
                   child: RTCVideoView(media.localRenderer, mirror: true),
                 ),
-                const Text('Вы'),
+                const UiText('Вы'),
               ],
             ),
           ),
@@ -141,12 +142,12 @@ class _CallsFeatureState extends State<CallsFeature> {
         CheckboxListTile(
           value: phone,
           onChanged: (v) => setState(() => phone = v!),
-          title: const Text('Телефон'),
+          title: const UiText('Телефон'),
         ),
         CheckboxListTile(
           value: video,
           onChanged: (v) => setState(() => video = v!),
-          title: const Text('Видео'),
+          title: const UiText('Видео'),
         ),
         button(
           'Позвонить',
