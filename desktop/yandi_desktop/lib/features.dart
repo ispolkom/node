@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'dart:async';
@@ -56,6 +57,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   int transferred = 0, transferSize = 0;
   bool choosingFile = false;
   bool refreshError = false;
+  bool addingContact = false;
   Timer? timer;
   bool get active => mounted && widget.isActive();
 
@@ -475,14 +477,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           labelText: tr(context, 'Поиск по имени или ID'),
         ),
       ),
-      if (widget.page == 'Чат')
-        DevicesPanel(
-          api: widget.api,
-          paired: false,
-          busy: sending,
-          isActive: () => active,
-          mutate: (a) => mutate(a),
-        ),
       if (contacts.isEmpty && !loading) const UiText('Контактов пока нет.'),
       for (final c in contacts.where(
         (c) => '${c['name']} ${c['short_id']}'.toLowerCase().contains(
@@ -559,35 +553,105 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             ),
           ),
         ),
+      const SizedBox(height: 12),
+      if (widget.page == 'Чат')
+        DevicesPanel(
+          api: widget.api,
+          paired: false,
+          busy: sending,
+          isActive: () => active,
+          mutate: (a) => mutate(a),
+        ),
     ],
   );
 
-  Widget conversation() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget contactImport() => PanelStack(
     children: [
-      if (selected == null)
-        const UiText('Выберите контакт для переписки.')
-      else ...[
-        UiText(
-          'Чат: ${selected!['name']}',
-          style: const TextStyle(fontSize: 22),
-        ),
-        if (selected!['is_phone'] != true)
-          ContactTunnel(
-            key: ValueKey('tunnel:${selected!['short_id']}'),
+      const UiText('Добавить по карточке узла', style: TextStyle(fontSize: 22)),
+      field(name, 'Имя контакта'),
+      field(card, 'Карточка YANDI-NODE-1', lines: 2),
+      FilledButton(
+        onPressed: sending
+            ? null
+            : () {
+                if (name.text.trim().isEmpty ||
+                    name.text.runes.length > 64 ||
+                    !card.text.trim().startsWith('YANDI-NODE-1:') ||
+                    card.text.length > 2048) {
+                  setState(() {
+                    error = 'Введите имя (до 64 символов) и карточку узла.';
+                  });
+                  return;
+                }
+                mutate(
+                  () => repo.addCard(
+                    card.text,
+                    name.text,
+                    isActive: () => active,
+                  ),
+                  success: () {
+                    card.clear();
+                    name.clear();
+                  },
+                );
+              },
+        child: const UiText('Добавить контакт'),
+      ),
+    ],
+  );
+
+  Widget peerPanel() => Panel(
+    title: 'Профиль собеседника',
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (selected == null) ...[
+          const Icon(Icons.person_outline, size: 64, color: Icq.header),
+          const SizedBox(height: 16),
+          const UiText('—'),
+        ] else ...[
+          ProfilePanel(
+            key: ValueKey('profile:${selected!['short_id']}'),
             api: widget.api,
             peer: '${selected!['short_id']}',
             busy: sending,
             isActive: () => active,
             mutate: (action) => mutate(action),
           ),
-        ProfilePanel(
-          key: ValueKey('profile:${selected!['short_id']}'),
-          api: widget.api,
-          peer: '${selected!['short_id']}',
-          busy: sending,
-          isActive: () => active,
-          mutate: (action) => mutate(action),
+          const SizedBox(height: 16),
+          if (selected!['is_phone'] != true)
+            ContactTunnel(
+              key: ValueKey('tunnel:${selected!['short_id']}'),
+              api: widget.api,
+              peer: '${selected!['short_id']}',
+              busy: sending,
+              isActive: () => active,
+              mutate: (action) => mutate(action),
+            ),
+        ],
+      ],
+    ),
+  );
+
+  Widget conversation({bool wide = false}) {
+    if (selected == null)
+      return Container(
+        color: Colors.white,
+        padding: const EdgeInsets.all(24),
+        child: const Align(
+          alignment: Alignment.topCenter,
+          child: UiText(
+            'Выберите контакт для переписки.',
+            style: TextStyle(color: Icq.dark, fontStyle: FontStyle.italic),
+          ),
+        ),
+      );
+    final history = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        UiText(
+          'Чат: ${selected!['name']}',
+          style: const TextStyle(fontSize: 22),
         ),
         TextButton(
           onPressed: sending ? null : clearHistory,
@@ -598,9 +662,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           const UiText('История пуста.'),
         for (final m in messages)
           Card(
-            color: m['from'] == ownId
-                ? const Color(0xffc4f3e5)
-                : const Color(0xffffe2d7),
+            color: m['from'] == ownId ? Icq.sent : Colors.white,
             child: Padding(
               padding: const EdgeInsets.all(12),
               child: Column(
@@ -644,6 +706,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               ),
             ),
           ),
+      ],
+    );
+    final input = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
         Focus(
           onKeyEvent: (_, event) {
             if (event is KeyDownEvent &&
@@ -690,8 +757,37 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           child: const UiText('Отправить'),
         ),
       ],
-    ],
-  );
+    );
+    if (!wide)
+      return Panel(
+        color: Colors.white,
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [history, input, peerPanel()],
+        ),
+      );
+    return Container(
+      decoration: const BoxDecoration(color: Colors.white, border: Icq.frame),
+      child: Column(
+        children: [
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: history,
+            ),
+          ),
+          Container(
+            decoration: const BoxDecoration(
+              color: Icq.background,
+              border: Border(top: BorderSide(color: Icq.border)),
+            ),
+            padding: const EdgeInsets.all(10),
+            child: input,
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => widget.page == 'О приложении'
@@ -723,39 +819,43 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (loading || sending) const LinearProgressIndicator(),
-            if (error != null)
-              UiText(error!, style: const TextStyle(color: Colors.red)),
-            if (notice != null) UiText(notice!),
+            if (error != null) NoticePanel(error!, error: true),
+            if (notice != null) NoticePanel(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
-            if (widget.page == 'Настройки') ...[
-              AdvancedSettings(
-                api: widget.api,
-                busy: sending,
-                isActive: () => active,
-                mutate: (a) => mutate(a),
-              ),
-              DevicesPanel(
-                api: widget.api,
-                paired: true,
-                busy: sending,
-                isActive: () => active,
-                mutate: (a) => mutate(a),
-              ),
-              const UiText('Профиль', style: TextStyle(fontSize: 22)),
-              ProfilePanel(
-                api: widget.api,
-                busy: sending,
-                isActive: () => active,
-                mutate: (action) => mutate(action),
-              ),
-              field(name, 'Имя профиля'),
-              FilledButton(
-                onPressed: sending || loading
-                    ? null
-                    : () => mutate(() => repo.saveProfile(name.text.trim())),
-                child: const UiText('Сохранить профиль'),
-              ),
-            ] else ...[
+            if (widget.page == 'Настройки')
+              PanelStack(
+                children: [
+                  AdvancedSettings(
+                    api: widget.api,
+                    busy: sending,
+                    isActive: () => active,
+                    mutate: (a) => mutate(a),
+                  ),
+                  DevicesPanel(
+                    api: widget.api,
+                    paired: true,
+                    busy: sending,
+                    isActive: () => active,
+                    mutate: (a) => mutate(a),
+                  ),
+                  const UiText('Профиль', style: TextStyle(fontSize: 22)),
+                  ProfilePanel(
+                    api: widget.api,
+                    busy: sending,
+                    isActive: () => active,
+                    mutate: (action) => mutate(action),
+                  ),
+                  field(name, 'Имя профиля'),
+                  FilledButton(
+                    onPressed: sending || loading
+                        ? null
+                        : () =>
+                              mutate(() => repo.saveProfile(name.text.trim())),
+                    child: const UiText('Сохранить профиль'),
+                  ),
+                ],
+              )
+            else ...[
               if (widget.page == 'Контакты') ...[
                 const UiText(
                   'Карточка собственного узла',
@@ -780,52 +880,61 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     ),
                   ],
                 ),
-                const UiText(
-                  'Добавить по карточке узла',
-                  style: TextStyle(fontSize: 22),
-                ),
-                field(name, 'Имя контакта'),
-                field(card, 'Карточка YANDI-NODE-1', lines: 2),
-                FilledButton(
-                  onPressed: sending
-                      ? null
-                      : () {
-                          if (name.text.trim().isEmpty ||
-                              name.text.runes.length > 64 ||
-                              !card.text.trim().startsWith('YANDI-NODE-1:') ||
-                              card.text.length > 2048) {
-                            setState(() {
-                              error =
-                                  'Введите имя (до 64 символов) и карточку узла.';
-                            });
-                            return;
-                          }
-                          mutate(
-                            () => repo.addCard(
-                              card.text,
-                              name.text,
-                              isActive: () => active,
-                            ),
-                            success: () {
-                              card.clear();
-                              name.clear();
-                            },
-                          );
-                        },
-                  child: const UiText('Добавить контакт'),
-                ),
+                contactImport(),
               ],
               LayoutBuilder(
                 builder: (context, size) {
+                  final contactsPanel = Panel(
+                    title: 'Контакты',
+                    trailing: widget.page == 'Чат'
+                        ? BevelButton(
+                            label: 'Добавить',
+                            onPressed: sending
+                                ? null
+                                : () => setState(
+                                    () => addingContact = !addingContact,
+                                  ),
+                          )
+                        : null,
+                    padding: const EdgeInsets.all(8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        if (addingContact) contactImport(),
+                        contactList(),
+                      ],
+                    ),
+                  );
+                  if (widget.page != 'Чат')
+                    return Column(
+                      children: [
+                        contactsPanel,
+                        if (selected != null) conversation(),
+                      ],
+                    );
                   if (size.maxWidth < 700)
-                    return Column(children: [contactList(), conversation()]);
-                  return Row(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Expanded(child: contactList()),
-                      const SizedBox(width: 24),
-                      Expanded(flex: 2, child: conversation()),
-                    ],
+                    return Column(children: [contactsPanel, conversation()]);
+                  return SizedBox(
+                    height: (MediaQuery.sizeOf(context).height - 185).clamp(
+                      380.0,
+                      900.0,
+                    ),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
+                        SizedBox(
+                          width: size.maxWidth < 1000 ? 220 : 280,
+                          child: SingleChildScrollView(child: contactsPanel),
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(child: conversation(wide: true)),
+                        const SizedBox(width: 4),
+                        SizedBox(
+                          width: size.maxWidth < 1000 ? 200 : 258,
+                          child: SingleChildScrollView(child: peerPanel()),
+                        ),
+                      ],
+                    ),
                   );
                 },
               ),

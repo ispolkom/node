@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'dart:typed_data';
@@ -196,17 +197,21 @@ class _ProfilePanelState extends State<ProfilePanel> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      UiText(
-        own ? 'Мой аватар' : 'Профиль собеседника',
-        style: const TextStyle(fontSize: 18),
-      ),
+      if (own) const UiText('Мой аватар', style: TextStyle(fontSize: 18)),
       if (loading) const LinearProgressIndicator(),
-      if (profile != null) ...[
-        if (!own) Text('${profile!['display_name'] ?? widget.peer}'),
-        SelectableText('${profile!['short_id'] ?? widget.peer ?? ''}'),
-        if (!own) UiText(profile!['online'] == true ? 'В сети' : 'Не в сети'),
-      ],
       if (error != null) UiText(error!),
+      if (image == null)
+        Container(
+          width: 80,
+          height: 80,
+          margin: const EdgeInsets.symmetric(vertical: 12),
+          decoration: const BoxDecoration(color: Icq.header, border: Icq.bevel),
+          child: const Icon(
+            Icons.person_outline,
+            size: 48,
+            color: Colors.white,
+          ),
+        ),
       if (image != null)
         Image(
           image: image!,
@@ -215,6 +220,11 @@ class _ProfilePanelState extends State<ProfilePanel> {
           fit: BoxFit.contain,
           errorBuilder: (_, _, _) => const UiText('Не удалось показать аватар'),
         ),
+      if (profile != null) ...[
+        if (!own) Text('${profile!['display_name'] ?? widget.peer}'),
+        SelectableText('${profile!['short_id'] ?? widget.peer ?? ''}'),
+        if (!own) UiText(profile!['online'] == true ? 'В сети' : 'Не в сети'),
+      ],
       Wrap(
         children: [
           TextButton(

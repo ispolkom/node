@@ -184,6 +184,7 @@ void main() {
     expect(find.textContaining('превышен допустимый размер'), findsOneWidget);
     expect(find.text('chosen.bin'), findsOneWidget);
     api.reject = false;
+    await t.ensureVisible(find.text('Отправить файл'));
     await t.runAsync(() async {
       await t.tap(find.text('Отправить файл'));
       await Future<void>.delayed(const Duration(milliseconds: 100));
