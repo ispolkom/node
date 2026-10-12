@@ -212,7 +212,7 @@ void main() {
   ) async {
     final api = GroupApi();
     await open(t, api);
-    await m1.click(t, 'Каталог');
+    await m1.click(t, 'Список групп');
     await m1.click(t, 'Вступить');
     await t.enterText(field('Ваше имя'), 'Имя');
     await m1.click(t, 'Подтвердить');
@@ -229,7 +229,7 @@ void main() {
     await t.enterText(field('Ваше имя'), 'Имя');
     await m1.click(t, 'Подтвердить');
     expect(api.bodies.any((b) => b['code'] == 'CODE'), true);
-    await m1.click(t, 'Свои группы');
+    await m1.click(t, 'Мои группы');
     await m1.click(t, 'Забыть Ушедшая');
     await m1.click(t, 'Отмена');
     expect(api.calls.any((p) => p.endsWith('/forget')), false);

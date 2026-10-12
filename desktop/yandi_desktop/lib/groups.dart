@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'attachments.dart';
@@ -519,185 +520,204 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     });
   }
 
-  Widget conversation() => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      UiText(
-        '${group['name'] ?? 'Загрузка группы…'}',
-        style: const TextStyle(fontSize: 22),
-      ),
-      const UiText('История не старше календарного года.'),
-      if (feed?['damaged'] == true) const UiText('Повреждена лента на диске.'),
-      if (feed?['problem'] == true)
-        const UiText('Ключ владельца изменился: доверие не подтверждено.'),
-      if (feed != null && feed!['has_key'] != true)
-        const UiText('Ждём ключ группы.'),
-      if (group['muted'] == true) const UiText('Вам запрещено писать.'),
-      if (feed?['deny'] is List && (feed!['deny'] as List).isNotEmpty)
+  Widget conversation({bool wide = false}) {
+    final history = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
         UiText(
-          'Запрещено: ${(feed!['deny'] as List).map((k) => const {2: 'изображения', 3: 'файлы', 4: 'аудио', 5: 'видео', 6: 'ссылки'}[k] ?? '$k').join(', ')}',
+          '${group['name'] ?? 'Загрузка группы…'}',
+          style: const TextStyle(fontSize: 22),
         ),
-      if (feed != null && rows(feed, 'messages').isEmpty)
-        const UiText('История пуста.'),
-      for (final m in rows(feed, 'messages'))
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(8),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(m['mine'] == true ? tr(context, 'Вы') : '${m['author']}'),
-                if (m['attachment'] is Map)
-                  AttachmentView(
-                    key: ValueKey('$selected-${m['seq']}'),
-                    api: widget.api,
-                    attachment: {
-                      ...Map<String, dynamic>.from(m['attachment']),
-                      'mime_type': FileRepository.mime(
-                        '${m['attachment']['filename']}',
-                      ),
-                    },
-                    contentPath: repo.path(selected!, 'file/${m['seq']}'),
-                    isActive: () => active,
-                    mutate: (a) => mutate(a),
-                    busy: busy,
-                  )
-                else
-                  SelectableText(
-                    m['text'] == null
-                        ? tr(context, 'Вложение (недоступно)')
-                        : '${m['text']}',
+        const UiText('История не старше календарного года.'),
+        if (feed?['damaged'] == true)
+          const UiText('Повреждена лента на диске.'),
+        if (feed?['problem'] == true)
+          const UiText('Ключ владельца изменился: доверие не подтверждено.'),
+        if (feed != null && feed!['has_key'] != true)
+          const UiText('Ждём ключ группы.'),
+        if (group['muted'] == true) const UiText('Вам запрещено писать.'),
+        if (feed?['deny'] is List && (feed!['deny'] as List).isNotEmpty)
+          UiText(
+            'Запрещено: ${(feed!['deny'] as List).map((k) => const {2: 'изображения', 3: 'файлы', 4: 'аудио', 5: 'видео', 6: 'ссылки'}[k] ?? '$k').join(', ')}',
+          ),
+        if (feed != null && rows(feed, 'messages').isEmpty)
+          const UiText('История пуста.'),
+        for (final m in rows(feed, 'messages'))
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    m['mine'] == true ? tr(context, 'Вы') : '${m['author']}',
                   ),
-                UiText(
-                  '${DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt()).toLocal()} · №${m['seq']}',
-                ),
-                if (canDelete(m))
-                  button(
-                    'Удалить сообщение №${m['seq']}',
-                    () => deleteMessage(m),
+                  if (m['attachment'] is Map)
+                    AttachmentView(
+                      key: ValueKey('$selected-${m['seq']}'),
+                      api: widget.api,
+                      attachment: {
+                        ...Map<String, dynamic>.from(m['attachment']),
+                        'mime_type': FileRepository.mime(
+                          '${m['attachment']['filename']}',
+                        ),
+                      },
+                      contentPath: repo.path(selected!, 'file/${m['seq']}'),
+                      isActive: () => active,
+                      mutate: (a) => mutate(a),
+                      busy: busy,
+                    )
+                  else
+                    SelectableText(
+                      m['text'] == null
+                          ? tr(context, 'Вложение (недоступно)')
+                          : '${m['text']}',
+                    ),
+                  UiText(
+                    '${DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt()).toLocal()} · №${m['seq']}',
                   ),
-              ],
-            ),
-          ),
-        ),
-      Focus(
-        onKeyEvent: (_, event) {
-          if (event is KeyDownEvent &&
-              event.logicalKey == LogicalKeyboardKey.enter &&
-              (HardwareKeyboard.instance.isControlPressed ||
-                  HardwareKeyboard.instance.isMetaPressed)) {
-            send();
-            return KeyEventResult.handled;
-          }
-          return KeyEventResult.ignored;
-        },
-        child: TextField(
-          controller: composer,
-          enabled: !busy && canSend,
-          minLines: 2,
-          maxLines: 6,
-          decoration: InputDecoration(
-            labelText: tr(context, 'Сообщение группе'),
-          ),
-        ),
-      ),
-      FilledButton(
-        onPressed: !busy && canSend ? send : null,
-        child: const UiText('Отправить группе'),
-      ),
-      Wrap(
-        children: [
-          TextButton(
-            onPressed: busy || choosing || !canSend ? null : pickFile,
-            child: const UiText('Выбрать файл'),
-          ),
-          if (picked != null) ...[
-            Text(picked!.uri.pathSegments.last),
-            TextButton(
-              onPressed: busy ? null : () => setState(() => picked = null),
-              child: const UiText('Убрать файл'),
-            ),
-            FilledButton(
-              onPressed: busy || !canSend ? null : sendFile,
-              child: const UiText('Отправить файл'),
-            ),
-          ],
-        ],
-      ),
-      if (fileSize > 0) ...[
-        LinearProgressIndicator(value: sentBytes / fileSize),
-        UiText(
-          'Передано демону: $sentBytes / $fileSize байт. Доставка подтверждается отдельно.',
-        ),
-      ],
-      if (info != null) ...[
-        participants(),
-        if (manager) ...[
-          button('Изменить настройки группы', () async {
-            final id = selected!;
-            final value = await form(
-              'Настройки группы',
-              ['Название', 'Тематика', 'Описание'],
-              initial: [
-                '${group['name']}',
-                '${group['topic']}',
-                '${group['about'] ?? ''}',
-              ],
-            );
-            if (value == null) return;
-            await mutate(() async {
-              await repo.act(id, 'settings', {
-                'name': value[0],
-                'topic': value[1],
-                'about': value[2],
-              });
-            });
-          }),
-          button('Правила группы', () async {
-            final id = selected!, rev = revision;
-            final deny = await showDialog<List<int>>(
-              context: context,
-              builder: (_) => GroupRules(
-                initial: (info?['deny'] as List? ?? []).cast<int>(),
+                  if (canDelete(m))
+                    button(
+                      'Удалить сообщение №${m['seq']}',
+                      () => deleteMessage(m),
+                    ),
+                ],
               ),
-            );
-            if (!active || rev != revision || deny == null) return;
-            await mutate(() async {
-              await repo.act(id, 'rules', {'deny': deny});
-            });
-          }),
+            ),
+          ),
+        if (info != null) ...[
+          participants(),
+          if (manager) ...[
+            button('Изменить настройки группы', () async {
+              final id = selected!;
+              final value = await form(
+                'Настройки группы',
+                ['Название', 'Тематика', 'Описание'],
+                initial: [
+                  '${group['name']}',
+                  '${group['topic']}',
+                  '${group['about'] ?? ''}',
+                ],
+              );
+              if (value == null) return;
+              await mutate(() async {
+                await repo.act(id, 'settings', {
+                  'name': value[0],
+                  'topic': value[1],
+                  'about': value[2],
+                });
+              });
+            }),
+            button('Правила группы', () async {
+              final id = selected!, rev = revision;
+              final deny = await showDialog<List<int>>(
+                context: context,
+                builder: (_) => GroupRules(
+                  initial: (info?['deny'] as List? ?? []).cast<int>(),
+                ),
+              );
+              if (!active || rev != revision || deny == null) return;
+              await mutate(() async {
+                await repo.act(id, 'rules', {'deny': deny});
+              });
+            }),
+          ],
+          if (role != 'owner')
+            button('Покинуть группу', () async {
+              final id = selected!;
+              if (!await confirm('Покинуть группу?')) return;
+              await mutate(
+                () async {
+                  await repo.act(id, 'leave');
+                },
+                success: () {
+                  drafts.remove(id);
+                  composer.clear();
+                },
+              );
+            }),
         ],
-        if (role != 'owner')
-          button('Покинуть группу', () async {
-            final id = selected!;
-            if (!await confirm('Покинуть группу?')) return;
-            await mutate(
-              () async {
-                await repo.act(id, 'leave');
-              },
-              success: () {
-                drafts.remove(id);
-                composer.clear();
-              },
-            );
-          }),
       ],
-    ],
-  );
-  @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      if (loading || busy) const LinearProgressIndicator(),
-      if (error != null)
-        UiText(error!, style: const TextStyle(color: Colors.red)),
-      Wrap(
+    );
+    final input = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Focus(
+          onKeyEvent: (_, event) {
+            if (event is KeyDownEvent &&
+                event.logicalKey == LogicalKeyboardKey.enter &&
+                (HardwareKeyboard.instance.isControlPressed ||
+                    HardwareKeyboard.instance.isMetaPressed)) {
+              send();
+              return KeyEventResult.handled;
+            }
+            return KeyEventResult.ignored;
+          },
+          child: TextField(
+            controller: composer,
+            enabled: !busy && canSend,
+            minLines: 2,
+            maxLines: 6,
+            decoration: InputDecoration(
+              labelText: tr(context, 'Сообщение группе'),
+            ),
+          ),
+        ),
+        FilledButton(
+          onPressed: !busy && canSend ? send : null,
+          child: const UiText('Отправить группе'),
+        ),
+        Wrap(
+          children: [
+            TextButton(
+              onPressed: busy || choosing || !canSend ? null : pickFile,
+              child: const UiText('Выбрать файл'),
+            ),
+            if (picked != null) ...[
+              Text(picked!.uri.pathSegments.last),
+              TextButton(
+                onPressed: busy ? null : () => setState(() => picked = null),
+                child: const UiText('Убрать файл'),
+              ),
+              FilledButton(
+                onPressed: busy || !canSend ? null : sendFile,
+                child: const UiText('Отправить файл'),
+              ),
+            ],
+          ],
+        ),
+        if (fileSize > 0) ...[
+          LinearProgressIndicator(value: sentBytes / fileSize),
+          UiText(
+            'Передано демону: $sentBytes / $fileSize байт. Доставка подтверждается отдельно.',
+          ),
+        ],
+      ],
+    );
+    if (!wide)
+      return Panel(
+        color: Colors.white,
+        child: Column(children: [history, input]),
+      );
+    return Container(
+      decoration: const BoxDecoration(color: Colors.white, border: Icq.frame),
+      child: Column(
         children: [
-          for (final label in ['Свои группы', 'Каталог', 'Управление узла'])
-            button(label, () => choose(null, nextTab: label)),
-          button('Обновить группы', refresh),
+          Expanded(
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(12),
+              child: history,
+            ),
+          ),
+          Padding(padding: const EdgeInsets.all(10), child: input),
         ],
       ),
+    );
+  }
+
+  Widget groupList() => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
       Wrap(
         children: [
           button('Создать группу', create),
@@ -775,7 +795,114 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             ),
           ),
       ],
-      if (selected != null) conversation(),
+    ],
+  );
+
+  @override
+  Widget build(BuildContext context) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (loading || busy) const LinearProgressIndicator(),
+      if (error != null) NoticePanel(error!, error: true),
+      Panel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const UiText(
+              'Группы. Группы телефонов со сквозным шифрованием: компьютер участвует как обычное устройство. Содержимое доступно только участникам и хранится на узле в зашифрованном виде.',
+            ),
+            const SizedBox(height: 10),
+            TabStrip(
+              labels: const ['Мои группы', 'Список групп', 'Управление узла'],
+              selected: tab == 'Свои группы'
+                  ? 'Мои группы'
+                  : tab == 'Каталог'
+                  ? 'Список групп'
+                  : tab,
+              onSelected: busy
+                  ? null
+                  : (label) => choose(
+                      null,
+                      nextTab: label == 'Мои группы'
+                          ? 'Свои группы'
+                          : label == 'Список групп'
+                          ? 'Каталог'
+                          : label,
+                    ),
+            ),
+          ],
+        ),
+      ),
+      const SizedBox(height: 12),
+      LayoutBuilder(
+        builder: (context, size) {
+          final list = Panel(
+            title: 'Группы',
+            padding: const EdgeInsets.all(10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [button('Обновить группы', refresh), groupList()],
+            ),
+          );
+          final empty = Panel(
+            color: Colors.white,
+            child: SizedBox(
+              height:
+                  (MediaQuery.sizeOf(context).height - 280).clamp(
+                    350.0,
+                    800.0,
+                  ) -
+                  34,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  const UiText(
+                    'Выберите группу слева.',
+                    style: TextStyle(color: Icq.dark),
+                  ),
+                  const Spacer(),
+                  if (tab == 'Свои группы')
+                    TextField(
+                      enabled: false,
+                      decoration: InputDecoration(
+                        hintText: tr(context, 'Сообщение группе'),
+                      ),
+                    ),
+                  const SizedBox(height: 8),
+                  if (tab == 'Свои группы')
+                    const FilledButton(
+                      onPressed: null,
+                      child: UiText('Отправить группе'),
+                    ),
+                ],
+              ),
+            ),
+          );
+          if (size.maxWidth < 700)
+            return Column(
+              children: [list, selected == null ? empty : conversation()],
+            );
+          return SizedBox(
+            height: (MediaQuery.sizeOf(context).height - 280).clamp(
+              350.0,
+              800.0,
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                SizedBox(
+                  width: size.maxWidth < 1000 ? 260 : 320,
+                  child: SingleChildScrollView(child: list),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: selected == null ? empty : conversation(wide: true),
+                ),
+              ],
+            ),
+          );
+        },
+      ),
     ],
   );
 }
