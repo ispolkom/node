@@ -23,6 +23,22 @@ class AdvancedSettings extends StatefulWidget {
 }
 
 class _AdvancedSettingsState extends State<AdvancedSettings> {
+  static const portLabels = [
+    'Discovery порт',
+    'Data порт',
+    'Mobile Gateway порт',
+    'Mobile P2P порт',
+    'HTTP Proxy порт',
+    'Web UI порт',
+  ];
+  static const portHelp = [
+    'Порт для обнаружения пиров (Hello packets)',
+    'Порт для передачи данных между нодами (зашифрованные wagons)',
+    'Порт шлюза для телефонов',
+    'Порт P2P для телефонов',
+    'Порт локального HTTP-прокси',
+    'Порт веб-интерфейса узла',
+  ];
   static const ports = [
     'discovery_port',
     'data_port',
@@ -170,7 +186,7 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
   @override
   Widget build(BuildContext context) => PanelStack(
     children: [
-      const UiText('Расширенные настройки', style: TextStyle(fontSize: 22)),
+      const UiText('Сеть', style: TextStyle(fontSize: 22)),
       if (loading) const LinearProgressIndicator(),
       if (error != null) UiText(error!),
       if (restart)
@@ -181,7 +197,12 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
           controller: fields[i],
           enabled: !widget.busy && !loading,
           decoration: InputDecoration(
-            labelText: i < 6 ? ports[i] : tr(context, 'Адрес bind'),
+            labelText: i < 6
+                ? tr(context, portLabels[i])
+                : tr(context, 'Адрес bind'),
+            helperText: i < 6
+                ? '${tr(context, portHelp[i])} (${ports[i]})'
+                : null,
           ),
         ),
       DropdownButton<String>(
@@ -193,6 +214,10 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         onChanged: widget.busy ? null : (v) => setState(() => level = v!),
       ),
       button('Сохранить порты и журнал', saveNetwork),
+      const UiText(
+        'Выход в интернет через ваш узел',
+        style: TextStyle(fontSize: 22),
+      ),
       const UiText('Кто может выходить в интернет через этот узел'),
       DropdownButton<String>(
         value: exit,
@@ -212,7 +237,10 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
           await widget.api.request('/api/exit/settings', body: {'mode': exit});
         }),
       ),
-      const UiText('Пул внешних прокси', style: TextStyle(fontSize: 22)),
+      const UiText(
+        'Внешние прокси для выхода в интернет',
+        style: TextStyle(fontSize: 22),
+      ),
       const UiText(
         'Изменения пула требуют открытой настроенной закрытой среды. Пароли хранит только демон в запечатанном файле.',
       ),

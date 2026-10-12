@@ -483,71 +483,136 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           search.text.toLowerCase(),
         ),
       ))
-        Card(
+        Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          decoration: BoxDecoration(
+            color: selected?['short_id'] == c['short_id']
+                ? Icq.active
+                : Icq.panel,
+            border: Border.all(color: Icq.border),
+          ),
           child: Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(8),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                UiText(
-                  '${c['name']} · ${tr(context, c['online'] == true ? 'В сети' : 'Не в сети')}',
-                ),
-                SelectableText('${c['short_id']}'),
-                Wrap(
-                  spacing: 8,
-                  children: [
-                    TextButton(
-                      onPressed: sending ? null : () => choose(c),
-                      child: const UiText('Открыть чат'),
-                    ),
-                    TextButton(
-                      onPressed: sending ? null : () => rename(c),
-                      child: const UiText('Переименовать'),
-                    ),
-                    if (c['is_phone'] == true) ...[
-                      for (final a in ['remove', 'hide', 'block'])
-                        TextButton(
-                          onPressed: sending
-                              ? null
-                              : () async {
-                                  if (!await confirm(
-                                    'Изменить доступ устройства?',
-                                    deviceActionLabel(a),
-                                  ))
-                                    return;
-                                  await mutate(
-                                    () => widget.api
-                                        .request(
-                                          '/api/mobile/phone-action',
-                                          body: {
-                                            'peer': c['short_id'],
-                                            'action': a,
-                                          },
-                                        )
-                                        .then((_) {}),
-                                    success: () {
-                                      selected = null;
-                                      messages = [];
-                                      composer.clear();
-                                      drafts.clear();
-                                      pickedFile = null;
-                                    },
-                                  );
-                                },
-                          child: UiText(deviceActionLabel(a)),
+                InkWell(
+                  onTap: sending ? null : () => choose(c),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 40,
+                        height: 40,
+                        alignment: Alignment.center,
+                        decoration: const BoxDecoration(
+                          color: Icq.header,
+                          border: Icq.bevel,
                         ),
-                    ],
-                    if (c['is_phone'] != true &&
-                        trusted.any((t) => t['id'] == peer(c)))
-                      TextButton(
-                        onPressed: sending ? null : () => revoke(c),
-                        child: const UiText('Отозвать доверие'),
+                        child: Text(
+                          '${c['name']}'.isEmpty
+                              ? '?'
+                              : '${c['name']}'.characters.first.toUpperCase(),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
                       ),
-                    TextButton(
-                      onPressed: sending ? null : () => remove(c),
-                      child: const UiText('Удалить контакт'),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            UiText(
+                              '${c['name']} · ${tr(context, c['online'] == true ? 'В сети' : 'Не в сети')}',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 14,
+                              ),
+                            ),
+                            Text(
+                              '${c['short_id']}',
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                fontSize: 12,
+                                color: Icq.dark,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                TextButtonTheme(
+                  data: TextButtonThemeData(
+                    style: TextButton.styleFrom(
+                      minimumSize: const Size(0, 26),
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      textStyle: const TextStyle(
+                        fontSize: 12,
+                        fontFamily: 'Tahoma',
+                      ),
                     ),
-                  ],
+                  ),
+                  child: Wrap(
+                    spacing: 4,
+                    runSpacing: 2,
+                    children: [
+                      TextButton(
+                        onPressed: sending ? null : () => choose(c),
+                        child: const UiText('Открыть чат'),
+                      ),
+                      TextButton(
+                        onPressed: sending ? null : () => rename(c),
+                        child: const UiText('Переименовать'),
+                      ),
+                      if (c['is_phone'] == true) ...[
+                        for (final a in ['remove', 'hide', 'block'])
+                          TextButton(
+                            onPressed: sending
+                                ? null
+                                : () async {
+                                    if (!await confirm(
+                                      'Изменить доступ устройства?',
+                                      deviceActionLabel(a),
+                                    ))
+                                      return;
+                                    await mutate(
+                                      () => widget.api
+                                          .request(
+                                            '/api/mobile/phone-action',
+                                            body: {
+                                              'peer': c['short_id'],
+                                              'action': a,
+                                            },
+                                          )
+                                          .then((_) {}),
+                                      success: () {
+                                        selected = null;
+                                        messages = [];
+                                        composer.clear();
+                                        drafts.clear();
+                                        pickedFile = null;
+                                      },
+                                    );
+                                  },
+                            child: UiText(deviceActionLabel(a)),
+                          ),
+                      ],
+                      if (c['is_phone'] != true &&
+                          trusted.any((t) => t['id'] == peer(c)))
+                        TextButton(
+                          onPressed: sending ? null : () => revoke(c),
+                          child: const UiText('Отозвать доверие'),
+                        ),
+                      TextButton(
+                        onPressed: sending ? null : () => remove(c),
+                        child: const UiText('Удалить контакт'),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),
@@ -633,6 +698,86 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     ),
   );
 
+  Widget bubble(Map<String, dynamic> m) {
+    final own = m['from'] == ownId;
+    final ts = DateTime.fromMillisecondsSinceEpoch(
+      (m['timestamp'] as num).toInt(),
+    ).toLocal();
+    final hm =
+        '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
+    const link = TextStyle(fontSize: 11, fontFamily: 'Tahoma');
+    final small = TextButton.styleFrom(
+      minimumSize: const Size(0, 22),
+      padding: const EdgeInsets.symmetric(horizontal: 6),
+      textStyle: link,
+    );
+    return Align(
+      alignment: own ? Alignment.centerRight : Alignment.centerLeft,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 560),
+        child: Container(
+          margin: const EdgeInsets.symmetric(vertical: 4),
+          padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
+          decoration: BoxDecoration(
+            color: own ? Icq.sent : Colors.white,
+            border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (!own)
+                Text(
+                  '${selected!['name']}',
+                  style: const TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                    color: Icq.peer,
+                  ),
+                ),
+              SelectableText('${m['text'] ?? ''}'),
+              if (m['attachment'] is Map)
+                AttachmentView(
+                  key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
+                  api: widget.api,
+                  attachment: Map<String, dynamic>.from(m['attachment'] as Map),
+                  isActive: () => active,
+                  mutate: (action) => mutate(action),
+                  busy: sending,
+                ),
+              Wrap(
+                alignment: WrapAlignment.end,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  if (own) ...[
+                    if (m['attachment'] == null)
+                      TextButton(
+                        style: small,
+                        onPressed: sending ? null : () => editMessage(m),
+                        child: const UiText('Изменить сообщение'),
+                      ),
+                    TextButton(
+                      style: small,
+                      onPressed: sending ? null : () => deleteMessage(m),
+                      child: const UiText('Удалить сообщение'),
+                    ),
+                  ],
+                  Padding(
+                    padding: const EdgeInsets.only(left: 6),
+                    child: Text(
+                      '$hm · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · ${tr(context, 'изменено')}' : ''}',
+                      style: const TextStyle(fontSize: 11, color: Icq.dark),
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   Widget conversation({bool wide = false}) {
     if (selected == null)
       return Container(
@@ -651,85 +796,80 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       children: [
         UiText(
           'Чат: ${selected!['name']}',
-          style: const TextStyle(fontSize: 22),
+          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
         ),
-        TextButton(
-          onPressed: sending ? null : clearHistory,
-          child: const UiText('Очистить историю'),
+        Wrap(
+          crossAxisAlignment: WrapCrossAlignment.center,
+          spacing: 10,
+          children: [
+            TextButton(
+              onPressed: sending ? null : clearHistory,
+              child: const UiText('Очистить историю'),
+            ),
+            const UiText(
+              'Показаны последние 100 сообщений не старше года.',
+              style: TextStyle(fontSize: 12, color: Icq.dark),
+            ),
+          ],
         ),
-        const UiText('Показаны последние 100 сообщений не старше года.'),
         if (!loading && messages.isEmpty && error == null)
           const UiText('История пуста.'),
-        for (final m in messages)
-          Card(
-            color: m['from'] == ownId ? Icq.sent : Colors.white,
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    m['from'] == ownId
-                        ? tr(context, 'Вы')
-                        : '${selected!['name']}',
-                  ),
-                  SelectableText('${m['text'] ?? ''}'),
-                  if (m['from'] == ownId)
-                    Wrap(
-                      children: [
-                        if (m['attachment'] == null)
-                          TextButton(
-                            onPressed: sending ? null : () => editMessage(m),
-                            child: const UiText('Изменить сообщение'),
-                          ),
-                        TextButton(
-                          onPressed: sending ? null : () => deleteMessage(m),
-                          child: const UiText('Удалить сообщение'),
-                        ),
-                      ],
-                    ),
-                  if (m['attachment'] is Map)
-                    AttachmentView(
-                      key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
-                      api: widget.api,
-                      attachment: Map<String, dynamic>.from(
-                        m['attachment'] as Map,
-                      ),
-                      isActive: () => active,
-                      mutate: (action) => mutate(action),
-                      busy: sending,
-                    ),
-                  UiText(
-                    '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${tr(context, ShellRepository.delivery(m['status']))}${m['edited'] == true ? ' · изменено' : ''}',
-                  ),
-                ],
-              ),
-            ),
-          ),
+        for (final m in messages) bubble(m),
       ],
+    );
+    final inputField = Focus(
+      onKeyEvent: (_, event) {
+        if (event is KeyDownEvent &&
+            event.logicalKey == LogicalKeyboardKey.enter &&
+            !HardwareKeyboard.instance.isShiftPressed) {
+          send();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: field(composer, 'Сообщение', lines: 2),
+    );
+    final attachButton = TextButton(
+      onPressed: sending || choosingFile ? null : pickFile,
+      child: const UiText('Выбрать файл'),
+    );
+    final sendButton = FilledButton(
+      onPressed: sending ? null : send,
+      child: const UiText('Отправить'),
     );
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Focus(
-          onKeyEvent: (_, event) {
-            if (event is KeyDownEvent &&
-                event.logicalKey == LogicalKeyboardKey.enter &&
-                !HardwareKeyboard.instance.isShiftPressed) {
-              send();
-              return KeyEventResult.handled;
-            }
-            return KeyEventResult.ignored;
-          },
-          child: field(composer, 'Сообщение', lines: 2),
+        LayoutBuilder(
+          builder: (context, box) => box.maxWidth < 520
+              ? Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    inputField,
+                    Wrap(children: [attachButton, sendButton]),
+                  ],
+                )
+              : Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: attachButton,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(child: inputField),
+                    const SizedBox(width: 6),
+                    Padding(
+                      padding: const EdgeInsets.only(top: 8),
+                      child: sendButton,
+                    ),
+                  ],
+                ),
         ),
-        Wrap(
-          children: [
-            TextButton(
-              onPressed: sending || choosingFile ? null : pickFile,
-              child: const UiText('Выбрать файл'),
-            ),
-            if (pickedFile != null) ...[
+        if (pickedFile != null)
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
               Text(pickedFile!.uri.pathSegments.last),
               TextButton(
                 onPressed: sending
@@ -744,18 +884,13 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 child: const UiText('Отправить файл'),
               ),
             ],
-          ],
-        ),
+          ),
         if (transferSize > 0) ...[
           LinearProgressIndicator(value: transferred / transferSize),
           UiText(
             'Передано демону: $transferred / $transferSize байт. Доставка подтверждается отдельно.',
           ),
         ],
-        FilledButton(
-          onPressed: sending ? null : send,
-          child: const UiText('Отправить'),
-        ),
       ],
     );
     if (!wide)

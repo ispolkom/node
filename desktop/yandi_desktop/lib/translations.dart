@@ -30,6 +30,23 @@ const moreEnglishLabels = <String, String>{
   "Автоблокировка, секунды (0 — отключена, максимум 2592000)":
       "Auto-lock, seconds (0 disables, maximum 2592000)",
   "Адрес bind": "Bind address",
+  "Сеть": "Network",
+  "Discovery порт": "Discovery port",
+  "Data порт": "Data port",
+  "Mobile Gateway порт": "Mobile Gateway port",
+  "Mobile P2P порт": "Mobile P2P port",
+  "HTTP Proxy порт": "HTTP Proxy port",
+  "Web UI порт": "Web UI port",
+  "Выход в интернет через ваш узел": "Internet exit through your node",
+  "Внешние прокси для выхода в интернет": "Upstream proxies for internet exit",
+  "Порт для обнаружения пиров (Hello packets)":
+      "Peer discovery port (Hello packets)",
+  "Порт для передачи данных между нодами (зашифрованные wagons)":
+      "Data port between nodes (encrypted wagons)",
+  "Порт шлюза для телефонов": "Gateway port for phones",
+  "Порт P2P для телефонов": "P2P port for phones",
+  "Порт локального HTTP-прокси": "Local HTTP proxy port",
+  "Порт веб-интерфейса узла": "Node web UI port",
   "Адреса": "Addresses",
   "Активные поезда": "Active trains",
   "Активные прокси": "Active proxies",

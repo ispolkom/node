@@ -98,7 +98,7 @@ void main() {
         mutate: (f) => f(),
       ),
     );
-    expect(find.text('Upstream proxy pool'), findsOneWidget);
+    expect(find.text('Upstream proxies for internet exit'), findsOneWidget);
     expect(find.widgetWithText(TextField, 'Bind address'), findsOneWidget);
     await show(
       t,

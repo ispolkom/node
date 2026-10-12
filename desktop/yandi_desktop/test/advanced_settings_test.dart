@@ -90,12 +90,12 @@ void main() {
   testWidgets('ports validate and save PUT with restart banner', (t) async {
     final api = SettingsApi();
     await panel(t, api, []);
-    await t.enterText(find.widgetWithText(TextField, 'discovery_port'), '0');
+    await t.enterText(find.widgetWithText(TextField, 'Discovery порт'), '0');
     await m1.click(t, 'Сохранить порты и журнал');
     expect(api.methods.contains('PUT'), false);
-    await t.ensureVisible(find.widgetWithText(TextField, 'discovery_port'));
+    await t.ensureVisible(find.widgetWithText(TextField, 'Discovery порт'));
     await t.enterText(
-      find.widgetWithText(TextField, 'discovery_port'),
+      find.widgetWithText(TextField, 'Discovery порт'),
       '12345',
     );
     await m1.click(t, 'Сохранить порты и журнал');

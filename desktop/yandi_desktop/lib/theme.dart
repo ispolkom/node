@@ -15,6 +15,7 @@ abstract final class Icq {
       online = Color(0xff00aa00),
       danger = Color(0xffaa0000),
       sent = Color(0xffe0f0e0),
+      active = Color(0xffc0e0c0),
       peer = Color(0xffff4001),
       mine = Color(0xff00d4aa);
   static const bevel = Border(

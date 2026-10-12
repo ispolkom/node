@@ -70,14 +70,20 @@ void main() {
     });
     await t.pumpAndSettle();
     expect(api.payloads.single, files.png);
-    expect(find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage), findsOneWidget);
+    expect(
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      findsOneWidget,
+    );
     await m1.click(t, 'Удалить аватар профиля');
     await m1.click(t, 'Отмена');
     expect(api.bodies.where((b) => b['avatar'] == ''), isEmpty);
     await m1.click(t, 'Удалить аватар профиля');
     await m1.click(t, 'Удалить аватар');
     expect(api.bodies.last, {'avatar': ''});
-    expect(find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage), findsNothing);
+    expect(
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      findsNothing,
+    );
     expect(find.text('Несохранённое имя'), findsOneWidget);
     await m1.stop(t);
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -94,7 +100,10 @@ void main() {
     await m1.click(t, 'Открыть чат');
     expect(find.text('Профиль собеседника'), findsOneWidget);
     await m1.click(t, 'Просмотреть аватар');
-    expect(find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage), findsOneWidget);
+    expect(
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      findsOneWidget,
+    );
     api.peerPending = Completer();
     await t.ensureVisible(find.text('Обновить профиль'));
     await t.tap(find.text('Обновить профиль'));

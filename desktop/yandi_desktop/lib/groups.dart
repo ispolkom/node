@@ -367,6 +367,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       ),
     );
   }
+
   static const labels = {
     'mute': 'Запретить писать',
     'unmute': 'Разрешить писать',
@@ -580,8 +581,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
 
   Widget bubble(Map<String, dynamic> m) {
     final own = m['mine'] == true;
-    final ts = DateTime.fromMillisecondsSinceEpoch((m['ts'] as num).toInt())
-        .toLocal();
+    final ts = DateTime.fromMillisecondsSinceEpoch(
+      (m['ts'] as num).toInt(),
+    ).toLocal();
     final hm =
         '${ts.hour.toString().padLeft(2, '0')}:${ts.minute.toString().padLeft(2, '0')}';
     return Align(
@@ -639,7 +641,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                       style: TextButton.styleFrom(
                         minimumSize: const Size(0, 22),
                         padding: const EdgeInsets.symmetric(horizontal: 6),
-                        textStyle: const TextStyle(fontSize: 11, fontFamily: 'Tahoma'),
+                        textStyle: const TextStyle(
+                          fontSize: 11,
+                          fontFamily: 'Tahoma',
+                        ),
                       ),
                       onPressed: busy ? null : () => deleteMessage(m),
                       child: UiText('Удалить сообщение №${m['seq']}'),
@@ -683,7 +688,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               ),
             if (info != null)
               button(
-                settingsFor == selected ? 'Закрыть настройки' : 'Настройки группы',
+                settingsFor == selected
+                    ? 'Закрыть настройки'
+                    : 'Настройки группы',
                 () => setState(
                   () => settingsFor = settingsFor == selected ? null : selected,
                 ),
@@ -800,7 +807,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           builder: (context, box) => box.maxWidth < 520
               ? Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [field, Wrap(children: [attach, sendButton])],
+                  children: [
+                    field,
+                    Wrap(children: [attach, sendButton]),
+                  ],
                 )
               : Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -987,7 +997,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
             ),
           );
           final wideList = Container(
-            decoration: const BoxDecoration(color: Icq.panel, border: Icq.frame),
+            decoration: const BoxDecoration(
+              color: Icq.panel,
+              border: Icq.frame,
+            ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
