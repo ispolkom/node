@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'domain/shell_repository.dart';
 import 'domain/states.dart';
 import 'transport/api.dart';
+import 'groups.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -41,6 +42,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   void initState() {
     super.initState();
+    if (widget.page == 'Группы') return;
     refresh();
     if (widget.page != 'Настройки') {
       timer = Timer.periodic(const Duration(seconds: 5), (_) => refresh());
@@ -381,76 +383,84 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   );
 
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
-    children: [
-      if (loading || sending) const LinearProgressIndicator(),
-      if (error != null)
-        Text(error!, style: const TextStyle(color: Colors.red)),
-      if (notice != null) Text(notice!),
-      if (refreshError) const Text('Данные не обновлены.'),
-      if (widget.page == 'Настройки') ...[
-        const Text('Профиль', style: TextStyle(fontSize: 22)),
-        field(name, 'Имя профиля'),
-        FilledButton(
-          onPressed: sending || loading
-              ? null
-              : () => mutate(() => repo.saveProfile(name.text.trim())),
-          child: const Text('Сохранить профиль'),
-        ),
-      ] else ...[
-        if (widget.page == 'Контакты') ...[
-          const Text(
-            'Добавить по карточке узла',
-            style: TextStyle(fontSize: 22),
-          ),
-          field(name, 'Имя контакта'),
-          field(card, 'Карточка YANDI-NODE-1', lines: 2),
-          FilledButton(
-            onPressed: sending
-                ? null
-                : () {
-                    if (name.text.trim().isEmpty ||
-                        name.text.runes.length > 64 ||
-                        !card.text.trim().startsWith('YANDI-NODE-1:') ||
-                        card.text.length > 2048) {
-                      setState(() {
-                        error = 'Введите имя (до 64 символов) и карточку узла.';
-                      });
-                      return;
-                    }
-                    mutate(
-                      () => repo.addCard(
-                        card.text,
-                        name.text,
-                        isActive: () => active,
-                      ),
-                      success: () {
-                        card.clear();
-                        name.clear();
-                      },
-                    );
-                  },
-            child: const Text('Добавить контакт'),
-          ),
-        ],
-        LayoutBuilder(
-          builder: (context, size) {
-            if (size.maxWidth < 700)
-              return Column(children: [contactList(), conversation()]);
-            return Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Expanded(child: contactList()),
-                const SizedBox(width: 24),
-                Expanded(flex: 2, child: conversation()),
+  Widget build(BuildContext context) => widget.page == 'Группы'
+      ? GroupsFeature(
+          api: widget.api,
+          isActive: widget.isActive,
+          onFailure: widget.onFailure,
+          onLocked: widget.onLocked,
+        )
+      : Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if (loading || sending) const LinearProgressIndicator(),
+            if (error != null)
+              Text(error!, style: const TextStyle(color: Colors.red)),
+            if (notice != null) Text(notice!),
+            if (refreshError) const Text('Данные не обновлены.'),
+            if (widget.page == 'Настройки') ...[
+              const Text('Профиль', style: TextStyle(fontSize: 22)),
+              field(name, 'Имя профиля'),
+              FilledButton(
+                onPressed: sending || loading
+                    ? null
+                    : () => mutate(() => repo.saveProfile(name.text.trim())),
+                child: const Text('Сохранить профиль'),
+              ),
+            ] else ...[
+              if (widget.page == 'Контакты') ...[
+                const Text(
+                  'Добавить по карточке узла',
+                  style: TextStyle(fontSize: 22),
+                ),
+                field(name, 'Имя контакта'),
+                field(card, 'Карточка YANDI-NODE-1', lines: 2),
+                FilledButton(
+                  onPressed: sending
+                      ? null
+                      : () {
+                          if (name.text.trim().isEmpty ||
+                              name.text.runes.length > 64 ||
+                              !card.text.trim().startsWith('YANDI-NODE-1:') ||
+                              card.text.length > 2048) {
+                            setState(() {
+                              error =
+                                  'Введите имя (до 64 символов) и карточку узла.';
+                            });
+                            return;
+                          }
+                          mutate(
+                            () => repo.addCard(
+                              card.text,
+                              name.text,
+                              isActive: () => active,
+                            ),
+                            success: () {
+                              card.clear();
+                              name.clear();
+                            },
+                          );
+                        },
+                  child: const Text('Добавить контакт'),
+                ),
               ],
-            );
-          },
-        ),
-      ],
-    ],
-  );
+              LayoutBuilder(
+                builder: (context, size) {
+                  if (size.maxWidth < 700)
+                    return Column(children: [contactList(), conversation()]);
+                  return Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(child: contactList()),
+                      const SizedBox(width: 24),
+                      Expanded(flex: 2, child: conversation()),
+                    ],
+                  );
+                },
+              ),
+            ],
+          ],
+        );
 }
 
 class ContactNameDialog extends StatefulWidget {

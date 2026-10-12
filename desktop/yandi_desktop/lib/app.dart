@@ -600,6 +600,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               'Панель',
               'Контакты',
               'Чат',
+              'Группы',
               'Настройки',
               'Закрытая среда',
             ])

@@ -4,6 +4,7 @@ import 'dart:io';
 import '../lib/transport/api.dart';
 import '../lib/domain/shell_repository.dart';
 import '../lib/domain/states.dart';
+import '../lib/domain/group_repository.dart';
 
 Future<void> waitFor(Future<bool> Function() check, String label) async {
   final deadline = DateTime.now().add(const Duration(seconds: 120));
@@ -69,6 +70,72 @@ Future<void> main(List<String> args) async {
           (await ra.history(idB)).any((m) => m['text'] == '$marker B→A'),
       'B→A delivery',
     );
+    // Groups are hosted by one daemon; the two-node scenario above covers
+    // transport chat. Group lifecycle uses the same desktop repository on A.
+    final groups = GroupRepository(a);
+    final gid = await groups.create(
+      'Группа оболочки',
+      'Технологии',
+      'M2',
+      'invite',
+    );
+    await waitFor(
+      () async => (await groups.feed(gid))['has_key'] == true,
+      'group key',
+    );
+    await groups.send(gid, '$marker группа');
+    await waitFor(
+      () async => ((await groups.feed(gid))['messages'] as List).any(
+        (m) => m['text'] == '$marker группа',
+      ),
+      'group text',
+    );
+    final info = await groups.info(gid);
+    if ((info['group'] as Map)['role'] != 'owner' ||
+        (info['members'] as List).isEmpty)
+      throw StateError('group owner/members');
+    final invite = await groups.act(gid, 'invite-code');
+    if (!(invite['invite'] as String).startsWith('YANDI-GROUP-1:$gid:'))
+      throw StateError('group invite');
+    await groups.act(gid, 'settings', {
+      'name': 'Новое имя группы',
+      'topic': 'Работа',
+      'about': 'Обновлено',
+    });
+    if (((await groups.info(gid))['group'] as Map)['name'] !=
+        'Новое имя группы')
+      throw StateError('group settings');
+    await groups.send(gid, 'https://example.com/desktop-test');
+    await waitFor(
+      () async => ((await groups.feed(gid))['messages'] as List).any(
+        (m) => m['kind'] == 6,
+      ),
+      'group link',
+    );
+    await groups.act(gid, 'rules', {
+      'deny': [6],
+    });
+    if (((await groups.feed(gid))['messages'] as List).any(
+      (m) => m['kind'] == 6,
+    ))
+      throw StateError('group denied snapshot');
+    final textRow = ((await groups.feed(gid))['messages'] as List).firstWhere(
+      (m) => m['text'] == '$marker группа',
+    );
+    await groups.act(gid, 'mod', {
+      'action': 'delete_entry',
+      'seq': textRow['seq'],
+    });
+    if (((await groups.feed(gid))['messages'] as List).any(
+      (m) => m['text'] == '$marker группа',
+    ))
+      throw StateError('group deleted snapshot');
+    await a.request(
+      '/api/mobile/groups/$gid/delete',
+      body: {'password': 'testlogin123'},
+    );
+    if (((await groups.groups())['groups'] as List).any((g) => g['id'] == gid))
+      throw StateError('group StepUp delete');
     final contact = (await ra.contacts()).firstWhere(
       (c) => c['name'] == 'Узел Б',
     );
@@ -81,7 +148,9 @@ Future<void> main(List<String> args) async {
     await ra.remove(contact['id'] as String);
     if ((await ra.contacts()).any((c) => c['id'] == contact['id']))
       throw StateError('remove');
-    stdout.writeln('PASS: desktop M2 Unix API card/contacts/chat A↔B/profile');
+    stdout.writeln(
+      'PASS: desktop M2 Unix API card/contacts/chat A↔B/profile/groups',
+    );
   } catch (e) {
     stderr.writeln(e is ApiFailure ? e.message : 'Проверка M2 не пройдена: $e');
     exitCode = 1;
