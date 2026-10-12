@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:io';
+import 'package:path_provider/path_provider.dart' as pp;
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -10,6 +12,7 @@ import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
 import 'chat_files_screen.dart';
+import '../services/voice_recorder.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -195,7 +198,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
-    context.read<AppState>().activeChatPeerId = null;
+    final state = context.read<AppState>();
+    state.activeChatPeerId = null;
+    // запись оборвана закрытием экрана: останавливаем, выбрасываем и затираем открытую копию
+    _rec.stop().then((r) { if (r.$1 != null) state.dropPickerCopy(r.$1!); }).whenComplete(_rec.dispose);
     _inputCtrl.dispose();
     _inputFocus.dispose();
     _scrollCtrl.dispose();
@@ -231,6 +237,47 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   /// Скрепка: выбрать файл и отправить его (зашифрованно, только на своё устройство).
+  // ── Голосовое сообщение ────────────────────────────────────────────────────
+  late final VoiceRecording _rec = VoiceRecording(
+    voiceBackendFactory(),
+    () async => '${(await pp.getTemporaryDirectory()).path}/voice_${DateTime.now().millisecondsSinceEpoch}.m4a',
+  )..addListener(() { if (mounted) setState(() {}); });
+  bool _sendingVoice = false;
+
+  Future<void> _startVoice() async {
+    final state = context.read<AppState>();
+    if (!await state.canSendFiles(widget.peerId)) {
+      _snack('Голосовые можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)');
+      return;
+    }
+    _rec.onLimit = () => _finishVoice(send: true);
+    final err = await _rec.start();
+    if (err != null) _snack(err);
+  }
+
+  /// Остановить запись: отправить (send) или выбросить. Открытая копия записи в кеше затирается в любом случае.
+  Future<void> _finishVoice({required bool send}) async {
+    if (!_rec.active || _sendingVoice) return;
+    _sendingVoice = true;
+    final state = context.read<AppState>();
+    final (path, seconds) = await _rec.stop();
+    try {
+      if (send && path != null && seconds >= 1) {
+        final now = DateTime.now();
+        String two(int n) => n.toString().padLeft(2, '0');
+        final name = 'Голосовое_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}.m4a';
+        final err = await state.sendFile(widget.peerId, path, name: name);
+        if (err != null) _snack(err);
+      } else if (send) {
+        _snack('Запись слишком короткая');
+      }
+    } finally {
+      if (path != null) await state.dropPickerCopy(path);
+      _sendingVoice = false;
+    }
+    WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
+  }
+
   Future<void> _pickAndSend() async {
     final state = context.read<AppState>();
     if (!await state.canSendFiles(widget.peerId)) {
@@ -457,6 +504,11 @@ class _ChatScreenState extends State<ChatScreen> {
             ownKeyboard: context.watch<AppState>().secureKeyboard,
             onSend: _send,
             onAttach: _pickAndSend,
+            recording: _rec.active,
+            recordSeconds: _rec.seconds,
+            onMic: _startVoice,
+            onRecordSend: () => _finishVoice(send: true),
+            onRecordCancel: () => _finishVoice(send: false),
           ),
           if (context.watch<AppState>().secureKeyboard && _inputFocus.hasFocus)
             SecureKeyboard(controller: _inputCtrl),
@@ -551,7 +603,15 @@ class _InputBar extends StatelessWidget {
   final bool ownKeyboard;
   final VoidCallback onSend;
   final VoidCallback onAttach;
-  const _InputBar({required this.controller, required this.focusNode, required this.ownKeyboard, required this.onSend, required this.onAttach});
+  final bool recording;
+  final int recordSeconds;
+  final VoidCallback onMic, onRecordSend, onRecordCancel;
+  const _InputBar({
+    required this.controller, required this.focusNode, required this.ownKeyboard, required this.onSend, required this.onAttach,
+    required this.recording, required this.recordSeconds, required this.onMic, required this.onRecordSend, required this.onRecordCancel,
+  });
+
+  static String _mmss(int s) => '${s ~/ 60}:${(s % 60).toString().padLeft(2, '0')}';
 
   @override
   Widget build(BuildContext context) {
@@ -560,7 +620,30 @@ class _InputBar extends StatelessWidget {
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: SafeArea(
         top: false,
-        child: Row(
+        child: recording
+            ? Row(children: [
+                IconButton(
+                  key: const ValueKey('voice-cancel'),
+                  tooltip: 'Отменить запись',
+                  icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
+                  onPressed: onRecordCancel,
+                ),
+                const Icon(Icons.fiber_manual_record, color: Colors.redAccent, size: 14),
+                const SizedBox(width: 8),
+                Text(_mmss(recordSeconds), key: const ValueKey('voice-timer'), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+                const SizedBox(width: 12),
+                const Expanded(child: Text('Идёт запись…', style: TextStyle(color: AppTheme.textSecondary))),
+                GestureDetector(
+                  key: const ValueKey('voice-send'),
+                  onTap: onRecordSend,
+                  child: Container(
+                    width: 44, height: 44,
+                    decoration: const BoxDecoration(shape: BoxShape.circle, color: AppTheme.accent),
+                    child: const Icon(Icons.send, color: Colors.white, size: 20),
+                  ),
+                ),
+              ])
+            : Row(
           children: [
             IconButton(
               tooltip: 'Отправить файл',
@@ -594,16 +677,24 @@ class _InputBar extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            GestureDetector(
-              onTap: onSend,
-              child: Container(
-                width: 44, height: 44,
-                decoration: const BoxDecoration(
-                  shape: BoxShape.circle,
-                  color: AppTheme.accent,
-                ),
-                child: const Icon(Icons.send, color: Colors.white, size: 20),
-              ),
+            // как в других мессенджерах: пока строка пуста — микрофон, с текстом — «отправить»
+            ValueListenableBuilder<TextEditingValue>(
+              valueListenable: controller,
+              builder: (_, v, __) {
+                final empty = v.text.trim().isEmpty;
+                return GestureDetector(
+                  key: ValueKey(empty ? 'voice-mic' : 'send-text'),
+                  onTap: empty ? onMic : onSend,
+                  child: Container(
+                    width: 44, height: 44,
+                    decoration: const BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppTheme.accent,
+                    ),
+                    child: Icon(empty ? Icons.mic : Icons.send, color: Colors.white, size: 22),
+                  ),
+                );
+              },
             ),
           ],
         ),
@@ -649,7 +740,7 @@ class _FileCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(offer.name, maxLines: 2, overflow: TextOverflow.ellipsis,
+                  Text(offer.name.startsWith('Голосовое_') ? 'Голосовое сообщение' : offer.name, maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: AppTheme.text, fontSize: 15, fontWeight: FontWeight.w600)),
                   Text(FileOffer.humanSize(offer.size) + ' · зашифровано',
                       style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
