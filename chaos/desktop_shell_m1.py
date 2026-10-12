@@ -67,6 +67,8 @@ def main():
                     subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(chat_probe), str(sock), str(second_sock)], env=env, check=True, timeout=420)
                     subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(probe.with_name('network_probe.dart')), str(sock), str(second_sock)], env=env, check=True, timeout=180)
                     subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(probe.with_name('call_probe.dart')), str(sock), str(second_sock)], env=env, check=True, timeout=180)
+                if phase == 'restart':
+                    subprocess.run(['nice', '-n', '15', str(sdk / 'bin/dart'), str(probe.with_name('shell_m5_probe.dart')), str(sock)], env=env, check=True, timeout=180)
                 n.kill()
                 time.sleep(.5)
         finally:

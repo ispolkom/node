@@ -14,6 +14,7 @@ import 'domain/file_repository.dart';
 import 'platform_files.dart';
 import 'profile_panel.dart';
 import 'contact_tunnel.dart';
+import 'devices.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -456,6 +457,14 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         onChanged: (_) => setState(() {}),
         decoration: const InputDecoration(labelText: 'Поиск по имени или ID'),
       ),
+      if (widget.page == 'Чат')
+        DevicesPanel(
+          api: widget.api,
+          paired: false,
+          busy: sending,
+          isActive: () => active,
+          mutate: (a) => mutate(a),
+        ),
       if (contacts.isEmpty && !loading) const UiText('Контактов пока нет.'),
       for (final c in contacts.where(
         (c) => '${c['name']} ${c['short_id']}'.toLowerCase().contains(
@@ -483,6 +492,40 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       onPressed: sending ? null : () => rename(c),
                       child: const UiText('Переименовать'),
                     ),
+                    if (c['is_phone'] == true) ...[
+                      for (final a in ['remove', 'hide', 'block'])
+                        TextButton(
+                          onPressed: sending
+                              ? null
+                              : () async {
+                                  if (!await confirm(
+                                    'Изменить доступ устройства?',
+                                    deviceActionLabel(a),
+                                  ))
+                                    return;
+                                  await mutate(
+                                    () => widget.api
+                                        .request(
+                                          '/api/mobile/phone-action',
+                                          body: {
+                                            'peer': c['short_id'],
+                                            'action': a,
+                                          },
+                                        )
+                                        .then((_) {}),
+                                    success: () {
+                                      selected = null;
+                                      messages = [];
+                                      composer.clear();
+                                      drafts.clear();
+                                      pickedFile = null;
+                                      revision++;
+                                    },
+                                  );
+                                },
+                          child: UiText(deviceActionLabel(a)),
+                        ),
+                    ],
                     if (c['is_phone'] != true &&
                         trusted.any((t) => t['id'] == peer(c)))
                       TextButton(
@@ -658,6 +701,13 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (notice != null) Text(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
             if (widget.page == 'Настройки') ...[
+              DevicesPanel(
+                api: widget.api,
+                paired: true,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
               const UiText('Профиль', style: TextStyle(fontSize: 22)),
               ProfilePanel(
                 api: widget.api,
@@ -797,3 +847,9 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
     ],
   );
 }
+
+String deviceActionLabel(String action) => const {
+  'remove': 'Убрать устройство из контактов',
+  'hide': 'Скрыть устройство',
+  'block': 'Заблокировать устройство',
+}[action]!;
