@@ -10,6 +10,7 @@
 struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
+  GtkWidget* chooser;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
@@ -17,6 +18,57 @@ G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
   gtk_widget_show(gtk_widget_get_toplevel(GTK_WIDGET(view)));
+}
+
+// Local file chooser is asynchronous so vault polling continues while it is open.
+static void chooser_response(GtkDialog* dialog, gint response, gpointer data) {
+  MyApplication* self = MY_APPLICATION(data);
+  FlMethodCall* call = FL_METHOD_CALL(g_object_get_data(G_OBJECT(dialog), "call"));
+  g_autofree gchar* path = response == GTK_RESPONSE_ACCEPT
+      ? gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog)) : nullptr;
+  g_autoptr(FlValue) result = path ? fl_value_new_string(path) : fl_value_new_null();
+  fl_method_call_respond_success(call, result, nullptr);
+  self->chooser = nullptr;
+  gtk_widget_destroy(GTK_WIDGET(dialog));
+}
+
+static void local_method(FlMethodChannel*, FlMethodCall* call, gpointer data) {
+  MyApplication* self = MY_APPLICATION(data);
+  const gchar* method = fl_method_call_get_name(call);
+  if (g_strcmp0(method, "cancelChooser") == 0) {
+    if (self->chooser) gtk_dialog_response(GTK_DIALOG(self->chooser), GTK_RESPONSE_CANCEL);
+    fl_method_call_respond_success(call, nullptr, nullptr);
+  } else if (g_strcmp0(method, "choose") == 0) {
+    if (self->chooser) {
+      fl_method_call_respond_error(call, "busy", "File chooser busy", nullptr, nullptr);
+      return;
+    }
+    FlValue* args = fl_method_call_get_args(call);
+    FlValue* save_value = fl_value_lookup_string(args, "save");
+    FlValue* name_value = fl_value_lookup_string(args, "name");
+    gboolean save = save_value && fl_value_get_bool(save_value);
+    self->chooser = gtk_file_chooser_dialog_new(save ? "Сохранить файл" : "Выбрать файл",
+        GTK_WINDOW(gtk_application_get_active_window(GTK_APPLICATION(self))),
+        save ? GTK_FILE_CHOOSER_ACTION_SAVE : GTK_FILE_CHOOSER_ACTION_OPEN,
+        "Отмена", GTK_RESPONSE_CANCEL, save ? "Сохранить" : "Выбрать", GTK_RESPONSE_ACCEPT, nullptr);
+    gtk_window_set_modal(GTK_WINDOW(self->chooser), TRUE);
+    gtk_file_chooser_set_local_only(GTK_FILE_CHOOSER(self->chooser), TRUE);
+    if (save && name_value) gtk_file_chooser_set_current_name(GTK_FILE_CHOOSER(self->chooser), fl_value_get_string(name_value));
+    g_object_set_data_full(G_OBJECT(self->chooser), "call", g_object_ref(call), g_object_unref);
+    g_signal_connect(self->chooser, "response", G_CALLBACK(chooser_response), self);
+    gtk_widget_show(self->chooser);
+  } else if (g_strcmp0(method, "open") == 0) {
+    const gchar* path = fl_value_get_string(fl_method_call_get_args(call));
+    g_autofree gchar* uri = g_filename_to_uri(path, nullptr, nullptr);
+    g_autoptr(GError) error = nullptr;
+    if (uri && g_app_info_launch_default_for_uri(uri, nullptr, &error)) {
+      fl_method_call_respond_success(call, nullptr, nullptr);
+    } else {
+      fl_method_call_respond_error(call, "open", "Cannot open file", nullptr, nullptr);
+    }
+  } else {
+    fl_method_call_respond_not_implemented(call, nullptr);
+  }
 }
 
 // Implements GApplication::activate.
@@ -74,6 +126,10 @@ static void my_application_activate(GApplication* application) {
   gtk_widget_realize(GTK_WIDGET(view));
 
   fl_register_plugins(FL_PLUGIN_REGISTRY(view));
+  g_autoptr(FlStandardMethodCodec) codec = fl_standard_method_codec_new();
+  g_autoptr(FlMethodChannel) local = fl_method_channel_new(
+      fl_engine_get_binary_messenger(fl_view_get_engine(view)), "yandi/local", FL_METHOD_CODEC(codec));
+  fl_method_channel_set_method_call_handler(local, local_method, self, nullptr);
 
   gtk_widget_grab_focus(GTK_WIDGET(view));
 }

@@ -12,6 +12,12 @@ class ApiFailure implements Exception {
     'timeout' => 'Демон не ответил вовремя. Повторите вручную.',
     'large' => 'Ответ демона превышает допустимый размер.',
     'protocol' => 'Ответ демона не соответствует протоколу JSON.',
+    'file_limit' => 'Демон: превышен допустимый размер файла.',
+    'file_busy' => 'Демон: слишком много незавершённых загрузок.',
+    'file_invalid' => 'Демон: неверный идентификатор файла.',
+    'empty_file' => 'Пустые файлы не поддерживаются демоном.',
+    'exists' => 'Файл уже существует. Выберите новое имя.',
+    'cancelled' => 'Операция прервана.',
     'busy' => 'Подождите завершения текущих запросов.',
     'http' || 'business' => switch (status) {
       401 => 'Неверный секрет или доступ запрещён.',
@@ -26,6 +32,13 @@ class ApiFailure implements Exception {
   @override
   String toString() => message;
 }
+
+String fileErrorKind(dynamic message) => switch (message) {
+  'File is larger than the allowed size' => 'file_limit',
+  'Too many unfinished uploads' => 'file_busy',
+  'Invalid file_id' => 'file_invalid',
+  _ => 'business',
+};
 
 String resolveSocket(List<String> args, Map<String, String> env) {
   String? override;
@@ -64,9 +77,48 @@ abstract class Api {
   void cancel();
 }
 
+/// Binary data never enters cookies, caches or a TCP connection.
+abstract class BinaryApi {
+  Future<Map<String, dynamic>> multipart(
+    String path,
+    Map<String, String> fields,
+    String field,
+    String filename,
+    Uint8List bytes,
+  );
+  Future<Uint8List> bytes(String path, {int limit = 8 * 1024 * 1024});
+  Future<void> download(
+    String path,
+    File destination, {
+    required int limit,
+    required bool Function() isActive,
+  });
+}
+
+bool validApiPath(String path) {
+  if (RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path)) return true;
+  if (RegExp(r'^/api/mobile/call/events\?after=[0-9]{1,20}$').hasMatch(path))
+    return true;
+  final match = RegExp(
+    r'^/api/files/(content|status)/[a-zA-Z0-9_-]{1,128}/([^/?#]+)$',
+  ).firstMatch(path);
+  if (match == null) return false;
+  try {
+    final name = Uri.decodeComponent(match.group(2)!);
+    return name.isNotEmpty &&
+        name != '.' &&
+        name != '..' &&
+        !name.contains(RegExp(r'[/\\\x00-\x1f\x7f]')) &&
+        name.length <= 255 &&
+        Uri.encodeComponent(name) == match.group(2);
+  } catch (_) {
+    return false;
+  }
+}
+
 /// A short-lived, non-cookie client per RPC lets a deadline forcibly close IO.
 /// There is no TCP fallback, proxy, redirect, persistence or automatic POST retry.
-class UnixApi implements Api {
+class UnixApi implements Api, BinaryApi {
   final String socketPath;
   final Duration timeout;
   final int maxResponseBytes;
@@ -84,13 +136,31 @@ class UnixApi implements Api {
     Map<String, dynamic>? body,
     String? method,
   }) async {
-    final events = RegExp(
-      r'^/api/mobile/call/events\?after=[0-9]{1,20}$',
-    ).hasMatch(path);
-    if ((!RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path) && !events) ||
+    return await _exchange(path, body: body, method: method)
+        as Map<String, dynamic>;
+  }
+
+  Future<Object> _exchange(
+    String path, {
+    Map<String, dynamic>? body,
+    String? method,
+    Uint8List? multipartBody,
+    String? boundary,
+    int? binaryLimit,
+    File? destination,
+    bool Function()? isActive,
+  }) async {
+    if (!validApiPath(path) ||
         (method != null &&
-            !const ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'].contains(method)))
+            !const [
+              'GET',
+              'POST',
+              'PUT',
+              'PATCH',
+              'DELETE',
+            ].contains(method))) {
       throw const ApiFailure('protocol');
+    }
     if (_active.length >= 6) throw const ApiFailure('busy');
     final client = HttpClient()
       ..findProxy = ((_) => 'DIRECT')
@@ -109,6 +179,7 @@ class UnixApi implements Api {
     };
     Uint8List? encoded;
     try {
+      encoded = multipartBody;
       if (body != null)
         encoded = Uint8List.fromList(utf8.encode(jsonEncode(body)));
       return await (() async {
@@ -120,7 +191,13 @@ class UnixApi implements Api {
         req.headers.set(HttpHeaders.acceptHeader, 'application/json');
         final payload = encoded;
         if (payload != null) {
-          req.headers.contentType = ContentType.json;
+          req.headers.contentType = boundary == null
+              ? ContentType.json
+              : ContentType(
+                  'multipart',
+                  'form-data',
+                  parameters: {'boundary': boundary},
+                );
           req.contentLength = payload.length;
           req.add(payload);
           await req.flush();
@@ -130,6 +207,45 @@ class UnixApi implements Api {
         final response = await req.close();
         if (response.isRedirect)
           throw ApiFailure('protocol', response.statusCode);
+        if (binaryLimit != null) {
+          if (response.statusCode != 200)
+            throw ApiFailure('http', response.statusCode);
+          if (response.contentLength > binaryLimit)
+            throw const ApiFailure('large');
+          final builder = destination == null
+              ? BytesBuilder(copy: false)
+              : null;
+          RandomAccessFile? output;
+          var length = 0;
+          var created = false, completed = false;
+          try {
+            if (destination != null) {
+              if (isActive?.call() != true) throw const ApiFailure('cancelled');
+              // Exclusive creation: never truncate existing files or follow symlinks.
+              await destination.create(exclusive: true);
+              created = true;
+              output = await destination.open(mode: FileMode.writeOnly);
+            }
+            await for (final chunk in response) {
+              if (isActive != null && !isActive())
+                throw const ApiFailure('cancelled');
+              length += chunk.length;
+              if (length > binaryLimit) throw const ApiFailure('large');
+              if (output != null) {
+                await output.writeFrom(chunk);
+              } else {
+                builder!.add(chunk);
+              }
+            }
+            if (response.contentLength >= 0 && length != response.contentLength)
+              throw const ApiFailure('protocol');
+            completed = true;
+            return builder?.takeBytes() ?? <String, dynamic>{'ok': true};
+          } finally {
+            await output?.close();
+            if (created && !completed) await destination!.delete();
+          }
+        }
         if (response.contentLength > maxResponseBytes)
           throw const ApiFailure('large');
         if (response.headers.contentType?.mimeType != 'application/json')
@@ -162,7 +278,10 @@ class UnixApi implements Api {
               value['error'] != null &&
                   value['error'] != '' &&
                   path != '/api/vault/status') {
-            throw ApiFailure('business', response.statusCode);
+            throw ApiFailure(
+              fileErrorKind(value['message']),
+              response.statusCode,
+            );
           }
           return value;
         } finally {
@@ -189,6 +308,74 @@ class UnixApi implements Api {
       _active.remove(client);
       client.close(force: true);
     }
+  }
+
+  @override
+  Future<Map<String, dynamic>> multipart(
+    String path,
+    Map<String, String> fields,
+    String field,
+    String filename,
+    Uint8List bytes,
+  ) async {
+    if (!(RegExp(
+              r'^/api/files/send-chunk/[a-zA-Z0-9_-]{1,128}$',
+            ).hasMatch(path) ||
+            path == '/api/profile/avatar') ||
+        !RegExp(r'^[a-z_]+$').hasMatch(field) ||
+        fields.keys.any((key) => !RegExp(r'^[a-z_]+$').hasMatch(key))) {
+      throw const ApiFailure('protocol');
+    }
+    final boundary = 'yandi_${DateTime.now().microsecondsSinceEpoch}';
+    final payload = BytesBuilder();
+    void add(String value) => payload.add(utf8.encode(value));
+    for (final entry in fields.entries) {
+      add(
+        '--$boundary\r\nContent-Disposition: form-data; name="${entry.key}"\r\n\r\n${entry.value}\r\n',
+      );
+    }
+    // The filename text field carries the real name. Never interpolate a selected name into headers.
+    add(
+      '--$boundary\r\nContent-Disposition: form-data; name="$field"; filename="upload"\r\nContent-Type: application/octet-stream\r\n\r\n',
+    );
+    payload.add(bytes);
+    add('\r\n--$boundary--\r\n');
+    final encoded = payload.takeBytes();
+    try {
+      return await _exchange(
+            path,
+            method: 'POST',
+            multipartBody: encoded,
+            boundary: boundary,
+          )
+          as Map<String, dynamic>;
+    } finally {
+      encoded.fillRange(0, encoded.length, 0);
+    }
+  }
+
+  @override
+  Future<Uint8List> bytes(String path, {int limit = 8 * 1024 * 1024}) async =>
+      await _exchange(path, binaryLimit: limit) as Uint8List;
+
+  @override
+  Future<void> download(
+    String path,
+    File destination, {
+    required int limit,
+    required bool Function() isActive,
+  }) async {
+    // Only explicit user-selected destinations, never a shell cache.
+    if (await FileSystemEntity.type(destination.path, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw const ApiFailure('exists');
+    }
+    await _exchange(
+      path,
+      binaryLimit: limit,
+      destination: destination,
+      isActive: isActive,
+    );
   }
 
   /// WebSocket upgrade over the same owner-only Unix socket. No TCP fallback.

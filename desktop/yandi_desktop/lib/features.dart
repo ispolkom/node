@@ -1,3 +1,4 @@
+import 'dart:io';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -7,6 +8,9 @@ import 'transport/api.dart';
 import 'groups.dart';
 import 'network.dart';
 import 'calls.dart';
+import 'attachments.dart';
+import 'domain/file_repository.dart';
+import 'platform_files.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -37,6 +41,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   String? ownId, error, notice;
   bool loading = true, refreshing = false, sending = false;
   int revision = 0;
+  File? pickedFile;
+  int transferred = 0, transferSize = 0;
+  bool choosingFile = false;
   bool refreshError = false;
   Timer? timer;
   bool get active => mounted && widget.isActive();
@@ -56,6 +63,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   void dispose() {
     revision++;
     timer?.cancel();
+    PlatformFiles.cancel().catchError((Object _) {});
+    pickedFile = null;
     drafts.clear();
     contacts = messages = trusted = [];
     selected = null;
@@ -197,6 +206,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     if (selected != null) drafts[peer(selected!)] = composer.text;
     revision++;
     setState(() {
+      pickedFile = null;
+      transferred = transferSize = 0;
       selected = contact;
       messages = [];
       composer.text = drafts[peer(contact)] ?? '';
@@ -219,6 +230,51 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       success: () {
         composer.clear();
         drafts.remove(target);
+      },
+    );
+  }
+
+  Future<void> pickFile() async {
+    if (choosingFile || sending || selected == null) return;
+    choosingFile = true;
+    final rev = revision;
+    try {
+      final path = await PlatformFiles.choose();
+      if (!active || rev != revision || path == null) return;
+      setState(() {
+        pickedFile = File(path);
+        transferred = transferSize = 0;
+      });
+    } catch (e) {
+      if (active && rev == revision) failure(e);
+    } finally {
+      choosingFile = false;
+    }
+  }
+
+  Future<void> sendFile() async {
+    final file = pickedFile, contact = selected;
+    if (file == null || contact == null || sending) return;
+    final rev = revision, target = peer(contact);
+    await mutate(
+      () async {
+        await FileRepository(widget.api).upload(
+          target,
+          file,
+          phone: contact['is_phone'] == true,
+          isActive: () => active && revision == rev,
+          progress: (done, total) {
+            if (active && revision == rev)
+              setState(() {
+                transferred = done;
+                transferSize = total;
+              });
+          },
+        );
+      },
+      success: () {
+        pickedFile = null;
+        transferred = transferSize = 0;
       },
     );
   }
@@ -431,7 +487,16 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       ],
                     ),
                   if (m['attachment'] is Map)
-                    const Text('Вложение (открытие файлов пока недоступно)'),
+                    AttachmentView(
+                      key: ValueKey('${peer(selected!)}:${m['msg_id']}'),
+                      api: widget.api,
+                      attachment: Map<String, dynamic>.from(
+                        m['attachment'] as Map,
+                      ),
+                      isActive: () => active,
+                      mutate: (action) => mutate(action),
+                      busy: sending,
+                    ),
                   Text(
                     '${DateTime.fromMillisecondsSinceEpoch((m['timestamp'] as num).toInt()).toLocal()} · ${ShellRepository.delivery(m['status'])}${m['edited'] == true ? ' · изменено' : ''}',
                   ),
@@ -451,6 +516,35 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           },
           child: field(composer, 'Сообщение', lines: 2),
         ),
+        Wrap(
+          children: [
+            TextButton(
+              onPressed: sending || choosingFile ? null : pickFile,
+              child: const Text('Выбрать файл'),
+            ),
+            if (pickedFile != null) ...[
+              Text(pickedFile!.uri.pathSegments.last),
+              TextButton(
+                onPressed: sending
+                    ? null
+                    : () => setState(() {
+                        pickedFile = null;
+                      }),
+                child: const Text('Убрать файл'),
+              ),
+              FilledButton(
+                onPressed: sending ? null : sendFile,
+                child: const Text('Отправить файл'),
+              ),
+            ],
+          ],
+        ),
+        if (transferSize > 0) ...[
+          LinearProgressIndicator(value: transferred / transferSize),
+          Text(
+            'Передано демону: $transferred / $transferSize байт. Доставка подтверждается отдельно.',
+          ),
+        ],
         FilledButton(
           onPressed: sending ? null : send,
           child: const Text('Отправить'),

@@ -1,6 +1,8 @@
 // Destructive fixtures only: sockets belong to two freshly allocated /tmp nodes.
 import 'dart:async';
 import 'dart:io';
+import 'dart:typed_data';
+import '../lib/domain/file_repository.dart';
 import '../lib/transport/api.dart';
 import '../lib/domain/shell_repository.dart';
 import '../lib/domain/states.dart';
@@ -70,6 +72,61 @@ Future<void> main(List<String> args) async {
           (await ra.history(idB)).any((m) => m['text'] == '$marker B→A'),
       'B→A delivery',
     );
+    final own = (await ra.history(
+      idB,
+    )).firstWhere((m) => m['text'] == '$marker A→B');
+    await ra.edit(idB, own['msg_id'] as String, '$marker edited');
+    if (!(await ra.history(
+      idB,
+    )).any((m) => m['text'] == '$marker edited' && m['edited'] == true))
+      throw StateError('local edit');
+    await ra.deleteMessage(idB, own['msg_id'] as String);
+    if ((await ra.history(idB)).any((m) => m['msg_id'] == own['msg_id']))
+      throw StateError('local delete');
+    if (!(await rb.history(idA)).any((m) => m['text'] == '$marker A→B'))
+      throw StateError('local deletion changed remote history');
+    final temporary = await Directory.systemTemp.createTemp('m4-selected-');
+    try {
+      final content = Uint8List.fromList(List.generate(1501, (i) => i % 251));
+      final selected = await File(
+        '${temporary.path}/проверка файла.bin',
+      ).writeAsBytes(content);
+      final filesA = FileRepository(a), filesB = FileRepository(b);
+      final attachment = await filesA.upload(
+        idB,
+        selected,
+        phone: false,
+        isActive: () => true,
+        progress: (_, _) {},
+      );
+      await waitFor(
+        () async => (await rb.history(idA)).any(
+          (m) =>
+              m['attachment'] is Map &&
+              (m['attachment'] as Map)['file_ref'] is Map &&
+              ((m['attachment'] as Map)['file_ref'] as Map)['file_id'] ==
+                  (attachment['file_ref'] as Map)['file_id'],
+        ),
+        'file message A→B',
+      );
+      await waitFor(
+        () async =>
+            (await b.request(filesB.path(attachment, 'status')))['exists'] ==
+            true,
+        'file content A→B',
+      );
+      final received = await b.bytes(filesB.path(attachment, 'content'));
+      if (received.length != content.length ||
+          List.generate(
+            content.length,
+            (i) => received[i] == content[i],
+          ).contains(false))
+        throw StateError('file bytes A→B');
+    } finally {
+      await temporary.delete(recursive: true);
+    }
+    await ra.clearHistory(idB);
+    if ((await ra.history(idB)).isNotEmpty) throw StateError('clear history');
     // Groups are hosted by one daemon; the two-node scenario above covers
     // transport chat. Group lifecycle uses the same desktop repository on A.
     final groups = GroupRepository(a);
@@ -149,7 +206,7 @@ Future<void> main(List<String> args) async {
     if ((await ra.contacts()).any((c) => c['id'] == contact['id']))
       throw StateError('remove');
     stdout.writeln(
-      'PASS: desktop M2 Unix API card/contacts/chat A↔B/profile/groups',
+      'PASS: desktop M4 Unix API chat edit/delete/clear/file A→B + M2 contacts/profile/groups',
     );
   } catch (e) {
     stderr.writeln(e is ApiFailure ? e.message : 'Проверка M2 не пройдена: $e');

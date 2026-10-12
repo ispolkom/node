@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Real desktop Dart client / daemon M1 + M2 chat/groups + M3 network/call signaling smoke; isolated HOME and offline network.
+"""Real desktop Dart client / daemon M1 + M2 chat/groups + M3 network/call signaling + M4 edit/delete/files smoke; isolated HOME and offline network.
 Usage: python3 chaos/desktop_shell_m1.py /absolute/path/to/yandi [flutter-sdk]
 The fixture directory is newly allocated under /tmp and deleted on exit.
 """
@@ -72,7 +72,7 @@ def main():
         finally:
             second.kill()
             n.kill()
-    print('PASS: desktop M1 + M2 chat/groups + M3 network/call signaling real Unix daemon smoke; temporary data removed')
+    print('PASS: desktop M1 + M2 chat/groups + M3 network/call signaling + M4 edit/delete/files real Unix daemon smoke; temporary data removed')
 
 
 if __name__ == '__main__':
