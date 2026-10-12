@@ -61,9 +61,10 @@ class CallCoordinator extends ChangeNotifier {
   final Duration ringTimeout, connectTimeout, graceTimeout, endedDelay;
   CallPhase phase = CallPhase.idle;
   CallRef? call;
-  String? error;
+  String? error, mediaNote;
   bool muted = false, cameraEnabled = false, busy = false;
   int seconds = 0, epoch = 0;
+  double? microphoneLevel;
   bool disposed = false,
       polling = false,
       mediaReady = false,
@@ -256,6 +257,17 @@ class CallCoordinator extends ChangeNotifier {
         lost();
       } else if (event.type == 'failed') {
         finish(const ApiFailure('disconnected'));
+      } else if (event.type == 'audio-only' || event.type == 'recvonly') {
+        cameraEnabled = false;
+        mediaNote = event.type == 'recvonly'
+            ? 'Микрофон недоступен: только приём звука и видео.'
+            : 'Камера недоступна: передаётся только аудио.';
+        changed();
+      } else if (event.type == 'level') {
+        microphoneLevel = (event.signal?['value'] as num?)?.toDouble();
+        changed();
+      } else if (event.type == 'preview') {
+        changed();
       } else if (event.type == 'signal' && event.signal != null) {
         unawaited(
           signaling.send(c, event.signal!).catchError((Object e) {
@@ -484,6 +496,8 @@ class CallCoordinator extends ChangeNotifier {
     mediaReady = remoteDescription = false;
     busy = false;
     muted = cameraEnabled = false;
+    mediaNote = null;
+    microphoneLevel = null;
     error = e == null ? null : safe(e);
     phase = e == null ? CallPhase.ended : CallPhase.error;
     changed();

@@ -1,5 +1,7 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart';
+import 'domain/call_media.dart';
 import 'domain/call_coordinator.dart';
 import 'domain/call_signaling.dart';
 import 'domain/states.dart';
@@ -35,7 +37,7 @@ class _CallsFeatureState extends State<CallsFeature> {
     super.initState();
     coordinator = CallCoordinator(
       signaling: widget.signaling ?? DaemonCallSignaling(widget.api),
-      mediaFactory: widget.mediaFactory,
+      mediaFactory: widget.mediaFactory ?? WebRtcCallMedia.new,
       authorize: () async {
         if (!mounted || !widget.isActive()) return false;
         final vault = VaultState.fromJson(
@@ -94,9 +96,7 @@ class _CallsFeatureState extends State<CallsFeature> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       const Text('Звонки', style: TextStyle(fontSize: 22)),
-      const Text(
-        'Сигнальный режим: реальное аудио и видео недоступны до подключения нативной библиотеки WebRTC. При принятии звонка медиа-слой сообщит об отсутствии библиотеки. Входящие проверяются, пока открыт этот экран.',
-      ),
+      const Text('Входящие проверяются, пока открыт этот экран.'),
       Text(label),
       if (coordinator.error != null)
         Text(coordinator.error!, style: const TextStyle(color: Colors.red)),
@@ -104,6 +104,31 @@ class _CallsFeatureState extends State<CallsFeature> {
         SelectableText(
           '${coordinator.call!.name} · ${coordinator.call!.peer} · ${coordinator.call!.video ? 'видео' : 'голос'}',
         ),
+      if (coordinator.microphoneLevel != null) ...[
+        const Text('Уровень микрофона'),
+        LinearProgressIndicator(value: coordinator.microphoneLevel),
+      ],
+      if (coordinator.mediaNote != null) Text(coordinator.mediaNote!),
+      if (coordinator.media case final WebRtcCallMedia media)
+        if (coordinator.call?.video == true)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            child: Column(
+              children: [
+                AspectRatio(
+                  aspectRatio: 16 / 9,
+                  child: RTCVideoView(media.remoteRenderer),
+                ),
+                const Text('Собеседник'),
+                SizedBox(
+                  width: 160,
+                  height: 120,
+                  child: RTCVideoView(media.localRenderer, mirror: true),
+                ),
+                const Text('Вы'),
+              ],
+            ),
+          ),
       if (coordinator.phase == CallPhase.idle) ...[
         TextField(
           controller: peer,
@@ -160,6 +185,7 @@ class _CallsFeatureState extends State<CallsFeature> {
                     ? 'Выключить камеру'
                     : 'Включить камеру',
                 () => coordinator.camera(),
+                enabled: coordinator.mediaNote == null,
               ),
           ],
         ),
