@@ -12,6 +12,7 @@ import 'attachments.dart';
 import 'domain/file_repository.dart';
 import 'platform_files.dart';
 import 'profile_panel.dart';
+import 'contact_tunnel.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
 class ShellFeatures extends StatefulWidget {
@@ -39,7 +40,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   final drafts = <String, String>{};
   List<Map<String, dynamic>> contacts = [], messages = [], trusted = [];
   Map<String, dynamic>? selected;
-  String? ownId, error, notice;
+  String? ownId, ownCard, error, notice;
   bool loading = true, refreshing = false, sending = false;
   int revision = 0;
   File? pickedFile;
@@ -69,6 +70,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     drafts.clear();
     contacts = messages = trusted = [];
     selected = null;
+    ownCard = null;
     for (final field in [card, name, search, composer]) {
       field.clear();
       field.dispose();
@@ -131,6 +133,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             }
           }
           trusted = ShellRepository.list(cards, 'peers');
+          ownCard = cards['card'] as String?;
           ownId = status['node_id'] as String?;
         });
         if (currentPeer != null && selected != null) {
@@ -315,6 +318,37 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     );
   }
 
+  Future<void> exportContacts() async {
+    final rev = revision;
+    final path = await PlatformFiles.choose(save: true, name: 'contacts.json');
+    if (!active || revision != rev || path == null) return;
+    await mutate(
+      () => FileRepository(widget.api).binary.download(
+        '/api/contacts/export',
+        File(path),
+        limit: 1024 * 1024,
+        isActive: () => active && revision == rev,
+      ),
+    );
+  }
+
+  Future<void> revoke(Map<String, dynamic> contact) async {
+    final id = peer(contact);
+    if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(id)) return;
+    if (!await confirm(
+      'Отозвать доверие?',
+      'Контакт останется в списке. Доверие карточке этого узла будет отозвано.',
+    ))
+      return;
+    await mutate(() async {
+      await widget.api.request('/api/peers/trusted/remove', body: {'id': id});
+      if (!active) return;
+      final remaining = ShellRepository.list(await repo.trusted(), 'peers');
+      if (remaining.any((p) => p['id'] == id))
+        throw const ApiFailure('business');
+    });
+  }
+
   Future<void> rename(Map<String, dynamic> contact) async {
     final rev = revision;
     final value = await showDialog<String>(
@@ -434,6 +468,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       onPressed: sending ? null : () => rename(c),
                       child: const Text('Переименовать'),
                     ),
+                    if (c['is_phone'] != true &&
+                        trusted.any((t) => t['id'] == peer(c)))
+                      TextButton(
+                        onPressed: sending ? null : () => revoke(c),
+                        child: const Text('Отозвать доверие'),
+                      ),
                     TextButton(
                       onPressed: sending ? null : () => remove(c),
                       child: const Text('Удалить контакт'),
@@ -454,6 +494,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         const Text('Выберите контакт для переписки.')
       else ...[
         Text('Чат: ${selected!['name']}', style: const TextStyle(fontSize: 22)),
+        if (selected!['is_phone'] != true)
+          ContactTunnel(
+            key: ValueKey('tunnel:${selected!['short_id']}'),
+            api: widget.api,
+            peer: '${selected!['short_id']}',
+            busy: sending,
+            isActive: () => active,
+            mutate: (action) => mutate(action),
+          ),
         ProfilePanel(
           key: ValueKey('profile:${selected!['short_id']}'),
           api: widget.api,
@@ -610,6 +659,29 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               ),
             ] else ...[
               if (widget.page == 'Контакты') ...[
+                const Text(
+                  'Карточка собственного узла',
+                  style: TextStyle(fontSize: 22),
+                ),
+                if (ownCard != null) SelectableText(ownCard!),
+                Wrap(
+                  children: [
+                    TextButton(
+                      onPressed: sending || ownCard == null
+                          ? null
+                          : () => mutate(() async {
+                              await Clipboard.setData(
+                                ClipboardData(text: ownCard!),
+                              );
+                            }),
+                      child: const Text('Копировать карточку'),
+                    ),
+                    TextButton(
+                      onPressed: sending ? null : exportContacts,
+                      child: const Text('Экспорт contacts.json'),
+                    ),
+                  ],
+                ),
                 const Text(
                   'Добавить по карточке узла',
                   style: TextStyle(fontSize: 22),
