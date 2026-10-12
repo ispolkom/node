@@ -50,6 +50,34 @@ class MainActivity : FlutterActivity() {
                         runOnUiThread { result.success(ok) }
                     }.start()
                 }
+                // кадр видео для превью в чате: источник — адрес на 127.0.0.1 (видео расшифровывается в памяти, файла на диске нет)
+                "videoFrame" -> {
+                    val url = call.argument<String>("url")
+                    val ms = call.argument<Int>("ms") ?: 0
+                    val maxW = call.argument<Int>("maxWidth") ?: 480
+                    if (url == null) { result.error("arg", "нет адреса", null); return@setMethodCallHandler }
+                    Thread {
+                        val r = runCatching {
+                            val mmr = android.media.MediaMetadataRetriever()
+                            try {
+                                mmr.setDataSource(url, HashMap<String, String>())
+                                var bmp = mmr.getFrameAtTime(ms.toLong() * 1000, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                    ?: mmr.getFrameAtTime(0)
+                                    ?: throw IllegalStateException("нет кадра")
+                                if (bmp.width > maxW) {
+                                    val h = (bmp.height.toLong() * maxW / bmp.width).toInt().coerceAtLeast(1)
+                                    bmp = android.graphics.Bitmap.createScaledBitmap(bmp, maxW, h, true)
+                                }
+                                val out = java.io.ByteArrayOutputStream()
+                                bmp.compress(android.graphics.Bitmap.CompressFormat.JPEG, 72, out)
+                                out.toByteArray()
+                            } finally {
+                                runCatching { mmr.release() }
+                            }
+                        }
+                        runOnUiThread { r.fold({ result.success(it) }, { result.error("frame", it.message, null) }) }
+                    }.start()
+                }
                 // системное окно удаления этого приложения (после «Удалить всё» с паролем)
                 "uninstall" -> {
                     runCatching {

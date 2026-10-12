@@ -13,6 +13,7 @@ import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
 import 'chat_files_screen.dart';
 import '../services/voice_recorder.dart';
+import '../widgets/inline_media.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -719,6 +720,9 @@ class _FileCard extends StatelessWidget {
     final busy  = fs != null && !fs.failed;
     final error = fs?.failed == true ? fs!.error : null;
     final showImage = offer.isImage && local != null && File(local).existsSync();
+    final inlineOk = local != null && !failed && !busy && error == null;
+    final inlineAudio = inlineOk && offer.mime.startsWith('audio/') && offer.size <= InlineAudio.maxInline;
+    final inlineVideo = inlineOk && offer.mime.startsWith('video/');
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -731,7 +735,7 @@ class _FileCard extends StatelessWidget {
               child: VaultImage(path: local, width: 220, cacheWidth: 440),
             ),
           ),
-        Row(
+        if (!inlineAudio) Row(
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(_icon(offer.mime), color: AppTheme.text, size: 28),
@@ -750,6 +754,25 @@ class _FileCard extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 8),
+        // как в Telegram: звук и видео играют прямо в сообщении, без экрана «Открыть»
+        if (inlineAudio) ...[
+          InlineAudio(key: ValueKey('ia-${offer.tid}'), path: local, size: offer.size,
+              caption: offer.name.startsWith('Голосовое_') ? null : offer.name),
+          const SizedBox(height: 4),
+        ] else if (inlineVideo) ...[
+          InlineVideo(
+            key: ValueKey('iv-${offer.tid}'),
+            path: local,
+            size: offer.size,
+            mime: offer.mime,
+            onFullscreen: () async {
+              final v = await (await state.vaultFiles()).describe(local);
+              if (!context.mounted) return;
+              await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
+            },
+          ),
+          const SizedBox(height: 4),
+        ],
         if (busy) ...[
           LinearProgressIndicator(value: fs.progress == 0 ? null : fs.progress,
               backgroundColor: Colors.black26, color: AppTheme.text),
