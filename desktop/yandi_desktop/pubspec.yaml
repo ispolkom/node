@@ -15,3 +15,9 @@ flutter:
   uses-material-design: true
   assets:
     - assets/logo.png
+    - assets/fonts/NotoColorEmoji-LICENSE.txt
+  fonts:
+    # Цветные эмодзи как на телефоне (Noto Color Emoji, лицензия OFL 1.1): системного шрифта на ПК может не быть.
+    - family: NotoColorEmoji
+      fonts:
+        - asset: assets/fonts/NotoColorEmoji.ttf

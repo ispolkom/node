@@ -324,7 +324,13 @@ class ComposerTools extends StatelessWidget {
                           width: 40,
                           height: 40,
                           child: Center(
-                            child: Text(e, style: const TextStyle(fontSize: 22)),
+                            child: Text(
+                              e,
+                              style: const TextStyle(
+                                fontSize: 22,
+                                fontFamily: 'NotoColorEmoji',
+                              ),
+                            ),
                           ),
                         ),
                       ),

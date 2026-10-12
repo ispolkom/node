@@ -49,4 +49,24 @@ void main() {
     expect(data.every((b) => b == 0), true);
     await expectLater(fetch(url), throwsA(anything));
   });
+  test('reader mode decrypts slices on demand and serves ranges', () async {
+    final data = Uint8List.fromList(List.generate(3 * 1024 * 1024 + 7, (i) => i % 251));
+    var calls = 0, biggest = 0;
+    final m = LoopbackMedia.reader(data.length, 'video/mp4', (start, len) async {
+      calls++;
+      if (len > biggest) biggest = len;
+      return Uint8List.sublistView(data, start, start + len);
+    });
+    final url = await m.start();
+    final all = await fetch(url);
+    expect(all.$1, 200);
+    expect(all.$2.length, data.length);
+    expect(all.$2[1234567], data[1234567]);
+    expect(biggest <= LoopbackMedia.slice, true);
+    expect(calls >= 4, true);
+    final part = await fetch(url, range: 'bytes=2000000-2000009');
+    expect(part.$1, 206);
+    expect(part.$2, data.sublist(2000000, 2000010));
+    await m.stop();
+  });
 }

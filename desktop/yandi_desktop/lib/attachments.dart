@@ -125,7 +125,7 @@ class _AttachmentViewState extends State<AttachmentView> {
   Future<void> play() async {
     if (playing) return;
     final size = widget.attachment['size'];
-    if (size is! num || size <= 0 || size > 256 * 1024 * 1024) {
+    if (size is! num || size <= 0 || size > 512 * 1024 * 1024) {
       setState(() => error = 'Файл слишком большой для воспроизведения.');
       return;
     }

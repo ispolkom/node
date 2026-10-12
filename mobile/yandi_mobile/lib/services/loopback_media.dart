@@ -6,11 +6,25 @@ import 'dart:typed_data';
 /// Serves one decrypted media file from memory on 127.0.0.1 under an unguessable
 /// path, with Range support so the player can seek. Nothing is written to disk.
 class LoopbackMedia {
-  final Uint8List bytes;
+  /// Весь файл в памяти (маленькие файлы) — либо null, если данные читаются кусками по запросу.
+  final Uint8List? bytes;
+  final int length;
   final String mime;
+  final Future<Uint8List> Function(int start, int len)? _read;
   HttpServer? _server;
   late final String token = _token();
-  LoopbackMedia(this.bytes, this.mime);
+  LoopbackMedia(Uint8List data, this.mime)
+      : bytes = data,
+        length = data.length,
+        _read = null;
+
+  /// Данные расшифровываются кусками по мере запросов плеера: в памяти одновременно только кусок, размер файла не ограничен.
+  LoopbackMedia.reader(this.length, this.mime, Future<Uint8List> Function(int start, int len) read)
+      : bytes = null,
+        _read = read;
+
+  /// Размер порции, которой отдаётся ответ.
+  static const slice = 1 << 20;
 
   static String _token() {
     final r = Random.secure();
@@ -39,7 +53,7 @@ class LoopbackMedia {
         ..set(HttpHeaders.contentTypeHeader, mime)
         ..set(HttpHeaders.acceptRangesHeader, 'bytes')
         ..set(HttpHeaders.cacheControlHeader, 'no-store');
-      var start = 0, end = bytes.length - 1;
+      var start = 0, end = length - 1;
       final range = request.headers.value(HttpHeaders.rangeHeader);
       if (range != null) {
         final m = RegExp(r'^bytes=(\d*)-(\d*)$').firstMatch(range.trim());
@@ -49,37 +63,54 @@ class LoopbackMedia {
         }
         if (m[1]!.isEmpty) {
           final n = int.parse(m[2]!);
-          start = max(0, bytes.length - n);
+          start = max(0, length - n);
         } else {
           start = int.parse(m[1]!);
           if (m[2]!.isNotEmpty) end = min(end, int.parse(m[2]!));
         }
-        if (start > end || start >= bytes.length) {
+        if (start > end || start >= length) {
           response.statusCode = HttpStatus.requestedRangeNotSatisfiable;
           response.headers.set(
             HttpHeaders.contentRangeHeader,
-            'bytes */${bytes.length}',
+            'bytes */${length}',
           );
           return;
         }
         response.statusCode = HttpStatus.partialContent;
         response.headers.set(
           HttpHeaders.contentRangeHeader,
-          'bytes $start-$end/${bytes.length}',
+          'bytes $start-$end/${length}',
         );
       }
       response.contentLength = end - start + 1;
       if (request.method == 'GET') {
-        response.add(Uint8List.sublistView(bytes, start, end + 1));
+        final data = bytes;
+        if (data != null) {
+          response.add(Uint8List.sublistView(data, start, end + 1));
+        } else {
+          var pos = start;
+          while (pos <= end) {
+            final n = min(slice, end - pos + 1);
+            final part = await _read!(pos, n);
+            if (part.isEmpty) break;
+            response.add(part);
+            await response.flush();
+            pos += part.length;
+          }
+        }
       }
+    } catch (_) {
+      // плеер оборвал соединение (перемотка) — это нормально
     } finally {
-      await response.close();
+      try {
+        await response.close();
+      } catch (_) {}
     }
   }
 
   Future<void> stop() async {
     await _server?.close(force: true);
     _server = null;
-    bytes.fillRange(0, bytes.length, 0);
+    bytes?.fillRange(0, length, 0);
   }
 }

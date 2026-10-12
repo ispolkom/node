@@ -35,7 +35,12 @@ abstract final class Icq {
     final base = ThemeData(
       useMaterial3: false,
       fontFamily: 'Tahoma',
-      fontFamilyFallback: const ['MS Sans Serif', 'Segoe UI', 'DejaVu Sans'],
+      fontFamilyFallback: const [
+        'MS Sans Serif',
+        'Segoe UI',
+        'DejaVu Sans',
+        'NotoColorEmoji',
+      ],
       colorScheme: const ColorScheme.light(
         primary: header,
         secondary: online,
@@ -74,7 +79,11 @@ abstract final class Icq {
       minimumSize: const WidgetStatePropertyAll(Size(28, 30)),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       textStyle: const WidgetStatePropertyAll(
-        TextStyle(fontSize: 14, fontFamily: 'Tahoma'),
+        TextStyle(
+          fontSize: 14,
+          fontFamily: 'Tahoma',
+          fontFamilyFallback: ['NotoColorEmoji'],
+        ),
       ),
     );
     const outline = OutlineInputBorder(
@@ -82,7 +91,10 @@ abstract final class Icq {
       borderSide: BorderSide(color: border),
     );
     return base.copyWith(
-      textTheme: textTheme.apply(fontFamily: 'Tahoma'),
+      textTheme: textTheme.apply(
+        fontFamily: 'Tahoma',
+        fontFamilyFallback: const ['NotoColorEmoji'],
+      ),
       filledButtonTheme: FilledButtonThemeData(
         style: buttonStyle(header, Colors.white),
       ),

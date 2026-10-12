@@ -54,12 +54,10 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   /// (с Range для перемотки). Открытой копии на диске нет; после закрытия экрана память затирается.
   Future<void> _openVideo() async {
     try {
-      if (f.size > 200 * 1024 * 1024) {
-        setState(() => _videoError = 'Видео больше 200 МБ внутри приложения не воспроизводится');
-        return;
-      }
-      final bytes = await (await VaultService.instance.files()).readAll(File(f.path));
-      final m = LoopbackMedia(bytes, f.mime);
+      final vault = await VaultService.instance.files();
+      final file = File(f.path);
+      // Куски расшифровываются по запросам плеера: размер видео не ограничен (фильм в гигабайт), в памяти — один кусок.
+      final m = LoopbackMedia.reader(f.size, f.mime, (start, len) => vault.readRange(file, start, len));
       _media = m;
       final url = await m.start();
       final c = VideoPlayerController.networkUrl(url);
