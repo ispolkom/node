@@ -32,4 +32,4 @@ src/web/first_setup.rs:2
 src/web/media_api.rs:1
 src/web/peers.rs:2
 src/web/server.rs:6
-src/web/ui_socket.rs:3
+src/web/ui_socket.rs:4
