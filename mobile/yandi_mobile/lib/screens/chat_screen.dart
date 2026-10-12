@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
 import '../models/group_invite.dart';
+import '../models/group.dart';
 import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
@@ -66,6 +67,28 @@ class _ChatScreenState extends State<ChatScreen> {
     });
   }
 
+  /// Поделиться: переслать текст в другой чат или группу внутри приложения.
+  Future<void> _share(String text) async {
+    final state = context.read<AppState>();
+    final targets = <ShareTarget>[
+      for (final c in state.contacts)
+        if (c.saved && c.peerId != widget.peerId) ShareTarget.contact(c.peerId, c.displayName),
+      for (final g in state.groups?.groups ?? const <GroupInfo>[]) ShareTarget.group(g.id, g.name),
+    ];
+    final to = await pickShareTarget(context, targets);
+    if (to == null || !mounted) return;
+    try {
+      if (to.group) {
+        await state.groups!.send(to.id, kindOfText(text), {'t': text});
+      } else {
+        await state.sendMessage(to.id, text);
+      }
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправлено: ${to.title}')));
+    } catch (e) {
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не отправлено: $e')));
+    }
+  }
+
   void _cancelEdit() {
     setState(() { _editingId = null; _inputCtrl.clear(); });
   }
@@ -77,6 +100,7 @@ class _ChatScreenState extends State<ChatScreen> {
       if (m.outgoing && plain) cmdEdit,
       cmdReply,
       if (plain) cmdCopy,
+      if (plain) cmdShare,
       cmdDelete,
     ]);
     if (!mounted || choice == null) return;
@@ -88,6 +112,8 @@ class _ChatScreenState extends State<ChatScreen> {
         _inputFocus.requestFocus();
       case cmdCopy:
         await Clipboard.setData(ClipboardData(text: m.text));
+      case cmdShare:
+        await _share(m.text);
       case cmdDelete:
         setState(() => _selected..clear()..add(m.id));
         await _deleteSelected();

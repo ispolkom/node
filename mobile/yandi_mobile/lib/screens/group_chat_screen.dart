@@ -217,6 +217,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final choice = await showMessageMenu(context, at, [
       cmdReply,
       if (hasText) cmdCopy,
+      if (hasText) cmdShare,
       if (!mine) cmdHideAuthor,
       if (g.canModerate) cmdEraseAll,
       if (g.canModerate && !mine) cmdMute,
@@ -228,6 +229,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         _focus.requestFocus();
       case cmdCopy:
         await Clipboard.setData(ClipboardData(text: '${e.body['t']}'));
+      case cmdShare:
+        await _share('${e.body['t']}');
       case cmdHideAuthor:
         setState(() => _hidden.add(e.from));
         await _saveHidden();
@@ -235,6 +238,29 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         try { await _svc!.moderate(g.id, 'delete_entry', seq: e.seq); await _load(); } catch (err) { _toast('$err'); }
       case cmdMute:
         try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast('Заглушён'); } catch (err) { _toast('$err'); }
+    }
+  }
+
+  /// Поделиться: переслать текст в чат или в другую группу внутри приложения.
+  Future<void> _share(String text) async {
+    final state = context.read<AppState>();
+    final targets = <ShareTarget>[
+      for (final c in state.contacts)
+        if (c.saved) ShareTarget.contact(c.peerId, c.displayName),
+      for (final g in _svc!.groups)
+        if (g.id != widget.gid) ShareTarget.group(g.id, g.name),
+    ];
+    final to = await pickShareTarget(context, targets);
+    if (to == null || !mounted) return;
+    try {
+      if (to.group) {
+        await _svc!.send(to.id, kindOfText(text), {'t': text});
+      } else {
+        await state.sendMessage(to.id, text);
+      }
+      _toast('Отправлено: ${to.title}');
+    } catch (e) {
+      _toast('Не отправлено: $e');
     }
   }
 

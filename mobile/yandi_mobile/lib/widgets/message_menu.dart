@@ -5,6 +5,7 @@ import '../theme.dart';
 const cmdEdit = 'Изменить',
     cmdReply = 'Ответить',
     cmdCopy = 'Копировать',
+    cmdShare = 'Поделиться',
     cmdDelete = 'Удалить',
     cmdHideAuthor = 'Скрыть сообщения этого пользователя',
     cmdEraseAll = 'Стереть у всех',
@@ -107,6 +108,48 @@ class QuoteBox extends StatelessWidget {
               ),
             ),
         ],
+      ),
+    ),
+  );
+}
+
+/// Куда поделиться: контакт или группа. Пересылка остаётся внутри YANDI (шифруется как обычное сообщение), а не уходит в чужие приложения.
+class ShareTarget {
+  final bool group;
+  final String id, title;
+  const ShareTarget.contact(this.id, this.title) : group = false;
+  const ShareTarget.group(this.id, this.title) : group = true;
+}
+
+Future<ShareTarget?> pickShareTarget(BuildContext context, List<ShareTarget> targets) {
+  return showModalBottomSheet<ShareTarget>(
+    context: context,
+    backgroundColor: AppTheme.surface,
+    isScrollControlled: true,
+    builder: (ctx) => SafeArea(
+      child: ConstrainedBox(
+        constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          const Padding(
+            padding: EdgeInsets.all(14),
+            child: Text('Поделиться с…', style: TextStyle(color: AppTheme.text, fontSize: 16)),
+          ),
+          Flexible(
+            child: targets.isEmpty
+                ? const Padding(
+                    padding: EdgeInsets.all(20),
+                    child: Text('Некому пересылать', style: TextStyle(color: AppTheme.textSecondary)),
+                  )
+                : ListView(shrinkWrap: true, children: [
+                    for (final t in targets)
+                      ListTile(
+                        leading: Icon(t.group ? Icons.group_outlined : Icons.person_outline, color: AppTheme.accent),
+                        title: Text(t.title, style: const TextStyle(color: AppTheme.text)),
+                        onTap: () => Navigator.pop(ctx, t),
+                      ),
+                  ]),
+          ),
+        ]),
       ),
     ),
   );
