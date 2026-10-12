@@ -1,3 +1,4 @@
+import 'theme.dart';
 import 'preferences.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -218,13 +219,11 @@ class _NetworkFeatureState extends State<NetworkFeature> {
     ],
   );
   @override
-  Widget build(BuildContext context) => Column(
-    crossAxisAlignment: CrossAxisAlignment.start,
+  Widget build(BuildContext context) => PanelStack(
     children: [
       UiText(widget.page, style: const TextStyle(fontSize: 22)),
       if (busy) const LinearProgressIndicator(),
-      if (error != null)
-        UiText(error!, style: const TextStyle(color: Colors.red)),
+      if (error != null) NoticePanel(error!, error: true),
       if (notice != null) UiSelectableText(notice!),
       button('Обновить', () => refresh(nodes: true)),
       if (gateways) ...[
@@ -233,6 +232,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
         const UiText(
           'Stop меняет метаданные демона; закрытие сокета не подтверждено. Подключение/отключение узла в API — заглушка. Задержка: —.',
         ),
+        const UiText('Добавить шлюз', style: TextStyle(fontSize: 22)),
         TextField(
           controller: name,
           decoration: InputDecoration(labelText: tr(context, 'Имя шлюза')),
@@ -320,6 +320,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
             ),
           ),
       ] else ...[
+        const UiText('Управление Relay Server', style: TextStyle(fontSize: 22)),
         UiText(
           'Сервер: ${relay == null
               ? tr(context, 'статус неизвестен')
@@ -351,6 +352,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
         const UiText(
           'Запрос подключения не гарантирует публичную доступность Relay.',
         ),
+        const UiText('Активные Relay Сессии', style: TextStyle(fontSize: 22)),
         for (final s in sessions)
           Card(
             child: Padding(
@@ -360,6 +362,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
               ),
             ),
           ),
+        const UiText('Подключение через Relay', style: TextStyle(fontSize: 22)),
         for (final p in peers)
           Wrap(
             spacing: 8,

@@ -179,7 +179,7 @@ void main() {
     expect(api.socks, false);
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await click(t, 'Старт SOCKS5');
-    await click(t, 'Панель');
+    await click(t, 'Главная');
     await click(t, 'Шлюзы');
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await stop(t);
@@ -202,7 +202,7 @@ void main() {
     api.late = Completer();
     await t.pump(const Duration(seconds: 5));
     await t.pump();
-    await click(t, 'Панель');
+    await click(t, 'Главная');
     api.late!.complete({'relay_server': true});
     await t.pumpAndSettle();
     expect(find.text('Сервер: включён'), findsNothing);
