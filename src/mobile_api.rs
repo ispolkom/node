@@ -484,9 +484,15 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
             return;
         }
         crate::mobile_self::Envelope::Ignored => return,
+        crate::mobile_self::Envelope::Reaction { cmid, emoji } => {
+            let local = crate::chat_reactions::local_for_phone(from_device, &cmid);
+            crate::chat_reactions::set_peer(&hex::encode(&device.0[..8]), &local, &emoji);
+            return;
+        }
         crate::mobile_self::Envelope::Message { cmid, text, reply } => {
             // сообщение с номером: в историю под выведенным номером, телефону сразу «доставлено», «прочитано» — когда откроют страницу
             let local = crate::mobile_self::incoming_id(from_device, &cmid);
+            crate::chat_reactions::remember_rid(&hex::encode(local.0), &cmid); // чтобы страница могла поставить на него смайл
             let mut msg = ChatMessage::new(device, st.my_id, text);
             msg.msg_id = local;
             msg.encrypted = true;
@@ -687,6 +693,17 @@ pub fn pc_mark_read(peer: &str) {
     if !ids.is_empty() {
         node_mail_to_device(&st, peer, &crate::mobile_self::receipt(true, &ids));
     }
+}
+
+/// Смайл со страницы телефону владельца: конверт реакции уходит почтой, у телефона тот же номер сообщения.
+pub fn pc_react_device(peer: &str, msg_hex: &str, emoji: &str) -> Result<(), String> {
+    let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    if !is_device_peer(peer) {
+        return Err("нет такого устройства".into());
+    }
+    let key = crate::chat_reactions::key_for_peer(msg_hex);
+    node_mail_to_device(&st, peer, &crate::chat_reactions::envelope(&key, emoji));
+    Ok(())
 }
 
 /// Правка своего сообщения со страницы: в истории узла и у телефона (конверт правки с тем же номером).

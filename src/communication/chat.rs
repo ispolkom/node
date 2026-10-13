@@ -476,6 +476,9 @@ impl ChatManager {
             let _ = self.send_service(from, reply).await;
         }
 
+        // смайл-реакция собеседника на сообщение: запоминаем, в переписке её не показываем
+        crate::chat_reactions::on_incoming(&from, &msg.text);
+
         // 7. Уведомить Web UI (через канал)
         let _ = self.incoming_tx.send(msg.clone());
         crate::mobile_api::publish(&msg);

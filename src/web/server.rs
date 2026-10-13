@@ -530,6 +530,7 @@ impl WebServer {
             .route("/api/chat/send/:peer_id", post(api_chat_send))
             .route("/api/chat/history/:peer_id", get(api_chat_history))
             .route("/api/chat/clear/:peer_id", post(api_chat_clear))
+            .route("/api/chat/react/:peer_id", post(api_chat_react))
             .route(
                 "/api/chat/edit/:peer_id",
                 axum::routing::patch(api_chat_edit),
@@ -3195,6 +3196,62 @@ async fn api_chat_send(
     }
 }
 
+#[derive(Deserialize)]
+struct ReactRequest {
+    /// номер сообщения (hex, 64 знака — как в истории)
+    msg_id: String,
+    /// смайл из набора; пустой — снять
+    emoji: String,
+}
+
+/// Поставить или снять смайл на сообщение личного чата (повтор того же смайла снимает).
+async fn api_chat_react(
+    State(state): State<AppState>,
+    PathExtractor(peer_id): PathExtractor<String>,
+    Json(req): Json<ReactRequest>,
+) -> impl IntoResponse {
+    let err = |m: &str| Json(serde_json::json!({"status": "error", "message": m}));
+    if !(req.emoji.is_empty() || crate::chat_reactions::SET.contains(&req.emoji.as_str())) {
+        return err("такого смайла нет");
+    }
+    if req.msg_id.len() != 64 || !req.msg_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return err("неверный номер сообщения");
+    }
+    // собеседник: полный номер или короткий
+    let peer_hash = match crate::util::HashId::from_hex(&peer_id) {
+        Ok(id) => id,
+        Err(_) => match &state.p2p_transport {
+            Some(t) => match t.find_peer_by_short_id(&peer_id).await {
+                Some(id) => id,
+                None => return err("собеседник не найден"),
+            },
+            None => return err("сеть недоступна"),
+        },
+    };
+    let short = hex::encode(&peer_hash.0[..8]);
+    let current = crate::chat_reactions::of_peer(&short).get(&req.msg_id).map(|r| r.0.clone()).unwrap_or_default();
+    let next = if current == req.emoji { String::new() } else { req.emoji.clone() };
+    let sent = if crate::mobile_api::is_device_peer(&peer_id) || crate::mobile_api::is_device_peer(&hex::encode(peer_hash.0)) {
+        crate::mobile_api::pc_react_device(&hex::encode(peer_hash.0), &req.msg_id, &next)
+    } else {
+        let chat = state.chat_manager.lock().await;
+        match chat.as_ref() {
+            Some(c) => c
+                .send_service(peer_hash, crate::chat_reactions::envelope(&req.msg_id, &next))
+                .await
+                .map_err(|e| format!("не удалось отправить: {e}")),
+            None => Err("чат недоступен".to_string()),
+        }
+    };
+    match sent {
+        Ok(()) => {
+            crate::chat_reactions::set_me(&short, &req.msg_id, &next);
+            Json(serde_json::json!({"status": "success", "emoji": next}))
+        }
+        Err(e) => err(&e),
+    }
+}
+
 /// Загрузить историю чата
 async fn api_chat_history(
     State(state): State<AppState>,
@@ -3246,6 +3303,7 @@ async fn api_chat_history(
     }
     // println!("🔍 Loading history for short_id: {}, peer_hash: {}", peer_id, hex::encode(&peer_hash.0[..8]));
     // Загрузить историю (последние 100 сообщений)
+    let reactions = crate::chat_reactions::of_peer(&hex::encode(&peer_hash.0[..8]));
     match chat_manager.load_history(&peer_hash, 100) {
         Ok(messages) => {
             // Конвертировать HashId в hex строку для JSON (полные 32 байта)
@@ -3264,7 +3322,8 @@ async fn api_chat_history(
                         "edited": msg.edited,
                         "edit_timestamp": msg.edit_timestamp,
                         "attachment": msg.attachment,
-                        "reply_to": msg.reply_to
+                        "reply_to": msg.reply_to,
+                        "reactions": reactions.get(&hex::encode(&msg.msg_id.0)).map(|(me, peer)| serde_json::json!({"me": me, "peer": peer}))
                     })
                 })
                 .collect();

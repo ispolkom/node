@@ -611,6 +611,8 @@ pub enum Envelope {
     Edit { cmid: String, text: String },
     /// устройство умеет квитанции
     CapPing,
+    /// смайл на сообщение (пустой — снят): номер сообщения как у приложения
+    Reaction { cmid: String, emoji: String },
     /// служебный конверт, которого этот узел не знает (например, аватарки `yandi-avh/avq/ava` между телефонами): молча отбрасывается,
     /// чтобы не показываться на странице чата как мусорное сообщение
     Ignored,
@@ -656,6 +658,11 @@ pub fn classify(text: String) -> Envelope {
         }
     } else if text.starts_with(CAP_MARKER) {
         return Envelope::CapPing;
+    } else if text.starts_with(crate::chat_reactions::MARKER) {
+        return match crate::chat_reactions::parse(&text) {
+            Some((cmid, emoji)) => Envelope::Reaction { cmid, emoji },
+            None => Envelope::Ignored,
+        };
     } else if text.starts_with("\u{1}yandi-") && !text.starts_with(FILE_MARKER) {
         return Envelope::Ignored;
     }
