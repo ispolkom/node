@@ -1,4 +1,5 @@
 import 'message_actions.dart';
+import 'contact_avatar.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -728,23 +729,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                   onTap: sending ? null : () => choose(c),
                   child: Row(
                     children: [
-                      Container(
-                        width: 40,
-                        height: 40,
-                        alignment: Alignment.center,
-                        decoration: const BoxDecoration(
-                          color: Icq.header,
-                          border: Icq.bevel,
-                        ),
-                        child: Text(
-                          '${c['name']}'.isEmpty
-                              ? '?'
-                              : '${c['name']}'.characters.first.toUpperCase(),
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontSize: 18,
-                            fontWeight: FontWeight.bold,
-                          ),
+                      ContactAvatar(
+                        api: widget.api,
+                        avatarId: '${c['avatar_id'] ?? c['short_id'] ?? ''}',
+                        name: '${c['name']}'.replaceFirst(
+                          RegExp('^[\\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true),
+                          '',
                         ),
                       ),
                       const SizedBox(width: 10),

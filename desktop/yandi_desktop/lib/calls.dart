@@ -47,6 +47,32 @@ class _CallsFeatureState extends State<CallsFeature> {
   late final CallCoordinator coordinator;
   Timer? timer;
   bool video = false, phone = false;
+  /// Имя собеседника из моих контактов (то, что я ему дал), без значка устройства: кто именно отвечает, не важно.
+  String resolvedPeer = '', resolvedName = '';
+
+  static String cleanName(String name) => name
+      .replaceFirst(RegExp('^[\\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '')
+      .trim();
+
+  Future<void> resolveName(String peerId) async {
+    try {
+      final r = await widget.api.request('/api/contacts');
+      final list = r['contacts'];
+      if (list is! List) return;
+      for (final c in list) {
+        if (c is! Map) continue;
+        final sid = '${c['short_id'] ?? ''}';
+        if (sid.isNotEmpty && (peerId.startsWith(sid) || sid.startsWith(peerId))) {
+          if (mounted && coordinator.call?.peer == peerId) {
+            setState(() => resolvedName = cleanName('${c['name'] ?? ''}'));
+          }
+          return;
+        }
+      }
+    } catch (_) {
+      /* имя необязательно: без него показывается только логотип */
+    }
+  }
   @override
   void initState() {
     super.initState();
@@ -78,6 +104,12 @@ class _CallsFeatureState extends State<CallsFeature> {
   }
 
   void update() {
+    final c = coordinator.call;
+    if (c != null && resolvedPeer != c.peer) {
+      resolvedPeer = c.peer;
+      resolvedName = cleanName(c.name);
+      resolveName(c.peer);
+    }
     if (mounted && widget.isActive()) setState(() {});
   }
 
@@ -126,8 +158,30 @@ class _CallsFeatureState extends State<CallsFeature> {
       if (coordinator.error != null)
         NoticePanel(coordinator.error!, error: true),
       if (coordinator.call != null)
-        SelectableText(
-          '${coordinator.call!.name} · ${coordinator.call!.peer} · ${tr(context, coordinator.call!.video ? 'видео' : 'голос')}',
+        Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // звонок в сети YANDI: логотип и название над именем, чтобы не спутать с другим мессенджером или сотовой связью
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Image.asset('assets/logo.png', width: 30, height: 30),
+                const SizedBox(width: 8),
+                const Text(
+                  'YANDI',
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.bold,
+                    letterSpacing: 2,
+                    color: Icq.header,
+                  ),
+                ),
+              ],
+            ),
+            if (resolvedName.isNotEmpty)
+              Text(resolvedName, style: const TextStyle(fontSize: 18)),
+            UiText(coordinator.call!.video ? 'Видеозвонок' : 'Голосовой звонок'),
+          ],
         ),
       if (coordinator.microphoneLevel != null) ...[
         const UiText('Уровень микрофона'),

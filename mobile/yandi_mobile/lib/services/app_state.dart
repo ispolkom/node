@@ -849,7 +849,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();
 
-  Uint8List? avatarBytes(String peerId) => avatars?.bytesForPeer(peerId);
+  /// Картинка контакта. У «компьютера» (моего же узла) та же картинка, что у меня: профиль общий на все мои устройства.
+  Uint8List? avatarBytes(String peerId) => peerId == _nodePeerId ? avatars?.myBytes : avatars?.bytesForPeer(peerId);
   Uint8List? get myAvatarBytes => avatars?.myBytes;
 
   bool _avatarEligible(String peerId) {

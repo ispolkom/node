@@ -6,6 +6,9 @@ import '../services/app_state.dart';
 import '../services/call_service.dart';
 import '../theme.dart';
 
+/// Имя абонента для экрана звонка: то, что человек сам дал контакту, без значка устройства (кто отвечает — телефон или компьютер — не важно).
+String displayCallName(String name) => name.replaceFirst(RegExp(r'^[\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '').trim();
+
 /// Экран звонка: исходящий (идёт вызов), входящий (принять/отклонить) и разговор с видео или без.
 class CallScreen extends StatefulWidget {
   const CallScreen({super.key});
@@ -64,19 +67,32 @@ class _CallScreenState extends State<CallScreen> {
           top: 24, left: 16, right: 16,
           child: Column(
             children: [
+              // звонок в сети YANDI: логотип и название над именем, чтобы не спутать с мессенджером или сотовой связью
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Image.asset('assets/images/logo.png', height: 28),
+                const SizedBox(width: 8),
+                const Text('YANDI', style: TextStyle(color: AppTheme.accent, fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: 2)),
+              ]),
               if (!showVideo) ...[
-                const SizedBox(height: 40),
-                CircleAvatar(
-                  radius: 54,
-                  backgroundColor: AppTheme.surface,
-                  child: Text(
-                    c.peerName.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim().characters.firstOrNull?.toUpperCase() ?? '?',
-                    style: const TextStyle(color: AppTheme.accent, fontSize: 44, fontWeight: FontWeight.bold),
-                  ),
-                ),
+                const SizedBox(height: 28),
+                Builder(builder: (context) {
+                  final bytes = c.peerId == null ? null : context.read<AppState>().avatarBytes(c.peerId!);
+                  final name = displayCallName(c.peerName);
+                  return CircleAvatar(
+                    radius: 54,
+                    backgroundColor: AppTheme.surface,
+                    backgroundImage: bytes != null ? MemoryImage(bytes) : null,
+                    onBackgroundImageError: bytes != null ? (_, __) {} : null,
+                    child: bytes != null
+                        ? null
+                        : Text(name.characters.firstOrNull?.toUpperCase() ?? '?',
+                            style: const TextStyle(color: AppTheme.accent, fontSize: 44, fontWeight: FontWeight.bold)),
+                  );
+                }),
                 const SizedBox(height: 16),
-              ],
-              Text(c.peerName, textAlign: TextAlign.center,
+              ] else
+                const SizedBox(height: 12),
+              Text(displayCallName(c.peerName), textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               Text(_status(c), textAlign: TextAlign.center,

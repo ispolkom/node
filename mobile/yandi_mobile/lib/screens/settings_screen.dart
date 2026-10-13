@@ -159,8 +159,6 @@ class SettingsScreen extends StatelessWidget {
           ),
           // Нода
           _Section(title: 'Нода'),
-          _InfoTile(label: 'Хост', value: pair?.host ?? '—'),
-          _InfoTile(label: 'Порт', value: pair?.port.toString() ?? '—'),
           _InfoTile(label: 'Node ID', value: state.myNodeId?.substring(0, 16) ?? '—'),
           _InfoTile(
             label: 'Статус',

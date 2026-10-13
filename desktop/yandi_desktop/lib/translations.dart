@@ -302,6 +302,7 @@ const moreEnglishLabels = <String, String>{
   "Пропустить": "Skip",
   "Профиль недоступен.": "Profile unavailable.",
   "Профиль собеседника": "Peer profile",
+  "Голосовой звонок": "Voice call",
   "Ник и аватар увидят ваши контакты и участники ваших групп. Не указывайте ФИО и личные фото. В любой группе их можно скрыть.": "Your contacts and group members will see your nickname and avatar. Do not use your real name or personal photos. You can hide them in any group.",
   "Прочитано": "Read",
   "Пул внешних прокси": "Upstream proxy pool",

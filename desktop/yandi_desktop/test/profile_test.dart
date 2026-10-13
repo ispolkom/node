@@ -71,7 +71,7 @@ void main() {
     await t.pumpAndSettle();
     expect(api.payloads.single, files.png);
     expect(
-      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage && w.width == 96),
       findsOneWidget,
     );
     await m1.click(t, 'Удалить аватар профиля');
@@ -81,7 +81,7 @@ void main() {
     await m1.click(t, 'Удалить аватар');
     expect(api.bodies.last, {'avatar': ''});
     expect(
-      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage && w.width == 96),
       findsNothing,
     );
     expect(find.text('Несохранённое имя'), findsOneWidget);
@@ -101,7 +101,7 @@ void main() {
     expect(find.text('Профиль собеседника'), findsOneWidget);
     await m1.click(t, 'Просмотреть аватар');
     expect(
-      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage),
+      find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage && w.width == 96),
       findsOneWidget,
     );
     api.peerPending = Completer();

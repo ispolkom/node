@@ -2422,6 +2422,8 @@ async fn mobile_phone_action_handler(Json(b): Json<PhoneActionReq>) -> Response 
 
 fn append_phone_contacts(data: &mut serde_json::Value) {
     crate::mobile_self::init_phone_status();
+    // профиль общий на все мои устройства: у моего телефона в списке та же картинка, что у меня
+    let own_avatar = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
     if let Some(arr) = data["contacts"].as_array_mut() {
         for d in crate::mobile_api::devices_overview() {
             let Some(full) = d["peer_id"].as_str() else { continue };
@@ -2434,6 +2436,7 @@ fn append_phone_contacts(data: &mut serde_json::Value) {
                 "short_id": full,
                 "online": d["online"],
                 "is_phone": true,
+                "avatar_id": own_avatar,
             }));
         }
     }

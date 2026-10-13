@@ -154,9 +154,7 @@ class _NodeTile extends StatelessWidget {
                   ],
                 ]),
                 const SizedBox(height: 4),
-                Text('${node.host}:${node.port}',
-                    style: const TextStyle(
-                        color: AppTheme.textSecondary, fontSize: 12)),
+                // адрес узла человеку не показываем: его знает только владелец узла
                 if (node.pingMs < 999)
                   Text('ping ${node.pingMs} ms  •  load ${(node.loadFactor * 100).toStringAsFixed(0)}%',
                       style: const TextStyle(
