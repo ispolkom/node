@@ -882,6 +882,13 @@ pub fn refresh_entry(gid: &str, seq: u64) {
     });
 }
 
+static NUDGE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Подтолкнуть синхронизацию групп сейчас (например, профиль изменился: визитка в группах должна обновиться сразу, а не по таймеру).
+pub fn nudge() {
+    NUDGE.notify_one();
+}
+
 /// Фоновая задача: синхронизация по таймеру и по намёкам групп.
 pub fn spawn_background() {
     crate::supervisor::supervise("groups-pc-sync", crate::supervisor::Policy::restart(), || async move {
@@ -890,6 +897,9 @@ pub fn spawn_background() {
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(12)) => {
+                    let _ = tokio::task::spawn_blocking(sync_all).await;
+                }
+                _ = NUDGE.notified() => {
                     let _ = tokio::task::spawn_blocking(sync_all).await;
                 }
                 h = rx.recv() => {

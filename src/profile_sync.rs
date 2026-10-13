@@ -289,6 +289,7 @@ pub fn changed() {
     DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
     WAKE.notify_one();
     crate::mobile_api::announce_profile_changed();
+    crate::group_client::nudge(); // визитка ПК в группах обновляется сразу, а не к следующему обходу
 }
 
 /// Контакт подключился (или подтвердил себя): если у него не тот хэш, что мы ему уже отдали, отправим разницу.
