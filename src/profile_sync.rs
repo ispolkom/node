@@ -76,19 +76,77 @@ fn nicks_path(base: &Path) -> PathBuf {
     base.join("peer_nicks.json")
 }
 
-fn load_nicks(base: &Path) -> HashMap<String, String> {
+#[derive(serde::Serialize, serde::Deserialize, Clone)]
+struct NickRec {
+    n: String,
+    /// когда контакт в последний раз сообщал ник (мс)
+    t: u64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+fn load_recs(base: &Path) -> HashMap<String, NickRec> {
     std::fs::read_to_string(nicks_path(base)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
 }
 
+fn load_nicks(base: &Path) -> HashMap<String, String> {
+    load_recs(base).into_iter().map(|(k, v)| (k, v.n)).collect()
+}
+
+fn save_recs(base: &Path, m: &HashMap<String, NickRec>) {
+    let _ = std::fs::create_dir_all(base);
+    if let Ok(s) = serde_json::to_vec(m) {
+        let _ = crate::util::private_file::write_private(&nicks_path(base), &s);
+    }
+}
+
 fn set_nick(base: &Path, short: &str, nick: &str) {
-    let mut m = load_nicks(base);
-    let changed = if nick.is_empty() { m.remove(short).is_some() } else { m.insert(short.to_string(), nick.to_string()).as_deref() != Some(nick) };
+    let mut m = load_recs(base);
+    let changed = if nick.is_empty() {
+        m.remove(short).is_some()
+    } else {
+        m.insert(short.to_string(), NickRec { n: nick.to_string(), t: now_ms() }).is_none_or(|old| old.n != nick)
+    };
     if changed {
-        let _ = std::fs::create_dir_all(base);
-        if let Ok(s) = serde_json::to_vec(&m) {
-            let _ = crate::util::private_file::write_private(&nicks_path(base), &s);
+        save_recs(base, &m);
+    }
+}
+
+/// Срок хранения чужого профиля, когда человек больше не в контактах.
+const KEEP_NON_CONTACT_MS: u64 = 30 * 24 * 3600 * 1000;
+
+/// Локальная очистка кэша: ники и аватары тех, кого нет в контактах, стираются через 30 дней после последнего обновления
+/// (до нового появления человека в сети). Сети не касается, у контактов и своего профиля ничего не трогает.
+fn cleanup(base: &Path, contacts: &HashSet<String>, my_short: &str, now: u64) -> usize {
+    let mut removed = 0;
+    let mut recs = load_recs(base);
+    let before = recs.len();
+    recs.retain(|k, v| contacts.contains(k) || now.saturating_sub(v.t) < KEEP_NON_CONTACT_MS);
+    if recs.len() != before {
+        removed += before - recs.len();
+        save_recs(base, &recs);
+    }
+    if let Ok(rd) = std::fs::read_dir(base.join("avatars")) {
+        for e in rd.flatten() {
+            let path = e.path();
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()).map(str::to_string) else { continue };
+            if stem == my_short || contacts.contains(&stem) || stem.len() != 16 {
+                continue;
+            }
+            let age = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_millis() as u64).unwrap_or(0);
+            if age >= KEEP_NON_CONTACT_MS && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+            }
         }
     }
+    removed
+}
+
+/// Очистка по таймеру (вызывается из фоновой рассылки).
+fn cleanup_now() {
+    cleanup(&base_dir(), &contact_shorts(), &my_short_cell(), now_ms());
 }
 
 /// Ник, который контакт задал себе сам (локальное имя в contacts.json его перекрывает на стороне показа).
@@ -228,6 +286,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
     *MY_SHORT.lock().unwrap_or_else(|e| e.into_inner()) = hex::encode(&my_id.0[..8]);
     tokio::spawn(async move {
         let mut sent: HashMap<String, ((String, String), Instant)> = HashMap::new();
+        let mut tick = 0u64;
         loop {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let (hash, nick) = my_state();
@@ -257,6 +316,10 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                 }
             }
             sent.retain(|k, _| contacts.contains(k));
+            if tick % 120 == 0 {
+                cleanup_now(); // раз в час
+            }
+            tick += 1;
         }
     });
 }
@@ -338,6 +401,25 @@ mod tests {
         assert_eq!(load_nicks(d.path()).get("ff66").map(String::as_str), Some("ДокторХаус"));
         process(d.path(), "ff66", &format!("{N}{{\"n\":\"\"}}"), true, None);
         assert!(load_nicks(d.path()).get("ff66").is_none());
+    }
+
+    #[test]
+    fn cleanup_forgets_only_old_non_contacts() {
+        let d = tempfile::tempdir().unwrap();
+        let base = d.path();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        let mut recs = HashMap::new();
+        recs.insert("aaaaaaaaaaaaaaaa".to_string(), NickRec { n: "Контакт".into(), t: now - 90 * day });
+        recs.insert("bbbbbbbbbbbbbbbb".to_string(), NickRec { n: "Давний".into(), t: now - 40 * day });
+        recs.insert("cccccccccccccccc".to_string(), NickRec { n: "Свежий".into(), t: now - 5 * day });
+        save_recs(base, &recs);
+        let contacts: HashSet<String> = ["aaaaaaaaaaaaaaaa".to_string()].into();
+        assert_eq!(cleanup(base, &contacts, "mmmmmmmmmmmmmmmm", now), 1);
+        let left = load_nicks(base);
+        assert!(left.contains_key("aaaaaaaaaaaaaaaa"), "контакт остаётся при любом возрасте");
+        assert!(!left.contains_key("bbbbbbbbbbbbbbbb"), "не контакт старше 30 дней стёрт");
+        assert!(left.contains_key("cccccccccccccccc"), "свежий не контакт ещё хранится");
     }
 
     #[test]
