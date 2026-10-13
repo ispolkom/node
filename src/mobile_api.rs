@@ -245,6 +245,19 @@ fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
 }
 
 /// Спаренные устройства и их состояние: для страницы узла (кто в сети, когда был виден).
+/// Открытые ключи подписи сопряжённых телефонов (только с проверенной связкой) и их имена.
+pub fn device_ed_keys() -> Vec<([u8; 32], String)> {
+    use base64::Engine;
+    with_devices(|d| {
+        d.iter()
+            .filter_map(|x| {
+                let raw = base64::engine::general_purpose::STANDARD.decode(x.key_sig.as_ref().and(x.ed25519_pub.as_deref())?).ok()?;
+                Some((<[u8; 32]>::try_from(raw.as_slice()).ok()?, x.name.clone()))
+            })
+            .collect()
+    })
+}
+
 pub fn devices_overview() -> Vec<serde_json::Value> {
     let seen = LAST_SEEN
         .lock()
@@ -1446,6 +1459,7 @@ fn router(st: Arc<MobileState>) -> Router {
             get(crate::mobile_groups::m_members),
         )
         .route("/mobile/groups/:gid/profile", post(crate::mobile_groups::m_card_put))
+        .route("/mobile/groups/:gid/proof", post(crate::mobile_groups::m_proof_put))
         .route("/mobile/groups/:gid/members/:alias/avatar", get(crate::mobile_groups::m_card_avatar))
         .route(
             "/mobile/groups/:gid/pubkey",

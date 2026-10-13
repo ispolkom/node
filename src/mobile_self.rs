@@ -334,6 +334,14 @@ fn make_keys(x: [u8; 32], e: [u8; 32]) -> Keys {
     Keys { x_secret, x_pub, ed_pub, sig, signing }
 }
 
+/// Подпись ключом «компьютера как собеседника» (тот же, что в связке для телефонов): так ПК доказывает контактам, что это он.
+/// `None` — закрытая среда заперта.
+pub fn sign_identity(message: &[u8]) -> Option<Vec<u8>> {
+    use ed25519_dalek::Signer;
+    let k = keys()?;
+    Some(k.signing.sign(message).to_bytes().to_vec())
+}
+
 /// Подписанная связка ключей узла для `/mobile/pubkey/<номер узла>` (тот же вид, что у телефонов).
 pub fn bundle_json() -> serde_json::Value {
     let Some(k) = keys() else { return serde_json::json!({"error":"vault_locked"}); };

@@ -26,6 +26,8 @@ abstract class GroupApi {
   Future<void> setPub(String gid, String memberPub);
   /// Раскрыть свой ник и картинку в группе (пустые — убрать).
   Future<void> setCard(String gid, String nick, String avatarB64);
+  /// Приложить подпись «это я» (пустая — убрать): проверить её могут только контакты подписавшего.
+  Future<void> setProof(String gid, String proofB64);
   /// Картинка визитки участника (PNG) по псевдониму; null — нет визитки или картинки.
   Future<List<int>?> cardAvatar(String gid, String alias);
   Future<Map<String, dynamic>> keys(String gid);

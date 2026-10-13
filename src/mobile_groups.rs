@@ -89,6 +89,9 @@ struct Member {
     /// добровольно раскрытая визитка: ник и маленькая картинка (вариант «А» — человек сам решает, показываться ли под именем)
     #[serde(default)]
     card: Option<Card>,
+    /// подпись личным ключом человека под (группа, мой групповой ключ): её проверяют его контакты, остальным это просто байты
+    #[serde(default)]
+    proof: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -646,6 +649,7 @@ impl Store {
             joined_ms: now_ms(),
             member_pub: None,
             card: None,
+            proof: None,
         };
         g.members.push(owner);
         for d in members {
@@ -660,6 +664,7 @@ impl Store {
                     joined_ms: now_ms(),
                     member_pub: None,
                     card: None,
+            proof: None,
                 });
             }
         }
@@ -876,6 +881,7 @@ impl Store {
             joined_ms: now_ms(),
             member_pub,
             card: None,
+            proof: None,
         });
         g.log(
             via.as_deref().unwrap_or(&alias),
@@ -942,6 +948,22 @@ impl Store {
         let g = self.get_mut(gid)?;
         if let Some(m) = g.members.iter_mut().find(|m| m.key == key) {
             m.card = card;
+        }
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
+    /// Участник прикладывает подпись, по которой его узнают контакты (пустая — убрать). Только base64, до 128 знаков.
+    pub fn set_proof(&mut self, gid: &str, device: &str, proof: &str) -> R<()> {
+        if proof.len() > 128 || !proof.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=') {
+            return Err(bad("подпись не в base64"));
+        }
+        let key = self.me(gid, device)?.1.key.clone();
+        let g = self.get_mut(gid)?;
+        if let Some(m) = g.members.iter_mut().find(|m| m.key == key) {
+            m.proof = if proof.is_empty() { None } else { Some(proof.to_string()) };
         }
         let to = g.keys();
         self.save()?;
@@ -1436,6 +1458,7 @@ impl Store {
             .members
             .iter()
             .map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms, "member_pub": m.member_pub, "has_key": cur.is_some_and(|b| b.contains_key(&m.key)),
+                "proof": m.proof,
                 "nick": m.card.as_ref().map(|c| c.nick.as_str()).filter(|n| !n.is_empty()),
                 "avatar": m.card.as_ref().filter(|c| !c.avatar_b64.is_empty()).map(|c| hex::encode(Sha256::digest(c.avatar_b64.as_bytes())))}))
             .collect();
@@ -1681,6 +1704,25 @@ pub(crate) async fn m_card_put(
             base64::engine::general_purpose::STANDARD.encode(png)
         };
         ok_json(with_store(|s| s.set_card(&gid, &me, &req.nick, &avatar)))
+    })())
+}
+
+#[derive(Deserialize)]
+pub struct ProofReq {
+    #[serde(default)]
+    proof: String,
+}
+
+/// Приложить подпись «это я» (её видят все участники, проверить могут только контакты): `POST /mobile/groups/:gid/proof`.
+pub(crate) async fn m_proof_put(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<ProofReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.set_proof(&gid, &me, &req.proof)))
     })())
 }
 
@@ -2520,6 +2562,23 @@ mod tests {
         assert!(list(&s).iter().all(|m| m["nick"].is_null() && m["avatar"].is_null()));
         // не участник визитку поставить не может
         assert!(s.set_card(&gid, "zz", "Х", "").is_err());
+    }
+
+    #[test]
+    fn identity_proof_is_attached_by_the_member_only_and_must_be_base64() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, "bb", None, None).unwrap();
+        let list = |s: &Store| s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().clone();
+        assert!(list(&s).iter().all(|m| m["proof"].is_null()));
+        let sig = "A".repeat(86) + "==";
+        s.set_proof(&gid, "bb", &sig).unwrap();
+        assert_eq!(list(&s).iter().filter(|m| m["proof"] == sig.as_str()).count(), 1, "подпись видна, и только у одного");
+        assert!(s.set_proof(&gid, "bb", "не base64!").is_err());
+        assert!(s.set_proof(&gid, "bb", &"A".repeat(129)).is_err());
+        assert!(s.set_proof(&gid, "zz", &sig).is_err(), "не участник подпись приложить не может");
+        s.set_proof(&gid, "bb", "").unwrap();
+        assert!(list(&s).iter().all(|m| m["proof"].is_null()));
     }
 
     #[test]

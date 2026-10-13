@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
+import '../crypto/identity.dart';
 import 'group_api.dart';
 import 'group_store.dart';
 
@@ -37,7 +38,53 @@ class GroupService {
 
   GroupRules rules(String gid) => _rules[gid] ?? const GroupRules();
   final Map<String, Map<String, String>> _nicks = {};       // группа → псевдоним → ник, раскрытый самим участником
-  String displayName(String gid, String alias) => _nicks[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
+  /// Участники, в которых я узнал своего контакта по подписи в визитке: группа → псевдоним → имя контакта (оно только у меня).
+  final Map<String, Map<String, String>> _known = {};
+  String displayName(String gid, String alias) => _known[gid]?[alias] ?? _nicks[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
+  /// true — это мой контакт (узнан по подписи): ему показывается моё имя для него.
+  bool isKnownContact(String gid, String alias) => _known[gid]?.containsKey(alias) ?? false;
+
+  /// Подпись личным ключом (ставит приложение); без неё доказательство «это я» не прикладывается.
+  Future<List<int>> Function(List<int>)? signer;
+  /// Ключи подписи моих контактов (открытый Ed25519, который я уже закрепил при переписке) и имя, которое я им дал.
+  Future<List<(List<int>, String)>> Function()? contactKeys;
+
+  static const proofDomain = 'YANDI-GROUP-CARD-V1\u0000';
+  static List<int> proofMessage(String gid, List<int> memberPub) => [...utf8.encode(proofDomain), ...utf8.encode(gid), 0, ...memberPub];
+
+  /// Приложить подпись «это я» в этой группе (один раз: ключ группы у меня постоянный).
+  Future<void> _ensureProof(String gid) async {
+    final sign = signer;
+    if (sign == null || await store.read('grp_proof_$gid') == '1') return;
+    final (_, pub) = await _memberKeys(gid);
+    final sig = await sign(proofMessage(gid, pub));
+    await api.setProof(gid, base64.encode(sig));
+    await store.write('grp_proof_$gid', '1');
+  }
+
+  /// Чьи подписи в группе принадлежат моим контактам. Проверка по всем ключам контактов; посторонний подпись проверить не может.
+  Future<void> _recognise(String gid, List members) async {
+    final keys = await (contactKeys?.call() ?? Future.value(const <(List<int>, String)>[]));
+    final found = <String, String>{};
+    for (final x in members) {
+      if (x is! Map || x['alias'] is! String || x['proof'] is! String || x['member_pub'] is! String) continue;
+      List<int> sig, pub;
+      try {
+        sig = base64.decode(x['proof'] as String);
+        pub = base64.decode(x['member_pub'] as String);
+      } catch (_) { continue; }
+      if (sig.length != 64) continue;
+      final msg = proofMessage(gid, pub);
+      for (final (key, name) in keys) {
+        if (key.length != 32) continue;
+        if (await Identity.verify(message: msg, signature: sig, publicKey: key)) {
+          found[x['alias'] as String] = name;
+          break;
+        }
+      }
+    }
+    _known[gid] = found;
+  }
 
   /// Показываю ли я свой ник и картинку в этой группе: по умолчанию да (пока человек не скрыл их сам именно здесь).
   Future<bool> cardShared(String gid) async => await store.read('grp_card_$gid') != '0';
@@ -376,6 +423,7 @@ class GroupService {
       }
       _roles[g.id] = roles;
       _nicks[g.id] = nicks;
+      try { await _recognise(g.id, m['members'] as List? ?? const []); } catch (_) {}
     } catch (_) {}
     for (final e in sys) {
       if (e.deleted) continue;
@@ -404,6 +452,7 @@ class GroupService {
         try {
           await _publishPub(g.id);
           try { await _ensureCard(g.id); } catch (_) {}
+          try { await _ensureProof(g.id); } catch (_) {}
           if (g.isOwner) {
             try { await _collectKeys(g, asOwner: true); } catch (_) {}
             await _provision(g);

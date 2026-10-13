@@ -203,6 +203,21 @@ class AppState extends ChangeNotifier implements FilesHost {
     final g = groups;
     if (g == null) return;
     g.setProfile(myNick, avatars?.myBytes);   // визитка в группах берётся из профиля
+    final id = identity;
+    if (id != null) {
+      g.signer = id.sign;
+      g.contactKeys = () async {
+        // ключ подписи контакта — тот, что закреплён при переписке (peer_ed25519_pin_*); нет закреплённого — контакт ещё не писал
+        final out = <(List<int>, String)>[];
+        for (final c in contacts) {
+          if (!c.saved) continue;
+          final pin = await StorageService.secureRead('peer_ed25519_pin_${c.peerId}');
+          if (pin == null) continue;
+          try { out.add((base64.decode(pin), c.displayName)); } catch (_) {}
+        }
+        return out;
+      };
+    }
     try {
       await g.syncAndAnnounce();
     } catch (_) {}

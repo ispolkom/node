@@ -49,6 +49,8 @@ class HttpGroupApi implements GroupApi {
   Future<void> setCard(String gid, String nick, String avatarB64) async =>
       _call('POST', '/mobile/groups/$gid/profile', {'nick': nick, 'avatar_b64': avatarB64});
   @override
+  Future<void> setProof(String gid, String proofB64) async => _call('POST', '/mobile/groups/$gid/proof', {'proof': proofB64});
+  @override
   Future<List<int>?> cardAvatar(String gid, String alias) async {
     final (code, b) = await _api.bytes('GET', '/mobile/groups/$gid/members/${Uri.encodeComponent(alias)}/avatar');
     return code == 200 && b.isNotEmpty ? b : null;

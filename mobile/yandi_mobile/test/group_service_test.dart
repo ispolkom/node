@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/group_crypto.dart';
 import 'package:yandi_mobile/models/group.dart';
@@ -106,7 +107,7 @@ class _Api implements GroupApi {
   Future<void> leave(String gid) async { n.members.remove(dev); n.rekeyNeeded = true; }
   @override
   Future<Map<String, dynamic>> members(String gid) async => {
-        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'avatar': (m['avatar'] as String?)?.isEmpty ?? true ? null : m['avatar'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
+        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'proof': m['proof'], 'avatar': (m['avatar'] as String?)?.isEmpty ?? true ? null : m['avatar'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
       };
   @override
   Future<void> setPub(String gid, String memberPub) async => me['pub'] = memberPub;
@@ -115,6 +116,8 @@ class _Api implements GroupApi {
     me['nick'] = nick.isEmpty ? null : nick;
     me['avatar'] = avatarB64;
   }
+  @override
+  Future<void> setProof(String gid, String proofB64) async => me['proof'] = proofB64.isEmpty ? null : proofB64;
   @override
   Future<List<int>?> cardAvatar(String gid, String alias) async {
     for (final m in n.members.values) {
@@ -581,6 +584,27 @@ void main() {
     await owner.sync();
     expect(await bob.cardShared(node.gid), isFalse);
     expect(owner.displayName(node.gid, bobAlias), before);
+  });
+
+  test('контакт узнаётся в группе по подписи: свой ключ в контактах — имя из контактов, без ключа — как был', () async {
+    await owner.sync();
+    await bobJoins();
+    final kp = await Ed25519().newKeyPair();
+    final pub = (await kp.extractPublicKey()).bytes;
+    bob.signer = (m) async => (await Ed25519().sign(m, keyPair: kp)).bytes;
+    await bob.sync();                                  // подпись прикладывается при обходе
+    final bobAlias = bob.byId(node.gid)!.myAlias;
+    owner.contactKeys = () async => const [];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isFalse);   // чужой ключ подпись не проверит
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xff), 'Сосед'), (pub, 'Мама')];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isTrue);
+    expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    // чужая подпись под тем же именем не годится: ключ контакта другой
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xaa), 'Мама')];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isFalse);
   });
 
   test('монетки одобрения: один голос на человека, свой голос не считается, повтор снимает, голоса не показываются сообщениями', () async {

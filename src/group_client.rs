@@ -192,6 +192,9 @@ struct GState {
     /// отпечаток визитки, которую я уже выложил в группе (пусто — ничего не выкладывалось)
     #[serde(default)]
     card_sent: String,
+    /// подпись «это я» в этой группе уже приложена
+    #[serde(default)]
+    proof_sent: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -515,6 +518,22 @@ fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str, card: &(String, S
                 let _ = c.save();
             } else {
                 c.gstate(gid).card_sent = previous;
+            }
+        }
+    }
+    // 0б) подпись «это я»: ключом «компьютера как собеседника» под (группа, мой групповой ключ); один раз
+    if !c.gstate(gid).proof_sent && c.gstate(gid).pub_sent {
+        use base64::Engine;
+        let pubk = base64::engine::general_purpose::STANDARD.decode(&c.gstate(gid).pubk).unwrap_or_default();
+        let mut msg = b"YANDI-GROUP-CARD-V1\0".to_vec();
+        msg.extend_from_slice(gid.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(&pubk);
+        if let Some(sig) = crate::mobile_self::sign_identity(&msg) {
+            let proof = base64::engine::general_purpose::STANDARD.encode(sig);
+            if with_store(|st| st.set_proof(gid, dev, &proof)).is_ok() {
+                c.gstate(gid).proof_sent = true;
+                let _ = c.save();
             }
         }
     }
@@ -1124,13 +1143,40 @@ pub fn set_auto_clean(gid: &str, days: u32) -> Result<u32, String> {
 
 /// Ники, которые участники сами раскрыли в группе: псевдоним → ник.
 fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
-    with_store(|st| st.members(gid, dev))
-        .ok()
-        .and_then(|m| m["members"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string())))
-        .collect()
+    let members = with_store(|st| st.members(gid, dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
+    let mut out: HashMap<String, String> =
+        members.iter().filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string()))).collect();
+    out.extend(recognised(gid, &members)); // имя моего контакта сильнее ника
+    out
+}
+
+/// Подпись «это я» в визитке участника: проверяется ключами сопряжённых устройств; чужой ключ её не проверит.
+/// Сообщение — то же, что подписывает телефон: «YANDI-GROUP-CARD-V1\0» + группа + 0 + групповой ключ участника.
+fn recognised(gid: &str, members: &[Value]) -> HashMap<String, String> {
+    use base64::Engine;
+    use ed25519_dalek::Verifier;
+    let keys: Vec<(ed25519_dalek::VerifyingKey, String)> = crate::mobile_api::device_ed_keys()
+        .into_iter()
+        .filter_map(|(raw, name)| Some((ed25519_dalek::VerifyingKey::from_bytes(&raw).ok()?, format!("📱 {name}"))))
+        .collect();
+    let mut found = HashMap::new();
+    if keys.is_empty() {
+        return found;
+    }
+    for x in members {
+        let (Some(proof), Some(pubb)) = (x["proof"].as_str(), x["member_pub"].as_str()) else { continue };
+        let (Ok(sig), Ok(pubk)) = (base64::engine::general_purpose::STANDARD.decode(proof), base64::engine::general_purpose::STANDARD.decode(pubb)) else { continue };
+        let Ok(sig) = <[u8; 64]>::try_from(sig.as_slice()) else { continue };
+        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        let mut msg = b"YANDI-GROUP-CARD-V1\0".to_vec();
+        msg.extend_from_slice(gid.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(&pubk);
+        if let Some((_, name)) = keys.iter().find(|(k, _)| k.verify(&msg, &sig).is_ok()) {
+            found.insert(s(x, "alias"), name.clone());
+        }
+    }
+    found
 }
 
 /// Раскрыть (или спрятать) ник и аватар компьютера в группе — из единого профиля узла.
