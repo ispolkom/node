@@ -13,6 +13,8 @@ abstract class GroupApi {
   Future<String> create(String name, String topic, String about, String kind);
   Future<void> requestJoin(String gid, String name);
   Future<void> settings(String gid, {String? name, String? topic, String? about});
+  /// Владелец включает автоочистку неактивных (0 — выключить).
+  Future<void> autoClean(String gid, int days);
   Future<void> transferOwner(String gid, String alias);
   /// Стирания после курсора: `{deleted:[seq], cursor, resync}`.
   Future<Map<String, dynamic>> deleted(String gid, int after);

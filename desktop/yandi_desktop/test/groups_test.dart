@@ -429,6 +429,21 @@ void main() {
     expect(find.text('YANDI-GROUP-1:$gid:CODE'), findsOneWidget);
     await m1.stop(t);
   });
+  testWidgets('автоочистка неактивных: владелец выбирает срок, админ только видит правило', (t) async {
+    final api = GroupApi();
+    await open(t, api, conversation: true);
+    expect(find.byKey(const ValueKey('autoclean-30')), findsOneWidget);
+    await t.ensureVisible(find.byKey(const ValueKey('autoclean-30')));
+    await t.tap(find.byKey(const ValueKey('autoclean-30')));
+    await t.pumpAndSettle();
+    expect(api.calls.any((p) => p.endsWith('/autoclean')), true);
+    expect(api.bodies.any((b) => b['days'] == 30), true);
+    await m1.stop(t);
+    final admin = GroupApi()..role = 'admin';
+    await open(t, admin, conversation: true);
+    expect(find.byKey(const ValueKey('autoclean-30')), findsNothing);
+    await m1.stop(t);
+  });
   testWidgets('ownership countdown and node delete StepUp', (t) async {
     final api = GroupApi();
     await open(t, api, conversation: true);

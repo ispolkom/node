@@ -1257,6 +1257,51 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                 });
               });
             }),
+            if (role == 'owner')
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 6),
+                child: Wrap(
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 14,
+                  children: [
+                    const UiText(
+                      'Автоочистка неактивных (рядовые без записей):',
+                      style: TextStyle(fontWeight: FontWeight.bold),
+                    ),
+                    for (final days in const [0, 30, 60, 90])
+                      InkWell(
+                        key: ValueKey('autoclean-$days'),
+                        onTap: busy
+                            ? null
+                            : () => mutate(() async {
+                                await repo.act(selected!, 'autoclean', {
+                                  'days': days,
+                                });
+                              }),
+                        child: UiText(
+                          days == 0 ? 'Выключена' : '$days дней',
+                          style: TextStyle(
+                            fontWeight: (group['auto_clean_days'] ?? 0) == days
+                                ? FontWeight.bold
+                                : FontWeight.normal,
+                            color: (group['auto_clean_days'] ?? 0) == days
+                                ? Icq.active
+                                : Icq.header,
+                            decoration: (group['auto_clean_days'] ?? 0) == days
+                                ? TextDecoration.none
+                                : TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+              )
+            else if ((group['auto_clean_days'] ?? 0) is int &&
+                (group['auto_clean_days'] ?? 0) > 0)
+              UiText(
+                'В группе включена автоочистка: кто не пишет ${group['auto_clean_days']} дней, исключается.',
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
             button('Правила группы', () async {
               final id = selected!, rev = revision;
               final deny = await showDialog<List<int>>(

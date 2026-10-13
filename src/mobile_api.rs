@@ -1364,6 +1364,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/groups", get(crate::mobile_groups::m_list).post(crate::mobile_groups::m_create))
         .route("/mobile/groups/open", get(crate::mobile_groups::m_open))
         .route("/mobile/groups/:gid/settings", post(crate::mobile_groups::m_settings))
+        .route("/mobile/groups/:gid/autoclean", post(crate::mobile_groups::m_autoclean))
         .route("/mobile/groups/:gid/owner", post(crate::mobile_groups::m_transfer))
         .route("/mobile/groups/:gid/deleted", get(crate::mobile_groups::m_deleted))
         .route("/mobile/groups/:gid/request", post(crate::mobile_groups::m_request))

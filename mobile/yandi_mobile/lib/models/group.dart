@@ -5,11 +5,13 @@ class GroupInfo {
   final String id, name, topic, about, kind, myAlias, role;
   final bool muted, rekeyNeeded;
   final int members, epoch, firstSeq, lastSeq, requests;
+  /// Автоочистка: сколько дней без записей терпят рядового участника (0 — выключена).
+  final int autoCleanDays;
   final List<String> pendingKeys;
   const GroupInfo({
     required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.myAlias, required this.role,
     required this.muted, required this.rekeyNeeded, required this.members, required this.epoch, required this.firstSeq,
-    required this.lastSeq, required this.pendingKeys, this.requests = 0,
+    required this.lastSeq, required this.pendingKeys, this.requests = 0, this.autoCleanDays = 0,
   });
 
   factory GroupInfo.fromJson(Map<String, dynamic> j) => GroupInfo(
@@ -27,6 +29,7 @@ class GroupInfo {
         firstSeq: (j['first_seq'] ?? 0) as int,
         lastSeq: (j['last_seq'] ?? 0) as int,
         requests: (j['requests'] ?? 0) as int,
+        autoCleanDays: (j['auto_clean_days'] ?? 0) as int,
         pendingKeys: [for (final a in (j['pending_keys'] ?? const []) as List) a as String],
       );
 

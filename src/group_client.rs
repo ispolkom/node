@@ -1054,6 +1054,12 @@ pub fn update_settings(gid: &str, name: Option<&str>, topic: Option<&str>, about
     with_store(|st| st.update_settings(gid, &dev, name, topic, about)).map_err(fail)
 }
 
+/// Владелец включает автоочистку неактивных участников своей группы (0 — выключить).
+pub fn set_auto_clean(gid: &str, days: u32) -> Result<u32, String> {
+    let dev = pc_device()?;
+    with_store(|st| st.set_auto_clean(gid, &dev, days)).map_err(fail)
+}
+
 /// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).
 pub fn info(gid: &str) -> Result<Value, String> {
     let dev = pc_device()?;

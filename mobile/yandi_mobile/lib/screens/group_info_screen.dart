@@ -412,6 +412,32 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             padding: const EdgeInsets.all(16),
             child: Text('Запрещено в группе: ${rules.deny.map((k) => _kindLabels[k] ?? '').where((s) => s.isNotEmpty).join(', ')}', style: const TextStyle(color: AppTheme.textSecondary)),
           ),
+        // автоочистка: владелец выбирает срок; остальные видят действующее правило (чтобы не было сюрпризов)
+        if (g.isOwner) ...[
+          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Автоочистка неактивных', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+          const Padding(
+            padding: EdgeInsets.symmetric(horizontal: 16),
+            child: Text('Рядовые участники, которые ни разу не написали за этот срок, исключаются. Чтение без записей не считается. Владельца, админов, модераторов и заглушённых это не касается.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          ),
+          for (final d in const [0, 30, 60, 90])
+            RadioListTile<int>(
+              key: ValueKey('autoclean-$d'),
+              dense: true,
+              title: Text(d == 0 ? 'Выключена' : '$d дней', style: const TextStyle(color: AppTheme.text)),
+              value: d,
+              groupValue: g.autoCleanDays,
+              activeColor: AppTheme.accent,
+              onChanged: (v) async {
+                if (v == null) return;
+                try { await _svc.setAutoClean(g.id, v); } catch (err) { if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$err'))); }
+                if (mounted) setState(() {});
+              },
+            ),
+        ] else if (g.autoCleanDays > 0)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+            child: Text('В группе включена автоочистка: кто не пишет ${g.autoCleanDays} дней, исключается.', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          ),
         const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Участники', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
         if (g.canModerate)
           Padding(

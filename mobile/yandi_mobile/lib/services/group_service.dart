@@ -407,6 +407,13 @@ class GroupService {
   /// Группы узла, куда можно вступить или попроситься.
   Future<List<DiscoverGroup>> discover() async => [for (final j in await api.openGroups()) DiscoverGroup.fromJson(j)];
 
+  /// Владелец включает автоочистку неактивных участников (0 — выключить).
+  Future<void> setAutoClean(String gid, int days) async {
+    await api.autoClean(gid, days);
+    groups = GroupInfo.listOf(await api.list());
+    onChanged?.call(gid);
+  }
+
   /// Владелец меняет название, тематику и описание группы.
   Future<void> updateSettings(String gid, {String? name, String? topic, String? about}) async {
     await api.settings(gid, name: name, topic: topic, about: about);

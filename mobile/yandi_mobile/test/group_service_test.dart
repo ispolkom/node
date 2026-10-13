@@ -50,6 +50,12 @@ class _Api implements GroupApi {
   Future<List<Map<String, dynamic>>> openGroups() async => n.members.containsKey(dev)
       ? []
       : [{'id': n.gid, 'name': 'Тест', 'topic': 'тема', 'kind': 'invite', 'members': n.members.length, 'requested': n.reqs.any((r) => r['dev'] == dev)}];
+  int autoCleanDays = 0;
+  @override
+  Future<void> autoClean(String gid, int days) async {
+    if (me['role'] != 'owner') throw const GroupApiError(403, 'автоочистку настраивает владелец группы');
+    autoCleanDays = days;
+  }
   @override
   Future<void> settings(String gid, {String? name, String? topic, String? about}) async {
     if (me['role'] != 'owner' && me['role'] != 'admin') throw const GroupApiError(403, 'настройки группы меняют владелец и админ');
@@ -424,6 +430,12 @@ void main() {
     await expectLater(owner.updateSettings(node.gid, name: '  '), throwsA(isA<GroupApiError>()));
   });
 
+  test('автоочистка: настраивает только владелец', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.setAutoClean(node.gid, 30);
+    await expectLater(bob.setAutoClean(node.gid, 7), throwsA(isA<GroupApiError>()));
+  });
   test('админ: владелец назначает, админ меняет настройки и задаёт правила, остальные клиенты принимают правила от админа', () async {
     await owner.sync();
     await bobJoins();

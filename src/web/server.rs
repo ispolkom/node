@@ -651,6 +651,7 @@ impl WebServer {
             .route("/api/groups/:gid/info", get(api_groups_info))
             .route("/api/groups/:gid/mod", post(api_groups_mod))
             .route("/api/groups/:gid/settings", post(api_groups_settings))
+            .route("/api/groups/:gid/autoclean", post(api_groups_autoclean))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
             .route(
@@ -1073,6 +1074,15 @@ struct MyGroupSettings {
     topic: Option<String>,
     #[serde(default)]
     about: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MyGroupAutoClean {
+    days: u32,
+}
+
+async fn api_groups_autoclean(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAutoClean>) -> Response {
+    grp_reply(crate::group_client::set_auto_clean(&gid, b.days).map(|d| serde_json::json!({"ok": true, "days": d})))
 }
 
 async fn api_groups_settings(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSettings>) -> Response {

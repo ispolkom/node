@@ -118,6 +118,9 @@ const MAX_REQUESTS: usize = 20;
 /// Сколько последних событий стирания хранится для догоняющих участников.
 const MAX_DELETION_EVENTS: usize = 5000;
 const REQUEST_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
+/// Автоочистка неактивных участников: допустимый срок в днях.
+const MIN_AUTO_CLEAN_DAYS: u32 = 7;
+const MAX_AUTO_CLEAN_DAYS: u32 = 365;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ModEntry {
@@ -176,6 +179,9 @@ struct Group {
     modlog: Vec<ModEntry>,
     #[serde(default)]
     requests: Vec<JoinRequest>,
+    /// автоочистка: сколько дней без единой записи в группе терпеть рядового участника (0 — выключена); настраивает владелец
+    #[serde(default)]
+    auto_clean_days: u32,
 }
 
 fn one() -> u64 {
@@ -617,6 +623,7 @@ impl Store {
             next_seq: 1,
             modlog: Vec::new(),
             requests: Vec::new(),
+            auto_clean_days: 0,
         };
         let owner = Member {
             key: member_key(&id, owner_device),
@@ -685,6 +692,73 @@ impl Store {
     }
 
 
+
+    /// Владелец включает или выключает автоочистку неактивных: 0 — выключена, иначе срок в днях (7…365).
+    pub fn set_auto_clean(&mut self, gid: &str, device: &str, days: u32) -> R<u32> {
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner {
+            return Err(forbidden("автоочистку настраивает владелец группы"));
+        }
+        let by = me.alias.clone();
+        let days = if days == 0 { 0 } else { days.clamp(MIN_AUTO_CLEAN_DAYS, MAX_AUTO_CLEAN_DAYS) };
+        let g = self.get_mut(gid)?;
+        g.auto_clean_days = days;
+        let why = days.to_string();
+        g.log(&by, "autoclean", None, None, Some(why.as_str()));
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(days)
+    }
+
+    /// Автоочистка: рядовые участники, не написавшие в группе ни одной записи за срок группы, исключаются. «Только читает» — не
+    /// участие. Владельца, админов и модераторов, заглушённых и тех, кто вступил недавно, не трогает. Ключ группы после этого
+    /// должен сменить владелец (`rekey_needed`), как после обычного изгнания. Возвращает, сколько участников исключено.
+    pub fn clean_inactive(&mut self, now: u64) -> R<usize> {
+        if self.broken.is_some() {
+            return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено: автоочистка не выполнена"));
+        }
+        let ids: Vec<String> = self.groups.values().filter(|g| g.auto_clean_days > 0).map(|g| g.id.clone()).collect();
+        let mut total = 0usize;
+        for gid in ids {
+            let days = self.groups.get(&gid).map(|g| g.auto_clean_days).unwrap_or(0);
+            let ttl = u64::from(days) * 24 * 3600 * 1000;
+            let mut last: HashMap<String, u64> = HashMap::new();
+            for l in self.read_lines(&gid) {
+                let e = last.entry(l.from).or_insert(0);
+                *e = (*e).max(l.ts);
+            }
+            let Some(g) = self.groups.get_mut(&gid) else { continue };
+            let gone: Vec<(String, String)> = g
+                .members
+                .iter()
+                .filter(|m| m.role == Role::Member && !m.muted)
+                .filter(|m| {
+                    let seen = last.get(&m.alias).copied().unwrap_or(0).max(m.joined_ms);
+                    now.saturating_sub(seen) > ttl
+                })
+                .map(|m| (m.key.clone(), m.alias.clone()))
+                .collect();
+            if gone.is_empty() {
+                continue;
+            }
+            let mut notify = g.keys();
+            for (key, alias) in &gone {
+                g.drop_member(key);
+                let why = format!("{days} дн. без записей");
+                g.log("автоочистка", "inactive", Some(alias), None, Some(why.as_str()));
+            }
+            for (key, _) in &gone {
+                if !notify.contains(key) {
+                    notify.push(key.clone());
+                }
+            }
+            total += gone.len();
+            self.save()?;
+            hint(&gid, HINT_CHANGED, 0, notify);
+        }
+        Ok(total)
+    }
 
     /// Владелец передаёт группу участнику (по псевдониму). Прежний владелец становится админом, новый должен создать новое поколение ключа
     /// (`rekey_needed`). Участнику нужен ключ группы (`member_pub`), иначе он не сможет раздавать ключи.
@@ -1209,7 +1283,7 @@ impl Store {
                 Some(json!({
                     "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
                     "members": g.members.len(), "epoch": g.epoch, "first_seq": g.first_seq, "last_seq": g.next_seq - 1,
-                    "rekey_needed": owner && g.rekey_needed, "pending_keys": pending,
+                    "rekey_needed": owner && g.rekey_needed, "pending_keys": pending, "auto_clean_days": g.auto_clean_days,
                     "requests": if m.role != Role::Member { g.requests.len() } else { 0 },
                 }))
             })
@@ -1357,7 +1431,7 @@ impl Store {
                 let bytes = std::fs::metadata(self.log_path(&g.id)).map(|m| m.len()).unwrap_or(0);
                 json!({
                     "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "created_ms": g.created_ms, "epoch": g.epoch,
-                    "entries": g.next_seq - g.first_seq, "last_seq": g.next_seq - 1, "journal_bytes": bytes, "rekey_needed": g.rekey_needed,
+                    "entries": g.next_seq - g.first_seq, "last_seq": g.next_seq - 1, "journal_bytes": bytes, "rekey_needed": g.rekey_needed, "auto_clean_days": g.auto_clean_days,
                     "members": g.members.iter().map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms})).collect::<Vec<_>>(),
                     "banned": g.banned.iter().map(|b| b.alias.clone()).collect::<Vec<_>>(),
                     "addable": addable,
@@ -1422,6 +1496,15 @@ pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, boo
 pub fn cleanup_requests() {
     if let Err(e) = with_store(|s| s.expire_requests()) {
         eprintln!("[groups] просроченные просьбы не стёрты: {e:?}");
+    }
+}
+
+/// Автоочистка по таймеру (из main): рядовые, молчавшие дольше срока группы, исключаются.
+pub fn cleanup_inactive() {
+    match with_store(|s| s.clean_inactive(now_ms())) {
+        Ok(n) if n > 0 => eprintln!("[groups] автоочистка: исключено неактивных — {n}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[groups] автоочистка не выполнена: {e:?}"),
     }
 }
 
@@ -1779,6 +1862,24 @@ pub(crate) async fn m_settings(
         checked(&gid)?;
         let me = device(&dev)?;
         ok_json(with_store(|s| s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())))
+    })())
+}
+
+#[derive(Deserialize)]
+pub struct AutoCleanReq {
+    days: u32,
+}
+
+/// Владелец включает автоочистку неактивных (0 — выключить).
+pub(crate) async fn m_autoclean(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<AutoCleanReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        with_store(|s| s.set_auto_clean(&gid, &me, req.days)).map(|d| json!({"ok": true, "days": d}))
     })())
 }
 
@@ -2298,6 +2399,54 @@ mod tests {
         s.delete(&gid).unwrap();
         assert!(s.list_for(OWNER).is_empty());
         assert!(!d.path().join(format!("groups/{gid}.log")).exists());
+    }
+
+    #[test]
+    fn auto_clean_removes_silent_regular_members_only() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        for d in ["bb", "cc", "dd", "ee", "ff"] {
+            s.join(&gid, d, None, Some(&pubk())).unwrap();
+        }
+        let alias = |s: &mut Store, d: &str| s.list_for(d)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, carol, dan, eve, fay) = (alias(&mut s, "bb"), alias(&mut s, "cc"), alias(&mut s, "dd"), alias(&mut s, "ee"), alias(&mut s, "ff"));
+        // carol — модератор, dan заглушён, eve молчит, fay молчит, но вступила недавно; bob пишет
+        s.moderate(&gid, OWNER, "promote", Some(&carol), None, None).unwrap();
+        s.moderate(&gid, OWNER, "mute", Some(&dan), None, None).unwrap();
+        s.append(&gid, "bb", 0, &b64(b"hi")).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            if m.alias != fay {
+                m.joined_ms = now - 40 * day; // давно в группе
+            }
+        }
+        // запись bob — пять дней назад
+        let mut lines = s.read_lines(&gid);
+        for l in lines.iter_mut() {
+            l.ts = now - 5 * day;
+        }
+        s.rewrite(&gid, &lines).unwrap();
+        // выключена по умолчанию: никого не трогает
+        assert_eq!(s.clean_inactive(now).unwrap(), 0);
+        assert!(s.set_auto_clean(&gid, "bb", 30).is_err(), "настраивает только владелец");
+        assert_eq!(s.set_auto_clean(&gid, OWNER, 3).unwrap(), 7, "меньше недели не бывает");
+        assert_eq!(s.set_auto_clean(&gid, OWNER, 30).unwrap(), 30);
+        assert_eq!(s.clean_inactive(now).unwrap(), 1, "исключён только молчавший eve");
+        let members: Vec<String> = s.groups[&gid].members.iter().map(|m| m.alias.clone()).collect();
+        assert!(members.contains(&bob), "писал — остаётся");
+        assert!(members.contains(&carol), "модератора не трогает");
+        assert!(members.contains(&dan), "заглушённого не трогает");
+        assert!(members.contains(&fay), "вступил недавно — не трогает");
+        assert!(!members.contains(&eve), "молчал 40 дней — исключён");
+        assert!(s.groups[&gid].rekey_needed, "после исключения ключ стоит сменить");
+        assert!(s.groups[&gid].modlog.iter().any(|m| m.action == "inactive" && m.target.as_deref() == Some(eve.as_str())));
+        // и через 100 дней без записей остальные рядовые тоже уходят, а владелец и модератор — нет
+        assert_eq!(s.clean_inactive(now + 100 * day).unwrap(), 2, "bob и fay");
+        assert!(s.groups[&gid].members.iter().any(|m| m.role == Role::Owner));
+        assert!(s.groups[&gid].members.iter().any(|m| m.alias == carol));
     }
 
     #[test]
