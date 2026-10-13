@@ -11,6 +11,26 @@ class MsgChannel {
   static const String rcptMarker = '\u0001yandi-rcpt:';  // {kind: delivered|read, ids: [...]} — квитанция
   static const String capMarker  = '\u0001yandi-cap:';   // поддержка квитанций этим устройством (пинг)
   static const String editMarker = '\u0001yandi-edit:';  // {cmid, text} — правка ранее отправленного сообщения
+  static const String rxMarker   = '\u0001yandi-rx:';    // {m: cmid, e: смайл} — реакция на сообщение личного чата (пустой смайл — снять)
+
+  /// Смайлы личного чата (простые, без счёта).
+  static const List<String> reactionSet = ['👍', '👎', '😊', '😢', '😂', '❤️'];
+
+  static String reaction(String cmid, String emoji) => rxMarker + jsonEncode({'m': cmid, 'e': emoji});
+
+  /// Разобрать реакцию: (cmid сообщения, смайл; пустой — снята). Неизвестный смайл отвергается.
+  static (String, String)? parseReaction(String t) {
+    if (!t.startsWith(rxMarker)) return null;
+    try {
+      final m = jsonDecode(t.substring(rxMarker.length)) as Map<String, dynamic>;
+      final id = m['m'], e = m['e'];
+      if (id is! String || id.isEmpty || id.length > 128 || e is! String) return null;
+      if (e.isNotEmpty && !reactionSet.contains(e)) return null;
+      return (id, e);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Завернуть текст с его локальным id (cmid), чтобы получатель мог сослаться на него в квитанции.
   static String wrapMessage(String cmid, String text, {String? replyId, String? replyText}) =>
@@ -29,7 +49,7 @@ class MsgChannel {
       editMarker + jsonEncode({'cmid': cmid, 'text': text});
 
   static bool isService(String t) =>
-      t.startsWith('\u0001yandi-av') || t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker);
+      t.startsWith('\u0001yandi-av') || t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker) || t.startsWith(rxMarker);
 
   static bool isCapPing(String t) => t.startsWith(capMarker);
 

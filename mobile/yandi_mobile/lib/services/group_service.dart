@@ -316,6 +316,7 @@ class GroupService {
     }
     _names[g.id] = names;
     if (rules != null) _rules[g.id] = rules;
+    try { await _rebuildVotes(g); } catch (_) {}
   }
 
   // ── общий обход ──────────────────────────────────────────────────────────
@@ -573,7 +574,63 @@ class GroupService {
 
   /// Запись видна читателю? Служебные и стёртые не показываются как сообщения; запрещённые правилами — скрыты.
   bool visible(String gid, GroupEntry e) =>
-      !e.deleted && (e.kind != GroupKind.system || isPlaceholder(e)) && rules(gid).allows(e.kind);
+      !e.deleted && e.kind != GroupKind.reaction && (e.kind != GroupKind.system || isPlaceholder(e)) && rules(gid).allows(e.kind);
+
+  /// Монетки одобрения: группа → номер записи → баланс. Один голос на человека (последний), свои записи себе не одобряют.
+  final Map<String, Map<int, int>> _coins = {};
+  final Map<String, Map<int, int>> _myVotes = {};
+
+  /// Баланс монеток под записью (0 — голосов нет или они уравновешены).
+  int coins(String gid, int seq) => _coins[gid]?[seq] ?? 0;
+
+  /// Сколько людей голосовало за запись (чтобы показывать «0», когда голоса уравновесились).
+  bool hasVotes(String gid, int seq) => _voters[gid]?.contains(seq) ?? false;
+  final Map<String, Set<int>> _voters = {};
+
+  /// Мой голос за запись: 1, -1 или 0.
+  int myVote(String gid, int seq) => _myVotes[gid]?[seq] ?? 0;
+
+  /// Проголосовать за запись: 1 — одобряю, -1 — не одобряю; повтор того же голоса снимает его.
+  Future<void> vote(String gid, int seq, int v) async {
+    final g = byId(gid);
+    if (g == null) throw const GroupSendRefused('Группа не найдена');
+    final next = myVote(gid, seq) == v ? 0 : v;
+    await send(gid, GroupKind.reaction, {'s': seq, 'v': next});
+    final mine = _myVotes.putIfAbsent(gid, () => {});
+    final before = mine[seq] ?? 0;
+    mine[seq] = next;
+    final c = _coins.putIfAbsent(gid, () => {});
+    c[seq] = (c[seq] ?? 0) - before + next;
+    _voters.putIfAbsent(gid, () => {}).add(seq);
+    onChanged?.call(gid);
+  }
+
+  Future<void> _rebuildVotes(GroupInfo g) async {
+    final all = await store.entries(g.id, limit: 20000);
+    final author = <int, String>{};
+    for (final e in all) {
+      if (e.kind != GroupKind.reaction) author[e.seq] = e.from;
+    }
+    final latest = <int, Map<String, int>>{};   // запись → голосующий → голос
+    for (final e in all) {
+      if (e.kind != GroupKind.reaction || e.deleted) continue;
+      final t = e.body['s'], v = e.body['v'];
+      if (t is! int || v is! int || v < -1 || v > 1) continue;
+      final a = author[t];
+      if (a == null || a == e.from) continue;   // нет такой записи или голос за свою
+      (latest[t] ??= {})[e.from] = v;           // записи идут по порядку: остаётся последний голос
+    }
+    final coins = <int, int>{}, mine = <int, int>{}, voters = <int>{};
+    latest.forEach((t, m) {
+      coins[t] = m.values.fold(0, (a, b) => a + b);
+      if (m.isNotEmpty) voters.add(t);
+      final my = m[g.myAlias];
+      if (my != null) mine[t] = my;
+    });
+    _coins[g.id] = coins;
+    _myVotes[g.id] = mine;
+    _voters[g.id] = voters;
+  }
 
   /// Повреждённая (`bad`) или недоступная (`lost`, ключ поколения вытеснен с узла) запись: показывается в ленте пометкой, а не исчезает молча.
   static bool isPlaceholder(GroupEntry e) => e.kind == GroupKind.system && (e.body['op'] == 'bad' || e.body['op'] == 'lost');

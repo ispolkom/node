@@ -22,6 +22,7 @@ import '../services/app_state.dart';
 import '../services/file_transfer_service.dart' show maxFileSize;
 import '../widgets/vault_image.dart';
 import '../widgets/message_menu.dart';
+import '../models/receipt.dart';
 import 'package:flutter/services.dart';
 import '../theme.dart';
 import 'home_screen.dart' show showSaveContactDialog;
@@ -129,8 +130,16 @@ class _ChatScreenState extends State<ChatScreen> {
       if (plain || isFile) cmdShare,         // «Переслать»
       cmdSelect,
       cmdDelete,
+    ], reactions: [
+      for (final e in MsgChannel.reactionSet)
+        MenuReaction(e, e, active: context.read<AppState>().reactionsOf(m.id).$1 == e),
     ]);
     if (!mounted || choice == null) return;
+    if (choice.startsWith('react:')) {
+      final why = await context.read<AppState>().react(m, choice.substring(6));
+      if (why != null) _snack(why);
+      return;
+    }
     switch (choice) {
       case cmdEdit:
         _startEdit(m);
@@ -507,11 +516,30 @@ class _ChatScreenState extends State<ChatScreen> {
                         onTap: _selecting ? () => _toggleSelect(m.id) : () => _messageMenu(m, tapAt),
                         child: Container(
                           color: _selected.contains(m.id) ? AppTheme.accent.withOpacity(0.18) : null,
-                          child: _MessageBubble(
-                            msg: m,
-                            edited: state.isEdited(m.id),
-                            quoteAuthor: target == null ? null : (target.outgoing ? 'Вы' : title),
-                            onQuoteTap: target == null ? null : () => _jumpTo(target, messages),
+                          child: Column(
+                            crossAxisAlignment: m.outgoing ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+                            children: [
+                              _MessageBubble(
+                                msg: m,
+                                edited: state.isEdited(m.id),
+                                quoteAuthor: target == null ? null : (target.outgoing ? 'Вы' : title),
+                                onQuoteTap: target == null ? null : () => _jumpTo(target, messages),
+                              ),
+                              Builder(builder: (_) {
+                                final (mine, theirs) = state.reactionsOf(m.id);
+                                if (mine.isEmpty && theirs.isEmpty) return const SizedBox.shrink();
+                                return Padding(
+                                  key: ValueKey('rx-${m.id}'),
+                                  padding: const EdgeInsets.only(left: 10, right: 10, bottom: 2),
+                                  child: Row(mainAxisSize: MainAxisSize.min, children: [
+                                    if (mine.isNotEmpty) Text(mine, style: const TextStyle(fontSize: 16)),
+                                    if (mine.isNotEmpty && theirs.isNotEmpty && mine != theirs) const SizedBox(width: 4),
+                                    if (theirs.isNotEmpty && theirs != mine) Text(theirs, style: const TextStyle(fontSize: 16)),
+                                    if (mine.isNotEmpty && mine == theirs) const Text('×2', style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                                  ]),
+                                );
+                              }),
+                            ],
                           ),
                         ),
                       );

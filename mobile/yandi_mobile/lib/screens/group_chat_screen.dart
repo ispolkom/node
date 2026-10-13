@@ -301,8 +301,19 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (!mine) cmdHideAuthor,
       if (_canDelete(g, e)) cmdDelete,
       if (!mine && role != null && g.canActOnRole(role) && g.canModerate) cmdMute,
+    ], reactions: mine || e.kind == GroupKind.system || !_svc!.rules(g.id).allows(GroupKind.reaction) ? const [] : [
+      MenuReaction('1', '😊', coin: true, active: _svc!.myVote(g.id, e.seq) == 1),
+      MenuReaction('-1', '😢', coin: true, active: _svc!.myVote(g.id, e.seq) == -1),
     ]);
     if (!mounted || choice == null) return;
+    if (choice.startsWith('react:')) {
+      try {
+        await _svc!.vote(g.id, e.seq, int.parse(choice.substring(6)));
+      } catch (err) {
+        _toast('$err');
+      }
+      return;
+    }
     switch (choice) {
       case cmdReply:
         setState(() => _replyTo = e);
@@ -616,6 +627,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),
+                      coins: svc.hasVotes(g.id, e.seq) ? svc.coins(g.id, e.seq) : null,
                       sizeLabel: e.body['z'] is int ? _fmtSize(e.body['z'] as int) : null,
                       progress: e.body['f'] is String ? _progress[e.body['f']] : null,
                       onOpen: e.body['f'] is String ? () => _openFile(e.body) : null,
@@ -783,9 +795,11 @@ class _GroupBubble extends StatelessWidget {
   final void Function(LongPressStartDetails)? onLongPressStart;
   final bool selected;
   final bool flash;
+  /// Баланс монеток одобрения под сообщением (null — голосов нет).
+  final int? coins;
   /// Где файл лежит у меня (если уже скачан): для звука и видео — плеер прямо в сообщении.
   final String? localPath;
-  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.flash = false, this.localPath});
+  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.flash = false, this.localPath, this.coins});
 
   @override
   Widget build(BuildContext context) {
@@ -843,10 +857,72 @@ class _GroupBubble extends StatelessWidget {
               )
             else
               Text(text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
-            Align(alignment: Alignment.centerRight, child: Text(time, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 10))),
+            Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.end, children: [
+              if (coins != null) ...[
+                _CoinChip(key: ValueKey('coins-${entry.seq}'), value: coins!),
+                const SizedBox(width: 10),
+              ],
+              Text(time, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 10)),
+            ]),
           ]),
         ),
       ),
+    );
+  }
+}
+
+/// Монетка и баланс под сообщением; при изменении числа над монеткой на миг всплывает «+1» (вверх) или «−1» (вниз).
+class _CoinChip extends StatefulWidget {
+  final int value;
+  const _CoinChip({super.key, required this.value});
+
+  @override
+  State<_CoinChip> createState() => _CoinChipState();
+}
+
+class _CoinChipState extends State<_CoinChip> with SingleTickerProviderStateMixin {
+  late final AnimationController _c = AnimationController(vsync: this, duration: const Duration(milliseconds: 700));
+  int _delta = 0;
+
+  @override
+  void didUpdateWidget(_CoinChip old) {
+    super.didUpdateWidget(old);
+    if (old.value != widget.value) {
+      _delta = widget.value - old.value;
+      _c.forward(from: 0);
+    }
+  }
+
+  @override
+  void dispose() {
+    _c.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final v = widget.value;
+    return AnimatedBuilder(
+      animation: _c,
+      builder: (_, __) {
+        final t = _c.value;
+        final up = _delta >= 0;
+        return Stack(clipBehavior: Clip.none, alignment: Alignment.center, children: [
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            Transform.scale(scale: _c.isAnimating ? 1 + 0.25 * (1 - (2 * t - 1).abs()) : 1, child: const CoinIcon(size: 15)),
+            const SizedBox(width: 4),
+            Text(v > 0 ? '+$v' : '$v', style: TextStyle(color: v < 0 ? AppTheme.incoming : AppTheme.text, fontSize: 12, fontWeight: FontWeight.bold)),
+          ]),
+          if (_c.isAnimating && _delta != 0)
+            Positioned(
+              top: -4 + (up ? -22 * t : 22 * t),
+              child: Opacity(
+                opacity: 1 - t,
+                child: Text(up ? '+$_delta' : '−${-_delta}', style: TextStyle(color: up ? const Color(0xFFE0A100) : AppTheme.incoming, fontSize: 13, fontWeight: FontWeight.bold)),
+              ),
+            ),
+        ]);
+      },
     );
   }
 }

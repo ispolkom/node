@@ -102,6 +102,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _editedIds.addAll(await StorageService.loadEditedIds());
     secureKeyboard = (await StorageService.secureRead('pref_secure_keyboard')) != '0';
     await _loadProfileMeta();
+    await _loadRx();
 
     // аватарки: изолированная папка приложения + соответствие «контакт → хэш» в защищённом хранилище
     final docs = await pp.getApplicationDocumentsDirectory();
@@ -307,6 +308,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         );
         // ConflictAlgorithm.ignore в saveMessage гарантирует идемпотентность
         await StorageService.saveMessage(msg);
+        if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
         if (activeChatPeerId != fromPeerId) _bumpUnread(fromPeerId);
         if (remoteId != null) _sendDeliveredReceipt(fromPeerId, remoteId);
         ackIds.add(id);
@@ -1067,6 +1069,11 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (rcpt != null) { _applyReceipt(from, rcpt.$1, rcpt.$2); return null; }
     final edit = MsgChannel.parseEdit(rawText);
     if (edit != null) { _applyEdit(from, edit.$1, edit.$2); return null; }
+    if (rawText.startsWith(MsgChannel.rxMarker)) {
+      final rx = MsgChannel.parseReaction(rawText);
+      if (rx != null) _applyReaction(from, rx.$1, rx.$2);
+      return null;   // и неверный конверт реакции не показывается как текст
+    }
     if (MsgChannel.isCapPing(rawText)) { _receiptCapable.add(from); return null; }
     final env = MsgChannel.parseMessageFull(rawText);
     if (env != null) { _receiptCapable.add(from); return (env.$2, env.$1, env.$3, env.$4); } // (cmid, text, rid, rtext) -> (text, cmid, rid, rtext)
@@ -1087,6 +1094,80 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
     }
     if (changed) notifyListeners();
+  }
+
+  // ── реакции личного чата: простые смайлы, у каждой стороны не больше одной на сообщение ──
+
+  /// локальный номер сообщения → {'me': смайл, 'peer': смайл}; хранится в защищённом хранилище
+  final Map<String, Map<String, String>> _rx = {};
+  /// локальный номер входящего сообщения → его номер у отправителя (чтобы ссылаться на него после перезапуска)
+  final Map<String, String> _rids = {};
+  bool _rxLoaded = false;
+
+  Future<void> _loadRx() async {
+    if (_rxLoaded) return;
+    _rxLoaded = true;
+    try {
+      final raw = await StorageService.secureRead('reactions_v1');
+      if (raw == null) return;
+      final j = jsonDecode(raw) as Map<String, dynamic>;
+      ((j['rx'] as Map?) ?? {}).forEach((k, v) {
+        if (v is Map) _rx['$k'] = {for (final e in v.entries) if (e.value is String) '${e.key}': e.value as String};
+      });
+      ((j['rid'] as Map?) ?? {}).forEach((k, v) { if (v is String) _rids['$k'] = v; });
+    } catch (_) {}
+  }
+
+  void _saveRx() {
+    if (_rids.length > 3000) {
+      for (final k in _rids.keys.take(_rids.length - 3000).toList()) { _rids.remove(k); }
+    }
+    unawaited(StorageService.secureWrite('reactions_v1', jsonEncode({'rx': _rx, 'rid': _rids})));
+  }
+
+  /// Смайлы под сообщением: (мой, собеседника) — пустая строка, если нет.
+  (String, String) reactionsOf(String msgId) => (_rx[msgId]?['me'] ?? '', _rx[msgId]?['peer'] ?? '');
+
+  /// Номер сообщения так, как его знает собеседник (null — неизвестен: сообщение пришло в прошлом запуске без конверта).
+  String? _remoteKey(ChatMessage m) => m.outgoing ? m.id : (m.remoteId ?? _rids[m.id]);
+
+  /// Поставить смайл на сообщение (тот же смайл ещё раз — снять). null — готово, иначе причина.
+  Future<String?> react(ChatMessage m, String emoji) async {
+    if (!MsgChannel.reactionSet.contains(emoji)) return 'Такого смайла нет';
+    final key = _remoteKey(m);
+    if (key == null) return 'Это сообщение пришло без номера — на него нельзя отреагировать';
+    if (!_receiptCapable.contains(m.peerId)) return 'Собеседнику нужно обновить приложение, чтобы видеть смайлы';
+    await _loadRx();
+    final cur = _rx[m.id]?['me'] ?? '';
+    final next = cur == emoji ? '' : emoji;
+    (_rx[m.id] ??= {})['me'] = next;
+    if (next.isEmpty && (_rx[m.id]?['peer'] ?? '').isEmpty) _rx.remove(m.id);
+    _saveRx();
+    notifyListeners();
+    unawaited(_ws?.sendMessage(m.peerId, MsgChannel.reaction(key, next)) ?? Future<bool>.value(false));
+    return null;
+  }
+
+  void _applyReaction(String from, String cmid, String emoji) {
+    unawaited(() async {
+      await _loadRx();
+      final list = _chats[from] ?? const <ChatMessage>[];
+      String? local;
+      // реакция на моё сообщение — номер мой; на его — номер у него (в памяти или в сохранённом соответствии)
+      for (final m in list) {
+        if (m.outgoing ? m.id == cmid : (m.remoteId == cmid || _rids[m.id] == cmid)) { local = m.id; break; }
+      }
+      local ??= _rids.entries.where((e) => e.value == cmid).map((e) => e.key).firstOrNull;
+      if (local == null) return;
+      if (emoji.isEmpty) {
+        _rx[local]?.remove('peer');
+        if ((_rx[local] ?? const {}).isEmpty) _rx.remove(local);
+      } else {
+        (_rx[local] ??= {})['peer'] = emoji;
+      }
+      _saveRx();
+      notifyListeners();
+    }());
   }
 
   void _sendDeliveredReceipt(String to, String cmid) {
@@ -1270,6 +1351,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     );
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
+    if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
     if (activeChatPeerId != e.fromPeerId) _bumpUnread(e.fromPeerId);
     if (remoteId != null) {
       _sendDeliveredReceipt(e.fromPeerId, remoteId);

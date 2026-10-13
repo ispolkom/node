@@ -565,4 +565,33 @@ void main() {
     await owner.setCardShared(node.gid, false);
     expect(owner.displayName(node.gid, bobAlias), before);
   });
+
+  test('монетки одобрения: один голос на человека, свой голос не считается, повтор снимает, голоса не показываются сообщениями', () async {
+    await owner.sync();
+    await bobJoins();
+    final seq = await owner.send(node.gid, GroupKind.text, {'t': 'идея'});
+    await bob.sync();
+    await bob.vote(node.gid, seq, 1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 1);
+    expect(bob.coins(node.gid, seq), 1);
+    expect(bob.myVote(node.gid, seq), 1);
+    // автор за себя не голосует (даже обойдя интерфейс)
+    await owner.vote(node.gid, seq, 1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 1);
+    // передумал: «не одобряю» заменяет прежний голос, повтор снимает
+    await bob.vote(node.gid, seq, -1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), -1);
+    await bob.vote(node.gid, seq, -1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 0);
+    // голоса не попадают в ленту
+    expect((await owner.messages(node.gid)).map((e) => e.body['t']), ['идея']);
+    // владелец выключил голосование правилами
+    await owner.setRules(node.gid, const GroupRules({GroupKind.reaction}));
+    await bob.sync();
+    expect(() => bob.vote(node.gid, seq, 1), throwsA(isA<GroupSendRefused>()));
+  });
 }
