@@ -14,6 +14,9 @@ pub struct UserProfile {
     pub avatar: Option<String>,
     /// Last update timestamp
     pub updated_at: u64,
+    /// Версия профиля в миллисекундах: по ней устройства понимают, чья правка новее («последняя выигрывает»)
+    #[serde(default)]
+    pub updated_ms: u64,
     /// Short ID of the node (read-only)
     pub short_id: String,
 }
@@ -25,6 +28,7 @@ impl UserProfile {
             display_name: short_id.clone(),
             avatar: None,
             updated_at: current_timestamp(),
+            updated_ms: current_millis(),
             short_id,
         }
     }
@@ -65,7 +69,15 @@ impl UserProfile {
             self.avatar = Some(avatar_data);
         }
         self.updated_at = current_timestamp();
+        self.updated_ms = current_millis();
     }
+}
+
+fn current_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// Get current timestamp in seconds

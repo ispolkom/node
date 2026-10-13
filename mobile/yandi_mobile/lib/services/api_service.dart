@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
@@ -43,6 +44,39 @@ class ApiService {
     final info = jsonDecode(res.body) as Map<String, dynamic>;
     _deviceId = info['device_id'] as String?;
     return info;
+  }
+
+  /// Единый профиль с узла: {nick, avatar_hash, updated_ms}; null — узел не ответил (старый узел без профиля тоже).
+  Future<Map<String, dynamic>?> getProfile() async {
+    try {
+      final res = await _client.get(_url('/mobile/profile'), headers: _headers).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Записать профиль на узел: [nick] и/или [avatarB64] (пусто — убрать картинку). Возвращает профиль, как его теперь видит узел.
+  Future<Map<String, dynamic>?> putProfile({String? nick, String? avatarB64}) async {
+    try {
+      final res = await _client
+          .put(_url('/mobile/profile'), headers: _headers, body: jsonEncode({if (nick != null) 'nick': nick, if (avatarB64 != null) 'avatar_b64': avatarB64}))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return null;
+      return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<Uint8List?> getProfileAvatar() async {
+    try {
+      final res = await _client.get(_url('/mobile/profile/avatar'), headers: _headers).timeout(const Duration(seconds: 15));
+      return res.statusCode == 200 ? res.bodyBytes : null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<String?> devicePeerId() async {

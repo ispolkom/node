@@ -5275,6 +5275,17 @@ async fn api_profile_avatar(
         return Json(serde_json::json!({"status": "error", "message": "Avatar must be a PNG, JPEG or GIF image"}));
     }.to_string();
 
+    // картинка пересобирается из пикселей (метаданных нет) и сводится к маленькому PNG — так её принимают и телефоны
+    let file_data = match crate::mobile_profile::sanitize_avatar(&file_data) {
+        Some(png) => {
+            file_ext = "png".to_string();
+            png
+        }
+        None => {
+            return Json(serde_json::json!({"status": "error", "message": "Avatar could not be read as an image"}));
+        }
+    };
+
     // Save file
     let avatar_path = avatar_dir.join(format!("{}.{}", short_id, file_ext));
     if let Err(e) = tokio::fs::write(&avatar_path, &file_data).await {

@@ -13,6 +13,37 @@ const _emojis = ['😀','😎','🤓','🥳','😇','🤠','😺','🐱','🐶',
 class SettingsScreen extends StatelessWidget {
   const SettingsScreen({super.key});
 
+  Future<void> _nickDialog(BuildContext context) async {
+    final state = context.read<AppState>();
+    final ctl = TextEditingController(text: state.myNick);
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
+        content: TextField(
+          key: const ValueKey('nick-field'),
+          controller: ctl,
+          maxLength: 40,
+          autofocus: true,
+          style: const TextStyle(color: AppTheme.text),
+          decoration: const InputDecoration(hintText: 'Например: Доктор Хаус'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Сохранить')),
+        ],
+      ),
+    );
+    final text = ctl.text;
+    ctl.dispose();
+    if (ok != true || !context.mounted) return;
+    final err = await state.setMyNick(text);
+    if (err != null && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+    }
+  }
+
   /// Выбор картинки: фото из памяти, эмодзи или убрать. Системные «Поделиться/галерея» не используются для отправки — файл читается один раз
   /// и сразу пересобирается в маленький PNG, исходник нигде не сохраняется.
   Future<void> _avatarSheet(BuildContext context) async {
@@ -100,6 +131,16 @@ class SettingsScreen extends StatelessWidget {
         children: [
           // Профиль
           _Section(title: 'Профиль'),
+          ListTile(
+            key: const ValueKey('profile-nick'),
+            leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
+            title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(
+              state.myNick.isEmpty ? 'Не задан. Его видят контакты и участники групп; он один на ПК и все ваши телефоны.' : state.myNick,
+              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+            ),
+            onTap: () => _nickDialog(context),
+          ),
           ListTile(
             leading: const AvatarCircle.mine(label: 'Я', radius: 28),
             title: const Text('Моя картинка', style: TextStyle(color: AppTheme.text)),

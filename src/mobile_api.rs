@@ -802,6 +802,24 @@ async fn info(
     )
 }
 
+/// Короткий номер своего узла (как в списке контактов): 16 hex.
+fn my_short(st: &MobileState) -> String {
+    hex::encode(&st.my_id.0[..8])
+}
+
+/// Единый профиль (ник и аватар): один на ПК и все его телефоны.
+async fn profile_get(State(st): State<Arc<MobileState>>) -> axum::response::Response {
+    crate::mobile_profile::reply_json(Ok(crate::mobile_profile::snapshot(&my_short(&st))))
+}
+
+async fn profile_put(State(st): State<Arc<MobileState>>, Json(req): Json<crate::mobile_profile::PutReq>) -> axum::response::Response {
+    crate::mobile_profile::reply_json(crate::mobile_profile::apply(&my_short(&st), &req))
+}
+
+async fn profile_avatar(State(st): State<Arc<MobileState>>) -> axum::response::Response {
+    crate::mobile_profile::reply_avatar(crate::mobile_profile::avatar_bytes(&my_short(&st)))
+}
+
 async fn contacts(
     State(st): State<Arc<MobileState>>,
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
@@ -1339,6 +1357,8 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
 fn router(st: Arc<MobileState>) -> Router {
     let guarded = Router::new()
         .route("/mobile/info", get(info))
+        .route("/mobile/profile", get(profile_get).put(profile_put))
+        .route("/mobile/profile/avatar", get(profile_avatar))
         .route("/mobile/contacts", get(contacts))
         .route("/mobile/chat/:peer", get(history).post(send))
         .route("/mobile/inbox", get(inbox))

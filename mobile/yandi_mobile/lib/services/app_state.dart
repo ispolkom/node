@@ -101,6 +101,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
     secureKeyboard = (await StorageService.secureRead('pref_secure_keyboard')) != '0';
+    await _loadProfileMeta();
 
     // аватарки: изолированная папка приложения + соответствие «контакт → хэш» в защищённом хранилище
     final docs = await pp.getApplicationDocumentsDirectory();
@@ -181,7 +182,10 @@ class AppState extends ChangeNotifier implements FilesHost {
 
     // статусы «в сети» ещё и подтягиваем раз в 20 секунд: события о смене могут потеряться при обрыве связи
     _presenceTimer?.cancel();
-    _presenceTimer = async_lib.Timer.periodic(const Duration(seconds: 20), (_) => unawaited(refreshContacts()));
+    _presenceTimer = async_lib.Timer.periodic(const Duration(seconds: 20), (_) {
+      unawaited(refreshContacts());
+      unawaited(syncProfile());
+    });
 
     unawaited(_loadInitialData());
   }
@@ -238,6 +242,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
 
       await refreshContacts();
+      unawaited(syncProfile());
       await refreshProxyInfo();
       await _syncInbox();
       notifyListeners();
@@ -884,6 +889,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       await avatars!.setMine(await AvatarProcessor.fromImageBytes(bytes));
       _avatarAnnounced.clear();
       _announceAvatar();
+      _profileChanged();
       return null;
     } catch (e) {
       return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
@@ -895,6 +901,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       await avatars!.setMine(await AvatarProcessor.fromEmoji(emoji));
       _avatarAnnounced.clear();
       _announceAvatar();
+      _profileChanged();
       return null;
     } catch (e) {
       return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
@@ -905,6 +912,101 @@ class AppState extends ChangeNotifier implements FilesHost {
     await avatars?.clearMine();
     _avatarAnnounced.clear();
     _announceAvatar(force: true);   // сообщить контактам, что картинки больше нет
+    _profileChanged();
+  }
+
+  // ── единый профиль: ник и картинка хранятся на узле и общие для ПК и всех телефонов ──
+  String myNick = '';
+  int _profileSeenMs = 0;     // версия профиля узла, которую мы видели в последний раз
+  bool _profileDirty = false; // есть свои правки, ещё не доставленные на узел
+
+  Future<void> _loadProfileMeta() async {
+    try {
+      final raw = await StorageService.secureRead('profile_v1');
+      if (raw == null || raw.isEmpty) return;
+      final m = jsonDecode(raw) as Map<String, dynamic>;
+      myNick = (m['nick'] as String?) ?? '';
+      _profileSeenMs = (m['seen'] as num?)?.toInt() ?? 0;
+      _profileDirty = m['dirty'] == true;
+    } catch (_) {}
+  }
+
+  Future<void> _saveProfileMeta() =>
+      StorageService.secureWrite('profile_v1', jsonEncode({'nick': myNick, 'seen': _profileSeenMs, 'dirty': _profileDirty}));
+
+  void _profileChanged() {
+    _profileDirty = true;
+    unawaited(_saveProfileMeta());
+    unawaited(syncProfile());
+  }
+
+  /// Задать свой ник (виден контактам и в группах). null — готово, иначе причина.
+  Future<String?> setMyNick(String nick) async {
+    final n = nick.trim();
+    if (n.isEmpty) return 'Ник не может быть пустым';
+    if (n.runes.length > 40) return 'Ник не длиннее 40 знаков';
+    myNick = n;
+    notifyListeners();
+    _profileChanged();
+    return null;
+  }
+
+  bool _profileSyncing = false;
+
+  /// Сверка с узлом: свои несохранённые правки уходят на узел (последняя правка побеждает), иначе подтягивается то, что поменяли
+  /// на другом устройстве.
+  Future<void> syncProfile() async {
+    final api = _api;
+    if (api == null || _profileSyncing) return;
+    _profileSyncing = true;
+    try {
+      if (_profileDirty) {
+        final bytes = avatars?.myBytes;
+        final res = await api.putProfile(nick: myNick.isEmpty ? null : myNick, avatarB64: bytes == null ? '' : base64.encode(bytes));
+        if (res != null) {
+          _profileSeenMs = (res['updated_ms'] as num?)?.toInt() ?? _profileSeenMs;
+          _profileDirty = false;
+          await _saveProfileMeta();
+        }
+        return;
+      }
+      final remote = await api.getProfile();
+      if (remote == null) return;
+      final ms = (remote['updated_ms'] as num?)?.toInt() ?? 0;
+      if (ms == _profileSeenMs) return;
+      final nick = (remote['nick'] as String?) ?? '';
+      final hash = (remote['avatar_hash'] as String?) ?? '';
+      var changed = false;
+      if (nick != myNick) {
+        myNick = nick;
+        changed = true;
+      }
+      if (hash.isEmpty) {
+        if (avatars?.myHash != null) {
+          await avatars!.clearMine();
+          _avatarAnnounced.clear();
+          _announceAvatar(force: true);
+          changed = true;
+        }
+      } else if (avatars?.myHash != hash) {
+        final png = await api.getProfileAvatar();
+        if (png != null && AvatarMsg.validPng(png) && AvatarMsg.hashOf(png) == hash) {
+          await avatars!.setMine(png);
+          _avatarAnnounced.clear();
+          _announceAvatar();
+          changed = true;
+        } else {
+          return;   // картинка не подтянулась или не сошлась с хэшем: версию не принимаем, попробуем в следующий раз
+        }
+      }
+      _profileSeenMs = ms;
+      await _saveProfileMeta();
+      if (changed) notifyListeners();
+    } catch (_) {
+      // узел недоступен — повторим в следующий проход
+    } finally {
+      _profileSyncing = false;
+    }
   }
 
   Future<void> blockContact(String peerId, String name) async {
