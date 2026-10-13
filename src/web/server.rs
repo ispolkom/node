@@ -648,6 +648,7 @@ impl WebServer {
             .route("/api/groups/:gid/autoclean", post(api_groups_autoclean))
             .route("/api/groups/:gid/profile", post(api_groups_profile))
             .route("/api/groups/:gid/vote", post(api_groups_vote))
+            .route("/api/groups/:gid/avatar/:alias", get(api_groups_member_avatar))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
             .route(
@@ -1085,6 +1086,14 @@ async fn api_groups_autoclean(axum::extract::Path(gid): axum::extract::Path<Stri
 struct MyGroupVote {
     seq: u64,
     v: i64,
+}
+
+/// Картинка визитки участника группы (маленький PNG) для ленты и списка участников.
+async fn api_groups_member_avatar(axum::extract::Path((gid, alias)): axum::extract::Path<(String, String)>) -> Response {
+    match crate::group_client::member_avatar(&gid, &alias) {
+        Ok(Some(png)) => ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "no-store")], png).into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 /// Монетка одобрения: v = 1 или -1.

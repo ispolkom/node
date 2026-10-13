@@ -186,6 +186,12 @@ struct GState {
     /// курсор событий стирания на узле (до какого стирания догнал)
     #[serde(default)]
     del_cursor: u64,
+    /// человек в этой группе сам скрыл ник и картинку: по умолчанию они показываются
+    #[serde(default)]
+    card_off: bool,
+    /// отпечаток визитки, которую я уже выложил в группе (пусто — ничего не выкладывалось)
+    #[serde(default)]
+    card_sent: String,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -478,17 +484,40 @@ pub fn sync_all() {
         if changed {
             let _ = c.save();
         }
+        let card = pc_card();
         for g in &list {
             let gid = s(g, "id");
-            let _ = sync_group(c, &dev, g, &gid);
+            let _ = sync_group(c, &dev, g, &gid, &card);
         }
         let _ = listed;
         Ok(())
     });
 }
 
-fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str) -> Result<(), String> {
+/// Визитка ПК из единого профиля узла: (ник, маленькая картинка в base64, отпечаток). Пустой профиль — пустой отпечаток.
+fn pc_card() -> (String, String, String) {
+    let short = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
+    let nick = crate::mobile_profile::snapshot(&short)["nick"].as_str().unwrap_or("").to_string();
+    let png = crate::mobile_profile::avatar_bytes(&short).and_then(|(b, _)| crate::mobile_profile::sanitize_small(&b));
+    let avatar = png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
+    let print = if nick.is_empty() && avatar.is_empty() { String::new() } else { { use sha2::Digest; hex::encode(Sha256::digest(format!("{nick}\u{0}{avatar}").as_bytes())) } };
+    (nick, avatar, print)
+}
+
+fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str, card: &(String, String, String)) -> Result<(), String> {
     let (role, alias, epoch) = (s(g, "role"), s(g, "my_alias"), g["epoch"].as_u64().unwrap_or(0) as u32);
+    // 0) визитка по умолчанию: пока человек сам не скрыл её в этой группе, ник и картинка профиля показываются
+    {
+        let gs = c.gstate(gid);
+        if !gs.card_off && gs.card_sent != card.2 {
+            let previous = std::mem::replace(&mut gs.card_sent, card.2.clone());
+            if with_store(|st| st.set_card(gid, dev, &card.0, &card.1)).is_ok() {
+                let _ = c.save();
+            } else {
+                c.gstate(gid).card_sent = previous;
+            }
+        }
+    }
     // 1) мой ключ группы опубликован на узле
     if !c.gstate(gid).pub_sent {
         let p = c.gstate(gid).pubk.clone();
@@ -1107,15 +1136,24 @@ fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
 /// Раскрыть (или спрятать) ник и аватар компьютера в группе — из единого профиля узла.
 pub fn share_card(gid: &str, on: bool) -> Result<(), String> {
     let dev = pc_device()?;
-    let (nick, avatar) = if on {
-        let short = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
-        let nick = crate::mobile_profile::snapshot(&short)["nick"].as_str().unwrap_or("").to_string();
-        let png = crate::mobile_profile::avatar_bytes(&short).and_then(|(b, _)| crate::mobile_profile::sanitize_small(&b));
-        (nick, png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default())
-    } else {
-        (String::new(), String::new())
-    };
-    with_store(|st| st.set_card(gid, &dev, &nick, &avatar)).map_err(fail)
+    let card = pc_card();
+    let (nick, avatar) = if on { (card.0.clone(), card.1.clone()) } else { (String::new(), String::new()) };
+    with_store(|st| st.set_card(gid, &dev, &nick, &avatar)).map_err(fail)?;
+    // явный выбор человека запоминается: «скрыть» не отменяется автоматически, «показать» снова следует за профилем
+    with_client(|c| {
+        let gs = c.gstate(gid);
+        gs.card_off = !on;
+        gs.card_sent = if on { card.2.clone() } else { String::new() };
+        c.save();
+        Ok(())
+    })
+}
+
+/// Картинка визитки участника (PNG) по псевдониму; нет визитки или картинки — `None`.
+pub fn member_avatar(gid: &str, alias: &str) -> Result<Option<Vec<u8>>, String> {
+    let dev = pc_device()?;
+    let b64 = with_store(|st| st.card_avatar(gid, &dev, alias)).map_err(fail)?;
+    Ok(b64.and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()))
 }
 
 /// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).

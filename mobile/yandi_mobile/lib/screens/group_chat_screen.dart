@@ -627,6 +627,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),
+                      avatar: svc.memberAvatar(g.id, e.from),
                       coins: svc.hasVotes(g.id, e.seq) ? svc.coins(g.id, e.seq) : null,
                       sizeLabel: e.body['z'] is int ? _fmtSize(e.body['z'] as int) : null,
                       progress: e.body['f'] is String ? _progress[e.body['f']] : null,
@@ -785,6 +786,8 @@ class _GroupBubble extends StatelessWidget {
   final GroupEntry entry;
   final bool mine;
   final String author;
+  /// Картинка визитки автора (если он её раскрыл).
+  final Uint8List? avatar;
   final VoidCallback? onTap;
   final void Function(TapDownDetails)? onTapDown;
   final VoidCallback? onOpen;
@@ -799,7 +802,7 @@ class _GroupBubble extends StatelessWidget {
   final int? coins;
   /// Где файл лежит у меня (если уже скачан): для звука и видео — плеер прямо в сообщении.
   final String? localPath;
-  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.flash = false, this.localPath, this.coins});
+  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.avatar, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.flash = false, this.localPath, this.coins});
 
   @override
   Widget build(BuildContext context) {
@@ -827,7 +830,14 @@ class _GroupBubble extends StatelessWidget {
             borderRadius: BorderRadius.circular(16),
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            if (!mine) Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold)),
+            if (!mine)
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                if (avatar != null) ...[
+                  CircleAvatar(radius: 9, backgroundColor: AppTheme.surface, backgroundImage: MemoryImage(avatar!), onBackgroundImageError: (_, __) {}),
+                  const SizedBox(width: 6),
+                ],
+                Flexible(child: Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold))),
+              ]),
             if (quote != null) QuoteBox(author: quote!.$1, text: quote!.$2, onTap: onQuoteTap),
             if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.audio && entry.body['z'] is int && (entry.body['z'] as int) <= InlineAudio.maxInline)
               InlineAudio(

@@ -27,7 +27,7 @@ class SettingsScreen extends StatelessWidget {
           maxLength: 40,
           autofocus: true,
           style: const TextStyle(color: AppTheme.text),
-          decoration: const InputDecoration(hintText: 'Например: Доктор Хаус'),
+          decoration: const InputDecoration(hintText: 'Например: Доктор Хаус', helperText: 'Его увидят контакты и участники групп. Не указывайте ФИО.', helperMaxLines: 2),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
@@ -136,7 +136,7 @@ class SettingsScreen extends StatelessWidget {
             leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
             title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
             subtitle: Text(
-              state.myNick.isEmpty ? 'Не задан. Его видят контакты и участники групп; он один на ПК и все ваши телефоны.' : state.myNick,
+              state.myNick.isEmpty ? 'Не задан. Ник и картинку увидят контакты и участники ваших групп (в любой группе их можно скрыть). Не указывайте ФИО и личные фото; ник один на ПК и все ваши телефоны.' : state.myNick,
               style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onTap: () => _nickDialog(context),
@@ -144,7 +144,7 @@ class SettingsScreen extends StatelessWidget {
           ListTile(
             leading: const AvatarCircle.mine(label: 'Я', radius: 28),
             title: const Text('Моя картинка', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Её видят только ваши контакты. Метаданные фото не передаются: картинка собирается заново.',
+            subtitle: const Text('Её увидят контакты и участники ваших групп. Не ставьте личные фото. Метаданные не передаются: картинка собирается заново.',
                 style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => _avatarSheet(context),
           ),

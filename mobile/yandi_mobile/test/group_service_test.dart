@@ -106,12 +106,22 @@ class _Api implements GroupApi {
   Future<void> leave(String gid) async { n.members.remove(dev); n.rekeyNeeded = true; }
   @override
   Future<Map<String, dynamic>> members(String gid) async => {
-        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
+        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'avatar': (m['avatar'] as String?)?.isEmpty ?? true ? null : m['avatar'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
       };
   @override
   Future<void> setPub(String gid, String memberPub) async => me['pub'] = memberPub;
   @override
-  Future<void> setCard(String gid, String nick, String avatarB64) async => me['nick'] = nick.isEmpty ? null : nick;
+  Future<void> setCard(String gid, String nick, String avatarB64) async {
+    me['nick'] = nick.isEmpty ? null : nick;
+    me['avatar'] = avatarB64;
+  }
+  @override
+  Future<List<int>?> cardAvatar(String gid, String alias) async {
+    for (final m in n.members.values) {
+      if (m['alias'] == alias && (m['avatar'] as String?)?.isNotEmpty == true) return base64.decode(m['avatar'] as String);
+    }
+    return null;
+  }
   @override
   Future<Map<String, dynamic>> keys(String gid) async => {
         'epoch': n.epoch,
@@ -545,24 +555,31 @@ void main() {
     expect((await bob.messages(node.gid)).where((e) => e.body['t'] == 'один раз').length, 1);
   });
 
-  test('ник раскрывается по желанию: до этого виден псевдоним, после — ник, обратно — снова псевдоним', () async {
+  test('визитка показывается по умолчанию; скрытие запоминается и не отменяется сменой профиля; картинка участника доходит', () async {
     await owner.sync();
     await bobJoins();
     await owner.sync();
     final bobAlias = bob.byId(node.gid)!.myAlias;
     final before = owner.displayName(node.gid, bobAlias);   // имя, названное при вступлении, или псевдоним
-    expect(await bob.cardShared(node.gid), isFalse);
-    await bob.setCardShared(node.gid, true, nick: 'Доктор Хаус');
-    expect(await bob.cardShared(node.gid), isTrue);
+    expect(await bob.cardShared(node.gid), isTrue);          // по умолчанию — показывать
+    bob.setProfile('Доктор Хаус', [1, 2, 3]);
+    await bob.sync();                                        // визитку выкладывает сам обход, без действий человека
     await owner.sync();
-    await owner.setCardShared(node.gid, false);   // чужая визитка не трогается; своя — выключена
     expect(owner.displayName(node.gid, bobAlias), 'Доктор Хаус');
-    await bob.refreshCards('Хаус', null);
+    expect(owner.memberAvatar(node.gid, bobAlias), isNull);  // первая загрузка идёт в фоне
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(owner.memberAvatar(node.gid, bobAlias), [1, 2, 3]);
+    await bob.refreshCards('Хаус', null);                    // профиль сменился — визитка обновилась
     await owner.sync();
-    await owner.setCardShared(node.gid, false);
     expect(owner.displayName(node.gid, bobAlias), 'Хаус');
-    await bob.setCardShared(node.gid, false);
-    await owner.setCardShared(node.gid, false);
+    expect(owner.memberAvatar(node.gid, bobAlias), isNull);  // картинки в профиле больше нет
+    await bob.setCardShared(node.gid, false);                // человек скрыл ник именно в этой группе
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), before);
+    await bob.refreshCards('Другой ник', [9]);               // смена профиля скрытое не раскрывает
+    await bob.sync();
+    await owner.sync();
+    expect(await bob.cardShared(node.gid), isFalse);
     expect(owner.displayName(node.gid, bobAlias), before);
   });
 

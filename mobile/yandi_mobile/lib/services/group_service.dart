@@ -39,22 +39,80 @@ class GroupService {
   final Map<String, Map<String, String>> _nicks = {};       // группа → псевдоним → ник, раскрытый самим участником
   String displayName(String gid, String alias) => _nicks[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
 
-  /// Показываю ли я свой ник в этой группе (решает человек, по умолчанию — нет).
-  Future<bool> cardShared(String gid) async => await store.read('grp_card_$gid') == '1';
+  /// Показываю ли я свой ник и картинку в этой группе: по умолчанию да (пока человек не скрыл их сам именно здесь).
+  Future<bool> cardShared(String gid) async => await store.read('grp_card_$gid') != '0';
+
+  /// Мой профиль, из которого берётся визитка (ставит приложение при старте и при смене).
+  String _profileNick = '';
+  List<int>? _profileAvatar;
+  void setProfile(String nick, List<int>? avatar) {
+    _profileNick = nick;
+    _profileAvatar = avatar;
+  }
+
+  /// Отпечаток визитки: пусто, если в профиле нет ни ника, ни картинки.
+  String _cardPrint(String nick, List<int>? avatar) {
+    if (nick.isEmpty && (avatar == null || avatar.isEmpty)) return '';
+    var h = 0x811c9dc5;
+    for (final b in utf8.encode(nick)) { h = ((h ^ b) * 0x01000193) & 0xffffffff; }
+    for (final b in avatar ?? const <int>[]) { h = ((h ^ b) * 0x01000193) & 0xffffffff; }
+    return '${nick.length}:${avatar?.length ?? 0}:$h';
+  }
+
+  /// Выложить визитку в группе, если человек её не скрывал и она с прошлого раза изменилась.
+  Future<void> _ensureCard(String gid) async {
+    if (!await cardShared(gid)) return;
+    final print = _cardPrint(_profileNick, _profileAvatar);
+    if (await store.read('grp_card_fp_$gid') == print) return;
+    final small = _profileAvatar;
+    await api.setCard(gid, _profileNick, small != null ? base64.encode(small) : '');
+    await store.write('grp_card_fp_$gid', print);
+  }
 
   /// Раскрыть (или спрятать) свой ник и картинку в группе. Сам ник и картинка берутся из профиля — их передаёт приложение.
   Future<void> setCardShared(String gid, bool on, {String nick = '', List<int>? avatar}) async {
     await api.setCard(gid, on ? nick : '', on && avatar != null ? base64.encode(avatar) : '');
     await store.write('grp_card_$gid', on ? '1' : '0');
+    await store.write('grp_card_fp_$gid', on ? _cardPrint(nick, avatar) : '');
     await _rebuildMetaFor(gid);
   }
 
-  /// Профиль поменялся — обновить визитки там, где я их раскрыл.
+  /// Профиль поменялся — обновить визитки там, где человек их не скрыл.
   Future<void> refreshCards(String nick, List<int>? avatar) async {
+    setProfile(nick, avatar);
     for (final g in groups) {
-      try {
-        if (await cardShared(g.id)) await api.setCard(g.id, nick, avatar != null ? base64.encode(avatar) : '');
-      } catch (_) {}
+      try { await _ensureCard(g.id); } catch (_) {}
+    }
+  }
+
+  // ── картинки участников ──────────────────────────────────────────────────
+  final Map<String, String> _avatarHash = {};       // «группа/псевдоним» → отпечаток, по которому картинка загружена
+  final Map<String, Uint8List> _avatars = {};
+  final Set<String> _avatarAsked = {};
+
+  /// Картинка участника, раскрытая им в группе; null — нет (или ещё не загрузилась: по приходу вызовется onChanged).
+  Uint8List? memberAvatar(String gid, String alias) {
+    final key = '$gid/$alias';
+    final want = _avatarWant[key];
+    if (want != null && want.isNotEmpty && _avatarHash[key] != want && _avatarAsked.add(key)) {
+      unawaited(_loadAvatar(gid, alias, key, want));
+    }
+    return _avatars[key];
+  }
+
+  final Map<String, String> _avatarWant = {};      // «группа/псевдоним» → отпечаток картинки у участника (из списка участников)
+
+  Future<void> _loadAvatar(String gid, String alias, String key, String want) async {
+    try {
+      final b = await api.cardAvatar(gid, alias);
+      if (b != null) {
+        _avatars[key] = Uint8List.fromList(b);
+        _avatarHash[key] = want;
+        onChanged?.call(gid);
+      }
+    } catch (_) {
+    } finally {
+      _avatarAsked.remove(key);
     }
   }
 
@@ -302,6 +360,17 @@ class GroupService {
       for (final x in (m['members'] as List? ?? const [])) {
         final r = (x as Map)['role'];
         if (x['alias'] is String && x['nick'] is String && (x['nick'] as String).isNotEmpty) nicks[x['alias'] as String] = x['nick'] as String;
+        if (x['alias'] is String) {
+          final key = '${g.id}/${x['alias']}';
+          final h = x['avatar'];
+          if (h is String && h.isNotEmpty) {
+            _avatarWant[key] = h;
+          } else {
+            _avatarWant.remove(key);
+            _avatars.remove(key);
+            _avatarHash.remove(key);
+          }
+        }
         if (x['alias'] is String && r is String) roles[x['alias'] as String] = r;
         if (r == 'owner' || r == 'admin') managers.add(x['alias'] as String);
       }
@@ -334,6 +403,7 @@ class GroupService {
         if (only != null && g.id != only) continue;
         try {
           await _publishPub(g.id);
+          try { await _ensureCard(g.id); } catch (_) {}
           if (g.isOwner) {
             try { await _collectKeys(g, asOwner: true); } catch (_) {}
             await _provision(g);

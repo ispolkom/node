@@ -1,4 +1,5 @@
 import 'message_actions.dart';
+import 'member_badge.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -976,7 +977,12 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
-                      InitialBadge('${m['author']}', size: 20),
+                      MemberBadge(
+                        api: widget.api,
+                        gid: '$selected',
+                        alias: '${m['from']}',
+                        name: '${m['author']}',
+                      ),
                       const SizedBox(width: 6),
                       Text(
                         '${m['author']}',

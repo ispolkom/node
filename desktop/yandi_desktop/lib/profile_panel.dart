@@ -198,6 +198,14 @@ class _ProfilePanelState extends State<ProfilePanel> {
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       if (own) const UiText('Мой аватар', style: TextStyle(fontSize: 18)),
+      if (own)
+        const Padding(
+          padding: EdgeInsets.symmetric(vertical: 6),
+          child: UiText(
+            'Ник и аватар увидят ваши контакты и участники ваших групп. Не указывайте ФИО и личные фото. В любой группе их можно скрыть.',
+            key: ValueKey('profile-warning'),
+          ),
+        ),
       if (loading) const LinearProgressIndicator(),
       if (error != null) UiText(error!),
       if (image == null)

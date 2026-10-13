@@ -202,6 +202,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> syncGroups({String? only}) async {
     final g = groups;
     if (g == null) return;
+    g.setProfile(myNick, avatars?.myBytes);   // визитка в группах берётся из профиля
     try {
       await g.syncAndAnnounce();
     } catch (_) {}
