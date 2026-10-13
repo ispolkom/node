@@ -65,30 +65,4 @@ class NetworkRepository {
     '/api/$family/$action/${ShellRepository(api).segment(id)}',
     method: 'POST',
   );
-  Future<Map<String, dynamic>> relay() async {
-    final result = await api.request('/api/relay/status');
-    if (result['relay_server'] is! bool) throw const ApiFailure('protocol');
-    return result;
-  }
-
-  Future<List<Map<String, dynamic>>> sessions() async => ShellRepository.list(
-    await api.request('/api/relay/sessions'),
-    'sessions',
-  );
-  Future<List<Map<String, dynamic>>> peers() async => ShellRepository.list(
-    await api.request('/api/nodes'),
-    'nodes',
-  ).where((n) => n['source'] == 'p2p').toList();
-  Future<void> server(bool start) async {
-    await api.request(
-      '/api/relay/server/${start ? 'start' : 'stop'}',
-      method: 'POST',
-    );
-    if ((await relay())['relay_server'] != start)
-      throw const ApiFailure('business');
-  }
-
-  Future<void> connect(String id) async {
-    await api.request('/api/relay/connect/${short(id)}', method: 'POST');
-  }
 }

@@ -250,13 +250,19 @@ pub fn on_packet(sender: &[u8; 32], plaintext: &[u8]) {
     }
 }
 
-/// Состояние для страницы и проверок: клиент ли этот узел, сколько записей о доступности известно.
-pub fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
-    async fn status() -> axum::Json<serde_json::Value> {
-        let n = store_cell().lock().unwrap_or_else(|e| e.into_inner()).total;
-        axum::Json(serde_json::json!({"client": is_client(), "relay_enabled": relay_enabled(), "records": n}))
+/// Состояние для страницы и проверок: клиент ли этот узел, готов ли служить ретранслятором, сколько записей о доступности известно.
+pub fn status_json() -> serde_json::Value {
+    let n = store_cell().lock().unwrap_or_else(|e| e.into_inner()).total;
+    serde_json::json!({"client": is_client(), "relay_enabled": relay_enabled(), "records": n})
+}
+
+/// Владелец разрешает или запрещает этому узлу служить ретранслятором для других (запрос на ретрансляцию всё равно приходит сам).
+pub fn set_relay_enabled(enabled: bool) -> std::io::Result<()> {
+    let p = relay_file();
+    if let Some(d) = p.parent() {
+        std::fs::create_dir_all(d)?;
     }
-    axum::Router::new().route("/api/network/relay", axum::routing::get(status))
+    crate::util::private_file::write_private(&p, serde_json::json!({"enabled": enabled}).to_string().as_bytes())
 }
 
 /// Запуск менеджера: решает, узел это или клиент; клиент держит связь с двумя ретрансляторами и объявляет запись.

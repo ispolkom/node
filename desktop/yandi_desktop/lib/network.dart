@@ -29,12 +29,11 @@ class _NetworkFeatureState extends State<NetworkFeature> {
   final name = TextEditingController(), id = TextEditingController();
   String country = 'RU';
   String? editing, error, notice;
-  List<Map<String, dynamic>> rows = [], sessions = [], peers = [];
-  Map<String, dynamic>? http, socks, relay;
+  List<Map<String, dynamic>> rows = [];
+  Map<String, dynamic>? http, socks;
   bool busy = false, refreshing = false;
   Timer? timer;
   bool get active => mounted && widget.isActive();
-  bool get gateways => widget.page == 'Шлюзы';
   @override
   void initState() {
     super.initState();
@@ -50,9 +49,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
     name.dispose();
     id.dispose();
     rows = [];
-    sessions = [];
-    peers = [];
-    http = socks = relay = null;
+    http = socks = null;
     notice = error = editing = null;
     super.dispose();
   }
@@ -75,38 +72,22 @@ class _NetworkFeatureState extends State<NetworkFeature> {
     if (!active || refreshing || busy) return;
     refreshing = true;
     try {
-      if (gateways) {
-        final r = await repo.gateways();
-        if (!active) return;
-        final h = await repo.proxy('proxy');
-        if (!active) return;
-        final s = await repo.proxy('socks5');
-        if (!active) return;
-        setState(() {
-          rows = r;
-          http = h;
-          socks = s;
-        });
-      } else {
-        final r = await repo.relay();
-        if (!active) return;
-        final s = await repo.sessions();
-        if (!active) return;
-        final p = nodes || relay == null ? await repo.peers() : peers;
-        if (!active) return;
-        setState(() {
-          relay = r;
-          sessions = s;
-          peers = p;
-        });
-      }
+      final r = await repo.gateways();
+      if (!active) return;
+      final h = await repo.proxy('proxy');
+      if (!active) return;
+      final s = await repo.proxy('socks5');
+      if (!active) return;
+      setState(() {
+        rows = r;
+        http = h;
+        socks = s;
+      });
     } catch (e) {
       if (active) {
         setState(() {
-          http = socks = relay = null;
+          http = socks = null;
           rows = [];
-          sessions = [];
-          peers = [];
         });
         fail(e);
       }
@@ -226,7 +207,7 @@ class _NetworkFeatureState extends State<NetworkFeature> {
       if (error != null) NoticePanel(error!, error: true),
       if (notice != null) UiSelectableText(notice!),
       button('Обновить', () => refresh(nodes: true)),
-      if (gateways) ...[
+      ...[
         proxyStatus('HTTP', http, 'proxy'),
         proxyStatus('SOCKS5', socks, 'socks5'),
         const UiText(
@@ -318,68 +299,6 @@ class _NetworkFeatureState extends State<NetworkFeature> {
                 ],
               ),
             ),
-          ),
-      ] else ...[
-        const UiText('Управление Relay Server', style: TextStyle(fontSize: 22)),
-        UiText(
-          'Сервер: ${relay == null
-              ? tr(context, 'статус неизвестен')
-              : relay!['relay_server'] == true
-              ? 'включён'
-              : 'выключен'}',
-        ),
-        if (relay != null) ...[
-          UiText('Сессий: ${relay!['active_sessions']}'),
-          UiText(
-            'Передано: ${relay!['total_bytes_forwarded']} Б · пакетов ${relay!['total_packets_forwarded']}',
-          ),
-        ],
-        Wrap(
-          spacing: 8,
-          children: [
-            button(
-              'Запустить сервер',
-              () => act(() => repo.server(true)),
-              enabled: relay?['relay_server'] == false,
-            ),
-            button(
-              'Остановить сервер',
-              () => act(() => repo.server(false)),
-              enabled: relay?['relay_server'] == true,
-            ),
-          ],
-        ),
-        const UiText(
-          'Запрос подключения не гарантирует публичную доступность Relay.',
-        ),
-        const UiText('Активные Relay Сессии', style: TextStyle(fontSize: 22)),
-        for (final s in sessions)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(12),
-              child: UiSelectableText(
-                '${s['session_id']} · ${s['source_peer']} → ${s['target_peer']}\n${s['status']} · ${s['bytes_forwarded']} Б · ${s['packets_forwarded']} пакетов · простой ${s['idle_time_secs']} с',
-              ),
-            ),
-          ),
-        const UiText('Подключение через Relay', style: TextStyle(fontSize: 22)),
-        for (final p in peers)
-          Wrap(
-            spacing: 8,
-            children: [
-              UiText('${p['hostname'] ?? ''} · ${p['short_id']}'),
-              button(
-                'Подключить',
-                () => act(() async {
-                  await repo.connect('${p['short_id']}');
-                  if (active)
-                    setState(
-                      () =>
-                          notice = 'Запрос Relay отправлен. Проверьте сессии.',
-                    );
-                }),
-              ),
-            ],
           ),
       ],
     ],

@@ -43,7 +43,6 @@ void main() {
       'Чат',
       'Группы',
       'Шлюзы',
-      'Relay',
       'Настройки',
     ]) {
       testWidgets('$scene ${size.width.toInt()}x${size.height.toInt()}', (

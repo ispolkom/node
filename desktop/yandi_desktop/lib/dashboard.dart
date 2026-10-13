@@ -7,12 +7,15 @@ class DashboardView extends StatelessWidget {
   final Map<String, dynamic>? status, speed;
   final List<dynamic> nodes;
   final Widget controls;
+  /// Карточка «Ретрансляция» (самостоятельно загружает своё состояние).
+  final Widget? relay;
   const DashboardView({
     super.key,
     required this.status,
     required this.speed,
     required this.nodes,
     required this.controls,
+    this.relay,
   });
 
   static String rate(dynamic bytesPerSecond) {
@@ -76,6 +79,7 @@ class DashboardView extends StatelessWidget {
         ),
         gap,
         Panel(title: 'Управление', child: controls),
+        if (relay != null) ...[gap, relay!],
         gap,
         Panel(
           title: 'Обнаруженные узлы',

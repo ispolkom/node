@@ -94,7 +94,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     if (const [
       'Группы',
       'Шлюзы',
-      'Relay',
       'О приложении',
     ].contains(widget.page))
       return;
@@ -1460,7 +1459,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   Widget build(BuildContext context) => widget.page == 'О приложении'
       ? const AboutPanel()
-      : const ['Шлюзы', 'Relay'].contains(widget.page)
+      : widget.page == 'Шлюзы'
       ? NetworkFeature(
           api: widget.api,
           page: widget.page,

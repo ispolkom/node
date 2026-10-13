@@ -1,5 +1,6 @@
 import 'theme.dart';
 import 'dashboard.dart';
+import 'relay_card.dart';
 import 'preferences.dart';
 import 'background_alerts.dart';
 import 'dart:async';
@@ -352,6 +353,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         button('Остановить узел', () => act('/api/node/stop', {})),
       ],
     ),
+    relay: RelayCard(api: widget.api, isActive: () => mounted && visible),
   );
 
   Widget vaultPanel() {
@@ -713,7 +715,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     'Чат',
                     'Группы',
                     'Шлюзы',
-                    'Relay',
                     'Настройки',
                     'О приложении',
                     'Закрытая среда',

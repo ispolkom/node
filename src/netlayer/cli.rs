@@ -140,9 +140,6 @@ impl P2PCli {
         println!("   socks5 hops [NL]   - анонимно: цепочка через три узла");
         println!("   proxy <SHORT_ID>   - запустить HTTP Proxy (DPI bypass) через пира");
         println!("   proxy-gateway      - запустить HTTP Proxy Gateway (на exit node)");
-        println!("   relay-server       - включить режим relay сервера");
-        println!("   relay-connect <ID> - подключиться к пиру через relay");
-        println!("   relay-list         - показать активные relay сессии");
         println!("   tun link <ID>      - связать TUN с exit node (entry node)");
         println!("   tun exit           - открыть внешний трафик (exit node)");
         println!("   exit               - запустить Exit Node Handler (SOCKS5/Proxy)");
@@ -331,27 +328,6 @@ impl P2PCli {
                 Self::handle_socks5_gateway_command(transport, socks5_req_rx, socks5_tunnel_rx.clone()).await?
             }
 
-            "relay-server" => {
-                Self::handle_relay_server_command(transport).await?
-            }
-
-            "relay-connect" => {
-                if parts.len() < 2 {
-                    println!("Использование: relay-connect <SHORT_ID>");
-                    println!("Пример: relay-connect 0021944b");
-                    println!();
-                    println!("Подключается к пиру через публичный relay сервер");
-                    println!("Используется для пиров за NAT");
-                    return Ok(());
-                }
-
-                let short_id_hex = parts[1];
-                Self::handle_relay_connect_command(transport, short_id_hex).await?
-            }
-
-            "relay-list" => {
-                Self::handle_relay_list_command(transport).await?
-            }
 
             "tunnel" => {
                 if parts.len() < 2 {
@@ -757,9 +733,6 @@ impl P2PCli {
                 println!("   socks5 <SHORT_ID>  - запустить SOCKS5 Proxy через пира");
                 println!("   proxy <SHORT_ID>   - запустить HTTP Proxy (DPI bypass) через пира");
                 println!("   proxy-gateway      - запустить HTTP Proxy Gateway (на exit node)");
-                println!("   relay-server       - включить режим relay сервера");
-                println!("   relay-connect <ID> - подключиться к пиру через relay");
-                println!("   relay-list         - показать активные relay сессии");
                 println!("   tunnel <CMD>       - управление P2P тоннелями (voice/video/file)");
                 println!("   tun init           - создать TUN устройства");
                 println!("   tun link <ID>      - связать TUN с exit node (entry node)");
@@ -1243,131 +1216,4 @@ impl P2PCli {
         Ok(())
     }
 
-    /// Handle relay-server command - enable relay server mode
-    async fn handle_relay_server_command(transport: &P2PTransport) -> Result<(), String> {
-        println!("🌐 Включение режима Relay Server...");
-        println!();
-        println!("   Эта нода будет ретранслировать трафик между пирами за NAT");
-        println!("   Публичный IP требуется для работы в качестве relay сервера");
-        println!();
-
-        // Получаем relay manager из транспорта
-        let mut relay_manager = transport.relay_manager.lock().await;
-        relay_manager.set_relay_server_mode(true);
-
-        println!("✅ Relay Server режим ВКЛЮЧЕН!");
-        println!("   Нода готова принимать relay-соединения");
-        println!();
-
-        Ok(())
-    }
-
-    /// Handle relay-connect command - connect to peer via relay
-    async fn handle_relay_connect_command(transport: &P2PTransport, short_id_hex: &str) -> Result<(), String> {
-        // Парсим short_id
-        let short_id_bytes = hex::decode(short_id_hex)
-            .map_err(|_| format!("Неверный формат Short ID: {}", short_id_hex))?;
-
-        if short_id_bytes.len() != 8 {
-            return Err(format!("Short ID должен быть 8 байт (16 hex), получено: {}", short_id_bytes.len()));
-        }
-
-        // Ищем пира по short_id
-        let peers = transport.get_peers().await;
-        let target_peer = peers.iter()
-            .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-            .ok_or_else(|| format!("Пир с Short ID {} не найден", short_id_hex))?;
-
-        println!("🔌 Подключение к пиру {} через Relay...", short_id_hex);
-        println!("   Peer: {} ({})", target_peer.addr, short_id_hex);
-        println!("   NAT статус: {}", target_peer.get_nat_status().as_str());
-
-        // Проверяем, есть ли у нас relay manager
-        let relay_manager = transport.relay_manager.lock().await;
-
-        if !relay_manager.is_relay_server() {
-            println!("⚠️  Предупреждение: Эта нода не является relay сервером");
-            println!("   Для подключения нужна публичная нода с relay-server");
-            println!();
-            println!("   Сначала найдите публичную ноду и включите на ней relay-server");
-            drop(relay_manager);
-            return Ok(());
-        }
-
-        // Создаем relay сессию
-        let my_id = transport.identity().node_id();
-        let session_id = {
-            let mut manager = transport.relay_manager.lock().await;
-            manager.create_session(my_id, target_peer.id)
-        };
-
-        println!("🔗 Relay сессия #{} создана", session_id);
-
-        // Отправляем запрос на подключение
-        use crate::netlayer::packet::RelayConnectRequest;
-
-        let request = RelayConnectRequest {
-            source_peer: my_id,
-            target_peer: target_peer.id,
-            session_id,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        let request_bytes = serde_json::to_vec(&request)
-            .map_err(|e| format!("Failed to serialize relay request: {}", e))?;
-
-        let mut packet = vec![0x60u8]; // RelayConnectRequest
-        packet.extend_from_slice(&request_bytes);
-
-        transport.send_encrypted(target_peer.id, &packet).await?;
-
-        println!("📤 Запрос на relay-соединение отправлен пиру {}", short_id_hex);
-        println!("⏳ Ожидание ответа...");
-
-        Ok(())
-    }
-
-    /// Handle relay-list command - show active relay sessions
-    async fn handle_relay_list_command(transport: &P2PTransport) -> Result<(), String> {
-        let relay_manager = transport.relay_manager.lock().await;
-
-        if !relay_manager.is_relay_server() {
-            println!("ℹ️  Relay server режим НЕ АКТИВЕН");
-            println!("   Включите: relay-server");
-        } else {
-            println!("🌐 Relay Server режим АКТИВЕН");
-        }
-
-        let stats = relay_manager.get_stats();
-
-        println!();
-        println!("📊 Статистика Relay:");
-        println!("   Активных сессий: {}", stats.active_sessions);
-        println!("   Всего передано: {} байт", stats.total_bytes_forwarded);
-        println!("   Всего пакетов: {}", stats.total_packets_forwarded);
-        println!();
-
-        let active_sessions = relay_manager.get_active_sessions();
-
-        if active_sessions.is_empty() {
-            println!("   (нет активных relay сессий)");
-        } else {
-            println!("📋 Активные relay сессии:");
-            for (i, session) in active_sessions.iter().enumerate() {
-                println!("   {}. Сессия #{}", i + 1, session.session_id);
-                println!("      От: {}", hex::encode(&session.source_peer.0[..8]));
-                println!("      Кому: {}", hex::encode(&session.target_peer.0[..8]));
-                println!("      Статус: {:?}", session.status);
-                println!("      Передано: {} байт", session.bytes_forwarded);
-                println!("      Бездействие: {:?}", session.idle_time());
-                println!();
-            }
-        }
-
-        drop(relay_manager);
-        Ok(())
-    }
 }

@@ -73,37 +73,19 @@ class NetworkApi extends FakeApi {
       proxy = false;
       return {'ok': true};
     }
-    if (path == '/api/relay/status') {
+    if (path == '/api/network/relay') {
       if (late != null) return late!.future;
+      if (body != null) {
+        calls.add(path);
+        relay = body['enabled'] == true;
+        return {'status': 'success', 'relay_enabled': relay};
+      }
       return {
-        'relay_server': relay,
-        'active_sessions': 1,
-        'total_bytes_forwarded': 123,
-        'total_packets_forwarded': 2,
+        'client': false,
+        'relay_enabled': relay,
+        'records': 0,
+        'forwarding': {'active_sessions': 1, 'bytes': 123, 'packets': 2},
       };
-    }
-    if (path == '/api/relay/sessions')
-      return {
-        'sessions': [
-          {
-            'session_id': 's1',
-            'status': 'Active',
-            'source_peer': 'a',
-            'target_peer': 'b',
-            'bytes_forwarded': 123,
-            'packets_forwarded': 2,
-            'idle_time_secs': 3,
-          },
-        ],
-      };
-    if (path.startsWith('/api/relay/server/')) {
-      calls.add(path);
-      relay = path.endsWith('start');
-      return {'ok': true};
-    }
-    if (path.startsWith('/api/relay/connect/')) {
-      calls.add(path);
-      return {'ok': true};
     }
     if (path == '/api/nodes')
       return {
@@ -184,28 +166,22 @@ void main() {
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await stop(t);
   });
-  testWidgets('relay status sessions actions and late response wipe', (
+  testWidgets('карточка «Ретрансляция» на Главной: состояние и слово-переключатель', (
     t,
   ) async {
-    final api = NetworkApi();
+    final api = NetworkApi()..relay = true;
     await start(t, api);
     await click(t, 'Войти');
-    await click(t, 'Relay');
-    expect(find.textContaining('s1'), findsOneWidget);
-    expect(find.textContaining('mdns'), findsNothing);
-    await click(t, 'Запустить сервер');
-    expect(find.text('Сервер: включён'), findsOneWidget);
-    await click(t, 'Остановить сервер');
-    expect(api.relay, false);
-    await click(t, 'Подключить');
-    expect(api.calls.contains('/api/relay/connect/0123456789abcdef'), true);
-    api.late = Completer();
-    await t.pump(const Duration(seconds: 5));
-    await t.pump();
-    await click(t, 'Главная');
-    api.late!.complete({'relay_server': true});
+    expect(find.text('Ретрансляция'), findsOneWidget);
+    expect(find.textContaining('Служит ретранслятором'), findsOneWidget);
+    expect(find.textContaining('1 пар'), findsOneWidget);
+    await t.ensureVisible(find.byKey(const ValueKey('relay-toggle')));
+    await t.tap(find.byKey(const ValueKey('relay-toggle')));
     await t.pumpAndSettle();
-    expect(find.text('Сервер: включён'), findsNothing);
+    expect(api.relay, false);
+    expect(find.textContaining('не служит'), findsOneWidget);
+    // ручных ручек relay больше нет: вкладки «Relay» тоже
+    expect(find.text('Relay'), findsNothing);
     await stop(t);
   });
   testWidgets('persistence error and preflight lock prevent success', (
@@ -232,8 +208,6 @@ void main() {
     await start(t, NetworkApi());
     await click(t, 'Войти');
     await click(t, 'Шлюзы');
-    expect(t.takeException(), isNull);
-    await click(t, 'Relay');
     expect(t.takeException(), isNull);
     await stop(t);
   });

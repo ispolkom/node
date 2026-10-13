@@ -474,13 +474,11 @@ impl WebServer {
             .merge(crate::web::peers::router())
             .merge(crate::network_offers::router())
             .merge(crate::hops_net::router())
-            .merge(crate::relay_net::router())
             .merge(crate::supervisor::router())
             .route("/contacts", get(contacts_handler))
             .route("/gateways", get(gateways_handler))
             .route("/settings", get(settings_handler))
             .route("/chat", get(chat_handler))
-            .route("/relay", get(relay_handler))
             .route("/groups", get(groups_handler))
             // Static files (protected — served only to logged-in users)
             .route("/style.css", get(style_handler))
@@ -504,12 +502,6 @@ impl WebServer {
             .route("/api/socks5/stop/:short_id", post(api_socks5_stop))
             .route("/api/socks5/status", get(api_socks5_status))
             .route("/api/socks5/personal", post(api_socks5_personal))
-            // Relay API endpoints
-            .route("/api/relay/status", get(api_relay_status))
-            .route("/api/relay/sessions", get(api_relay_sessions))
-            .route("/api/relay/server/start", post(api_relay_server_start))
-            .route("/api/relay/server/stop", post(api_relay_server_stop))
-            .route("/api/relay/connect/:short_id", post(api_relay_connect))
             .route("/api/gateway/start", post(api_gateway_start))
             .route("/api/gateway/stop", post(api_gateway_stop))
             .route(
@@ -519,6 +511,7 @@ impl WebServer {
                     .delete(api_contacts_delete),
             )
             .route("/api/contacts/export", get(api_contacts_export))
+            .route("/api/network/relay", get(api_network_relay).post(api_network_relay_set))
             .route(
                 "/api/gateways",
                 get(api_gateways_get)
@@ -1468,10 +1461,6 @@ async fn chat_handler() -> Html<&'static str> {
     Html(include_str!("ui/chat.html"))
 }
 
-async fn relay_handler() -> Html<&'static str> {
-    Html(include_str!("ui/relay.html"))
-}
-
 async fn groups_handler() -> Html<&'static str> {
     Html(include_str!("ui/groups.html"))
 }
@@ -2343,208 +2332,36 @@ async fn api_socks5_status(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Ретрансляция: узел сам служит ретранслятором по запросам других узлов (если не запрещено) и сам пользуется ретрансляторами,
+/// когда до него нельзя достучаться. Здесь — состояние и один переключатель «служить ретранслятором для других».
+async fn api_network_relay(State(state): State<AppState>) -> impl IntoResponse {
+    let mut j = crate::relay_net::status_json();
+    if let Some(t) = &state.transport {
+        let st = t.relay_manager.lock().await.get_stats();
+        j["forwarding"] = serde_json::json!({
+            "active_sessions": st.active_sessions,
+            "bytes": st.total_bytes_forwarded,
+            "packets": st.total_packets_forwarded,
+        });
+    }
+    Json(j)
+}
+
+#[derive(Deserialize)]
+struct RelaySetRequest {
+    enabled: bool,
+}
+
+async fn api_network_relay_set(Json(b): Json<RelaySetRequest>) -> impl IntoResponse {
+    match crate::relay_net::set_relay_enabled(b.enabled) {
+        Ok(()) => Json(serde_json::json!({"status": "success", "relay_enabled": b.enabled})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": format!("не удалось сохранить: {e}")})),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
-// RELAY API HANDLERS
+// GATEWAY API HANDLERS
 // ═══════════════════════════════════════════════════════════════
-
-/// Получить статус relay сервера
-async fn api_relay_status(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let relay_manager = transport.relay_manager.lock().await;
-
-    let stats = relay_manager.get_stats();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "relay_server": relay_manager.is_relay_server(),
-        "active_sessions": stats.active_sessions,
-        "total_bytes_forwarded": stats.total_bytes_forwarded,
-        "total_packets_forwarded": stats.total_packets_forwarded
-    }))
-}
-
-/// Получить список активных relay сессий
-async fn api_relay_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let relay_manager = transport.relay_manager.lock().await;
-
-    let sessions: Vec<serde_json::Value> = relay_manager
-        .get_active_sessions()
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "session_id": s.session_id,
-                "source_peer": hex::encode(&s.source_peer.0[..8]),
-                "target_peer": hex::encode(&s.target_peer.0[..8]),
-                "status": format!("{:?}", s.status),
-                "bytes_forwarded": s.bytes_forwarded,
-                "packets_forwarded": s.packets_forwarded,
-                "idle_time_secs": s.idle_time().as_secs()
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "sessions": sessions
-    }))
-}
-
-/// Включить режим relay сервера
-async fn api_relay_server_start(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let mut relay_manager = transport.relay_manager.lock().await;
-
-    relay_manager.set_relay_server_mode(true);
-
-    info!("🌐 Relay server mode ENABLED via Web UI");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Relay server mode enabled"
-    }))
-}
-
-/// Выключить режим relay сервера
-async fn api_relay_server_stop(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let mut relay_manager = transport.relay_manager.lock().await;
-
-    relay_manager.set_relay_server_mode(false);
-
-    info!("🌐 Relay server mode DISABLED via Web UI");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Relay server mode disabled"
-    }))
-}
-
-/// Подключиться к пиру через relay сервер
-async fn api_relay_connect(
-    State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>,
-) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-
-    // Парсим short_id
-    let short_id_bytes = match hex::decode(&short_id) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid short ID: {}", e)
-            }));
-        }
-    };
-
-    if short_id_bytes.len() != 8 {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Short ID must be 8 bytes (16 hex chars)"
-        }));
-    }
-
-    // Ищем пира по short_id
-    let peers = transport.get_peers().await;
-    let target_peer = match peers
-        .iter()
-        .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-    {
-        Some(peer) => peer,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Peer with short ID {} not found", short_id)
-            }));
-        }
-    };
-
-    info!("🔌 Connecting to peer {} via relay", short_id);
-
-    // Создаём relay сессию
-    let my_id = transport.identity().node_id();
-    let session_id = {
-        let mut manager = transport.relay_manager.lock().await;
-        manager.create_session(my_id, target_peer.id)
-    };
-
-    // Отправляем запрос на подключение
-    use crate::netlayer::packet::RelayConnectRequest;
-
-    let request = RelayConnectRequest {
-        source_peer: my_id,
-        target_peer: target_peer.id,
-        session_id,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
-
-    let request_bytes = match serde_json::to_vec(&request) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to serialize relay request: {}", e)
-            }));
-        }
-    };
-
-    let mut packet = vec![0x60u8]; // RelayConnectRequest
-    packet.extend_from_slice(&request_bytes);
-
-    if let Err(e) = transport.send_encrypted(target_peer.id, &packet).await {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to send relay request: {}", e)
-        }));
-    }
-
-    info!("✅ Relay connection request sent to {}", short_id);
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": format!("Relay connection request sent to {}", short_id),
-        "session_id": session_id
-    }))
-}
 
 /// Запустить Gateway mode (на этой ноде)
 async fn api_gateway_start() -> impl IntoResponse {
@@ -5949,7 +5766,7 @@ mod ui_socket_parity_tests {
         // A caller-supplied header is not the connection capability.
         assert_eq!(client.get(format!("{base}/api/status")).header("x-yandi-local-owner", "true").send().await.unwrap().status(), StatusCode::SEE_OTHER);
         assert_eq!(client.post(format!("{base}/api/node/start")).header("cookie", &cookie).header("origin", "http://evil.example").send().await.unwrap().status(), StatusCode::FORBIDDEN);
-        for (method, path, body) in [("GET", "/api/auth/state", ""), ("GET", "/api/status", ""), ("GET", "/api/speed", ""), ("GET", "/api/relay/status", ""), ("GET", "/api/vault/status", ""), ("POST", "/api/node/start", ""), ("POST", "/api/mobile/groups/0123456789abcdef0123456789abcdef/delete", "{\"password\":\"wrong\"}")] {
+        for (method, path, body) in [("GET", "/api/auth/state", ""), ("GET", "/api/status", ""), ("GET", "/api/speed", ""), ("GET", "/api/network/relay", ""), ("GET", "/api/vault/status", ""), ("POST", "/api/node/start", ""), ("POST", "/api/mobile/groups/0123456789abcdef0123456789abcdef/delete", "{\"password\":\"wrong\"}")] {
             if path.ends_with("/delete") {
                 // Exercise the actual StepUp backoff without reading the owner's key files.
                 for _ in 0..10 { auth.record_login_failure(); }

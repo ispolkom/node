@@ -9,7 +9,6 @@ const translations = {
         nav_main: "Главная",
         nav_contacts: "Контакты",
         nav_gateways: "Шлюзы",
-        nav_relay: "Relay",
         nav_settings: "Настройки",
 
         // Main page
@@ -166,7 +165,6 @@ const translations = {
         nav_main: "Main",
         nav_contacts: "Contacts",
         nav_gateways: "Gateways",
-        nav_relay: "Relay",
         nav_settings: "Settings",
 
         // Main page
@@ -1090,13 +1088,6 @@ function renderGatewaysList(gateways, proxyStatus = { active: false, proxies: []
                 ${t('btn_socks5')}
                </button>`;
 
-        // Relay button (для пиров за NAT)
-        const relayBtn = gw.nat_status === 'BehindNAT' || gw.nat_status === 'Unknown'
-            ? `<button class="btn btn-sm btn-warning" onclick="connectViaRelay('${gw.short_id}')" style="background: #f59e0b; color: white;">
-                🔌 Relay
-               </button>`
-            : '';
-
         // Proxy badge when active (показываем тип прокси)
         const activeProxy = proxyStatus.active && proxyStatus.proxies.find(p => p.short_id === gw.short_id);
         const proxyBadge = activeProxy
@@ -1133,7 +1124,6 @@ function renderGatewaysList(gateways, proxyStatus = { active: false, proxies: []
                     }
                     ${proxyBtn}
                     ${socks5Btn}
-                    ${relayBtn}
                     <button class="btn btn-sm btn-icon" onclick="editGateway('${gw.id}', '${gw.name}', '${gw.short_id}', '${gw.country}')">${t('btn_edit')}</button>
                     <button class="btn btn-sm btn-icon btn-danger" onclick="deleteGateway('${gw.id}', '${gw.name}')">🗑️</button>
                 </div>
@@ -1318,13 +1308,6 @@ function setupGatewayActions() {
 }
 
 // === Initialize ===
-        // Relay page initialization
-        if (window.location.pathname === '/relay') {
-            console.log('📡 Relay page loaded');
-            // Relay page uses its own script from relay.html
-            // Just ensure language translations are applied
-            applyTranslations();
-        }
 document.addEventListener('DOMContentLoaded', () => {
     console.log('YANDI Web UI loaded');
 
@@ -1365,8 +1348,6 @@ document.addEventListener('DOMContentLoaded', () => {
     if (window.location.pathname === '/settings') {
         loadSettings();
     }
-
-    // Relay page is handled by relay.html's own script
 
     // Simulate live updates
     setInterval(() => {
@@ -1445,13 +1426,6 @@ function renderNodes(nodes, proxyStatus) {
             ? `<button class="btn btn-sm btn-danger" onclick="disconnectFromNode('${node.short_id}')">${t('btn_disconnect')}</button>`
             : `<button class="btn btn-sm btn-primary" onclick="connectToNode('${node.short_id}')">${t('btn_connect')}</button>`;
 
-        // Relay button (для пиров за NAT)
-        const relayBtn = node.nat_status === 'BehindNAT' || node.nat_status === 'Unknown'
-            ? `<button class="btn btn-sm btn-warning" onclick="connectViaRelay('${node.short_id}')" style="background: #f59e0b; color: white;">
-                🔌 Relay
-               </button>`
-            : '';
-
         // NAT status badge
         const natBadge = node.nat_status === 'Public' 
             ? '<span class="node-badge" style="background: #dcfce7; color: #166534;">🌐 Public</span>'
@@ -1483,7 +1457,6 @@ function renderNodes(nodes, proxyStatus) {
             <div class="node-actions">
                 ${connectBtn}
                 ${proxyBtn}
-                ${relayBtn}
             </div>
         </div>
     `;
@@ -1613,28 +1586,6 @@ async function stopSocks5(shortId) {
     } catch (error) {
         console.error('Failed to stop SOCKS5:', error);
         alert('SOCKS5 stop error');
-    }
-}
-
-// Connect via relay (для пиров за NAT)
-async function connectViaRelay(shortId) {
-    try {
-        const response = await fetch(`/api/relay/connect/${shortId}`, {
-            method: 'POST'
-        });
-
-        const data = await response.json();
-
-        if (response.ok) {
-            alert(`✅ ${data.message}\nSession ID: ${data.session_id}`);
-            // Reload nodes to update UI
-            setTimeout(() => loadNodes(), 1000);
-        } else {
-            alert(`❌ ${data.message}`);
-        }
-    } catch (error) {
-        console.error('Failed to connect via relay:', error);
-        alert('❌ Error connecting via relay');
     }
 }
 
