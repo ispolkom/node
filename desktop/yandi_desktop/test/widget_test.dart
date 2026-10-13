@@ -57,12 +57,14 @@ Future<void> start(WidgetTester tester, FakeApi api) async {
   await tester.pumpAndSettle();
 }
 
-Finder action(String label) => find
-    .ancestor(
-      of: find.text(label),
-      matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
-    )
-    .first;
+Finder action(String label) {
+  final byText = find.ancestor(
+    of: find.text(label),
+    matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
+  );
+  // значок без слова (отправка) находится по подсказке
+  return byText.evaluate().isNotEmpty ? byText.first : find.byTooltip(label).first;
+}
 Future<void> click(WidgetTester tester, String label) async {
   final button = action(label);
   await tester.ensureVisible(button);

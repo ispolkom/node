@@ -238,6 +238,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (text.isEmpty) return;
     final editing = _editingId;
     _inputCtrl.clear();
+    // после отправки клавиатура (и обычная, и наша) убирается
+    setState(_inputFocus.unfocus);
     if (editing != null) {
       context.read<AppState>().editMessage(widget.peerId, editing, text);
       setState(() => _editingId = null);
@@ -444,6 +446,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   title: title,
                   shortId: widget.peerId.substring(0, 8),
                   offers: offers,
+                  links: [
+                    for (final m in state.messagesFor(widget.peerId))
+                      if (FileOffer.tryParse(m.text) == null) ...FileLink.inText(m.text, m.timestamp),
+                  ],
                 ),
               ));
             },

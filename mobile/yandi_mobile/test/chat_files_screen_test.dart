@@ -63,7 +63,7 @@ void main() {
     return offers;
   }
 
-  Future<void> pump(WidgetTester t, List<FileOffer> offers, {FakeHost? host, int maxPerFile = 20}) async {
+  Future<void> pump(WidgetTester t, List<FileOffer> offers, {FakeHost? host, int maxPerFile = 20, List<FileLink> links = const []}) async {
     await t.pumpWidget(MaterialApp(
       theme: AppTheme.dark,
       home: ChatFilesScreen(
@@ -72,6 +72,7 @@ void main() {
         offers: offers,
         host: host ?? FakeHost(),
         maxPerFile: maxPerFile,
+        links: links,
         vault: VaultFiles(dir, vault: () async => _fv(), tempDir: Directory('${dir.path}/tmp')),
       ),
     ));
@@ -230,5 +231,32 @@ void main() {
     await t.pumpAndSettle();
     expect(host.sent.length, 10);
     expect(find.textContaining('не больше 7 получателей'), findsOneWidget);
+  });
+
+  testWidgets('вкладки по видам, ссылки в своём разделе, сообщений в папке нет', (t) async {
+    final offers = await seed(t);
+    await pump(t, offers, links: [FileLink('https://example.org/a', DateTime(2026, 10, 1))]);
+    expect(find.text('отчёт.pdf'), findsOneWidget);
+    expect(find.text('https://example.org/a'), findsOneWidget);
+    await t.tap(find.text('Картинки'));
+    await t.pump();
+    expect(find.text('фото.png'), findsOneWidget);
+    expect(find.text('отчёт.pdf'), findsNothing);
+    expect(find.text('https://example.org/a'), findsNothing);
+    await t.tap(find.text('Аудио'));
+    await t.pump();
+    expect(find.text('песня.mp3'), findsOneWidget);
+    await t.tap(find.text('Видео'));
+    await t.pump();
+    expect(find.text('В этом разделе пусто'), findsOneWidget);
+    await t.tap(find.text('Ссылки'));
+    await t.pump();
+    expect(find.text('https://example.org/a'), findsOneWidget);
+    expect(find.text('песня.mp3'), findsNothing);
+  });
+
+  test('ссылки из текста: адрес без хвостовой точки', () {
+    final l = FileLink.inText('смотри https://a.b/c, и www.x.y.', DateTime(2026));
+    expect(l.map((e) => e.url), ['https://a.b/c', 'www.x.y']);
   });
 }

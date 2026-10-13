@@ -246,6 +246,8 @@ const englishLabels = <String, String>{
   'Вам запрещено писать.': 'You cannot post.',
   'История пуста.': 'History is empty.',
   'Отправить группе': 'Send to group',
+  'Файлы группы': 'Group files',
+  'Назад к сообщениям': 'Back to messages',
   'Вы ещё не состоите в группах.': 'You have not joined any groups.',
   'Каталог пуст.': 'Catalog is empty.',
   'Просьба отправлена': 'Request sent',

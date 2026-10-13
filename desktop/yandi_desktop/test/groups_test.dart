@@ -338,8 +338,8 @@ void main() {
     await t.enterText(field('Сообщение группе'), 'Не отправлять');
     api.configured = true;
     api.unlocked = false;
-    await t.ensureVisible(find.text('Отправить группе'));
-    await t.tap(find.text('Отправить группе'));
+    await t.ensureVisible(find.byTooltip('Отправить группе'));
+    await t.tap(find.byTooltip('Отправить группе'));
     await t.pumpAndSettle();
     expect(api.calls.any((p) => p.endsWith('/send')), false);
     expect(field('Сообщение группе'), findsNothing);
@@ -499,12 +499,18 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('<script>текст</script>'), findsOneWidget);
+    // разделов в ленте нет: они в отдельном виде «Файлы группы», где сообщений не видно
+    expect(find.text('Картинки'), findsNothing);
+    await t.ensureVisible(find.text('Файлы группы'));
+    await t.tap(find.text('Файлы группы'));
+    await t.pumpAndSettle();
+    expect(find.text('<script>текст</script>'), findsNothing);
     await t.ensureVisible(find.text('Картинки'));
     await t.tap(find.text('Картинки'));
     await t.pumpAndSettle();
     expect(find.text('<script>текст</script>'), findsNothing);
     expect(find.text('В этом разделе пусто'), findsOneWidget);
-    await t.tap(find.text('Все'));
+    await t.tap(find.text('Назад к сообщениям'));
     await t.pumpAndSettle();
     expect(find.text('<script>текст</script>'), findsOneWidget);
     await m1.stop(t);

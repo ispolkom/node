@@ -994,9 +994,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       onAttach: sending || choosingFile ? null : pickFile,
       controller: composer,
     );
-    final sendButton = FilledButton(
+    final sendButton = IconButton(
+      tooltip: tr(context, 'Отправить'),
       onPressed: sending ? null : send,
-      child: const UiText('Отправить'),
+      icon: const Icon(Icons.send, color: Icq.header),
     );
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,

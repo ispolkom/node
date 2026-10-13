@@ -152,6 +152,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       tab = nextTab ?? tab;
       composer.text = drafts[id] ?? '';
       feed = info = null;
+      filesView = false;
+      section = null;
       invitation = error = null;
       loading = true;
     });
@@ -325,6 +327,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   final hiddenAuthors = <String, Set<String>>{};
   // Раздел-фильтр ленты, как в мобильном чате: вид записи или null — все.
   int? section;
+  bool filesView = false;
   static const sections = <(int?, String)>[
     (null, 'Все'),
     (2, 'Картинки'),
@@ -858,42 +861,57 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               ),
             ],
           ),
+        // «Файлы группы» — отдельный вид без сообщений: картинки, файлы, аудио, видео и ссылки по разделам.
         Wrap(
           spacing: 14,
+          crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            for (final (kind, label) in sections)
-              InkWell(
-                onTap: () => setState(() => section = kind),
-                child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 2),
-                  child: UiText(
-                    label,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: section == kind
-                          ? FontWeight.bold
-                          : FontWeight.normal,
-                      color: section == kind ? Icq.active : Icq.header,
-                      decoration: section == kind
-                          ? TextDecoration.none
-                          : TextDecoration.underline,
+            CommandText(
+              filesView ? 'Назад к сообщениям' : 'Файлы группы',
+              onTap: () => setState(() {
+                filesView = !filesView;
+                section = null;
+              }),
+            ),
+            if (filesView)
+              for (final (kind, label) in sections)
+                InkWell(
+                  onTap: () => setState(() => section = kind),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 2),
+                    child: UiText(
+                      label,
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: section == kind
+                            ? FontWeight.bold
+                            : FontWeight.normal,
+                        color: section == kind ? Icq.active : Icq.header,
+                        decoration: section == kind
+                            ? TextDecoration.none
+                            : TextDecoration.underline,
+                      ),
                     ),
                   ),
                 ),
-              ),
           ],
         ),
         // Просьбы вступить — служебные карточки в ленте, видны управляющим.
         if (staff && settingsFor != selected)
           for (final r in rows(info, 'requests')) requestCard(r),
-        if (section != null &&
-            !rows(feed, 'messages').any((m) => m['kind'] == section))
+        if (filesView &&
+            !rows(feed, 'messages').any(
+              (m) => m['kind'] is int && (m['kind'] as int) >= 2 && (section == null || m['kind'] == section),
+            ))
           const UiText('В этом разделе пусто'),
         for (final m in rows(feed, 'messages'))
           if (!(hiddenAuthors[selected] ?? const <String>{}).contains(
                 '${m['from']}',
               ) &&
-              (section == null || m['kind'] == section))
+              (!filesView ||
+                  (m['kind'] is int &&
+                      (m['kind'] as int) >= 2 &&
+                      (section == null || m['kind'] == section))))
             bubble(m),
         if (info != null && settingsFor == selected) ...[
           participants(),
@@ -971,9 +989,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         ),
       ),
     );
-    final sendButton = FilledButton(
+    final sendButton = IconButton(
+      tooltip: tr(context, 'Отправить группе'),
       onPressed: !busy && canSend ? send : null,
-      child: const UiText('Отправить группе'),
+      icon: const Icon(Icons.send, color: Icq.header),
     );
     final attach = ComposerTools(
       onAttach: busy || choosing || !canSend ? null : pickFile,

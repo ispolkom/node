@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import '../models/file_offer.dart';
@@ -43,6 +44,23 @@ FileKind fileKindOf(String name, String mime) {
   return FileKind.other;
 }
 
+/// Ссылка из переписки для раздела «Ссылки» папки: адрес и когда он появился.
+class FileLink {
+  final String url;
+  final DateTime when;
+  const FileLink(this.url, this.when);
+
+  static final _re = RegExp(r'(https?://|www\.)[^\s<>"]+', caseSensitive: false);
+
+  /// Все адреса из текста (без хвостовой пунктуации).
+  static List<FileLink> inText(String text, DateTime when) => [
+        for (final m in _re.allMatches(text)) FileLink(m.group(0)!.replaceAll(RegExp(r'[.,;:!?)\]]+$'), ''), when),
+      ];
+}
+
+/// Разделы-вкладки папки (как в мессенджерах): вид содержимого, без сообщений.
+const _tabs = ['Все', 'Картинки', 'Файлы', 'Аудио', 'Видео', 'Ссылки'];
+
 /// «Файлы чата»: отдельная папка внутри защищённого пространства — только файлы этого собеседника (и присланные, и отправленные).
 /// Папка называется коротким идентификатором контакта. Файлы можно открыть и посмотреть или послушать внутри приложения,
 /// удалять по одному, выбранными или все сразу (с подтверждением). Наружу из этой папки файлы не выносятся.
@@ -58,7 +76,9 @@ class ChatFilesScreen extends StatefulWidget {
   final int maxPerFile;
   /// Подсказка пустой папки (для группы своя).
   final String? emptyHint;
-  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile, this.emptyHint});
+  /// Ссылки из переписки (раздел «Ссылки»); сами сообщения в папке не показываются.
+  final List<FileLink> links;
+  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile, this.emptyHint, this.links = const []});
 
   /// За один раз — не больше стольких получателей; суммарно на один файл — не больше defaultMaxPerFile.
   static const maxPerBatch = 5;
@@ -75,6 +95,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
   /// Кому уже пересылали файл в этом сеансе (путь файла → получатели): предел на один файл.
   final Map<String, Set<String>> _sentTo = {};
   bool _loading = true;
+  int _tab = 0;
 
   @override
   void initState() {
@@ -251,9 +272,17 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
   Widget build(BuildContext context) {
     final selecting = _selected.isNotEmpty;
     final groups = <FileKind, List<VaultFile>>{};
+    const tabKinds = <int, Set<FileKind>>{
+      1: {FileKind.pictures},
+      2: {FileKind.documents, FileKind.archives, FileKind.other},
+      3: {FileKind.music},
+      4: {FileKind.video},
+    };
     for (final f in _files) {
-      groups.putIfAbsent(fileKindOf(f.name, f.mime), () => []).add(f);
+      final k = fileKindOf(f.name, f.mime);
+      if (_tab == 0 || (tabKinds[_tab]?.contains(k) ?? false)) groups.putIfAbsent(k, () => []).add(f);
     }
+    final showLinks = (_tab == 0 || _tab == 5) && widget.links.isNotEmpty;
     return Scaffold(
       appBar: AppBar(
         leading: selecting
@@ -292,7 +321,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _files.isEmpty
+          : _files.isEmpty && widget.links.isEmpty
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(32),
@@ -302,6 +331,53 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                 )
               : ListView(
                   children: [
+                    SizedBox(
+                      height: 44,
+                      child: ListView(
+                        key: const ValueKey('files-tabs'),
+                        scrollDirection: Axis.horizontal,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        children: [
+                          for (var i = 0; i < _tabs.length; i++)
+                            Padding(
+                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
+                              child: ChoiceChip(
+                                label: Text(_tabs[i], style: TextStyle(fontSize: 12, color: _tab == i ? Colors.black : AppTheme.text)),
+                                selected: _tab == i,
+                                selectedColor: AppTheme.accent,
+                                backgroundColor: AppTheme.surface,
+                                onSelected: (_) => setState(() => _tab = i),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    if (groups.isEmpty && !showLinks)
+                      const Padding(
+                        padding: EdgeInsets.all(32),
+                        child: Center(child: Text('В этом разделе пусто', style: TextStyle(color: AppTheme.textSecondary))),
+                      ),
+                    if (showLinks) ...[
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
+                        child: Text('Ссылки · ${widget.links.length}',
+                            style: const TextStyle(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.bold)),
+                      ),
+                      for (final l in widget.links)
+                        ListTile(
+                          leading: const Icon(Icons.link, color: AppTheme.textSecondary),
+                          title: Text(l.url, maxLines: 2, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
+                          subtitle: Text(DateFormat('dd.MM.yyyy HH:mm').format(l.when),
+                              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                          // наружу сами не выходим: адрес копируется, открывать или нет — решает человек
+                          onTap: () async {
+                            await Clipboard.setData(ClipboardData(text: l.url));
+                            if (!mounted) return;
+                            ScaffoldMessenger.of(context).clearSnackBars();
+                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+                          },
+                        ),
+                    ],
                     for (final kind in FileKind.values)
                       if (groups[kind] != null) ...[
                         Padding(

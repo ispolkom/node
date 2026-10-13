@@ -228,6 +228,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       });
       _ctrl.clear();
       _replyTo = null;
+      // после отправки клавиатура (и обычная, и наша) убирается
+      if (mounted) setState(_focus.unfocus);
       await svc.sync(only: widget.gid);
       await _load();
     } on GroupSendRefused catch (e) {
@@ -461,7 +463,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   ),
             ];
             Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.'),
+              builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.',
+                  links: [
+                    for (final e in _entries)
+                      if (e.body['t'] is String) ...FileLink.inText(e.body['t'] as String, DateTime.fromMillisecondsSinceEpoch(e.ts)),
+                  ]),
             ));
           },
           child: Container(
@@ -475,26 +481,6 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               Spacer(),
               Icon(Icons.chevron_right, size: 18, color: AppTheme.textSecondary),
             ]),
-          ),
-        ),
-        SizedBox(
-          height: 44,
-          child: ListView(
-            scrollDirection: Axis.horizontal,
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            children: [
-              for (final (k, label) in groupSections)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 6),
-                  child: ChoiceChip(
-                    label: Text(label, style: TextStyle(fontSize: 12, color: _section == k ? Colors.black : AppTheme.text)),
-                    selected: _section == k,
-                    selectedColor: AppTheme.accent,
-                    backgroundColor: AppTheme.surface,
-                    onSelected: (_) { setState(() => _section = k); _load(); },
-                  ),
-                ),
-            ],
           ),
         ),
         if (svc.hasProblem(g.id))
