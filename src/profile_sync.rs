@@ -25,7 +25,7 @@ const MAX_NICK: usize = 40;
 
 /// Служебное сообщение профиля: не показывается в переписке.
 pub fn is_service(text: &str) -> bool {
-    text.starts_with("\u{1}yandi-av")
+    text.starts_with("\u{1}yandi-av") || text.starts_with("\u{1}yandi-rx:") // профиль и реакции-смайлы телефонов
 }
 
 fn hex64(h: &str) -> bool {

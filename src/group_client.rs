@@ -30,7 +30,9 @@ pub const KIND_AUDIO: u8 = 4;
 pub const KIND_VIDEO: u8 = 5;
 pub const KIND_LINK: u8 = 6;
 pub const KIND_SYSTEM: u8 = 7;
-const KINDS: [u8; 7] = [1, 2, 3, 4, 5, 6, 7];
+/// Голос «одобряю / не одобряю» за запись: `{s: номер записи, v: 1 | -1 | 0}`; в ленту не попадает, считается в монетки под записью.
+pub const KIND_REACTION: u8 = 8;
+const KINDS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const VERSION: u8 = 1;
 
 fn b64(b: &[u8]) -> String {
@@ -941,6 +943,32 @@ fn ui_body(body: &Value) -> Value {
     public
 }
 
+/// Монетки: запись → (баланс, мой голос). Один голос на человека (последний по порядку), голос за свою запись и за несуществующую
+/// не считается.
+fn tally_votes(log: &[Entry], my: &str) -> HashMap<u64, (i64, i64)> {
+    let author: HashMap<u64, &str> = log.iter().filter(|e| e.kind != KIND_REACTION).map(|e| (e.seq, e.from.as_str())).collect();
+    let mut latest: HashMap<u64, HashMap<&str, i64>> = HashMap::new();
+    for e in log.iter().filter(|e| e.kind == KIND_REACTION && !e.deleted) {
+        let (Some(t), Some(v)) = (e.body["s"].as_u64(), e.body["v"].as_i64()) else { continue };
+        if !(-1..=1).contains(&v) || author.get(&t).map_or(true, |a| *a == e.from) {
+            continue;
+        }
+        latest.entry(t).or_default().insert(e.from.as_str(), v);
+    }
+    latest.into_iter().map(|(t, m)| (t, (m.values().sum(), m.get(my).copied().unwrap_or(0)))).collect()
+}
+
+/// Проголосовать за запись: 1 — одобряю, -1 — не одобряю; тот же голос ещё раз снимает его.
+pub fn vote(gid: &str, seq: u64, v: i64) -> Result<(), String> {
+    if !(-1..=1).contains(&v) || v == 0 {
+        return Err("голос — 1 или -1".into());
+    }
+    let dev = pc_device()?;
+    let my = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).map(|g| s(&g, "my_alias")).ok_or("группа недоступна")?;
+    let cur = with_client(|c| Ok(tally_votes(c.load_log(gid), &my).get(&seq).map(|x| x.1).unwrap_or(0)))?;
+    send(gid, KIND_REACTION, json!({"s": seq, "v": if cur == v { 0 } else { v }})).map(|_| ())
+}
+
 /// Лента группы: видимые записи (стёртые, служебные и запрещённые правилами не показываются) и сведения о группе.
 pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
     let dev = pc_device()?;
@@ -951,10 +979,14 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
         names.extend(card_nicks(gid, &dev)); // раскрытый ник важнее имени «при вступлении»
         let deny = c.rules.get(gid).cloned().unwrap_or_default();
         let log = c.load_log(gid).clone();
+        let tally = tally_votes(&log, &my);
         let items: Vec<Value> = log
             .iter()
-            .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && !deny.contains(&e.kind))
-            .map(|e| json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": ui_body(&e.body)}))
+            .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && e.kind != KIND_REACTION && !deny.contains(&e.kind))
+            .map(|e| {
+                let (coins, mine_vote) = tally.get(&e.seq).map(|(c, m)| (json!(c), json!(m))).unwrap_or((Value::Null, json!(0)));
+                json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": ui_body(&e.body), "coins": coins, "my_vote": mine_vote})
+            })
             .collect();
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
         Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items}))
@@ -1301,6 +1333,23 @@ pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coins_count_one_vote_per_person_and_ignore_self_votes() {
+        let e = |seq: u64, kind: u8, from: &str, body: Value| Entry { seq, ts: 0, epoch: 1, kind, from: from.into(), body, deleted: false };
+        let log = vec![
+            e(1, KIND_TEXT, "Автор", json!({"t": "идея"})),
+            e(2, KIND_REACTION, "Боб", json!({"s": 1, "v": 1})),
+            e(3, KIND_REACTION, "Вера", json!({"s": 1, "v": 1})),
+            e(4, KIND_REACTION, "Автор", json!({"s": 1, "v": 1})),   // за себя — не считается
+            e(5, KIND_REACTION, "Боб", json!({"s": 1, "v": -1})),   // передумал: заменяет прежний
+            e(6, KIND_REACTION, "Вера", json!({"s": 99, "v": 1})),  // такой записи нет
+            e(7, KIND_REACTION, "Вера", json!({"s": 1, "v": 7})),   // неверное значение
+        ];
+        let t = tally_votes(&log, "Боб");
+        assert_eq!(t.get(&1), Some(&(0, -1)), "Вера +1, Боб −1");
+        assert!(t.get(&99).is_none());
+    }
 
     #[test]
     fn desktop_file_view_does_not_export_decryption_keys_or_mutate_daemon_log() {

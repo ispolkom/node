@@ -869,6 +869,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         .firstOrNull;
     final commands = [
       commandReply,
+      if (!own && m['seq'] != null) commandApprove,
+      if (!own && m['seq'] != null) commandDisapprove,
       if (m['reply'] is Map) commandThread,
       if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
       if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
@@ -884,6 +886,12 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     final choice = await showMessageMenu(context, at, commands);
     if (!mounted || choice == null) return;
     switch (choice) {
+      case commandApprove:
+      case commandDisapprove:
+        final v = choice == commandApprove ? 1 : -1;
+        await mutate(() async {
+          await repo.act(id, 'vote', {'seq': m['seq'], 'v': v});
+        });
       case commandReply:
         setState(() {
           replyTo = {
@@ -1009,9 +1017,35 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                   ),
                 Align(
                   alignment: Alignment.centerRight,
-                  child: Text(
-                    hm,
-                    style: const TextStyle(fontSize: 11, color: Icq.dark),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (m['coins'] is num) ...[
+                        AnimatedSwitcher(
+                          duration: const Duration(milliseconds: 450),
+                          transitionBuilder: (child, animation) => ScaleTransition(
+                            scale: animation,
+                            child: FadeTransition(opacity: animation, child: child),
+                          ),
+                          child: Text(
+                            '🪙 ${(m['coins'] as num) > 0 ? '+' : ''}${m['coins']}',
+                            key: ValueKey('coins-${m['seq']}-${m['coins']}'),
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: (m['coins'] as num) < 0
+                                  ? const Color(0xFFB00020)
+                                  : Icq.dark,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                      ],
+                      Text(
+                        hm,
+                        style: const TextStyle(fontSize: 11, color: Icq.dark),
+                      ),
+                    ],
                   ),
                 ),
               ],

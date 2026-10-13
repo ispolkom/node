@@ -454,6 +454,17 @@ void main() {
     expect(api.bodies.any((b) => b['share'] == true), true);
     await m1.stop(t);
   });
+  testWidgets('монетки: слово «Одобряю» в меню чужой записи отправляет голос', (t) async {
+    final api = GroupApi();
+    await open(t, api, conversation: true);
+    await t.tap(find.text('<script>текст</script>'));
+    await t.pumpAndSettle();
+    await t.tap(find.text('🪙 Одобряю'));
+    await t.pumpAndSettle();
+    expect(api.calls.any((p) => p.endsWith('/vote')), true);
+    expect(api.bodies.any((b) => b['v'] == 1 && b.containsKey('seq')), true);
+    await m1.stop(t);
+  });
   testWidgets('ownership countdown and node delete StepUp', (t) async {
     final api = GroupApi();
     await open(t, api, conversation: true);

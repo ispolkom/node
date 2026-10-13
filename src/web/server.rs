@@ -653,6 +653,7 @@ impl WebServer {
             .route("/api/groups/:gid/settings", post(api_groups_settings))
             .route("/api/groups/:gid/autoclean", post(api_groups_autoclean))
             .route("/api/groups/:gid/profile", post(api_groups_profile))
+            .route("/api/groups/:gid/vote", post(api_groups_vote))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
             .route(
@@ -1084,6 +1085,17 @@ struct MyGroupAutoClean {
 
 async fn api_groups_autoclean(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAutoClean>) -> Response {
     grp_reply(crate::group_client::set_auto_clean(&gid, b.days).map(|d| serde_json::json!({"ok": true, "days": d})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupVote {
+    seq: u64,
+    v: i64,
+}
+
+/// Монетка одобрения: v = 1 или -1.
+async fn api_groups_vote(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupVote>) -> Response {
+    grp_reply(crate::group_client::vote(&gid, b.seq, b.v).map(|_| serde_json::json!({"ok": true})))
 }
 
 #[derive(Deserialize)]

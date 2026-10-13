@@ -13,7 +13,9 @@ const commandEdit = 'Изменить',
     commandSelect = 'Выбрать',
     commandShare = 'Переслать',
     commandThread = 'Вся цепочка ответов',
-    commandMute = 'Заглушить';
+    commandMute = 'Заглушить',
+    commandApprove = '🪙 Одобряю',
+    commandDisapprove = '🪙 Не одобряю';
 
 Future<String?> showMessageMenu(
   BuildContext context,
