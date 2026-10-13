@@ -652,6 +652,7 @@ impl WebServer {
             .route("/api/groups/:gid/mod", post(api_groups_mod))
             .route("/api/groups/:gid/settings", post(api_groups_settings))
             .route("/api/groups/:gid/autoclean", post(api_groups_autoclean))
+            .route("/api/groups/:gid/profile", post(api_groups_profile))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
             .route(
@@ -1083,6 +1084,16 @@ struct MyGroupAutoClean {
 
 async fn api_groups_autoclean(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAutoClean>) -> Response {
     grp_reply(crate::group_client::set_auto_clean(&gid, b.days).map(|d| serde_json::json!({"ok": true, "days": d})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupShare {
+    share: bool,
+}
+
+/// Показывать ли ник и аватар компьютера в группе (по желанию, из единого профиля узла).
+async fn api_groups_profile(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupShare>) -> Response {
+    grp_reply(crate::group_client::share_card(&gid, b.share).map(|_| serde_json::json!({"ok": true})))
 }
 
 async fn api_groups_settings(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSettings>) -> Response {

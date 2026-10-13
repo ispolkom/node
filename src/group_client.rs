@@ -947,7 +947,8 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
     with_client(|c| {
         let info = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
         let my = s(&info, "my_alias");
-        let names = c.names.get(gid).cloned().unwrap_or_default();
+        let mut names = c.names.get(gid).cloned().unwrap_or_default();
+        names.extend(card_nicks(gid, &dev)); // раскрытый ник важнее имени «при вступлении»
         let deny = c.rules.get(gid).cloned().unwrap_or_default();
         let log = c.load_log(gid).clone();
         let items: Vec<Value> = log
@@ -1060,6 +1061,31 @@ pub fn set_auto_clean(gid: &str, days: u32) -> Result<u32, String> {
     with_store(|st| st.set_auto_clean(gid, &dev, days)).map_err(fail)
 }
 
+/// Ники, которые участники сами раскрыли в группе: псевдоним → ник.
+fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
+    with_store(|st| st.members(gid, dev))
+        .ok()
+        .and_then(|m| m["members"].as_array().cloned())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string())))
+        .collect()
+}
+
+/// Раскрыть (или спрятать) ник и аватар компьютера в группе — из единого профиля узла.
+pub fn share_card(gid: &str, on: bool) -> Result<(), String> {
+    let dev = pc_device()?;
+    let (nick, avatar) = if on {
+        let short = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
+        let nick = crate::mobile_profile::snapshot(&short)["nick"].as_str().unwrap_or("").to_string();
+        let png = crate::mobile_profile::avatar_bytes(&short).and_then(|(b, _)| crate::mobile_profile::sanitize_small(&b));
+        (nick, png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default())
+    } else {
+        (String::new(), String::new())
+    };
+    with_store(|st| st.set_card(gid, &dev, &nick, &avatar)).map_err(fail)
+}
+
 /// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).
 pub fn info(gid: &str) -> Result<Value, String> {
     let dev = pc_device()?;
@@ -1067,12 +1093,13 @@ pub fn info(gid: &str) -> Result<Value, String> {
         let g = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
         let m = with_store(|st| st.members(gid, &dev)).map_err(fail)?;
         let names = c.names.get(gid).cloned().unwrap_or_default();
+        let nicks = card_nicks(gid, &dev);
         let members: Vec<Value> = m["members"]
             .as_array()
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|x| json!({"alias": s(x, "alias"), "name": names.get(&s(x, "alias")).cloned().unwrap_or_default(), "role": s(x, "role"), "muted": x["muted"], "has_key": x["has_key"]}))
+            .map(|x| json!({"alias": s(x, "alias"), "nick": nicks.get(&s(x, "alias")).cloned().unwrap_or_default(), "name": names.get(&s(x, "alias")).cloned().unwrap_or_default(), "role": s(x, "role"), "muted": x["muted"], "has_key": x["has_key"]}))
             .collect();
         let staff = s(&g, "role") != "member";
         let requests = if staff && s(&g, "kind") == "invite" {
