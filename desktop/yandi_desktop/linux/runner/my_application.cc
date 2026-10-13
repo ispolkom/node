@@ -90,6 +90,12 @@ static void local_method(FlMethodChannel*, FlMethodCall* call, gpointer data) {
 // Implements GApplication::activate.
 static void my_application_activate(GApplication* application) {
   MyApplication* self = MY_APPLICATION(application);
+  // Окно уже открыто (повторный запуск): не создаём второе, а поднимаем имеющееся.
+  GList* windows = gtk_application_get_windows(GTK_APPLICATION(application));
+  if (windows != nullptr) {
+    gtk_window_present(GTK_WINDOW(windows->data));
+    return;
+  }
   // File selection must not write GTK recent-file history. GSettings is memory-only.
   g_object_set(gtk_settings_get_default(), "gtk-recent-files-enabled", FALSE, nullptr);
   GtkWindow* window =
@@ -223,5 +229,5 @@ MyApplication* my_application_new() {
 
   return MY_APPLICATION(g_object_new(my_application_get_type(),
                                      "application-id", APPLICATION_ID, "flags",
-                                     G_APPLICATION_NON_UNIQUE, nullptr));
+                                     G_APPLICATION_DEFAULT_FLAGS, nullptr));
 }
