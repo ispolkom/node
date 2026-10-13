@@ -77,7 +77,9 @@ class GroupMember {
   final String alias, role;
   final bool muted, hasKey;
   final String? memberPub;
-  const GroupMember({required this.alias, required this.role, required this.muted, required this.hasKey, this.memberPub});
+  /// ник, который участник сам раскрыл в этой группе (null — виден только псевдоним)
+  final String? nick;
+  const GroupMember({required this.alias, required this.role, required this.muted, required this.hasKey, this.memberPub, this.nick});
 
   factory GroupMember.fromJson(Map<String, dynamic> j) => GroupMember(
         alias: j['alias'] as String,
@@ -85,6 +87,7 @@ class GroupMember {
         muted: j['muted'] == true,
         hasKey: j['has_key'] == true,
         memberPub: j['member_pub'] as String?,
+        nick: j['nick'] as String?,
       );
 }
 

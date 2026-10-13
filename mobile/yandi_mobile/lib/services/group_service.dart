@@ -36,7 +36,33 @@ class GroupService {
   List<(String, String)> gone = const [];
 
   GroupRules rules(String gid) => _rules[gid] ?? const GroupRules();
-  String displayName(String gid, String alias) => _names[gid]?[alias] ?? alias;
+  final Map<String, Map<String, String>> _nicks = {};       // группа → псевдоним → ник, раскрытый самим участником
+  String displayName(String gid, String alias) => _nicks[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
+
+  /// Показываю ли я свой ник в этой группе (решает человек, по умолчанию — нет).
+  Future<bool> cardShared(String gid) async => await store.read('grp_card_$gid') == '1';
+
+  /// Раскрыть (или спрятать) свой ник и картинку в группе. Сам ник и картинка берутся из профиля — их передаёт приложение.
+  Future<void> setCardShared(String gid, bool on, {String nick = '', List<int>? avatar}) async {
+    await api.setCard(gid, on ? nick : '', on && avatar != null ? base64.encode(avatar) : '');
+    await store.write('grp_card_$gid', on ? '1' : '0');
+    await _rebuildMetaFor(gid);
+  }
+
+  /// Профиль поменялся — обновить визитки там, где я их раскрыл.
+  Future<void> refreshCards(String nick, List<int>? avatar) async {
+    for (final g in groups) {
+      try {
+        if (await cardShared(g.id)) await api.setCard(g.id, nick, avatar != null ? base64.encode(avatar) : '');
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _rebuildMetaFor(String gid) async {
+    final g = byId(gid);
+    if (g != null) await _rebuildMeta(g);
+    onChanged?.call(gid);
+  }
   bool hasProblem(String gid) => _problems.contains(gid);
   /// Роль участника по псевдониму (null — не знаем или ушёл из группы).
   String? roleOf(String gid, String alias) => _roles[gid]?[alias];
@@ -272,12 +298,15 @@ class GroupService {
     try {
       final m = await api.members(g.id);
       final roles = <String, String>{};
+      final nicks = <String, String>{};
       for (final x in (m['members'] as List? ?? const [])) {
         final r = (x as Map)['role'];
+        if (x['alias'] is String && x['nick'] is String && (x['nick'] as String).isNotEmpty) nicks[x['alias'] as String] = x['nick'] as String;
         if (x['alias'] is String && r is String) roles[x['alias'] as String] = r;
         if (r == 'owner' || r == 'admin') managers.add(x['alias'] as String);
       }
       _roles[g.id] = roles;
+      _nicks[g.id] = nicks;
     } catch (_) {}
     for (final e in sys) {
       if (e.deleted) continue;

@@ -24,6 +24,8 @@ abstract class GroupApi {
   Future<void> leave(String gid);
   Future<Map<String, dynamic>> members(String gid);
   Future<void> setPub(String gid, String memberPub);
+  /// Раскрыть свой ник и картинку в группе (пустые — убрать).
+  Future<void> setCard(String gid, String nick, String avatarB64);
   Future<Map<String, dynamic>> keys(String gid);
   Future<void> putKeys(String gid, int epoch, Map<String, String> boxes);
   Future<Map<String, dynamic>> pull(String gid, int after, {int limit = 200});

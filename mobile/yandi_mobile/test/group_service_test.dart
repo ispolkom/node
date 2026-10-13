@@ -106,10 +106,12 @@ class _Api implements GroupApi {
   Future<void> leave(String gid) async { n.members.remove(dev); n.rekeyNeeded = true; }
   @override
   Future<Map<String, dynamic>> members(String gid) async => {
-        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
+        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
       };
   @override
   Future<void> setPub(String gid, String memberPub) async => me['pub'] = memberPub;
+  @override
+  Future<void> setCard(String gid, String nick, String avatarB64) async => me['nick'] = nick.isEmpty ? null : nick;
   @override
   Future<Map<String, dynamic>> keys(String gid) async => {
         'epoch': n.epoch,
@@ -541,5 +543,26 @@ void main() {
     node.log.add({...orig, 'seq': node.log.length + 1, 'ts': 9999});   // узел (или кто-то) переложил тот же шифртекст
     await bob.sync();
     expect((await bob.messages(node.gid)).where((e) => e.body['t'] == 'один раз').length, 1);
+  });
+
+  test('ник раскрывается по желанию: до этого виден псевдоним, после — ник, обратно — снова псевдоним', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.sync();
+    final bobAlias = bob.byId(node.gid)!.myAlias;
+    final before = owner.displayName(node.gid, bobAlias);   // имя, названное при вступлении, или псевдоним
+    expect(await bob.cardShared(node.gid), isFalse);
+    await bob.setCardShared(node.gid, true, nick: 'Доктор Хаус');
+    expect(await bob.cardShared(node.gid), isTrue);
+    await owner.sync();
+    await owner.setCardShared(node.gid, false);   // чужая визитка не трогается; своя — выключена
+    expect(owner.displayName(node.gid, bobAlias), 'Доктор Хаус');
+    await bob.refreshCards('Хаус', null);
+    await owner.sync();
+    await owner.setCardShared(node.gid, false);
+    expect(owner.displayName(node.gid, bobAlias), 'Хаус');
+    await bob.setCardShared(node.gid, false);
+    await owner.setCardShared(node.gid, false);
+    expect(owner.displayName(node.gid, bobAlias), before);
   });
 }

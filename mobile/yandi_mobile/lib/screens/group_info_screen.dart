@@ -26,6 +26,7 @@ class GroupInfoScreen extends StatefulWidget {
 
 class _GroupInfoScreenState extends State<GroupInfoScreen> {
   List<GroupMember> _members = const [];
+  bool _cardShared = false;
   List<JoinRequest> _requests = const [];
   List<String> _banned = const [];
   final _nameCtrl = TextEditingController();
@@ -78,8 +79,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       if (gi != null && gi.canModerate && gi.kind == 'invite') {
         try { reqs = await _svc.joinRequests(widget.gid); } catch (_) {}
       }
+      final shared = await _svc.cardShared(widget.gid);
       if (!mounted) return;
       setState(() {
+        _cardShared = shared;
         _members = [for (final x in (m['members'] as List? ?? const [])) GroupMember.fromJson((x as Map).cast<String, dynamic>())];
         _requests = reqs;
         _banned = [for (final b in (m['banned'] as List? ?? const [])) '$b'];
@@ -452,6 +455,25 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             ),
           ),
         if (_error != null) Padding(padding: const EdgeInsets.all(16), child: Text(_error!, style: const TextStyle(color: AppTheme.incoming))),
+        SwitchListTile(
+          key: const Key('card-share'),
+          value: _cardShared,
+          title: const Text('Показывать мой ник и аватар в этой группе', style: TextStyle(color: AppTheme.text)),
+          subtitle: Text(
+            _cardShared
+                ? 'Участники видят вас как «${state.myNick.isEmpty ? 'без ника' : state.myNick}». Выключите — снова будет только псевдоним ${g.myAlias}.'
+                : 'Сейчас вас видят только под псевдонимом ${g.myAlias}. По вашему выбору — под ником и аватаркой из профиля.',
+            style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+          ),
+          onChanged: (on) async {
+            try {
+              await _svc.setCardShared(widget.gid, on, nick: state.myNick, avatar: state.myAvatarBytes);
+              await _load();
+            } catch (e) {
+              if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
+            }
+          },
+        ),
         // участники: список с прокруткой; нажатие на участника открывает окно действий
         ConstrainedBox(
           constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.42),

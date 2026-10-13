@@ -938,6 +938,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _profileDirty = true;
     unawaited(_saveProfileMeta());
     unawaited(syncProfile());
+    unawaited(groups?.refreshCards(myNick, avatars?.myBytes) ?? Future<void>.value());   // там, где раскрыт ник, обновить визитку
   }
 
   /// Задать свой ник (виден контактам и в группах). null — готово, иначе причина.
