@@ -412,8 +412,11 @@ impl P2PTransport {
     }
 
     pub async fn add_peer(&self, peer: P2PPeer) {
+        let id = peer.id;
         let mut peers = self.peers.lock().await;
         peers.insert(peer.id, peer);
+        drop(peers);
+        crate::profile_sync::peer_seen(&id);
     }
 
     /// Get peer by ID

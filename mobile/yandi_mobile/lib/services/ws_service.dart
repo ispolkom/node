@@ -22,6 +22,7 @@ const int ftPeerOffline = 0x14;
 const int ftSendLive    = 0x31;
 // намёк «в группе что-то изменилось» (без содержимого): [0x15][16 номер группы][1 что][8 seq LE]
 const int ftGroupHint   = 0x15;
+const int ftProfile     = 0x16;
 
 class GroupHintEvent {
   final String gid;
@@ -97,6 +98,7 @@ class WsService {
   final _liveCtrl      = StreamController<LiveSignalEvent>.broadcast();
   final _offlineCtrl   = StreamController<String>.broadcast();
   final _groupCtrl     = StreamController<GroupHintEvent>.broadcast();
+  final _profileCtrl   = StreamController<void>.broadcast();
 
   Stream<IncomingChatEvent> get chatStream      => _chatCtrl.stream;
   Stream<PeerStatusEvent>   get statusStream    => _statusCtrl.stream;
@@ -105,6 +107,8 @@ class WsService {
   /// Номер телефона, которому сигнал не доставлен: его нет на связи.
   Stream<String>            get offlineStream   => _offlineCtrl.stream;
   Stream<GroupHintEvent>    get groupStream     => _groupCtrl.stream;
+  /// Узел сообщил: профиль владельца (ник или картинка) изменился — подтянуть его.
+  Stream<void>              get profileStream   => _profileCtrl.stream;
   bool get connected => _channel != null;
 
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
@@ -228,6 +232,9 @@ class WsService {
           final seq = ByteData.sublistView(data, 18, 26).getUint64(0, Endian.little);
           _groupCtrl.add(GroupHintEvent(_bytesToHex(data.sublist(1, 17)), data[17], seq));
         }
+
+      case ftProfile:
+        _profileCtrl.add(null);
 
       case ftPeerOffline:
         if (data.length >= 33) _offlineCtrl.add(_bytesToHex(data.sublist(1, 33)));
@@ -395,6 +402,7 @@ class WsService {
     _liveCtrl.close();
     _offlineCtrl.close();
     _groupCtrl.close();
+    _profileCtrl.close();
   }
 
   // ── TLS pinning ────────────────────────────────────────────────────────────

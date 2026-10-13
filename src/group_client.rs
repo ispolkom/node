@@ -498,13 +498,25 @@ pub fn sync_all() {
 }
 
 /// Визитка ПК из единого профиля узла: (ник, маленькая картинка в base64, отпечаток). Пустой профиль — пустой отпечаток.
+/// Картинка пересобирается только когда сменились ник или сами байты картинки (обход групп идёт часто).
 fn pc_card() -> (String, String, String) {
+    use sha2::Digest;
+    static LAST: Mutex<Option<(String, (String, String, String))>> = Mutex::new(None);
     let short = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
     let nick = crate::mobile_profile::snapshot(&short)["nick"].as_str().unwrap_or("").to_string();
-    let png = crate::mobile_profile::avatar_bytes(&short).and_then(|(b, _)| crate::mobile_profile::sanitize_small(&b));
+    let raw = crate::mobile_profile::avatar_bytes(&short).map(|(b, _)| b);
+    let key = format!("{nick}\u{0}{}", raw.as_ref().map(|b| hex::encode(Sha256::digest(b))).unwrap_or_default());
+    if let Some((k, card)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *k == key {
+            return card.clone();
+        }
+    }
+    let png = raw.and_then(|b| crate::mobile_profile::sanitize_small(&b));
     let avatar = png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
-    let print = if nick.is_empty() && avatar.is_empty() { String::new() } else { { use sha2::Digest; hex::encode(Sha256::digest(format!("{nick}\u{0}{avatar}").as_bytes())) } };
-    (nick, avatar, print)
+    let print = if nick.is_empty() && avatar.is_empty() { String::new() } else { hex::encode(Sha256::digest(format!("{nick}\u{0}{avatar}").as_bytes())) };
+    let card = (nick, avatar, print);
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, card.clone()));
+    card
 }
 
 fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str, card: &(String, String, String)) -> Result<(), String> {

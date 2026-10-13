@@ -55,6 +55,7 @@ impl UserProfile {
         let path = Self::profile_path();
         let content = serde_json::to_string_pretty(self)?;
         std::fs::write(path, content)?;
+        crate::profile_sync::changed(); // ник или картинка могли измениться: сообщить контактам и своим телефонам
         Ok(())
     }
 

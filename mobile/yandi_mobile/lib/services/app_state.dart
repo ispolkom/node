@@ -178,6 +178,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws!.liveStream.listen(_onLiveSignal);
     _ws!.offlineStream.listen(calls.onPeerOffline);
     _ws!.groupStream.listen(_onGroupHint);
+    _ws!.profileStream.listen((_) => unawaited(syncProfile()));   // узел сообщил, что профиль изменился
 
     chatBg.start(node);
 

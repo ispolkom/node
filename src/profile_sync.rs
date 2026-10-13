@@ -20,7 +20,6 @@ const N: &str = "\u{1}yandi-avn:";
 const MAX_PNG: usize = 40 * 1024;
 const MAX_SIDE: u32 = 1024;
 const PENDING_TTL: Duration = Duration::from_secs(300);
-const RESYNC: Duration = Duration::from_secs(6 * 3600);
 const MAX_NICK: usize = 40;
 
 /// Служебное сообщение профиля: не показывается в переписке.
@@ -280,50 +279,99 @@ fn my_state() -> (String, String) {
     (hash, nick)
 }
 
-/// Фоновая рассылка: раз в полминуты каждому сохранённому контакту, который сейчас на связи, сообщаем изменения профиля;
-/// раз в шесть часов — заново (картинка могла смениться, пока мы не виделись).
+// События, по которым узел сверяет профиль с контактами (таймеров нет): профиль сохранён, контакт подключился, узел запущен.
+static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static SEEN: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::new());
+
+/// Профиль (ник или картинка) изменился: сверить всех контактов, которые сейчас на связи, и сообщить своим телефонам.
+pub fn changed() {
+    DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
+    WAKE.notify_one();
+    crate::mobile_api::announce_profile_changed();
+}
+
+/// Контакт подключился (или подтвердил себя): если у него не тот хэш, что мы ему уже отдали, отправим разницу.
+pub fn peer_seen(id: &crate::util::HashId) {
+    let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
+    if !seen.contains(&id.0) && seen.len() < 4096 {
+        seen.push(id.0);
+    }
+    drop(seen);
+    WAKE.notify_one();
+}
+
+type Sent = HashMap<String, (String, String)>;
+
+fn sent_path() -> PathBuf {
+    base_dir().join("profile_sent.json")
+}
+
+fn load_sent() -> Sent {
+    std::fs::read(sent_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+}
+
+fn save_sent(sent: &Sent) {
+    if let Ok(b) = serde_json::to_vec(sent) {
+        if let Some(d) = sent_path().parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        let _ = crate::util::private_file::write_private(&sent_path(), &b);
+    }
+}
+
+/// Рассылка по событиям: какой хэш и какой ник кому уже отдан, помнится на диске — после перезапуска повторно не шлём.
 pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::sync::Arc<crate::p2p::P2PTransport>, my_id: crate::util::HashId) {
     *MY_SHORT.lock().unwrap_or_else(|e| e.into_inner()) = hex::encode(&my_id.0[..8]);
+    DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); // старт: сверить тех, кто уже на связи
     crate::supervisor::supervise("profile_sync", crate::supervisor::Policy::restart(), move || {
         let chat = chat.clone();
         let p2p = p2p.clone();
         async move {
-        let mut sent: HashMap<String, ((String, String), Instant)> = HashMap::new();
-        let mut tick = 0u64;
-        loop {
-            tokio::time::sleep(Duration::from_secs(30)).await;
-            let (hash, nick) = my_state();
-            let contacts = contact_shorts();
-            for peer in p2p.list_peers().await {
-                let short = hex::encode(&peer.id.0[..8]);
-                if !contacts.contains(&short) {
+            let mut sent = load_sent();
+            let mut last_cleanup: Option<Instant> = None;
+            loop {
+                WAKE.notified().await;
+                tokio::time::sleep(Duration::from_millis(400)).await; // слить пачку событий в одну сверку
+                let full = DIRTY.swap(false, std::sync::atomic::Ordering::SeqCst);
+                let seen: HashSet<[u8; 32]> = std::mem::take(&mut *SEEN.lock().unwrap_or_else(|e| e.into_inner())).into_iter().collect();
+                if !full && seen.is_empty() {
                     continue;
                 }
-                let prev = match sent.get(&short) {
-                    Some((st, at)) if at.elapsed() < RESYNC => Some(st),
-                    _ => None,
-                };
-                let texts = plan(prev, &hash, &nick);
-                if texts.is_empty() {
-                    continue;
-                }
-                let mut ok = true;
-                for t in texts {
-                    if chat.send_service(peer.id, t).await.is_err() {
-                        ok = false;
-                        break;
+                let (hash, nick) = my_state();
+                let contacts = contact_shorts();
+                let mut changed = false;
+                for peer in p2p.list_peers().await {
+                    let short = hex::encode(&peer.id.0[..8]);
+                    if !contacts.contains(&short) || (!full && !seen.contains(&peer.id.0)) {
+                        continue;
+                    }
+                    let texts = plan(sent.get(&short), &hash, &nick);
+                    if texts.is_empty() {
+                        continue;
+                    }
+                    let mut ok = true;
+                    for t in texts {
+                        if chat.send_service(peer.id, t).await.is_err() {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        sent.insert(short, (hash.clone(), nick.clone()));
+                        changed = true;
                     }
                 }
-                if ok {
-                    sent.insert(short, ((hash.clone(), nick.clone()), Instant::now()));
+                let before = sent.len();
+                sent.retain(|k, _| contacts.contains(k));
+                if changed || sent.len() != before {
+                    save_sent(&sent);
+                }
+                if last_cleanup.map_or(true, |t| t.elapsed() > Duration::from_secs(3600)) {
+                    cleanup_now(); // раз в час, по случаю
+                    last_cleanup = Some(Instant::now());
                 }
             }
-            sent.retain(|k, _| contacts.contains(k));
-            if tick % 120 == 0 {
-                cleanup_now(); // раз в час
-            }
-            tick += 1;
-        }
         }
     });
 }
@@ -443,5 +491,21 @@ mod tests {
         assert!(is_service(&format!("{N}{{}}")));
         assert!(!is_service("привет"));
         assert!(!is_service("\u{1}yandi-msg:{}"));
+    }
+
+    #[test]
+    fn events_replace_timers_changed_marks_dirty_and_peers_are_collected_once() {
+        DIRTY.store(false, std::sync::atomic::Ordering::SeqCst);
+        SEEN.lock().unwrap().clear();
+        changed();
+        assert!(DIRTY.load(std::sync::atomic::Ordering::SeqCst));
+        let id = crate::util::HashId([7u8; 32]);
+        peer_seen(&id);
+        peer_seen(&id);
+        assert_eq!(SEEN.lock().unwrap().iter().filter(|x| **x == [7u8; 32]).count(), 1);
+        // разницу плана считает plan(): тот же хэш и ник — ничего слать не надо, новый ник — одно сообщение
+        let prev = ("h".to_string(), "Х".to_string());
+        assert!(plan(Some(&prev), "h", "Х").is_empty());
+        assert_eq!(plan(Some(&prev), "h", "111").len(), 1);
     }
 }

@@ -45,6 +45,7 @@ const FT_SEND_LIVE: u8 = 0x31;
 const FT_LIVE_MSG: u8 = 0x13;
 /// Ответ отправителю: адресата нет на связи (кадр: тип и 32 байта номера).
 const FT_PEER_OFFLINE: u8 = 0x14;
+const FT_PROFILE: u8 = 0x16;
 /// Сигнал звонка небольшой (описание сеанса и кандидаты): больше не принимаем.
 const MAX_LIVE: usize = 32 * 1024;
 
@@ -80,6 +81,13 @@ enum Event {
     Presence(String, bool),
     /// устройство забыто: его открытые сокеты закрываются сразу
     Revoked(String),
+    /// профиль владельца изменился: телефоны подтянут его сами
+    Profile,
+}
+
+/// Сообщить всем открытым сокетам телефонов, что ник или картинка профиля изменились.
+pub fn announce_profile_changed() {
+    let _ = bus().send(Event::Profile);
 }
 
 /// Сообщение от одного телефона владельца другому: узел только передаёт байты (они могут быть зашифрованы телефоном для телефона).
@@ -1277,6 +1285,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
             ev = rx.recv() => match ev {
                 Ok(Event::Revoked(peer)) => {
                     if peer == me { break; }
+                }
+                Ok(Event::Profile) => {
+                    if sock.send(Message::Binary(vec![FT_PROFILE])).await.is_err() { break; }
                 }
                 Ok(Event::Node(m)) => {
                     if m.from != st.my_id && seen.insert(m.msg_id) {
