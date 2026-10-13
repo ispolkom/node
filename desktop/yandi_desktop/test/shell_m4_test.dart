@@ -167,6 +167,18 @@ void main() {
     await m1.stop(t);
   });
 
+  testWidgets('чат: слово «Смайл…» открывает набор и отправляет выбранный смайл', (t) async {
+    final api = m2.FeatureApi();
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await m1.command(t, '<b>Текст</b>', 'Смайл…');
+    await t.tap(find.byKey(const ValueKey('rx-😊')));
+    await t.pumpAndSettle();
+    expect(api.calls.any((p) => p.startsWith('/api/chat/react/')), true);
+    expect(api.bodies.any((b) => b['emoji'] == '😊' && b['msg_id'] == 'new'), true);
+    await m1.stop(t);
+  });
+
   testWidgets('чат: микрофон вместо самолётика, запись и отмена', (t) async {
     final old = voiceBackendFactory;
     voiceBackendFactory = _FakeVoice.new;

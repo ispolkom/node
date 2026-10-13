@@ -14,6 +14,7 @@ const commandEdit = 'Изменить',
     commandShare = 'Переслать',
     commandThread = 'Вся цепочка ответов',
     commandMute = 'Заглушить',
+    commandReact = 'Смайл…',
     commandApprove = '🪙 Одобряю',
     commandDisapprove = '🪙 Не одобряю';
 

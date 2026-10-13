@@ -256,6 +256,8 @@ const englishLabels = <String, String>{
   'Вся цепочка ответов': 'Whole reply chain',
   'Цепочка ответов: сверху — с чего всё началось': 'Reply chain: the first message is at the top',
   'Заглушить': 'Mute',
+  'Смайл…': 'Emoji…',
+  'Смайл на сообщение': 'Emoji for the message',
   '🪙 Одобряю': '🪙 Approve',
   '🪙 Не одобряю': '🪙 Disapprove',
   'Голосовое сообщение': 'Voice message',

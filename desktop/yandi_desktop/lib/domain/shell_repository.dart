@@ -105,6 +105,14 @@ class ShellRepository {
     );
   }
 
+  /// Смайл на сообщение; тот же смайл ещё раз снимает его (решает узел).
+  Future<void> react(String peer, String id, String emoji) async {
+    await api.request(
+      '/api/chat/react/${segment(peer)}',
+      body: {'msg_id': id, 'emoji': emoji},
+    );
+  }
+
   Future<void> edit(String peer, String id, String text) async {
     await api.request(
       '/api/chat/edit/${segment(peer)}',

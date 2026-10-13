@@ -933,6 +933,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final commands = [
       if (own && m['attachment'] == null) commandEdit,
       commandReply,
+      commandReact,
       if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
       if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
         commandShare,
@@ -942,6 +943,33 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final choice = await showMessageMenu(context, at, commands);
     if (!mounted || choice == null) return;
     switch (choice) {
+      case commandReact:
+        final emoji = await showDialog<String>(
+          context: context,
+          builder: (ctx) => SimpleDialog(
+            title: const UiText('Смайл на сообщение'),
+            children: [
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 10,
+                children: [
+                  for (final e in const ['👍', '👎', '😊', '😢', '😂', '❤️'])
+                    InkWell(
+                      key: ValueKey('rx-$e'),
+                      onTap: () => Navigator.pop(ctx, e),
+                      child: Padding(
+                        padding: const EdgeInsets.all(8),
+                        child: Text(e, style: const TextStyle(fontSize: 28)),
+                      ),
+                    ),
+                ],
+              ),
+            ],
+          ),
+        );
+        if (!mounted || emoji == null || selected == null) return;
+        final target = peer(selected!);
+        await mutate(() => repo.react(target, '${m['msg_id']}', emoji));
       case commandEdit:
         editMessage(m);
       case commandShare:
@@ -1072,6 +1100,21 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     isActive: () => active,
                     mutate: (action) => mutate(action),
                     busy: sending,
+                  ),
+                if (m['reactions'] is Map &&
+                    ('${(m['reactions'] as Map)['me'] ?? ''}'.isNotEmpty ||
+                        '${(m['reactions'] as Map)['peer'] ?? ''}'.isNotEmpty))
+                  Padding(
+                    key: ValueKey('rx-row-${m['msg_id']}'),
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      [
+                        for (final k in const ['me', 'peer'])
+                          if ('${(m['reactions'] as Map)[k] ?? ''}'.isNotEmpty)
+                            '${(m['reactions'] as Map)[k]}',
+                      ].toSet().join(' '),
+                      style: const TextStyle(fontSize: 16),
+                    ),
                   ),
                 Align(
                   alignment: Alignment.centerRight,
