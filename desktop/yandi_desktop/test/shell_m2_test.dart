@@ -127,9 +127,11 @@ void main() {
     t,
   ) async {
     final api = FeatureApi();
-    await open(t, api, 'Контакты');
+    await open(t, api, 'Чат');
     expect(find.text('Алиса · В сети'), findsOneWidget);
     expect(find.text('Боб · Не в сети'), findsOneWidget);
+    expect(find.text('Контакты'), findsOneWidget, reason: 'отдельной вкладки «Контакты» нет, есть панель');
+    await m1.click(t, 'Добавить');
     await t.enterText(field('Имя контакта'), 'Новый контакт');
     await t.enterText(field('Карточка YANDI-NODE-1'), 'YANDI-NODE-1:test');
     await m1.click(t, 'Добавить контакт');
@@ -286,7 +288,7 @@ void main() {
     final api = FeatureApi()
       ..configured = true
       ..unlocked = true;
-    await open(t, api, 'Контакты');
+    await open(t, api, 'Чат');
     await m1.click(t, 'Переименовать');
     await t.enterText(find.widgetWithText(TextField, 'Имя'), 'Секретное имя');
     api.unlocked = false;
@@ -304,6 +306,18 @@ void main() {
     await m1.click(t, 'Открыть чат');
     await t.ensureVisible(field('Сообщение'));
     expect(t.takeException(), isNull);
+    await m1.stop(t);
+  });
+  testWidgets('не добавленные в контакты видны только в поиске и добавляются словом', (t) async {
+    final api = FeatureApi();
+    api.rows.removeWhere((r) => r['id'] == 'two'); // Боб известен узлу, но не в контактах
+    await open(t, api, 'Чат');
+    expect(find.text('Не в контактах'), findsNothing);
+    await t.enterText(field('Поиск по имени или ID'), 'bbbb');
+    await t.pump();
+    expect(find.text('Не в контактах'), findsOneWidget);
+    await m1.word(t, 'Добавить в контакты');
+    expect(api.bodies.any((b) => b['short_id'] == 'b' * 16), true);
     await m1.stop(t);
   });
 }

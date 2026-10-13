@@ -715,7 +715,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     'Шлюзы',
                     'Relay',
                     'Настройки',
-                    'Контакты',
                     'О приложении',
                     'Закрытая среда',
                   ],

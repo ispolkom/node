@@ -80,14 +80,15 @@ void main() {
     await t.ensureVisible(language);
     await t.tap(language);
     await t.pumpAndSettle();
-    expect(find.text('Contacts'), findsOneWidget);
+    expect(find.text('Contacts'), findsNothing, reason: 'вкладки «Контакты» нет');
     expect(find.text('Chat'), findsOneWidget);
     expect(find.text('System sound'), findsOneWidget);
     expect(
       find.textContaining('Language applies to all shell forms and states'),
       findsOneWidget,
     );
-    await m1.click(t, 'Contacts');
+    await m1.click(t, 'Chat');
+    await m1.click(t, 'Add');
     expect(find.text('Export contacts.json'), findsOneWidget);
     await m1.stop(t);
   });

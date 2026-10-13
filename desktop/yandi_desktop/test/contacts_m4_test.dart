@@ -91,7 +91,8 @@ void main() {
         (call) async => call.method == 'choose' ? target.path : null,
       );
       final api = ContactsApi();
-      await m2.open(t, api, 'Контакты');
+      await m2.open(t, api, 'Чат');
+      await m1.click(t, 'Добавить');
       await m1.click(t, 'Копировать карточку');
       expect(copied, 'YANDI-NODE-1:own');
       await t.ensureVisible(find.text('Экспорт contacts.json'));
@@ -127,7 +128,7 @@ void main() {
     'tunnel start polls daemon, stop and failure never report active',
     (t) async {
       final api = ContactsApi();
-      await m2.open(t, api, 'Контакты');
+      await m2.open(t, api, 'Чат');
       await m1.click(t, 'Открыть чат');
       expect(
         find.textContaining('Нет подтверждённого туннеля'),

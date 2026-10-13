@@ -622,6 +622,48 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     ),
   );
 
+  /// Собственная карточка и обмен списком контактов — в панели «Добавить» (отдельной вкладки «Контакты» больше нет).
+  Widget ownCardPanel() => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      const UiText(
+        'Карточка собственного узла',
+        style: TextStyle(fontWeight: FontWeight.bold),
+      ),
+      if (ownCard != null) SelectableText(ownCard!),
+      Wrap(
+        spacing: 14,
+        children: [
+          CommandText(
+            'Копировать карточку',
+            onTap: sending || ownCard == null
+                ? null
+                : () => mutate(() async {
+                    await Clipboard.setData(ClipboardData(text: ownCard!));
+                  }),
+          ),
+          CommandText(
+            'Экспорт contacts.json',
+            onTap: sending ? null : exportContacts,
+          ),
+        ],
+      ),
+    ],
+  );
+
+  /// Известные узлу, но не добавленные в контакты (доверенные карточки): показываются только в поиске.
+  List<String> strangers() {
+    final q = search.text.trim().toLowerCase();
+    if (q.length < 2) return const [];
+    return [
+      for (final t in trusted)
+        if (t['id'] is String &&
+            !contacts.any((c) => (t['id'] as String).startsWith('${c['short_id']}')) &&
+            '${t['name'] ?? ''} ${t['id']}'.toLowerCase().contains(q))
+          t['id'] as String,
+    ];
+  }
+
   Widget contactList() => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
@@ -632,7 +674,39 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           labelText: tr(context, 'Поиск по имени или ID'),
         ),
       ),
-      if (contacts.isEmpty && !loading) const UiText('Контактов пока нет.'),
+      if (contacts.isEmpty && !loading && strangers().isEmpty)
+        const UiText('Контактов пока нет.'),
+      for (final id in strangers())
+        Container(
+          margin: const EdgeInsets.only(bottom: 6),
+          padding: const EdgeInsets.all(8),
+          decoration: BoxDecoration(
+            color: Icq.panel,
+            border: Border.all(color: Icq.border),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const UiText(
+                'Не в контактах',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+              ),
+              Text(
+                id.substring(0, 16),
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
+              CommandText(
+                'Добавить в контакты',
+                onTap: sending
+                    ? null
+                    : () => mutate(() async {
+                        await repo.saveContact(id);
+                        search.clear();
+                      }),
+              ),
+            ],
+          ),
+        ),
       for (final c in contacts.where(
         (c) => '${c['name']} ${c['short_id']}'.toLowerCase().contains(
           search.text.toLowerCase(),
@@ -1400,32 +1474,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 ],
               ),
             ] else ...[
-              if (widget.page == 'Контакты') ...[
-                const UiText(
-                  'Карточка собственного узла',
-                  style: TextStyle(fontSize: 22),
-                ),
-                if (ownCard != null) SelectableText(ownCard!),
-                Wrap(
-                  children: [
-                    TextButton(
-                      onPressed: sending || ownCard == null
-                          ? null
-                          : () => mutate(() async {
-                              await Clipboard.setData(
-                                ClipboardData(text: ownCard!),
-                              );
-                            }),
-                      child: const UiText('Копировать карточку'),
-                    ),
-                    TextButton(
-                      onPressed: sending ? null : exportContacts,
-                      child: const UiText('Экспорт contacts.json'),
-                    ),
-                  ],
-                ),
-                contactImport(),
-              ],
               LayoutBuilder(
                 builder: (context, size) {
                   final contactsPanel = Panel(
@@ -1444,6 +1492,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        if (addingContact) ownCardPanel(),
                         if (addingContact) contactImport(),
                         contactList(),
                       ],

@@ -40,6 +40,15 @@ class ShellRepository {
     );
   }
 
+  /// Добавить в контакты уже известный узлу (доверенный) узел; имя потом меняется командой «Переименовать».
+  Future<void> saveContact(String id) async {
+    if (!RegExp(r'^[a-f0-9]{64}$').hasMatch(id)) throw const ApiFailure('protocol');
+    await api.request(
+      '/api/contacts',
+      body: {'name': id.substring(0, 8), 'short_id': id.substring(0, 16)},
+    );
+  }
+
   Future<void> rename(Map<String, dynamic> contact, String name) async {
     await api.request(
       '/api/contacts',
