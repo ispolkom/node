@@ -284,7 +284,10 @@ fn my_state() -> (String, String) {
 /// раз в шесть часов — заново (картинка могла смениться, пока мы не виделись).
 pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::sync::Arc<crate::p2p::P2PTransport>, my_id: crate::util::HashId) {
     *MY_SHORT.lock().unwrap_or_else(|e| e.into_inner()) = hex::encode(&my_id.0[..8]);
-    tokio::spawn(async move {
+    crate::supervisor::supervise("profile_sync", crate::supervisor::Policy::restart(), move || {
+        let chat = chat.clone();
+        let p2p = p2p.clone();
+        async move {
         let mut sent: HashMap<String, ((String, String), Instant)> = HashMap::new();
         let mut tick = 0u64;
         loop {
@@ -320,6 +323,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                 cleanup_now(); // раз в час
             }
             tick += 1;
+        }
         }
     });
 }
