@@ -29,6 +29,8 @@ use crate::mobile_api::{device_peer_of, DeviceKey};
 
 const MAX_GROUPS: usize = 64;
 const MAX_MEMBERS: usize = 256;
+/// Картинка визитки в base64 — не больше (≈12 КБ PNG).
+const CARD_AVATAR_B64: usize = 16 * 1024;
 const MAX_NAME: usize = 64;
 const MAX_TOPIC: usize = 256;
 /// Самая большая запись журнала (шифртекст), байт.
@@ -84,6 +86,17 @@ struct Member {
     /// открытый ключ участника для этой группы (x25519, base64): им владелец запечатывает ключ группы
     #[serde(default)]
     member_pub: Option<String>,
+    /// добровольно раскрытая визитка: ник и маленькая картинка (вариант «А» — человек сам решает, показываться ли под именем)
+    #[serde(default)]
+    card: Option<Card>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Card {
+    nick: String,
+    /// PNG до 12 КБ в base64; пусто — без картинки
+    #[serde(default)]
+    avatar_b64: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -632,6 +645,7 @@ impl Store {
             muted: false,
             joined_ms: now_ms(),
             member_pub: None,
+            card: None,
         };
         g.members.push(owner);
         for d in members {
@@ -645,6 +659,7 @@ impl Store {
                     muted: false,
                     joined_ms: now_ms(),
                     member_pub: None,
+                    card: None,
                 });
             }
         }
@@ -860,6 +875,7 @@ impl Store {
             muted: false,
             joined_ms: now_ms(),
             member_pub,
+            card: None,
         });
         g.log(
             via.as_deref().unwrap_or(&alias),
@@ -909,6 +925,34 @@ impl Store {
         self.save()?;
         hint(gid, HINT_KEYS, 0, owner);
         Ok(())
+    }
+
+    /// Участник раскрывает (или убирает) свою визитку в этой группе. Пустой ник и пустая картинка — убрать.
+    pub fn set_card(&mut self, gid: &str, device: &str, nick: &str, avatar_b64: &str) -> R<()> {
+        let nick: String = nick.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(40).collect();
+        let key = self.me(gid, device)?.1.key.clone();
+        let card = if nick.is_empty() && avatar_b64.is_empty() {
+            None
+        } else {
+            if avatar_b64.len() > CARD_AVATAR_B64 {
+                return Err(bad("картинка слишком большая"));
+            }
+            Some(Card { nick, avatar_b64: avatar_b64.to_string() })
+        };
+        let g = self.get_mut(gid)?;
+        if let Some(m) = g.members.iter_mut().find(|m| m.key == key) {
+            m.card = card;
+        }
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
+    /// Картинка визитки участника по псевдониму (для показа в ленте и списке).
+    pub fn card_avatar(&self, gid: &str, device: &str, alias: &str) -> R<Option<String>> {
+        let (g, _) = self.me(gid, device)?;
+        Ok(g.members.iter().find(|m| m.alias == alias).and_then(|m| m.card.as_ref()).filter(|c| !c.avatar_b64.is_empty()).map(|c| c.avatar_b64.clone()))
     }
 
     /// Владелец кладёт запечатанный ключ группы для участников (по псевдонимам). Поколение больше текущего — смена ключа.
@@ -1391,7 +1435,9 @@ impl Store {
         let list: Vec<Value> = g
             .members
             .iter()
-            .map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms, "member_pub": m.member_pub, "has_key": cur.is_some_and(|b| b.contains_key(&m.key))}))
+            .map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms, "member_pub": m.member_pub, "has_key": cur.is_some_and(|b| b.contains_key(&m.key)),
+                "nick": m.card.as_ref().map(|c| c.nick.as_str()).filter(|n| !n.is_empty()),
+                "avatar": m.card.as_ref().filter(|c| !c.avatar_b64.is_empty()).map(|c| hex::encode(Sha256::digest(c.avatar_b64.as_bytes())))}))
             .collect();
         let banned: Vec<&str> = if me.role != Role::Member {
             g.banned.iter().map(|b| b.alias.as_str()).collect()
@@ -1603,6 +1649,58 @@ pub(crate) async fn m_members(
         let me = device(&dev)?;
         with_store(|s| s.members(&gid, &me))
     })())
+}
+
+#[derive(Deserialize)]
+pub struct CardReq {
+    #[serde(default)]
+    nick: String,
+    /// PNG/JPEG любой разумной величины в base64; узел пересобирает его в маленький PNG. Пусто — без картинки.
+    #[serde(default)]
+    avatar_b64: String,
+}
+
+/// Раскрыть свой ник и картинку в группе (пустые — убрать).
+pub(crate) async fn m_card_put(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<CardReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        let avatar = if req.avatar_b64.is_empty() {
+            String::new()
+        } else {
+            use base64::Engine;
+            let raw = base64::engine::general_purpose::STANDARD.decode(&req.avatar_b64).map_err(|_| bad("картинка не в base64"))?;
+            if raw.len() > crate::mobile_profile::MAX_AVATAR_IN {
+                return Err(bad("картинка слишком большая"));
+            }
+            let png = crate::mobile_profile::sanitize_small(&raw).ok_or_else(|| bad("это не картинка"))?;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        ok_json(with_store(|s| s.set_card(&gid, &me, &req.nick, &avatar)))
+    })())
+}
+
+/// Картинка визитки участника: `GET /mobile/groups/:gid/members/:alias/avatar`.
+pub(crate) async fn m_card_avatar(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path((gid, alias)): Path<(String, String)>,
+) -> Response {
+    use base64::Engine;
+    let png = (|| -> R<Option<Vec<u8>>> {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        let b64 = with_store(|s| s.card_avatar(&gid, &me, &alias))?;
+        Ok(b64.and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()))
+    })();
+    match png {
+        Ok(Some(b)) => ([(axum::http::header::CONTENT_TYPE, "image/png")], b).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(Fail(c, _)) => c.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -2399,6 +2497,29 @@ mod tests {
         s.delete(&gid).unwrap();
         assert!(s.list_for(OWNER).is_empty());
         assert!(!d.path().join(format!("groups/{gid}.log")).exists());
+    }
+
+    #[test]
+    fn member_card_is_voluntary_cleaned_and_visible_to_members() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, "bb", None, None).unwrap();
+        let list = |s: &Store| s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().clone();
+        assert!(list(&s).iter().all(|m| m["nick"].is_null()), "по умолчанию — только псевдоним");
+        s.set_card(&gid, "bb", "  Доктор\u{0}Хаус ", "").unwrap();
+        let bob = list(&s).into_iter().find(|m| m["nick"] == "ДокторХаус").expect("ник виден участникам");
+        assert!(bob["avatar"].is_null());
+        // картинка: хэш виден, байты отдаются по псевдониму
+        s.set_card(&gid, "bb", "Хаус", "aGk=").unwrap();
+        let alias = bob["alias"].as_str().unwrap();
+        assert_eq!(s.card_avatar(&gid, OWNER, alias).unwrap().as_deref(), Some("aGk="));
+        // слишком большая картинка отвергается
+        assert!(s.set_card(&gid, "bb", "Хаус", &"A".repeat(CARD_AVATAR_B64 + 1)).is_err());
+        // убрать
+        s.set_card(&gid, "bb", "", "").unwrap();
+        assert!(list(&s).iter().all(|m| m["nick"].is_null() && m["avatar"].is_null()));
+        // не участник визитку поставить не может
+        assert!(s.set_card(&gid, "zz", "Х", "").is_err());
     }
 
     #[test]

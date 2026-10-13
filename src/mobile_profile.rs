@@ -148,6 +148,26 @@ pub fn sanitize_avatar(raw: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
+/// Маленькая картинка для визитки в группе: до 12 КБ, сторона 64 или 48.
+pub fn sanitize_small(raw: &[u8]) -> Option<Vec<u8>> {
+    let mut reader = image::ImageReader::new(std::io::Cursor::new(raw)).with_guessed_format().ok()?;
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(4096);
+    limits.max_image_height = Some(4096);
+    limits.max_alloc = Some(96 * 1024 * 1024);
+    reader.limits(limits);
+    let img = reader.decode().ok()?;
+    for side in [64u32, 48, 32] {
+        let small = image::DynamicImage::ImageRgba8(img.thumbnail(side, side).to_rgba8());
+        let mut out = Vec::new();
+        small.write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).ok()?;
+        if out.len() <= 12 * 1024 {
+            return Some(out);
+        }
+    }
+    None
+}
+
 pub fn avatar_bytes(short: &str) -> Option<(Vec<u8>, &'static str)> {
     let (p, ty) = avatar_file(short)?;
     std::fs::read(p).ok().map(|b| (b, ty))

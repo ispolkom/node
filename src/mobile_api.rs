@@ -1410,6 +1410,8 @@ fn router(st: Arc<MobileState>) -> Router {
             "/mobile/groups/:gid/members",
             get(crate::mobile_groups::m_members),
         )
+        .route("/mobile/groups/:gid/profile", post(crate::mobile_groups::m_card_put))
+        .route("/mobile/groups/:gid/members/:alias/avatar", get(crate::mobile_groups::m_card_avatar))
         .route(
             "/mobile/groups/:gid/pubkey",
             post(crate::mobile_groups::m_pub),
