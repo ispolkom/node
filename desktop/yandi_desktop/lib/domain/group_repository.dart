@@ -112,6 +112,8 @@ class GroupRepository {
             'author': m['author'],
             'mine': m['mine'],
             'kind': m['kind'],
+            if (m['coins'] is num) 'coins': m['coins'],
+            if (m['my_vote'] is num) 'my_vote': m['my_vote'],
             if (const [2, 3, 4, 5].contains(m['kind']) &&
                 m['body'] is Map &&
                 m['body']['n'] is String &&

@@ -177,6 +177,8 @@ void main() {
           'ts': cutoff,
           'kind': 1,
           'body': {'t': 'Two'},
+          'coins': 2,
+          'my_vote': 1,
         },
         {'seq': 3, 'ts': cutoff, 'kind': 7},
         {'seq': 4, 'ts': cutoff, 'kind': 1, 'deleted': true},
@@ -185,6 +187,8 @@ void main() {
         api,
       ).feed(gid, now: DateTime.utc(2026, 2, 28, 12));
       expect((result['messages'] as List).map((m) => m['seq']), [2, 9]);
+      final two = (result['messages'] as List).firstWhere((m) => m['seq'] == 2);
+      expect([two['coins'], two['my_vote']], [2, 1]); // монетки доходят до ленты
       expect(result.toString(), isNot(contains('SECRET')));
       await expectLater(
         GroupRepository(api).send(gid, 'я' * 4001),
