@@ -63,7 +63,7 @@ void main() {
     return offers;
   }
 
-  Future<void> pump(WidgetTester t, List<FileOffer> offers, {FakeHost? host, int maxPerFile = 20, List<FileLink> links = const []}) async {
+  Future<void> pump(WidgetTester t, List<FileOffer> offers, {FakeHost? host, int maxPerFile = 20, List<FileLink> links = const [], Future<bool> Function(FileOffer)? onFetch}) async {
     await t.pumpWidget(MaterialApp(
       theme: AppTheme.dark,
       home: ChatFilesScreen(
@@ -73,6 +73,7 @@ void main() {
         host: host ?? FakeHost(),
         maxPerFile: maxPerFile,
         links: links,
+        onFetch: onFetch,
         vault: VaultFiles(dir, vault: () async => _fv(), tempDir: Directory('${dir.path}/tmp')),
       ),
     ));
@@ -253,6 +254,17 @@ void main() {
     await t.pump();
     expect(find.text('https://example.org/a'), findsOneWidget);
     expect(find.text('песня.mp3'), findsNothing);
+  });
+
+  testWidgets('файл группы, которого ещё нет у меня, виден как «не скачан» и скачивается по нажатию', (t) async {
+    final offers = await seed(t);
+    final asked = <String>[];
+    await pump(t, offers, onFetch: (o) async { asked.add(o.name); return true; });
+    expect(find.text('нет-на-диске.txt'), findsOneWidget);
+    expect(find.textContaining('не скачан'), findsOneWidget);
+    await t.tap(find.text('нет-на-диске.txt'));
+    await io(t, 5);
+    expect(asked, ['нет-на-диске.txt']);
   });
 
   test('ссылки из текста: адрес без хвостовой точки', () {

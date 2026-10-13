@@ -78,7 +78,9 @@ class ChatFilesScreen extends StatefulWidget {
   final String? emptyHint;
   /// Ссылки из переписки (раздел «Ссылки»); сами сообщения в папке не показываются.
   final List<FileLink> links;
-  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile, this.emptyHint, this.links = const []});
+  /// Скачать файл, которого ещё нет в закрытой среде (для групп): такие файлы показываются в папке с пометкой «не скачан».
+  final Future<bool> Function(FileOffer)? onFetch;
+  const ChatFilesScreen({super.key, required this.title, required this.shortId, required this.offers, this.vault, this.host, this.maxPerFile = defaultMaxPerFile, this.emptyHint, this.links = const [], this.onFetch});
 
   /// За один раз — не больше стольких получателей; суммарно на один файл — не больше defaultMaxPerFile.
   static const maxPerBatch = 5;
@@ -91,6 +93,8 @@ class ChatFilesScreen extends StatefulWidget {
 class ChatFilesScreenState extends State<ChatFilesScreen> {
   VaultFiles? _vault;
   List<VaultFile> _files = [];
+  List<FileOffer> _missing = [];
+  final Set<String> _fetching = {};
   final Set<String> _selected = {};
   /// Кому уже пересылали файл в этом сеансе (путь файла → получатели): предел на один файл.
   final Map<String, Set<String>> _sentTo = {};
@@ -112,10 +116,14 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     _vault = v;
     final out = <VaultFile>[];
     final seen = <String>{};
+    final missing = <FileOffer>[];
     for (final o in widget.offers) {
       if (!seen.add(o.tid)) continue;
       final p = '${v.dir.path}/${FileTransferService.localName(o)}';
-      if (!await File(p).exists()) continue;
+      if (!await File(p).exists()) {
+        if (widget.onFetch != null) missing.add(o);
+        continue;
+      }
       try {
         out.add(await v.describe(p));
       } catch (_) {
@@ -126,6 +134,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     if (!mounted) return;
     setState(() {
       _files = out;
+      _missing = missing;
       _loading = false;
       _selected.removeWhere((p) => !out.any((f) => f.path == p));
     });
@@ -283,6 +292,11 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       if (_tab == 0 || (tabKinds[_tab]?.contains(k) ?? false)) groups.putIfAbsent(k, () => []).add(f);
     }
     final showLinks = (_tab == 0 || _tab == 5) && widget.links.isNotEmpty;
+    final missingBy = <FileKind, List<FileOffer>>{};
+    for (final o in _missing) {
+      final k = fileKindOf(o.name, o.mime);
+      if (_tab == 0 || (tabKinds[_tab]?.contains(k) ?? false)) missingBy.putIfAbsent(k, () => []).add(o);
+    }
     return Scaffold(
       appBar: AppBar(
         leading: selecting
@@ -321,7 +335,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
-          : _files.isEmpty && widget.links.isEmpty
+          : _files.isEmpty && _missing.isEmpty && widget.links.isEmpty
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(32),
@@ -352,7 +366,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                         ],
                       ),
                     ),
-                    if (groups.isEmpty && !showLinks)
+                    if (groups.isEmpty && missingBy.isEmpty && !showLinks)
                       const Padding(
                         padding: EdgeInsets.all(32),
                         child: Center(child: Text('В этом разделе пусто', style: TextStyle(color: AppTheme.textSecondary))),
@@ -379,13 +393,32 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                         ),
                     ],
                     for (final kind in FileKind.values)
-                      if (groups[kind] != null) ...[
+                      if (groups[kind] != null || missingBy[kind] != null) ...[
                         Padding(
                           padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-                          child: Text('${_kindTitles[kind]} · ${groups[kind]!.length}',
+                          child: Text('${_kindTitles[kind]} · ${(groups[kind]?.length ?? 0) + (missingBy[kind]?.length ?? 0)}',
                               style: const TextStyle(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.bold)),
                         ),
-                        for (final f in groups[kind]!)
+                        for (final o in missingBy[kind] ?? const <FileOffer>[])
+                          ListTile(
+                            key: ValueKey('missing-${o.tid}'),
+                            leading: _fetching.contains(o.tid)
+                                ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
+                                : const Icon(Icons.cloud_download_outlined, color: AppTheme.textSecondary),
+                            title: Text(o.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
+                            subtitle: Text('не скачан · ${_size(o.size)} · нажмите, чтобы скачать',
+                                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                            onTap: _fetching.contains(o.tid) || widget.onFetch == null
+                                ? null
+                                : () async {
+                                    setState(() => _fetching.add(o.tid));
+                                    try { await widget.onFetch!(o); } finally {
+                                      if (mounted) setState(() => _fetching.remove(o.tid));
+                                    }
+                                    await reload();
+                                  },
+                          ),
+                        for (final f in groups[kind] ?? const <VaultFile>[])
                           GestureDetector(
                             key: ValueKey('file-${f.id}'),
                             onLongPressStart: (d) {

@@ -208,27 +208,35 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     return null;
   }
 
+  /// Скачивает файл группы в закрытую среду; путь к нему или null, если не вышло (причина — во всплывающей строке).
+  Future<String?> _fetchFile(Map<String, dynamic> d) async {
+    final fid = d['f'] as String;
+    final vf = await context.read<AppState>().vaultFiles();
+    final out = File(vf.pathFor(FileVault.safeId(fid)));
+    final part = File('${out.path}.part');   // пока качается, файла в хранилище нет
+    setState(() => _progress[fid] = 0);
+    try {
+      await GroupFiles(_svc!.api, vault: await VaultService.instance.files()).download(widget.gid, d, part, onProgress: (done, total) {
+        if (mounted) setState(() => _progress[fid] = done / total);
+      });
+    } catch (e) {
+      _toast('Не скачано: $e');
+      try { if (await part.exists()) await part.delete(); } catch (_) {}
+      return null;
+    } finally {
+      if (mounted) setState(() => _progress.remove(fid));
+    }
+    await part.rename(out.path);
+    _paths[fid] = out.path;
+    return out.path;
+  }
+
   Future<void> _openFile(Map<String, dynamic> d) async {
     final fid = d['f'] as String;
     var path = await _localPath(d);
     if (path == null) {
-      final vf = await context.read<AppState>().vaultFiles();
-      final out = File(vf.pathFor(FileVault.safeId(fid)));
-      final part = File('${out.path}.part');   // пока качается, файла в хранилище нет
-      setState(() => _progress[fid] = 0);
-      try {
-        await GroupFiles(_svc!.api, vault: await VaultService.instance.files()).download(widget.gid, d, part, onProgress: (done, total) {
-          if (mounted) setState(() => _progress[fid] = done / total);
-        });
-      } catch (e) {
-        _toast('Не скачано: $e');
-        return;
-      } finally {
-        if (mounted) setState(() => _progress.remove(fid));
-      }
-      await part.rename(out.path);
-      _paths[fid] = out.path;
-      path = out.path;
+      path = await _fetchFile(d);
+      if (path == null) return;
     }
     final k = GroupFiles.kindForName('${d['n'] ?? ''}');
     if (k == GroupKind.audio || k == GroupKind.video) {
@@ -542,8 +550,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     key: '',
                   ),
             ];
+            final bodies = {for (final e in _entries) if (e.body['f'] is String) e.body['f'] as String: e.body};
             Navigator.push(context, MaterialPageRoute(
-              builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.',
+              builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers,
+                  // не скачанные файлы группы тоже в папке: нажатие скачивает их в закрытую среду
+                  onFetch: (o) async => bodies[o.tid] != null && await _fetchFile(bodies[o.tid]!) != null, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.',
                   links: [
                     for (final e in _entries)
                       if (e.body['t'] is String) ...FileLink.inText(e.body['t'] as String, DateTime.fromMillisecondsSinceEpoch(e.ts)),
