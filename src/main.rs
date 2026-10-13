@@ -650,6 +650,7 @@ async fn main() -> anyhow::Result<()> {
     let chat_manager = std::sync::Arc::new(chat_manager);
     chat_manager.clone().spawn_delivery_timeout_task();
     yandi::mobile_api::init(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
+    yandi::profile_sync::spawn(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
     #[cfg(unix)]
     if let Some(env) = closed_env.as_ref() {
         env.register(std::sync::Arc::new(yandi::closed_api::ChatConsumer(chat_manager.clone())));

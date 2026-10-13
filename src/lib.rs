@@ -52,6 +52,7 @@ pub mod group_client;
 pub mod mobile_group_files;
 pub mod mobile_groups;
 pub mod mobile_profile;
+pub mod profile_sync;
 pub mod mobile_self;
 pub mod mobile_tls;
 pub mod node_vault;

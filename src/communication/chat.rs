@@ -312,6 +312,12 @@ impl ChatManager {
         self.file_transfer_manager = Some(manager);
     }
 
+    /// Служебное сообщение (профиль и т.п.): одна попытка, без записи в историю и без очереди повторов.
+    pub async fn send_service(&self, to: HashId, text: String) -> Result<()> {
+        let msg = ChatMessage::new(self.my_node_id, to, text);
+        self.send_once(&msg).await
+    }
+
     /// Отправить текстовое сообщение
     pub async fn send_message(&self, to: HashId, text: String) -> Result<ChatMessage> {
         self.send_message_with_attachment(to, text, None).await
@@ -464,6 +470,11 @@ impl ChatManager {
 
         // 6. Отправить подтверждение доставки (ACK)
         self.send_ack(from, msg.msg_id).await?;
+
+        // профиль контакта (ник, аватар): разбираем на узле; телефоны получат то же сообщение сами
+        for reply in crate::profile_sync::on_incoming(&from, &msg.text) {
+            let _ = self.send_service(from, reply).await;
+        }
 
         // 7. Уведомить Web UI (через канал)
         let _ = self.incoming_tx.send(msg.clone());

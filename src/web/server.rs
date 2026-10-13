@@ -2618,9 +2618,12 @@ async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
                     // Обновляем поле online для каждого контакта
                     if let Some(contacts_arr) = data["contacts"].as_array_mut() {
                         for contact in contacts_arr.iter_mut() {
-                            if let Some(short_id) = contact["short_id"].as_str() {
-                                let is_online = online_peers.contains(short_id);
+                            if let Some(short_id) = contact["short_id"].as_str().map(str::to_string) {
+                                let is_online = online_peers.contains(&short_id);
                                 contact["online"] = serde_json::json!(is_online);
+                                if let Some(n) = crate::profile_sync::peer_nick(&short_id) {
+                                    contact["nick"] = serde_json::json!(n);
+                                }
                             }
                         }
                     }
@@ -3225,6 +3228,7 @@ async fn api_chat_history(
             // Конвертировать HashId в hex строку для JSON (полные 32 байта)
             let messages_json: Vec<serde_json::Value> = messages
                 .into_iter()
+                .filter(|msg| !crate::profile_sync::is_service(&msg.text)) // служебные сообщения профиля в переписке не показываем
                 .map(|msg| {
                     serde_json::json!({
                         "msg_id": hex::encode(&msg.msg_id.0),  // Полный HashId (32 байта)

@@ -847,6 +847,7 @@ async fn contacts(
             "display_name": c["name"].as_str().unwrap_or(&short),
             "online": full.is_some(),
             "is_manual": true,
+            "nick": crate::profile_sync::peer_nick(&short),
         }));
     }
     let me = with_devices(|d| {
