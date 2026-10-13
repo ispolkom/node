@@ -10,7 +10,10 @@ const commandEdit = 'Изменить',
     commandCopy = 'Копировать',
     commandDelete = 'Удалить',
     commandHideAuthor = 'Скрыть сообщения этого пользователя',
-    commandSelect = 'Выбрать';
+    commandSelect = 'Выбрать',
+    commandShare = 'Переслать',
+    commandThread = 'Вся цепочка ответов',
+    commandMute = 'Заглушить';
 
 Future<String?> showMessageMenu(
   BuildContext context,
@@ -197,11 +200,16 @@ class GroupInviteMessage {
       if (j is! Map) return null;
       final gid = '${j['g'] ?? ''}'.toLowerCase(), code = '${j['c'] ?? ''}';
       if (!RegExp(r'^[0-9a-f]{32}$').hasMatch(gid)) return null;
-      if (code.isNotEmpty && !RegExp(r'^[0-9A-Za-z_-]{8,128}$').hasMatch(code)) {
+      if (code.isNotEmpty &&
+          !RegExp(r'^[0-9A-Za-z_-]{8,128}$').hasMatch(code)) {
         return null;
       }
       final n = '${j['n'] ?? ''}'.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
-      return GroupInviteMessage(gid, code, n.length > 64 ? n.substring(0, 64) : n);
+      return GroupInviteMessage(
+        gid,
+        code,
+        n.length > 64 ? n.substring(0, 64) : n,
+      );
     } catch (_) {
       return null;
     }
@@ -268,7 +276,10 @@ class InitialBadge extends StatelessWidget {
       width: size,
       height: size,
       alignment: Alignment.center,
-      decoration: const BoxDecoration(color: Icq.header, shape: BoxShape.circle),
+      decoration: const BoxDecoration(
+        color: Icq.header,
+        shape: BoxShape.circle,
+      ),
       child: Text(
         t.isEmpty ? '?' : t.characters.first.toUpperCase(),
         style: TextStyle(
@@ -284,11 +295,70 @@ class InitialBadge extends StatelessWidget {
 
 /// Same set as the phone app's own keyboard panel.
 const emojiPanel = [
-  '😀', '😂', '🥹', '😊', '😍', '🥰', '😘', '😎', '🤔', '😅', '😭', '😡', '🥳',
-  '😴', '🤯', '😱', '👍', '👎', '👏', '🙏', '💪', '👋', '🤝', '✌️', '👌', '🤞',
-  '🫡', '🙌', '❤️', '💔', '🔥', '✨', '🎉', '🎁', '☀️', '🌙', '⭐', '🌈', '🍀',
-  '🌸', '🍕', '☕', '🍺', '🎂', '🚗', '✈️', '🏠', '📞', '🐱', '🐶', '🦊', '🐼',
-  '🦁', '🐸', '🐵', '🦉', '🐧', '🐢', '🦄', '🐙', '🔑', '🛡️', '💎', '✅',
+  '😀',
+  '😂',
+  '🥹',
+  '😊',
+  '😍',
+  '🥰',
+  '😘',
+  '😎',
+  '🤔',
+  '😅',
+  '😭',
+  '😡',
+  '🥳',
+  '😴',
+  '🤯',
+  '😱',
+  '👍',
+  '👎',
+  '👏',
+  '🙏',
+  '💪',
+  '👋',
+  '🤝',
+  '✌️',
+  '👌',
+  '🤞',
+  '🫡',
+  '🙌',
+  '❤️',
+  '💔',
+  '🔥',
+  '✨',
+  '🎉',
+  '🎁',
+  '☀️',
+  '🌙',
+  '⭐',
+  '🌈',
+  '🍀',
+  '🌸',
+  '🍕',
+  '☕',
+  '🍺',
+  '🎂',
+  '🚗',
+  '✈️',
+  '🏠',
+  '📞',
+  '🐱',
+  '🐶',
+  '🦊',
+  '🐼',
+  '🦁',
+  '🐸',
+  '🐵',
+  '🦉',
+  '🐧',
+  '🐢',
+  '🦄',
+  '🐙',
+  '🔑',
+  '🛡️',
+  '💎',
+  '✅',
 ];
 
 /// Paperclip and emoji icons of the input row, as in the phone app.
@@ -358,4 +428,165 @@ class ComposerTools extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// Выбор получателей пересылки: до [max] за раз (как в телефоне), слова-команды вместо кнопок.
+/// Возвращает выбранные контакты или null, если отказались.
+Future<List<Map<String, dynamic>>?> pickRecipients(
+  BuildContext context, {
+  required String title,
+  required List<Map<String, dynamic>> contacts,
+  int max = 5,
+}) => showDialog<List<Map<String, dynamic>>>(
+  context: context,
+  builder: (_) => _RecipientsDialog(title: title, contacts: contacts, max: max),
+);
+
+class _RecipientsDialog extends StatefulWidget {
+  final String title;
+  final List<Map<String, dynamic>> contacts;
+  final int max;
+  const _RecipientsDialog({
+    required this.title,
+    required this.contacts,
+    required this.max,
+  });
+  @override
+  State<_RecipientsDialog> createState() => _RecipientsDialogState();
+}
+
+class _RecipientsDialogState extends State<_RecipientsDialog> {
+  final chosen = <int>{};
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: UiText(widget.title),
+    content: SizedBox(
+      width: 360,
+      child: widget.contacts.isEmpty
+          ? const UiText('Некому отправлять: в списке нет контактов.')
+          : SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  UiText(
+                    'Выбрано: ${chosen.length} из ${widget.max}',
+                    style: const TextStyle(fontSize: 12, color: Icq.dark),
+                  ),
+                  for (var i = 0; i < widget.contacts.length; i++)
+                    InkWell(
+                      key: ValueKey('recipient-$i'),
+                      onTap: () => setState(() {
+                        if (!chosen.remove(i) && chosen.length < widget.max) {
+                          chosen.add(i);
+                        }
+                      }),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 5),
+                        child: Row(
+                          children: [
+                            Text(
+                              chosen.contains(i) ? '☑' : '☐',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                color: Icq.header,
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            Flexible(
+                              child: Text('${widget.contacts[i]['name']}'),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+    ),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const UiText('Отмена'),
+      ),
+      FilledButton(
+        onPressed: chosen.isEmpty
+            ? null
+            : () => Navigator.pop(context, [
+                for (final i in chosen.toList()..sort()) widget.contacts[i],
+              ]),
+        child: const UiText('Переслать'),
+      ),
+    ],
+  );
+}
+
+/// Самолётик, пока в строке есть текст, и микрофон, пока строка пуста — как в телефоне.
+class SendOrMic extends StatelessWidget {
+  final TextEditingController controller;
+  final VoidCallback? onSend;
+  final VoidCallback? onMic;
+  final String sendTip;
+  final bool hasFile;
+  const SendOrMic({
+    super.key,
+    required this.controller,
+    required this.onSend,
+    required this.onMic,
+    required this.sendTip,
+    this.hasFile = false,
+  });
+  @override
+  Widget build(BuildContext context) =>
+      ValueListenableBuilder<TextEditingValue>(
+        valueListenable: controller,
+        builder: (_, v, _) {
+          final empty = v.text.trim().isEmpty && !hasFile;
+          return empty
+              ? IconButton(
+                  key: const ValueKey('voice-mic'),
+                  tooltip: tr(context, 'Голосовое сообщение'),
+                  onPressed: onMic,
+                  icon: const Icon(Icons.mic, color: Icq.header),
+                )
+              : IconButton(
+                  key: const ValueKey('send-text'),
+                  tooltip: tr(context, sendTip),
+                  onPressed: onSend,
+                  icon: const Icon(Icons.send, color: Icq.header),
+                );
+        },
+      );
+}
+
+/// Строка во время записи голосового: время, «Отмена» и самолётик для отправки.
+class VoiceBar extends StatelessWidget {
+  final int seconds;
+  final VoidCallback onCancel;
+  final VoidCallback onSend;
+  const VoiceBar({
+    super.key,
+    required this.seconds,
+    required this.onCancel,
+    required this.onSend,
+  });
+  @override
+  Widget build(BuildContext context) {
+    final t = '${seconds ~/ 60}:${(seconds % 60).toString().padLeft(2, '0')}';
+    return Row(
+      children: [
+        const Icon(Icons.fiber_manual_record, color: Icq.danger, size: 14),
+        const SizedBox(width: 8),
+        Text(t, style: const TextStyle(fontSize: 16)),
+        const SizedBox(width: 12),
+        const Expanded(child: UiText('Идёт запись…')),
+        CommandText('Отмена', onTap: onCancel),
+        IconButton(
+          key: const ValueKey('voice-send'),
+          tooltip: tr(context, 'Отправить голосовое'),
+          onPressed: onSend,
+          icon: const Icon(Icons.send, color: Icq.header),
+        ),
+      ],
+    );
+  }
 }

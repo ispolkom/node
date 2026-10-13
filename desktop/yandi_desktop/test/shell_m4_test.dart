@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
+import 'package:yandi_desktop/voice.dart';
 
 void main() {
   testWidgets('own text edit, local delete and real clear confirmation', (
@@ -119,4 +120,85 @@ void main() {
     expect(field.controller!.text.startsWith('ку'), true);
     await m1.stop(t);
   });
+  testWidgets('чат: переслать и выбор, файлы чата без сообщений, голосовое', (t) async {
+    final api = m2.FeatureApi();
+    api.historyRows.add({
+      'msg_id': 'lnk',
+      'from': m2.alice,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'text': 'смотри https://example.org/page',
+    });
+    api.historyRows.add({
+      'msg_id': 'pic',
+      'from': m2.alice,
+      'timestamp': DateTime.now().millisecondsSinceEpoch + 1,
+      'text': '',
+      'attachment': {
+        'filename': 'кот.png',
+        'size': 10,
+        'file_ref': {'file_id': 'f1', 'total_chunks': 1},
+      },
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    // удержание/нажатие: «Переслать» и «Выбрать» есть, выбор показывает счётчик и «Переслать выбранные»
+    await m1.command(t, '<b>Текст</b>', 'Выбрать');
+    expect(find.text('Выбрано: 1'), findsOneWidget);
+    expect(find.text('Переслать выбранные'), findsOneWidget);
+    await m1.click(t, 'Переслать выбранные');
+    expect(find.text('Переслать сообщение'), findsOneWidget);
+    expect(find.text('Боб'), findsOneWidget);
+    await t.tap(find.text('Отмена').last);
+    await t.pumpAndSettle();
+    await m1.click(t, 'Снять выбор');
+    // «Файлы чата»: сообщений нет, разделы по видам, ссылки отдельно
+    await m1.word(t, 'Файлы чата');
+    expect(find.text('<b>Текст</b>'), findsNothing);
+    expect(find.text('https://example.org/page'), findsOneWidget);
+    expect(find.text('кот.png'), findsOneWidget);
+    await m1.word(t, 'Картинки');
+    expect(find.text('https://example.org/page'), findsNothing);
+    expect(find.text('кот.png'), findsOneWidget);
+    await m1.word(t, 'Ссылки');
+    expect(find.text('кот.png'), findsNothing);
+    expect(find.text('https://example.org/page'), findsOneWidget);
+    await m1.word(t, 'Назад к сообщениям');
+    expect(find.text('<b>Текст</b>'), findsOneWidget);
+    await m1.stop(t);
+  });
+
+  testWidgets('чат: микрофон вместо самолётика, запись и отмена', (t) async {
+    final old = voiceBackendFactory;
+    voiceBackendFactory = _FakeVoice.new;
+    voicePathFactory = () async => '/tmp/yandi_voice_test/Голосовое_test.m4a';
+    addTearDown(() {
+      voiceBackendFactory = old;
+      voicePathFactory = newVoicePath;
+    });
+    final api = m2.FeatureApi();
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    expect(find.byKey(const ValueKey('voice-mic')), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('voice-mic')));
+    await t.pump(const Duration(seconds: 1));
+    expect(find.text('Идёт запись…'), findsOneWidget);
+    await t.tap(find.text('Отмена').first);
+    await t.pumpAndSettle();
+    expect(find.text('Идёт запись…'), findsNothing);
+    await t.enterText(find.widgetWithText(TextField, 'Сообщение'), 'привет');
+    await t.pump();
+    expect(find.byKey(const ValueKey('send-text')), findsOneWidget);
+    await m1.stop(t);
+  });
+}
+
+class _FakeVoice implements VoiceBackend {
+  @override
+  Future<bool> hasPermission() async => true;
+  @override
+  Future<void> start(String path) async {}
+  @override
+  Future<String?> stop() async => null;
+  @override
+  Future<void> dispose() async {}
 }

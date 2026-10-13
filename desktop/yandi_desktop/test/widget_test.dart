@@ -63,9 +63,12 @@ Finder action(String label) {
     matching: find.byWidgetPredicate((w) => w is ButtonStyleButton),
   );
   // значок без слова (отправка) находится по подсказке
-  return byText.evaluate().isNotEmpty ? byText.first : find.byTooltip(label).first;
+  if (byText.evaluate().isNotEmpty) return byText.first;
+  final tip = find.byTooltip(label);
+  return tip.evaluate().isNotEmpty ? tip.first : find.text(label).first;
 }
 Future<void> click(WidgetTester tester, String label) async {
+  await tester.pump(); // введённый текст меняет микрофон на самолётик
   final button = action(label);
   await tester.ensureVisible(button);
   await tester.tap(button);

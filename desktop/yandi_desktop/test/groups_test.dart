@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/domain/group_repository.dart';
 import 'package:yandi_desktop/transport/api.dart';
 import 'package:yandi_desktop/preferences.dart';
+import 'package:yandi_desktop/voice.dart';
 import 'widget_test.dart' as m1;
 
 final gid = 'a' * 32, other = 'b' * 32;
@@ -61,6 +62,14 @@ class GroupApi extends m1.FakeApi {
     Map<String, dynamic>? body,
     String? method,
   }) async {
+    if (path == '/api/contacts' && method == null && body == null) {
+      return {
+        'contacts': [
+          {'id': 'f' * 64, 'short_id': 'f' * 16, 'name': 'Алиса'},
+        ],
+      };
+    }
+    if (path == '/api/peers/trusted' && body == null) return {'peers': []};
     if (!path.startsWith('/api/groups') &&
         !path.startsWith('/api/mobile/groups')) {
       return super.request(path, body: body, method: method);
@@ -338,6 +347,7 @@ void main() {
     await t.enterText(field('Сообщение группе'), 'Не отправлять');
     api.configured = true;
     api.unlocked = false;
+    await t.pump();
     await t.ensureVisible(find.byTooltip('Отправить группе'));
     await t.tap(find.byTooltip('Отправить группе'));
     await t.pumpAndSettle();
@@ -359,7 +369,17 @@ void main() {
       );
       expect(
         find.text('Назначить админом'),
-        findsNWidgets(role == 'owner' ? 3 : 0),
+        // админом можно назначить рядового и модератора, только владельцем; админа — нельзя
+        findsNWidgets(role == 'owner' ? 2 : 0),
+      );
+      expect(
+        find.text('Назначить модератором'),
+        findsNWidgets(role == 'owner' || role == 'admin' ? 1 : 0),
+      );
+      expect(
+        find.text('Сделать участником'),
+        // владелец снимает и админа, и модератора; админ — только модератора
+        findsNWidgets({'owner': 2, 'admin': 1}[role] ?? 0),
       );
       expect(
         find.text('Создать приглашение'),
@@ -515,4 +535,75 @@ void main() {
     expect(find.text('<script>текст</script>'), findsOneWidget);
     await m1.stop(t);
   });
+
+  testWidgets('цепочка ответов: от первого сообщения до выбранного, переход по звену', (t) async {
+    final api = GroupApi();
+    api.messages.clear();
+    final now = DateTime.now().millisecondsSinceEpoch;
+    api.messages.addAll([
+      {'seq': 1, 'ts': now, 'from': 'member', 'author': 'Боб', 'kind': 1, 'body': {'t': 'Я построил вечный двигатель'}},
+      {'seq': 2, 'ts': now + 1, 'from': 'mod', 'author': 'Модератор', 'kind': 1,
+        'body': {'t': 'Из каких материалов?', 'r': {'s': 1, 'a': 'Боб', 't': 'Я построил вечный двигатель'}}},
+      {'seq': 3, 'ts': now + 2, 'from': 'admin', 'author': 'Админ', 'kind': 1,
+        'body': {'t': 'Сколько энергии?', 'r': {'s': 2, 'a': 'Модератор', 't': 'Из каких материалов?'}}},
+    ]);
+    await open(t, api, conversation: true);
+    await m1.click(t, 'Закрыть настройки');
+    await m1.command(t, 'Сколько энергии?', 'Вся цепочка ответов');
+    expect(find.byKey(const ValueKey('thread-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('thread-2')), findsOneWidget);
+    expect(find.text('Цепочка ответов: сверху — с чего всё началось'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('thread-0')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('thread-0')), findsNothing);
+    await m1.stop(t);
+  });
+
+  testWidgets('выбор записей: пересылка открывает выбор получателей, не больше 5 за раз', (t) async {
+    final api = GroupApi();
+    await open(t, api, conversation: true);
+    await m1.click(t, 'Закрыть настройки');
+    await m1.command(t, '<script>текст</script>', 'Выбрать');
+    expect(find.text('Выбрано: 1'), findsOneWidget);
+    await m1.click(t, 'Переслать выбранные');
+    expect(find.text('Переслать запись'), findsOneWidget);
+    expect(find.text('Алиса'), findsOneWidget);
+    await t.tap(find.text('Отмена').last);
+    await t.pumpAndSettle();
+    await m1.click(t, 'Снять выбор');
+    expect(find.text('Выбрано: 1'), findsNothing);
+    await m1.stop(t);
+  });
+
+  testWidgets('голосовое в группе: микрофон вместо самолётика, запись и отмена', (t) async {
+    final old = voiceBackendFactory;
+    voiceBackendFactory = _FakeVoice.new;
+    voicePathFactory = () async => '/tmp/yandi_voice_test/Голосовое_test.m4a';
+    addTearDown(() {
+      voiceBackendFactory = old;
+      voicePathFactory = newVoicePath;
+    });
+    final api = GroupApi();
+    await open(t, api, conversation: true);
+    await m1.click(t, 'Закрыть настройки');
+    expect(find.byKey(const ValueKey('voice-mic')), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('voice-mic')));
+    await t.pump(const Duration(seconds: 1));
+    expect(find.text('Идёт запись…'), findsOneWidget);
+    await t.tap(find.text('Отмена').first);
+    await t.pumpAndSettle();
+    expect(find.text('Идёт запись…'), findsNothing);
+    await m1.stop(t);
+  });
+}
+
+class _FakeVoice implements VoiceBackend {
+  @override
+  Future<bool> hasPermission() async => true;
+  @override
+  Future<void> start(String path) async {}
+  @override
+  Future<String?> stop() async => null;
+  @override
+  Future<void> dispose() async {}
 }

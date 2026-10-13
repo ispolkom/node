@@ -2,8 +2,10 @@ import 'message_actions.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
+import 'dart:typed_data';
 import 'attachments.dart';
 import 'platform_files.dart';
+import 'voice.dart';
 import 'domain/file_repository.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -58,6 +60,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   @override
   void initState() {
     super.initState();
+    voice.onLimit = () => finishVoice(send: true);
+    voice.addListener(() {
+      if (mounted) setState(() {});
+    });
     refresh();
     timer = Timer.periodic(const Duration(seconds: 4), (_) => refresh());
   }
@@ -68,6 +74,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     picked = null;
     PlatformFiles.cancel().catchError((Object _) {});
     timer?.cancel();
+    flashTimer?.cancel();
+    voice.dispose();
     composer.clear();
     composer.dispose();
     drafts.clear();
@@ -154,6 +162,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       feed = info = null;
       filesView = false;
       section = null;
+      picked_.clear();
       invitation = error = null;
       loading = true;
     });
@@ -315,8 +324,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
       TextButton(
         style: primary
             ? TextButton.styleFrom(
-                backgroundColor: Icq.header,
-                foregroundColor: Colors.white,
+                textStyle: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  decoration: TextDecoration.underline,
+                ),
               )
             : null,
         onPressed: busy || loading ? null : callback,
@@ -328,6 +339,13 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   // Раздел-фильтр ленты, как в мобильном чате: вид записи или null — все.
   int? section;
   bool filesView = false;
+  late final voice = VoiceRecording(voiceBackendFactory(), () => voicePathFactory());
+  // выбор записей (по номерам), подсветка записи после перехода по карточке-ответу
+  final picked_ = <String>{};
+  String? flash;
+  Timer? flashTimer;
+  // кому уже пересылали запись в этом сеансе: не больше 20 получателей на запись
+  final forwardedTo = <String, Set<String>>{};
   static const sections = <(int?, String)>[
     (null, 'Все'),
     (2, 'Картинки'),
@@ -421,8 +439,14 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                         m['muted'] == true ? 'unmute' : 'mute',
                         'kick',
                         'ban',
-                        if (manager) ...['promote', 'demote'],
-                        if (role == 'owner') 'make_admin',
+                        // роли — только по матрице: владелец назначает и снимает админов,
+                        // админ — модераторов; админ админа не назначает, модератор не назначает никого
+                        if (manager && m['role'] == 'member') 'promote',
+                        if (manager && m['role'] == 'moderator') 'demote',
+                        if (role == 'owner' && m['role'] == 'admin') 'demote',
+                        if (role == 'owner' &&
+                            (m['role'] == 'member' || m['role'] == 'moderator'))
+                          'make_admin',
                       ])
                         button(labels[action]!, () => mod(action, m)),
                     ],
@@ -518,8 +542,6 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           ),
         for (final b in rows(info, 'banned'))
           button('Снять блокировку ${b['alias']}', () => mod('unban', b)),
-        for (final log in rows(info, 'modlog').reversed.take(20))
-          UiText('${log['ts']} · ${log['action']} · ${log['target'] ?? ''}'),
       ],
     ],
   );
@@ -538,6 +560,28 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         setState(() => error = 'Не удалось открыть диалог выбора файла.');
     } finally {
       if (mounted) setState(() => choosing = false);
+    }
+  }
+
+  Future<void> startVoice() async {
+    if (busy || !canSend || selected == null) return;
+    final why = await voice.start();
+    if (why != null && mounted) setState(() => error = why);
+  }
+
+  /// Завершить запись: отправить в группу как файл «Голосовое_…» (как в телефоне) или отбросить; файл затирается.
+  Future<void> finishVoice({required bool send}) async {
+    final (path, secs) = await voice.stop();
+    if (path == null) return;
+    final f = File(path);
+    try {
+      if (send && secs >= 1 && active && selected != null) {
+        setState(() => picked = f);
+        await sendFile();
+      }
+    } finally {
+      if (mounted && picked?.path == f.path) setState(() => picked = null);
+      await wipeVoice(f);
     }
   }
 
@@ -599,15 +643,243 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     });
   }
 
+  /// Цепочка ответов от первого сообщения до записи: у каждой карточки якорь на то, на что отвечали.
+  List<({String? seq, String author, String text, bool known})> chainOf(
+    Map<String, dynamic> m,
+  ) {
+    final bySeq = {for (final x in rows(feed, 'messages')) '${x['seq']}': x};
+    final out = <({String? seq, String author, String text, bool known})>[];
+    final seen = <String>{};
+    Map<String, dynamic>? cur = m;
+    while (cur != null && seen.add('${cur['seq']}')) {
+      out.add((
+        seq: '${cur['seq']}',
+        author: '${cur['author']}',
+        text:
+            '${cur['text'] ?? (cur['attachment'] is Map ? (cur['attachment'] as Map)['filename'] : '')}',
+        known: true,
+      ));
+      final r = cur['reply'];
+      if (r is! Map) break;
+      final parent = bySeq['${r['seq']}'];
+      if (parent == null) {
+        out.add((
+          seq: null,
+          author: '${r['author'] ?? ''}',
+          text: '${r['text'] ?? ''}',
+          known: false,
+        ));
+        break;
+      }
+      cur = parent;
+    }
+    return out.reversed.toList();
+  }
+
+  void jumpTo(String seq) {
+    final ctx = anchors['$selected:$seq']?.currentContext;
+    setState(() => flash = seq);
+    flashTimer?.cancel();
+    flashTimer = Timer(const Duration(milliseconds: 1800), () {
+      if (mounted && flash == seq) setState(() => flash = null);
+    });
+    if (ctx != null) {
+      Scrollable.ensureVisible(
+        ctx,
+        duration: const Duration(milliseconds: 200),
+      );
+    }
+  }
+
+  Future<void> showThread(Map<String, dynamic> m) async {
+    final chain = chainOf(m);
+    final seq = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const UiText('Цепочка ответов: сверху — с чего всё началось'),
+        content: SizedBox(
+          width: 420,
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                for (var i = 0; i < chain.length; i++)
+                  Padding(
+                    padding: EdgeInsets.only(
+                      left: (i * 12.0).clamp(0, 72),
+                      bottom: 6,
+                    ),
+                    child: InkWell(
+                      key: ValueKey('thread-$i'),
+                      onTap: chain[i].seq == null
+                          ? null
+                          : () => Navigator.pop(ctx, chain[i].seq),
+                      child: Container(
+                        padding: const EdgeInsets.fromLTRB(8, 4, 8, 4),
+                        decoration: BoxDecoration(
+                          color: Icq.light,
+                          border: Border(
+                            left: BorderSide(
+                              color: i == chain.length - 1
+                                  ? Icq.header
+                                  : Icq.peer,
+                              width: 3,
+                            ),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              '${chain[i].author}${chain[i].known ? '' : ' · сообщение недоступно'}',
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.bold,
+                                color: Icq.peer,
+                              ),
+                            ),
+                            Text(chain[i].text),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const UiText('Закрыть'),
+          ),
+        ],
+      ),
+    );
+    if (seq != null && active) jumpTo(seq);
+  }
+
+  /// Переслать записи группы выбранным контактам (до 5 за раз, до 20 на запись за сеанс); файл пересылается как файл.
+  Future<void> forward(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty || busy || selected == null) return;
+    final id = selected!;
+    final shell = ShellRepository(widget.api);
+    List<Map<String, dynamic>> contacts = [], trusted = [];
+    try {
+      contacts = await shell.contacts();
+      trusted = ShellRepository.list(await shell.trusted(), 'peers');
+    } catch (e) {
+      failure(e);
+      return;
+    }
+    String peerOf(Map<String, dynamic> c) {
+      final short = '${c['short_id']}';
+      for (final t in trusted) {
+        final tid = t['id'];
+        if (tid is String && tid.startsWith(short)) return tid;
+      }
+      return short;
+    }
+
+    if (!mounted) return;
+    final to = await pickRecipients(
+      context,
+      title: items.length == 1
+          ? 'Переслать запись'
+          : 'Переслать записи (${items.length})',
+      contacts: contacts,
+    );
+    if (to == null || to.isEmpty || !active) return;
+    final targets = [for (final c in to) peerOf(c)];
+    for (final m in items) {
+      final all = {...?forwardedTo['$id:${m['seq']}'], ...targets};
+      if (all.length > 20) {
+        setState(
+          () => error =
+              'Одну запись можно переслать не больше чем 20 получателям.',
+        );
+        return;
+      }
+    }
+    final files = FileRepository(widget.api);
+    await mutate(() async {
+      for (final m in items) {
+        final att = m['attachment'] is Map
+            ? Map<String, dynamic>.from(m['attachment'] as Map)
+            : null;
+        final text = '${m['text'] ?? ''}';
+        Uint8List? bytes;
+        try {
+          if (att != null) {
+            final size = att['size'];
+            if (size is! num || size <= 0) throw const ApiFailure('protocol');
+            bytes = await files.binary.bytes(
+              repo.path(id, 'file/${m['seq']}'),
+              limit: size.toInt(),
+            );
+          }
+          for (var i = 0; i < to.length; i++) {
+            if (!active) return;
+            if (bytes != null) {
+              await files.uploadBytes(
+                targets[i],
+                '${att!['filename']}',
+                bytes,
+                phone: to[i]['is_phone'] == true,
+                isActive: () => active,
+              );
+            } else if (text.isNotEmpty) {
+              await shell.send(targets[i], text);
+            }
+            (forwardedTo['$id:${m['seq']}'] ??= <String>{}).add(targets[i]);
+          }
+        } finally {
+          bytes?.fillRange(0, bytes.length, 0);
+        }
+      }
+    }, success: () => picked_.clear());
+  }
+
+  Future<void> deletePicked() async {
+    final id = selected!;
+    final items = [
+      for (final m in rows(feed, 'messages'))
+        if (picked_.contains('${m['seq']}') && canDelete(m)) m,
+    ];
+    if (items.isEmpty) return;
+    if (!await confirm(
+      'Удалить выбранные записи (${items.length})?',
+      detail: 'Записи будут удалены для участников группы.',
+    ))
+      return;
+    await mutate(() async {
+      for (final m in items) {
+        await repo.act(id, 'mod', {'action': 'delete_entry', 'seq': m['seq']});
+      }
+    }, success: () => picked_.clear());
+  }
+
   Future<void> messageMenu(Map<String, dynamic> m, Offset at) async {
     if (busy || selected == null) return;
     final id = selected!;
     final own = m['mine'] == true;
+    final authorRole = rows(info, 'members')
+        .where((x) => x['alias'] == m['from'])
+        .map((x) => '${x['role']}')
+        .firstOrNull;
     final commands = [
       commandReply,
+      if (m['reply'] is Map) commandThread,
       if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
+        commandShare,
+      commandSelect,
       if (!own) commandHideAuthor,
       if (canDelete(m)) commandDelete,
+      if (!own &&
+          authorRole != null &&
+          GroupRepository.canTouch(role, authorRole))
+        commandMute,
     ];
     final choice = await showMessageMenu(context, at, commands);
     if (!mounted || choice == null) return;
@@ -628,6 +900,14 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         });
       case commandCopy:
         await Clipboard.setData(ClipboardData(text: '${m['text'] ?? ''}'));
+      case commandThread:
+        await showThread(m);
+      case commandShare:
+        await forward([m]);
+      case commandSelect:
+        setState(() => picked_.add('${m['seq']}'));
+      case commandMute:
+        await mod('mute', {'alias': m['from'], 'name': m['author']});
       case commandHideAuthor:
         setState(() {
           (hiddenAuthors[id] ??= <String>{}).add('${m['from']}');
@@ -654,13 +934,31 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         child: GestureDetector(
           behavior: HitTestBehavior.opaque,
           onTapDown: (d) => tapAt = d.globalPosition,
-          onTap: () => messageMenu(m, tapAt),
+          onTap: () {
+            if (picked_.isEmpty) {
+              messageMenu(m, tapAt);
+            } else {
+              setState(() {
+                final k = '${m['seq']}';
+                if (!picked_.remove(k)) picked_.add(k);
+              });
+            }
+          },
           child: Container(
             margin: const EdgeInsets.symmetric(vertical: 4),
             padding: const EdgeInsets.fromLTRB(12, 6, 12, 4),
             decoration: BoxDecoration(
               color: own ? Icq.sent : Colors.white,
-              border: Border.all(color: own ? Icq.mine : Icq.peer, width: 1.5),
+              border: Border.all(
+                color: picked_.contains('${m['seq']}')
+                    ? const Color(0xFF2E86DE)
+                    : (flash == '${m['seq']}'
+                          ? Colors.black
+                          : (own ? Icq.mine : Icq.peer)),
+                width: picked_.contains('${m['seq']}') || flash == '${m['seq']}'
+                    ? 3
+                    : 1.5,
+              ),
             ),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -686,16 +984,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                   QuoteCard(
                     author: '${reply['author']}',
                     text: '${reply['text'] ?? ''}',
-                    onTap: () {
-                      final ctx = anchors['${selected}:${reply['seq']}']
-                          ?.currentContext;
-                      if (ctx != null) {
-                        Scrollable.ensureVisible(
-                          ctx,
-                          duration: const Duration(milliseconds: 200),
-                        );
-                      }
-                    },
+                    onTap: () => jumpTo('${reply['seq']}'),
                   ),
                 if (m['attachment'] is Map)
                   AttachmentView(
@@ -861,6 +1150,35 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               ),
             ],
           ),
+        if (picked_.isNotEmpty)
+          Wrap(
+            spacing: 14,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              UiText(
+                'Выбрано: ${picked_.length}',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              CommandText(
+                'Переслать выбранные',
+                onTap: busy
+                    ? null
+                    : () => forward([
+                        for (final m in rows(feed, 'messages'))
+                          if (picked_.contains('${m['seq']}')) m,
+                      ]),
+              ),
+              if (rows(
+                feed,
+                'messages',
+              ).any((m) => picked_.contains('${m['seq']}') && canDelete(m)))
+                CommandText(
+                  'Удалить выбранные',
+                  onTap: busy ? null : deletePicked,
+                ),
+              CommandText('Снять выбор', onTap: () => setState(picked_.clear)),
+            ],
+          ),
         // «Файлы группы» — отдельный вид без сообщений: картинки, файлы, аудио, видео и ссылки по разделам.
         Wrap(
           spacing: 14,
@@ -901,7 +1219,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
           for (final r in rows(info, 'requests')) requestCard(r),
         if (filesView &&
             !rows(feed, 'messages').any(
-              (m) => m['kind'] is int && (m['kind'] as int) >= 2 && (section == null || m['kind'] == section),
+              (m) =>
+                  m['kind'] is int &&
+                  (m['kind'] as int) >= 2 &&
+                  (section == null || m['kind'] == section),
             ))
           const UiText('В этом разделе пусто'),
         for (final m in rows(feed, 'messages'))
@@ -989,10 +1310,14 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         ),
       ),
     );
-    final sendButton = IconButton(
-      tooltip: tr(context, 'Отправить группе'),
-      onPressed: !busy && canSend ? send : null,
-      icon: const Icon(Icons.send, color: Icq.header),
+    final sendButton = SendOrMic(
+      controller: composer,
+      sendTip: 'Отправить группе',
+      hasFile: picked != null,
+      onSend: !busy && canSend
+          ? (picked != null && composer.text.trim().isEmpty ? sendFile : send)
+          : null,
+      onMic: !busy && canSend ? startVoice : null,
     );
     final attach = ComposerTools(
       onAttach: busy || choosing || !canSend ? null : pickFile,
@@ -1010,26 +1335,33 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               onTap: () => setState(() => replyTo = null),
             ),
           ),
-        LayoutBuilder(
-          builder: (context, box) => box.maxWidth < 520
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    field,
-                    Wrap(children: [attach, sendButton]),
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    attach,
-                    const SizedBox(width: 6),
-                    Expanded(child: field),
-                    const SizedBox(width: 6),
-                    sendButton,
-                  ],
-                ),
-        ),
+        if (voice.active)
+          VoiceBar(
+            seconds: voice.seconds,
+            onCancel: () => finishVoice(send: false),
+            onSend: () => finishVoice(send: true),
+          )
+        else
+          LayoutBuilder(
+            builder: (context, box) => box.maxWidth < 520
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      field,
+                      Wrap(children: [attach, sendButton]),
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      attach,
+                      const SizedBox(width: 6),
+                      Expanded(child: field),
+                      const SizedBox(width: 6),
+                      sendButton,
+                    ],
+                  ),
+          ),
         if (picked != null)
           Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,

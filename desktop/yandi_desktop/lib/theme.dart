@@ -63,26 +63,28 @@ abstract final class Icq {
           titleMedium: const TextStyle(fontSize: 16, color: text),
           labelLarge: const TextStyle(fontSize: 14, color: text),
         );
-    ButtonStyle buttonStyle(Color color, Color foreground) => ButtonStyle(
-      backgroundColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.disabled) ? panel : color,
-      ),
+    // Команды — слова, а не кнопки: без фона и рамки, подчёркнутые; главное действие — жирным.
+    ButtonStyle wordStyle({bool primary = false}) => ButtonStyle(
+      backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+      overlayColor: WidgetStatePropertyAll(header.withValues(alpha: 0.10)),
       foregroundColor: WidgetStateProperty.resolveWith(
-        (s) => s.contains(WidgetState.disabled) ? dark : foreground,
+        (s) => s.contains(WidgetState.disabled) ? dark : header,
       ),
-      shape: const WidgetStatePropertyAll(BevelBorder()),
+      shape: const WidgetStatePropertyAll(RoundedRectangleBorder()),
       elevation: const WidgetStatePropertyAll(0),
       shadowColor: const WidgetStatePropertyAll(Colors.transparent),
       padding: const WidgetStatePropertyAll(
-        EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+        EdgeInsets.symmetric(horizontal: 8, vertical: 4),
       ),
-      minimumSize: const WidgetStatePropertyAll(Size(28, 30)),
+      minimumSize: const WidgetStatePropertyAll(Size(0, 28)),
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-      textStyle: const WidgetStatePropertyAll(
+      textStyle: WidgetStatePropertyAll(
         TextStyle(
           fontSize: 14,
           fontFamily: 'Tahoma',
-          fontFamilyFallback: ['NotoColorEmoji'],
+          fontFamilyFallback: const ['NotoColorEmoji'],
+          fontWeight: primary ? FontWeight.bold : FontWeight.normal,
+          decoration: TextDecoration.underline,
         ),
       ),
     );
@@ -95,17 +97,19 @@ abstract final class Icq {
         fontFamily: 'Tahoma',
         fontFamilyFallback: const ['NotoColorEmoji'],
       ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: buttonStyle(header, Colors.white),
-      ),
+      filledButtonTheme: FilledButtonThemeData(style: wordStyle(primary: true)),
       elevatedButtonTheme: ElevatedButtonThemeData(
-        style: buttonStyle(header, Colors.white),
+        style: wordStyle(primary: true),
       ),
-      textButtonTheme: TextButtonThemeData(style: buttonStyle(button, text)),
-      outlinedButtonTheme: OutlinedButtonThemeData(
-        style: buttonStyle(button, text),
+      textButtonTheme: TextButtonThemeData(style: wordStyle()),
+      outlinedButtonTheme: OutlinedButtonThemeData(style: wordStyle()),
+      iconButtonTheme: IconButtonThemeData(
+        style: ButtonStyle(
+          backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+          shape: const WidgetStatePropertyAll(RoundedRectangleBorder()),
+          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        ),
       ),
-      iconButtonTheme: IconButtonThemeData(style: buttonStyle(button, text)),
       cardTheme: const CardThemeData(
         color: panel,
         elevation: 0,
@@ -184,12 +188,16 @@ class BevelButton extends TextButton {
     bool primary = false,
     bool danger = false,
   }) : super(
-         style: (primary || danger)
-             ? TextButton.styleFrom(
-                 backgroundColor: danger ? Icq.danger : Icq.header,
-                 foregroundColor: Colors.white,
-               )
-             : null,
+         style: danger
+             ? TextButton.styleFrom(foregroundColor: Icq.danger)
+             : (primary
+                   ? TextButton.styleFrom(
+                       textStyle: const TextStyle(
+                         fontWeight: FontWeight.bold,
+                         decoration: TextDecoration.underline,
+                       ),
+                     )
+                   : null),
          child: UiText(label),
        );
 }

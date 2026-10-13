@@ -2,6 +2,7 @@ import 'message_actions.dart';
 import 'theme.dart';
 import 'preferences.dart';
 import 'dart:io';
+import 'dart:typed_data';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,6 +15,7 @@ import 'calls.dart';
 import 'attachments.dart';
 import 'domain/file_repository.dart';
 import 'platform_files.dart';
+import 'voice.dart';
 import 'profile_panel.dart';
 import 'contact_tunnel.dart';
 import 'devices.dart';
@@ -54,6 +56,20 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   final search = TextEditingController(), composer = TextEditingController();
   final drafts = <String, String>{};
   List<Map<String, dynamic>> contacts = [], messages = [], trusted = [];
+  late final voice = VoiceRecording(voiceBackendFactory(), () => voicePathFactory());
+  // «Файлы чата»: отдельный вид без сообщений, как в телефоне.
+  bool filesView = false;
+  int fileTab = 0;
+  static const fileTabs = [
+    'Все',
+    'Картинки',
+    'Файлы',
+    'Аудио',
+    'Видео',
+    'Ссылки',
+  ];
+  // кому уже пересылали сообщение в этом сеансе: не больше 20 получателей на сообщение
+  final forwardedTo = <String, Set<String>>{};
   Map<String, dynamic>? selected;
   String? ownId, ownCard, lastProfileName, error, notice;
   bool loading = true, refreshing = false, sending = false;
@@ -71,6 +87,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   void initState() {
     super.initState();
+    voice.onLimit = () => finishVoice(send: true);
+    voice.addListener(() {
+      if (mounted) setState(() {});
+    });
     if (const [
       'Группы',
       'Шлюзы',
@@ -88,6 +108,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   void dispose() {
     revision++;
     timer?.cancel();
+    voice.dispose();
     PlatformFiles.cancel().catchError((Object _) {});
     pickedFile = null;
     drafts.clear();
@@ -245,6 +266,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       replyTo = null;
       editingId = null;
       picked.clear();
+      filesView = false;
+      fileTab = 0;
       transferred = transferSize = 0;
       selected = contact;
       messages = [];
@@ -292,6 +315,30 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (active && rev == revision) failure(e);
     } finally {
       choosingFile = false;
+    }
+  }
+
+  Future<void> startVoice() async {
+    if (sending || selected == null) return;
+    final why = await voice.start();
+    if (why != null && mounted) setState(() => error = why);
+  }
+
+  /// Завершить запись: отправить как файл (имя «Голосовое_…», как в телефоне) или отбросить; временный файл затирается.
+  Future<void> finishVoice({required bool send}) async {
+    final (path, secs) = await voice.stop();
+    if (path == null) return;
+    final f = File(path);
+    try {
+      if (send && secs >= 1 && active && selected != null) {
+        setState(() => pickedFile = f);
+        await sendFile();
+      }
+    } finally {
+      if (mounted && pickedFile?.path == f.path) {
+        setState(() => pickedFile = null);
+      }
+      await wipeVoice(f);
     }
   }
 
@@ -456,6 +503,71 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     });
   }
 
+  /// Переслать сообщения или файлы выбранным контактам (до 5 за раз, до 20 на сообщение за сеанс).
+  Future<void> forward(List<Map<String, dynamic>> items) async {
+    if (items.isEmpty || sending || selected == null) return;
+    final here = peer(selected!);
+    final to = await pickRecipients(
+      context,
+      title: items.length == 1
+          ? 'Переслать сообщение'
+          : 'Переслать сообщения (${items.length})',
+      contacts: [
+        for (final c in contacts)
+          if (peer(c) != here) c,
+      ],
+    );
+    if (to == null || to.isEmpty || !active) return;
+    final targets = [for (final c in to) peer(c)];
+    for (final m in items) {
+      final all = {...?forwardedTo['${m['msg_id']}'], ...targets};
+      if (all.length > 20) {
+        setState(
+          () => error =
+              'Одно сообщение можно переслать не больше чем 20 получателям.',
+        );
+        return;
+      }
+    }
+    final files = FileRepository(widget.api);
+    await mutate(() async {
+      for (final m in items) {
+        final att = m['attachment'] is Map
+            ? Map<String, dynamic>.from(m['attachment'] as Map)
+            : null;
+        final text = '${m['text'] ?? ''}';
+        Uint8List? bytes;
+        try {
+          if (att != null) {
+            final size = att['size'];
+            if (size is! num || size <= 0) throw const ApiFailure('protocol');
+            bytes = await files.binary.bytes(
+              files.path(att, 'content'),
+              limit: size.toInt(),
+            );
+          }
+          for (var i = 0; i < to.length; i++) {
+            if (!active) return;
+            if (bytes != null) {
+              await files.uploadBytes(
+                targets[i],
+                '${att!['filename']}',
+                bytes,
+                phone: to[i]['is_phone'] == true,
+                isActive: () => active,
+              );
+            } else if (text.isNotEmpty) {
+              await repo.send(targets[i], text);
+            }
+            (forwardedTo['${m['msg_id']}'] ??= <String>{}).add(targets[i]);
+          }
+        } finally {
+          bytes?.fillRange(0, bytes.length, 0);
+        }
+      }
+    }, success: () => picked.clear());
+  }
+
   Future<void> deleteSelected() async {
     final target = peer(selected!), ids = picked.toList();
     if (ids.isEmpty) return;
@@ -465,14 +577,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     )) {
       return;
     }
-    await mutate(
-      () async {
-        for (final id in ids) {
-          await repo.deleteMessage(target, id);
-        }
-      },
-      success: () => picked.clear(),
-    );
+    await mutate(() async {
+      for (final id in ids) {
+        await repo.deleteMessage(target, id);
+      }
+    }, success: () => picked.clear());
   }
 
   Future<void> deleteMessage(Map<String, dynamic> message) async {
@@ -751,6 +860,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (own && m['attachment'] == null) commandEdit,
       commandReply,
       if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
+        commandShare,
       commandSelect,
       if (own) commandDelete,
     ];
@@ -759,6 +870,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     switch (choice) {
       case commandEdit:
         editMessage(m);
+      case commandShare:
+        await forward([m]);
       case commandSelect:
         setState(() => picked.add('${m['msg_id']}'));
       case commandReply:
@@ -903,6 +1016,85 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     );
   }
 
+  static final _link = RegExp(
+    r'(https?://|www\.)[^\s<>"]+',
+    caseSensitive: false,
+  );
+
+  /// Вид «Файлы чата»: картинки, файлы, аудио, видео и ссылки по разделам; сообщений здесь нет.
+  List<Widget> filesList() {
+    String kind(Map a) {
+      final t = FileRepository.mime('${a['filename']}');
+      return t.startsWith('image/')
+          ? 'Картинки'
+          : t.startsWith('audio/')
+          ? 'Аудио'
+          : t.startsWith('video/')
+          ? 'Видео'
+          : 'Файлы';
+    }
+
+    final tab = fileTabs[fileTab];
+    final withFiles = [
+      for (final m in messages)
+        if (m['attachment'] is Map &&
+            (tab == 'Все' || kind(m['attachment'] as Map) == tab))
+          m,
+    ];
+    final links = <String>[
+      if (tab == 'Все' || tab == 'Ссылки')
+        for (final m in messages)
+          if (m['attachment'] is! Map)
+            for (final l in _link.allMatches('${m['text'] ?? ''}'))
+              l.group(0)!.replaceAll(RegExp(r'[.,;:!?)\]]+$'), ''),
+    ];
+    return [
+      Wrap(
+        spacing: 14,
+        children: [
+          for (var i = 0; i < fileTabs.length; i++)
+            InkWell(
+              onTap: () => setState(() => fileTab = i),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: UiText(
+                  fileTabs[i],
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: fileTab == i
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                    color: fileTab == i ? Icq.active : Icq.header,
+                    decoration: fileTab == i
+                        ? TextDecoration.none
+                        : TextDecoration.underline,
+                  ),
+                ),
+              ),
+            ),
+        ],
+      ),
+      if (withFiles.isEmpty && links.isEmpty)
+        const UiText('В этом разделе пусто'),
+      for (final m in withFiles) bubble(m),
+      for (final l in links)
+        Padding(
+          padding: const EdgeInsets.symmetric(vertical: 3),
+          child: Row(
+            children: [
+              const Icon(Icons.link, size: 18, color: Icq.header),
+              const SizedBox(width: 6),
+              Expanded(child: SelectableText(l)),
+              CommandText(
+                'Копировать',
+                onTap: () => Clipboard.setData(ClipboardData(text: l)),
+              ),
+            ],
+          ),
+        ),
+    ];
+  }
+
   Widget conversation({bool wide = false}) {
     if (selected == null)
       return Container(
@@ -945,6 +1137,13 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               ),
             ],
             CommandText(
+              filesView ? 'Назад к сообщениям' : 'Файлы чата',
+              onTap: () => setState(() {
+                filesView = !filesView;
+                fileTab = 0;
+              }),
+            ),
+            CommandText(
               'Очистить историю',
               onTap: sending ? null : clearHistory,
             ),
@@ -964,18 +1163,28 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 style: const TextStyle(fontWeight: FontWeight.bold),
               ),
               CommandText(
+                'Переслать выбранные',
+                onTap: sending
+                    ? null
+                    : () => forward([
+                        for (final m in messages)
+                          if (picked.contains('${m['msg_id']}')) m,
+                      ]),
+              ),
+              CommandText(
                 'Удалить выбранные',
                 onTap: sending ? null : deleteSelected,
               ),
-              CommandText(
-                'Снять выбор',
-                onTap: () => setState(picked.clear),
-              ),
+              CommandText('Снять выбор', onTap: () => setState(picked.clear)),
             ],
           ),
-        if (!loading && messages.isEmpty && error == null)
-          const UiText('История пуста.'),
-        for (final m in messages) bubble(m),
+        if (filesView)
+          ...filesList()
+        else ...[
+          if (!loading && messages.isEmpty && error == null)
+            const UiText('История пуста.'),
+          for (final m in messages) bubble(m),
+        ],
       ],
     );
     final inputField = Focus(
@@ -994,10 +1203,16 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       onAttach: sending || choosingFile ? null : pickFile,
       controller: composer,
     );
-    final sendButton = IconButton(
-      tooltip: tr(context, 'Отправить'),
-      onPressed: sending ? null : send,
-      icon: const Icon(Icons.send, color: Icq.header),
+    final sendButton = SendOrMic(
+      controller: composer,
+      sendTip: 'Отправить',
+      hasFile: pickedFile != null,
+      onSend: sending
+          ? null
+          : (pickedFile != null && composer.text.trim().isEmpty
+                ? sendFile
+                : send),
+      onMic: sending || editingId != null ? null : startVoice,
     );
     final input = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -1034,32 +1249,39 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               onTap: () => setState(() => replyTo = null),
             ),
           ),
-        LayoutBuilder(
-          builder: (context, box) => box.maxWidth < 520
-              ? Column(
-                  crossAxisAlignment: CrossAxisAlignment.stretch,
-                  children: [
-                    inputField,
-                    Wrap(children: [attachButton, sendButton]),
-                  ],
-                )
-              : Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: attachButton,
-                    ),
-                    const SizedBox(width: 6),
-                    Expanded(child: inputField),
-                    const SizedBox(width: 6),
-                    Padding(
-                      padding: const EdgeInsets.only(top: 8),
-                      child: sendButton,
-                    ),
-                  ],
-                ),
-        ),
+        if (voice.active)
+          VoiceBar(
+            seconds: voice.seconds,
+            onCancel: () => finishVoice(send: false),
+            onSend: () => finishVoice(send: true),
+          )
+        else
+          LayoutBuilder(
+            builder: (context, box) => box.maxWidth < 520
+                ? Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      inputField,
+                      Wrap(children: [attachButton, sendButton]),
+                    ],
+                  )
+                : Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: attachButton,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(child: inputField),
+                      const SizedBox(width: 6),
+                      Padding(
+                        padding: const EdgeInsets.only(top: 8),
+                        child: sendButton,
+                      ),
+                    ],
+                  ),
+          ),
         if (pickedFile != null)
           Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
