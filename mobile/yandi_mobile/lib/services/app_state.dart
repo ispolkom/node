@@ -350,6 +350,14 @@ class AppState extends ChangeNotifier implements FilesHost {
         : (existing != null ? _plainName(existing.displayName) : '');
     final finalName = shown.isNotEmpty ? shown : peerId.substring(0, 12);
     await StorageService.saveManualContact(peerId, finalName);
+    // общий список узла: имя увидят ПК и другие телефоны этого же владельца (свои устройства и сам узел туда не попадают)
+    if (peerId.length == 64 && peerId != _nodePeerId && (existing == null || existing.isManual)) {
+      unawaited(() async {
+        try {
+          await _api?.json('POST', '/mobile/contacts', {'peer_id': peerId, 'name': finalName});
+        } catch (_) {}
+      }());
+    }
     if (existing != null) {
       contacts[contacts.indexOf(existing)] = Contact(
         peerId: peerId, displayName: finalName, online: existing.online,

@@ -5104,6 +5104,23 @@ fn remove_avatar_files_in(dir: &std::path::Path, short_id: &str, keep: Option<&s
 /// Один писатель на файл контактов: чтение–изменение–запись без потерь при одновременных запросах.
 static CONTACTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Имя контакта из приложения на телефоне: завести контакт или переименовать (общий список узла, его видят все устройства и ПК).
+pub async fn contacts_upsert(short_id: &str, name: &str) -> Result<(), String> {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect();
+    if name.is_empty() || short_id.len() != 16 || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("неверное имя или номер".into());
+    }
+    let short_id = short_id.to_ascii_lowercase();
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = load_contacts_for_edit("contacts.json").await?;
+    match contacts.iter_mut().find(|c| c.get("short_id").and_then(|v| v.as_str()) == Some(short_id.as_str())) {
+        Some(c) => c["name"] = serde_json::json!(name),
+        None => contacts.push(serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "name": name, "short_id": short_id, "online": false})),
+    }
+    save_contacts("contacts.json", &contacts).await
+}
+
+
 /// Список контактов для изменения. Нет файла — пустой список; файл есть, но не читается или не разбирается — ошибка
 /// (раньше такой файл считался пустым и затем перезаписывался одним новым контактом).
 async fn load_contacts_for_edit(path: &str) -> Result<Vec<serde_json::Value>, String> {

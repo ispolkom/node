@@ -820,6 +820,24 @@ async fn profile_avatar(State(st): State<Arc<MobileState>>) -> axum::response::R
     crate::mobile_profile::reply_avatar(crate::mobile_profile::avatar_bytes(&my_short(&st)))
 }
 
+#[derive(Deserialize)]
+struct ContactNameReq {
+    peer_id: String,
+    name: String,
+}
+
+/// Телефон сохранил или переименовал контакт: имя уходит в общий список узла, чтобы его видели ПК и другие телефоны.
+async fn contact_put(Json(req): Json<ContactNameReq>) -> axum::response::Response {
+    let Some(short) = req.peer_id.get(..16) else { return StatusCode::BAD_REQUEST.into_response() };
+    if req.peer_id.len() != 64 && req.peer_id.len() != 16 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    match crate::web::server::contacts_upsert(short, &req.name).await {
+        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+    }
+}
+
 async fn contacts(
     State(st): State<Arc<MobileState>>,
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
@@ -1360,7 +1378,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/info", get(info))
         .route("/mobile/profile", get(profile_get).put(profile_put))
         .route("/mobile/profile/avatar", get(profile_avatar))
-        .route("/mobile/contacts", get(contacts))
+        .route("/mobile/contacts", get(contacts).post(contact_put))
         .route("/mobile/chat/:peer", get(history).post(send))
         .route("/mobile/inbox", get(inbox))
         .route("/mobile/inbox/ack", post(inbox_ack))

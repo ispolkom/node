@@ -105,9 +105,13 @@ class ApiService {
     final list = data['contacts'] as List<dynamic>? ?? [];
     return list.map((e) {
       final m = e as Map<String, dynamic>;
+      // своё имя контакта сильнее его ника; ник подставляется, только когда имя не задано (пусто или обрезок номера)
+      final name = m['display_name'] as String? ?? '';
+      final nick = (m['nick'] as String?)?.trim() ?? '';
+      final unnamed = name.isEmpty || RegExp(r'^[0-9a-f]{8,16}$').hasMatch(name);
       return Contact(
         peerId:      m['peer_id']      as String,
-        displayName: m['display_name'] as String? ?? '',
+        displayName: (unnamed && nick.isNotEmpty) ? nick : name,
         online:      m['online']       as bool?   ?? false,
         isManual:    m['is_manual']    as bool?   ?? false,
         lastActivityMs: (m['last_activity_ms'] as num?)?.toInt() ?? 0,
