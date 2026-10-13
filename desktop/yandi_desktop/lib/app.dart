@@ -1,4 +1,5 @@
 import 'theme.dart';
+import 'dashboard.dart';
 import 'preferences.dart';
 import 'background_alerts.dart';
 import 'dart:async';
@@ -340,91 +341,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       danger: label.startsWith('Остановить'),
     ),
   );
-  Widget dashboard() => PanelStack(
-    children: [
-      const UiText('Статус узла', style: TextStyle(fontSize: 22)),
-      if (status == null)
-        const UiText('Загрузка статуса…')
-      else ...[
-        for (final item in const {
-          'is_local': 'Локальный узел',
-          'status': 'Статус',
-          'short_id': 'Short ID',
-          'cid': 'CID',
-          'node_id': 'ID узла',
-          'role': 'Роль',
-          'mode': 'Режим',
-          'nat_status': 'NAT',
-          'external_ip': 'Внешний IP',
-          'virtual_ipv6': 'Виртуальная IPv6',
-          'ipv6_short': 'Короткая IPv6',
-          'discovery_port': 'Порт обнаружения',
-          'data_port': 'Порт данных',
-          'web_port': 'Веб-порт',
-          'active_proxies': 'Активные прокси',
-        }.entries)
-          StatusRow(item.value, status![item.key] ?? '—'),
+  Widget dashboard() => DashboardView(
+    status: status,
+    speed: speed,
+    nodes: nodes,
+    controls: Wrap(
+      spacing: 12,
+      children: [
+        button('Запустить узел', () => act('/api/node/start', {})),
+        button('Остановить узел', () => act('/api/node/stop', {})),
       ],
-      const UiText('Управление', style: TextStyle(fontSize: 22)),
-      Wrap(
-        spacing: 12,
-        children: [
-          button('Запустить узел', () => act('/api/node/start', {})),
-          button('Остановить узел', () => act('/api/node/stop', {})),
-        ],
-      ),
-      const Divider(),
-      const UiText('Скорость', style: TextStyle(fontSize: 22)),
-      if (speed == null)
-        const UiText('Загрузка метрик…')
-      else
-        for (final item in const {
-          'rx_speed': 'Приём, Б/с',
-          'tx_speed': 'Отправка, Б/с',
-          'peer_rx_estimate': 'Оценка приёма соседа, Б/с',
-          'avg_rtt_ms': 'RTT, мс',
-          'path0_loss_incoming': 'Path0: входящие потери (диагностика)',
-          'peer_path0_loss': 'Path0 соседа (диагностика)',
-          'clone_hit_pct': 'Попадания клонов, %',
-          'wagon_drop_crc_pct': 'Отброшено + CRC, %',
-          'depot_bytes': 'Депо, байт',
-          'active_trains': 'Активные поезда',
-          'evictions_delta': 'Вытеснения за интервал',
-          'evictions_total': 'Вытеснения всего',
-        }.entries)
-          StatusRow(item.value, speed![item.key] ?? '—'),
-      const Divider(),
-      const UiText('Узлы', style: TextStyle(fontSize: 22)),
-      if (nodes.isEmpty) const UiText('Обнаруженных узлов нет.'),
-      for (final node in nodes.whereType<Map>())
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                for (final entry in const {
-                  'short_id': 'Short ID',
-                  'hostname': 'Имя узла',
-                  'source': 'Источник обнаружения',
-                  'role': 'Роль',
-                  'nat_status': 'NAT',
-                  'connected': 'Соединение (по данным демона)',
-                  'addresses': 'Адреса',
-                  'admin_port': 'Порт управления',
-                  'discovery_port': 'Порт обнаружения',
-                  'data_port': 'Порт данных',
-                }.entries)
-                  if (node.containsKey(entry.key))
-                    SelectableText(
-                      '${tr(context, entry.value)}: ${node[entry.key]}',
-                    ),
-                const UiText('Подключение узла в текущем API — заглушка.'),
-              ],
-            ),
-          ),
-        ),
-    ],
+    ),
   );
 
   Widget vaultPanel() {
