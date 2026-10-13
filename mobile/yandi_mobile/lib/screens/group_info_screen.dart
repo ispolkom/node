@@ -26,7 +26,6 @@ class GroupInfoScreen extends StatefulWidget {
 
 class _GroupInfoScreenState extends State<GroupInfoScreen> {
   List<GroupMember> _members = const [];
-  List<Map<String, dynamic>> _modlog = const [];
   List<JoinRequest> _requests = const [];
   List<String> _banned = const [];
   final _nameCtrl = TextEditingController();
@@ -74,7 +73,6 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   Future<void> _load() async {
     try {
       final m = await _svc.api.members(widget.gid);
-      final log = await _svc.api.modlog(widget.gid);
       List<JoinRequest> reqs = const [];
       final gi = _svc.byId(widget.gid);
       if (gi != null && gi.canModerate && gi.kind == 'invite') {
@@ -83,7 +81,6 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       if (!mounted) return;
       setState(() {
         _members = [for (final x in (m['members'] as List? ?? const [])) GroupMember.fromJson((x as Map).cast<String, dynamic>())];
-        _modlog = log.reversed.take(30).toList();
         _requests = reqs;
         _banned = [for (final b in (m['banned'] as List? ?? const [])) '$b'];
         _error = null;
@@ -448,11 +445,6 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запрещён вход (${_banned.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
           for (final al in _banned)
             ListTile(dense: true, title: Text(al, style: const TextStyle(color: AppTheme.text)), trailing: TextButton(onPressed: () => _act('unban', al), child: const Text('Разрешить вход'))),
-        ],
-        if (_modlog.isNotEmpty) ...[
-          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Действия модераторов', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
-          for (final l in _modlog)
-            ListTile(dense: true, title: Text('${l['by'] ?? ''}: ${l['action'] ?? ''}${l['target'] != null ? ' → ${l['target']}' : ''}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
         ],
         if (g.isOwner && _members.length > 1) ...[
           const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Передача владения', style: TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),

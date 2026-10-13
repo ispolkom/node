@@ -27,6 +27,31 @@ import '../widgets/inline_media.dart';
 import '../widgets/recipients_sheet.dart';
 import 'package:path_provider/path_provider.dart' as pp;
 
+/// Звено цепочки ответов: запись (seq) либо, если её уже нет, то, что осталось в карточке (known == false).
+typedef ThreadItem = ({int? seq, String author, String text, bool known});
+
+/// Цепочка ответов от первого сообщения до записи [e]: у каждой карточки-ответа якорь `r.s` на то, на что отвечали.
+/// Защищена от петель; если родитель не загружен или стёрт, цепочка начинается с выдержки из карточки.
+List<ThreadItem> replyChain(List<GroupEntry> entries, GroupEntry e, String Function(String from) nameOf, String Function(GroupEntry) excerpt) {
+  final bySeq = {for (final x in entries) x.seq: x};
+  final out = <ThreadItem>[];
+  final seen = <int>{};
+  GroupEntry? cur = e;
+  while (cur != null && seen.add(cur.seq)) {
+    out.add((seq: cur.seq, author: nameOf(cur.from), text: excerpt(cur), known: true));
+    final r = cur.body['r'];
+    if (r is! Map) break;
+    final s = r['s'];
+    final parent = s is int ? bySeq[s] : null;
+    if (parent == null) {
+      if (r['t'] is String) out.add((seq: null, author: r['a'] is String ? r['a'] as String : '', text: r['t'] as String, known: false));
+      break;
+    }
+    cur = parent;
+  }
+  return out.reversed.toList();
+}
+
 /// Разделы-фильтры группы: вид записи → подпись.
 const groupSections = <(int?, String)>[
   (null, 'Все'),
@@ -261,6 +286,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     final role = _authorRole(g, e);
     final choice = await showMessageMenu(context, at, [
       cmdReply,
+      if (e.body['r'] is Map) cmdThread,
       if (hasText) cmdCopy,
       if (hasText || isFile) cmdShare,
       cmdSelect,
@@ -273,6 +299,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       case cmdReply:
         setState(() => _replyTo = e);
         _focus.requestFocus();
+      case cmdThread:
+        await _showThread(g, e);
       case cmdCopy:
         await Clipboard.setData(ClipboardData(text: '${e.body['t']}'));
       case cmdShare:
@@ -379,7 +407,59 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  int? _flash;   // запись, к которой только что перешли по карточке: подсвечивается на пару секунд
+
+  void _flashSeq(int seq) {
+    setState(() => _flash = seq);
+    Future.delayed(const Duration(milliseconds: 1800), () { if (mounted && _flash == seq) setState(() => _flash = null); });
+  }
+
+  List<ThreadItem> _chainOf(GroupInfo g, GroupEntry e) =>
+      replyChain(_entries, e, (from) => _svc!.displayName(g.id, from), _excerpt);
+
+  Future<void> _showThread(GroupInfo g, GroupEntry e) async {
+    final chain = _chainOf(g, e);
+    final seq = await showModalBottomSheet<int>(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      isScrollControlled: true,
+      builder: (ctx) => SafeArea(
+        child: ConstrainedBox(
+          constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
+          child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(12), children: [
+            const Padding(
+              padding: EdgeInsets.only(bottom: 8),
+              child: Text('Цепочка ответов: сверху — с чего всё началось', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            ),
+            for (var i = 0; i < chain.length; i++)
+              Padding(
+                padding: EdgeInsets.only(left: (i * 10.0).clamp(0, 60), bottom: 6),
+                child: InkWell(
+                  key: ValueKey('thread-$i'),
+                  onTap: chain[i].seq == null ? null : () => Navigator.pop(ctx, chain[i].seq),
+                  child: Container(
+                    padding: const EdgeInsets.fromLTRB(10, 6, 10, 6),
+                    decoration: BoxDecoration(
+                      color: AppTheme.accent.withOpacity(i == chain.length - 1 ? 0.16 : 0.07),
+                      border: const Border(left: BorderSide(color: AppTheme.accent, width: 3)),
+                    ),
+                    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                      Text('${chain[i].author}${chain[i].known ? '' : ' · сообщение недоступно'}',
+                          style: const TextStyle(color: AppTheme.accent, fontSize: 12, fontWeight: FontWeight.bold)),
+                      Text(chain[i].text, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
+                    ]),
+                  ),
+                ),
+              ),
+          ]),
+        ),
+      ),
+    );
+    if (seq != null && mounted) _jumpToSeq(seq);
+  }
+
   void _jumpToSeq(int seq) {
+    _flashSeq(seq);
     final ctx = _anchors[seq]?.currentContext;
     if (ctx != null) { Scrollable.ensureVisible(ctx, duration: const Duration(milliseconds: 250), alignment: 0.3); return; }
     final i = _entries.indexWhere((x) => x.seq == seq);
@@ -520,6 +600,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           ? setState(() => _selected.contains(e.seq) ? _selected.remove(e.seq) : _selected.add(e.seq))
                           : _entryCommands(g, e, d.globalPosition),
                       selected: _selected.contains(e.seq),
+                      flash: _flash == e.seq,
                       localPath: e.body['f'] is String ? _paths[e.body['f']] : null,
                       entry: e,
                       mine: mine,
@@ -690,9 +771,10 @@ class _GroupBubble extends StatelessWidget {
   final VoidCallback? onQuoteTap;
   final void Function(LongPressStartDetails)? onLongPressStart;
   final bool selected;
+  final bool flash;
   /// Где файл лежит у меня (если уже скачан): для звука и видео — плеер прямо в сообщении.
   final String? localPath;
-  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.localPath});
+  const _GroupBubble({super.key, required this.entry, required this.mine, required this.author, this.onTap, this.onTapDown, this.onOpen, this.sizeLabel, this.progress, this.quote, this.onQuoteTap, this.onLongPressStart, this.selected = false, this.flash = false, this.localPath});
 
   @override
   Widget build(BuildContext context) {
@@ -716,7 +798,7 @@ class _GroupBubble extends StatelessWidget {
           constraints: BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.78),
           decoration: BoxDecoration(
             color: AppTheme.bg,
-            border: Border.all(color: mine ? AppTheme.accent.withOpacity(0.85) : AppTheme.incoming, width: 1.5),
+            border: Border.all(color: flash ? Colors.white : (mine ? AppTheme.accent.withOpacity(0.85) : AppTheme.incoming), width: flash ? 3 : 1.5),
             borderRadius: BorderRadius.circular(16),
           ),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

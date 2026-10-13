@@ -4,6 +4,7 @@ import '../theme.dart';
 /// Команды сообщения — слова в меню, а не кнопки.
 const cmdEdit = 'Изменить',
     cmdReply = 'Ответить',
+    cmdThread = 'Вся цепочка ответов',
     cmdCopy = 'Копировать',
     cmdShare = 'Переслать',
     cmdSelect = 'Выбрать',
