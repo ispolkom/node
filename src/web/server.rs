@@ -5080,10 +5080,30 @@ async fn api_profile_put(
 }
 
 /// Get profile by short_id (from contacts cache)
+fn phone_profile(short_id: &str) -> Option<serde_json::Value> {
+    // телефон владельца в contacts.json не хранится: профиль строим из списка сопряжённых устройств
+    let mut data = serde_json::json!({ "contacts": [] });
+    append_phone_contacts(&mut data);
+    data["contacts"].as_array()?.iter().find(|c| c["short_id"].as_str() == Some(short_id)).map(|c| {
+        serde_json::json!({
+            "status": "success",
+            "profile": {
+                "display_name": c.get("name").and_then(|n| n.as_str()).unwrap_or(short_id),
+                "avatar": c.get("avatar"),
+                "short_id": short_id,
+                "online": c.get("online").and_then(|o| o.as_bool()).unwrap_or(false)
+            }
+        })
+    })
+}
+
 async fn api_profile_get_by_short_id(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
+    if let Some(found) = phone_profile(&short_id) {
+        return Json(found);
+    }
     let contacts_path = "contacts.json";
 
     if !std::path::Path::new(contacts_path).exists() {
