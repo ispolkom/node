@@ -54,7 +54,23 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
+    // само переименование живёт в каталоге: без его fsync после отключения питания может вернуться старое имя, а вызывающий
+    // (перенос ключей) уже затёр исходник
+    sync_dir(path);
     Ok(())
+}
+
+/// Сбросить на диск запись каталога, где лежит `path` (где ОС это умеет; ошибка не фатальна — файл уже записан и сохранён).
+pub fn sync_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Read a secret that is created once: if it is there and `valid`, that is the secret (a file left readable by others is made
@@ -117,6 +133,18 @@ fn open_new_private(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn directory_sync_after_write_is_harmless_everywhere() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("secret.bin");
+        super::write_private(&p, b"x").unwrap();
+        super::write_private(&p, b"y").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"y");
+        super::sync_dir(&p);
+        super::sync_dir(std::path::Path::new("только-имя"));
+        super::sync_dir(std::path::Path::new("/нет/такого/каталога/файл"));
+    }
+
     use super::*;
 
     #[test]
