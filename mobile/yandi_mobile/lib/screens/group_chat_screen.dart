@@ -716,7 +716,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               autocorrect: !state.secureKeyboard,
               enableIMEPersonalizedLearning: !state.secureKeyboard,
               decoration: InputDecoration(
-                hintText: denied ? 'Вы заглушены в этой группе' : 'Сообщение…',
+                hintText: denied
+                    ? 'Вы заглушены в этой группе'
+                    : (!g.ownerPresent ? 'Владелец группы отсутствует: писать может не получиться' : 'Сообщение…'),
                 hintStyle: const TextStyle(color: AppTheme.textSecondary),
                 filled: true,
                 fillColor: AppTheme.bg,

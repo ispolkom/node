@@ -817,6 +817,15 @@ pub(crate) fn device_peer_of(token_hash: &str) -> Option<String> {
     })
 }
 
+/// Кто может быть живым владельцем группы: сопряжённые телефоны и сам компьютер.
+pub(crate) fn live_owner_peers() -> Vec<String> {
+    let mut v: Vec<String> = with_devices(|d| d.iter().map(|x| x.peer_id()).collect());
+    if let Some(n) = node_peer_hex() {
+        v.push(n);
+    }
+    v
+}
+
 /// Это сопряжённое устройство этого узла?
 pub(crate) fn is_device_peer(peer: &str) -> bool {
     device_by_peer(peer).is_some()

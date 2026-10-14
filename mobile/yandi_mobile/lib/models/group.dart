@@ -4,6 +4,8 @@ import 'dart:convert';
 class GroupInfo {
   final String id, name, topic, about, kind, myAlias, role;
   final bool muted, rekeyNeeded;
+  /// Устройство владельца группы сопряжено с узлом: без него новый ключ группы никому не выдать.
+  final bool ownerPresent;
   final int members, epoch, firstSeq, lastSeq, requests;
   /// Автоочистка: сколько дней без записей терпят рядового участника (0 — выключена).
   final int autoCleanDays;
@@ -11,7 +13,7 @@ class GroupInfo {
   const GroupInfo({
     required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.myAlias, required this.role,
     required this.muted, required this.rekeyNeeded, required this.members, required this.epoch, required this.firstSeq,
-    required this.lastSeq, required this.pendingKeys, this.requests = 0, this.autoCleanDays = 0,
+    required this.lastSeq, required this.pendingKeys, this.requests = 0, this.autoCleanDays = 0, this.ownerPresent = true,
   });
 
   factory GroupInfo.fromJson(Map<String, dynamic> j) => GroupInfo(
@@ -24,6 +26,7 @@ class GroupInfo {
         role: (j['role'] ?? 'member') as String,
         muted: j['muted'] == true,
         rekeyNeeded: j['rekey_needed'] == true,
+        ownerPresent: j['owner_present'] != false,
         members: (j['members'] ?? 0) as int,
         epoch: (j['epoch'] ?? 0) as int,
         firstSeq: (j['first_seq'] ?? 0) as int,

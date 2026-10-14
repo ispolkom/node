@@ -1364,6 +1364,34 @@ impl Store {
     }
 
     /// Группы этого узла, куда устройство ещё не вступило: открытые (вступить сразу) и «по приглашению» (можно попросить приглашение).
+    /// Жив ли владелец группы: его устройство сопряжено с узлом (или это сам компьютер). Без владельца ключ группы никому не
+    /// выдать и нового поколения не выпустить: такая группа новым участникам не предлагается.
+    fn owner_alive(g: &Group, live: &[String]) -> bool {
+        g.owner().is_some_and(|o| live.iter().any(|p| member_key(&g.id, p) == o.key))
+    }
+
+    /// Каталог открытых групп без «осиротевших» (владелец устройство которого забыто узлом).
+    pub fn open_for_live(&self, device: &str, live: &[String]) -> Vec<Value> {
+        self.open_for(device)
+            .into_iter()
+            .filter(|v| {
+                v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live))
+            })
+            .collect()
+    }
+
+    /// Группы устройства с пометкой `owner_present`: приложение показывает «владелец отсутствует» вместо немого отказа писать.
+    pub fn list_for_live(&self, device: &str, live: &[String]) -> Vec<Value> {
+        self.list_for(device)
+            .into_iter()
+            .map(|mut v| {
+                let alive = v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live));
+                v["owner_present"] = json!(alive);
+                v
+            })
+            .collect()
+    }
+
     pub fn open_for(&self, device: &str) -> Vec<Value> {
         self.groups
             .values()
@@ -1615,13 +1643,15 @@ fn checked(gid: &str) -> R<()> {
 pub(crate) async fn m_list(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
 ) -> Response {
-    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.list_for(&me))})))
+    let live = crate::mobile_api::live_owner_peers();
+    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.list_for_live(&me, &live))})))
 }
 
 pub(crate) async fn m_open(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
 ) -> Response {
-    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.open_for(&me))})))
+    let live = crate::mobile_api::live_owner_peers();
+    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.open_for_live(&me, &live))})))
 }
 
 #[derive(Deserialize)]
@@ -2133,6 +2163,19 @@ mod tests {
         s.moderate(&gid, OWNER, "delete_entry", None, Some(b), None).unwrap();
         assert_eq!(s.deletions_after(&gid, BOB, cur).unwrap()["deleted"], json!([b]), "только новое после курсора");
         assert!(s.deletions_after(&gid, EVE, 0).is_err(), "посторонний не видит");
+    }
+
+    #[test]
+    fn a_group_whose_owner_device_is_gone_is_not_offered_to_new_members() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let live = vec![OWNER.to_string()];
+        assert_eq!(s.open_for_live(BOB, &live).len(), 1, "владелец жив — группа в каталоге");
+        assert_eq!(s.list_for_live(OWNER, &live)[0]["owner_present"], json!(true));
+        let gone: Vec<String> = Vec::new();
+        assert!(s.open_for_live(BOB, &gone).is_empty(), "владельца нет — группа новичкам не предлагается");
+        assert_eq!(s.list_for_live(OWNER, &gone)[0]["owner_present"], json!(false));
+        let _ = gid;
     }
 
     #[test]

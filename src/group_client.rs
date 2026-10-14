@@ -952,7 +952,8 @@ fn list_value(c: &mut Client, dev: &str) -> Value {
         })
         .collect();
     let gone: Vec<Value> = c.state.known.iter().filter(|(id, _)| !listed.contains(*id)).map(|(id, n)| json!({"id": id, "name": n})).collect();
-    let catalog: Vec<Value> = with_store(|st| st.open_for(dev));
+    let live = crate::mobile_api::live_owner_peers();
+    let catalog: Vec<Value> = with_store(|st| st.open_for_live(dev, &live));
     json!({"groups": groups, "gone": gone, "catalog": catalog})
 }
 
