@@ -359,6 +359,11 @@ class AppState extends ChangeNotifier implements FilesHost {
   // ── Паринг новой ноды ──────────────────────────────────────────────────────
 
   Future<void> completePairing(TrustedNode node) async {
+    // Сопряжение по QR — личное действие у экрана узла: закреплённый ключ этого узла забывается, чтобы после пересоздания ключей
+    // узла (новая среда, перенос) не оставаться с устаревшим ключом и не отвергать его сообщения.
+    if (node.id.length == 64) {
+      try { await StorageService.secureDelete('peer_ed25519_pin_${node.id}'); } catch (_) {}
+    }
     await nodeManager.addNode(node);
 
     // Запускаемся на новой ноде если это первая или лучше текущей
