@@ -2258,6 +2258,68 @@ mod tests {
         assert!(s.deletions_after(&gid, EVE, 0).is_err(), "посторонний не видит");
     }
 
+    /// Дочерний режим теста падения: дописывает записи в журнал группы, пока его не убьют.
+    #[test]
+    fn crash_child_appender() {
+        let Some(dir) = std::env::var_os("YANDI_GROUP_CRASH_CHILD") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut s = Store::open(dir.clone());
+        let gid = std::fs::read_to_string(dir.join("gid.txt")).unwrap();
+        let payload = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(vec![7u8; 4000])
+        };
+        loop {
+            let _ = s.append(gid.trim(), OWNER, 0, &payload);
+        }
+    }
+
+    /// Падение (kill -9) во время дописывания записей: журнал открывается, номера идут без повторов, новые записи пишутся дальше.
+    #[test]
+    fn group_journal_survives_kill_during_appends() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("groups");
+        let gid = {
+            let mut s = Store::open(dir.clone());
+            let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+            std::fs::write(dir.join("gid.txt"), &gid).unwrap();
+            gid
+        };
+        let exe = std::env::current_exe().unwrap();
+        let mut last_total = 0u64;
+        for round in 0..12u64 {
+            let mut child = std::process::Command::new(&exe)
+                .args(["--exact", "mobile_groups::tests::crash_child_appender", "--nocapture", "--test-threads=1"])
+                .env("YANDI_GROUP_CRASH_CHILD", &dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(40 + (round * 53) % 140));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            // сторож: журнал читается целиком, номера строго возрастают без повторов
+            let raw = std::fs::read_to_string(dir.join(format!("{gid}.log"))).unwrap_or_default();
+            let mut prev = 0u64;
+            let mut count = 0u64;
+            for line in raw.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let seq = v["seq"].as_u64().unwrap();
+                    assert!(seq > prev, "раунд {round}: номера записей повторяются или идут назад ({prev} → {seq})");
+                    prev = seq;
+                    count += 1;
+                }
+            }
+            assert!(count >= last_total, "раунд {round}: записи пропали ({count} < {last_total})");
+            last_total = count;
+            // после падения хранилище открывается и пишет дальше с верным следующим номером
+            let mut s = Store::open(dir.clone());
+            let next = s.append(&gid, OWNER, 0, "AAAA").unwrap();
+            assert!(next > prev, "раунд {round}: новая запись получила старый номер ({next} ≤ {prev})");
+        }
+        assert!(last_total > 0, "дочерний процесс должен был успеть записать");
+    }
+
     #[test]
     fn group_logo_is_set_by_owner_rebuilt_and_shown_in_lists() {
         use base64::Engine;

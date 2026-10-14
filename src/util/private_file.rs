@@ -7,6 +7,30 @@ use std::io::Write;
 use std::path::Path;
 
 /// Записать `data` в `path` так, чтобы читать мог только владелец.
+/// Временные файлы, оставшиеся от записи, которую оборвали (падение, питание, kill -9): имя `.<файл>.tmp<pid>-<n>`.
+/// Удаляются те, чей процесс уже не существует; временные файлы живых процессов (в том числе этого) не трогаются.
+fn sweep_stale_temps(path: &Path, name: &str) {
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()).or(Some(Path::new("."))) else { return };
+    let prefix = format!(".{name}.tmp");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let me = std::process::id();
+    for e in rd.flatten() {
+        let fname = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = fname.strip_prefix(&prefix) else { continue };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if pid == me {
+            continue;
+        }
+        #[cfg(unix)]
+        let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(not(unix))]
+        let alive = true; // без /proc: чужие временные файлы не трогаем
+        if !alive {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -18,6 +42,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_file_name(format!(".{name}.tmp{}-{}", std::process::id(), COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_file(&tmp);
+    sweep_stale_temps(path, &name);
     let mut f = open_new_private(&tmp)?;
     let res = f.write_all(data).and_then(|_| f.sync_all());
     drop(f);
