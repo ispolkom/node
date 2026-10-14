@@ -179,13 +179,14 @@ class _DevicesPanelState extends State<DevicesPanel> {
         ),
       if (text != null && expires != null) ...[
         if (qr != null)
-          // Align снимает «растяжение» колонки: QR остаётся квадратом 280×280.
+          // Align снимает «растяжение» колонки: QR остаётся квадратом. Сторона — целое число экранных точек на единицу сетки (×2):
+          // дробный масштаб давал модули разной ширины, и камера телефона не читала код с экрана.
           Align(
             alignment: Alignment.centerLeft,
             child: SizedBox(
               key: const ValueKey('pairing-qr'),
-              width: 280,
-              height: 280,
+              width: (qr!.extent * 2).roundToDouble().clamp(280, 760),
+              height: (qr!.extent * 2).roundToDouble().clamp(280, 760),
               child: CustomPaint(painter: qr),
             ),
           ),
