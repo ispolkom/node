@@ -1596,18 +1596,28 @@ impl Store {
     /// Устройство забыто узлом: убираем его из всех групп (хэш у каждой группы свой, поэтому пересчитываем).
     pub fn forget_device(&mut self, device: &str) {
         let mut changed = Vec::new();
+        let mut dead: Vec<String> = Vec::new();
         let mut had_request = false;
         for g in self.groups.values_mut() {
             let n = g.requests.len();
             g.requests.retain(|r| r.peer != device);
             had_request |= g.requests.len() != n;
             let k = member_key(&g.id, device);
+            let was_owner = g.owner().is_some_and(|o| o.key == k);
             if let Some(m) = g.drop_member(&k) {
-                g.log(PC, "removed_device", Some(&m.alias), None, None);
-                changed.push((g.id.clone(), g.keys()));
+                if was_owner {
+                    // владелец ушёл: ключ группы выдавать и менять больше некому, группа без него мертва и не должна висеть в списках
+                    dead.push(g.id.clone());
+                } else {
+                    g.log(PC, "removed_device", Some(&m.alias), None, None);
+                    changed.push((g.id.clone(), g.keys()));
+                }
             }
         }
-        if had_request && changed.is_empty() {
+        for gid in &dead {
+            let _ = self.delete(gid);
+        }
+        if had_request && changed.is_empty() && dead.is_empty() {
             if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
         }
         if !changed.is_empty() {
@@ -1616,6 +1626,16 @@ impl Store {
                 hint(&gid, HINT_CHANGED, 0, to);
             }
         }
+    }
+
+    /// Группы, чей владелец не сопряжён с узлом и не компьютер: удаляются (одноразовая уборка того, что осталось от прежних удалений).
+    /// Вызывающий обязан убедиться, что список живых устройств полон (иначе пустой список снёс бы все группы).
+    pub fn sweep_orphans(&mut self, live: &[String]) -> usize {
+        let dead: Vec<String> = self.groups.values().filter(|g| !Self::owner_alive(g, live)).map(|g| g.id.clone()).collect();
+        for gid in &dead {
+            let _ = self.delete(gid);
+        }
+        dead.len()
     }
 }
 
@@ -1669,6 +1689,11 @@ pub(crate) fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
 
 pub fn forget_device(device: &str) {
     with_store(|s| s.forget_device(device));
+}
+
+/// Уборка групп без владельца (запускается узлом после старта).
+pub fn sweep_orphans(live: &[String]) -> usize {
+    with_store(|s| s.sweep_orphans(live))
 }
 
 /// Мера владельца узла по жалобе: удалить группу с узла.
@@ -2318,6 +2343,26 @@ mod tests {
             assert!(next > prev, "раунд {round}: новая запись получила старый номер ({next} ≤ {prev})");
         }
         assert!(last_total > 0, "дочерний процесс должен был успеть записать");
+    }
+
+    #[test]
+    fn group_disappears_when_its_owner_device_is_forgotten_and_members_leaving_keeps_it() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, None).unwrap();
+        s.forget_device(BOB);
+        assert_eq!(s.list_for(OWNER).len(), 1, "ушёл рядовой участник — группа на месте");
+        let gid2 = s.create_as("Г2", "т", Kind::Open, "cc", &[], true).unwrap();
+        s.join(&gid2, BOB, None, None).unwrap();
+        s.forget_device("cc");
+        assert!(s.list_for(BOB).is_empty(), "владелец удалён — группа удалена, у участников её больше нет");
+        assert!(s.open_for(BOB).iter().all(|v| v["id"] != gid2.as_str()), "и в каталоге её нет");
+        // уборка: группа с владельцем, которого нет среди живых
+        let live = vec![OWNER.to_string()];
+        let _ = s.create_as("Г3", "т", Kind::Open, "dd", &[], true).unwrap();
+        assert_eq!(s.sweep_orphans(&live), 1);
+        assert_eq!(s.list_for(OWNER).len(), 1, "группа живого владельца уцелела");
+        let _ = gid;
     }
 
     #[test]

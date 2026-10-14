@@ -200,9 +200,21 @@ fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
 fn spawn_pc_inbox_drain() {
     crate::supervisor::supervise("pc-inbox-drain", crate::supervisor::Policy::restart(), move || async move {
         use base64::Engine;
+        let mut swept = false;
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let Some(st) = STATE.get().cloned() else { continue };
+            if !swept {
+                // один раз после старта: группы, чей владелец давно удалён, не висят в списках
+                let live = live_owner_peers();
+                if node_peer_hex().is_some() && live.len() > 1 {
+                    let n = crate::mobile_groups::sweep_orphans(&live);
+                    if n > 0 {
+                        eprintln!("[groups] удалено групп без владельца: {n}");
+                    }
+                    swept = true;
+                }
+            }
             #[cfg(unix)]
             if crate::closed_api::is_locked() {
                 continue;
