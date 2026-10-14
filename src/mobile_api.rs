@@ -175,27 +175,40 @@ fn pc_inbox_path() -> std::path::PathBuf {
 }
 
 fn with_pc_inbox<R>(f: impl FnOnce(&mut Vec<PcMail>) -> R) -> R {
+    with_pc_inbox_saved(f).0
+}
+
+/// То же, но говорит, удалось ли записать очередь на диск.
+fn with_pc_inbox_saved<R>(f: impl FnOnce(&mut Vec<PcMail>) -> R) -> (R, bool) {
     let mut g = PC_INBOX.lock().unwrap_or_else(|e| e.into_inner());
     let list = g.get_or_insert_with(|| {
         std::fs::read_to_string(pc_inbox_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
     });
     let r = f(list);
-    if let Ok(s) = serde_json::to_vec(&*list) {
-        let _ = crate::util::private_file::write_private(&pc_inbox_path(), &s);
-    }
-    r
+    let saved = serde_json::to_vec(&*list).ok().map(|s| crate::util::private_file::write_private(&pc_inbox_path(), &s).is_ok()).unwrap_or(false);
+    (r, saved)
 }
 
 /// Положить в ожидание. false — очередь переполнена (телефон увидит «не доставлено»).
 fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
     use base64::Engine;
-    with_pc_inbox(|l| {
+    let ((queued, pos), saved) = with_pc_inbox_saved(|l| {
         if l.len() >= PC_INBOX_MAX || l.iter().filter(|m| m.from == device).count() >= PC_INBOX_PER_DEVICE {
-            return false;
+            return (false, 0);
         }
         l.push(PcMail { ts: now_ms(), from: device.to_string(), blob_b64: base64::engine::general_purpose::STANDARD.encode(blob) });
-        true
-    })
+        (true, l.len() - 1)
+    });
+    if queued && !saved {
+        // на диск не легло — телефону «не доставлено», а не тихая потеря после перезапуска
+        with_pc_inbox(|l| {
+            if pos < l.len() {
+                l.remove(pos);
+            }
+        });
+        return false;
+    }
+    queued
 }
 
 /// Когда среда открыта, ожидающие сообщения обрабатываются как обычные входящие.
@@ -221,14 +234,23 @@ fn spawn_pc_inbox_drain() {
             if crate::closed_api::is_locked() {
                 continue;
             }
-            let batch: Vec<PcMail> = with_pc_inbox(|l| std::mem::take(l));
-            for m in batch {
-                if now_ms().saturating_sub(m.ts) > MAIL_TTL_MS {
-                    continue;
+            // по одному: письмо уходит из очереди только после обработки, сбой сохранения оставляет его на повтор
+            while let Some(m) = with_pc_inbox(|l| l.first().cloned()) {
+                let done = if now_ms().saturating_sub(m.ts) > MAIL_TTL_MS {
+                    true
+                } else if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(&m.blob_b64) {
+                    phone_to_node(&st, &m.from, &blob)
+                } else {
+                    true
+                };
+                if !done {
+                    break;
                 }
-                if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(&m.blob_b64) {
-                    phone_to_node(&st, &m.from, &blob);
-                }
+                with_pc_inbox(|l| {
+                    if l.first().map(|x| x.ts == m.ts && x.from == m.from && x.blob_b64 == m.blob_b64).unwrap_or(false) {
+                        l.remove(0);
+                    }
+                });
             }
         }
     });
@@ -605,12 +627,13 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
 pub(crate) struct DeviceKey(pub(crate) String);
 
 /// Сообщение телефона самому компьютеру (подписанный E4): расшифровать и положить в историю веб-чата.
-fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
+/// true — письмо обработано (или не подлежит обработке); false — сохранить не удалось, его стоит повторить.
+fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
     if crate::mobile_self::is_blocked_phone(from_device) {
-        return; // заблокированное устройство: ни сообщений, ни файлов, ни звонков компьютеру
+        return true; // заблокированное устройство: ни сообщений, ни файлов, ни звонков компьютеру
     }
-    let Ok(ed) = device_ed25519(from_device) else { return };
-    let (Some(text), Some(from)) = (crate::mobile_self::open(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return };
+    let Ok(ed) = device_ed25519(from_device) else { return true };
+    let (Some(text), Some(from)) = (crate::mobile_self::open(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return true };
     let device = HashId(from);
     crate::mobile_self::unhide_phone(from_device);
     let text = match crate::mobile_self::classify(text) {
@@ -621,21 +644,21 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
                     let _ = st.chat.store_local_status(&device, &mid, status.clone());
                 }
             }
-            return;
+            return true;
         }
         crate::mobile_self::Envelope::Edit { cmid, text } => {
             let _ = st.chat.edit_message(&device, &crate::mobile_self::incoming_id(from_device, &cmid), text);
-            return;
+            return true;
         }
         crate::mobile_self::Envelope::CapPing => {
             node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
-            return;
+            return true;
         }
-        crate::mobile_self::Envelope::Ignored => return,
+        crate::mobile_self::Envelope::Ignored => return true,
         crate::mobile_self::Envelope::Reaction { cmid, emoji } => {
             let local = crate::chat_reactions::local_for_phone(from_device, &cmid);
             crate::chat_reactions::set_peer(&hex::encode(&device.0[..8]), &local, &emoji);
-            return;
+            return true;
         }
         crate::mobile_self::Envelope::Message { cmid, text, reply } => {
             // сообщение с номером: в историю под выведенным номером, телефону сразу «доставлено», «прочитано» — когда откроют страницу
@@ -654,10 +677,12 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
                 crate::communication::ReplyRef { msg_id: anchor, text: quote }.sanitized()
             });
             msg.mark_delivered();
-            let _ = st.chat.store_local_incoming(&device, &msg);
+            if st.chat.store_local_incoming(&device, &msg).is_err() {
+                return false; // не сохранили — квитанции «доставлено» не будет, телефон пришлёт снова
+            }
             crate::mobile_self::remember_unread(&local, from_device, &cmid);
             node_mail_to_device(st, from_device, &crate::mobile_self::receipt(false, &[cmid]));
-            return;
+            return true;
         }
         crate::mobile_self::Envelope::Plain(t) => t,
     };
@@ -691,12 +716,12 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) {
                 }
             }
         });
-        return;
+        return true;
     }
     let mut msg = ChatMessage::new(HashId(from), st.my_id, text);
     msg.encrypted = true;
     msg.mark_delivered();
-    let _ = st.chat.store_local_incoming(&HashId(from), &msg);
+    st.chat.store_local_incoming(&HashId(from), &msg).is_ok()
 }
 
 /// Номер самого узла (hex): под ним компьютер участвует в группах как устройство.
@@ -2255,6 +2280,14 @@ mod pc_inbox_tests {
         // на диске лежит запечатанный блоб, не текст
         let raw = std::fs::read_to_string(pc_inbox_path()).unwrap();
         assert!(!raw.contains("sealed-blob"), "блоб лежит в base64");
+        with_pc_inbox(|l| l.clear());
+        // не легло на диск — «не доставлено», а не тихая потеря: очередь остаётся пустой
+        let p = pc_inbox_path();
+        let _ = std::fs::remove_file(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(!queue_for_pc("dev-c", b"sealed-blob"), "сбой записи очереди — отказ");
+        assert_eq!(with_pc_inbox(|l| l.len()), 0);
+        std::fs::remove_dir_all(&p).unwrap();
         with_pc_inbox(|l| l.clear());
     }
 }
