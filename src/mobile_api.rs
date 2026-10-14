@@ -929,6 +929,16 @@ struct DeviceProfilePut {
     hide: Option<bool>,
 }
 
+/// Устройство само выходит из узла (старая запись при пересопряжении): токен перестаёт действовать, очередь стирается.
+async fn device_forget_self(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if remove_device(&me) {
+        Json(json!({"ok": true})).into_response()
+    } else {
+        StatusCode::NOT_FOUND.into_response()
+    }
+}
+
 /// Свой профиль устройства (ник, картинка, скрытие): им пользуются в списке «Пользователи».
 async fn device_profile_get(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
@@ -1594,6 +1604,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/info", get(info))
         .route("/mobile/profile", get(profile_get).put(profile_put))
         .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
+        .route("/mobile/me", axum::routing::delete(device_forget_self))
         .route("/mobile/users", get(users_list))
         .route("/mobile/complaints", get(complaints_mine).post(complaint_submit))
         .route("/mobile/users/:peer/avatar", get(user_avatar))

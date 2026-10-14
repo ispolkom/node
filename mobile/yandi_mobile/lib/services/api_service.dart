@@ -71,6 +71,17 @@ class ApiService {
     }
   }
 
+  /// Выйти из узла самому: токен этого устройства отзывается (старая запись при пересопряжении). Лучшее усилие.
+  static Future<void> revokeSelf(TrustedNode node) async {
+    try {
+      final client = _buildClient(node.fingerprint);
+      await client
+          .delete(Uri.parse('https://${node.host}:${node.port}/mobile/me'), headers: {'Authorization': 'Bearer ${node.token}'})
+          .timeout(const Duration(seconds: 8));
+      client.close();
+    } catch (_) {}
+  }
+
   /// Профиль этого устройства (виден другим пользователям узла в списке «Пользователи»).
   Future<bool> putDeviceProfile({String? nick, String? avatarB64, bool? hide}) async {
     try {

@@ -118,6 +118,19 @@ class AppState extends ChangeNotifier implements FilesHost {
     av.addListener(notifyListeners);
     avatars = av;
 
+    // Профиль (ник и картинка) теперь у каждого устройства свой, а не общий с ПК и другими телефонами. Один раз сбрасываем
+    // ранее подтянутый общий профиль, чтобы у всех устройств не оказалось одинаковой картинки; человек задаёт свой.
+    try {
+      if (await StorageService.secureRead('profile_v2') != '1') {
+        myNick = '';
+        await av.clearMine();
+        _profileDirty = false;
+        await _saveProfileMeta();
+        await StorageService.secureWrite('nick_prompted', '0');
+        await StorageService.secureWrite('profile_v2', '1');
+      }
+    } catch (_) {}
+
     unawaited(_filesHousekeeping());
     unawaited(StorageService.replayLedger?.reseal().catchError((_) {}) ?? Future<void>.value());   // старый открытый журнал повторов — в зашифрованный вид
 
@@ -363,6 +376,10 @@ class AppState extends ChangeNotifier implements FilesHost {
     // узла (новая среда, перенос) не оставаться с устаревшим ключом и не отвергать его сообщения.
     if (node.id.length == 64) {
       try { await StorageService.secureDelete('peer_ed25519_pin_${node.id}'); } catch (_) {}
+    }
+    // старая запись этого же узла на этом телефоне: её устройство на узле отзывается, иначе в «Пользователях» будет двойник
+    for (final old in nodeManager.nodes.where((n) => n.id == node.id && n.token != node.token).toList()) {
+      await api_svc.ApiService.revokeSelf(old);
     }
     await nodeManager.addNode(node);
 
@@ -877,7 +894,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   DateTime _lastAvatarSync = DateTime.now();
 
   /// Картинка контакта. У «компьютера» (моего же узла) та же картинка, что у меня: профиль общий на все мои устройства.
-  Uint8List? avatarBytes(String peerId) => peerId == _nodePeerId ? avatars?.myBytes : (avatars?.bytesForPeer(peerId) ?? _directoryAvatars[peerId]);
+  Uint8List? avatarBytes(String peerId) => peerId == _nodePeerId ? null : (avatars?.bytesForPeer(peerId) ?? _directoryAvatars[peerId]);
   Uint8List? get myAvatarBytes => avatars?.myBytes;
 
   bool _avatarEligible(String peerId) {
@@ -1089,58 +1106,20 @@ class AppState extends ChangeNotifier implements FilesHost {
     }
   }
 
+  /// Профиль теперь свой у каждого устройства: общий с ПК профиль не подтягивается и не перезаписывается. Здесь только публикация
+  /// своих ника и картинки на узел (для списка «Пользователи»), когда человек их менял или это первый вход.
   Future<void> syncProfile() async {
     final api = _api;
     if (api == null || _profileSyncing) return;
     _profileSyncing = true;
     try {
-      if (_profileDirty) {
-        final bytes = avatars?.myBytes;
-        final res = await api.putProfile(nick: myNick.isEmpty ? null : myNick, avatarB64: bytes == null ? '' : base64.encode(bytes));
-        if (res != null) {
-          _profileSeenMs = (res['updated_ms'] as num?)?.toInt() ?? _profileSeenMs;
+      if (_profileDirty || !_deviceProfilePublished) {
+        await _publishDeviceProfile();
+        if (_deviceProfilePublished) {
           _profileDirty = false;
           await _saveProfileMeta();
-          await _publishDeviceProfile();
-        }
-        return;
-      }
-      final remote = await api.getProfile();
-      if (remote == null) return;
-      final ms = (remote['updated_ms'] as num?)?.toInt() ?? 0;
-      if (ms == _profileSeenMs) {
-        if (!_deviceProfilePublished) await _publishDeviceProfile();   // первый вход: ник и картинка устройства ещё не на узле
-        return;
-      }
-      final nick = (remote['nick'] as String?) ?? '';
-      final hash = (remote['avatar_hash'] as String?) ?? '';
-      var changed = false;
-      if (nick != myNick) {
-        myNick = nick;
-        changed = true;
-      }
-      if (hash.isEmpty) {
-        if (avatars?.myHash != null) {
-          await avatars!.clearMine();
-          _avatarAnnounced.clear();
-          _announceAvatar(force: true);
-          changed = true;
-        }
-      } else if (avatars?.myHash != hash) {
-        final png = await api.getProfileAvatar();
-        if (png != null && AvatarMsg.validPng(png) && AvatarMsg.hashOf(png) == hash) {
-          await avatars!.setMine(png);
-          _avatarAnnounced.clear();
-          _announceAvatar();
-          changed = true;
-        } else {
-          return;   // картинка не подтянулась или не сошлась с хэшем: версию не принимаем, попробуем в следующий раз
         }
       }
-      _profileSeenMs = ms;
-      await _saveProfileMeta();
-      await _publishDeviceProfile();
-      if (changed) notifyListeners();
     } catch (_) {
       // узел недоступен — повторим в следующий проход
     } finally {
