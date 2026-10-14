@@ -99,10 +99,52 @@ fn link_ranges(text: &str) -> Vec<(usize, usize)> {
 
 /// Имена, которыми нельзя называться: так подписывает сообщения сам узел («Администрация узла»), подделка этого имени — обман.
 pub fn is_reserved_name(s: &str) -> bool {
-    let l = s.to_lowercase();
-    ["администрац", "administrat", "служба узла", "служба поддержки", "техподдержк", "support", "moderator узла"]
-        .iter()
-        .any(|k| l.contains(k))
+    const KEYS: [&str; 7] = ["администрац", "administrat", "службаузла", "службаподдержки", "техподдержк", "support", "moderatorузла"];
+    // две свёртки: латинские двойники → кириллица и кириллица → латинская транслитерация (смешанное написание ловится одной из них)
+    let (cy, la) = (fold_name(s), translit(s));
+    KEYS.iter().any(|k| cy.contains(&fold_name(k)) || la.contains(&translit(k)))
+}
+
+/// Кириллица → латиница по звучанию; прочие буквы — строчными, без пробелов и знаков.
+fn translit(s: &str) -> String {
+    let mut out = String::new();
+    for c in s.chars().filter(|c| c.is_alphanumeric()).flat_map(|c| c.to_lowercase()) {
+        let t = match c {
+            'а' => "a", 'б' => "b", 'в' => "v", 'г' => "g", 'д' => "d", 'е' | 'ё' => "e", 'ж' => "zh", 'з' => "z",
+            'и' | 'й' | 'і' => "i", 'к' => "k", 'л' => "l", 'м' => "m", 'н' => "n", 'о' => "o", 'п' => "p", 'р' => "r",
+            'с' => "s", 'т' => "t", 'у' => "u", 'ф' => "f", 'х' => "h", 'ц' => "ts", 'ч' => "ch", 'ш' => "sh",
+            'щ' => "sch", 'ъ' | 'ь' => "", 'ы' => "y", 'э' => "e", 'ю' => "yu", 'я' => "ya",
+            _ => { out.push(c); continue; }
+        };
+        out.push_str(t);
+    }
+    out
+}
+
+/// Имя для сравнения: без пробелов, знаков и невидимых символов, строчными, латинские двойники — кириллицей
+/// (чтобы «Адми\u{200b}нистрация» и «Аdministrация» не обходили запрет).
+fn fold_name(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_alphanumeric())
+        .flat_map(|c| c.to_lowercase())
+        .map(|c| match c {
+            'a' => 'а',
+            'c' => 'с',
+            'e' => 'е',
+            'o' => 'о',
+            'p' => 'р',
+            'x' => 'х',
+            'y' => 'у',
+            'k' => 'к',
+            'm' => 'м',
+            't' => 'т',
+            'h' => 'н',
+            'b' => 'в',
+            'u' => 'и',
+            'i' => 'і',
+            _ => c,
+        })
+        .collect()
 }
 
 /// Первая найденная ссылка (для сообщения отправителю), если есть.
@@ -263,6 +305,10 @@ mod tests {
         assert!(is_reserved_name("ADMINISTRATOR Yandi"));
         assert!(is_reserved_name("Техподдержка"));
         assert!(!is_reserved_name("Аня"));
+        assert!(is_reserved_name("Адми\u{200b}нистрация узла"), "невидимый символ внутри");
+        assert!(is_reserved_name("Аdministrация"), "латинский двойник");
+        assert!(is_reserved_name("А д м и н и с т р а ц и я"), "пробелы между буквами");
+        assert!(is_reserved_name("Служба_узла"));
     }
 
     #[test]

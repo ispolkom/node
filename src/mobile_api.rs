@@ -587,7 +587,7 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     rand::thread_rng().fill_bytes(&mut raw);
     let token = hex::encode(raw);
     let mut name: String = req.device_name.trim().chars().take(64).collect();
-    if name.is_empty() {
+    if name.is_empty() || crate::content_policy::is_reserved_name(&name) {
         name = "Телефон".to_string();
     }
     // вытесняем того, кто дольше всех молчит, а не самого давно сопряжённого: давнее, но живое устройство не должно вылетать.
