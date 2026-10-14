@@ -9,6 +9,7 @@ import '../theme.dart';
 import 'chat_screen.dart';
 import 'add_contact_screen.dart';
 import 'qr_scan_screen.dart';
+import 'pair_screen.dart';
 import '../widgets/secure_keyboard.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
@@ -420,6 +421,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen(title: 'QR контакта')));
                     final id = raw == null ? null : extractPeerId(raw);
                     if (!context.mounted || raw == null) return;
+                    if (isPairingPayload(raw)) {
+                      Navigator.of(context).push(MaterialPageRoute(builder: (_) => PairScreen(initialPayload: raw)));
+                      return;
+                    }
                     Navigator.of(context).push(MaterialPageRoute(builder: (_) => AddContactScreen(initialId: id ?? '')));
                   },
                 ),
@@ -428,8 +433,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                   icon: const Icon(Icons.content_paste, color: AppTheme.accent),
                   onPressed: () async {
                     final data = await Clipboard.getData(Clipboard.kTextPlain);
-                    final id = extractPeerId(data?.text ?? '');
+                    final text = data?.text ?? '';
+                    final id = extractPeerId(text);
                     if (!context.mounted) return;
+                    if (isPairingPayload(text)) {
+                      Navigator.of(context).push(MaterialPageRoute(builder: (_) => PairScreen(initialPayload: text)));
+                      return;
+                    }
                     if (id == null) {
                       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('В буфере обмена нет ID (64 знака)')));
                       return;

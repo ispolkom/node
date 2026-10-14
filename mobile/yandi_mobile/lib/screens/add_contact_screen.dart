@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
 import '../widgets/secure_field.dart';
+import 'pair_screen.dart';
 import 'qr_scan_screen.dart';
 
 /// 64 hex-знака ID из любого текста (сообщение, JSON из QR, строка с пробелами или переносами).
@@ -36,6 +37,11 @@ class _AddContactScreenState extends State<AddContactScreen> {
   Future<void> _scan() async {
     final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen(title: 'QR контакта')));
     if (raw == null || !mounted) return;
+    if (isPairingPayload(raw)) {
+      // это QR сопряжения с узлом, а не ID контакта: открываем сопряжение, оно подключится само
+      Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => PairScreen(initialPayload: raw)));
+      return;
+    }
     final id = extractPeerId(raw);
     setState(() {
       if (id == null) {
@@ -49,7 +55,12 @@ class _AddContactScreenState extends State<AddContactScreen> {
 
   Future<void> _pasteId() async {
     final data = await Clipboard.getData(Clipboard.kTextPlain);
-    final id = extractPeerId(data?.text ?? '');
+    final text = data?.text ?? '';
+    if (isPairingPayload(text)) {
+      if (mounted) Navigator.of(context).pushReplacement(MaterialPageRoute(builder: (_) => PairScreen(initialPayload: text)));
+      return;
+    }
+    final id = extractPeerId(text);
     if (!mounted) return;
     setState(() {
       if (id == null) {

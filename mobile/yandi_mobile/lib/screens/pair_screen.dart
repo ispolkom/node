@@ -13,12 +13,29 @@ import '../widgets/secure_field.dart';
 
 /// QR-формат: JSON {"host":"...","port":8766,"pairing_code":"123456","tls_fingerprint":"...","tls":true}
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key});
+  /// Уже прочитанный QR сопряжения (его отсканировали в другом месте приложения): подключаемся сразу.
+  final String? initialPayload;
+  const PairScreen({super.key, this.initialPayload});
   @override
   State<PairScreen> createState() => _PairScreenState();
 }
 
+/// Это QR сопряжения с узлом (а не ID контакта)?
+bool isPairingPayload(String raw) {
+  final t = raw.trim();
+  return t.startsWith('YANDI-PAIR-1:') || (t.startsWith('{') && t.contains('"pairing_code"'));
+}
+
 class _PairScreenState extends State<PairScreen> {
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.initialPayload;
+    if (p != null && p.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _onQr(p); });
+    }
+  }
+
   bool _processing = false;
   String? _error;
   final TextEditingController _manual = TextEditingController();
