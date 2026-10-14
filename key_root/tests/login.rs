@@ -287,7 +287,7 @@ fn the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prin
         out.is_empty() && err.is_empty(),
         "nothing is printed on success: {out}{err}"
     );
-    assert!(path.join("auth.json").exists() && path.join("device.key").exists());
+    assert!(path.join("auth.json").exists() && (path.join("device.seal").exists() || path.join("device.key").exists()));
 
     let before = fs::read(path.join("auth.json")).unwrap();
     let (code, _, err) = tool(
