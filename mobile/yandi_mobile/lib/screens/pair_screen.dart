@@ -1,4 +1,5 @@
 import 'dart:math';
+import '../services/limited_client.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
@@ -254,7 +255,7 @@ class _PairScreenState extends State<PairScreen> {
           final fp = crypto.sha256.convert(cert.der).toString();
           return fp.toLowerCase() == normalizedFp;
         };
-    return IOClient(ioClient);
+    return LimitedClient(IOClient(ioClient));
   }
 
   @override

@@ -340,6 +340,9 @@ class YandiChatService : Service() {
  * TLS: javax.net.ssl + кастомный TrustManager для cert pinning по SHA-256.
  * WS: HTTP Upgrade + бинарные фреймы RFC 6455.
  */
+/** Наибольший допустимый кадр WS от узла (текст, сигналы, служебное); файлы идут по HTTP кусками. */
+private const val MAX_WS_FRAME = 4L * 1024 * 1024
+
 class RawWsClient(
     private val host:        String,
     private val port:        Int,
@@ -387,6 +390,8 @@ class RawWsClient(
             else -> payloadLen
         }
 
+        // длина кадра приходит от узла: выделять память под неё можно только в разумных пределах (кадры YANDI — текст и сигналы, файлы идут по HTTP)
+        if (payloadLen < 0 || payloadLen > MAX_WS_FRAME) throw java.io.IOException("WS frame too large: $payloadLen")
         val mask    = if (masked) ByteArray(4).also { readFully(it) } else null
         val payload = ByteArray(payloadLen.toInt()).also { readFully(it) }
         if (mask != null) {

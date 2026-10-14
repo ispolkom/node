@@ -11,6 +11,7 @@ import '../models/avatar_msg.dart';
 import '../crypto/identity.dart';
 import '../crypto/peer_trust.dart';
 import 'storage_service.dart';
+import 'limited_client.dart';
 
 class ApiService {
   TrustedNode _node;
@@ -436,6 +437,6 @@ class ApiService {
           final fp = crypto.sha256.convert(cert.der).toString();
           return fp.toLowerCase() == normalizedFp;
         };
-    return IOClient(ioClient);
+    return LimitedClient(IOClient(ioClient));
   }
 }
