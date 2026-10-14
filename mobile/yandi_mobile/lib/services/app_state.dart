@@ -101,6 +101,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
     secureKeyboard = (await StorageService.secureRead('pref_secure_keyboard')) != '0';
+    await _loadHidden();
     await _loadProfileMeta();
     await _loadRx();
 
@@ -199,6 +200,26 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Для экранов: перерисоваться после действия над группами.
   void notifyListenersPublic() => notifyListeners();
+
+  /// Скрытые на странице поиска пользователи и группы (только у меня на телефоне).
+  final Set<String> hiddenUsers = {};
+  final Set<String> hiddenGroups = {};
+
+  Future<void> _loadHidden() async {
+    for (final (key, set) in [('hidden_users', hiddenUsers), ('hidden_groups', hiddenGroups)]) {
+      try {
+        final raw = await StorageService.secureRead(key);
+        if (raw != null && raw.isNotEmpty) set.addAll((jsonDecode(raw) as List).cast<String>());
+      } catch (_) {}
+    }
+  }
+
+  Future<void> setHidden({required bool group, required String id, required bool hidden}) async {
+    final set = group ? hiddenGroups : hiddenUsers;
+    hidden ? set.add(id) : set.remove(id);
+    await StorageService.secureWrite(group ? 'hidden_groups' : 'hidden_users', jsonEncode(set.toList()));
+    notifyListeners();
+  }
 
   Future<void> syncGroups({String? only}) async {
     final g = groups;

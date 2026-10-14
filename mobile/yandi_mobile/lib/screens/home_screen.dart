@@ -10,7 +10,9 @@ import 'chat_screen.dart';
 import 'add_contact_screen.dart';
 import 'qr_scan_screen.dart';
 import 'pair_screen.dart';
+import 'search_hub.dart';
 import '../widgets/secure_keyboard.dart';
+import '../widgets/secure_field.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 import 'files_tab.dart';
@@ -454,9 +456,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           ),
         ),
         Expanded(
-          child: found.isEmpty
-              ? Center(child: Text(q.isEmpty ? 'Здесь появятся те, кого нет в контактах' : 'Ничего не найдено',
-                  style: const TextStyle(color: AppTheme.textSecondary)))
+          child: q.isEmpty
+              ? const SearchHub()
+              : found.isEmpty
+              ? const Center(child: Text('Ничего не найдено', style: TextStyle(color: AppTheme.textSecondary)))
               : RefreshIndicator(
                   color: AppTheme.accent,
                   backgroundColor: AppTheme.surface,
@@ -553,15 +556,7 @@ void showSaveContactDialog(BuildContext context, String peerId, String currentNa
     builder: (ctx) => AlertDialog(
       backgroundColor: AppTheme.surface,
       title: const Text('Добавить в контакты', style: TextStyle(color: AppTheme.text)),
-      content: TextField(
-        controller: ctrl,
-        autofocus: true,
-        style: const TextStyle(color: AppTheme.text),
-        decoration: const InputDecoration(
-          hintText: 'Имя контакта',
-          hintStyle: TextStyle(color: AppTheme.textSecondary),
-        ),
-      ),
+      content: SingleChildScrollView(child: SecureField(controller: ctrl, hint: 'Имя контакта')),
       actions: [
         TextButton(
           onPressed: () => Navigator.pop(ctx),

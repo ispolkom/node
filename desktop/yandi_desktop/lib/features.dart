@@ -1,6 +1,7 @@
 import 'message_actions.dart';
 import 'contact_avatar.dart';
 import 'theme.dart';
+import 'search_page.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'dart:typed_data';
@@ -93,6 +94,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (mounted) setState(() {});
     });
     if (const [
+      'Поиск',
       'Группы',
       'Шлюзы',
       'О приложении',
@@ -1449,6 +1451,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   Widget build(BuildContext context) => widget.page == 'О приложении'
       ? const AboutPanel()
+      : widget.page == 'Поиск'
+      ? SearchFeature(
+          api: widget.api,
+          isActive: widget.isActive,
+          onFailure: widget.onFailure,
+        )
       : widget.page == 'Шлюзы'
       ? NetworkFeature(
           api: widget.api,

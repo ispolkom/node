@@ -1370,12 +1370,14 @@ impl Store {
         g.owner().is_some_and(|o| live.iter().any(|p| member_key(&g.id, p) == o.key))
     }
 
-    /// Каталог открытых групп без «осиротевших» (владелец устройство которого забыто узлом).
+    /// Каталог групп узла: видны все, у каждой пометка `owner_present` (владелец осиротевшей группы не может выдать ключ новичку).
     pub fn open_for_live(&self, device: &str, live: &[String]) -> Vec<Value> {
         self.open_for(device)
             .into_iter()
-            .filter(|v| {
-                v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live))
+            .map(|mut v| {
+                let alive = v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live));
+                v["owner_present"] = json!(alive);
+                v
             })
             .collect()
     }
@@ -2166,14 +2168,16 @@ mod tests {
     }
 
     #[test]
-    fn a_group_whose_owner_device_is_gone_is_not_offered_to_new_members() {
+    fn a_group_whose_owner_device_is_gone_stays_visible_but_marked() {
         let (_d, mut s) = store();
         let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
         let live = vec![OWNER.to_string()];
-        assert_eq!(s.open_for_live(BOB, &live).len(), 1, "владелец жив — группа в каталоге");
+        assert_eq!(s.open_for_live(BOB, &live)[0]["owner_present"], json!(true), "владелец жив");
         assert_eq!(s.list_for_live(OWNER, &live)[0]["owner_present"], json!(true));
         let gone: Vec<String> = Vec::new();
-        assert!(s.open_for_live(BOB, &gone).is_empty(), "владельца нет — группа новичкам не предлагается");
+        let cat = s.open_for_live(BOB, &gone);
+        assert_eq!(cat.len(), 1, "группа видна всегда: людям важно видеть, что узел жив");
+        assert_eq!(cat[0]["owner_present"], json!(false), "но помечена: владельца нет");
         assert_eq!(s.list_for_live(OWNER, &gone)[0]["owner_present"], json!(false));
         let _ = gid;
     }

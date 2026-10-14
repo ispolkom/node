@@ -125,7 +125,9 @@ class DiscoverGroup {
   final String id, name, topic, about, kind;
   final int members;
   final bool requested;
-  const DiscoverGroup({required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.members, required this.requested});
+  /// Устройство владельца сопряжено с узлом: у группы без него новичку ключ не выдать.
+  final bool ownerPresent;
+  const DiscoverGroup({required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.members, required this.requested, this.ownerPresent = true});
 
   factory DiscoverGroup.fromJson(Map<String, dynamic> j) => DiscoverGroup(
         id: j['id'] as String,
@@ -135,6 +137,7 @@ class DiscoverGroup {
         kind: (j['kind'] ?? 'open') as String,
         members: (j['members'] ?? 0) as int,
         requested: j['requested'] == true,
+        ownerPresent: j['owner_present'] != false,
       );
 
   bool get isOpen => kind == 'open';

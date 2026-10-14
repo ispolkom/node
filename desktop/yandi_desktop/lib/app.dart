@@ -666,6 +666,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   labels: const [
                     'Главная',
                     'Чат',
+                    'Поиск',
                     'Группы',
                     'Шлюзы',
                     'Настройки',
