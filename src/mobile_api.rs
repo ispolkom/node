@@ -330,6 +330,7 @@ pub fn remove_device(id: &str) -> bool {
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
+    crate::device_profile::forget(&peer);
     crate::mobile_groups::forget_device(&peer);
     let _ = bus().send(Event::Revoked(peer));
 }
@@ -871,6 +872,51 @@ async fn info(
     )
 }
 
+#[derive(Deserialize, Default)]
+struct DeviceProfilePut {
+    #[serde(default)]
+    nick: Option<String>,
+    #[serde(default)]
+    avatar_b64: Option<String>,
+    /// не показывать ник и картинку другим пользователям узла
+    #[serde(default)]
+    hide: Option<bool>,
+}
+
+/// Свой профиль устройства (ник, картинка, скрытие): им пользуются в списке «Пользователи».
+async fn device_profile_get(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    Json(crate::device_profile::own(&me)).into_response()
+}
+
+async fn device_profile_put(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<DeviceProfilePut>) -> Response {
+    let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    crate::mobile_profile::reply_json(crate::device_profile::put(&me, req.nick.as_deref(), req.avatar_b64.as_deref(), req.hide))
+}
+
+/// Пользователи узла: сопряжённые устройства со своими никами и картинками и статусом «в сети». Себя не включает.
+async fn users_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Json<serde_json::Value> {
+    let me = device_peer_of(&dev);
+    let mut out = Vec::new();
+    for d in with_devices(|d| d.clone()) {
+        let pid = d.peer_id();
+        if Some(&pid) == me.as_ref() {
+            continue;
+        }
+        let (nick, hash) = crate::device_profile::public(&pid);
+        out.push(json!({"peer_id": pid, "name": d.name, "nick": nick, "avatar_hash": hash, "online": live_count(&pid) > 0, "last_activity_ms": d.last_activity_ms()}));
+    }
+    out.push(json!({"peer_id": hex::encode(st.my_id.0), "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
+    Json(json!({"users": out}))
+}
+
+async fn user_avatar(axum::Extension(DeviceKey(_dev)): axum::Extension<DeviceKey>, Path(peer): Path<String>) -> Response {
+    match crate::device_profile::avatar(&peer) {
+        Some(b) => ([(header::CONTENT_TYPE, "image/png")], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 /// Короткий номер своего узла (как в списке контактов): 16 hex.
 fn my_short(st: &MobileState) -> String {
     hex::encode(&st.my_id.0[..8])
@@ -948,7 +994,9 @@ async fn contacts(
             continue;
         }
         // last_activity_ms — для приложения: устройство, не бывшее на связи и не в контактах дольше суток, уходит с главного экрана
-        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", d.name), "online": live_count(&pid) > 0, "is_manual": false, "last_activity_ms": d.last_activity_ms()}));
+        let (nick, hash) = crate::device_profile::public(&pid);
+        let shown = if nick.is_empty() { d.name.clone() } else { nick.clone() };
+        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", shown), "online": live_count(&pid) > 0, "is_manual": false, "last_activity_ms": d.last_activity_ms(), "nick": nick, "avatar_hash": hash}));
     }
     out.push(json!({"peer_id": hex::encode(st.my_id.0), "display_name": "💻 Компьютер", "online": true, "is_manual": false}));
     Json(json!({"contacts": out}))
@@ -1499,6 +1547,9 @@ fn router(st: Arc<MobileState>) -> Router {
     let guarded = Router::new()
         .route("/mobile/info", get(info))
         .route("/mobile/profile", get(profile_get).put(profile_put))
+        .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
+        .route("/mobile/users", get(users_list))
+        .route("/mobile/users/:peer/avatar", get(user_avatar))
         .route("/mobile/profile/avatar", get(profile_avatar))
         .route("/mobile/contacts", get(contacts).post(contact_put))
         .route("/mobile/chat/:peer", get(history).post(send))
