@@ -3425,6 +3425,12 @@ async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
 
     let chat_manager = chat_manager.unwrap();
 
+    // пока закрытая среда заперта, даже список собеседников (имена файлов истории) не отдаётся: это метаданные владельца
+    #[cfg(unix)]
+    if crate::closed_api::is_locked() {
+        return Json(serde_json::json!({"status": "locked", "chats": [], "message": "закрытая среда заперта"}));
+    }
+
     // Получить список чатов
     match chat_manager.list_chats() {
         Ok(peer_ids) => {

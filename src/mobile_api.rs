@@ -69,6 +69,8 @@ const MAX_MAIL: usize = 5000;
 /// Сколько неполученных писем может держать один отправитель и одна пара «отправитель → адресат»: один телефон не вытеснит чужую почту.
 const MAX_MAIL_PER_SENDER: usize = 1500;
 const MAX_MAIL_PER_PAIR: usize = 500;
+/// Общий потолок очереди писем по размеру: файл очереди переписывается целиком, поэтому он не должен разрастаться до сотен МБ.
+const MAX_MAIL_BYTES: usize = 24 * 1024 * 1024;
 /// Письмо дольше этого не ждёт (конверт E4 всё равно недействителен через 30 суток).
 const MAIL_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 const FT_PEER_STATUS: u8 = 0x12;
@@ -520,7 +522,8 @@ fn mail_accept(l: &mut Vec<Mail>, m: Mail, now: u64) -> bool {
     l.retain(|x| now.saturating_sub(x.ts) < MAIL_TTL_MS);
     let from_n = l.iter().filter(|x| x.from == m.from).count();
     let pair_n = l.iter().filter(|x| x.from == m.from && x.to == m.to).count();
-    if l.len() >= MAX_MAIL || from_n >= MAX_MAIL_PER_SENDER || pair_n >= MAX_MAIL_PER_PAIR {
+    let bytes: usize = l.iter().map(|x| x.payload_b64.len()).sum();
+    if l.len() >= MAX_MAIL || from_n >= MAX_MAIL_PER_SENDER || pair_n >= MAX_MAIL_PER_PAIR || bytes + m.payload_b64.len() > MAX_MAIL_BYTES {
         return false;
     }
     l.push(m);
@@ -951,6 +954,20 @@ async fn auth(mut req: Request, next: Next) -> Response {
     next.run(req).await
 }
 
+/// Знает ли узел такого получателя: он есть среди контактов владельца или виден в сети.
+async fn is_known_destination(st: &MobileState, h: &HashId) -> bool {
+    if st.p2p.list_peers().await.into_iter().any(|p| p.id == *h) {
+        return true;
+    }
+    let short = hex::encode(&h.0[..8]);
+    std::fs::read_to_string("contacts.json")
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v["contacts"].as_array().cloned())
+        .map(|a| a.iter().any(|c| c["short_id"].as_str() == Some(short.as_str())))
+        .unwrap_or(false)
+}
+
 async fn resolve_hex(st: &MobileState, id: &str) -> Option<HashId> {
     if let Ok(h) = HashId::from_hex(id) {
         return Some(h);
@@ -1229,14 +1246,20 @@ async fn send(
     let Some(h) = resolve_hex(&st, &peer).await else {
         return StatusCode::NOT_FOUND.into_response();
     };
+    // получателя, которого узел не знает (нет ни среди контактов, ни среди видимых узлов), не принимаем: иначе письмо
+    // повисло бы в очереди неподтверждённым до суточного таймаута
+    if h != st.my_id && !is_known_destination(&st, &h).await {
+        return (StatusCode::NOT_FOUND, Json(json!({"error": "получатель неизвестен узлу"}))).into_response();
+    }
     let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.id, text: r.text });
     match st.chat.send_message_full(h, req.text, None, reply).await {
         Ok(m) => Json(json!({"id": hex::encode(m.msg_id.0), "ts_ms": m.timestamp})).into_response(),
-        Err(e) => (
-            StatusCode::BAD_GATEWAY,
-            Json(json!({"error": e.to_string()})),
-        )
-            .into_response(),
+        Err(e) => {
+            let msg = e.to_string();
+            // отказ по правилам сети (ссылка, тип файла) — ошибка запроса, а не сбой шлюза
+            let code = if msg.contains("в YANDI не передаются") || msg.contains("не передаётся") { StatusCode::UNPROCESSABLE_ENTITY } else { StatusCode::BAD_GATEWAY };
+            (code, Json(json!({"error": msg}))).into_response()
+        }
     }
 }
 
@@ -2037,6 +2060,22 @@ mod mail_quota_tests {
 
     fn mail(from: &str, to: &str, ts: u64) -> Mail {
         Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into() }
+    }
+
+    #[test]
+    fn the_mail_queue_has_a_byte_ceiling() {
+        let big = "A".repeat(60_000);
+        let mut l: Vec<Mail> = Vec::new();
+        let mut accepted = 0;
+        for i in 0..2000 {
+            let m = Mail { ts: 1_000 + i as u64, from: format!("s{}", i % 50), to: format!("r{}", i % 70), payload_b64: big.clone() };
+            if mail_accept(&mut l, m, 2_000) {
+                accepted += 1;
+            }
+        }
+        let bytes: usize = l.iter().map(|x| x.payload_b64.len()).sum();
+        assert!(bytes <= MAX_MAIL_BYTES, "очередь не выше потолка: {bytes}");
+        assert!(accepted < 2000, "часть писем отвергнута по размеру");
     }
 
     #[test]

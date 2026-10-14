@@ -821,6 +821,8 @@ class _GroupBubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final time = DateFormat('HH:mm').format(DateTime.fromMillisecondsSinceEpoch(entry.ts));
     final t = entry.body['t'], name = entry.body['name'];
+    // файл с типом, который в сети не передаётся (чужой клиент): не показывается как файл и не скачивается
+    final blockedFile = entry.body['f'] is String ? attachmentProblem('${entry.body['n'] ?? ''}') : null;
     final text = entry.body['op'] == 'lost' && entry.kind == GroupKind.system
         ? '🔒 Сообщение недоступно: ключ этого поколения уже удалён с узла'
         : entry.body['op'] == 'bad' && entry.kind == GroupKind.system
@@ -852,7 +854,9 @@ class _GroupBubble extends StatelessWidget {
                 Flexible(child: Text(author, style: const TextStyle(color: AppTheme.incoming, fontSize: 12, fontWeight: FontWeight.bold))),
               ]),
             if (quote != null) QuoteBox(author: quote!.$1, text: quote!.$2, onTap: onQuoteTap),
-            if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.audio && entry.body['z'] is int && (entry.body['z'] as int) <= InlineAudio.maxInline)
+            if (blockedFile != null)
+              Text('Файл не принят: $blockedFile', style: const TextStyle(color: AppTheme.incoming, fontSize: 13))
+            else if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.audio && entry.body['z'] is int && (entry.body['z'] as int) <= InlineAudio.maxInline)
               InlineAudio(
                 key: ValueKey('ga-${entry.body['f']}'),
                 path: localPath!,

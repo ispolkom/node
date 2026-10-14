@@ -26,6 +26,7 @@ import 'vault_bytes_cache.dart';
 import 'vault_files.dart';
 import 'vault_service.dart';
 import 'api_service.dart' as api_svc;
+import '../content_policy.dart';
 import 'ws_service.dart';
 import 'vpn_service.dart' show YandiVpnService;
 import 'chat_bg_service.dart';
@@ -1514,6 +1515,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   void _onFileOffer(FileOfferEvent e) {
+    // тип файла, который в сети не передаётся (старый или чужой клиент), не принимается: ни предложения, ни уведомления
+    if (attachmentProblem(e.fileName) != null) return;
     pendingFileOffers.add(e);
     _player.play(AssetSource('sounds/icq.mp3'));
     final name = _contactName(e.fromPeerId);
