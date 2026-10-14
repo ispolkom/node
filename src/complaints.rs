@@ -307,12 +307,12 @@ pub fn measures_for(device: &str) -> Vec<Value> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    pub(crate) static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn fresh() {
+    pub(crate) fn fresh() {
         lock();
         let d = tempfile::tempdir().unwrap();
         // каталог данных тестов общий: файл удаляем, чтобы не читать чужое

@@ -2190,6 +2190,36 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
     }
 
+    #[tokio::test]
+    async fn restricted_device_cannot_send_files_by_any_path() {
+        use super::*;
+        use axum::extract::Path;
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let th = "r".repeat(64);
+        with_devices(|d| {
+            d.retain(|x| x.token_hash != th);
+            d.push(Device { token_hash: th.clone(), name: "r".into(), created_ms: 0, acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: 0 });
+        });
+        let peer = device_peer_of(&th).unwrap();
+        let ext = || axum::Extension(DeviceKey(th.clone()));
+        let id = crate::complaints::submit(&"a".repeat(64), "user", &peer, "r", "spam", "спам", &[]).unwrap();
+        crate::complaints::add_measure(&id, "restrict", "сутки", now_ms() + 3_600_000).unwrap();
+        let gid = "a".repeat(32);
+        let status = |r: Response| r.status();
+        let r = crate::mobile_group_files::start(ext(), Path(gid.clone()), Json(serde_json::from_str(r#"{"file_size":10,"total_chunks":1}"#).unwrap())).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "групповая заливка");
+        let r = crate::mobile_group_files::put_chunk(ext(), Path((gid.clone(), "b".repeat(32), 0)), axum::body::Bytes::from_static(b"x")).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "кусок группового файла");
+        let r = crate::mobile_group_files::done(ext(), Path((gid, "b".repeat(32)))).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "завершение группового файла");
+        let r = crate::mobile_files::put_chunk(ext(), Path(("b".repeat(32), 0)), axum::body::Bytes::from_static(b"x")).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "кусок личного файла");
+        let r = crate::mobile_files::done(ext(), Path("b".repeat(32))).await;
+        assert_eq!(status(r), StatusCode::FORBIDDEN, "завершение личного файла");
+        with_devices(|d| d.retain(|x| x.token_hash != th));
+    }
+
     #[test]
     fn code_compare_is_exact() {
         assert!(same("123456", "123456"));

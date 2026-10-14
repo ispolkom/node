@@ -243,6 +243,9 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 /// Залить один кусок (повторная заливка того же куска безопасна: так работает докачка).
 pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((id, idx)): Path<(String, u32)>, body: Bytes) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let Some(m) = live_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
     if m.from != me {
         return StatusCode::FORBIDDEN.into_response();
@@ -278,6 +281,9 @@ async fn present(id: &str) -> Vec<u32> {
 /// Отправитель сообщает, что все куски залиты; узел проверяет, что ни одного не потеряно.
 pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(id): Path<String>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let Some(mut m) = live_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
     if m.from != me {
         return StatusCode::FORBIDDEN.into_response();

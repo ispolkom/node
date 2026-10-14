@@ -246,6 +246,9 @@ async fn begin(gid: &str, key: &str, muted: bool, file_size: u64, total_chunks: 
 
 /// Начать заливку файла в группу.
 pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(gid): Path<String>, Json(req): Json<StartReq>) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, muted) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
@@ -258,6 +261,9 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 
 /// Залить кусок (повтор безопасен — так работает докачка). Только тот, кто начал заливку.
 pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id, idx)): Path<(String, String, u32)>, body: Bytes) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, muted) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
@@ -298,6 +304,9 @@ async fn present(gid: &str, id: &str) -> Vec<u32> {
 
 /// Все куски залиты — файл становится доступным участникам.
 pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id)): Path<(String, String)>) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, _) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
