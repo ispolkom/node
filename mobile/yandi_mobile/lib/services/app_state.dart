@@ -1016,6 +1016,28 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (ok) _deviceProfilePublished = true;
   }
 
+  /// Логотипы групп (только в памяти): группа → (хэш, PNG).
+  final Map<String, (String, Uint8List)> _groupLogos = {};
+  final Set<String> _logoFetching = {};
+
+  Uint8List? groupLogo(String gid, String hash) {
+    final v = _groupLogos[gid];
+    return (v != null && v.$1 == hash) ? v.$2 : null;
+  }
+
+  Future<void> ensureGroupLogo(String gid, String hash) async {
+    if (hash.isEmpty || groupLogo(gid, hash) != null || !_logoFetching.add(gid)) return;
+    try {
+      final png = await _api?.getGroupLogo(gid);
+      if (png != null) {
+        _groupLogos[gid] = (hash, png);
+        notifyListeners();
+      }
+    } finally {
+      _logoFetching.remove(gid);
+    }
+  }
+
   /// Пользователи узла со своими никами и картинками (только в памяти, на диск не пишутся).
   List<Map<String, dynamic>> directory = const [];
   final Map<String, Uint8List> _directoryAvatars = {};
@@ -1130,6 +1152,18 @@ class AppState extends ChangeNotifier implements FilesHost {
     unawaited(StorageService.saveUnread(_unread));
     notifyListeners();
   }
+
+  /// «Игнорировать» запрос знакомства: непрочитанное снимается, человек не в контактах и не заблокирован.
+  void dismissIntro(String peerId) => _clearUnread(peerId);
+
+  /// Не более стольких сообщений от человека, которого вы ещё не приняли в контакты: дальше молча не принимаются.
+  static const int introLimit = 3;
+
+  /// Знакомства: люди не из контактов, написавшие вам и ещё не принятые и не заблокированные.
+  List<Contact> get introRequests => [
+        for (final c in contacts)
+          if (!c.saved && !isBlocked(c.peerId) && unreadFor(c.peerId) > 0 && c.peerId != _nodePeerId) c,
+      ];
 
   void _clearUnread(String peerId) {
     if ((_unread[peerId] ?? 0) == 0) return;
@@ -1420,6 +1454,11 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   void _onIncomingChat(IncomingChatEvent e) async {
     if (isBlocked(e.fromPeerId)) return;   // чёрный список: не показываем и не подтверждаем
+    // незнакомый человек: до принятия в контакты принимаются только первые несколько сообщений (защита от спама)
+    if (!isSaved(e.fromPeerId) && e.fromPeerId != _nodePeerId &&
+        (_chats[e.fromPeerId]?.where((m) => !m.outgoing).length ?? 0) >= introLimit) {
+      return;
+    }
     final res = _classifyIncoming(e.fromPeerId, e.text);
     if (res == null) { notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
     final showText = res.$1;

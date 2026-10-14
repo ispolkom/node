@@ -4,6 +4,8 @@ import 'dart:convert';
 class GroupInfo {
   final String id, name, topic, about, kind, myAlias, role;
   final bool muted, rekeyNeeded;
+  /// Хэш логотипа группы (пусто — нет); сам рисунок берётся отдельным запросом.
+  final String logoHash;
   /// Устройство владельца группы сопряжено с узлом: без него новый ключ группы никому не выдать.
   final bool ownerPresent;
   final int members, epoch, firstSeq, lastSeq, requests;
@@ -13,7 +15,7 @@ class GroupInfo {
   const GroupInfo({
     required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.myAlias, required this.role,
     required this.muted, required this.rekeyNeeded, required this.members, required this.epoch, required this.firstSeq,
-    required this.lastSeq, required this.pendingKeys, this.requests = 0, this.autoCleanDays = 0, this.ownerPresent = true,
+    required this.lastSeq, required this.pendingKeys, this.requests = 0, this.autoCleanDays = 0, this.ownerPresent = true, this.logoHash = '',
   });
 
   factory GroupInfo.fromJson(Map<String, dynamic> j) => GroupInfo(
@@ -26,6 +28,7 @@ class GroupInfo {
         role: (j['role'] ?? 'member') as String,
         muted: j['muted'] == true,
         rekeyNeeded: j['rekey_needed'] == true,
+        logoHash: (j['logo_hash'] ?? '') as String,
         ownerPresent: j['owner_present'] != false,
         members: (j['members'] ?? 0) as int,
         epoch: (j['epoch'] ?? 0) as int,
@@ -127,7 +130,8 @@ class DiscoverGroup {
   final bool requested;
   /// Устройство владельца сопряжено с узлом: у группы без него новичку ключ не выдать.
   final bool ownerPresent;
-  const DiscoverGroup({required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.members, required this.requested, this.ownerPresent = true});
+  final String logoHash;
+  const DiscoverGroup({required this.id, required this.name, required this.topic, this.about = '', required this.kind, required this.members, required this.requested, this.ownerPresent = true, this.logoHash = ''});
 
   factory DiscoverGroup.fromJson(Map<String, dynamic> j) => DiscoverGroup(
         id: j['id'] as String,
@@ -138,6 +142,7 @@ class DiscoverGroup {
         members: (j['members'] ?? 0) as int,
         requested: j['requested'] == true,
         ownerPresent: j['owner_present'] != false,
+        logoHash: (j['logo_hash'] ?? '') as String,
       );
 
   bool get isOpen => kind == 'open';

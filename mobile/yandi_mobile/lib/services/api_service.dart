@@ -95,6 +95,15 @@ class ApiService {
     }
   }
 
+  Future<Uint8List?> getGroupLogo(String gid) async {
+    try {
+      final res = await _client.get(_url('/mobile/groups/$gid/logo'), headers: _headers).timeout(const Duration(seconds: 12));
+      return res.statusCode == 200 && AvatarMsg.validPng(res.bodyBytes) ? res.bodyBytes : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<Uint8List?> getUserAvatar(String peerId) async {
     try {
       final res = await _client.get(_url('/mobile/users/$peerId/avatar'), headers: _headers).timeout(const Duration(seconds: 12));

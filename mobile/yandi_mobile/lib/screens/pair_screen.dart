@@ -1,3 +1,4 @@
+import 'dart:math';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
@@ -84,6 +85,13 @@ class _PairScreenState extends State<PairScreen> {
     _scanner.dispose();
     _manual.dispose();
     super.dispose();
+  }
+
+  /// Имя устройства на узле: «Телефон ab12» вместо одинакового «YANDI Mobile» у всех (потом человек задаёт ник).
+  static String _deviceLabel() {
+    final r = Random.secure();
+    final tag = List.generate(2, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+    return 'Телефон $tag';
   }
 
   /// Понятное объяснение вместо сырого текста исключения.
@@ -192,7 +200,7 @@ class _PairScreenState extends State<PairScreen> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'pairing_code': code,
-          'device_name':  'YANDI Mobile',
+          'device_name':  _deviceLabel(),
         }),
       ).timeout(const Duration(seconds: 10));
 

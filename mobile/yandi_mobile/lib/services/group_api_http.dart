@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'api_service.dart';
 import 'group_api.dart';
 
@@ -19,11 +20,13 @@ class HttpGroupApi implements GroupApi {
   @override
   Future<List<Map<String, dynamic>>> openGroups() async => _list(await _call('GET', '/mobile/groups/open'), 'groups');
   @override
-  Future<String> create(String name, String topic, String about, String kind) async =>
-      (await _call('POST', '/mobile/groups', {'name': name, 'topic': topic, 'about': about, 'kind': kind}))['id'] as String;
+  Future<String> create(String name, String topic, String about, String kind, {String? logoB64}) async =>
+      (await _call('POST', '/mobile/groups', {'name': name, 'topic': topic, 'about': about, 'kind': kind, if (logoB64 != null && logoB64.isNotEmpty) 'logo_b64': logoB64}))['id'] as String;
   @override
-  Future<void> settings(String gid, {String? name, String? topic, String? about}) async =>
-      _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about});
+  Future<void> settings(String gid, {String? name, String? topic, String? about, String? logoB64}) async =>
+      _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about, if (logoB64 != null) 'logo_b64': logoB64});
+  @override
+  Future<Uint8List?> logo(String gid) => _api.getGroupLogo(gid);
   @override
   Future<void> autoClean(String gid, int days) async => _call('POST', '/mobile/groups/$gid/autoclean', {'days': days});
   @override

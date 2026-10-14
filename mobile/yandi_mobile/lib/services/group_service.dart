@@ -544,8 +544,8 @@ class GroupService {
   // ── действия ─────────────────────────────────────────────────────────────
 
   /// Создать группу: этот телефон — владелец, ключ и права раздаёт он. kind: `invite` или `open`.
-  Future<String> createGroup(String name, String topic, String about, String kind) async {
-    final gid = await api.create(name.trim(), topic.trim(), about.trim(), kind);
+  Future<String> createGroup(String name, String topic, String about, String kind, {String? logoB64}) async {
+    final gid = await api.create(name.trim(), topic.trim(), about.trim(), kind, logoB64: logoB64);
     groups = GroupInfo.listOf(await api.list());
     await sync(only: gid);   // сразу создаёт первое поколение ключа
     groups = GroupInfo.listOf(await api.list());
@@ -581,8 +581,8 @@ class GroupService {
   }
 
   /// Владелец меняет название, тематику и описание группы.
-  Future<void> updateSettings(String gid, {String? name, String? topic, String? about}) async {
-    await api.settings(gid, name: name, topic: topic, about: about);
+  Future<void> updateSettings(String gid, {String? name, String? topic, String? about, String? logoB64}) async {
+    await api.settings(gid, name: name, topic: topic, about: about, logoB64: logoB64);
     groups = GroupInfo.listOf(await api.list());
     onChanged?.call(gid);
   }

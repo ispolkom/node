@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/group.dart';
@@ -6,6 +7,8 @@ import '../services/app_state.dart';
 import '../services/group_api.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
+import '../widgets/group_logo.dart';
+import '../widgets/logo_picker.dart';
 import 'group_chat_screen.dart';
 
 /// Вкладка «Группы»: мои группы, открытые группы узла, вступление по приглашению.
@@ -125,10 +128,7 @@ class _GroupsTabState extends State<GroupsTab> {
                     }
                     final g = _node[k - 1];
                     return ListTile(
-                      leading: CircleAvatar(
-                        backgroundColor: AppTheme.surface,
-                        child: Text(g.name.isEmpty ? '?' : g.name.characters.first.toUpperCase(), style: const TextStyle(color: AppTheme.accent)),
-                      ),
+                      leading: GroupLogo(gid: g.id, name: g.name, hash: g.logoHash),
                       title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
                       subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                         if (g.about.isNotEmpty) Text(g.about, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
@@ -168,10 +168,7 @@ class _GroupsTabState extends State<GroupsTab> {
                   }
                   final g = list[i];
                   return ListTile(
-                    leading: CircleAvatar(
-                      backgroundColor: AppTheme.surface,
-                      child: Text(g.name.isEmpty ? '?' : g.name.characters.first.toUpperCase(), style: const TextStyle(color: AppTheme.accent)),
-                    ),
+                    leading: GroupLogo(gid: g.id, name: g.name, hash: g.logoHash),
                     title: Text(g.name, style: const TextStyle(color: AppTheme.text)),
                     subtitle: Text('${g.topic.isEmpty ? '' : 'Тематика: ${g.topic} · '}${g.members} уч. · вы: ${_roleLabel(g.role)}${g.muted ? ' · заглушены' : ''}${g.about.isEmpty ? '' : '\n${g.about}'}',
                         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
@@ -223,6 +220,8 @@ class _GroupsTabState extends State<GroupsTab> {
     String kind = 'invite';
     String? error;
     bool busy = false;
+    String logoB64 = '';
+    Uint8List? logoPreview;
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -233,6 +232,12 @@ class _GroupsTabState extends State<GroupsTab> {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Новая группа', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
+            LogoPicker(
+              current: logoPreview,
+              groupName: nameCtrl.text,
+              onPicked: (b64, preview) async => setS(() { logoB64 = b64; logoPreview = preview; }),
+            ),
+            const SizedBox(height: 8),
             SecureTextField(controller: nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
             SecureTextField(controller: topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика (обязательно)', hintText: 'например: Садоводство')),
             Wrap(spacing: 6, runSpacing: 0, children: [
@@ -261,7 +266,7 @@ class _GroupsTabState extends State<GroupsTab> {
                 if (topicCtrl.text.trim().isEmpty) { setS(() => error = 'Укажите тематику группы'); return; }
                 setS(() { busy = true; error = null; });
                 try {
-                  final gid = await state.groups!.createGroup(nameCtrl.text, topicCtrl.text, aboutCtrl.text, kind);
+                  final gid = await state.groups!.createGroup(nameCtrl.text, topicCtrl.text, aboutCtrl.text, kind, logoB64: logoB64);
                   await state.syncGroups();
                   if (!ctx.mounted) return;
                   Navigator.pop(ctx);

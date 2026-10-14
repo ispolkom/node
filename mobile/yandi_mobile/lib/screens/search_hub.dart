@@ -6,6 +6,7 @@ import '../services/app_state.dart';
 import '../theme.dart';
 import '../widgets/avatar_circle.dart';
 import '../widgets/secure_field.dart';
+import '../widgets/group_logo.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 
 /// Видимые пользователи: сопряжённые с узлом и не удалённые им за бездействие (давно не бывшие в сети не показываются).
@@ -359,7 +360,10 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
                 child: Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
                   decoration: const BoxDecoration(border: Border(bottom: BorderSide(color: AppTheme.divider, width: 0.5))),
-                  child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  GroupLogo(gid: g.id, name: g.name, hash: g.logoHash, radius: 22),
+                  const SizedBox(width: 12),
+                  Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text(g.name, style: const TextStyle(color: AppTheme.text, fontWeight: FontWeight.w700, fontSize: 16)),
                     if (g.topic.isNotEmpty) Text(g.topic, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13)),
                     const SizedBox(height: 4),
@@ -374,6 +378,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
                       if (g.requested) const Text('запрос отправлен', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                       if (state.hiddenGroups.contains(g.id)) const Text('скрыта', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                     ]),
+                  ])),
                   ]),
                 ),
               ),

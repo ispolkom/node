@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 /// Запросы к группам узла (docs/CLIENT_WIRE.md «Группы»). Интерфейс отдельно, чтобы сервис проверялся без сети.
 class GroupApiError implements Exception {
   final int status;
@@ -10,9 +11,11 @@ class GroupApiError implements Exception {
 abstract class GroupApi {
   Future<List<Map<String, dynamic>>> list();
   Future<List<Map<String, dynamic>>> openGroups();
-  Future<String> create(String name, String topic, String about, String kind);
+  Future<String> create(String name, String topic, String about, String kind, {String? logoB64});
   Future<void> requestJoin(String gid, String name);
-  Future<void> settings(String gid, {String? name, String? topic, String? about});
+  Future<void> settings(String gid, {String? name, String? topic, String? about, String? logoB64});
+  /// Логотип группы (PNG) или null, если не задан.
+  Future<Uint8List?> logo(String gid);
   /// Владелец включает автоочистку неактивных (0 — выключить).
   Future<void> autoClean(String gid, int days);
   Future<void> transferOwner(String gid, String alias);

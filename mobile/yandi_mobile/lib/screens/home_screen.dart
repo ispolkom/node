@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/contact.dart';
 import '../services/app_state.dart';
+import '../services/storage_service.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
@@ -13,6 +14,7 @@ import 'qr_scan_screen.dart';
 import 'pair_screen.dart';
 import 'search_hub.dart';
 import '../widgets/secure_keyboard.dart';
+import '../widgets/intro_requests.dart';
 import '../widgets/secure_field.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
@@ -48,7 +50,40 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       context.read<AppState>().refreshContacts();
       NotificationService.cancelAll();   // события просмотрены — гасим значок у иконки
       _handlePendingNotification();
+      _askNickOnce();
     });
+  }
+
+  /// Первый вход: попросить ник, под которым человека увидят другие пользователи узла (один раз; можно пропустить).
+  Future<void> _askNickOnce() async {
+    final state = context.read<AppState>();
+    if (state.myNick.isNotEmpty) return;
+    try {
+      if (await StorageService.secureRead('nick_prompted') == '1') return;
+    } catch (_) {}
+    if (!mounted) return;
+    final ctrl = TextEditingController();
+    final nick = await showDialog<String>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Как вас называть?', style: TextStyle(color: AppTheme.text)),
+        content: SingleChildScrollView(
+          child: SecureField(controller: ctrl, hint: 'Ник (его увидят другие пользователи узла)', onSubmitted: () => Navigator.pop(ctx, ctrl.text.trim())),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, ''), child: const Text('Позже', style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('Сохранить', style: TextStyle(color: AppTheme.accent))),
+        ],
+      ),
+    );
+    ctrl.dispose();
+    try { await StorageService.secureWrite('nick_prompted', '1'); } catch (_) {}
+    if (nick != null && nick.isNotEmpty && mounted) {
+      final err = await state.setMyNick(nick);
+      if (err != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+    }
   }
 
   @override
@@ -347,6 +382,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   Widget _contactsBody(BuildContext context, AppState state) {
+    final inner = _contactsBodyInner(context, state);
+    final intros = state.introRequests;
+    if (intros.isEmpty) return inner;
+    return Column(children: [
+      IntroRequests(peers: intros, onAccept: (c) => showSaveContactDialog(context, c.peerId, c.displayName)),
+      Expanded(child: inner),
+    ]);
+  }
+
+  Widget _contactsBodyInner(BuildContext context, AppState state) {
     // на вкладке «Контакты» — только добавленные; остальные устройства и люди — на вкладке поиска
     final mine = state.contacts.where((c) => c.saved).toList();
     if (mine.isEmpty) {

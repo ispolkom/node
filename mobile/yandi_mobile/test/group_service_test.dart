@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:convert';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -58,7 +59,7 @@ class _Api implements GroupApi {
     autoCleanDays = days;
   }
   @override
-  Future<void> settings(String gid, {String? name, String? topic, String? about}) async {
+  Future<void> settings(String gid, {String? name, String? topic, String? about, String? logoB64}) async {
     if (me['role'] != 'owner' && me['role'] != 'admin') throw const GroupApiError(403, 'настройки группы меняют владелец и админ');
     if (name != null && name.trim().isEmpty) throw const GroupApiError(400, 'нужно название группы');
     if (name != null) n.name = name;
@@ -95,7 +96,7 @@ class _Api implements GroupApi {
     n.reqs.removeWhere((r) => r['id'] == rid);
   }
   @override
-  Future<String> create(String name, String topic, String about, String kind) async => n.gid;
+  Future<String> create(String name, String topic, String about, String kind, {String? logoB64}) async => n.gid;
   @override
   Future<String> join(String gid, {String? inviteCode, String? memberPub}) async {
     if (inviteCode != 'AAAA-BBBB-CCCC') throw const GroupApiError(403, 'неверное приглашение');
@@ -179,6 +180,8 @@ class _Api implements GroupApi {
     if (!n.doneFiles.contains(fileId)) throw const GroupApiError(404, 'нет');
     return n.files[fileId]![idx]!;
   }
+  @override
+  Future<Uint8List?> logo(String gid) async => null;
   @override
   Future<void> fileDelete(String gid, String fileId) async { me; n.files.remove(fileId); n.doneFiles.remove(fileId); }
 }
