@@ -88,29 +88,45 @@ fn persist(s: &State) -> Result<(), (StatusCode, String)> {
     crate::util::sealed::write(&path(), key, AAD, &bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("не удалось сохранить жалобы: {e}")))
 }
 
+/// Сохранить; при ошибке записи вернуть в памяти прежнее состояние — иначе экран покажет то, чего на диске нет.
+fn persist_or_rollback(s: &mut State, backup: Vec<Complaint>) -> Result<(), (StatusCode, String)> {
+    let r = persist(s);
+    if r.is_err() {
+        s.items = backup;
+    }
+    r
+}
+
 /// Выдан ключ области: жалобы читаются из запечатанного файла. Файл, который этим ключом не открывается (он ещё под ключом
 /// закрытой среды и будет перенесён при входе владельца), не перезаписывается: до переноса область остаётся запертой.
 pub fn unlock(key: [u8; 32]) {
+    // чтение и замена — под одним замком: жалоба, принятая между ними, не теряется; уже открытое тем же ключом не перечитывается
+    let mut s = lock_state();
+    if s.key == Some(key) {
+        return;
+    }
     let raw = std::fs::read(path()).ok();
-    let items = match raw.as_deref() {
-        None => Vec::new(),
+    match raw.as_deref() {
+        None => {
+            s.key = Some(key);
+            s.items = Vec::new();
+        }
         Some(b) => match crate::util::sealed::open(&key, AAD, b).and_then(|p| serde_json::from_slice::<Vec<Complaint>>(&p).ok()) {
-            Some(v) => v,
+            Some(v) => {
+                s.key = Some(key);
+                s.items = v;
+            }
             None => {
-                let mut s = lock_state();
                 s.key = None;
                 s.items = Vec::new();
-                return;
             }
         },
-    };
-    let mut s = lock_state();
-    s.key = Some(key);
-    s.items = items;
+    }
 }
 
 /// Перенос файла жалоб из-под ключа закрытой среды под служебный ключ (идемпотентно: уже открывающийся новым ключом остаётся).
 pub fn adopt(owner_key: [u8; 32], service_key: [u8; 32]) -> Result<(), String> {
+    let _guard = lock_state(); // не пишем файл поверх одновременного сохранения жалобы
     let Ok(raw) = std::fs::read(path()) else { return Ok(()) };
     if crate::util::sealed::open(&service_key, AAD, &raw).is_some() {
         return Ok(());
@@ -171,6 +187,7 @@ pub fn submit(
     }
     let evidence: Vec<String> = evidence.iter().take(MAX_EVIDENCE).map(|e| clean(e, MAX_EVIDENCE_LEN)).filter(|e| !e.is_empty()).collect();
     let mut s = lock_state();
+    let backup = s.items.clone();
     if s.key.is_none() {
         return Err((StatusCode::SERVICE_UNAVAILABLE, "узел сейчас не принимает жалобы, попробуйте позже".into()));
     }
@@ -211,7 +228,7 @@ pub fn submit(
         thread: Vec::new(),
         measures: Vec::new(),
     });
-    persist(&s)?;
+    persist_or_rollback(&mut s, backup)?;
     Ok(id)
 }
 
@@ -262,6 +279,7 @@ pub fn add_message(id: &str, side: &str, from: &str, text: &str) -> Result<(), (
         return Err((StatusCode::BAD_REQUEST, "пустое сообщение".into()));
     }
     let mut s = lock_state();
+    let backup = s.items.clone();
     let c = s.items.iter_mut().find(|c| c.id == id).ok_or((StatusCode::NOT_FOUND, "жалобы нет".to_string()))?;
     if c.thread.len() >= MAX_THREAD {
         return Err((StatusCode::TOO_MANY_REQUESTS, "переписка по жалобе слишком длинная".into()));
@@ -270,7 +288,7 @@ pub fn add_message(id: &str, side: &str, from: &str, text: &str) -> Result<(), (
     if c.status == "new" && from == "admin" {
         c.status = "review".into();
     }
-    persist(&s)
+    persist_or_rollback(&mut s, backup)
 }
 
 pub fn set_status(id: &str, status: &str) -> Result<(), (StatusCode, String)> {
@@ -278,17 +296,19 @@ pub fn set_status(id: &str, status: &str) -> Result<(), (StatusCode, String)> {
         return Err((StatusCode::BAD_REQUEST, "неверный статус".into()));
     }
     let mut s = lock_state();
+    let backup = s.items.clone();
     let c = s.items.iter_mut().find(|c| c.id == id).ok_or((StatusCode::NOT_FOUND, "жалобы нет".to_string()))?;
     c.status = status.to_string();
-    persist(&s)
+    persist_or_rollback(&mut s, backup)
 }
 
 /// Записать меру в журнал жалобы (сама мера применяется вызывающим).
 pub fn add_measure(id: &str, kind: &str, note: &str, until_ms: u64) -> Result<(), (StatusCode, String)> {
     let mut s = lock_state();
+    let backup = s.items.clone();
     let c = s.items.iter_mut().find(|c| c.id == id).ok_or((StatusCode::NOT_FOUND, "жалобы нет".to_string()))?;
     c.measures.push(Measure { ts: now_ms(), kind: kind.to_string(), note: clean(note, 500), until_ms });
-    persist(&s)
+    persist_or_rollback(&mut s, backup)
 }
 
 /// Действует ли ограничение на человека (по всем жалобам): до какого времени, 0 — нет.
@@ -330,6 +350,40 @@ pub(crate) mod tests {
         let _ = std::fs::remove_file(path());
         std::mem::forget(d);
         unlock([7; 32]);
+    }
+
+    #[test]
+    fn repeated_unlock_does_not_drop_a_complaint_taken_meanwhile() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        fresh();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        submit(&a, "user", &b, "Боб", "spam", "спамит", &[]).unwrap();
+        // повторный вход владельца тем же ключом не перечитывает файл и не затирает память
+        unlock([7; 32]);
+        assert_eq!(lock_state().items.len(), 1);
+        // другой ключ, которым файл не открывается: область запирается, файл не тронут
+        unlock([9; 32]);
+        assert!(lock_state().key.is_none());
+        unlock([7; 32]);
+        assert_eq!(lock_state().items.len(), 1, "из файла возвращается то, что было сохранено");
+    }
+
+    #[test]
+    fn failed_save_rolls_the_memory_back() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        fresh();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        let id = submit(&a, "user", &b, "Боб", "spam", "спамит", &[]).unwrap();
+        let p = path();
+        let _ = std::fs::remove_file(&p);
+        std::fs::create_dir_all(&p).unwrap();
+        assert!(add_message(&id, "reporter", "admin", "ответ").is_err());
+        assert!(find(&id).unwrap().thread.is_empty(), "сообщение, которого нет на диске, не показывается");
+        assert!(set_status(&id, "closed").is_err());
+        assert_eq!(find(&id).unwrap().status, "new");
+        assert!(submit(&a, "group", "g1", "Группа", "abuse", "плохо", &[]).is_err());
+        assert_eq!(lock_state().items.len(), 1);
+        std::fs::remove_dir_all(&p).unwrap();
     }
 
     #[test]
