@@ -9,6 +9,7 @@ import '../services/group_service.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/logo_picker.dart';
+import '../widgets/complaint_sheet.dart';
 
 const _kindLabels = <int, String>{
   GroupKind.image: 'Картинки',
@@ -382,6 +383,12 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary))),
           if (g.about.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text(g.about, style: const TextStyle(color: AppTheme.text))),
         ],
+        ListTile(
+          leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
+          title: const Text('Пожаловаться на группу', style: TextStyle(color: AppTheme.text)),
+          subtitle: const Text('Жалобу получит владелец узла', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          onTap: () => showComplaintSheet(context, kind: 'group', targetId: g.id, title: g.name),
+        ),
         ListTile(
           leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
           title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),

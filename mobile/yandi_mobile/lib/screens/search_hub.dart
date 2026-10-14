@@ -7,6 +7,7 @@ import '../theme.dart';
 import '../widgets/avatar_circle.dart';
 import '../widgets/secure_field.dart';
 import '../widgets/group_logo.dart';
+import '../widgets/complaint_sheet.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 
 /// Видимые пользователи: сопряжённые с узлом и не удалённые им за бездействие (давно не бывшие в сети не показываются).
@@ -171,6 +172,14 @@ class _UsersScreenState extends State<UsersScreen> {
               state.setHidden(group: false, id: c.peerId, hidden: !hidden);
             },
           ),
+          ListTile(
+            leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
+            title: const Text('Пожаловаться', style: TextStyle(color: AppTheme.text)),
+            onTap: () {
+              Navigator.pop(ctx);
+              showComplaintSheet(context, kind: 'user', targetId: c.peerId, title: c.displayName);
+            },
+          ),
         ]),
       ),
     );
@@ -321,6 +330,14 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
             onTap: () {
               Navigator.pop(ctx);
               state.setHidden(group: true, id: g.id, hidden: !hidden);
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
+            title: const Text('Пожаловаться', style: TextStyle(color: AppTheme.text)),
+            onTap: () {
+              Navigator.pop(ctx);
+              showComplaintSheet(context, kind: 'group', targetId: g.id, title: g.name);
             },
           ),
         ]),

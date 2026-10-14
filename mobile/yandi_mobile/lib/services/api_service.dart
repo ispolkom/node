@@ -95,6 +95,24 @@ class ApiService {
     }
   }
 
+  /// Пожаловаться на пользователя (`user`, номер устройства) или группу (`group`). Возвращает null при успехе, иначе текст причины.
+  Future<String?> submitComplaint({required String kind, required String targetId, required String reason, required String text, List<String> evidence = const []}) async {
+    try {
+      final res = await _client
+          .post(_url('/mobile/complaints'), headers: _headers, body: jsonEncode({'target_kind': kind, 'target_id': targetId, 'reason': reason, 'text': text, 'evidence': evidence}))
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode == 200) return null;
+      try {
+        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        return (j['error'] as String?) ?? 'Не удалось отправить жалобу';
+      } catch (_) {
+        return 'Не удалось отправить жалобу (код ${res.statusCode})';
+      }
+    } catch (_) {
+      return 'Узел не отвечает: жалоба не отправлена';
+    }
+  }
+
   Future<Uint8List?> getGroupLogo(String gid) async {
     try {
       final res = await _client.get(_url('/mobile/groups/$gid/logo'), headers: _headers).timeout(const Duration(seconds: 12));

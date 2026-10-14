@@ -15,6 +15,7 @@ import 'pair_screen.dart';
 import 'search_hub.dart';
 import '../widgets/secure_keyboard.dart';
 import '../widgets/intro_requests.dart';
+import '../widgets/complaint_sheet.dart';
 import '../widgets/secure_field.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
@@ -151,6 +152,12 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 if (ok) await state.clearChat(c.peerId);
               },
             ),
+            if (c.peerId != state.nodePeerId)
+              ListTile(
+                leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
+                title: const Text('Пожаловаться', style: TextStyle(color: AppTheme.text)),
+                onTap: () { Navigator.pop(ctx); showComplaintSheet(context, kind: 'user', targetId: c.peerId, title: c.displayName); },
+              ),
             ListTile(
               leading: const Icon(Icons.person_remove_outlined, color: Colors.redAccent),
               title: const Text('Удалить контакт', style: TextStyle(color: Colors.redAccent)),

@@ -867,6 +867,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   AvatarService? avatars;
   String? _nodePeerId;
+  String? get nodePeerId => _nodePeerId;
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();
 
@@ -1014,6 +1015,20 @@ class AppState extends ChangeNotifier implements FilesHost {
     final bytes = avatars?.myBytes;
     final ok = await api.putDeviceProfile(nick: myNick, avatarB64: bytes == null ? '' : base64.encode(bytes));
     if (ok) _deviceProfilePublished = true;
+  }
+
+  /// Жалоба узлу. [attachRecent] — приложить последние входящие сообщения этого человека (доказательства выбирает заявитель).
+  Future<String?> complain({required String kind, required String targetId, required String reason, required String text, bool attachRecent = false}) {
+    final api = _api;
+    if (api == null) return Future.value('Нет связи с узлом');
+    final evidence = <String>[];
+    if (attachRecent && kind == 'user') {
+      final inc = messagesFor(targetId).where((m) => !m.outgoing).toList();
+      for (final m in inc.reversed.take(5).toList().reversed) {
+        evidence.add(m.text);
+      }
+    }
+    return api.submitComplaint(kind: kind, targetId: targetId, reason: reason, text: text, evidence: evidence);
   }
 
   /// Логотипы групп (только в памяти): группа → (хэш, PNG).
