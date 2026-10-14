@@ -89,32 +89,54 @@ pub async fn run(auth: AuthState, port: u16) -> Result<(), String> {
 }
 
 async fn run_with(auth: AuthState, port: u16, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>) -> Result<(), String> {
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("порт {port} занят или недоступен: {e}"))?;
+    // На Linux настройка доступна только оболочке через локальный сокет: TCP-порт в браузер не открывается.
+    #[cfg(target_os = "linux")]
+    let listener = {
+        let _ = port;
+        None
+    };
+    #[cfg(not(target_os = "linux"))]
+    let listener = Some(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("порт {port} занят или недоступен: {e}"))?);
     serve(listener, auth, make_keys, crate::util::data_dir::data_dir()).await
 }
 
-async fn serve(listener: tokio::net::TcpListener, auth: AuthState, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>, socket_dir: std::path::PathBuf) -> Result<(), String> {
-    let port = listener.local_addr().map_err(|e| e.to_string())?.port();
+async fn serve(listener: Option<tokio::net::TcpListener>, auth: AuthState, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>, socket_dir: std::path::PathBuf) -> Result<(), String> {
+    let port = match &listener {
+        Some(l) => l.local_addr().map_err(|e| e.to_string())?.port(),
+        None => 0,
+    };
     let (tx, rx) = oneshot::channel::<()>();
     let sh = Shared { auth, done: Arc::new(Mutex::new(Some(tx))), port, make_keys };
     let app = router(sh);
     #[cfg(target_os = "linux")]
     let socket = super::ui_socket::Endpoint::bind(&socket_dir)
         .map_err(|_| "Cannot start setup UI socket: unsafe permissions or occupied socket".to_string())?;
-    let tcp = axum::serve(listener, app.clone())
-        .with_graceful_shutdown(async move {
-            let _ = rx.await;
-        })
-        .into_future();
+    let app_tcp = app.clone();
+    let tcp = async move {
+        match listener {
+            Some(l) => axum::serve(l, app_tcp)
+                .with_graceful_shutdown(async move {
+                    let _ = rx.await;
+                })
+                .into_future()
+                .await
+                .map_err(|e| e.to_string()),
+            // только сокет: ждём, пока настройка не завершится (сам сокет остановит `serve` ниже)
+            None => {
+                let _ = rx.await;
+                Ok(())
+            }
+        }
+    };
     #[cfg(target_os = "linux")]
     {
         tokio::select! {
-            result = tcp => result.map_err(|e| e.to_string()),
+            result = tcp => result,
             result = socket.serve(app) => result.map_err(|_| "Setup UI socket listener stopped".to_string()),
         }
     }
     #[cfg(not(target_os = "linux"))]
-    tcp.await.map_err(|e| e.to_string())
+    tcp.await
 }
 
 #[cfg(test)]
@@ -129,7 +151,7 @@ mod tests {
         let socket_dir = dir.path().join("data");
         (port, tokio::spawn(async move {
             let _dir = dir;
-            serve(listener, AuthState::default(), make, socket_dir).await
+            serve(Some(listener), AuthState::default(), make, socket_dir).await
         }))
     }
 
@@ -145,7 +167,7 @@ mod tests {
         let data = dir.path().join("data");
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint_path = data.join("run/yandi-ui.sock");
-        let handle = tokio::spawn(serve(listener, AuthState::default(), Arc::new(|_, _| Ok(())), data.clone()));
+        let handle = tokio::spawn(serve(Some(listener), AuthState::default(), Arc::new(|_, _| Ok(())), data.clone()));
         for _ in 0..100 {
             if endpoint_path.exists() { break; }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;

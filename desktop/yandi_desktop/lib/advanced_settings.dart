@@ -24,7 +24,6 @@ class AdvancedSettings extends StatefulWidget {
 
 class _AdvancedSettingsState extends State<AdvancedSettings> {
   final cap = TextEditingController();
-  String exit = 'trusted';
   Map<String, dynamic>? pool;
   String? error;
   bool loading = false;
@@ -47,14 +46,10 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
     if (!active || loading) return;
     loading = true;
     try {
-      final policy = await widget.api.request('/api/exit/settings');
       final proxies = await widget.api.request('/api/upstream-proxies');
       if (!active) return;
       ShellRepository.list(proxies, 'proxies');
-      if (!['off', 'trusted', 'all'].contains(policy['mode']))
-        throw const ApiFailure('protocol');
       setState(() {
-        exit = policy['mode'];
         pool = proxies;
         cap.text = '${proxies['max_clients']}';
         error = null;
@@ -131,29 +126,6 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
       if (loading) const LinearProgressIndicator(),
       if (error != null) UiText(error!),
       button('Обновить настройки', refresh),
-      const UiText(
-        'Выход в интернет через ваш узел',
-        style: TextStyle(fontSize: 22),
-      ),
-      const UiText('Кто может выходить в интернет через этот узел'),
-      DropdownButton<String>(
-        value: exit,
-        items: [
-          for (final e in {
-            'off': 'Никто',
-            'trusted': 'Доверенные узлы',
-            'all': 'Все узлы',
-          }.entries)
-            DropdownMenuItem(value: e.key, child: UiText(e.value)),
-        ],
-        onChanged: widget.busy ? null : (v) => setState(() => exit = v!),
-      ),
-      button(
-        'Сохранить политику выхода',
-        () => widget.mutate(() async {
-          await widget.api.request('/api/exit/settings', body: {'mode': exit});
-        }),
-      ),
       const UiText(
         'Внешние прокси для выхода в интернет',
         style: TextStyle(fontSize: 22),

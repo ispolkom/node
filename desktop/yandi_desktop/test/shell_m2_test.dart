@@ -242,19 +242,8 @@ void main() {
     await m1.click(t, 'Сохранить профиль');
     expect(api.profileName, 'Новое имя');
     expect(api.methods.contains('PUT'), true);
-    await t.enterText(
-      field('Мастер-пароль или код восстановления'),
-      'test master',
-    );
-    await t.enterText(field('Новый пароль входа'), 'new login password');
-    // «Повтор нового пароля» есть и у смены пароля закрытой среды: форма входа — последняя
-    await t.enterText(field('Повтор нового пароля').last, 'new login password');
-    await m1.click(t, 'Сменить пароль входа');
-    expect(api.bodies.last, {
-      'recovery_code': 'test master',
-      'new_login_password': 'new login password',
-      'remember_me': false,
-    });
+    // формы смены пароля входа на этой странице больше нет: браузерного входа нет
+    expect(find.text('Сменить пароль входа'), findsNothing);
     await m1.stop(t);
   });
   testWidgets(

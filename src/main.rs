@@ -251,7 +251,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     if !auth_state.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
         let port = config.ports.web_ui;
-        println!("🔐 Первый запуск: откройте http://127.0.0.1:{port} и создайте пароль входа и мастер-пароль");
+        println!("🔐 Первый запуск: откройте оболочку YANDI и создайте пароль и четыре секретных слова");
         if let Err(e) = yandi::web::first_setup::run(auth_state.clone(), port).await {
             eprintln!("🔐 Первичная настройка не запустилась: {e}");
             std::process::exit(2);
@@ -580,8 +580,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mdns_hostname = format!("{}.local", short_id);
     println!("✅ mDNS: This node is now accessible as:");
-    println!("   🌐 yandi.local    → Web UI (port {})", web_ui_port);
-    println!("   🌐 {}  → Web UI (port {})", mdns_hostname, web_ui_port);
+    println!("   🌐 yandi.local, {}", mdns_hostname);
     println!();
 
     // 8.6 Start Web Server in background
@@ -844,7 +843,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    println!("🌐 Web UI running on http://127.0.0.1:{}", web_ui_port);
+    println!("🌐 Оболочка подключается через локальный сокет");
     println!("   Proxy will run on port {} (use CLI: proxy <SHORT_ID>)", http_proxy_port);
     println!();
 

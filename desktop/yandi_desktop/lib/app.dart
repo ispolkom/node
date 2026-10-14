@@ -635,28 +635,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               !vault!.hasError &&
               (!vault!.configured || vault!.unlocked))
             features(),
-          const Divider(),
-          const UiText(
-            'Пароль входа меняется через мастер-пароль или код восстановления. Смена мастер-пароля в API отсутствует.',
-          ),
-          SecretForm(
-            key: ValueKey('settings-auth-$formVersion'),
-            title: 'Сменить пароль входа',
-            labels: const [
-              'Мастер-пароль или код восстановления',
-              'Новый пароль входа',
-              'Повтор нового пароля',
-            ],
-            busy: busy,
-            submit: (v) {
-              validateNew(v[1], v[2]);
-              return act('/api/auth/recover', {
-                'recovery_code': v[0],
-                'new_login_password': v[1],
-                'remember_me': false,
-              });
-            },
-          ),
         ] else if (!visible || vault == null)
           const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)

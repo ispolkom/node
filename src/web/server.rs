@@ -428,33 +428,34 @@ impl WebServer {
         let state = self.state.clone();
         let app = self.create_router(state.clone()).with_state(state);
 
-        let addr = format!("127.0.0.1:{}", port);
-        info!("🌐 Web UI available at: http://{}", addr);
-
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
-
-        #[cfg(target_os = "linux")]
-        let socket = super::ui_socket::Endpoint::bind(&crate::util::data_dir::data_dir())
-            .map_err(|_| "Cannot start UI socket: unsafe permissions, occupied socket, or unavailable data directory".to_string())?;
-
-        let tcp = axum::serve(listener, app.clone())
-            .with_graceful_shutdown(async {
-                tokio::signal::ctrl_c()
-                    .await
-                    .expect("failed to install CTRL+C handler");
-            })
-            .into_future();
+        // На Linux оболочка работает через локальный сокет владельца; TCP-порт для браузера не открывается.
         #[cfg(target_os = "linux")]
         {
-            tokio::select! {
-                result = tcp => result.map_err(|e| format!("Server error: {e}"))?,
-                result = socket.serve(app) => result.map_err(|_| "UI socket listener stopped".to_string())?,
-            }
+            let _ = port;
+            let socket = super::ui_socket::Endpoint::bind(&crate::util::data_dir::data_dir())
+                .map_err(|_| "Cannot start UI socket: unsafe permissions, occupied socket, or unavailable data directory".to_string())?;
+            info!("🌐 Оболочка подключается через локальный сокет (TCP-порта нет)");
+            socket
+                .serve(app)
+                .await
+                .map_err(|_| "UI socket listener stopped".to_string())?;
         }
         #[cfg(not(target_os = "linux"))]
-        tcp.await.map_err(|e| format!("Server error: {e}"))?;
+        {
+            let addr = format!("127.0.0.1:{}", port);
+            info!("🌐 Web UI available at: http://{}", addr);
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    tokio::signal::ctrl_c()
+                        .await
+                        .expect("failed to install CTRL+C handler");
+                })
+                .await
+                .map_err(|e| format!("Server error: {e}"))?;
+        }
 
         Ok(())
     }
