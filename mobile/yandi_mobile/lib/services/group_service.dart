@@ -506,6 +506,13 @@ class GroupService {
     listed.forEach((id, name) { if (known[id] != name) { known[id] = name; changed = true; } });
     if (changed) await store.write('grp_known', jsonEncode(known));
     gone = [for (final e in known.entries) if (!listed.containsKey(e.key)) (e.key, e.value)];
+    // Группы, которых на узле больше нет (владелец ушёл с узла), с телефона стираются сами: ключи, записи и файлы.
+    // Предохранитель: пустой список при многих известных группах — скорее сбой, чем исчезновение всех сразу.
+    if (gone.isNotEmpty && !(listed.isEmpty && known.length > 3)) {
+      for (final g in List.of(gone)) {
+        try { await forgetLocal(g.$1); } catch (_) {}
+      }
+    }
   }
 
   /// Убрать с телефона всё о группе, которой на узле уже нет.

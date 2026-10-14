@@ -1691,6 +1691,17 @@ pub fn forget_device(device: &str) {
     with_store(|s| s.forget_device(device));
 }
 
+/// Группы, которыми владеет устройство: (номер, название, ключи участников). Нужны, чтобы известить участников об удалении.
+pub fn owned_by(device: &str) -> Vec<(String, String, Vec<String>)> {
+    with_store(|s| {
+        s.groups
+            .values()
+            .filter(|g| g.owner().is_some_and(|o| o.key == member_key(&g.id, device)))
+            .map(|g| (g.id.clone(), g.name.clone(), g.members.iter().map(|m| m.key.clone()).collect()))
+            .collect()
+    })
+}
+
 /// Уборка групп без владельца (запускается узлом после старта).
 pub fn sweep_orphans(live: &[String]) -> usize {
     with_store(|s| s.sweep_orphans(live))

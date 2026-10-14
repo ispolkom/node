@@ -409,7 +409,30 @@ pub fn remove_device(id: &str) -> bool {
 fn after_forget(peer: String) {
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
     crate::device_profile::forget(&peer);
+    // группы, которыми владел этот человек, удаляются вместе с ним; бывшим участникам уходит извещение от имени узла
+    let owned = crate::mobile_groups::owned_by(&peer);
+    let others: Vec<(String, Vec<String>)> = if owned.is_empty() {
+        Vec::new()
+    } else {
+        with_devices(|d| d.iter().map(|x| x.peer_id()).filter(|p| *p != peer).collect::<Vec<_>>())
+            .into_iter()
+            .map(|p| {
+                let keys: Vec<String> = owned.iter().filter(|(gid, _, ks)| ks.contains(&crate::mobile_groups::member_key_for(gid, &p))).map(|(_, name, _)| name.clone()).collect();
+                (p, keys)
+            })
+            .filter(|(_, names)| !names.is_empty())
+            .collect()
+    };
     crate::mobile_groups::forget_device(&peer);
+    if !others.is_empty() {
+        tokio::spawn(async move {
+            for (device, names) in others {
+                for name in names {
+                    let _ = pc_admin_message(&device, &format!("Группа «{name}» удалена: её владелец больше не на узле. Это решение узла, а не ваше действие.")).await;
+                }
+            }
+        });
+    }
     let _ = bus().send(Event::Revoked(peer));
 }
 
