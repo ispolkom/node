@@ -9,6 +9,7 @@ import 'package:provider/provider.dart';
 import '../models/trusted_node.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
+import '../widgets/secure_field.dart';
 
 /// QR-формат: JSON {"host":"...","port":8766,"pairing_code":"123456","tls_fingerprint":"...","tls":true}
 class PairScreen extends StatefulWidget {
@@ -314,19 +315,13 @@ class _PairScreenState extends State<PairScreen> {
                       style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
                     ),
                     const SizedBox(height: 12),
-                    TextField(
+                    SecureField(
                       controller: _manual,
                       enabled: !_processing,
+                      hint: 'Текст подключения',
                       minLines: 4,
                       maxLines: 8,
-                      style: const TextStyle(color: AppTheme.text, fontSize: 12),
-                      decoration: InputDecoration(
-                        hintText: 'Текст подключения',
-                        hintStyle: const TextStyle(color: AppTheme.textSecondary),
-                        filled: true,
-                        fillColor: AppTheme.surface,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                      ),
+                      fontSize: 12,
                     ),
                     const SizedBox(height: 12),
                     ElevatedButton(

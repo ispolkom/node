@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
 import 'chat_screen.dart';
+import 'add_contact_screen.dart';
+import 'qr_scan_screen.dart';
+import '../widgets/secure_keyboard.dart';
 import 'blacklist_screen.dart';
 import 'settings_screen.dart';
 import 'files_tab.dart';
@@ -23,11 +27,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   late final TabController _tabs;
   final _filesKey = GlobalKey<FilesTabState>();
   final _searchCtrl = TextEditingController();
+  final _searchFocus = FocusNode();
   String _query = '';
 
   @override
   void initState() {
     super.initState();
+    _searchFocus.addListener(() { if (mounted) setState(() {}); });
     _tabs = TabController(length: 4, vsync: this);
     _tabs.addListener(() {
       if (!mounted) return;
@@ -45,6 +51,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   void dispose() {
     _tabs.dispose();
     _searchCtrl.dispose();
+    _searchFocus.dispose();
     super.dispose();
   }
 
@@ -320,7 +327,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           : FloatingActionButton(
               backgroundColor: AppTheme.accent,
               foregroundColor: Colors.black,
-              onPressed: () => _showAddContactDialog(context, state),
+              onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AddContactScreen())),
               child: const Icon(Icons.person_add),
             ),
       body: TabBarView(
@@ -389,16 +396,48 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
           padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
           child: TextField(
             controller: _searchCtrl,
+            focusNode: _searchFocus,
             onChanged: (v) => setState(() => _query = v),
             style: const TextStyle(color: AppTheme.text),
+            keyboardType: SecureKeyboard.inputType,
+            enableSuggestions: false,
+            autocorrect: false,
+            enableIMEPersonalizedLearning: false,
             decoration: InputDecoration(
               hintText: 'Поиск контактов и групп',
               hintStyle: const TextStyle(color: AppTheme.textSecondary),
               prefixIcon: const Icon(Icons.search, color: AppTheme.textSecondary),
-              suffixIcon: _query.isEmpty ? null : IconButton(
-                icon: const Icon(Icons.close, color: AppTheme.textSecondary),
-                onPressed: () => setState(() { _query = ''; _searchCtrl.clear(); }),
-              ),
+              suffixIcon: Row(mainAxisSize: MainAxisSize.min, children: [
+                if (_query.isNotEmpty)
+                  IconButton(
+                    icon: const Icon(Icons.close, color: AppTheme.textSecondary),
+                    onPressed: () => setState(() { _query = ''; _searchCtrl.clear(); }),
+                  ),
+                IconButton(
+                  tooltip: 'Сканировать QR',
+                  icon: const Icon(Icons.qr_code_scanner, color: AppTheme.accent),
+                  onPressed: () async {
+                    final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen(title: 'QR контакта')));
+                    final id = raw == null ? null : extractPeerId(raw);
+                    if (!context.mounted || raw == null) return;
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => AddContactScreen(initialId: id ?? '')));
+                  },
+                ),
+                IconButton(
+                  tooltip: 'Вставить ID',
+                  icon: const Icon(Icons.content_paste, color: AppTheme.accent),
+                  onPressed: () async {
+                    final data = await Clipboard.getData(Clipboard.kTextPlain);
+                    final id = extractPeerId(data?.text ?? '');
+                    if (!context.mounted) return;
+                    if (id == null) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('В буфере обмена нет ID (64 знака)')));
+                      return;
+                    }
+                    Navigator.of(context).push(MaterialPageRoute(builder: (_) => AddContactScreen(initialId: id)));
+                  },
+                ),
+              ]),
               filled: true, fillColor: AppTheme.surface,
               border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
             ),
@@ -421,78 +460,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                     ),
                 ),
         ),
+        if (_searchFocus.hasFocus) SecureKeyboard(controller: _searchCtrl),
       ],
     );
   }
-
-  void _showAddContactDialog(BuildContext context, AppState state) {
-    final peerCtrl = TextEditingController();
-    final nameCtrl = TextEditingController();
-    String? error;
-
-    showDialog(
-      context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (ctx, setLocal) => AlertDialog(
-          backgroundColor: AppTheme.surface,
-          title: const Text('Добавить контакт', style: TextStyle(color: AppTheme.text)),
-          content: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              TextField(
-                controller: peerCtrl,
-                style: const TextStyle(color: AppTheme.text, fontSize: 13),
-                decoration: _inputDecor('Peer ID (64 hex символа)'),
-                maxLength: 64,
-                autocorrect: false,
-                enableSuggestions: false,
-              ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: nameCtrl,
-                style: const TextStyle(color: AppTheme.text),
-                decoration: _inputDecor('Имя (необязательно)'),
-              ),
-              if (error != null) ...[
-                const SizedBox(height: 8),
-                Text(error!, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
-              ],
-            ],
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary)),
-            ),
-            TextButton(
-              onPressed: () {
-                final pid = peerCtrl.text.trim().toLowerCase();
-                if (pid.length != 64 || !RegExp(r'^[0-9a-f]+$').hasMatch(pid)) {
-                  setLocal(() => error = 'Peer ID должен быть 64 hex-символа');
-                  return;
-                }
-                Navigator.pop(ctx);
-                state.addManualContact(pid, nameCtrl.text.trim());
-              },
-              child: const Text('Добавить', style: TextStyle(color: AppTheme.accent)),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  InputDecoration _inputDecor(String hint) => InputDecoration(
-    hintText: hint,
-    hintStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
-    filled: true,
-    fillColor: AppTheme.bg,
-    counterStyle: const TextStyle(color: AppTheme.textSecondary, fontSize: 10),
-    border: OutlineInputBorder(
-      borderRadius: BorderRadius.circular(8),
-      borderSide: BorderSide.none,
-    ),
-  );
 }
 
 /// Сохранённые контакты сверху, ниже раздел «Другие устройства» (видны, но ещё не в контактах). Устройства, которых нет в сети дольше суток
