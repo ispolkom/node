@@ -379,20 +379,18 @@ void main() {
     expect(owner.byId(gid)!.epoch, 1);
   });
 
-  test('группа удалена на узле: пропадает из списка, помечается «удалена», локальные данные чистятся по команде', () async {
+  test('группа удалена на узле (или участника исключили): пропадает из списка, данные на телефоне стираются сами', () async {
     await owner.sync();
     await bobJoins();
     await bob.send(node.gid, GroupKind.text, {'t': 'привет'});
     await bob.sync();                                 // своя запись вернулась из журнала
     expect(bob.gone, isEmpty);
+    expect(bobStore.log[node.gid], isNotNull);
     node.members.remove('bob');                       // узел группу для Боба больше не показывает
     await bob.sync();
     expect(bob.groups, isEmpty);
-    expect(bob.gone.map((g) => g.$1), [node.gid]);
-    expect(bobStore.log[node.gid], isNotNull, reason: 'история пока на месте');
-    await bob.forgetLocal(node.gid);
-    expect(bob.gone, isEmpty);
-    expect(bobStore.log[node.gid], isNull);
+    expect(bob.gone, isEmpty, reason: 'заглушки «удалена» нет: данные группы стёрты сразу');
+    expect(bobStore.log[node.gid], isNull, reason: 'история стёрта');
     expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty, reason: 'ключи группы стёрты');
     await bob.sync();
     expect(bob.gone, isEmpty, reason: 'забытая группа не возвращается');
