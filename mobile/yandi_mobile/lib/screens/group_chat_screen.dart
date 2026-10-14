@@ -13,6 +13,8 @@ import '../services/group_service.dart';
 import '../services/vault_service.dart';
 import 'file_viewer_screen.dart';
 import '../theme.dart';
+import '../content_policy.dart';
+import '../widgets/link_guard.dart';
 import '../widgets/secure_keyboard.dart';
 import '../widgets/message_menu.dart';
 import 'package:flutter/services.dart';
@@ -167,6 +169,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   /// Отправить файл в группу (выбранный или записанное голосовое); открытая копия затирается при любом исходе.
   Future<void> _sendFilePath(String path, String name) async {
     final svc = _svc!;
+    final bad = await attachmentVerdict(path, name);
+    if (bad != null) { _toast('«$name»: $bad'); return; }
     final kind = GroupFiles.kindForName(name);
     if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
     setState(() => _progress['up'] = 0);
@@ -249,8 +253,15 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   }
 
   Future<void> _send() async {
-    final text = _ctrl.text.trim();
+    var text = _ctrl.text.trim();
     if (text.isEmpty) return;
+    final guarded = await guardLinks(context, text);
+    if (!mounted) return;
+    if (guarded == null) {
+      if (findLink(text) != null) _ctrl.text = removeLinks(text);
+      return;
+    }
+    text = guarded;
     final svc = _svc!;
     try {
       final q = _replyTo;
@@ -568,7 +579,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                   onFetch: (o) async => bodies[o.tid] != null && await _fetchFile(bodies[o.tid]!) != null, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.',
                   links: [
                     for (final e in _entries)
-                      if (e.body['t'] is String) ...FileLink.inText(e.body['t'] as String, DateTime.fromMillisecondsSinceEpoch(e.ts)),
+                      if (e.body['t'] is String) ...FileLink.inText(stripLinks(e.body['t'] as String), DateTime.fromMillisecondsSinceEpoch(e.ts)),
                   ]),
             ));
           },

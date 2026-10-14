@@ -2,6 +2,7 @@ import 'message_actions.dart';
 import 'contact_avatar.dart';
 import 'theme.dart';
 import 'search_page.dart';
+import 'content_policy.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'dart:typed_data';
@@ -289,6 +290,14 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     if (contact == null || composer.text.trim().isEmpty || sending) return;
     final target = peer(contact), text = composer.text, quote = replyTo;
     final editing = editingId;
+    if (findLink(text) != null) {
+      // ссылки в YANDI не передаются: убираем из поля и сообщаем, отправлять без ссылки человек решает сам
+      setState(() {
+        composer.text = removeLinks(text);
+        error = 'Ссылки в YANDI не передаются: ссылка удалена из сообщения. Проверьте текст и отправьте снова.';
+      });
+      return;
+    }
     await mutate(
       () => editing != null
           ? repo.edit(target, editing, text)
@@ -309,6 +318,11 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     try {
       final path = await PlatformFiles.choose();
       if (!active || rev != revision || path == null) return;
+      final bad = await fileVerdict(path);
+      if (bad != null) {
+        if (active) setState(() => error = bad);
+        return;
+      }
       setState(() {
         pickedFile = File(path);
         transferred = transferSize = 0;
@@ -1080,7 +1094,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     onJoin: () => joinInvited(inv),
                   )
                 else
-                  Text('${m['text'] ?? ''}'),
+                  Text(stripLinks('${m['text'] ?? ''}')),
                 if (m['attachment'] is Map)
                   AttachmentView(
                     key: ValueKey('${peer(selected!)}:${m['msg_id']}'),

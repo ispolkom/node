@@ -1,6 +1,7 @@
 import 'message_actions.dart';
 import 'member_badge.dart';
 import 'theme.dart';
+import 'content_policy.dart';
 import 'preferences.dart';
 import 'dart:io';
 import 'dart:typed_data';
@@ -305,6 +306,13 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     if (id == null || busy || !canSend || composer.text.trim().isEmpty) return;
     final text = composer.text;
     final quote = replyTo;
+    if (findLink(text) != null) {
+      setState(() {
+        composer.text = removeLinks(text);
+        error = 'Ссылки в YANDI не передаются: ссылка удалена из сообщения. Проверьте текст и отправьте снова.';
+      });
+      return;
+    }
     await mutate(
       () => repo.send(id, text, reply: quote),
       success: () {
@@ -551,7 +559,10 @@ class _GroupsFeatureState extends State<GroupsFeature> {
     choosing = true;
     try {
       final path = await PlatformFiles.choose();
-      if (active && rev == revision && path != null)
+      final bad = path == null ? null : await fileVerdict(path);
+      if (bad != null) {
+        if (active) setState(() => error = bad);
+      } else if (active && rev == revision && path != null)
         setState(() {
           picked = File(path);
           sentBytes = fileSize = 0;
@@ -1019,7 +1030,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                   Text(
                     m['text'] == null
                         ? tr(context, 'Вложение (недоступно)')
-                        : '${m['text']}',
+                        : stripLinks('${m['text']}'),
                   ),
                 Align(
                   alignment: Alignment.centerRight,

@@ -25,6 +25,8 @@ import '../widgets/message_menu.dart';
 import '../models/receipt.dart';
 import 'package:flutter/services.dart';
 import '../theme.dart';
+import '../content_policy.dart';
+import '../widgets/link_guard.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 
 class ChatScreen extends StatefulWidget {
@@ -242,9 +244,17 @@ class _ChatScreenState extends State<ChatScreen> {
     super.dispose();
   }
 
-  void _send() {
-    final text = _inputCtrl.text.trim();
+  Future<void> _send() async {
+    var text = _inputCtrl.text.trim();
     if (text.isEmpty) return;
+    // ссылки в YANDI не передаются: предлагаем удалить (текст остаётся в поле, пока человек не решил)
+    final guarded = await guardLinks(context, text);
+    if (!mounted) return;
+    if (guarded == null) {
+      if (findLink(text) != null) _inputCtrl.text = removeLinks(text);
+      return;
+    }
+    text = guarded;
     final editing = _editingId;
     _inputCtrl.clear();
     // после отправки клавиатура (и обычная, и наша) убирается
@@ -328,6 +338,11 @@ class _ChatScreenState extends State<ChatScreen> {
       if (path == null) continue;
       if (f.size > maxFileSize) {
         _snack('«${f.name}» больше 1 ГБ: слишком большой');
+        continue;
+      }
+      final bad = await attachmentVerdict(path, f.name);
+      if (bad != null) {
+        _snack('«${f.name}»: $bad');
         continue;
       }
       final err = await state.sendFile(widget.peerId, path, name: f.name);
@@ -457,7 +472,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   offers: offers,
                   links: [
                     for (final m in state.messagesFor(widget.peerId))
-                      if (FileOffer.tryParse(m.text) == null) ...FileLink.inText(m.text, m.timestamp),
+                      if (FileOffer.tryParse(m.text) == null) ...FileLink.inText(stripLinks(m.text), m.timestamp),
                   ],
                 ),
               ));

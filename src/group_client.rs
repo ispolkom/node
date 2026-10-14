@@ -1075,6 +1075,22 @@ pub fn send(gid: &str, kind: u8, body: Value) -> Result<u64, String> {
         if !KINDS.contains(&kind) {
             return Err("неверный вид записи".into());
         }
+        if kind == KIND_LINK {
+            return Err("ссылки в YANDI не передаются".into());
+        }
+        // политика содержимого: ни в тексте, ни в подписи ссылок, а у вложений — расширение из белого списка
+        for field in ["t", "caption", "text"] {
+            if let Some(t) = body.get(field).and_then(|v| v.as_str()) {
+                crate::content_policy::check_text(t)?;
+            }
+        }
+        if matches!(kind, KIND_IMAGE | KIND_FILE | KIND_AUDIO | KIND_VIDEO) {
+            for field in ["name", "filename", "file_name"] {
+                if let Some(n) = body.get(field).and_then(|v| v.as_str()) {
+                    crate::content_policy::attachment_allowed(n)?;
+                }
+            }
+        }
         if !kind_allowed(c, gid, kind) {
             return Err("в этой группе запрещён такой вид сообщений".into());
         }

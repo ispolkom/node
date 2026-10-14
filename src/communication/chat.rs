@@ -343,6 +343,12 @@ impl ChatManager {
     ) -> Result<ChatMessage> {
         info!("📤 Sending chat message to {}", hex::encode(&to.0[..8]));
 
+        // политика содержимого: ссылки не передаются, вложения только из белого списка
+        crate::content_policy::check_text(&text).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(att) = attachment.as_ref() {
+            crate::content_policy::attachment_allowed(&att.filename).map_err(|e| anyhow::anyhow!(e))?;
+        }
+
         // 1. Создать сообщение
         let mut msg = ChatMessage::new(self.my_node_id, to, text.clone());
         msg.status = MessageStatus::Shipping;
@@ -417,6 +423,16 @@ impl ChatManager {
         // 2. Десериализовать
         let mut msg: ChatMessage = serde_json::from_slice(&data)?;
         msg.reply_to = msg.reply_to.take().and_then(|r| r.sanitized());
+        // старый или чужой клиент мог прислать ссылку или запрещённое вложение: у нас они не показываются
+        msg.text = crate::content_policy::strip_links(&msg.text);
+        if let Some(att) = msg.attachment.as_ref() {
+            if crate::content_policy::attachment_allowed(&att.filename).is_err() {
+                msg.attachment = None;
+                if msg.text.trim().is_empty() {
+                    msg.text = "[вложение не принято: такой тип файла в YANDI не передаётся]".into();
+                }
+            }
+        }
 
         // 3. Проверить: нам ли, от того ли, чьим ключом расшифровано, и в пределах размеров
         if let Err(why) = check_incoming(&msg, from, self.my_node_id) {

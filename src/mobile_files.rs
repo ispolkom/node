@@ -197,6 +197,10 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
     if req.to_peer_id == me || !(is_device_peer(&req.to_peer_id) || crate::mobile_api::is_node_peer(&req.to_peer_id)) {
         return err(StatusCode::BAD_REQUEST, "файлы можно отправлять только на другое сопряжённое устройство");
     }
+    // политика содержимого: только разрешённые типы файлов (имя проверяется целиком, содержимое — приложением до шифрования)
+    if let Err(why) = crate::content_policy::attachment_allowed(&req.file_name) {
+        return err(StatusCode::UNSUPPORTED_MEDIA_TYPE, &why);
+    }
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой");
     }

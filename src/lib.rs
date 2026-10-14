@@ -40,6 +40,7 @@ pub mod core;
 pub mod crypto;
 pub mod dataplane;
 pub mod dht;
+pub mod content_policy;
 pub mod exit_policy;
 pub mod exit_select;
 pub mod hops;
