@@ -25,6 +25,7 @@ pub const DOMAIN_GROUPS: &str = "groups_pc";
 pub const DOMAIN_SELF: &str = "mobile_self";
 pub const DOMAIN_PROXY: &str = "upstream_proxy";
 pub const DOMAIN_COMPLAINTS: &str = "complaints";
+pub const DOMAIN_FILES: &str = "files";
 
 /// Автоблокировка по умолчанию при создании среды.
 pub const DEFAULT_AUTO_LOCK_SECS: u64 = 15 * 60;

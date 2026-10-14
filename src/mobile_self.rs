@@ -520,7 +520,6 @@ pub struct ReceivedFile {
 /// загрузки страницы. Куски с узла удаляются после успеха.
 pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -> Result<ReceivedFile, String> {
     use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
     let o: Offer = serde_json::from_str(offer_text.strip_prefix(FILE_MARKER).ok_or("не предложение файла")?).map_err(|e| e.to_string())?;
     let key = unb64(&o.key).filter(|k| k.len() == 32).ok_or("неверный ключ файла")?;
     let (chunks, size) = crate::mobile_files::ready_for(&o.tid, from_device, node_hex).await.ok_or("передача не найдена или не завершена")?;
@@ -532,7 +531,8 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
     tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
     let stored = format!("{}__{}", file_id, crate::web::server::sanitize_storage_filename(&o.name));
     let part = dir.join(format!("{stored}.part"));
-    let mut out = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
+    // принятое сразу ложится запечатанными блоками (ключ защитной среды): открытого файла на диске нет
+    let mut out = crate::file_vault::Writer::create(&part, o.size).map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
     let mut total = 0u64;
     let res: Result<(), String> = async {
@@ -541,19 +541,21 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
             let plain = open_chunk(&key, &o.tid, i, o.chunks, &wire).ok_or(format!("кусок {} не прошёл проверку: подменён или повреждён", i + 1))?;
             hash.update(&plain);
             total += plain.len() as u64;
-            out.write_all(&plain).await.map_err(|e| e.to_string())?;
+            if total > o.size {
+                return Err(format!("размер не совпал: больше {}", o.size));
+            }
+            out.push(&plain).map_err(|e| e.to_string())?;
         }
-        out.flush().await.map_err(|e| e.to_string())?;
         if total != o.size {
             return Err(format!("размер не совпал: {total} из {}", o.size));
         }
+        out.finish().map_err(|e| e.to_string())?;
         if !o.sha.is_empty() && hex::encode(hash.finalize()) != o.sha.to_lowercase() {
             return Err("контрольная сумма не совпала".into());
         }
         Ok(())
     }
     .await;
-    drop(out);
     if let Err(e) = res {
         let _ = tokio::fs::remove_file(&part).await;
         return Err(e);
@@ -577,22 +579,23 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
 /// предложения (его надо запечатать ключом телефона и положить в его очередь).
 pub async fn send_file(node_hex: &str, device: &str, path: &std::path::Path, name: &str, mime: &str) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    use tokio::io::AsyncReadExt;
-    let size = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?.len();
+    let size = crate::file_vault::plain_len(path).map_err(|e| e.to_string())?;
     let chunk = file_chunk_for(size);
     let chunks = (size.div_ceil(chunk as u64)).max(1) as u32;
     let tid = crate::mobile_files::node_begin(node_hex, device, size, chunks).await?;
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    let mut f = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
-    let mut buf = vec![0u8; chunk];
     let res: Result<(), String> = async {
         for i in 0..chunks {
             let want = (size - i as u64 * chunk as u64).min(chunk as u64) as usize;
-            f.read_exact(&mut buf[..want]).await.map_err(|e| e.to_string())?;
-            hash.update(&buf[..want]);
-            crate::mobile_files::node_put(&tid, i, &seal_chunk(&key, &tid, i, chunks, &buf[..want])).await?;
+            let (p, off) = (path.to_path_buf(), i as u64 * chunk as u64);
+            let buf = tokio::task::spawn_blocking(move || crate::file_vault::read_range(&p, off, want))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            hash.update(&buf);
+            crate::mobile_files::node_put(&tid, i, &seal_chunk(&key, &tid, i, chunks, &buf)).await?;
         }
         crate::mobile_files::node_finish(&tid).await
     }
@@ -1149,7 +1152,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("receipt-test.txt");
         let data = b"file receipt round trip";
-        tokio::fs::write(&path, data).await.unwrap();
+        crate::file_vault::write_all(&path, data).unwrap();
         let device = format!("receipt-test-{}", rand::random::<u64>());
         let offer = send_file(&device, "receipt-test-pc", &path, "receipt-test.txt", "text/plain").await.unwrap();
         let tid = offer_tid(&offer).unwrap();
@@ -1166,7 +1169,7 @@ mod tests {
         assert_eq!(received.receipt_id, format!("file_{tid}"));
         let saved = crate::communication::files_dir("downloads")
             .join(received.attachment.file_ref.unwrap().local_name.unwrap());
-        assert_eq!(tokio::fs::read(&saved).await.unwrap(), data);
+        assert_eq!(crate::file_vault::read_all(&saved).unwrap(), data);
         assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_none());
         let id = received.receipt_id;
         assert!(matches!(classify(receipt(false, &[id.clone()])), Envelope::Receipt { read: false, ids } if ids == [id.clone()]));
@@ -1184,7 +1187,7 @@ mod tests {
     async fn a_corrupt_file_has_no_success_receipt() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.txt");
-        tokio::fs::write(&path, b"must not acknowledge corruption").await.unwrap();
+        crate::file_vault::write_all(&path, b"must not acknowledge corruption").unwrap();
         let from = format!("receipt-bad-{}", rand::random::<u64>());
         let offer = send_file(&from, "receipt-bad-pc", &path, "bad.txt", "text/plain").await.unwrap();
         let mut parsed: Offer = serde_json::from_str(offer.strip_prefix(FILE_MARKER).unwrap()).unwrap();

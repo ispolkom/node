@@ -3611,7 +3611,7 @@ async fn api_files_upload(
     let file_path = uploads_dir.join(&safe_filename);
 
     // Сохраняем файл
-    if let Err(e) = tokio::fs::write(&file_path, file_data.clone()).await {
+    if let Err(e) = crate::file_vault::write_all(&file_path, &file_data) {
         error!("❌ Failed to save file: {}", e);
         return Json(serde_json::json!({
             "status": "error",
@@ -3752,7 +3752,7 @@ async fn api_files_send_direct(
         transfer_id,
         sanitize_storage_filename(&filename)
     ));
-    if let Err(e) = std::fs::write(&temp_path, &file_data) {
+    if let Err(e) = crate::file_vault::write_all(&temp_path, &file_data) {
         error!("❌ Failed to write file to disk: {}", e);
         return Json(serde_json::json!({
             "status": "error",
@@ -4043,6 +4043,7 @@ async fn api_files_send_chunk(
         let alive = u.started.elapsed() < PENDING_UPLOAD_TTL;
         if !alive {
             let _ = std::fs::remove_file(&u.temp_path);
+            let _ = std::fs::remove_dir_all(upload_parts_dir(&u.temp_path));
         }
         alive
     });
@@ -4085,18 +4086,11 @@ async fn api_files_send_chunk(
         }));
     }
 
+    // каждая часть — отдельный запечатанный файл; открытого файла на диске нет, целый запечатанный файл собирается по завершении
     let write_result = (|| -> std::io::Result<()> {
-        use std::io::{Seek, SeekFrom, Write};
-
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&upload.temp_path)?;
-        let offset = (chunk_index as u64) * (chunk_limit as u64);
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&chunk_data)?;
-        Ok(())
+        let dir = upload_parts_dir(&upload.temp_path);
+        std::fs::create_dir_all(&dir)?;
+        crate::file_vault::write_all(&dir.join(chunk_index.to_string()), &chunk_data)
     })();
 
     if let Err(e) = write_result {
@@ -4131,6 +4125,29 @@ async fn api_files_send_chunk(
 
     drop(uploads);
 
+    // все части на месте: собираем запечатанный файл (с него идут повторы недостающих кусков)
+    if is_complete {
+        let parts: Vec<std::path::PathBuf> =
+            (0..upload_total_chunks).map(|i| upload_parts_dir(&temp_path).join(i.to_string())).collect();
+        let tp = temp_path.clone();
+        let size = file_size;
+        let built = tokio::task::spawn_blocking(move || {
+            let r = crate::file_vault::assemble(&parts, &tp, size);
+            let _ = std::fs::remove_dir_all(upload_parts_dir(&tp));
+            r
+        })
+        .await;
+        match built {
+            Ok(Ok(())) => {}
+            other => {
+                let why = match other { Ok(Err(e)) => e.to_string(), Err(e) => e.to_string(), Ok(Ok(())) => String::new() };
+                CHUNK_UPLOADS.lock().await.remove(&file_id);
+                error!("❌ Failed to assemble upload: {}", why);
+                return Json(serde_json::json!({"status": "error", "message": format!("Failed to assemble upload: {}", why)}));
+            }
+        }
+    }
+
     // телефон владельца: по сети узлов не шлём; когда файл собран, кладём его в uploads — отправит api_chat_send (зашифровав для телефона)
     if crate::mobile_api::is_device_peer(&peer_id) {
         if !is_complete {
@@ -4141,7 +4158,7 @@ async fn api_files_send_chunk(
             return Json(serde_json::json!({"status": "error", "message": format!("Failed to store upload: {}", e)}));
         }
         CHUNK_UPLOADS.lock().await.remove(&file_id);
-        let size = std::fs::metadata(&stored).map(|m| m.len()).unwrap_or(file_size);
+        let size = crate::file_vault::plain_len(&stored).unwrap_or(file_size);
         return Json(serde_json::json!({"status": "success", "message": "File transfer completed", "file_id": file_id, "size": size, "complete": true}));
     }
 
@@ -4178,8 +4195,8 @@ async fn api_files_send_chunk(
     }
 
     if is_complete {
-        let file_size = match std::fs::metadata(&temp_path) {
-            Ok(meta) => meta.len(),
+        let file_size = match crate::file_vault::plain_len(&temp_path) {
+            Ok(len) => len,
             Err(e) => {
                 error!("❌ Failed to stat temp upload file: {}", e);
                 return Json(serde_json::json!({
@@ -4276,7 +4293,7 @@ async fn api_files_send_uploaded(
 
     // Читаем файл из uploads
     let file_path = crate::communication::files_dir("uploads").join(&filename);
-    let file_data = match tokio::fs::read(&file_path).await {
+    let file_data = match crate::file_vault::read_all(&file_path) {
         Ok(data) => data,
         Err(e) => {
             return Json(serde_json::json!({
@@ -4478,6 +4495,12 @@ fn parse_single_http_range(range_header: &str, data_len: usize) -> Option<(usize
     Some((start, end))
 }
 
+/// Папка с отдельными запечатанными частями загрузки, пока файл не собран.
+fn upload_parts_dir(temp: &std::path::Path) -> std::path::PathBuf {
+    let name = temp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    temp.with_file_name(format!(".{name}.parts"))
+}
+
 async fn api_files_content(
     headers: HeaderMap,
     PathExtractor((file_id, filename)): PathExtractor<(String, String)>,
@@ -4493,7 +4516,7 @@ async fn api_files_content(
         }
     };
 
-    match std::fs::read(&file_path) {
+    match crate::file_vault::read_all(&file_path) {
         Ok(data) => {
             let content_type = safe_served_type(&filename);
             let data_len = data.len();

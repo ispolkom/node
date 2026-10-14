@@ -168,6 +168,39 @@ impl Consumer for ComplaintsConsumer {
     }
 }
 
+/// Файлы переписки (принятые, отправляемые, части передач): на диске только запечатанными блоками, личный уровень.
+pub struct FilesConsumer;
+
+impl Consumer for FilesConsumer {
+    fn domain(&self) -> &'static str {
+        crate::closed_env::DOMAIN_FILES
+    }
+    fn migrate(&self, _old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move {
+            // файлы прежних версий (открытые) запечатываются на месте; уже запечатанные не трогаются
+            crate::file_vault::unlock(new);
+            tokio::task::spawn_blocking(move || {
+                let root = crate::util::data_dir::data_dir().join("files");
+                Ok(crate::file_vault::seal_dir(&root))
+            })
+            .await
+            .map_err(|e| e.to_string())?
+        })
+    }
+    fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::file_vault::unlock(key) })
+    }
+    fn lock(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::file_vault::lock() })
+    }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            crate::file_vault::lock();
+            let _ = std::fs::remove_dir_all(crate::util::data_dir::data_dir().join("files"));
+        })
+    }
+}
+
 /// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
 pub struct ProxyConsumer;
 
@@ -362,5 +395,28 @@ mod tests {
         assert!(!is_locked() && probe.0.lock().unwrap().is_some());
         assert_eq!(code(auto_lock(Json(AutoLockBody { secs: 600 })).await).await, 200);
         assert_eq!(env.status().auto_lock_secs, 600);
+    }
+}
+
+#[cfg(test)]
+mod files_consumer_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn legacy_open_files_are_sealed_on_migrate_and_erased_with_the_environment() {
+        let root = crate::util::data_dir::data_dir().join("files");
+        let down = root.join("downloads");
+        std::fs::create_dir_all(&down).unwrap();
+        let p = down.join("legacy-consumer-test__a.txt");
+        std::fs::write(&p, "открытый файл прежней версии").unwrap();
+        let c = FilesConsumer;
+        assert_eq!(c.migrate(None, [0x5a; 32]).await.unwrap(), 0);
+        assert!(crate::file_vault::is_sealed(&p));
+        assert_eq!(crate::file_vault::read_all(&p).unwrap(), "открытый файл прежней версии".as_bytes());
+        let raw = std::fs::read(&p).unwrap();
+        assert!(!String::from_utf8_lossy(&raw).contains("открытый"));
+        c.erase().await;
+        assert!(!p.exists(), "стирание среды удаляет и файлы переписки");
+        crate::file_vault::unlock([0x5a; 32]); // erase запер хранилище; остальные тесты процесса работают с тем же ключом
     }
 }

@@ -35,6 +35,8 @@ fn decrypt_chunk(key: &[u8; 32], data: &[u8]) -> Result<Vec<u8>> {
 /// Фиксированный размер P2P чанка для transport-safe MTU.
 /// Этот размер должен совпадать с browser upload chunk size в Web UI/API.
 pub const FILE_TRANSFER_CHUNK_SIZE: usize = 700;
+// кусок передачи = блок запечатанного файла (crate::file_vault)
+const _: () = assert!(FILE_TRANSFER_CHUNK_SIZE == crate::file_vault::BLOCK);
 const ACK_WAIT_SLICE_MS: u64 = 200;
 const ACK_ROUND_TIMEOUT_MS: u64 = 2000;
 const MAX_RETRY_ROUNDS: usize = 6;
@@ -71,7 +73,7 @@ fn save_checkpoint(file_id: &str, filename: &str, sent_chunks: u32, total_chunks
     std::fs::create_dir_all(&cache_dir)?;
     let checkpoint_path = cache_dir.join(format!("transfer_{}.state", file_id));
     let content = format!("{}\n{}\n{}\n", filename, sent_chunks, total_chunks);
-    std::fs::write(&checkpoint_path, content)?;
+    crate::file_vault::write_all(&checkpoint_path, content.as_bytes())?;
     debug!("💾 Checkpoint saved: {} chunks sent", sent_chunks);
     Ok(())
 }
@@ -91,7 +93,7 @@ fn load_checkpoint(file_id: &str) -> Result<Option<CheckpointData>> {
     if !checkpoint_path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&checkpoint_path)?;
+    let content = String::from_utf8_lossy(&crate::file_vault::read_all(&checkpoint_path)?).into_owned();
     let lines: Vec<&str> = content.lines().collect();
     if lines.len() >= 3 {
         let filename = lines[0].to_string();
@@ -334,8 +336,8 @@ impl FileTransferManager {
         file_path: std::path::PathBuf,
         mime_type: String,
     ) -> Result<String> {
-        let metadata = tokio::fs::metadata(&file_path).await?;
-        let file_size = metadata.len();
+        // отправляемый файл лежит в папке файлов запечатанным: размер — открытый, не размер файла на диске
+        let file_size = crate::file_vault::plain_len(&file_path)?;
         let total_chunks = ((file_size as usize + FILE_TRANSFER_CHUNK_SIZE - 1) / FILE_TRANSFER_CHUNK_SIZE) as u32;
 
         let file_id = explicit_file_id.unwrap_or_else(|| {
@@ -531,14 +533,13 @@ impl FileTransferManager {
             (transfer.file_path.clone(), transfer.total_chunks)
         };
 
-        let start = (chunk_index as usize) * FILE_TRANSFER_CHUNK_SIZE;
-        let mut file = tokio::fs::File::open(&file_path).await?;
-        use tokio::io::{AsyncSeekExt, AsyncReadExt};
-        file.seek(std::io::SeekFrom::Start(start as u64)).await?;
-
-        let mut chunk_data = vec![0u8; FILE_TRANSFER_CHUNK_SIZE];
-        let bytes_read = file.read(&mut chunk_data).await?;
-        chunk_data.truncate(bytes_read);
+        // кусок передачи = блок запечатанного файла
+        let chunk_data = {
+            let path = file_path.clone();
+            tokio::task::spawn_blocking(move || crate::file_vault::read_block(&path, chunk_index as u64))
+                .await
+                .map_err(|e| anyhow::anyhow!("{e}"))??
+        };
 
         // Per-file AES-256-GCM application-layer encryption
         let file_key = self.transport.derive_file_key(to, file_id).await;
@@ -564,7 +565,7 @@ impl FileTransferManager {
         );  // total_parts=0, каждый чанк независим
         self.transport.send_packet_dual_path(*to, p2p_packet).await.map_err(|e| anyhow::anyhow!("{}", e))?;
 
-        debug!("📦 Sent chunk {}/{} from disk ({} bytes)", chunk_index + 1, total_chunks, bytes_read);
+        debug!("📦 Sent chunk {}/{} from disk ({} bytes)", chunk_index + 1, total_chunks, chunk_data.len());
         Ok(())
     }
 
@@ -719,14 +720,8 @@ impl FileTransferManager {
         let final_path = downloads_dir.join(&local_name);
         let temp_path = downloads_dir.join(format!("{}.part", &local_name));
 
-        {
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .write(true)
-                .truncate(true)
-                .open(&temp_path)?;
-            file.set_len(start.file_size)?;
-        }
+        // принятые части — сразу запечатанными блоками: открытого файла на диске нет ни во время приёма, ни после
+        crate::file_vault::create(&temp_path, start.file_size)?;
 
         let transfer = IncomingTransfer {
             filename: start.filename,
@@ -868,17 +863,7 @@ impl FileTransferManager {
             return Ok(false);
         }
 
-        let write_result = (|| -> std::io::Result<()> {
-            use std::io::{Seek, SeekFrom, Write};
-
-            let mut file = std::fs::OpenOptions::new()
-                .write(true)
-                .open(&transfer.temp_path)?;
-            let offset = (chunk_index as u64) * (FILE_TRANSFER_CHUNK_SIZE as u64);
-            file.seek(SeekFrom::Start(offset))?;
-            file.write_all(plain_data)?;
-            Ok(())
-        })();
+        let write_result = crate::file_vault::write_block(&transfer.temp_path, chunk_index as u64, plain_data);
 
         if let Err(e) = write_result {
             return Err(anyhow::anyhow!("Failed to write incoming chunk: {}", e));
@@ -987,7 +972,7 @@ impl FileTransferManager {
         }
 
         if is_complete {
-            let actual_size = std::fs::metadata(&temp_path)?.len();
+            let actual_size = crate::file_vault::plain_len(&temp_path)?;
             if actual_size != file_size {
                 return Err(anyhow::anyhow!(
                     "Incoming file size mismatch for {}: expected {}, got {}",

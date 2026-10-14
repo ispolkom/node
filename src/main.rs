@@ -657,6 +657,7 @@ async fn main() -> anyhow::Result<()> {
         env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ProxyConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ComplaintsConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::FilesConsumer));
         env.spawn_auto_lock();
         yandi::closed_api::install_global(env.clone());
         // служебные части (ключи «Компьютера», группы ПК, жалобы) поднимаются сами, без владельца у экрана

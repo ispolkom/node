@@ -224,6 +224,66 @@ pub fn read_range(path: &Path, offset: u64, len: usize) -> std::io::Result<Vec<u
     Ok(out)
 }
 
+/// Последовательная запись запечатанного файла кусками любой длины (куски ложатся в блоки).
+pub struct Writer {
+    path: std::path::PathBuf,
+    buf: Vec<u8>,
+    index: u64,
+    total: u64,
+    expected: u64,
+}
+
+impl Writer {
+    /// Создать файл под `plain_size` открытых байт.
+    pub fn create(path: &Path, plain_size: u64) -> std::io::Result<Self> {
+        create(path, plain_size)?;
+        Ok(Self { path: path.to_path_buf(), buf: Vec::with_capacity(BLOCK * 2), index: 0, total: 0, expected: plain_size })
+    }
+
+    pub fn push(&mut self, data: &[u8]) -> std::io::Result<()> {
+        self.total += data.len() as u64;
+        if self.total > self.expected {
+            return Err(bad("записано больше заявленного размера"));
+        }
+        self.buf.extend_from_slice(data);
+        while self.buf.len() >= BLOCK {
+            write_block(&self.path, self.index, &self.buf[..BLOCK])?;
+            self.buf.drain(..BLOCK);
+            self.index += 1;
+        }
+        Ok(())
+    }
+
+    /// Дописать хвост; размер должен совпасть с заявленным.
+    pub fn finish(mut self) -> std::io::Result<()> {
+        if !self.buf.is_empty() {
+            write_block(&self.path, self.index, &self.buf)?;
+            self.buf.clear();
+        }
+        if self.total != self.expected {
+            return Err(bad("записано меньше заявленного размера"));
+        }
+        Ok(())
+    }
+}
+
+/// Собрать запечатанный файл из отдельных запечатанных частей (по порядку): куски любой длины ложатся в блоки.
+/// Размер собранного должен совпасть с `plain_size`, иначе файл не создаётся.
+pub fn assemble(parts: &[std::path::PathBuf], out: &Path, plain_size: u64) -> std::io::Result<()> {
+    let run = || -> std::io::Result<()> {
+        let mut w = Writer::create(out, plain_size)?;
+        for part in parts {
+            w.push(&read_all(part)?)?;
+        }
+        w.finish()
+    };
+    let r = run();
+    if r.is_err() {
+        let _ = std::fs::remove_file(out);
+    }
+    r
+}
+
 /// Старый открытый файл → запечатанный (на месте). Уже запечатанный не трогается. Ok(true) — файл был перенесён.
 pub fn seal_existing(path: &Path) -> std::io::Result<bool> {
     if is_sealed(path) {
@@ -328,6 +388,25 @@ mod tests {
         std::fs::write(d.path().join("sub/x"), b"1").unwrap();
         assert_eq!(seal_dir(d.path()), 0);
         assert!(is_sealed(&d.path().join("sub/x")));
+    }
+
+    #[test]
+    fn parts_of_any_size_assemble_into_blocks() {
+        let d = tempfile::tempdir().unwrap();
+        let data: Vec<u8> = (0..4000u32).map(|i| (i % 13) as u8).collect();
+        let mut parts = Vec::new();
+        for (i, c) in data.chunks(1111).enumerate() {
+            let p = d.path().join(format!("p{i}"));
+            write_all(&p, c).unwrap();
+            parts.push(p);
+        }
+        let out = d.path().join("out");
+        assemble(&parts, &out, 4000).unwrap();
+        assert_eq!(read_all(&out).unwrap(), data);
+        let bad_out = d.path().join("bad");
+        assert!(assemble(&parts, &bad_out, 3999).is_err(), "размер не совпал");
+        assert!(!bad_out.exists());
+        assert!(assemble(&parts, &bad_out, 4001).is_err());
     }
 
     #[test]
