@@ -198,6 +198,14 @@ struct Group {
     /// автоочистка: сколько дней без единой записи в группе терпеть рядового участника (0 — выключена); настраивает владелец
     #[serde(default)]
     auto_clean_days: u32,
+    /// логотип группы: маленький PNG (пересобран из пикселей), base64; виден всем в каталоге, как название и тематика
+    #[serde(default)]
+    logo: Option<String>,
+}
+
+fn logo_hash(g: &Group) -> String {
+    use sha2::Digest;
+    g.logo.as_deref().map(|l| hex::encode(sha2::Sha256::digest(l.as_bytes()))).unwrap_or_default()
 }
 
 fn one() -> u64 {
@@ -651,6 +659,7 @@ impl Store {
             modlog: Vec::new(),
             requests: Vec::new(),
             auto_clean_days: 0,
+            logo: None,
         };
         let owner = Member {
             key: member_key(&id, owner_device),
@@ -1360,13 +1369,42 @@ impl Store {
                     Vec::new()
                 };
                 Some(json!({
-                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
+                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted, "logo_hash": logo_hash(g),
                     "members": g.members.len(), "epoch": g.epoch, "first_seq": g.first_seq, "last_seq": g.next_seq - 1,
                     "rekey_needed": owner && g.rekey_needed, "pending_keys": pending, "auto_clean_days": g.auto_clean_days,
                     "requests": if m.role != Role::Member { g.requests.len() } else { 0 },
                 }))
             })
             .collect()
+    }
+
+    /// Логотип группы: ставят владелец и админ. Пустая строка — убрать. Картинка пересобирается из пикселей (до 12 КБ).
+    pub fn set_logo(&mut self, gid: &str, device: &str, logo_b64: &str) -> R<()> {
+        use base64::Engine;
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner && me.role != Role::Admin {
+            return Err(forbidden("логотип меняют владелец и админ"));
+        }
+        let value = if logo_b64.is_empty() {
+            None
+        } else {
+            if logo_b64.len() > 96 * 1024 {
+                return Err(bad("картинка слишком большая"));
+            }
+            let raw = base64::engine::general_purpose::STANDARD.decode(logo_b64).map_err(|_| bad("картинка не в base64"))?;
+            let png = crate::mobile_profile::sanitize_small(&raw).ok_or_else(|| bad("это не картинка или она слишком большая"))?;
+            Some(base64::engine::general_purpose::STANDARD.encode(png))
+        };
+        let g = self.get_mut(gid)?;
+        g.logo = value;
+        self.save()
+    }
+
+    /// Логотип группы (PNG), если задан: каталог публичный, поэтому любому сопряжённому устройству.
+    pub fn logo_png(&self, gid: &str) -> Option<Vec<u8>> {
+        use base64::Engine;
+        let g = self.groups.get(gid)?;
+        base64::engine::general_purpose::STANDARD.decode(g.logo.as_deref()?).ok()
     }
 
     pub fn set_about(&mut self, gid: &str, about: &str) {
@@ -1414,7 +1452,7 @@ impl Store {
                 let k = member_key(&g.id, device);
                 g.member(&k).is_none() && !g.banned.iter().any(|b| b.key == k)
             })
-            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device)}))
+            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device), "logo_hash": logo_hash(g)}))
             .collect()
     }
 
@@ -1662,6 +1700,17 @@ pub(crate) async fn m_list(
     reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.list_for_live(&me, &live))})))
 }
 
+/// `GET /mobile/groups/:gid/logo` — логотип группы (PNG) для любого сопряжённого устройства: он виден в каталоге.
+pub(crate) async fn m_logo(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(gid): Path<String>) -> Response {
+    if device_peer_of(&dev).is_none() || !valid_gid(&gid) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match with_store(|s| s.logo_png(&gid)) {
+        Some(b) => ([(axum::http::header::CONTENT_TYPE, "image/png")], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 pub(crate) async fn m_open(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
 ) -> Response {
@@ -1882,6 +1931,9 @@ pub struct MobileCreateReq {
     #[serde(default)]
     about: String,
     kind: String,
+    /// логотип группы: картинка в base64 (необязательно)
+    #[serde(default)]
+    logo_b64: String,
 }
 
 /// Телефон создаёт группу и становится её владельцем: ключ группы и права раздаёт он, а не владелец узла.
@@ -1902,6 +1954,9 @@ pub(crate) async fn m_create(
             }
             let id = s.create_as(&req.name, &req.topic, kind, &me, &[], true)?;
             s.set_about(&id, &req.about);
+            if !req.logo_b64.is_empty() {
+                s.set_logo(&id, &me, &req.logo_b64)?;
+            }
             Ok(id)
         })?;
         Ok(json!({"id": id}))
@@ -2035,6 +2090,9 @@ pub struct SettingsReq {
     topic: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    /// логотип: base64 картинки; пустая строка — убрать; не указан — не менять
+    #[serde(default)]
+    logo_b64: Option<String>,
 }
 
 /// Владелец меняет название, тематику и описание группы.
@@ -2046,7 +2104,13 @@ pub(crate) async fn m_settings(
     reply((|| {
         checked(&gid)?;
         let me = device(&dev)?;
-        ok_json(with_store(|s| s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())))
+        ok_json(with_store(|s| {
+            s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())?;
+            if let Some(l) = req.logo_b64.as_deref() {
+                s.set_logo(&gid, &me, l)?;
+            }
+            Ok(())
+        }))
     })())
 }
 
@@ -2178,6 +2242,28 @@ mod tests {
         s.moderate(&gid, OWNER, "delete_entry", None, Some(b), None).unwrap();
         assert_eq!(s.deletions_after(&gid, BOB, cur).unwrap()["deleted"], json!([b]), "только новое после курсора");
         assert!(s.deletions_after(&gid, EVE, 0).is_err(), "посторонний не видит");
+    }
+
+    #[test]
+    fn group_logo_is_set_by_owner_rebuilt_and_shown_in_lists() {
+        use base64::Engine;
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, None).unwrap();
+        let mut src = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(300, 200, image::Rgba([10, 150, 40, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&src);
+        assert!(s.set_logo(&gid, BOB, &b64).is_err(), "рядовой логотип не меняет");
+        assert!(s.set_logo(&gid, OWNER, &base64::engine::general_purpose::STANDARD.encode(b"MZ not an image")).is_err(), "не картинка");
+        s.set_logo(&gid, OWNER, &b64).unwrap();
+        let png = s.logo_png(&gid).unwrap();
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        assert!(png.len() <= 12 * 1024, "пересобрана в маленькую");
+        assert_eq!(s.list_for(OWNER)[0]["logo_hash"].as_str().unwrap().len(), 64);
+        s.set_logo(&gid, OWNER, "").unwrap();
+        assert!(s.logo_png(&gid).is_none());
     }
 
     #[test]
