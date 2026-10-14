@@ -23,36 +23,11 @@ class AdvancedSettings extends StatefulWidget {
 }
 
 class _AdvancedSettingsState extends State<AdvancedSettings> {
-  static const portLabels = [
-    'Discovery порт',
-    'Data порт',
-    'Mobile Gateway порт',
-    'Mobile P2P порт',
-    'HTTP Proxy порт',
-    'Web UI порт',
-  ];
-  static const portHelp = [
-    'Порт для обнаружения пиров (Hello packets)',
-    'Порт для передачи данных между нодами (зашифрованные wagons)',
-    'Порт шлюза для телефонов',
-    'Порт P2P для телефонов',
-    'Порт локального HTTP-прокси',
-    'Порт веб-интерфейса узла',
-  ];
-  static const ports = [
-    'discovery_port',
-    'data_port',
-    'mobile_gateway',
-    'mobile_p2p',
-    'http_proxy',
-    'web_ui',
-  ];
-  final fields = List.generate(7, (_) => TextEditingController());
   final cap = TextEditingController();
-  String level = 'info', exit = 'trusted';
+  String exit = 'trusted';
   Map<String, dynamic>? pool;
   String? error;
-  bool restart = false, loading = false;
+  bool loading = false;
   bool get active => mounted && widget.isActive();
   @override
   void initState() {
@@ -63,10 +38,8 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
   @override
   void dispose() {
     pool = null;
-    for (final f in [...fields, cap]) {
-      f.clear();
-      f.dispose();
-    }
+    cap.clear();
+    cap.dispose();
     super.dispose();
   }
 
@@ -74,21 +47,13 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
     if (!active || loading) return;
     loading = true;
     try {
-      final settings = await widget.api.request('/api/settings');
       final policy = await widget.api.request('/api/exit/settings');
       final proxies = await widget.api.request('/api/upstream-proxies');
       if (!active) return;
       ShellRepository.list(proxies, 'proxies');
-      if (settings['network'] is! Map ||
-          settings['server'] is! Map ||
-          !['off', 'trusted', 'all'].contains(policy['mode']))
+      if (!['off', 'trusted', 'all'].contains(policy['mode']))
         throw const ApiFailure('protocol');
       setState(() {
-        for (var i = 0; i < ports.length; i++) {
-          fields[i].text = '${settings['network'][ports[i]]}';
-        }
-        fields.last.text = '${settings['server']['bind_address']}';
-        level = '${settings['server']['log_level']}';
         exit = policy['mode'];
         pool = proxies;
         cap.text = '${proxies['max_clients']}';
@@ -118,29 +83,6 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         await action();
         if (active) await refresh();
       });
-  Future<void> saveNetwork() async {
-    final values = fields.take(6).map((f) => int.tryParse(f.text)).toList();
-    if (values.any((p) => p == null || p < 1 || p > 65535) ||
-        fields.last.text.trim().isEmpty) {
-      setState(() => error = 'Порты: 1–65535. Укажите IP bind.');
-      return;
-    }
-    await widget.mutate(() async {
-      final result = await widget.api.request(
-        '/api/settings',
-        method: 'PUT',
-        body: {
-          'network': {for (var i = 0; i < 6; i++) ports[i]: values[i]},
-          'server': {
-            'bind_address': fields.last.text.trim(),
-            'log_level': level,
-          },
-        },
-      );
-      if (active) setState(() => restart = result['requires_restart'] == true);
-    });
-  }
-
   Future<void> createProxy() async {
     final body = await showDialog<Map<String, dynamic>>(
       context: context,
@@ -186,40 +128,9 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
   @override
   Widget build(BuildContext context) => PanelStack(
     children: [
-      const UiText('Сеть', style: TextStyle(fontSize: 22)),
       if (loading) const LinearProgressIndicator(),
       if (error != null) UiText(error!),
-      if (restart)
-        const UiText('Нужен перезапуск узла для применения настроек.'),
       button('Обновить настройки', refresh),
-      for (var i = 0; i < fields.length; i++)
-        Align(
-          alignment: Alignment.centerLeft,
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: TextField(
-              controller: fields[i],
-              enabled: !widget.busy && !loading,
-              decoration: InputDecoration(
-                labelText: i < 6
-                    ? tr(context, portLabels[i])
-                    : tr(context, 'Адрес bind'),
-                helperText: i < 6
-                    ? '${tr(context, portHelp[i])} (${ports[i]})'
-                    : null,
-              ),
-            ),
-          ),
-        ),
-      DropdownButton<String>(
-        value: level,
-        items: [
-          for (final v in ['error', 'warn', 'info', 'debug', 'trace'])
-            DropdownMenuItem(value: v, child: UiText(v)),
-        ],
-        onChanged: widget.busy ? null : (v) => setState(() => level = v!),
-      ),
-      button('Сохранить порты и журнал', saveNetwork),
       const UiText(
         'Выход в интернет через ваш узел',
         style: TextStyle(fontSize: 22),

@@ -99,7 +99,7 @@ void main() {
       ),
     );
     expect(find.text('Upstream proxies for internet exit'), findsOneWidget);
-    expect(find.widgetWithText(TextField, 'Bind address'), findsOneWidget);
+    expect(find.text('Internet exit through your node'), findsOneWidget);
     await show(
       t,
       DevicesPanel(

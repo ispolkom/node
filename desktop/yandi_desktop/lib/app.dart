@@ -373,7 +373,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             'Перенос части старых данных не завершён и повторится при входе.',
           ),
         const UiText(
-          'Пароль владельца закрытой среды отличается от пароля входа и мастер-пароля.',
+          'Пять неверных паролей подряд оставляют вход только по секретным словам; пять неверных наборов слов стирают закрытую среду без возможности восстановления.',
         ),
         if (!v.configured)
           SecretForm(
@@ -382,7 +382,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             labels: const [
               'Пароль владельца',
               'Повтор пароля',
-              'Четыре секретных слова (необязательно)',
+              'Четыре секретных слова',
             ],
             busy: busy,
             submit: (values) async {
@@ -391,38 +391,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               if (values[0].runes.length < 6)
                 throw const FormatException('Пароль — не короче 6 символов');
               final phrase = values[2].trim();
-              if (phrase.isNotEmpty && phrase.split(RegExp(r'\s+')).length != 4)
+              if (phrase.split(RegExp(r'\s+')).length != 4)
                 throw const FormatException('Введите четыре секретных слова');
-              final operationEpoch = epoch;
               final payload = <String, dynamic>{
                 'password': values[0],
-                'phrase': phrase.isEmpty ? null : phrase,
+                'phrase': phrase,
               };
-              if (phrase.isEmpty) {
-                final answer = await showDialog<bool>(
-                  context: navigator.currentContext!,
-                  builder: (context) => AlertDialog(
-                    title: const UiText('Без секретных слов'),
-                    content: const UiText(
-                      'Без секретных слов забытый пароль не восстановить. Продолжить без слов?',
-                    ),
-                    actions: [
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, false),
-                        child: const UiText('Отмена'),
-                      ),
-                      TextButton(
-                        onPressed: () => Navigator.pop(context, true),
-                        child: const UiText('Продолжить'),
-                      ),
-                    ],
-                  ),
-                );
-                if (answer != true || !visible || operationEpoch != epoch) {
-                  payload.clear();
-                  return;
-                }
-              }
               await act('/api/vault/setup', payload);
             },
           ),
@@ -587,11 +561,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         if (lockUnconfirmed) ...[
           const UiText('Состояние блокировки не подтверждено'),
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
-        ] else if (page == 'Панель')
-          dashboard()
-        else if (page == 'Закрытая среда')
+        ] else if (vault != null && !vault!.hasError && !vault!.configured)
+          // первый запуск: закрытая среда создаётся сразу, до остальных страниц
           vaultPanel()
+        else if (page == 'Панель')
+          dashboard()
         else if (page == 'Настройки') ...[
+          vaultPanel(),
+          const Divider(),
           AnimatedBuilder(
             animation: preferences,
             builder: (context, _) => PanelStack(
@@ -681,7 +658,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               });
             },
           ),
-          vaultPanel(),
         ] else if (!visible || vault == null)
           const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)
@@ -717,7 +693,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     'Шлюзы',
                     'Настройки',
                     'О приложении',
-                    'Закрытая среда',
                   ],
                   selected: page == 'Панель' ? 'Главная' : page,
                   onSelected: busy

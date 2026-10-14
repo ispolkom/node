@@ -59,7 +59,7 @@ void main() {
         if (!['offline', 'login', 'setup'].contains(scene)) {
           await click(t, 'Войти');
           if (scene == 'unlock')
-            await click(t, 'Закрытая среда');
+            await click(t, 'Настройки');
           else if (scene != 'Главная')
             await click(t, scene);
           if (scene == 'Чат') await click(t, 'Открыть чат');

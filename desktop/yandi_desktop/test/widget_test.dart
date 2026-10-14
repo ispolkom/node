@@ -3,10 +3,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/app.dart';
 import 'package:yandi_desktop/transport/api.dart';
+import 'shell_m2_test.dart' as m2;
 
 class FakeApi implements Api {
   bool setup = false, recovery = false, down = false;
-  bool configured = false, unlocked = false;
+  bool configured = true, unlocked = true;
   int secs = 0, cancels = 0;
   String? failPath;
   final calls = <String>[];
@@ -93,7 +94,7 @@ Future<void> word(WidgetTester tester, String label) async {
 
 Future<void> vaultPage(WidgetTester tester) async {
   await click(tester, 'Войти');
-  await click(tester, 'Закрытая среда');
+  await click(tester, 'Настройки');
 }
 
 Future<void> stop(WidgetTester tester) => tester.pumpWidget(const SizedBox());
@@ -184,17 +185,23 @@ void main() {
     expect(api.calls.length, greaterThan(count));
     await stop(t);
   });
-  testWidgets('vault setup without phrase requires confirmation', (t) async {
-    final api = FakeApi();
+  testWidgets('vault setup requires four secret words', (t) async {
+    final api = m2.FeatureApi()..configured = false..unlocked = false;
     await start(t, api);
     await vaultPage(t);
     await t.enterText(find.byType(TextField).at(0), 'owner password');
     await t.enterText(find.byType(TextField).at(1), 'owner password');
     await click(t, 'Создать закрытую среду');
-    expect(find.byType(AlertDialog), findsOneWidget);
+    expect(find.byType(AlertDialog), findsNothing);
     expect(api.calls.contains('/api/vault/setup'), false);
-    await click(t, 'Продолжить');
-    expect(api.bodies.last, {'password': 'owner password', 'phrase': null});
+    await t.enterText(find.byType(TextField).at(0), 'owner password');
+    await t.enterText(find.byType(TextField).at(1), 'owner password');
+    await t.enterText(find.byType(TextField).at(2), 'alpha1 bravo2 charlie3 delta4');
+    await click(t, 'Создать закрытую среду');
+    expect(api.bodies.last, {
+      'password': 'owner password',
+      'phrase': 'alpha1 bravo2 charlie3 delta4',
+    });
     expect(
       find.text('Открыта. Узел может читать историю и группы ПК.'),
       findsOneWidget,
@@ -204,7 +211,9 @@ void main() {
   testWidgets('vault unlock, change, timeout, lock, phrase recovery', (
     t,
   ) async {
-    final api = FakeApi()..configured = true;
+    final api = m2.FeatureApi()
+      ..configured = true
+      ..unlocked = false;
     await start(t, api);
     await vaultPage(t);
     await t.enterText(find.byType(TextField).first, 'owner password');
@@ -222,7 +231,13 @@ void main() {
       'old_password': 'owner password',
       'new_password': 'new password',
     });
-    await t.enterText(find.byType(TextField).last, '60');
+    await t.enterText(
+      find.descendant(
+        of: find.byType(TimeoutForm),
+        matching: find.byType(TextField),
+      ),
+      '60',
+    );
     await click(t, 'Сохранить автоблокировку');
     expect(api.secs, 60);
     await click(t, 'Запереть');
@@ -243,7 +258,7 @@ void main() {
   testWidgets(
     'remote lock clears focused secrets; late unlock ignored after hide',
     (t) async {
-      final api = FakeApi()
+      final api = m2.FeatureApi()
         ..configured = true
         ..unlocked = true;
       await start(t, api);
@@ -280,7 +295,7 @@ void main() {
   testWidgets('failed lock stays closed locally until explicit retry', (
     t,
   ) async {
-    final api = FakeApi()
+    final api = m2.FeatureApi()
       ..configured = true
       ..unlocked = true;
     await start(t, api);
@@ -331,12 +346,18 @@ void main() {
   testWidgets('small window and invalid auto-lock stay usable', (t) async {
     await t.binding.setSurfaceSize(const Size(400, 500));
     addTearDown(() => t.binding.setSurfaceSize(null));
-    final api = FakeApi()
+    final api = m2.FeatureApi()
       ..configured = true
       ..unlocked = true;
     await start(t, api);
     await vaultPage(t);
-    await t.enterText(find.byType(TextField).last, '2592001');
+    await t.enterText(
+      find.descendant(
+        of: find.byType(TimeoutForm),
+        matching: find.byType(TextField),
+      ),
+      '2592001',
+    );
     await click(t, 'Сохранить автоблокировку');
     expect(find.text('Введите число от 0 до 2592000'), findsOneWidget);
     expect(api.calls.contains('/api/vault/auto_lock'), false);

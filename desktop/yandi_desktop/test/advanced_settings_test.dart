@@ -87,27 +87,23 @@ Future<void> panel(WidgetTester t, SettingsApi api, List<Object> errors) async {
 }
 
 void main() {
-  testWidgets('ports validate and save PUT with restart banner', (t) async {
+  testWidgets('no network section: ports are fixed and never edited or read', (
+    t,
+  ) async {
     final api = SettingsApi();
-    await panel(t, api, []);
-    await t.enterText(find.widgetWithText(TextField, 'Discovery порт'), '0');
-    await m1.click(t, 'Сохранить порты и журнал');
-    expect(api.methods.contains('PUT'), false);
-    await t.ensureVisible(find.widgetWithText(TextField, 'Discovery порт'));
-    await t.enterText(
-      find.widgetWithText(TextField, 'Discovery порт'),
-      '12345',
-    );
-    await m1.click(t, 'Сохранить порты и журнал');
-    expect(api.bodies.last['network']['discovery_port'], 12345);
-    expect(
-      find.text('Нужен перезапуск узла для применения настроек.'),
-      findsOneWidget,
-    );
+    final errors = <Object>[];
+    await panel(t, api, errors);
+    expect(find.textContaining('порт'), findsNothing);
+    expect(find.text('Сохранить порты и журнал'), findsNothing);
+    expect(find.text('Адрес bind'), findsNothing);
+    expect(api.calls.contains('/api/settings'), false);
+    expect(errors, isEmpty);
     await m1.stop(t);
   });
   testWidgets('proxy passwords never go to plain daemon storage', (t) async {
-    final api = SettingsApi();
+    final api = SettingsApi()
+      ..configured = false
+      ..unlocked = false;
     final errors = <Object>[];
     await panel(t, api, errors);
     await m1.click(t, 'Добавить внешний прокси');

@@ -247,7 +247,8 @@ void main() {
       'test master',
     );
     await t.enterText(field('Новый пароль входа'), 'new login password');
-    await t.enterText(field('Повтор нового пароля'), 'new login password');
+    // «Повтор нового пароля» есть и у смены пароля закрытой среды: форма входа — последняя
+    await t.enterText(field('Повтор нового пароля').last, 'new login password');
     await m1.click(t, 'Сменить пароль входа');
     expect(api.bodies.last, {
       'recovery_code': 'test master',
