@@ -101,7 +101,11 @@ impl Consumer for SelfConsumer {
         })
     }
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
-        Box::pin(async move { crate::mobile_self::set_master(key) })
+        Box::pin(async move {
+            crate::mobile_self::set_master(key);
+            // открытая часть связки ключей ПК записывается рядом: пока среда заперта, телефоны всё равно могут писать ПК
+            let _ = crate::mobile_self::bundle_json();
+        })
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::mobile_self::lock_keys() })

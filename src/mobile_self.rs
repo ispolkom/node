@@ -344,8 +344,23 @@ pub fn sign_identity(message: &[u8]) -> Option<Vec<u8>> {
 
 /// Подписанная связка ключей узла для `/mobile/pubkey/<номер узла>` (тот же вид, что у телефонов).
 pub fn bundle_json() -> serde_json::Value {
-    let Some(k) = keys() else { return serde_json::json!({"error":"vault_locked"}); };
-    serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)})
+    let public_path = crate::util::data_dir::data_dir().join("mobile_self_public.json");
+    let Some(k) = keys() else {
+        // среда заперта: открытая часть связки (только открытые ключи и подпись) лежит отдельно, чтобы телефоны могли писать ПК
+        // и пока владельца нет у экрана — сообщение зашифровано ключом ПК и дождётся входа
+        return std::fs::read_to_string(&public_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(|v| v.get("x25519_pub").is_some())
+            .unwrap_or_else(|| serde_json::json!({"error":"vault_locked"}));
+    };
+    let v = serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)});
+    if let Ok(text) = serde_json::to_string(&v) {
+        if std::fs::read_to_string(&public_path).ok().as_deref() != Some(text.as_str()) {
+            let _ = crate::util::private_file::write_private(&public_path, text.as_bytes());
+        }
+    }
+    v
 }
 
 fn aad(header: &[u8]) -> Vec<u8> {
