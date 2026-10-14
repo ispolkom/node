@@ -1665,6 +1665,22 @@ pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, boo
     with_store(|s| s.get(gid).ok().and_then(|g| g.member(&key).map(|m| (key.clone(), m.role, m.muted))))
 }
 
+/// Роль участника по его ключу в группе (None — такого нет: ушёл).
+pub(crate) fn role_of_key(gid: &str, key: &str) -> Option<Role> {
+    with_store(|s| s.get(gid).ok().and_then(|g| g.member(key).map(|m| m.role)))
+}
+
+/// Может ли тот, кто в роли `by`, стирать то, что принадлежит автору с ролью `author` (та же матрица, что у записей):
+/// модератор — рядовых, админ — рядовых и модераторов, владелец — любых; чужое от ушедшего участника — любой модератор.
+pub(crate) fn may_override(by: Role, author: Option<Role>) -> bool {
+    match author {
+        None | Some(Role::Member) => by != Role::Member,
+        Some(Role::Moderator) => by == Role::Owner || by == Role::Admin,
+        Some(Role::Admin) => by == Role::Owner,
+        Some(Role::Owner) => false,
+    }
+}
+
 /// Уборка по таймеру (из main): просроченные просьбы о вступлении.
 pub fn cleanup_requests() {
     if let Err(e) = with_store(|s| s.expire_requests()) {
@@ -2251,6 +2267,22 @@ pub async fn pc_delete(Path(gid): Path<String>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_removal_follows_the_role_ladder() {
+        use super::{may_override, Role::*};
+        assert!(!may_override(Member, Some(Member)));
+        assert!(may_override(Moderator, Some(Member)));
+        assert!(!may_override(Moderator, Some(Admin)), "модератор не стирает файл админа");
+        assert!(!may_override(Moderator, Some(Owner)), "и файл владельца");
+        assert!(!may_override(Moderator, Some(Moderator)));
+        assert!(may_override(Admin, Some(Moderator)));
+        assert!(!may_override(Admin, Some(Admin)));
+        assert!(may_override(Owner, Some(Admin)));
+        assert!(!may_override(Owner, Some(Owner)));
+        assert!(may_override(Moderator, None), "файл ушедшего — любой модератор");
+        assert!(!may_override(Member, None));
+    }
+
     use super::*;
     use base64::Engine;
 

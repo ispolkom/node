@@ -361,7 +361,8 @@ pub async fn remove(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
         Err(r) => return r,
     };
     let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
-    if m.by != key && role == Role::Member {
+    // чужой файл стирает тот, кто выше автора по роли (как и записи): модератор не трогает файлы админа и владельца
+    if m.by != key && !crate::mobile_groups::may_override(role, crate::mobile_groups::role_of_key(&gid, &m.by)) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let _ = tokio::fs::remove_dir_all(dir_of(&gid, &id)).await;
@@ -428,8 +429,8 @@ pub(crate) async fn pc_chunk(gid: &str, device: &str, id: &str, idx: u32) -> Res
 pub(crate) async fn pc_remove(gid: &str, device: &str, id: &str) -> Result<(), String> {
     let (key, role, _) = pc_member(gid, device)?;
     let m = load_meta(gid, id).await.ok_or("нет такого файла")?;
-    if m.by != key && role == Role::Member {
-        return Err("стереть может залившего, модератор, админ или владелец".into());
+    if m.by != key && !crate::mobile_groups::may_override(role, crate::mobile_groups::role_of_key(gid, &m.by)) {
+        return Err("файл стирает залившего или тот, кто выше него по роли в группе".into());
     }
     let _ = tokio::fs::remove_dir_all(dir_of(gid, id)).await;
     Ok(())
