@@ -3,6 +3,20 @@
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
+    // в тестах каталог данных не настоящий: иначе проверки затирали бы файлы живого узла на этой же машине
+    #[cfg(test)]
+    {
+        static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        if std::env::var_os("XDG_DATA_HOME").is_none() {
+            return TEST_DIR
+                .get_or_init(|| {
+                    let d = std::env::temp_dir().join(format!("yandi-unit-test-data-{}", std::process::id()));
+                    let _ = std::fs::create_dir_all(&d);
+                    d
+                })
+                .clone();
+        }
+    }
     let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     if cfg!(windows) {
         return std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("yandi");
