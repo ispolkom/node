@@ -193,6 +193,8 @@ fn spawn_node(dir: &Path, p: &Ports) -> std::io::Result<u32> {
     if std::env::var("YANDI_TESTNET_CLIENT_NODES").map(|v| v.split(',').any(|x| x.trim() == k)).unwrap_or(false) {
         cmd.env("YANDI_CLIENT_ONLY", "1");
     }
+    // тренировочная сеть управляется по обычному HTTP на петле (на Linux у боевого узла TCP-порта оболочки нет)
+    cmd.env("YANDI_LOCAL_TCP", "1");
     let child = cmd
         .current_dir(dir)
         .envs(node_env(dir, p))

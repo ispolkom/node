@@ -431,14 +431,25 @@ impl WebServer {
         // На Linux оболочка работает через локальный сокет владельца; TCP-порт для браузера не открывается.
         #[cfg(target_os = "linux")]
         {
-            let _ = port;
             let socket = super::ui_socket::Endpoint::bind(&crate::util::data_dir::data_dir())
                 .map_err(|_| "Cannot start UI socket: unsafe permissions, occupied socket, or unavailable data directory".to_string())?;
-            info!("🌐 Оболочка подключается через локальный сокет (TCP-порта нет)");
-            socket
-                .serve(app)
-                .await
-                .map_err(|_| "UI socket listener stopped".to_string())?;
+            if std::env::var_os("YANDI_LOCAL_TCP").is_some() {
+                // только тренировочная сеть (testnet): рядом с сокетом открывается и петля; на боевом узле переменной нет
+                let addr = format!("127.0.0.1:{}", port);
+                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+                info!("🌐 Тренировочная сеть: управление ещё и по http://{}", addr);
+                let tcp = axum::serve(listener, app.clone()).into_future();
+                tokio::select! {
+                    result = tcp => result.map_err(|e| format!("Server error: {e}"))?,
+                    result = socket.serve(app) => result.map_err(|_| "UI socket listener stopped".to_string())?,
+                }
+            } else {
+                info!("🌐 Оболочка подключается через локальный сокет (TCP-порта нет)");
+                socket
+                    .serve(app)
+                    .await
+                    .map_err(|_| "UI socket listener stopped".to_string())?;
+            }
         }
         #[cfg(not(target_os = "linux"))]
         {

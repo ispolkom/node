@@ -47,6 +47,7 @@ pub mod exit_policy;
 pub mod exit_select;
 pub mod hops;
 pub mod hops_net;
+#[cfg(unix)]
 pub use key_root::hw_print;
 pub mod ip_history;
 pub mod mdns;

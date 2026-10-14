@@ -91,8 +91,10 @@ pub async fn run(auth: AuthState, port: u16) -> Result<(), String> {
 async fn run_with(auth: AuthState, port: u16, make_keys: Arc<dyn Fn(&AuthState, &SetupBody) -> Result<(), String> + Send + Sync>) -> Result<(), String> {
     // На Linux настройка доступна только оболочке через локальный сокет: TCP-порт в браузер не открывается.
     #[cfg(target_os = "linux")]
-    let listener = {
-        let _ = port;
+    let listener = if std::env::var_os("YANDI_LOCAL_TCP").is_some() {
+        // только тренировочная сеть (testnet): управление по петле; на боевом узле переменной нет
+        Some(tokio::net::TcpListener::bind(("127.0.0.1", port)).await.map_err(|e| format!("порт {port} занят или недоступен: {e}"))?)
+    } else {
         None
     };
     #[cfg(not(target_os = "linux"))]
