@@ -680,6 +680,8 @@ impl WebServer {
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
+            // пока закрытая среда заперта, расшифрованное содержимое владельца (группы, жалобы, файлы переписки) не отдаётся
+            .route_layer(axum::middleware::from_fn(locked_guard))
             // Apply auth middleware to all routes above
             .route_layer(axum::middleware::from_fn_with_state(
                 state_for_auth,
@@ -3406,6 +3408,21 @@ async fn api_chat_delete(
     }
 }
 
+/// Пути с расшифрованным содержимым владельца: при запертой среде отвечают 423 (служебная доставка идёт внутри узла и не страдает).
+fn is_owner_content_path(path: &str) -> bool {
+    ["/api/groups", "/api/complaints", "/api/files/content"]
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+}
+
+async fn locked_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    #[cfg(unix)]
+    if is_owner_content_path(req.uri().path()) && crate::closed_api::is_locked() {
+        return (StatusCode::LOCKED, Json(serde_json::json!({"status": "locked", "message": "закрытая среда заперта: введите пароль"}))).into_response();
+    }
+    next.run(req).await
+}
+
 /// Получить список всех чатов
 async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
     let chat_manager = state.chat_manager.lock().await;
@@ -5857,6 +5874,22 @@ async fn pair_issue_handler(
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod locked_guard_tests {
+    use super::is_owner_content_path as p;
+
+    #[test]
+    fn owner_content_paths_are_matched_exactly() {
+        assert!(p("/api/groups"));
+        assert!(p("/api/groups/abc/messages"));
+        assert!(p("/api/complaints/7/reply"));
+        assert!(p("/api/files/content/id/name.txt"));
+        assert!(!p("/api/groupsx"));
+        assert!(!p("/api/mobile/groups"));
+        assert!(!p("/api/auth/login"));
+    }
 }
 
 #[cfg(test)]
