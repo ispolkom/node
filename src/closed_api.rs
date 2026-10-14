@@ -48,6 +48,12 @@ impl Consumer for ChatConsumer {
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { self.0.lock().await })
     }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let cm = self.0.clone();
+            let _ = tokio::task::spawn_blocking(move || cm.erase_encrypted()).await;
+        })
+    }
 }
 
 pub struct GroupsConsumer;
@@ -70,6 +76,11 @@ impl Consumer for GroupsConsumer {
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::group_client::lock() })
+    }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = tokio::task::spawn_blocking(crate::group_client::erase_encrypted).await;
+        })
     }
 }
 
@@ -95,6 +106,11 @@ impl Consumer for SelfConsumer {
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::mobile_self::lock_keys() })
     }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("mobile_self.enc"));
+        })
+    }
 }
 
 /// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
@@ -116,6 +132,11 @@ impl Consumer for ProxyConsumer {
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::upstream_proxy::lock() })
+    }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move {
+            let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("upstream_proxy.enc"));
+        })
     }
 }
 

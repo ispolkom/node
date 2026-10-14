@@ -37,6 +37,10 @@ pub trait Consumer: Send + Sync {
     fn migrate(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>>;
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()>;
     fn lock(&self) -> BoxFuture<'_, ()>;
+    /// Среда стёрта (пять неверных сид-фраз): удалить зашифрованные файлы этой части — ключа к ним больше нет ни у кого.
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
 }
 
 #[derive(Clone, Serialize)]
@@ -222,7 +226,11 @@ impl ClosedEnv {
             self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = std::fs::remove_file(self.dir.join(MARKER));
             self.lock().await;
-            eprintln!("[closed] ⚠️  закрытая среда стёрта: пять неверных сид-фраз");
+            let consumers: Vec<Arc<dyn Consumer>> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            for c in consumers {
+                c.erase().await;
+            }
+            eprintln!("[closed] ⚠️  закрытая среда стёрта: пять неверных сид-фраз; зашифрованные файлы потребителей удалены");
         }
         e
     }
@@ -335,6 +343,7 @@ mod tests {
         migrated_with: Mutex<Vec<(Option<[u8; 32]>, [u8; 32])>>,
         fail_migration: AtomicBool,
         unlock_delay_ms: AtomicU64,
+        erased: AtomicBool,
     }
 
     impl Mock {
@@ -345,6 +354,7 @@ mod tests {
                 migrated_with: Mutex::new(Vec::new()),
                 fail_migration: AtomicBool::new(false),
                 unlock_delay_ms: AtomicU64::new(0),
+                erased: AtomicBool::new(false),
             })
         }
         fn key(&self) -> Option<[u8; 32]> {
@@ -374,6 +384,11 @@ mod tests {
         fn lock(&self) -> BoxFuture<'_, ()> {
             Box::pin(async move {
                 *self.key.lock().unwrap() = None;
+            })
+        }
+        fn erase(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.erased.store(true, Ordering::SeqCst);
             })
         }
     }
@@ -455,6 +470,7 @@ mod tests {
         }
         assert!(!e.configured(), "после стирания среда не создана");
         assert!(chat.key().is_none());
+        assert!(chat.erased.load(Ordering::SeqCst), "потребителям велено удалить свои зашифрованные файлы");
         e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
         assert!(e.unlocked());
     }

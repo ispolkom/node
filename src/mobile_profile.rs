@@ -83,6 +83,9 @@ pub fn apply(short: &str, req: &PutReq) -> Result<Value, (StatusCode, String)> {
             if n.is_empty() {
                 return Err(bad("ник не может быть пустым"));
             }
+            if crate::content_policy::find_link(&n).is_some() {
+                return Err(bad("ссылки в YANDI не передаются: в нике не должно быть адреса сайта"));
+            }
             Some(n)
         }
         None => None,

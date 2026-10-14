@@ -255,6 +255,16 @@ pub fn init(master: [u8; 32]) {
 static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+/// Среда стёрта: состояние групп ПК и зашифрованные ленты без ключа бесполезны — удаляются (группы начнутся с чистого листа).
+pub fn erase_encrypted() {
+    let dir = crate::util::data_dir::data_dir().join("groups_pc");
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
 /// Перенос файлов `groups_pc` с прежнего мастер-ключа на ключ закрытой среды. Идемпотентно: что уже открывается новым ключом, остаётся.
 /// Файл, часть которого не открывается ни одним ключом, не меняется (возвращается число таких файлов). Клиент должен быть заперт.
 pub fn rekey(old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize, String> {
@@ -1379,6 +1389,8 @@ pub async fn upload_file(gid: &str, name: &str, data: Vec<u8>) -> Result<u64, St
     let dev = pc_device()?;
     let name: String = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(120).collect();
     let name = if name.trim().is_empty() { "file".to_string() } else { name };
+    // политика содержимого: разрешённое расширение и содержимое, соответствующее ему (исполняемое под любым именем отклоняется)
+    crate::content_policy::sniff_ok(&name, &data[..data.len().min(64)])?;
     let kind = kind_for_name(&name);
     // проверки до заливки: участник, не заглушён, вид разрешён, ключ есть
     with_client(|c| {

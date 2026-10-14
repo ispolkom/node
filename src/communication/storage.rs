@@ -508,6 +508,19 @@ impl ChatStorage {
         Ok(failed)
     }
 
+    /// Удалить все зашифрованные файлы чатов (после стирания закрытой среды): `chat_*.enc`, `outbox.enc`, журналы статусов.
+    pub fn erase_encrypted(&self) {
+        let _g = self.locked();
+        if let Ok(rd) = std::fs::read_dir(&self.chats_dir) {
+            for e in rd.flatten() {
+                let name = e.file_name().to_string_lossy().into_owned();
+                if (name.starts_with("chat_") && (name.ends_with(".enc") || name.contains(".enc."))) || name == "outbox.enc" || name.ends_with(".enc.rekey") {
+                    let _ = std::fs::remove_file(e.path());
+                }
+            }
+        }
+    }
+
     fn locked(&self) -> std::sync::MutexGuard<'_, ()> {
         // замок защищает только порядок операций с файлами; отравление (паника в другой задаче) данных не портит
         self.write_lock.lock().unwrap_or_else(|e| e.into_inner())

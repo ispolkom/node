@@ -115,6 +115,11 @@ impl ChatManager {
         self.storage.rekey_to(old, new)
     }
 
+    /// Среда стёрта: зашифрованные файлы чатов (история, очередь, журналы статусов) без ключа бесполезны — удаляются.
+    pub fn erase_encrypted(&self) {
+        self.storage.erase_encrypted();
+    }
+
     pub fn is_locked(&self) -> bool {
         self.storage.is_locked()
     }

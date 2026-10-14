@@ -397,6 +397,16 @@ pub(crate) fn valid_gid(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Название, тематика, описание, ник и подпись не могут содержать ссылку (политика содержимого сети).
+fn no_links(fields: &[&str]) -> R<()> {
+    for f in fields {
+        if crate::content_policy::find_link(f).is_some() {
+            return Err(bad("ссылки в YANDI не передаются: уберите адрес сайта из названия, тематики, описания и ника"));
+        }
+    }
+    Ok(())
+}
+
 fn clean(s: &str, max: usize) -> String {
     s.trim()
         .chars()
@@ -605,6 +615,7 @@ impl Store {
         members: &[String],
         by_phone: bool,
     ) -> R<String> {
+        no_links(&[name, topic])?;
         let name = clean(name, MAX_NAME);
         if name.is_empty() {
             return Err(bad("нужно название группы"));
@@ -681,6 +692,7 @@ impl Store {
 
     /// Настройки группы меняют владелец и админ: название, тематика, описание. Название и тематика не бывают пустыми.
     pub fn update_settings(&mut self, gid: &str, device: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> R<()> {
+        no_links(&[name.unwrap_or(""), topic.unwrap_or(""), about.unwrap_or("")])?;
         let (_, me) = self.me(gid, device)?;
         if me.role != Role::Owner && me.role != Role::Admin {
             return Err(forbidden("настройки группы меняют владелец и админ"));
@@ -935,6 +947,7 @@ impl Store {
 
     /// Участник раскрывает (или убирает) свою визитку в этой группе. Пустой ник и пустая картинка — убрать.
     pub fn set_card(&mut self, gid: &str, device: &str, nick: &str, avatar_b64: &str) -> R<()> {
+        no_links(&[nick])?;
         let nick: String = nick.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(40).collect();
         let key = self.me(gid, device)?.1.key.clone();
         let card = if nick.is_empty() && avatar_b64.is_empty() {
