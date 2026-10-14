@@ -46,6 +46,24 @@ void main() {
     expect((await _raw.read(key: 'y')), isNull, reason: 'ничего не записано открытым');
   });
 
+  test('блокировка во время прогрева кэша: расшифрованное не публикуется', () async {
+    StorageService.setSecureKey(_k1);
+    await StorageService.secureWrite('node_token_a', 'токен A');
+    await StorageService.secureWrite('id_ed25519_seed', 'seed');
+    final warming = StorageService.warmSecureCache();
+    StorageService.setSecureKey(null);   // заблокировали, пока прогрев ещё дешифрует
+    await warming;
+    expect(await StorageService.secureRead('node_token_a'), isNull);
+    expect(await StorageService.secureRead('id_ed25519_seed'), isNull);
+    // вход заново: читается, кэш собирается снова
+    StorageService.setSecureKey(_k1);
+    await StorageService.warmSecureCache();
+    expect(await StorageService.secureRead('node_token_a'), 'токен A');
+    // кэш без ключа не отдаёт значения
+    StorageService.setSecureKey(null);
+    expect(await StorageService.secureRead('node_token_a'), isNull);
+  });
+
   test('служебные записи хранилища ключей (vault_…) остаются как есть: без них пароль не проверить', () async {
     await StorageService.secureWrite('vault_hw', 'секрет-keystore');
     expect(await _raw.read(key: 'vault_hw'), 'секрет-keystore');

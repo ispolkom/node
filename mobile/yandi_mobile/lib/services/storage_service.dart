@@ -322,6 +322,7 @@ class StorageService {
 
   /// Ключ защиты значений (подключ ключа данных); null — заблокировано. Задаётся при входе, стирается при блокировке.
   static void setSecureKey(List<int>? key) {
+    _cacheGen++;   // начатый до этого прогрев кэша не должен опубликовать расшифрованное после смены ключа/блокировки
     _secureKey?.fillRange(0, _secureKey!.length, 0);   // прежний ключ стирается, а не только забывается
     _secureKey = key == null ? null : Uint8List.fromList(key);
     if (key == null) _secureCache = null;
@@ -364,9 +365,16 @@ class StorageService {
   static Map<String, String>? _secureCache;
 
   /// Блокировка: расшифрованные значения защищённого хранилища из памяти убираем (при следующем входе читаются заново).
-  static void dropSecureCache() => _secureCache = null;
+  static void dropSecureCache() {
+    _cacheGen++;
+    _secureCache = null;
+  }
+
+  /// Поколение кэша: смена ключа или блокировка отменяют прогрев, который ещё не закончился.
+  static int _cacheGen = 0;
 
   static Future<void> warmSecureCache() async {
+    final gen = _cacheGen;
     try {
       final all = await _secure.readAll();
       final migrated = all[_kMigrated] == '1';
@@ -377,8 +385,10 @@ class StorageService {
           continue;
         }
         final v = await _unwrap(e.key, e.value, migrated: migrated);
+        if (gen != _cacheGen) return;   // пока дешифровали, приложение заблокировали или сменили ключ
         if (v != null) out[e.key] = v;
       }
+      if (gen != _cacheGen) return;
       _secureCache = out;
     } catch (_) {
       _secureCache = null; // не вышло — читаем по одному, как раньше
@@ -387,7 +397,11 @@ class StorageService {
 
   static Future<String?> secureRead(String key) async {
     final c = _secureCache;
-    if (c != null) return c[key];
+    if (c != null) {
+      // без ключа данных расшифрованное из кэша не отдаётся (служебные vault_… — как есть)
+      if (_secureKey == null && !_isRaw(key)) return null;
+      return c[key];
+    }
     final raw = await _secure.read(key: key);
     if (_isRaw(key)) return raw;
     return _unwrap(key, raw, migrated: (await _secure.read(key: _kMigrated)) == '1');
