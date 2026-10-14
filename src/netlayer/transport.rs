@@ -2297,7 +2297,8 @@ impl P2PTransport {
         nonce: u64,
     ) -> bool {
         let now = Instant::now();
-        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(5 * 60));
+        // окно времени симметрично (±5 мин): пакет с часами вперёд остаётся годным до 10 минут после первого приёма — помним дольше
+        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(11 * 60));
         if seen.contains_key(&(node_id, nonce)) {
             return false;
         }
@@ -2385,6 +2386,10 @@ impl P2PTransport {
                                 let verdict = admission.lock().await.check(from.ip(), hello_packet.node_id, known, table_len, Instant::now());
                                 let verdict = match verdict {
                                     Err(crate::netlayer::admission::Reject::TableFull) => {
+                                        // сначала квоты новой личности (с адреса и общая): вытеснение честного узла не бесплатно
+                                        if let Err(r) = admission.lock().await.quotas_for_new(from.ip(), hello_packet.node_id, Instant::now()) {
+                                            Err(r)
+                                        } else {
                                         // полна: вытесняем самого давнего неприкреплённого, не якоря; если некого — отказ
                                         let pins = pinned_identities.read().await;
                                         let mut p = peers.lock().await;
@@ -2400,6 +2405,7 @@ impl P2PTransport {
                                                 Ok(())
                                             }
                                             None => Err(crate::netlayer::admission::Reject::TableFull),
+                                        }
                                         }
                                     }
                                     other => other,

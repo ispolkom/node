@@ -942,6 +942,10 @@ impl P2PTransport {
                                 let verdict = self.admission.lock().await.check(from.ip(), hello.node_id, known, table_len, std::time::Instant::now());
                                 let verdict = match verdict {
                                     Err(crate::netlayer::admission::Reject::TableFull) => {
+                                        // сначала квоты новой личности (с адреса и общая): вытеснение честного узла не бесплатно
+                                        if let Err(r) = self.admission.lock().await.quotas_for_new(from.ip(), hello.node_id, std::time::Instant::now()) {
+                                            Err(r)
+                                        } else {
                                         let mut p = self.peers.lock().await;
                                         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
                                         let victim = crate::netlayer::admission::pick_victim(p.values().map(|x| (x.id, x.last_seen, false, false)), now_ms, 120_000);
@@ -951,6 +955,7 @@ impl P2PTransport {
                                                 Ok(())
                                             }
                                             None => Err(crate::netlayer::admission::Reject::TableFull),
+                                        }
                                         }
                                     }
                                     other => other,
