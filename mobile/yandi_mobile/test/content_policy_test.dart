@@ -54,4 +54,12 @@ void main() {
     expect(contentProblem('a.odt', zip('mimetype')), isNull);
     expect(contentProblem('a.odt', zip('run.js')), isNotNull);
   });
+
+  test('разделители IDN и punycode-зона — ссылка', () {
+    for (final t in ['example。com', 'example．com', 'example｡com', 'сайт.xn--p1ai', 'пример.xn--p1ai/путь']) {
+      expect(findLink(t), isNotNull, reason: t);
+    }
+    expect(stripLinks('зайди на site.xn--p1ai тут').contains('xn--'), isFalse, reason: 'зона вычищается целиком');
+    expect(findLink('мы встретились. потом разошлись'), isNull);
+  });
 }

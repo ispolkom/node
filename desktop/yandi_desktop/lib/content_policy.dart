@@ -33,6 +33,7 @@ const Set<String> _tlds = {
 
 bool _isTld(String zone) {
   final z = zone.toLowerCase();
+  if (z.startsWith('xn--')) return true;
   if (allowedExt.contains(z) && z.length > 2) return false;
   if (_tlds.contains(z) || bannedExt.contains(z)) return true;
   return z.length == 2 && RegExp(r'^[a-z]{2}$').hasMatch(z) && !allowedExt.contains(z);
@@ -40,7 +41,7 @@ bool _isTld(String zone) {
 
 final RegExp _scheme = RegExp(r'[a-z][a-z0-9+.\-]{1,15}://\S*|www\.\S+|\bmailto:\S+', caseSensitive: false);
 final RegExp _domain = RegExp(
-  r'(?:[\p{L}\p{N}](?:[\p{L}\p{N}\-]{0,61}[\p{L}\p{N}])?\.)+([\p{L}\p{N}]{2,24}|xn--[a-z0-9\-]{2,40})(?:[/:?#]\S*)?',
+  r'(?:[\p{L}\p{N}](?:[\p{L}\p{N}\-]{0,61}[\p{L}\p{N}])?[.。．｡])+(xn--[a-z0-9\-]{2,40}|[\p{L}\p{N}]{2,24})(?:[/:?#]\S*)?',
   caseSensitive: false,
   unicode: true,
 );

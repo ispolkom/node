@@ -47,6 +47,9 @@ const TLDS: &[&str] = &[
 
 fn is_tld(z: &str) -> bool {
     let z = z.to_lowercase();
+    if z.starts_with("xn--") {
+        return true; // punycode-зона целиком (xn--p1ai и т. п.)
+    }
     if ALLOWED_EXT.contains(&z.as_str()) && z.len() > 2 {
         return false; // pdf, docx, mp3...: расширение файла, не зона
     }
@@ -65,7 +68,7 @@ fn re_scheme() -> &'static Regex {
 fn re_domain() -> &'static Regex {
     static R: OnceLock<Regex> = OnceLock::new();
     R.get_or_init(|| {
-        Regex::new(r"(?i)(?:[\p{L}\p{N}](?:[\p{L}\p{N}\-]{0,61}[\p{L}\p{N}])?\.)+([\p{L}\p{N}]{2,24}|xn--[a-z0-9\-]{2,40})(?:[/:?#]\S*)?").unwrap()
+        Regex::new(r"(?i)(?:[\p{L}\p{N}](?:[\p{L}\p{N}\-]{0,61}[\p{L}\p{N}])?[.\x{3002}\x{FF0E}\x{FF61}])+(xn--[a-z0-9\-]{2,40}|[\p{L}\p{N}]{2,24})(?:[/:?#]\S*)?").unwrap()
     })
 }
 
@@ -269,6 +272,15 @@ pub fn sniff_ok(name: &str, head: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idn_separators_and_punycode_zones_are_links() {
+        for t in ["example。com", "example．com", "example｡com", "сайт.xn--p1ai", "пример.xn--p1ai/путь"] {
+            assert!(find_link(t).is_some(), "{t}");
+        }
+        assert_eq!(strip_links("зайди на site.xn--p1ai тут"), format!("зайди на {REMOVED} тут"), "зона вычищается целиком");
+        assert!(find_link("мы встретились. потом разошлись").is_none());
+    }
 
     fn zip_head(first: &str) -> Vec<u8> {
         let mut v = b"PK\x03\x04".to_vec();
