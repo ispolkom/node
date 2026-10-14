@@ -157,7 +157,7 @@ void main() {
     t,
   ) async {
     final file = (await t.runAsync(
-      () => File('${temp.path}/chosen.bin').writeAsBytes([1, 2, 3]),
+      () => File('${temp.path}/chosen.txt').writeAsBytes([1, 2, 3]),
     ))!;
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       PlatformFiles.channel,
@@ -174,9 +174,9 @@ void main() {
     await m1.click(t, 'Открыть чат');
     await t.tap(find.byTooltip('Выбрать файл'));
     await t.pumpAndSettle();
-    expect(find.text('chosen.bin'), findsOneWidget);
+    expect(find.text('chosen.txt'), findsOneWidget);
     await m1.click(t, 'Убрать файл');
-    expect(find.text('chosen.bin'), findsNothing);
+    expect(find.text('chosen.txt'), findsNothing);
     await t.tap(find.byTooltip('Выбрать файл'));
     await t.pumpAndSettle();
     api.reject = true;
@@ -187,7 +187,7 @@ void main() {
     });
     await t.pumpAndSettle();
     expect(find.textContaining('превышен допустимый размер'), findsOneWidget);
-    expect(find.text('chosen.bin'), findsOneWidget);
+    expect(find.text('chosen.txt'), findsOneWidget);
     api.reject = false;
     await t.ensureVisible(find.text('Отправить файл'));
     await t.runAsync(() async {
@@ -195,7 +195,7 @@ void main() {
       await Future<void>.delayed(const Duration(milliseconds: 100));
     });
     await t.pumpAndSettle();
-    expect(find.text('chosen.bin'), findsNothing);
+    expect(find.text('chosen.txt'), findsNothing);
     expect(api.payloads.length, 1);
     await m1.stop(t);
   });
@@ -265,7 +265,7 @@ void main() {
     t,
   ) async {
     final file = (await t.runAsync(
-      () => File('${temp.path}/focus.bin').writeAsBytes([1]),
+      () => File('${temp.path}/focus.txt').writeAsBytes([1]),
     ))!;
     final gate = Completer<String?>();
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -291,7 +291,7 @@ void main() {
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await t.pump(const Duration(seconds: 1));
     await t.pumpAndSettle();
-    expect(find.text('focus.bin'), findsOneWidget);
+    expect(find.text('focus.txt'), findsOneWidget);
   });
   testWidgets('audio plays through loopback in memory, no player is reported', (
     t,

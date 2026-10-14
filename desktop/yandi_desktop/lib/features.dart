@@ -2,6 +2,7 @@ import 'message_actions.dart';
 import 'contact_avatar.dart';
 import 'theme.dart';
 import 'search_page.dart';
+import 'complaints_page.dart';
 import 'content_policy.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -96,6 +97,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     });
     if (const [
       'Поиск',
+      'Жалобы',
       'Группы',
       'Шлюзы',
       'О приложении',
@@ -1465,6 +1467,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   @override
   Widget build(BuildContext context) => widget.page == 'О приложении'
       ? const AboutPanel()
+      : widget.page == 'Жалобы'
+      ? ComplaintsFeature(
+          api: widget.api,
+          isActive: widget.isActive,
+          onFailure: widget.onFailure,
+        )
       : widget.page == 'Поиск'
       ? SearchFeature(
           api: widget.api,

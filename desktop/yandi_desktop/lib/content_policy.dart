@@ -159,18 +159,21 @@ String? contentProblem(String name, List<int> head) {
 }
 
 /// Проверка файла перед отправкой: имя по белому списку и первые байты содержимого. null — можно отправлять.
-Future<String?> fileVerdict(String path) async {
+/// Чтение синхронное и короткое (64 байта): так проверка не зависит от очереди событий и не мешает выбору файла.
+String? fileVerdictSync(String path) {
   final name = path.split(RegExp(r'[/\\]')).last;
   final byName = attachmentProblem(name);
   if (byName != null) return byName;
   try {
-    final raf = await File(path).open();
+    final raf = File(path).openSync();
     try {
-      return contentProblem(name, await raf.read(64));
+      return contentProblem(name, raf.readSync(64));
     } finally {
-      await raf.close();
+      raf.closeSync();
     }
   } catch (_) {
     return 'Не удалось прочитать файл для проверки';
   }
 }
+
+Future<String?> fileVerdict(String path) async => fileVerdictSync(path);

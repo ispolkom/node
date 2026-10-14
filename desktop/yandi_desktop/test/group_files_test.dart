@@ -100,9 +100,11 @@ void main() {
   });
   testWidgets('group upload preserves selection after rejection', (t) async {
     final api = GroupFiles()..reject = true;
+    final chosen = File('${Directory.systemTemp.path}/group file.txt');
+    await t.runAsync(() => chosen.writeAsBytes([65, 66]));
     t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
       PlatformFiles.channel,
-      (call) async => '/tmp/group file.bin',
+      (call) async => chosen.path,
     );
     addTearDown(
       () => t.binding.defaultBinaryMessenger.setMockMethodCallHandler(
@@ -114,8 +116,8 @@ void main() {
     await t.tap(find.byTooltip('Выбрать файл'));
     await t.pumpAndSettle();
     await m1.click(t, 'Отправить файл');
-    expect(api.uploaded, '/api/groups/${g.gid}/upload?name=group%20file.bin');
-    expect(find.text('group file.bin'), findsOneWidget);
+    expect(api.uploaded, '/api/groups/${g.gid}/upload?name=group%20file.txt');
+    expect(find.text('group file.txt'), findsOneWidget);
     await m1.stop(t);
   });
 }
