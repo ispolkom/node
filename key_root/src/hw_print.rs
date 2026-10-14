@@ -6,7 +6,8 @@
 //! обёртки не открываются, и нужен пароль или сид-фраза.
 //!
 //! Части читаются без root из `/sys`, `/proc`, `/dev/disk/by-id`. IP не используется.
-//! Значения не хранятся: на диске только обёртки и соль.
+//! Значения не хранятся: на диске только обёртки, соль и хэш полного отпечатка (чтобы тихо обновить слепок,
+//! когда изменилась одна часть).
 
 use std::fs;
 use std::path::Path;
@@ -16,7 +17,12 @@ use aes_gcm::{Aes256Gcm, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use zeroize::Zeroize;
+
+/// Цена одной обёртки в бою: 64 МиБ, 3 прохода (около четверти секунды), четыре обёртки при каждом старте.
+pub const COST_MEM_KIB: u32 = 64 * 1024;
+pub const COST_PASSES: u32 = 3;
 
 pub const PARTS: usize = 4;
 const NAMES: [&str; PARTS] = ["board", "cpu", "nics", "disks"];
@@ -38,6 +44,10 @@ pub struct Wrap {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Sealed {
     pub salt: [u8; 16],
+    pub mem_kib: u32,
+    pub passes: u32,
+    /// sha256(соль, полный отпечаток) в hex: показывает, что слепок уже свежий
+    pub full: String,
     pub wraps: Vec<Wrap>,
 }
 
@@ -144,8 +154,19 @@ impl HwPrint {
         out
     }
 
+    fn full_digest(&self, salt: &[u8; 16]) -> String {
+        let mut h = Sha256::new();
+        h.update(salt);
+        for i in 0..PARTS {
+            let c = self.canonical(i);
+            h.update((c.len() as u32).to_be_bytes());
+            h.update(&c);
+        }
+        hex::encode(h.finalize())
+    }
+
     /// Ключ обёртки для набора «все части, кроме `skip`».
-    fn subset_key(&self, skip: usize, salt: &[u8; 16]) -> [u8; 32] {
+    fn subset_key(&self, skip: usize, salt: &[u8; 16], mem_kib: u32, passes: u32) -> [u8; 32] {
         let mut input = Vec::new();
         for i in 0..PARTS {
             if i == skip {
@@ -155,8 +176,8 @@ impl HwPrint {
             input.extend_from_slice(&(c.len() as u32).to_be_bytes());
             input.extend_from_slice(&c);
         }
-        // Подбор комбинаций дорогой: Argon2id, 19 МиБ, 2 прохода.
-        let params = Params::new(19 * 1024, 2, 1, Some(32)).expect("argon2 params");
+        // Подбор комбинаций дорогой: Argon2id с памятью `mem_kib`.
+        let params = Params::new(mem_kib, passes, 1, Some(32)).expect("argon2 params");
         let mut key = [0u8; 32];
         Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
             .hash_password_into(&input, salt, &mut key)
@@ -165,13 +186,18 @@ impl HwPrint {
         key
     }
 
-    /// Запечатать ключ данных под этот отпечаток.
+    /// Запечатать ключ данных под этот отпечаток (цена подбора — боевая).
     pub fn seal(&self, data_key: &[u8; 32]) -> Sealed {
+        self.seal_with_cost(data_key, COST_MEM_KIB, COST_PASSES)
+    }
+
+    /// То же с явной ценой (тесты берут меньшую).
+    pub fn seal_with_cost(&self, data_key: &[u8; 32], mem_kib: u32, passes: u32) -> Sealed {
         let mut salt = [0u8; 16];
         rand::rngs::OsRng.fill_bytes(&mut salt);
         let mut wraps = Vec::with_capacity(PARTS);
         for skip in 0..PARTS {
-            let mut key = self.subset_key(skip, &salt);
+            let mut key = self.subset_key(skip, &salt, mem_kib, passes);
             let cipher = Aes256Gcm::new_from_slice(&key).expect("key");
             key.zeroize();
             let mut nonce = [0u8; 12];
@@ -181,18 +207,29 @@ impl HwPrint {
                 .expect("aes-gcm");
             wraps.push(Wrap { nonce, ct });
         }
-        Sealed { salt, wraps }
+        Sealed { salt, mem_kib, passes, full: self.full_digest(&salt), wraps }
     }
 }
 
 impl Sealed {
+    /// Слепок уже соответствует этому отпечатку (ни одна часть не изменилась).
+    pub fn is_current(&self, hw: &HwPrint) -> bool {
+        self.full == hw.full_digest(&self.salt)
+    }
+
     /// Открыть ключ данных текущим железом. `None` — совпало меньше трёх частей.
     pub fn open(&self, hw: &HwPrint) -> Option<[u8; 32]> {
-        if self.wraps.len() != PARTS {
+        // файл не может «удешевить» подбор ниже разумного минимума и не может потребовать лишнего
+        if self.wraps.len() != PARTS
+            || self.mem_kib < 8 * 1024
+            || self.mem_kib > 1024 * 1024
+            || self.passes == 0
+            || self.passes > 16
+        {
             return None;
         }
         for skip in 0..PARTS {
-            let mut key = hw.subset_key(skip, &self.salt);
+            let mut key = hw.subset_key(skip, &self.salt, self.mem_kib, self.passes);
             let cipher = Aes256Gcm::new_from_slice(&key).ok()?;
             key.zeroize();
             let w = &self.wraps[skip];
@@ -228,7 +265,7 @@ mod tests {
     #[test]
     fn same_hardware_opens_and_one_changed_part_still_opens() {
         let key = [7u8; 32];
-        let sealed = print().seal(&key);
+        let sealed = print().seal_with_cost(&key, 8 * 1024, 1);
         assert_eq!(sealed.open(&print()), Some(key));
 
         for part in 0..PARTS {
@@ -240,7 +277,7 @@ mod tests {
 
     #[test]
     fn two_changed_parts_do_not_open() {
-        let sealed = print().seal(&[9u8; 32]);
+        let sealed = print().seal_with_cost(&[9u8; 32], 8 * 1024, 1);
         for a in 0..PARTS {
             for b in a + 1..PARTS {
                 let mut changed = print();
@@ -282,7 +319,7 @@ mod tests {
     #[test]
     fn empty_machine_is_not_usable_and_sealed_survives_serde() {
         assert!(!HwPrint::default().usable());
-        let s = print().seal(&[1u8; 32]);
+        let s = print().seal_with_cost(&[1u8; 32], 8 * 1024, 1);
         let back: Sealed = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.open(&print()), Some([1u8; 32]));
     }

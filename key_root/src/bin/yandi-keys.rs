@@ -19,7 +19,7 @@
 use base64::Engine;
 use key_root::{
     derive_domain, recovery_code::looks_like_code, status, unlock_root, DeviceKeyProvider,
-    FileDeviceKey, FixedMachine, KdfParams, KdfPolicy, KeyDir, KeyRootError, MachineContext,
+    HardwareDeviceKey, FixedMachine, KdfParams, KdfPolicy, KeyDir, KeyRootError, MachineContext,
     Migration, NewRecoveryCode, Recovery, RecoveryCode, SystemMachine, DOMAIN_CORE,
 };
 use std::io::{BufRead, Write};
@@ -162,7 +162,7 @@ fn run() -> Result<i32, String> {
         Ok(d) => d,
         Err(e) => return Ok(fail(&e)),
     };
-    let device = FileDeviceKey::new(dir.file("device.key"));
+    let device = HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
     let policy = KdfPolicy::production();
     match args.command.as_str() {
         "status" => {

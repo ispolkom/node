@@ -1181,7 +1181,12 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
         out.contains(&hex::encode(&id.address[..8])),
         "the node id must be reported: {out}"
     );
-    let device_hex = hex::encode(fs::read(a.dir.file("device.key")).unwrap());
+    let device_hex = hex::encode(
+        *HardwareDeviceKey::new(a.dir.file("device.seal"), a.dir.file("device.key"))
+            .load()
+            .unwrap()
+            .unwrap(),
+    );
     for secret in [
         PASSWORD.to_owned(),
         hex::encode(master),
@@ -1247,7 +1252,12 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
     for secret in [
         PASSWORD.to_owned(),
         hex::encode(master),
-        hex::encode(fs::read(c.dir.file("device.key")).unwrap()),
+        hex::encode(
+            *HardwareDeviceKey::new(c.dir.file("device.seal"), c.dir.file("device.key"))
+                .load()
+                .unwrap()
+                .unwrap(),
+        ),
     ] {
         assert!(!out.contains(&secret) && !err.contains(&secret));
     }
@@ -1603,7 +1613,12 @@ fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identit
     );
     assert_eq!(code, 0, "{out}{err}");
     assert!(out.contains(&hex::encode(&id.address[..8])) && RecoveryCode::parse(&shown).is_ok());
-    let device_hex = hex::encode(fs::read(a.dir.file("device.key")).unwrap());
+    let device_hex = hex::encode(
+        *HardwareDeviceKey::new(a.dir.file("device.seal"), a.dir.file("device.key"))
+            .load()
+            .unwrap()
+            .unwrap(),
+    );
     for secret in [hex::encode([0x5Au8; 32]), device_hex] {
         assert!(
             !out.contains(&secret) && !err.contains(&secret),
@@ -1710,7 +1725,7 @@ fn core_key_prints_exactly_the_key_the_node_gives_the_core_and_nothing_else() {
     let (root, _) = unlock_root(
         &s.dir,
         &FixedMachine("machine-A".into()),
-        &FileDeviceKey::new(s.dir.file("device.key")),
+        &HardwareDeviceKey::new(s.dir.file("device.seal"), s.dir.file("device.key")),
     )
     .unwrap();
     let expected = base64::engine::general_purpose::STANDARD

@@ -352,7 +352,7 @@ pub(super) fn ui_auth_state(auth: &AuthState) -> axum::Json<serde_json::Value> {
 /// Returns the loaded AuthState (may be in setup/rebind mode).
 #[cfg(unix)]
 pub fn load_auth_state() -> AuthState {
-    use key_root::{unlock_root, FileDeviceKey, KeyDir, KeyRootError, RootSource, SystemMachine};
+    use key_root::{unlock_root, HardwareDeviceKey, KeyDir, KeyRootError, RootSource, SystemMachine};
     let state = AuthState::default();
     let path = auth_file_path();
 
@@ -384,7 +384,8 @@ pub fn load_auth_state() -> AuthState {
             return state;
         }
     };
-    let device = FileDeviceKey::new(dir.file("device.key"));
+    // ключ устройства запечатан под железо (плата, процессор, карты, диски); прежний файл запечатывается при первой загрузке
+    let device = HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
     match unlock_root(&dir, &SystemMachine, &device) {
         Ok((root, source)) => {
             match source {
@@ -514,7 +515,7 @@ pub fn setup_auth(
                 .to_path_buf(),
         )
         .map_err(|_| "Каталог ключей недоступен".to_string())?;
-        let device = key_root::FileDeviceKey::new(dir.file("device.key"));
+        let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
         setup_auth_in(
             state,
             &dir,

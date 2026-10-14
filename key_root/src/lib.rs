@@ -11,6 +11,7 @@
 pub mod atomic;
 pub mod device;
 pub mod error;
+pub mod hw_print;
 pub mod identity_store;
 pub mod keydir;
 pub mod legacy;
@@ -22,7 +23,7 @@ pub mod root;
 pub mod unlock;
 pub mod wrap;
 
-pub use device::{DeviceKeyProvider, DeviceProtection, FileDeviceKey};
+pub use device::{DeviceKeyProvider, DeviceProtection, FileDeviceKey, HardwareDeviceKey};
 pub use error::{KeyRootError, Result};
 pub use identity_store::{
     load_or_initialize, IdentityFormat, IdentityMaterial, Loaded, OpenContext,

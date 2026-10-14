@@ -44,7 +44,7 @@ pub mod exit_policy;
 pub mod exit_select;
 pub mod hops;
 pub mod hops_net;
-pub mod hw_print;
+pub use key_root::hw_print;
 pub mod ip_history;
 pub mod mdns;
 pub mod mobile_api;
