@@ -375,14 +375,15 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> completePairing(TrustedNode node) async {
     // Сопряжение по QR — личное действие у экрана узла: закреплённый ключ этого узла забывается, чтобы после пересоздания ключей
     // узла (новая среда, перенос) не оставаться с устаревшим ключом и не отвергать его сообщения.
-    if (node.id.length == 64) {
-      try { await StorageService.secureDelete('peer_ed25519_pin_${node.id}'); } catch (_) {}
-    }
     // старая запись этого же узла на этом телефоне: её устройство на узле отзывается, иначе в «Пользователях» будет двойник
     for (final old in nodeManager.nodes.where((n) => n.id == node.id && n.token != node.token).toList()) {
       await api_svc.ApiService.revokeSelf(old);
     }
     await nodeManager.addNode(node);
+    // забываем только после того, как новое сопряжение сохранено: сбой записи не оставляет старое сопряжение без закреплённого ключа
+    if (node.id.length == 64) {
+      try { await StorageService.secureDelete('peer_ed25519_pin_${node.id}'); } catch (_) {}
+    }
 
     // Запускаемся на новой ноде если это первая или лучше текущей
     final current = nodeManager.activeNode;
