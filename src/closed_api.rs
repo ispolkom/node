@@ -273,7 +273,8 @@ mod tests {
 
         assert!(!is_locked(), "не создана — не «заперта»");
         assert_eq!(code(setup(Json(SetupBody { password: "short".into(), phrase: None })).await).await, 400);
-        assert_eq!(code(setup(Json(SetupBody { password: "owner password".into(), phrase: Some("   ".into()) })).await).await, 200);
+        assert_eq!(code(setup(Json(SetupBody { password: "owner password".into(), phrase: Some("   ".into()) })).await).await, 400, "без слов среду не создать");
+        assert_eq!(code(setup(Json(SetupBody { password: "owner password".into(), phrase: Some("alpha1 bravo2 charlie3 delta4".into()) })).await).await, 200);
         assert!(probe.0.lock().unwrap().is_some());
         assert_eq!(code(setup(Json(SetupBody { password: "owner password".into(), phrase: None })).await).await, 400, "повторно нельзя");
 

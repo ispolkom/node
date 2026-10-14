@@ -170,11 +170,15 @@ impl ClosedEnv {
         i.generation == generation && i.vault.is_some()
     }
 
-    /// Первичная настройка: пароль и необязательные четыре слова. Создаёт среду, переносит данные, открывает сеанс.
+    /// Первичная настройка: пароль и четыре слова (обязательны: пять неверных паролей оставляют только сид).
+    /// Создаёт среду, переносит данные, открывает сеанс.
     pub async fn setup(&self, password: String, phrase: Option<String>) -> Result<()> {
         let _op = self.op.lock().await;
         if self.configured() {
             bail!("закрытая среда уже создана");
+        }
+        if phrase.as_deref().map_or(true, |p| p.trim().is_empty()) {
+            bail!("нужны четыре секретных слова");
         }
         let (envelope, vault) = EnvelopeStore::create_unlocked_async(password, phrase).await?;
         self.store.prepare_attempts(&envelope)?;
@@ -199,8 +203,24 @@ impl ClosedEnv {
             self.touch();
             return Ok(());
         }
-        let vault = self.store.clone().unlock_async(password, false).await?;
+        let vault = match self.store.clone().unlock_async(password, false).await {
+            Ok(v) => v,
+            Err(e) => return Err(self.after_failed_entry(e).await),
+        };
         self.install(vault).await
+    }
+
+    /// После неудачного входа: если среда стёрта (пять неверных сид-фраз), она считается не созданной,
+    /// ключи у потребителей отзываются, и мастер настройки откроется заново.
+    async fn after_failed_entry(&self, e: anyhow::Error) -> anyhow::Error {
+        let erased = matches!(self.store.load(), Ok(None));
+        if erased && self.configured() {
+            self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::remove_file(self.dir.join(MARKER));
+            self.lock().await;
+            eprintln!("[closed] ⚠️  закрытая среда стёрта: пять неверных сид-фраз");
+        }
+        e
     }
 
     /// Забыли пароль: открыть словами и сразу задать новый.
@@ -209,7 +229,10 @@ impl ClosedEnv {
         if !self.configured() {
             bail!("закрытая среда не создана");
         }
-        let vault = self.store.clone().unlock_async(phrase, true).await?;
+        let vault = match self.store.clone().unlock_async(phrase, true).await {
+            Ok(v) => v,
+            Err(e) => return Err(self.after_failed_entry(e).await),
+        };
         let vault = self.save_new_password(vault, new_password).await?;
         self.install(vault).await
     }
@@ -407,11 +430,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn five_wrong_phrases_erase_the_environment_and_it_can_be_created_again() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        let phrase = "alpha1 bravo2 charlie3 delta4";
+        e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        e.lock().await;
+        for _ in 0..5 {
+            // пауза растёт после четвёртой попытки; для теста подменяем её
+            let c = base.path().join("closed").join("attempts.json");
+            if let Ok(b) = std::fs::read(&c) {
+                if let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                    if v["next_ms"].as_u64().unwrap_or(0) > 0 {
+                        v["next_ms"] = serde_json::json!(1);
+                        std::fs::write(&c, serde_json::to_vec(&v).unwrap()).unwrap();
+                    }
+                }
+            }
+            assert!(e.recover("wrong1 wrong2 wrong3 wrong4".into(), "new password".into()).await.is_err());
+        }
+        assert!(!e.configured(), "после стирания среда не создана");
+        assert!(chat.key().is_none());
+        e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        assert!(e.unlocked());
+    }
+
+    #[tokio::test]
     async fn unfinished_migration_is_retried_and_lock_wins_over_late_unlock() {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), Some([1; 32]));
         chat.fail_migration.store(true, Ordering::SeqCst);
-        e.setup("owner password".into(), None).await.unwrap();
+        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
         assert!(e.status().migration_pending, "метка осталась");
         e.lock().await;
         chat.fail_migration.store(false, Ordering::SeqCst);

@@ -17,8 +17,21 @@ const COUNTER: &str = "attempts.json";
 struct Attempts {
     format: u32,
     id: [u8; 16],
+    /// неверные пароли подряд; после [`MAX_PASSWORD_FAILURES`] пароль больше не принимается, нужна сид-фраза
     failures: u32,
     next_ms: u64,
+    /// неверные сид-фразы подряд; после [`MAX_PHRASE_FAILURES`] закрытая среда стирается
+    #[serde(default)]
+    rec_failures: u32,
+}
+
+pub const MAX_PASSWORD_FAILURES: u32 = 5;
+pub const MAX_PHRASE_FAILURES: u32 = 5;
+
+impl Attempts {
+    fn total(&self) -> u32 {
+        self.failures.saturating_add(self.rec_failures)
+    }
 }
 
 fn now_ms() -> Result<u64> {
@@ -55,8 +68,22 @@ impl EnvelopeStore {
                 id: envelope.id,
                 failures: 0,
                 next_ms: 0,
+                rec_failures: 0,
             })?,
         )
+    }
+
+    /// Криптостирание: убирает обёрнутый ключ данных и метки. Зашифрованные файлы потребителей остаются на диске, но без
+    /// ключа не читаются. Вызывается под flock, после этого среда считается не созданной.
+    fn wipe_locked(&self) {
+        for name in [super::ENVELOPE, super::PENDING, super::ANCHOR, COUNTER] {
+            if let Ok(c) = std::ffi::CString::new(name) {
+                unsafe {
+                    libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0);
+                }
+            }
+        }
+        let _ = self.dir.sync_all();
     }
 
     /// Откат первичной настройки, оборвавшейся до публикации envelope: счётчик, заведённый `prepare_attempts`, убирается,
@@ -85,8 +112,8 @@ impl EnvelopeStore {
         let mut attempts: Attempts = serde_json::from_slice(&bytes)?;
         if attempts.format != 1
             || attempts.id != snapshot.envelope.id
-            || (attempts.failures <= 3 && attempts.next_ms != 0)
-            || (attempts.failures > 3 && attempts.next_ms == 0)
+            || (attempts.total() <= 3 && attempts.next_ms != 0)
+            || (attempts.total() > 3 && attempts.next_ms == 0)
         {
             bail!("повреждён счётчик попыток; вход заблокирован до KDF");
         }
@@ -94,15 +121,22 @@ impl EnvelopeStore {
         if now < attempts.next_ms {
             bail!("пауза перед следующей попыткой входа");
         }
+        if !recovery && attempts.failures >= MAX_PASSWORD_FAILURES {
+            bail!("пять неверных паролей: вход только по сид-фразе");
+        }
         // Резервируем попытку до Argon2: crash/cancel не возвращают бесплатную попытку.
-        attempts.failures = attempts
-            .failures
+        let counter = if recovery {
+            &mut attempts.rec_failures
+        } else {
+            &mut attempts.failures
+        };
+        *counter = counter
             .checked_add(1)
             .ok_or_else(|| anyhow!("переполнение счётчика"))?;
-        attempts.next_ms = if attempts.failures <= 3 {
+        attempts.next_ms = if attempts.total() <= 3 {
             0
         } else {
-            now.saturating_add(delay_ms(attempts.failures))
+            now.saturating_add(delay_ms(attempts.total()))
         };
         self.write(COUNTER, &serde_json::to_vec(&attempts)?)?;
         let mut vault = NodeVault::default();
@@ -113,9 +147,16 @@ impl EnvelopeStore {
         };
         if result.is_ok() {
             attempts.failures = 0;
+            attempts.rec_failures = 0;
             attempts.next_ms = 0;
-        } else if attempts.failures > 3 {
-            attempts.next_ms = now_ms()?.saturating_add(delay_ms(attempts.failures));
+        } else {
+            if recovery && attempts.rec_failures >= MAX_PHRASE_FAILURES {
+                self.wipe_locked();
+                bail!("пять неверных сид-фраз: закрытая среда стёрта");
+            }
+            if attempts.total() > 3 {
+                attempts.next_ms = now_ms()?.saturating_add(delay_ms(attempts.total()));
+            }
         }
         // При ошибке записи успешный ключ наружу не отдаётся, Drop стирает DK.
         self.write(COUNTER, &serde_json::to_vec(&attempts)?)?;
@@ -229,6 +270,7 @@ mod tests {
             id: [3; 16],
             failures: 4,
             next_ms: now_ms().unwrap() + 300_000,
+            rec_failures: 0,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&attempts).unwrap())
@@ -255,6 +297,7 @@ mod tests {
             id: [3; 16],
             failures: 3,
             next_ms: 0,
+            rec_failures: 0,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&previous).unwrap())
@@ -358,5 +401,72 @@ mod tests {
             serde_json::from_slice(&reopened.read(COUNTER).unwrap().unwrap()).unwrap();
         assert_eq!(counter.failures, 0);
         assert_eq!(counter.next_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn five_wrong_passwords_close_the_password_door_and_the_phrase_still_opens() {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let phrase = "alpha bravo charlie delta";
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        for _ in 0..MAX_PASSWORD_FAILURES {
+            // пауза после четвёртой попытки не мешает счёту: снимаем её вручную
+            let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+            a.next_ms = if a.total() > 3 { 1 } else { 0 };
+            store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+            assert!(store.clone().unlock_async("wrong password".into(), false).await.is_err());
+        }
+        let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        a.next_ms = 1;
+        store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+        // правильный пароль уже не принимается: нужна сид-фраза
+        let refused = match store.clone().unlock_async("correct password".into(), false).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("пароль после пяти неверных не должен приниматься"),
+        };
+        assert!(refused.contains("сид-фраз"), "{refused}");
+        // а сид-фраза открывает и сбрасывает оба счётчика
+        let opened = store.clone().unlock_async(phrase.into(), true).await.unwrap();
+        assert!(opened.unlocked());
+        let a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        assert_eq!((a.failures, a.rec_failures), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn five_wrong_phrases_erase_the_closed_environment() {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let phrase = "alpha bravo charlie delta";
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        for i in 0..MAX_PHRASE_FAILURES {
+            let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+            a.next_ms = if a.total() > 3 { 1 } else { 0 };
+            store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+            let err = match store.clone().unlock_async("one two three four".into(), true).await {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("чужая фраза не должна открывать"),
+            };
+            assert_eq!(err.contains("стёрта"), i + 1 == MAX_PHRASE_FAILURES, "{err}");
+        }
+        // среда стёрта: ни envelope, ни метки, ни счётчика; правильная фраза ничего не открывает
+        assert!(store.load().unwrap().is_none());
+        assert!(store.read(COUNTER).unwrap().is_none());
+        assert!(store.clone().unlock_async(phrase.into(), true).await.is_err());
+        assert!(!std::fs::read_dir(d.path()).unwrap().any(|e| {
+            let n = e.unwrap().file_name().to_string_lossy().to_string();
+            n == "envelope.json" || n == "anchor.json"
+        }));
     }
 }

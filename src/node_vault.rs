@@ -126,7 +126,10 @@ fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     KDF_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     #[cfg(test)]
     let _probe = KdfProbe::new();
-    let params = Params::new(65536, 3, 1, Some(32)).map_err(|_| anyhow!("параметры KDF"))?;
+    // Цена подбора копии диска: в бою 256 МиБ и 3 прохода (около секунды на попытку, GPU почти не ускоряет);
+    // в тестах прежние 64 МиБ, чтобы набор не растягивался.
+    let memory_kib = if cfg!(test) { 65536 } else { 262_144 };
+    let params = Params::new(memory_kib, 3, 1, Some(32)).map_err(|_| anyhow!("параметры KDF"))?;
     // Обычный hash_password_into освобождает рабочие блоки без их стирания.
     // Владеем всей памятью KDF: Zeroizing очищает её и при ошибке/панике.
     let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
