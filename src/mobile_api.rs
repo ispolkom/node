@@ -1814,7 +1814,11 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/ws", get(ws))
         .layer(middleware::from_fn(auth));
     Router::new()
-        .route("/mobile/pair", post(pair))
+        // сопряжение до входа: тело читается не дольше 10 с, чтобы медленным POST не держали соединения
+        .route(
+            "/mobile/pair",
+            post(pair).layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(10))),
+        )
         .merge(guarded)
         .with_state(st)
 }
@@ -2168,6 +2172,22 @@ mod tests {
         .unwrap();
         assert_eq!(k, "abc");
         assert!(connect_target_and_token("GET / HTTP/1.1\r\n\r\n").is_none());
+    }
+
+    #[tokio::test]
+    async fn pairing_body_that_never_ends_is_cut_off() {
+        use tower::ServiceExt;
+        let app: Router = Router::new().route(
+            "/mobile/pair",
+            post(pair).layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_millis(300))),
+        );
+        let slow = futures_util::stream::pending::<Result<Vec<u8>, std::io::Error>>();
+        let req = axum::http::Request::post("/mobile/pair")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from_stream(slow))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::REQUEST_TIMEOUT);
     }
 
     #[test]
