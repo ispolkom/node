@@ -43,4 +43,15 @@ void main() {
     expect(contentProblem('a.png', '%PDF-1.7'.codeUnits), isNotNull);
     expect(contentProblem('v.amr', '#!AMR\n'.codeUnits), isNull);
   });
+
+  test('архив под видом документа не проходит, настоящий контейнер проходит', () {
+    List<int> zip(String first) {
+      final n = first.length;
+      return [0x50, 0x4b, 0x03, 0x04, ...List.filled(22, 0), n & 0xff, n >> 8, 0, 0, ...first.codeUnits, ...List.filled(20, 0)];
+    }
+    expect(contentProblem('a.docx', zip('[Content_Types].xml')), isNull);
+    expect(contentProblem('a.docx', zip('setup.exe')), isNotNull);
+    expect(contentProblem('a.odt', zip('mimetype')), isNull);
+    expect(contentProblem('a.odt', zip('run.js')), isNotNull);
+  });
 }

@@ -210,6 +210,26 @@ fn is_text_like(head: &[u8]) -> bool {
     !head.is_empty() && !head.contains(&0) && std::str::from_utf8(head).is_ok() || head.iter().all(|b| *b != 0) && head.len() < 4
 }
 
+/// Первая запись ZIP-контейнера должна быть из набора документа: произвольный архив, переименованный в .docx, не проходит.
+/// Видна только голова файла: если имя записи не уместилось — решает подпись.
+fn office_container_ok(ext: &str, head: &[u8]) -> bool {
+    if !head.starts_with(b"PK\x03\x04") {
+        return false;
+    }
+    if head.len() < 30 {
+        return true;
+    }
+    let n = u16::from_le_bytes([head[26], head[27]]) as usize;
+    if head.len() < 30 + n {
+        return true;
+    }
+    let name = String::from_utf8_lossy(&head[30..30 + n]).to_lowercase();
+    if matches!(ext, "odt" | "ods" | "odp") {
+        return name == "mimetype";
+    }
+    name == "[content_types].xml" || ["_rels/", "docprops/", "word/", "xl/", "ppt/", "customxml/"].iter().any(|p| name.starts_with(p))
+}
+
 /// Соответствует ли содержимое (первые байты) заявленному расширению; исполняемое под любым именем отклоняется.
 pub fn sniff_ok(name: &str, head: &[u8]) -> Result<(), String> {
     attachment_allowed(name)?;
@@ -239,7 +259,7 @@ pub fn sniff_ok(name: &str, head: &[u8]) -> Result<(), String> {
         "amr" => starts(b"#!AMR"),
         "mid" | "midi" => starts(b"MThd"),
         "mkv" | "webm" => starts(b"\x1a\x45\xdf\xa3"),
-        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => starts(b"PK\x03\x04"),
+        "docx" | "xlsx" | "pptx" | "odt" | "ods" | "odp" => office_container_ok(&ext, head),
         "txt" | "csv" | "xml" => is_text_like(head),
         _ => false,
     };
@@ -249,6 +269,25 @@ pub fn sniff_ok(name: &str, head: &[u8]) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn zip_head(first: &str) -> Vec<u8> {
+        let mut v = b"PK\x03\x04".to_vec();
+        v.extend_from_slice(&[0u8; 22]);
+        v.extend_from_slice(&(first.len() as u16).to_le_bytes());
+        v.extend_from_slice(&[0, 0]);
+        v.extend_from_slice(first.as_bytes());
+        v.extend_from_slice(&[0u8; 20]);
+        v
+    }
+
+    #[test]
+    fn plain_archive_is_not_an_office_document() {
+        assert!(sniff_ok("a.docx", &zip_head("[Content_Types].xml")).is_ok());
+        assert!(sniff_ok("a.docx", &zip_head("word/document.xml")).is_ok());
+        assert!(sniff_ok("a.docx", &zip_head("setup.exe")).is_err(), "произвольный архив под .docx");
+        assert!(sniff_ok("a.odt", &zip_head("mimetype")).is_ok());
+        assert!(sniff_ok("a.odt", &zip_head("run.js")).is_err());
+    }
 
     #[test]
     fn links_are_found_in_all_common_shapes() {

@@ -121,6 +121,18 @@ bool _textLike(List<int> head) {
   return !head.contains(0);
 }
 
+/// Первая запись ZIP-контейнера должна быть из набора документа: произвольный архив под видом .docx не проходит.
+bool _officeContainerOk(String ext, List<int> head) {
+  if (head.length < 4 || head[0] != 0x50 || head[1] != 0x4b || head[2] != 0x03 || head[3] != 0x04) return false;
+  if (head.length < 30) return true;
+  final n = head[26] | (head[27] << 8);
+  if (head.length < 30 + n) return true;
+  final name = String.fromCharCodes(head.sublist(30, 30 + n)).toLowerCase();
+  if (ext == 'odt' || ext == 'ods' || ext == 'odp') return name == 'mimetype';
+  return name == '[content_types].xml' ||
+      ['_rels/', 'docprops/', 'word/', 'xl/', 'ppt/', 'customxml/'].any(name.startsWith);
+}
+
 /// Проверка имени и первых байтов: исполняемое под любым именем отклоняется, содержимое должно соответствовать расширению.
 String? contentProblem(String name, List<int> head) {
   final p = attachmentProblem(name);
@@ -149,7 +161,7 @@ String? contentProblem(String name, List<int> head) {
     'amr' => starts(a('#!AMR')),
     'mid' || 'midi' => starts(a('MThd')),
     'mkv' || 'webm' => starts([0x1a, 0x45, 0xdf, 0xa3]),
-    'docx' || 'xlsx' || 'pptx' || 'odt' || 'ods' || 'odp' => starts([0x50, 0x4b, 0x03, 0x04]),
+    'docx' || 'xlsx' || 'pptx' || 'odt' || 'ods' || 'odp' => _officeContainerOk(ext, head),
     'txt' || 'csv' || 'xml' => _textLike(head),
     _ => false,
   };
