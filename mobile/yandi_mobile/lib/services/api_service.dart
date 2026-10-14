@@ -7,6 +7,7 @@ import 'package:http/io_client.dart';
 import '../models/trusted_node.dart';
 import '../models/contact.dart';
 import '../models/message.dart';
+import '../models/avatar_msg.dart';
 import '../crypto/identity.dart';
 import '../crypto/peer_trust.dart';
 import 'storage_service.dart';
@@ -65,6 +66,39 @@ class ApiService {
           .timeout(const Duration(seconds: 15));
       if (res.statusCode != 200) return null;
       return jsonDecode(res.body) as Map<String, dynamic>;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Профиль этого устройства (виден другим пользователям узла в списке «Пользователи»).
+  Future<bool> putDeviceProfile({String? nick, String? avatarB64, bool? hide}) async {
+    try {
+      final res = await _client
+          .put(_url('/mobile/me/profile'), headers: _headers, body: jsonEncode({if (nick != null) 'nick': nick, if (avatarB64 != null) 'avatar_b64': avatarB64, if (hide != null) 'hide': hide}))
+          .timeout(const Duration(seconds: 15));
+      return res.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// Пользователи узла: [{peer_id, name, nick, avatar_hash, online, last_activity_ms, is_node?}].
+  Future<List<Map<String, dynamic>>> getUsers() async {
+    try {
+      final res = await _client.get(_url('/mobile/users'), headers: _headers).timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return const [];
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      return [for (final u in (j['users'] as List? ?? const [])) (u as Map).cast<String, dynamic>()];
+    } catch (_) {
+      return const [];
+    }
+  }
+
+  Future<Uint8List?> getUserAvatar(String peerId) async {
+    try {
+      final res = await _client.get(_url('/mobile/users/$peerId/avatar'), headers: _headers).timeout(const Duration(seconds: 12));
+      return res.statusCode == 200 && AvatarMsg.validPng(res.bodyBytes) ? res.bodyBytes : null;
     } catch (_) {
       return null;
     }

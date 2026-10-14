@@ -871,7 +871,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   DateTime _lastAvatarSync = DateTime.now();
 
   /// Картинка контакта. У «компьютера» (моего же узла) та же картинка, что у меня: профиль общий на все мои устройства.
-  Uint8List? avatarBytes(String peerId) => peerId == _nodePeerId ? avatars?.myBytes : avatars?.bytesForPeer(peerId);
+  Uint8List? avatarBytes(String peerId) => peerId == _nodePeerId ? avatars?.myBytes : (avatars?.bytesForPeer(peerId) ?? _directoryAvatars[peerId]);
   Uint8List? get myAvatarBytes => avatars?.myBytes;
 
   bool _avatarEligible(String peerId) {
@@ -1005,6 +1005,48 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Сверка с узлом: свои несохранённые правки уходят на узел (последняя правка побеждает), иначе подтягивается то, что поменяли
   /// на другом устройстве.
+  bool _deviceProfilePublished = false;
+
+  /// Профиль этого устройства для списка «Пользователи» узла (ник и картинка, как человек их задал).
+  Future<void> _publishDeviceProfile() async {
+    final api = _api;
+    if (api == null) return;
+    final bytes = avatars?.myBytes;
+    final ok = await api.putDeviceProfile(nick: myNick, avatarB64: bytes == null ? '' : base64.encode(bytes));
+    if (ok) _deviceProfilePublished = true;
+  }
+
+  /// Пользователи узла со своими никами и картинками (только в памяти, на диск не пишутся).
+  List<Map<String, dynamic>> directory = const [];
+  final Map<String, Uint8List> _directoryAvatars = {};
+  final Map<String, String> _directoryHashes = {};
+
+  Future<void> refreshDirectory() async {
+    final api = _api;
+    if (api == null) return;
+    final users = await api.getUsers();
+    if (users.isEmpty) return;
+    directory = users;
+    notifyListeners();
+    for (final u in users) {
+      final id = u['peer_id'] as String? ?? '';
+      final hash = u['avatar_hash'] as String? ?? '';
+      if (id.isEmpty) continue;
+      if (hash.isEmpty) {
+        if (_directoryAvatars.remove(id) != null) notifyListeners();
+        _directoryHashes.remove(id);
+        continue;
+      }
+      if (_directoryHashes[id] == hash && _directoryAvatars.containsKey(id)) continue;
+      final png = await api.getUserAvatar(id);
+      if (png != null && AvatarMsg.hashOf(png) == hash) {
+        _directoryAvatars[id] = png;
+        _directoryHashes[id] = hash;
+        notifyListeners();
+      }
+    }
+  }
+
   Future<void> syncProfile() async {
     final api = _api;
     if (api == null || _profileSyncing) return;
@@ -1017,13 +1059,17 @@ class AppState extends ChangeNotifier implements FilesHost {
           _profileSeenMs = (res['updated_ms'] as num?)?.toInt() ?? _profileSeenMs;
           _profileDirty = false;
           await _saveProfileMeta();
+          await _publishDeviceProfile();
         }
         return;
       }
       final remote = await api.getProfile();
       if (remote == null) return;
       final ms = (remote['updated_ms'] as num?)?.toInt() ?? 0;
-      if (ms == _profileSeenMs) return;
+      if (ms == _profileSeenMs) {
+        if (!_deviceProfilePublished) await _publishDeviceProfile();   // первый вход: ник и картинка устройства ещё не на узле
+        return;
+      }
       final nick = (remote['nick'] as String?) ?? '';
       final hash = (remote['avatar_hash'] as String?) ?? '';
       var changed = false;
@@ -1051,6 +1097,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
       _profileSeenMs = ms;
       await _saveProfileMeta();
+      await _publishDeviceProfile();
       if (changed) notifyListeners();
     } catch (_) {
       // узел недоступен — повторим в следующий проход

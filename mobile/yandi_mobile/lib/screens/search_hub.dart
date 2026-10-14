@@ -23,8 +23,20 @@ List<Contact> visibleUsers(AppState state, {bool withHidden = false}) {
 }
 
 /// Две карточки страницы поиска: «Пользователи» и «Группы», в каждой — количество.
-class SearchHub extends StatelessWidget {
+class SearchHub extends StatefulWidget {
   const SearchHub({super.key});
+  @override
+  State<SearchHub> createState() => _SearchHubState();
+}
+
+class _SearchHubState extends State<SearchHub> {
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) context.read<AppState>().refreshDirectory();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -117,6 +129,17 @@ class UsersScreen extends StatefulWidget {
 
 class _UsersScreenState extends State<UsersScreen> {
   bool _showHidden = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ники и картинки устройств узла подтягиваются при открытии (в памяти, на диск не пишутся)
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final st = context.read<AppState>();
+      st.refreshContacts();
+      st.refreshDirectory();
+    });
+  }
 
   void _menu(BuildContext context, AppState state, Contact c) {
     final hidden = state.hiddenUsers.contains(c.peerId);
