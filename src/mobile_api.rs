@@ -165,7 +165,11 @@ fn devices_path() -> std::path::PathBuf {
     crate::util::data_dir::data_dir().join("mobile_devices.json")
 }
 
-fn with_devices<R>(f: impl FnOnce(&mut Vec<Device>) -> R) -> R {
+/// Что сейчас лежит на диске: пишем файл только при изменении (проверка токена не должна писать диск при каждом запросе).
+static DEVICES_ON_DISK: Mutex<Option<(std::path::PathBuf, String)>> = Mutex::new(None);
+
+/// Применить `f` к списку устройств и сохранить, если он изменился. Вторым значением — удалось ли сохранить.
+fn devices_apply<R>(f: impl FnOnce(&mut Vec<Device>) -> R) -> (R, bool) {
     let mut g = DEVICES.lock().unwrap_or_else(|e| e.into_inner());
     let list = g.get_or_insert_with(|| {
         std::fs::read_to_string(devices_path())
@@ -174,14 +178,26 @@ fn with_devices<R>(f: impl FnOnce(&mut Vec<Device>) -> R) -> R {
             .unwrap_or_default()
     });
     let r = f(list);
-    if let Ok(s) = serde_json::to_string_pretty(&*list) {
-        let p = devices_path();
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = crate::util::private_file::write_private(&p, s.as_bytes());
+    let Ok(s) = serde_json::to_string_pretty(&*list) else {
+        return (r, false);
+    };
+    let p = devices_path();
+    let mut disk = DEVICES_ON_DISK.lock().unwrap_or_else(|e| e.into_inner());
+    if matches!(&*disk, Some((path, text)) if *path == p && *text == s) {
+        return (r, true);
     }
-    r
+    if let Some(d) = p.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let saved = crate::util::private_file::write_private(&p, s.as_bytes()).is_ok();
+    if saved {
+        *disk = Some((p, s));
+    }
+    (r, saved)
+}
+
+fn with_devices<R>(f: impl FnOnce(&mut Vec<Device>) -> R) -> R {
+    devices_apply(f).0
 }
 
 fn token_hash(token: &str) -> String {
@@ -300,7 +316,13 @@ pub fn remove_device(id: &str) -> bool {
     else {
         return false;
     };
-    with_devices(|d| d.retain(|x| x.peer_id() != peer));
+    // отзыв подтверждается, только если новый список лёг на диск: иначе после перезапуска токен снова бы действовал
+    let before = with_devices(|d| d.clone());
+    let ((), saved) = devices_apply(|d| d.retain(|x| x.peer_id() != peer));
+    if !saved {
+        devices_apply(|d| *d = before);
+        return false;
+    }
     after_forget(peer);
     true
 }
@@ -1248,7 +1270,54 @@ async fn ws(
     }) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
-    up.on_upgrade(move |sock| ws_session(st, me, sock))
+    // сокет после upgrade уже не считается лимитом входа по TLS, поэтому свои пределы: всего и на устройство
+    let Some(slot) = WsSlot::take(&me) else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
+    up.max_message_size(2 * MAX_TEXT)
+        .max_frame_size(2 * MAX_TEXT)
+        .on_upgrade(move |sock| async move {
+            let _slot = slot;
+            ws_session(st, me, sock).await
+        })
+}
+
+const WS_MAX_TOTAL: usize = 128;
+const WS_MAX_PER_DEVICE: usize = 4;
+static WS_OPEN: Mutex<Option<std::collections::HashMap<String, usize>>> = Mutex::new(None);
+
+/// Место открытого WebSocket; освобождается, когда сокет закрыт.
+struct WsSlot(String);
+
+impl WsSlot {
+    fn take(peer: &str) -> Option<Self> {
+        let mut g = WS_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(Default::default);
+        let total: usize = m.values().sum();
+        let mine = m.entry(peer.to_string()).or_insert(0);
+        if total >= WS_MAX_TOTAL || *mine >= WS_MAX_PER_DEVICE {
+            if *mine == 0 {
+                m.remove(peer);
+            }
+            return None;
+        }
+        *mine += 1;
+        Some(Self(peer.to_string()))
+    }
+}
+
+impl Drop for WsSlot {
+    fn drop(&mut self) {
+        let mut g = WS_OPEN.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.as_mut() {
+            if let Some(n) = m.get_mut(&self.0) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.0);
+                }
+            }
+        }
+    }
 }
 
 fn frame(kind: u8, from: &[u8], ts: u64, payload: &[u8]) -> Vec<u8> {
@@ -1290,6 +1359,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                     if sock.send(Message::Binary(vec![FT_PROFILE])).await.is_err() { break; }
                 }
                 Ok(Event::Node(m)) => {
+                    if seen.len() > 4096 {
+                        seen.clear(); // «уже показанные» не должны расти без предела на долгом соединении
+                    }
                     if m.from != st.my_id && seen.insert(m.msg_id) {
                         if sock.send(Message::Binary(chat_frame(&m))).await.is_err() { break; }
                     }
@@ -1727,6 +1799,9 @@ where
     let io = TokioIo::new(Prepended::new(first, stream));
     let svc = TowerToHyperService::new(router(st));
     hyper::server::conn::http1::Builder::new()
+        // без таймера Hyper не ограничивает чтение заголовков: молчащий клиент держал бы слот сколько угодно
+        .timer(hyper_util::rt::TokioTimer::new())
+        .header_read_timeout(std::time::Duration::from_secs(10))
         .serve_connection(io, svc)
         .with_upgrades()
         .await
@@ -1848,5 +1923,20 @@ mod tests {
         assert_eq!(&f[1..33], &[7u8; 32]);
         assert_eq!(u32::from_le_bytes([f[41], f[42], f[43], f[44]]), 2);
         assert_eq!(&f[45..], b"hi");
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn websocket_slots_are_limited_per_device_and_released() {
+        let me = "ws-limit-test-device";
+        let held: Vec<_> = (0..WS_MAX_PER_DEVICE).map(|_| WsSlot::take(me).expect("в пределах лимита")).collect();
+        assert!(WsSlot::take(me).is_none(), "сверх лимита устройства — отказ");
+        assert!(WsSlot::take("ws-limit-other").is_some(), "другое устройство не страдает");
+        drop(held);
+        assert!(WsSlot::take(me).is_some(), "после закрытия место свободно");
     }
 }

@@ -43,6 +43,8 @@ pub struct Socks5ProxyServer {
     pending_requests: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
     /// Active tunnels: tunnel_id -> bounded writer queue
     active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// Какому выходу отправлен каждый запрос: ответы и данные принимаются только от него
+    expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     /// Channels for responses and tunnel data
     response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -340,6 +342,7 @@ impl Socks5ProxyServer {
             next_request_id: Arc::new(RwLock::new(1)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            expected: Arc::new(crate::proxy::expected_peers::ExpectedPeers::new()),
             response_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             station: Arc::new(station),
@@ -401,15 +404,17 @@ impl Socks5ProxyServer {
         let transport_clone = self.transport.clone();
         let pending_clone = self.pending_requests.clone();
         let response_rx_clone = self.response_rx.clone();
+        let expected_responses = self.expected.clone();
         tokio::spawn(async move {
-            Self::handle_responses(transport_clone, pending_clone, response_rx_clone).await;
+            Self::handle_responses(transport_clone, pending_clone, response_rx_clone, expected_responses).await;
         });
 
         // Subscribe to tunnel data
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
+        let expected_tunnels = self.expected.clone();
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, expected_tunnels).await;
         });
 
         // Accept incoming connections
@@ -445,6 +450,7 @@ impl Socks5ProxyServer {
             next_request_id: self.next_request_id.clone(),
             pending_requests: self.pending_requests.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            expected: self.expected.clone(),
             response_rx: self.response_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             station: self.station.clone(),
@@ -456,11 +462,16 @@ impl Socks5ProxyServer {
         _transport: Arc<P2PTransport>,
         pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
         response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
+        expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     ) {
         let mut rx_opt = { response_rx.lock().await.take() };
 
         if let Some(mut rx) = rx_opt {
-            while let Some((_source_node, response)) = rx.recv().await {
+            while let Some((source_node, response)) = rx.recv().await {
+                if !expected.is_from_owner(response.request_id, &source_node) {
+                    warn!("⚠️  SOCKS5 ответ #{} не от того выхода, которому ушёл запрос — отброшен", response.request_id);
+                    continue;
+                }
                 debug!("📨 Received SOCKS5 response for request #{}", response.request_id);
 
                 // Find pending request
@@ -482,10 +493,15 @@ impl Socks5ProxyServer {
     async fn handle_tunnel_data(
         active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
+        expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     ) {
         let rx = tunnel_rx.lock().await.take();
         if let Some(mut rx) = rx {
-            while let Some((_source_node, tunnel_data)) = rx.recv().await {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                if !expected.is_from_owner(tunnel_data.tunnel_id, &source_node) {
+                    warn!("[rx] tunnel #{}: данные не от своего выхода, отброшены", tunnel_data.tunnel_id);
+                    continue;
+                }
                 let key = tunnel_data.tunnel_id;
                 let mut tunnels = active_tunnels.lock().await;
                 if let Some(writer) = tunnels.get(&key) {
@@ -668,9 +684,12 @@ impl Socks5ProxyServer {
         // 5. Создаём oneshot для ответа
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // 6. Сохраняем pending request
+        // 6. Сохраняем pending request и выход, от которого ждём ответ
         {
             let mut pending = self.pending_requests.lock().await;
+            let tunnels = self.active_tunnels.lock().await;
+            self.expected.retain_live(|id| pending.contains_key(&id) || tunnels.contains_key(&id));
+            self.expected.expect(request_id, exit_node);
             pending.insert(request_id, tx);
         }
 

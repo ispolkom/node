@@ -1184,6 +1184,17 @@ impl P2PTransport {
                                     return;
                                 }
                             }
+                            // тот же допуск, что и у UDP-входа: личности бесплатны, таблица пиров не должна расти без предела
+                            if let Err(reason) = Self::admit_peer(
+                                &transport_for_pump.admission,
+                                &transport_for_pump.peers,
+                                &transport_for_pump.pinned_identities,
+                                conn.peer_addr.parse::<std::net::SocketAddr>().map(|a| a.ip()).unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                                hello.node_id,
+                            ).await {
+                                eprintln!("[ws-server] {} Hello REJECTED: admission ({})", conn.peer_addr, reason.name());
+                                return;
+                            }
                             {
                                 let pins = transport_for_pump.pinned_identities.read().await;
                                 if Self::identity_conflict(&pins, hello.node_id, &hello.public_key) {
@@ -6328,6 +6339,42 @@ impl P2PTransport {
     pub async fn stream_peer_id(&self, stream_id: u32) -> Result<Option<HashId>, String> {
         let streams = self.streams.lock().await;
         Ok(streams.get_stream(stream_id).map(|s| s.peer_id))
+    }
+
+    /// Допуск нового пира по любому входу (UDP и WS): личность создаётся бесплатно, поэтому новых принимаем с ограничениями,
+    /// а таблица пиров не растёт выше потолка; при переполнении вытесняется самый давний неприкреплённый не-якорь.
+    async fn admit_peer(
+        admission: &Arc<tokio::sync::Mutex<crate::netlayer::admission::Admission>>,
+        peers: &Arc<Mutex<HashMap<HashId, PeerInfo>>>,
+        pinned_identities: &Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+        ip: std::net::IpAddr,
+        node_id: HashId,
+    ) -> Result<(), crate::netlayer::admission::Reject> {
+        let (known, table_len) = {
+            let p = peers.lock().await;
+            (p.contains_key(&node_id), p.len())
+        };
+        let verdict = admission.lock().await.check(ip, node_id, known, table_len, Instant::now());
+        match verdict {
+            Err(crate::netlayer::admission::Reject::TableFull) => {
+                let pins = pinned_identities.read().await;
+                let mut p = peers.lock().await;
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                let victim = crate::netlayer::admission::pick_victim(
+                    p.values().map(|x| (x.id, x.last_seen, pins.contains_key(&x.id), (x.caps_bits & crate::netlayer::packet::hello_caps::ANCHOR) != 0)),
+                    now_ms,
+                    120_000,
+                );
+                match victim {
+                    Some(v) => {
+                        p.remove(&v);
+                        Ok(())
+                    }
+                    None => Err(crate::netlayer::admission::Reject::TableFull),
+                }
+            }
+            other => other,
+        }
     }
 
     /// Cleanup stale encryption sessions

@@ -105,6 +105,18 @@ impl P2PHelloPacket {
         Ok(())
     }
 
+    /// Допустимое расхождение часов; меньше срока хранения nonce (5 мин), чтобы повтор не проходил после забывания.
+    pub const FRESHNESS_SECS: u64 = 120;
+
+    /// Подписанная метка времени в пределах окна свежести (в обе стороны).
+    pub fn is_fresh(&self) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        now.abs_diff(self.timestamp) <= Self::FRESHNESS_SECS
+    }
+
     /// Verify the embedded Ed25519 signature against the embedded ed25519_public key.
     pub fn verify_signature(&self) -> Result<(), String> {
         use ed25519_dalek::Verifier;
@@ -136,5 +148,20 @@ impl P2PHelloPacket {
             return Err("Invalid P2P magic".to_string());
         }
         bincode::deserialize(&data[4..]).map_err(|e| e.to_string())
+    }
+}
+
+#[cfg(test)]
+mod freshness_tests {
+    use super::*;
+
+    #[test]
+    fn stale_or_future_hello_is_not_fresh() {
+        let mut h = P2PHelloPacket::new_request(HashId([1; 32]), [2; 32], "127.0.0.1:1".into(), [3; 32]);
+        assert!(h.is_fresh());
+        h.timestamp -= P2PHelloPacket::FRESHNESS_SECS + 5;
+        assert!(!h.is_fresh(), "старый Hello не проходит");
+        h.timestamp += 2 * (P2PHelloPacket::FRESHNESS_SECS + 5);
+        assert!(!h.is_fresh(), "Hello из будущего не проходит");
     }
 }

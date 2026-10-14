@@ -927,6 +927,11 @@ impl P2PTransport {
                                 eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", from, e);
                                 continue;
                             }
+                            // подпись не доказывает свежесть: записанный Hello нельзя проигрывать после окна, которое помнит кэш nonce
+                            if !hello.is_fresh() {
+                                eprintln!("[P2P] ⚠️ Hello from {} rejected — stale timestamp", from);
+                                continue;
+                            }
 
                             // Допуск: подписанное приветствие от неизвестной личности ничего не доказывает (личность создаётся бесплатно).
                             {

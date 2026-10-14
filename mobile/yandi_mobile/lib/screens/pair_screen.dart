@@ -160,8 +160,11 @@ class _PairScreenState extends State<PairScreen> {
       final port        = data['port']            as int;
       final code        = data['pairing_code']    as String;
       final fingerprint = data['tls_fingerprint'] as String? ?? '';
-      final useTls      = data['tls']             as bool? ?? false;
-      final scheme      = useTls ? 'https' : 'http';
+      // сопряжение только по HTTPS с закреплённым отпечатком: поле tls из QR безопасностью не управляет
+      if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(fingerprint.trim())) {
+        throw Exception('QR без отпечатка сертификата: сопряжение отклонено');
+      }
+      const scheme = 'https';
 
       // Pinned HTTP client для паринга (fingerprint известен из QR)
       final client = _buildPinnedClient(fingerprint);

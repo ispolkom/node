@@ -111,15 +111,17 @@ impl HttpProxyClient {
         let transport_clone = self.transport.clone();
         let pending_clone = self.pending_requests.clone();
         let response_rx_clone = self.response_rx.clone();
+        let gateway_for_responses = self.gateway_node;
         tokio::spawn(async move {
-            Self::handle_responses(transport_clone, pending_clone, response_rx_clone).await;
+            Self::handle_responses(transport_clone, pending_clone, response_rx_clone, gateway_for_responses).await;
         });
 
         // Subscribe to tunnel data packets
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
+        let gateway_for_tunnels = self.gateway_node;
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, gateway_for_tunnels).await;
         });
 
         // Accept incoming connections
@@ -588,10 +590,15 @@ impl HttpProxyClient {
     async fn handle_tunnel_data(
         active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
+        gateway: HashId,
     ) {
         let rx = tunnel_rx.lock().await.take();
         if let Some(mut rx) = rx {
-            while let Some((_source_node, tunnel_data)) = rx.recv().await {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                if source_node != gateway {
+                    warn!("[rx] tunnel #{}: данные не от шлюза, отброшены", tunnel_data.tunnel_id);
+                    continue;
+                }
                 let key = tunnel_data.tunnel_id;
                 let mut tunnels = active_tunnels.lock().await;
                 if let Some(writer) = tunnels.get(&key) {
@@ -610,6 +617,7 @@ impl HttpProxyClient {
         _transport: Arc<P2PTransport>,
         pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<ProxyResponse>>>>,
         response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
+        gateway: HashId,
     ) {
         info!("📡 P2P response handler started");
 
@@ -628,7 +636,12 @@ impl HttpProxyClient {
         };
 
         // Listen for responses
-        while let Some((_source_node, response)) = rx.recv().await {
+        while let Some((source_node, response)) = rx.recv().await {
+            if source_node != gateway {
+                // ответ принимается только от шлюза, которому ушёл запрос: иначе любой узел подставит чужой ответ по номеру
+                warn!("⚠️  ProxyResponse #{} не от шлюза, отброшен", response.request_id);
+                continue;
+            }
             let request_id = response.request_id;
             let status = response.status;
             let body_len = response.body.len();
