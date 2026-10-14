@@ -82,6 +82,18 @@ impl Consumer for GroupsConsumer {
             let _ = tokio::task::spawn_blocking(crate::group_client::erase_encrypted).await;
         })
     }
+    fn is_service(&self) -> bool {
+        true
+    }
+    fn adopt(&self, owner_key: [u8; 32], service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move {
+            // клиент групп ПК на время переноса заперт: файлы переписываются только под замком
+            crate::group_client::lock();
+            tokio::task::spawn_blocking(move || crate::group_client::rekey(Some(owner_key), service_key))
+                .await
+                .map_err(|e| e.to_string())?
+        })
+    }
 }
 
 pub struct SelfConsumer;
@@ -115,6 +127,18 @@ impl Consumer for SelfConsumer {
             let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("mobile_self.enc"));
         })
     }
+    fn is_service(&self) -> bool {
+        true
+    }
+    fn adopt(&self, owner_key: [u8; 32], service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move {
+            let dir = crate::util::data_dir::data_dir();
+            crate::mobile_self::lock_keys();
+            tokio::task::spawn_blocking(move || crate::mobile_self::rekey(&dir, Some(&owner_key), &service_key).map(|_| 0usize))
+                .await
+                .map_err(|e| e.to_string())?
+        })
+    }
 }
 
 /// Жалобы пользователей и журнал мер: закрытый уровень.
@@ -135,6 +159,12 @@ impl Consumer for ComplaintsConsumer {
     }
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::complaints::erase() })
+    }
+    fn is_service(&self) -> bool {
+        true
+    }
+    fn adopt(&self, owner_key: [u8; 32], service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move { crate::complaints::adopt(owner_key, service_key).map(|_| 0usize) })
     }
 }
 

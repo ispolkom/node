@@ -42,6 +42,25 @@ pub trait Consumer: Send + Sync {
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    /// Служебная часть: нужна узлу, чтобы работать без хозяина у экрана (ключи «Компьютера», группы ПК, жалобы). Её ключ
+    /// выводится из рабочего ключа устройства, она поднимается при старте и не запирается вместе с закрытой средой.
+    fn is_service(&self) -> bool {
+        false
+    }
+    /// Служебная часть при входе владельца: данные, лежавшие под ключом закрытой среды, переносятся под служебный ключ.
+    fn adopt(&self, _owner_key: [u8; 32], _service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async { Ok(0) })
+    }
+}
+
+/// Служебный ключ области: из рабочего ключа устройства (он доступен при старте без пароля), своя область — свой ключ.
+fn service_key_for(master: &[u8; 32], domain: &str) -> [u8; 32] {
+    use sha2::Sha256;
+    let mut out = [0u8; 32];
+    hkdf::Hkdf::<Sha256>::new(Some(b"yandi-service-v1"), master)
+        .expand(domain.as_bytes(), &mut out)
+        .expect("32 байта — допустимая длина");
+    out
 }
 
 #[derive(Clone, Serialize)]
@@ -111,6 +130,18 @@ impl ClosedEnv {
             configured: std::sync::atomic::AtomicBool::new(configured),
             load_error: Mutex::new(load_error),
         }))
+    }
+
+    /// При старте узла: служебные части получают свой ключ из рабочего ключа устройства и работают без владельца у экрана.
+    pub async fn start_service(&self) {
+        let Some(master) = (self.legacy_master)() else {
+            eprintln!("[closed] ⚠️  рабочий ключ устройства недоступен: служебные части ждут входа владельца");
+            return;
+        };
+        let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for c in consumers.iter().filter(|c| c.is_service()) {
+            c.unlock(service_key_for(&master, c.domain())).await;
+        }
     }
 
     pub fn register(&self, consumer: Arc<dyn Consumer>) {
@@ -280,8 +311,17 @@ impl ClosedEnv {
         let _apply = self.apply.lock().await;
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for c in consumers {
+            // служебные части продолжают работать: они не зависят от присутствия владельца
+            if self.service_active() && c.is_service() {
+                continue;
+            }
             c.lock().await;
         }
+    }
+
+    /// Есть ли рабочий ключ устройства (то есть служебные части живут отдельно от закрытой среды).
+    fn service_active(&self) -> bool {
+        (self.legacy_master)().is_some()
     }
 
     /// Принять открытый сеанс и выдать ключи потребителям.
@@ -323,9 +363,21 @@ impl ClosedEnv {
                 eprintln!("[closed] ⚠️  не всё перенесено ({failures}); метка оставлена, перенос повторится при следующем входе");
             }
         }
+        let master = (self.legacy_master)();
         for (c, key) in &keys {
             if !self.current(generation) {
                 return Ok(());
+            }
+            if c.is_service() {
+                if let Some(m) = master.as_ref() {
+                    let service = service_key_for(m, c.domain());
+                    match c.adopt(**key, service).await {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[closed] перенос служебных данных «{}» не удался: {e}", c.domain()),
+                    }
+                    c.unlock(service).await;
+                    continue;
+                }
             }
             c.unlock(**key).await;
         }
@@ -345,6 +397,8 @@ mod tests {
         fail_migration: AtomicBool,
         unlock_delay_ms: AtomicU64,
         erased: AtomicBool,
+        service: AtomicBool,
+        adopted: Mutex<Vec<([u8; 32], [u8; 32])>>,
     }
 
     impl Mock {
@@ -356,6 +410,8 @@ mod tests {
                 fail_migration: AtomicBool::new(false),
                 unlock_delay_ms: AtomicU64::new(0),
                 erased: AtomicBool::new(false),
+                service: AtomicBool::new(false),
+                adopted: Mutex::new(Vec::new()),
             })
         }
         fn key(&self) -> Option<[u8; 32]> {
@@ -390,6 +446,15 @@ mod tests {
         fn erase(&self) -> BoxFuture<'_, ()> {
             Box::pin(async move {
                 self.erased.store(true, Ordering::SeqCst);
+            })
+        }
+        fn is_service(&self) -> bool {
+            self.service.load(Ordering::SeqCst)
+        }
+        fn adopt(&self, owner_key: [u8; 32], service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+            Box::pin(async move {
+                self.adopted.lock().unwrap().push((owner_key, service_key));
+                Ok(0)
             })
         }
     }
@@ -447,6 +512,26 @@ mod tests {
         e.lock().await;
         e.unlock("recovered pass".into()).await.unwrap();
         assert_eq!(chat.key().unwrap(), kc);
+    }
+
+    #[tokio::test]
+    async fn service_parts_run_without_the_owner_and_survive_a_lock() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, groups) = env(base.path(), Some([9; 32]));
+        groups.service.store(true, Ordering::SeqCst);
+        // старт узла: служебная часть поднимается сама, личная — заперта
+        e.start_service().await;
+        let svc = groups.key().expect("служебная часть работает без владельца");
+        assert!(chat.key().is_none(), "личная часть ждёт пароль");
+        // владелец вошёл: личная открыта, служебная перенесена под свой ключ и осталась на нём
+        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        assert!(chat.key().is_some());
+        assert_eq!(groups.key().unwrap(), svc, "служебный ключ не меняется от входа владельца");
+        assert_eq!(groups.adopted.lock().unwrap().len(), 1, "данные под ключом среды переносятся под служебный ключ");
+        // блокировка запирает личное, служебное не трогает
+        e.lock().await;
+        assert!(chat.key().is_none());
+        assert_eq!(groups.key().unwrap(), svc);
     }
 
     #[tokio::test]

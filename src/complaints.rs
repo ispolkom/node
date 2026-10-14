@@ -88,16 +88,37 @@ fn persist(s: &State) -> Result<(), (StatusCode, String)> {
     crate::util::sealed::write(&path(), key, AAD, &bytes).map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, format!("не удалось сохранить жалобы: {e}")))
 }
 
-/// Выдан ключ области: жалобы читаются из запечатанного файла.
+/// Выдан ключ области: жалобы читаются из запечатанного файла. Файл, который этим ключом не открывается (он ещё под ключом
+/// закрытой среды и будет перенесён при входе владельца), не перезаписывается: до переноса область остаётся запертой.
 pub fn unlock(key: [u8; 32]) {
-    let items = std::fs::read(path())
-        .ok()
-        .and_then(|b| crate::util::sealed::open(&key, AAD, &b))
-        .and_then(|p| serde_json::from_slice::<Vec<Complaint>>(&p).ok())
-        .unwrap_or_default();
+    let raw = std::fs::read(path()).ok();
+    let items = match raw.as_deref() {
+        None => Vec::new(),
+        Some(b) => match crate::util::sealed::open(&key, AAD, b).and_then(|p| serde_json::from_slice::<Vec<Complaint>>(&p).ok()) {
+            Some(v) => v,
+            None => {
+                let mut s = lock_state();
+                s.key = None;
+                s.items = Vec::new();
+                return;
+            }
+        },
+    };
     let mut s = lock_state();
     s.key = Some(key);
     s.items = items;
+}
+
+/// Перенос файла жалоб из-под ключа закрытой среды под служебный ключ (идемпотентно: уже открывающийся новым ключом остаётся).
+pub fn adopt(owner_key: [u8; 32], service_key: [u8; 32]) -> Result<(), String> {
+    let Ok(raw) = std::fs::read(path()) else { return Ok(()) };
+    if crate::util::sealed::open(&service_key, AAD, &raw).is_some() {
+        return Ok(());
+    }
+    let Some(plain) = crate::util::sealed::open(&owner_key, AAD, &raw) else {
+        return Err("файл жалоб не открывается ни одним ключом; не тронут".into());
+    };
+    crate::util::sealed::write(&path(), &service_key, AAD, &plain)
 }
 
 /// Заперто: из памяти убирается всё.

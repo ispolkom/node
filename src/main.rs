@@ -659,6 +659,8 @@ async fn main() -> anyhow::Result<()> {
         env.register(std::sync::Arc::new(yandi::closed_api::ComplaintsConsumer));
         env.spawn_auto_lock();
         yandi::closed_api::install_global(env.clone());
+        // служебные части (ключи «Компьютера», группы ПК, жалобы) поднимаются сами, без владельца у экрана
+        env.start_service().await;
     }
 
     // Spawn Chat packet handler
