@@ -152,6 +152,72 @@ pub fn publish(msg: &ChatMessage) {
 
 pub fn init(chat: Arc<ChatManager>, p2p: Arc<crate::p2p::P2PTransport>, my_id: HashId) {
     let _ = STATE.set(Arc::new(MobileState { chat, p2p, my_id }));
+    spawn_pc_inbox_drain();
+}
+
+/// Сообщение телефона компьютеру, пришедшее, пока закрытая среда заперта: оно уже запечатано E2E ключом ПК (лежит в закрытой
+/// среде), поэтому открытым текстом нигде не появляется и просто ждёт входа владельца.
+#[derive(Clone, Serialize, Deserialize)]
+struct PcMail {
+    ts: u64,
+    from: String,
+    blob_b64: String,
+}
+
+static PC_INBOX: Mutex<Option<Vec<PcMail>>> = Mutex::new(None);
+const PC_INBOX_MAX: usize = 1000;
+const PC_INBOX_PER_DEVICE: usize = 200;
+
+fn pc_inbox_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("pc_inbox.json")
+}
+
+fn with_pc_inbox<R>(f: impl FnOnce(&mut Vec<PcMail>) -> R) -> R {
+    let mut g = PC_INBOX.lock().unwrap_or_else(|e| e.into_inner());
+    let list = g.get_or_insert_with(|| {
+        std::fs::read_to_string(pc_inbox_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+    });
+    let r = f(list);
+    if let Ok(s) = serde_json::to_vec(&*list) {
+        let _ = crate::util::private_file::write_private(&pc_inbox_path(), &s);
+    }
+    r
+}
+
+/// Положить в ожидание. false — очередь переполнена (телефон увидит «не доставлено»).
+fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
+    use base64::Engine;
+    with_pc_inbox(|l| {
+        if l.len() >= PC_INBOX_MAX || l.iter().filter(|m| m.from == device).count() >= PC_INBOX_PER_DEVICE {
+            return false;
+        }
+        l.push(PcMail { ts: now_ms(), from: device.to_string(), blob_b64: base64::engine::general_purpose::STANDARD.encode(blob) });
+        true
+    })
+}
+
+/// Когда среда открыта, ожидающие сообщения обрабатываются как обычные входящие.
+fn spawn_pc_inbox_drain() {
+    crate::supervisor::supervise("pc-inbox-drain", crate::supervisor::Policy::restart(), move || async move {
+        use base64::Engine;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            let Some(st) = STATE.get().cloned() else { continue };
+            #[cfg(unix)]
+            if crate::closed_api::is_locked() {
+                continue;
+            }
+            let batch: Vec<PcMail> = with_pc_inbox(|l| std::mem::take(l));
+            for m in batch {
+                if now_ms().saturating_sub(m.ts) > MAIL_TTL_MS {
+                    continue;
+                }
+                if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(&m.blob_b64) {
+                    phone_to_node(&st, &m.from, &blob);
+                }
+            }
+        }
+    });
 }
 
 fn now_ms() -> u64 {
@@ -1572,9 +1638,12 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                             // закрытая среда заперта (после перезапуска): сообщение не принимаем и не теряем молча, телефон видит «не доставлено»
                             #[cfg(unix)]
                             if crate::closed_api::is_locked() {
-                                let mut f = vec![FT_PEER_OFFLINE];
-                                f.extend_from_slice(&id);
-                                if sock.send(Message::Binary(f)).await.is_err() { break; }
+                                // среда заперта: сообщение (уже E2E для ПК) ждёт входа владельца, а не теряется; не поместилось — «не доставлено»
+                                if !queue_for_pc(&me, &d[37..37 + len]) {
+                                    let mut f = vec![FT_PEER_OFFLINE];
+                                    f.extend_from_slice(&id);
+                                    if sock.send(Message::Binary(f)).await.is_err() { break; }
+                                }
                                 continue;
                             }
                             // самому компьютеру: узел — конечная точка, расшифровывает и кладёт в историю веб-чата
@@ -2042,6 +2111,27 @@ mod tests {
         assert_eq!(&f[1..33], &[7u8; 32]);
         assert_eq!(u32::from_le_bytes([f[41], f[42], f[43], f[44]]), 2);
         assert_eq!(&f[45..], b"hi");
+    }
+}
+
+#[cfg(test)]
+mod pc_inbox_tests {
+    use super::*;
+
+    #[test]
+    fn locked_node_queues_phone_messages_per_device_with_a_limit() {
+        // каталог данных общий для тестов: очищаем очередь явно
+        with_pc_inbox(|l| l.clear());
+        for _ in 0..PC_INBOX_PER_DEVICE {
+            assert!(queue_for_pc("dev-a", b"sealed-blob"));
+        }
+        assert!(!queue_for_pc("dev-a", b"sealed-blob"), "сверх лимита устройства — отказ");
+        assert!(queue_for_pc("dev-b", b"sealed-blob"), "другое устройство не страдает");
+        assert_eq!(with_pc_inbox(|l| l.len()), PC_INBOX_PER_DEVICE + 1);
+        // на диске лежит запечатанный блоб, не текст
+        let raw = std::fs::read_to_string(pc_inbox_path()).unwrap();
+        assert!(!raw.contains("sealed-blob"), "блоб лежит в base64");
+        with_pc_inbox(|l| l.clear());
     }
 }
 

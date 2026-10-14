@@ -32,7 +32,8 @@ class _GroupsTabState extends State<GroupsTab> {
     final state = context.read<AppState>();
     await state.syncGroups();
     List<DiscoverGroup> node = _node;
-    try { node = await state.groups?.discover() ?? const []; } catch (_) {}
+    // группы узла, куда вы не вступили, показываются только на «Поиск → Группы»
+    node = const [];
     if (mounted) setState(() { _loaded = true; _node = node; });
   }
 
@@ -329,24 +330,8 @@ class _GroupsTabState extends State<GroupsTab> {
                 },
                 child: const Text('Вступить по приглашению'),
               ),
-              const SizedBox(height: 16),
-              const Text('Открытые группы этого узла', style: TextStyle(color: AppTheme.textSecondary)),
-              FutureBuilder<List<Map<String, dynamic>>>(
-                future: state.groups!.api.openGroups(),
-                builder: (_, snap) {
-                  final open = [for (final g in snap.data ?? const <Map<String, dynamic>>[]) if (g['kind'] == null || g['kind'] == 'open') g];
-                  if (open.isEmpty) return const Padding(padding: EdgeInsets.all(8), child: Text('нет', style: TextStyle(color: AppTheme.textSecondary)));
-                  return Column(children: [
-                    for (final g in open)
-                      ListTile(
-                        dense: true,
-                        title: Text('${g['name']}', style: const TextStyle(color: AppTheme.text)),
-                        subtitle: Text('${g['topic'] ?? ''} · ${g['members'] ?? 0} уч.', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                        trailing: TextButton(onPressed: busy ? null : () => doJoin(g['id'] as String, null), child: const Text('Вступить')),
-                      ),
-                  ]);
-                },
-              ),
+              const SizedBox(height: 12),
+              const Text('Открытые группы узла: «Поиск» → «Группы».', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             ]),
           ),
         );
