@@ -284,6 +284,17 @@ void main() {
     expect(bob.hasProblem(node.gid), isTrue);
   });
 
+  test('подмена ключа участника узлом: групповой ключ под чужим ключом не выдаётся', () async {
+    await owner.sync();
+    await bobJoins();                       // ключ Боба закреплён у владельца при первой раздаче
+    // узел подсовывает чужой ключ вместо ключа Боба и требует нового поколения
+    node.members.values.firstWhere((m) => m['alias'] != 'Хозяин-1')['pub'] = base64.encode(List.filled(32, 9));
+    node.rekeyNeeded = true;
+    await owner.sync();
+    expect(owner.keyConflicts(node.gid), isNotEmpty);
+    expect(node.boxes.values.every((b) => !b.containsValue(base64.encode(List.filled(32, 9)))), isTrue);
+  });
+
   test('смена ключа после выхода участника: оставшиеся читают новое, вышедший — нет', () async {
     await owner.sync();
     await bobJoins();

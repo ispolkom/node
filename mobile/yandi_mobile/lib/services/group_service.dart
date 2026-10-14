@@ -204,12 +204,29 @@ class GroupService {
     await store.write('grp_pubsent_$gid', '1');
   }
 
+  /// Участники, чей ключ изменился после закрепления: им групповой ключ не выдаётся, пока владелец не разберётся.
+  final Map<String, Set<String>> _keyConflicts = {};
+  Set<String> keyConflicts(String gid) => _keyConflicts[gid] ?? const <String>{};
+
   /// Владелец: раздаёт ключ группы. Новое поколение — при `rekey_needed` и самом первом разе; иначе только тем, у кого конверта ещё нет.
   Future<void> _provision(GroupInfo g) async {
     final (ownerSeed, _) = await _memberKeys(g.id);
     final m = await api.members(g.id);
     final members = [for (final x in (m['members'] as List? ?? const [])) GroupMember.fromJson((x as Map).cast<String, dynamic>())];
-    final others = members.where((x) => x.alias != g.myAlias && x.memberPub != null).toList();
+    // ключ участника закрепляется при первом виде: подмена списка узлом не даст получить групповой ключ под чужим ключом
+    final others = <GroupMember>[];
+    for (final x in members) {
+      if (x.alias == g.myAlias || x.memberPub == null) continue;
+      final pinKey = 'grp_mpin_${g.id}_${x.alias}';
+      final pinned = await store.read(pinKey);
+      if (pinned == null) {
+        await store.write(pinKey, x.memberPub!);
+      } else if (pinned != x.memberPub) {
+        _keyConflicts.putIfAbsent(g.id, () => <String>{}).add(x.alias);
+        continue;
+      }
+      others.add(x);
+    }
     var epoch = g.epoch;
     Uint8List? key = epoch == 0 ? null : await _groupKey(g.id, epoch);
     List<GroupMember> targets;
