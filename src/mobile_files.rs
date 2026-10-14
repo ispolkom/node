@@ -201,8 +201,11 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
         return err(StatusCode::BAD_REQUEST, "файлы можно отправлять только на другое сопряжённое устройство");
     }
     // политика содержимого: только разрешённые типы файлов (имя проверяется целиком, содержимое — приложением до шифрования)
-    if let Err(why) = crate::content_policy::attachment_allowed(&req.file_name) {
-        return err(StatusCode::UNSUPPORTED_MEDIA_TYPE, &why);
+    // анонимное имя «file» шлёт само приложение (настоящее имя — внутри зашифрованного предложения)
+    if req.file_name != "file" {
+        if let Err(why) = crate::content_policy::attachment_allowed(&req.file_name) {
+            return err(StatusCode::UNSUPPORTED_MEDIA_TYPE, &why);
+        }
     }
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой");
