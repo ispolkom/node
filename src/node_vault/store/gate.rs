@@ -312,10 +312,11 @@ mod tests {
         let previous = Attempts {
             format: 1,
             id: [3; 16],
-            // пауза 32 с: очередь KDF общая, в загруженном прогоне второй вход ждёт permit дольше, чем короткая пауза
-            failures: 7,
-            next_ms: 0,
-            rec_failures: 0,
+            failures: 3,
+            // уже были неверные сид-фразы: пауза после этой попытки 16 с, а не 2 — очередь KDF общая, и в загруженном прогоне
+            // второй вход ждёт своего permit дольше короткой паузы
+            next_ms: 1,
+            rec_failures: 3,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&previous).unwrap())
@@ -328,7 +329,7 @@ mod tests {
         let reopened = Arc::new(EnvelopeStore::open(d.path()).unwrap());
         let saved: Attempts =
             serde_json::from_slice(&reopened.read(COUNTER).unwrap().unwrap()).unwrap();
-        assert_eq!(saved.failures, 8);
+        assert_eq!(saved.failures, 4);
         assert!(saved.next_ms > now_ms().unwrap());
         assert!(reopened
             .unlock_async("wrong password".into(), false)
