@@ -25,6 +25,8 @@ pub const DOMAIN_GROUPS: &str = "groups_pc";
 pub const DOMAIN_SELF: &str = "mobile_self";
 pub const DOMAIN_PROXY: &str = "upstream_proxy";
 
+/// Автоблокировка по умолчанию при создании среды.
+pub const DEFAULT_AUTO_LOCK_SECS: u64 = 15 * 60;
 const MARKER: &str = "migration.pending";
 const SETTINGS: &str = "settings.json";
 
@@ -191,6 +193,8 @@ impl ClosedEnv {
             return Err(e);
         }
         self.configured.store(true, std::sync::atomic::Ordering::SeqCst);
+        // по умолчанию среда запирается сама через 15 минут бездействия; владелец меняет это в «Настройках»
+        let _ = self.set_auto_lock(DEFAULT_AUTO_LOCK_SECS);
         self.install(vault).await
     }
 

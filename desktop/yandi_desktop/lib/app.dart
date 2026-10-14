@@ -448,7 +448,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           ),
         ],
         UiText(
-          'Автоблокировка: ${v.autoLockSecs} с. Таймером управляет демон; опрос не считается активностью.',
+          v.autoLockSecs == 0
+              ? 'Автоблокировка выключена.'
+              : 'Автоблокировка: через ${(v.autoLockSecs / 60).ceil()} мин. Таймером управляет демон; опрос не считается активностью.',
         ),
         TimeoutForm(
           key: ValueKey('timeout-$formVersion'),
@@ -485,31 +487,26 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         key: ValueKey('setup-$formVersion'),
         title: 'Создать и запустить ноду',
         description:
-            'Первичная настройка. Запишите мастер-пароль на бумаге: он нужен для восстановления.',
-        labels: const [
-          'Пароль входа',
-          'Повтор пароля входа',
-          'Мастер-пароль',
-          'Повтор мастер-пароля',
-        ],
+            'Первичная настройка: один пароль и четыре секретных слова. Запишите слова на бумаге: пять неверных паролей оставляют вход только по словам, а пять неверных наборов слов стирают закрытую среду.',
+        labels: const ['Пароль', 'Повтор пароля', 'Четыре секретных слова'],
         busy: busy,
         submit: (v) {
           validateNew(v[0], v[1]);
-          if (v[2].runes.length < 12)
+          final words = v[2].trim().split(RegExp(r'\s+'));
+          if (words.length != 4)
+            throw const FormatException('Введите четыре секретных слова');
+          final phrase = words.join(' ');
+          if (phrase.runes.length < 12)
             throw const FormatException(
-              'Мастер-пароль — не короче 12 символов',
+              'Слова слишком короткие: нужно не меньше 12 знаков вместе',
             );
-          if (v[2] != v[3])
-            throw const FormatException('Мастер-пароли не совпадают');
-          if (v[0] == v[2])
-            throw const FormatException(
-              'Пароль входа и мастер-пароль должны отличаться',
-            );
+          if (v[0] == phrase)
+            throw const FormatException('Пароль и слова должны отличаться');
           return act('/api/auth/setup', {
             'login_password': v[0],
             'login_password_repeat': v[1],
-            'master_password': v[2],
-            'master_password_repeat': v[3],
+            'master_password': phrase,
+            'master_password_repeat': phrase,
           });
         },
       );
@@ -561,8 +558,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         if (lockUnconfirmed) ...[
           const UiText('Состояние блокировки не подтверждено'),
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
-        ] else if (vault != null && !vault!.hasError && !vault!.configured)
-          // первый запуск: закрытая среда создаётся сразу, до остальных страниц
+        ] else if (vault != null &&
+            !vault!.hasError &&
+            (!vault!.configured || !vault!.unlocked))
+          // первый запуск: среда создаётся сразу; после блокировки на любой странице — только вход
           vaultPanel()
         else if (page == 'Панель')
           dashboard()
@@ -1035,7 +1034,12 @@ class TimeoutForm extends StatefulWidget {
 }
 
 class _TimeoutFormState extends State<TimeoutForm> {
-  late final field = TextEditingController(text: widget.initial.toString());
+  late bool never = widget.initial == 0;
+  late final field = TextEditingController(
+    text: widget.initial == 0
+        ? '15'
+        : (widget.initial / 60).ceil().clamp(1, 100).toString(),
+  );
   String? error;
   @override
   void dispose() {
@@ -1047,14 +1051,23 @@ class _TimeoutFormState extends State<TimeoutForm> {
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
+      CheckboxListTile(
+        controlAffinity: ListTileControlAffinity.leading,
+        title: const UiText('Никогда не блокировать'),
+        value: never,
+        onChanged: widget.busy
+            ? null
+            : (v) => setState(() {
+                never = v == true;
+                error = null;
+              }),
+      ),
       TextField(
         controller: field,
+        enabled: !never,
         keyboardType: TextInputType.number,
         decoration: InputDecoration(
-          labelText: tr(
-            context,
-            'Автоблокировка, секунды (0 — отключена, максимум 2592000)',
-          ),
+          labelText: tr(context, 'Блокировать через, минут (1–100)'),
         ),
       ),
       if (error != null) UiText(error!),
@@ -1062,17 +1075,22 @@ class _TimeoutFormState extends State<TimeoutForm> {
         onPressed: widget.busy
             ? null
             : () {
-                final secs = int.tryParse(field.text);
-                if (secs == null || secs < 0 || secs > 2592000) {
+                if (never) {
+                  setState(() => error = null);
+                  widget.submit(0);
+                  return;
+                }
+                final minutes = int.tryParse(field.text.trim());
+                if (minutes == null || minutes < 1 || minutes > 100) {
                   setState(() {
-                    error = 'Введите число от 0 до 2592000';
+                    error = 'Введите число от 1 до 100';
                   });
                   return;
                 }
                 setState(() {
                   error = null;
                 });
-                widget.submit(secs);
+                widget.submit(minutes * 60);
               },
         child: const UiText('Сохранить автоблокировку'),
       ),

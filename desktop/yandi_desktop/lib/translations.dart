@@ -27,8 +27,10 @@ const moreEnglishLabels = <String, String>{
   "Аватар должен быть меньше 2 МБ.": "Avatar must be smaller than 2 MiB.",
   "Аватар перестанет отображаться в профиле. API демона сохраняет прежний файл на узле.":
       "The avatar will disappear from the profile. The daemon API keeps the old file on the node.",
-  "Автоблокировка, секунды (0 — отключена, максимум 2592000)":
-      "Auto-lock, seconds (0 disables, maximum 2592000)",
+  "Блокировать через, минут (1–100)": "Lock after, minutes (1–100)",
+  "Никогда не блокировать": "Never lock",
+  "Введите число от 1 до 100": "Enter a number from 1 to 100",
+  "Автоблокировка выключена.": "Auto-lock is off.",
   "Адрес bind": "Bind address",
   "Сеть": "Network",
   "Ответить": "Reply",
@@ -422,8 +424,8 @@ const englishTemplates = <String, String>{
   "{0} · Клиентов: {1} / {2}": "{0} · Clients: {1} / {2}",
   "{0} · порт {1} · {2}": "{0} · port {1} · {2}",
   "{0}: удалена или вы исключены": "{0}: deleted or you were removed",
-  "Автоблокировка: {0} с. Таймером управляет демон; опрос не считается активностью.":
-      "Auto-lock: {0} s. The daemon manages the timer; polling does not count as activity.",
+  "Автоблокировка: через {0} мин. Таймером управляет демон; опрос не считается активностью.":
+      "Auto-lock: after {0} min. The daemon manages the timer; polling does not count as activity.",
   "Адрес: {0}": "Address: {0}",
   "Вы станете админом. Новый владелец: {0}":
       "You will become an admin. New owner: {0}",

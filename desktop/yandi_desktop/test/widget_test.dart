@@ -114,7 +114,7 @@ void main() {
       final api = FakeApi()..setup = true;
       await start(t, api);
       final fields = find.byType(TextField);
-      expect(fields, findsNWidgets(4));
+      expect(fields, findsNWidgets(3));
       for (final field in t.widgetList<TextField>(fields)) {
         expect(
           field.obscureText &&
@@ -127,10 +127,9 @@ void main() {
       final inputs = [
         'пароль12',
         'пароль12',
-        'мастерпароль123',
-        'мастерпароль123',
+        'первое второе третье четвёртое',
       ];
-      for (var i = 0; i < 4; i++) {
+      for (var i = 0; i < 3; i++) {
         await t.enterText(fields.at(i), inputs[i]);
       }
       api.pending = Completer<Map<String, dynamic>>();
@@ -231,6 +230,7 @@ void main() {
       'old_password': 'owner password',
       'new_password': 'new password',
     });
+    await click(t, 'Никогда не блокировать'); // по умолчанию в тесте выключена: включаем таймер
     await t.enterText(
       find.descendant(
         of: find.byType(TimeoutForm),
@@ -239,7 +239,7 @@ void main() {
       '60',
     );
     await click(t, 'Сохранить автоблокировку');
-    expect(api.secs, 60);
+    expect(api.secs, 3600); // 60 минут
     await click(t, 'Запереть');
     expect(find.textContaining('Закрытая среда заперта'), findsOneWidget);
     for (var i = 1; i <= 3; i++) {
@@ -351,15 +351,16 @@ void main() {
       ..unlocked = true;
     await start(t, api);
     await vaultPage(t);
+    await click(t, 'Никогда не блокировать');
     await t.enterText(
       find.descendant(
         of: find.byType(TimeoutForm),
         matching: find.byType(TextField),
       ),
-      '2592001',
+      '101',
     );
     await click(t, 'Сохранить автоблокировку');
-    expect(find.text('Введите число от 0 до 2592000'), findsOneWidget);
+    expect(find.text('Введите число от 1 до 100'), findsOneWidget);
     expect(api.calls.contains('/api/vault/auto_lock'), false);
     expect(t.takeException(), isNull);
     await stop(t);
