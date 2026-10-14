@@ -44,6 +44,7 @@ pub mod complaints;
 pub mod content_policy;
 pub mod device_profile;
 pub mod exit_policy;
+pub mod file_vault;
 pub mod exit_select;
 pub mod hops;
 pub mod hops_net;

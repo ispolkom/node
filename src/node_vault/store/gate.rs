@@ -234,6 +234,10 @@ mod tests {
     use crate::node_vault::KDF_CALLS;
     use std::sync::atomic::Ordering;
 
+    /// Счётчик KDF и очередь попыток общие на весь процесс: тесты этого модуля идут по одному, иначе чужая попытка
+    /// сдвигает счётчик посреди проверки «ни одного вызова KDF».
+    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     fn installed() -> (tempfile::TempDir, Arc<EnvelopeStore>) {
         let d = temp();
         let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
@@ -245,6 +249,7 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_missing_counter_blocks_before_any_kdf() {
+        let _serial = SERIAL.lock().await;
         let (d, store) = installed();
         std::fs::remove_file(d.path().join(COUNTER)).unwrap();
         let calls = KDF_CALLS.load(Ordering::SeqCst);
@@ -264,6 +269,7 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_pause_and_corrupt_counter_block_before_any_kdf() {
+        let _serial = SERIAL.lock().await;
         let (d, store) = installed();
         let attempts = Attempts {
             format: 1,
@@ -291,6 +297,7 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_failure_pause_survives_reopen_and_blocks_before_kdf() {
+        let _serial = SERIAL.lock().await;
         let (d, store) = installed();
         let previous = Attempts {
             format: 1,
@@ -321,6 +328,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn bug_r15_kdf_does_not_block_runtime_and_attempt_is_durable() {
+        let _serial = SERIAL.lock().await;
         let (_d, store) = installed();
         let work = store.clone().unlock_async("wrong password".into(), false);
         let tick = async {
@@ -337,6 +345,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bug_r15_cancellation_does_not_release_running_worker_permit() {
+        let _serial = SERIAL.lock().await;
         let (_one, first) = installed();
         let (_two, second) = installed();
         let before = KDF_CALLS.load(Ordering::SeqCst);
@@ -380,6 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_success_resets_counter_and_store_reopen_preserves_it() {
+        let _serial = SERIAL.lock().await;
         let d = temp();
         let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
         let env = EnvelopeStore::create_envelope_async("correct password".into(), None)
