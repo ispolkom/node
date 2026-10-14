@@ -5647,7 +5647,9 @@ async fn mobile_pairing_handler(
                 "127.0.0.1".to_string()
             }
         });
-    let text = crate::mobile_api::pairing_qr_json(&host, port, &fp);
+    // ?role=user — код для постороннего пользователя узла (без личной переписки владельца), по умолчанию телефон владельца
+    let role = q.get("role").map(String::as_str).unwrap_or("owner");
+    let text = crate::mobile_api::pairing_qr_json(&host, port, &fp, role);
     let svg = match qrcode::QrCode::new(text.as_bytes()) {
         Ok(qr) => qr
             .render::<qrcode::render::svg::Color>()

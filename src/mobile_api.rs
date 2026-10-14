@@ -107,6 +107,8 @@ struct Pairing {
     code: String,
     expires: Instant,
     fails: u32,
+    /// роль, с которой сопрягается устройство по этому коду
+    role: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -127,6 +129,30 @@ struct Device {
     /// последний раз, когда устройство было на связи (мс); хранится на диске, чтобы переживать перезапуск узла
     #[serde(default)]
     last_seen_ms: u64,
+    /// `owner` — телефон владельца узла (всё), `user` — посторонний пользователь узла: свои почта, профиль, группы и жалобы
+    #[serde(default = "owner_role")]
+    role: String,
+}
+
+fn owner_role() -> String {
+    "owner".to_string()
+}
+
+fn is_user_role(peer: &str) -> bool {
+    with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.role == "user"))
+}
+
+/// Что недоступно роли `user`: личная переписка и контакты ПК, отправка от имени узла, профиль владельца.
+fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
+    path == "/mobile/contacts"
+        || path == "/mobile/inbox"
+        || path == "/mobile/inbox/ack"
+        || path.starts_with("/mobile/chat/")
+        || path.starts_with("/mobile/pubkey")
+        || path.starts_with("/mobile/files")
+        || (path == "/mobile/profile" && method != Method::GET)
+        || path == "/mobile/proxy/info"
 }
 
 impl Device {
@@ -308,12 +334,20 @@ fn token_hash(token: &str) -> String {
 
 /// Новый разовый код спаривания (6 цифр); предыдущий перестаёт действовать.
 pub fn issue_pairing_code() -> String {
+    issue_pairing_code_for("owner")
+}
+
+/// То же для роли: `owner` (телефон владельца) или `user` (посторонний пользователь узла).
+pub fn issue_pairing_code_for(role: &str) -> String {
     use rand::Rng;
+    // повышение — только явным «owner»: опечатка или неизвестное значение даёт меньше прав
+    let role = if role == "owner" { "owner" } else { "user" }.to_string();
     let code = format!("{:06}", rand::thread_rng().gen_range(0..1_000_000u32));
     *PAIRING.lock().unwrap_or_else(|e| e.into_inner()) = Some(Pairing {
         code: code.clone(),
         expires: Instant::now() + PAIRING_TTL,
         fails: 0,
+        role,
     });
     code
 }
@@ -322,9 +356,9 @@ pub fn issue_pairing_code() -> String {
 /// Содержимое QR и текста для приложения: `YANDI-PAIR-1:<base64 JSON>`. Непрозрачный blob (а не открытый JSON) — чтобы фильтры по
 /// шаблону («pairing_code», голый IP) не цепляли приглашение, когда его пересылают в чатах/почте. Безопасность та же: внутри всё тот
 /// же одноразовый код на 5 минут. Приложение понимает и новый blob, и старый открытый JSON.
-pub fn pairing_qr_json(host: &str, port: u16, fingerprint_hex: &str) -> String {
+pub fn pairing_qr_json(host: &str, port: u16, fingerprint_hex: &str, role: &str) -> String {
     use base64::Engine;
-    let json = json!({"host": host, "port": port, "pairing_code": issue_pairing_code(), "tls_fingerprint": fingerprint_hex, "tls": true}).to_string();
+    let json = json!({"host": host, "port": port, "pairing_code": issue_pairing_code_for(role), "tls_fingerprint": fingerprint_hex, "tls": true}).to_string();
     format!(
         "YANDI-PAIR-1:{}",
         base64::engine::general_purpose::STANDARD.encode(json.as_bytes())
@@ -560,28 +594,29 @@ struct PairReq {
 }
 
 async fn pair(Json(req): Json<PairReq>) -> Response {
-    let ok = {
+    let granted: Option<String> = {
         let mut g = PAIRING.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_mut() {
             Some(p) if Instant::now() < p.expires && p.fails < PAIRING_MAX_FAILS => {
                 if same(&p.code, req.pairing_code.trim()) {
+                    let role = p.role.clone();
                     *g = None;
-                    true
+                    Some(role)
                 } else {
                     p.fails += 1;
-                    false
+                    None
                 }
             }
-            _ => false,
+            _ => None,
         }
     };
-    if !ok {
+    let Some(role) = granted else {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error": "bad or expired pairing code"})),
         )
             .into_response();
-    }
+    };
     use rand::RngCore;
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
@@ -615,6 +650,7 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             ed25519_pub: None,
             key_sig: None,
             last_seen_ms: 0,
+            role,
         });
     });
     if let Some(peer) = evicted {
@@ -972,8 +1008,11 @@ async fn auth(mut req: Request, next: Next) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let h = token_hash(&token);
-    if !with_devices(|d| d.iter().any(|x| same(&x.token_hash, &h))) {
+    let Some(role) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &h)).map(|x| x.role.clone())) else {
         return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if role == "user" && owner_only_path(req.method(), req.uri().path()) {
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "это устройство подключено как пользователь узла: личная переписка владельца ему недоступна"}))).into_response();
     }
     req.extensions_mut().insert(DeviceKey(h));
     next.run(req).await
@@ -1717,6 +1756,8 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         id.copy_from_slice(&d[1..33]);
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_TEXT + 256 || d.len() < 37 + len { continue; }
+                        // посторонний пользователь узла не пишет от имени ПК и не шлёт P2P-сообщения владельца
+                        if is_user_role(&me) && (HashId(id) == st.my_id || device_by_peer(&hex::encode(id)).is_none()) { continue; }
                         if HashId(id) == st.my_id {
                             // закрытая среда заперта (после перезапуска): сообщение не принимаем и не теряем молча, телефон видит «не доставлено»
                             #[cfg(unix)]
@@ -2142,7 +2183,7 @@ mod tests {
     #[test]
     fn the_longest_silent_device_is_evicted_not_the_oldest_paired() {
         let mk = |name: &str, created: u64, seen: u64| Device { token_hash: name.into(), name: name.into(), created_ms: created, acked_ts: 0,
-            x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: seen };
+            x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: seen, role: owner_role() };
         let d = vec![mk("old-but-active", 1_000, 9_000), mk("newer-but-silent", 2_000, 0), mk("recent", 8_000, 8_500)];
         let i = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i).unwrap();
         assert_eq!(d[i].name, "newer-but-silent");
@@ -2161,7 +2202,7 @@ mod tests {
             x25519_pub: b64(&[x;32]), ed25519_pub: b64(&[ed;32]), signature:b64(&[0;64]),
         };
         let mut devices = vec![Device { token_hash:"test-token".into(), name:"test".into(), created_ms:0, acked_ts:0,
-            x25519_pub:None, ed25519_pub:None, key_sig:None, last_seen_ms:0 }];
+            x25519_pub:None, ed25519_pub:None, key_sig:None, last_seen_ms:0, role: owner_role() }];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         assert_eq!(store_device_bundle(&mut devices,"test-token",request(1,2),&[1;32],&path),StatusCode::OK);
@@ -2224,7 +2265,7 @@ mod tests {
         let th = "r".repeat(64);
         with_devices(|d| {
             d.retain(|x| x.token_hash != th);
-            d.push(Device { token_hash: th.clone(), name: "r".into(), created_ms: 0, acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: 0 });
+            d.push(Device { token_hash: th.clone(), name: "r".into(), created_ms: 0, acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: 0, role: owner_role() });
         });
         let peer = device_peer_of(&th).unwrap();
         let ext = || axum::Extension(DeviceKey(th.clone()));
@@ -2295,6 +2336,32 @@ mod pc_inbox_tests {
 #[cfg(test)]
 mod hardening_tests {
     use super::*;
+
+    #[test]
+    fn user_role_is_kept_away_from_the_owners_correspondence() {
+        use axum::http::Method;
+        for (m, p) in [(Method::GET, "/mobile/chat/abc"), (Method::POST, "/mobile/chat/abc"), (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack"),
+                       (Method::GET, "/mobile/contacts"), (Method::POST, "/mobile/contacts"), (Method::PUT, "/mobile/profile"), (Method::GET, "/mobile/files")] {
+            assert!(owner_only_path(&m, p), "{m} {p}");
+        }
+        for (m, p) in [(Method::GET, "/mobile/groups"), (Method::POST, "/mobile/complaints"), (Method::GET, "/mobile/me/profile"),
+                       (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y")] {
+            assert!(!owner_only_path(&m, p), "{m} {p}");
+        }
+        // роль в старом devices.json отсутствует — это владелец
+        let old: Device = serde_json::from_str(r#"{"token_hash":"t","name":"n","created_ms":7,"acked_ts":0}"#).unwrap();
+        assert_eq!(old.role, "owner");
+    }
+
+    #[test]
+    fn pairing_code_carries_its_role() {
+        let _ = issue_pairing_code_for("user");
+        assert_eq!(PAIRING.lock().unwrap().as_ref().unwrap().role, "user");
+        let _ = issue_pairing_code_for("что-то");
+        assert_eq!(PAIRING.lock().unwrap().as_ref().unwrap().role, "user", "неизвестное значение — меньше прав, владелец только явно");
+        let _ = issue_pairing_code();
+        assert_eq!(PAIRING.lock().unwrap().as_ref().unwrap().role, "owner");
+    }
 
     #[test]
     fn websocket_slots_are_limited_per_device_and_released() {
