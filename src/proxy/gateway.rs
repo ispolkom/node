@@ -16,6 +16,48 @@ use anyhow::{Result, Context};
 use tracing::{info, error, debug, warn};
 use reqwest::Client as HttpClient;
 
+/// Пределы выхода в интернет: одновременных запросов всего и от одного узла, туннелей от одного узла, размер ответа в памяти.
+const MAX_INFLIGHT_TOTAL: usize = 128;
+const MAX_INFLIGHT_PER_PEER: usize = 16;
+const MAX_TUNNELS_PER_PEER: usize = 32;
+const MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
+
+static INFLIGHT: std::sync::Mutex<Option<HashMap<HashId, usize>>> = std::sync::Mutex::new(None);
+
+/// Место в очереди выхода: занято до конца обработки запроса. None — узел или весь выход загружены.
+struct InflightSlot(HashId);
+
+impl InflightSlot {
+    fn take(peer: HashId) -> Option<Self> {
+        let mut g = INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(HashMap::new);
+        let total: usize = m.values().sum();
+        let mine = m.entry(peer).or_insert(0);
+        if total >= MAX_INFLIGHT_TOTAL || *mine >= MAX_INFLIGHT_PER_PEER {
+            if *mine == 0 {
+                m.remove(&peer);
+            }
+            return None;
+        }
+        *mine += 1;
+        Some(Self(peer))
+    }
+}
+
+impl Drop for InflightSlot {
+    fn drop(&mut self) {
+        let mut g = INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.as_mut() {
+            if let Some(n) = m.get_mut(&self.0) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.0);
+                }
+            }
+        }
+    }
+}
+
 /// Helper function to send tunnel data
 async fn send_tunnel_data(
     station: &Arc<Station>,
@@ -111,8 +153,15 @@ impl HttpProxyGateway {
         // Listen for incoming requests
         while let Some((source_node, request)) = rx.recv().await {
             let gateway = self.clone_for_handler();
+            let Some(slot) = InflightSlot::take(source_node) else {
+                warn!("⚠️  Proxy request #{} dropped: too many in flight from {}", request.request_id, hex::encode(&source_node.0[..8]));
+                let busy = ProxyResponse { request_id: request.request_id, status: 503, headers: vec![], body: b"exit busy".to_vec() };
+                let _ = gateway.send_response(source_node, busy).await;
+                continue;
+            };
 
             tokio::spawn(async move {
+                let _slot = slot;
                 if let Err(e) = gateway.handle_request(source_node, request).await {
                     error!("❌ Error handling proxy request: {}", e);
                 }
@@ -154,15 +203,21 @@ impl HttpProxyGateway {
         }
 
         // Make real HTTP request
-        let http_response = self.make_http_request(&request).await?;
+        let mut http_response = self.make_http_request(&request).await?;
 
-        // Build proxy response
-        let proxy_response = ProxyResponse {
-            request_id: request.request_id,
-            status: http_response.status().as_u16(),
-            headers: self.extract_headers(&http_response),
-            body: http_response.bytes().await?.to_vec(),
-        };
+        // тело читаем кусками и не больше предела: ответ не раздувает память узла
+        let status = http_response.status().as_u16();
+        let headers = self.extract_headers(&http_response);
+        let mut body = Vec::new();
+        while let Some(chunk) = http_response.chunk().await? {
+            if body.len() + chunk.len() > MAX_RESPONSE_BODY {
+                let big = ProxyResponse { request_id: request.request_id, status: 502, headers: vec![], body: b"response too large".to_vec() };
+                self.send_response(source_node, big).await?;
+                return Ok(());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let proxy_response = ProxyResponse { request_id: request.request_id, status, headers, body };
 
         debug!("✅ Response: {} {} bytes", proxy_response.status, proxy_response.body.len());
 
@@ -178,6 +233,18 @@ impl HttpProxyGateway {
 
         // Parse host:port from URL (format: "goodwin.su:443" or "example.com:443")
         let addr_str = request.url.clone();
+
+        // туннелей от одного узла не больше предела; повторный номер поверх живого туннеля не принимается
+        {
+            let tunnels = self.active_tunnels.lock().await;
+            let mine = tunnels.keys().filter(|(n, _)| *n == source_node).count();
+            if mine >= MAX_TUNNELS_PER_PEER || tunnels.contains_key(&(source_node, request.request_id)) {
+                drop(tunnels);
+                let busy = ProxyResponse { request_id: request.request_id, status: 429, headers: vec![], body: Vec::new() };
+                self.send_response(source_node, busy).await?;
+                return Ok(());
+            }
+        }
 
         info!("🔌 Connecting to {} ...", addr_str);
 
@@ -506,5 +573,21 @@ impl HttpProxyGateway {
         info!("✅ Response sent via YTP DUAL-PATH! Train #{}", train_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn inflight_slots_are_limited_per_peer_and_released() {
+        let a = HashId([0xA1; 32]);
+        let b = HashId([0xB2; 32]);
+        let held: Vec<_> = (0..MAX_INFLIGHT_PER_PEER).map(|_| InflightSlot::take(a).expect("в пределах")).collect();
+        assert!(InflightSlot::take(a).is_none(), "сверх предела узла — отказ");
+        assert!(InflightSlot::take(b).is_some(), "другой узел не страдает");
+        drop(held);
+        assert!(InflightSlot::take(a).is_some(), "после завершения место свободно");
     }
 }
