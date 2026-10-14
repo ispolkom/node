@@ -28,6 +28,32 @@ const DATA_AAD: &[u8] = b"YANDI-NODE-CLOSED-DATA-V1\0";
 static KDF_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 static KDF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Тестовая разметка: попытки входа, начатые внутри `KDF_TAG.scope(метка, …)`, считаются отдельно от общего счётчика, чтобы параллельные
+/// тесты не сдвигали друг другу «ни одного вызова KDF».
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static KDF_TAG: u64;
+}
+#[cfg(test)]
+thread_local! {
+    static WORKER_TAG: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+static KDF_TAGGED: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn set_worker_tag(tag: Option<u64>) {
+    WORKER_TAG.with(|c| c.set(tag));
+}
+/// Метка текущего async-контекста теста (если он внутри `KDF_TAG.scope`).
+#[cfg(test)]
+pub(crate) fn current_tag() -> Option<u64> {
+    KDF_TAG.try_with(|t| *t).ok()
+}
+/// Сколько вызовов KDF сделали попытки с этой меткой.
+#[cfg(test)]
+pub(crate) fn tagged_kdf_calls(tag: u64) -> usize {
+    KDF_TAGGED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(t, _)| *t == tag).map(|(_, n)| *n).unwrap_or(0)
+}
 #[cfg(test)]
 static KDF_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
@@ -124,6 +150,14 @@ fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
         .map_err(|_| anyhow!("очередь KDF остановлена после ошибки"))?;
     #[cfg(test)]
     KDF_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    #[cfg(test)]
+    if let Some(tag) = WORKER_TAG.with(|c| c.get()) {
+        let mut g = KDF_TAGGED.lock().unwrap_or_else(|e| e.into_inner());
+        match g.iter_mut().find(|(t, _)| *t == tag) {
+            Some((_, n)) => *n += 1,
+            None => g.push((tag, 1)),
+        }
+    }
     #[cfg(test)]
     let _probe = KdfProbe::new();
     // Цена подбора копии диска: в бою 256 МиБ и 3 прохода (около секунды на попытку, GPU почти не ускоряет);

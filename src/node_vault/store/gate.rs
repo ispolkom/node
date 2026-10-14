@@ -172,10 +172,17 @@ impl EnvelopeStore {
         recovery: bool,
     ) -> Result<NodeVault> {
         let secret = Zeroizing::new(secret);
+        #[cfg(test)]
+        let tag = crate::node_vault::current_tag();
         let permit = queue().clone().acquire_owned().await?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            self.unlock_counted(&secret, recovery)
+            #[cfg(test)]
+            crate::node_vault::set_worker_tag(tag);
+            let r = self.unlock_counted(&secret, recovery);
+            #[cfg(test)]
+            crate::node_vault::set_worker_tag(None);
+            r
         })
         .await?
     }
@@ -231,12 +238,13 @@ impl EnvelopeStore {
 mod tests {
     use super::super::tests::{fixture, temp};
     use super::*;
-    use crate::node_vault::KDF_CALLS;
-    use std::sync::atomic::Ordering;
+    use crate::node_vault::{tagged_kdf_calls, KDF_TAG};
+    use std::sync::atomic::{AtomicU64, Ordering};
 
-    /// Счётчик KDF и очередь попыток общие на весь процесс: тесты этого модуля идут по одному, иначе чужая попытка
-    /// сдвигает счётчик посреди проверки «ни одного вызова KDF».
-    static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
+    fn kdf_calls() -> usize {
+        tagged_kdf_calls(crate::node_vault::current_tag().expect("тест внутри KDF_TAG.scope"))
+    }
 
     fn installed() -> (tempfile::TempDir, Arc<EnvelopeStore>) {
         let d = temp();
@@ -249,10 +257,10 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_missing_counter_blocks_before_any_kdf() {
-        let _serial = SERIAL.lock().await;
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         std::fs::remove_file(d.path().join(COUNTER)).unwrap();
-        let calls = KDF_CALLS.load(Ordering::SeqCst);
+        let calls = kdf_calls();
         assert!(store
             .clone()
             .unlock_async("wrong password".into(), false)
@@ -263,13 +271,14 @@ mod tests {
             .unlock_async("first second third fourth".into(), true)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), calls);
+        assert_eq!(kdf_calls(), calls);
         assert!(store.prepare_attempts(&fixture().0).is_err());
+    }).await
     }
 
     #[tokio::test]
     async fn bug_r15_pause_and_corrupt_counter_block_before_any_kdf() {
-        let _serial = SERIAL.lock().await;
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         let attempts = Attempts {
             format: 1,
@@ -281,7 +290,7 @@ mod tests {
         store
             .write(COUNTER, &serde_json::to_vec(&attempts).unwrap())
             .unwrap();
-        let calls = KDF_CALLS.load(Ordering::SeqCst);
+        let calls = kdf_calls();
         assert!(store
             .clone()
             .unlock_async("wrong password".into(), false)
@@ -292,24 +301,26 @@ mod tests {
             .unlock_async("wrong password".into(), false)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), calls);
+        assert_eq!(kdf_calls(), calls);
+    }).await
     }
 
     #[tokio::test]
     async fn bug_r15_failure_pause_survives_reopen_and_blocks_before_kdf() {
-        let _serial = SERIAL.lock().await;
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         let previous = Attempts {
             format: 1,
             id: [3; 16],
-            failures: 3,
+            // пауза 32 с: очередь KDF общая, в загруженном прогоне второй вход ждёт permit дольше, чем короткая пауза
+            failures: 7,
             next_ms: 0,
             rec_failures: 0,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&previous).unwrap())
             .unwrap();
-        let before = KDF_CALLS.load(Ordering::SeqCst);
+        let before = kdf_calls();
         assert!(store
             .unlock_async("wrong password".into(), false)
             .await
@@ -317,18 +328,18 @@ mod tests {
         let reopened = Arc::new(EnvelopeStore::open(d.path()).unwrap());
         let saved: Attempts =
             serde_json::from_slice(&reopened.read(COUNTER).unwrap().unwrap()).unwrap();
-        assert_eq!(saved.failures, 4);
+        assert_eq!(saved.failures, 8);
         assert!(saved.next_ms > now_ms().unwrap());
         assert!(reopened
             .unlock_async("wrong password".into(), false)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(kdf_calls(), before + 1);
+    }).await
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn bug_r15_kdf_does_not_block_runtime_and_attempt_is_durable() {
-        let _serial = SERIAL.lock().await;
         let (_d, store) = installed();
         let work = store.clone().unlock_async("wrong password".into(), false);
         let tick = async {
@@ -345,12 +356,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bug_r15_cancellation_does_not_release_running_worker_permit() {
-        let _serial = SERIAL.lock().await;
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (_one, first) = installed();
         let (_two, second) = installed();
-        let before = KDF_CALLS.load(Ordering::SeqCst);
-        let running = tokio::spawn(first.unlock_async("wrong password".into(), false));
-        while KDF_CALLS.load(Ordering::SeqCst) == before {
+        let before = kdf_calls();
+        let tag = crate::node_vault::current_tag().unwrap();
+        let running = tokio::spawn(KDF_TAG.scope(tag, first.unlock_async("wrong password".into(), false)));
+        while kdf_calls() == before {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         running.abort();
@@ -364,7 +376,8 @@ mod tests {
                 .is_err()
         );
         assert!(next.await.is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(kdf_calls(), before + 1);
+    }).await
     }
 
     #[test]
@@ -389,7 +402,6 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_success_resets_counter_and_store_reopen_preserves_it() {
-        let _serial = SERIAL.lock().await;
         let d = temp();
         let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
         let env = EnvelopeStore::create_envelope_async("correct password".into(), None)
