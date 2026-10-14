@@ -4,7 +4,7 @@
 
 - Linux (kernel 5.x+, тестировалось на Debian 12).
 - Rust 1.75+ для сборки (если не используется prebuild бинарь).
-- Открытые порты: 9000/UDP (discovery), 10000/UDP (data), 9001/UDP (P2P discovery), 9998/UDP (P2P data), 8443/TCP (WS-over-TLS), 9999/TCP (Web UI).
+- Открытые порты: 9000/UDP (discovery), 10000/UDP (data), 9001/UDP (P2P discovery), 9998/UDP (P2P data), 8443/TCP (WS-over-TLS). Веб-порта нет: управление идёт через локальный сокет оболочки.
 
 ## ⚠️ Обязательный sysctl на каждом хосте
 
@@ -98,7 +98,7 @@ cargo build --release
 
 ## Web UI
 
-После старта web-интерфейс на `http://127.0.0.1:9999/`. Endpoints для pairing:
+После старта управление идёт через локальный сокет (`curl --unix-socket ~/.local/share/yandi/run/yandi-ui.sock http://localhost/...`). Endpoints для pairing:
 - `GET /pair/qr` — SVG-QR с PairingPayload.
 - `GET /pair/qr.json` — JSON для копипаста.
 - `POST /pair/issue` — anchor выдаёт SessionToken по pubkey.

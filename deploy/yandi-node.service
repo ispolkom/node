@@ -18,7 +18,7 @@
 # Данные узла (ключи, сопряжённые устройства, файлы, настройки) лежат в ~/.local/share/yandi этого пользователя и от службы не зависят.
 
 [Unit]
-Description=YANDI node (P2P, TLS entry for phones, web UI on 127.0.0.1:9999)
+Description=YANDI node (P2P, TLS entry for phones, shell over the local owner socket)
 Documentation=file:///home/iam/node/DEPLOYMENT.md
 # сеть и брандмауэр должны быть готовы до узла: порты телефонов и звонков открывает /etc/nftables.conf
 After=network-online.target nftables.service

@@ -39,7 +39,7 @@ Requires Rust (stable). On Linux, raise the UDP buffers (see [`DEPLOYMENT.md`](D
 
 ```bash
 cargo build --release
-./target/release/yandi            # start a node; control page: http://127.0.0.1:9999
+./target/release/yandi            # start a node; control is the YANDI shell over the local owner socket (no TCP port)
 ```
 
 On first start the node opens a small page on `127.0.0.1`: create a login password and a master password in the browser; the node then creates its identity (keys, stored encrypted with the master password). Everything else is configured on the web page ("Settings").
