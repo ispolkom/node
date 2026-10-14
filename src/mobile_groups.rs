@@ -411,6 +411,9 @@ fn no_links(fields: &[&str]) -> R<()> {
         if crate::content_policy::find_link(f).is_some() {
             return Err(bad("ссылки в YANDI не передаются: уберите адрес сайта из названия, тематики, описания и ника"));
         }
+        if crate::content_policy::is_reserved_name(f) {
+            return Err(bad("это имя занято узлом: так подписывает сообщения администрация"));
+        }
     }
     Ok(())
 }
@@ -1668,6 +1671,14 @@ pub fn forget_device(device: &str) {
     with_store(|s| s.forget_device(device));
 }
 
+/// Мера владельца узла по жалобе: удалить группу с узла.
+pub fn admin_delete_group(gid: &str) -> Result<(), String> {
+    if !valid_gid(gid) {
+        return Err("неверный номер группы".into());
+    }
+    with_store(|s| s.delete(gid)).map_err(|Fail(_, m)| m.to_string())
+}
+
 fn reply(r: R<Value>) -> Response {
     match r {
         Ok(v) => Json(v).into_response(),
@@ -1943,6 +1954,9 @@ pub(crate) async fn m_create(
 ) -> Response {
     reply((|| {
         let me = device(&dev)?;
+        if crate::mobile_api::restricted_until(&dev) > 0 {
+            return Err(Fail(StatusCode::FORBIDDEN, "владелец узла ограничил создание групп для вас на время"));
+        }
         let kind = match req.kind.as_str() {
             "open" => Kind::Open,
             "invite" => Kind::Invite,

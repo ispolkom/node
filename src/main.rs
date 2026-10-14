@@ -656,6 +656,7 @@ async fn main() -> anyhow::Result<()> {
         env.register(std::sync::Arc::new(yandi::closed_api::GroupsConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ProxyConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::ComplaintsConsumer));
         env.spawn_auto_lock();
         yandi::closed_api::install_global(env.clone());
     }

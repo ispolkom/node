@@ -872,6 +872,52 @@ async fn info(
     )
 }
 
+#[derive(Deserialize)]
+struct ComplaintReq {
+    /// `user` | `group`
+    target_kind: String,
+    target_id: String,
+    #[serde(default)]
+    reason: String,
+    #[serde(default)]
+    text: String,
+    /// выбранные заявителем сообщения (узел E2E-сообщений не читает, доказательства прикладывает сам человек)
+    #[serde(default)]
+    evidence: Vec<String>,
+}
+
+/// Подать жалобу на пользователя или группу. Заявитель нарушителю не виден.
+async fn complaint_submit(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<ComplaintReq>) -> Response {
+    let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    // имя цели узел берёт сам: заявитель не может подписать жалобу чужим именем
+    let name = if req.target_kind == "user" {
+        device_by_peer(&req.target_id).map(|d| d.name).unwrap_or_default()
+    } else {
+        String::new()
+    };
+    match crate::complaints::submit(&me, &req.target_kind, &req.target_id, &name, &req.reason, &req.text, &req.evidence) {
+        Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),
+        Err((c, m)) => (c, Json(json!({"error": m}))).into_response(),
+    }
+}
+
+/// Свои жалобы: статус и ответы узла.
+async fn complaints_mine(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    Json(json!({"complaints": crate::complaints::mine(&me), "measures": crate::complaints::measures_for(&me)})).into_response()
+}
+
+/// Ответ или предупреждение от имени узла: ложится в чат устройства с пометкой «Администрация узла».
+pub async fn pc_admin_message(peer: &str, text: &str) -> Result<(), String> {
+    let marked = format!("🛡 Администрация узла\n{text}");
+    pc_send_to_device(peer, marked).await.map(|_| ())
+}
+
+/// Ограничен ли человек сейчас (мера владельца): до какого времени, 0 — нет.
+pub(crate) fn restricted_until(device_token_hash: &str) -> u64 {
+    device_peer_of(device_token_hash).map(|p| crate::complaints::restricted_until(&p)).unwrap_or(0)
+}
+
 #[derive(Deserialize, Default)]
 struct DeviceProfilePut {
     #[serde(default)]
@@ -1549,6 +1595,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/profile", get(profile_get).put(profile_put))
         .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
         .route("/mobile/users", get(users_list))
+        .route("/mobile/complaints", get(complaints_mine).post(complaint_submit))
         .route("/mobile/users/:peer/avatar", get(user_avatar))
         .route("/mobile/profile/avatar", get(profile_avatar))
         .route("/mobile/contacts", get(contacts).post(contact_put))

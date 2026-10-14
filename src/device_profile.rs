@@ -74,6 +74,9 @@ pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Optio
             if crate::content_policy::find_link(&n).is_some() {
                 return Err(bad("ссылки в YANDI не передаются: в нике не должно быть адреса сайта"));
             }
+            if crate::content_policy::is_reserved_name(&n) {
+                return Err(bad("это имя занято узлом: так подписывает сообщения администрация"));
+            }
             Some(n)
         }
         None => None,

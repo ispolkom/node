@@ -616,6 +616,11 @@ impl WebServer {
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/api/mobile/devices", get(mobile_devices_handler))
             .route("/api/mobile/other-devices", get(mobile_other_devices_handler))
+            .route("/api/complaints", get(complaints_list_handler))
+            .route("/api/complaints/:id", get(complaint_get_handler))
+            .route("/api/complaints/:id/reply", post(complaint_reply_handler))
+            .route("/api/complaints/:id/status", post(complaint_status_handler))
+            .route("/api/complaints/:id/measure", post(complaint_measure_handler))
             .route("/api/mobile/phone-action", post(mobile_phone_action_handler))
             .route(
                 "/api/mobile/devices/:id",
@@ -5481,6 +5486,97 @@ async fn mobile_device_remove_handler(
 }
 
 /// QR для приложения на телефоне: адрес узла, порт TLS-входа, отпечаток сертификата и новый разовый код (живёт 5 минут).
+fn complaint_err(c: StatusCode, m: String) -> Response {
+    (c, Json(serde_json::json!({"error": m}))).into_response()
+}
+
+async fn complaints_list_handler() -> Response {
+    Json(serde_json::json!({"complaints": crate::complaints::list()})).into_response()
+}
+
+async fn complaint_get_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    match crate::complaints::get(&id) {
+        Some(v) => Json(v).into_response(),
+        None => complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ComplaintReply {
+    /// `reporter` — ответить заявителю, `target` — нарушителю (только если это пользователь)
+    side: String,
+    text: String,
+}
+
+async fn complaint_reply_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintReply>) -> Response {
+    let Some(c) = crate::complaints::find(&id) else { return complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()) };
+    let to = match b.side.as_str() {
+        "reporter" => c.reporter.clone(),
+        "target" if c.target_kind == "user" => c.target_id.clone(),
+        _ => return complaint_err(StatusCode::BAD_REQUEST, "адресат: заявитель или нарушитель-пользователь".into()),
+    };
+    if let Err((code, m)) = crate::complaints::add_message(&id, &b.side, "admin", &b.text) {
+        return complaint_err(code, m);
+    }
+    // доставка от имени узла; если телефона уже нет, запись в журнале остаётся
+    let delivered = crate::mobile_api::pc_admin_message(&to, &b.text).await.is_ok();
+    Json(serde_json::json!({"ok": true, "delivered": delivered})).into_response()
+}
+
+#[derive(Deserialize)]
+struct ComplaintStatus {
+    status: String,
+}
+
+async fn complaint_status_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintStatus>) -> Response {
+    match crate::complaints::set_status(&id, &b.status) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err((c, m)) => complaint_err(c, m),
+    }
+}
+
+#[derive(Deserialize)]
+struct ComplaintMeasure {
+    /// `warn` | `restrict` | `remove` | `delete_group`
+    kind: String,
+    #[serde(default)]
+    note: String,
+    /// для `restrict`: на сколько часов (1–720)
+    #[serde(default)]
+    hours: u64,
+}
+
+async fn complaint_measure_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintMeasure>) -> Response {
+    let Some(c) = crate::complaints::find(&id) else { return complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()) };
+    let is_user = c.target_kind == "user";
+    let until = if b.kind == "restrict" { crate::complaints::now_ms() + b.hours.clamp(1, 720) * 3600 * 1000 } else { 0 };
+    let result: Result<(), String> = match b.kind.as_str() {
+        "warn" if is_user => {
+            let text = if b.note.trim().is_empty() { "Предупреждение: ваше поведение нарушает правила узла. При повторении будут применены ограничения.".to_string() } else { b.note.clone() };
+            let _ = crate::complaints::add_message(&id, "target", "admin", &text);
+            crate::mobile_api::pc_admin_message(&c.target_id, &text).await.map_err(|e| format!("предупреждение записано, доставить не удалось: {e}"))
+        }
+        "restrict" if is_user => {
+            let text = format!("Ограничение на {} ч.: создание групп и отправка файлов недоступны. {}", b.hours.clamp(1, 720), b.note);
+            let _ = crate::complaints::add_message(&id, "target", "admin", &text);
+            let _ = crate::mobile_api::pc_admin_message(&c.target_id, &text).await;
+            Ok(())
+        }
+        "remove" if is_user => {
+            if crate::mobile_api::remove_device(&c.target_id) { Ok(()) } else { Err("устройство не найдено или не удалено".into()) }
+        }
+        "delete_group" if !is_user => crate::mobile_groups::admin_delete_group(&c.target_id),
+        _ => return complaint_err(StatusCode::BAD_REQUEST, "эта мера к этой жалобе не применима".into()),
+    };
+    if let Err(e) = crate::complaints::add_measure(&id, &b.kind, &b.note, until) {
+        return complaint_err(e.0, e.1);
+    }
+    match result {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(m) => Json(serde_json::json!({"ok": true, "warning": m})).into_response(),
+    }
+}
+
 async fn mobile_pairing_handler(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,

@@ -113,6 +113,27 @@ impl Consumer for SelfConsumer {
     }
 }
 
+/// Жалобы пользователей и журнал мер: закрытый уровень.
+pub struct ComplaintsConsumer;
+
+impl Consumer for ComplaintsConsumer {
+    fn domain(&self) -> &'static str {
+        crate::closed_env::DOMAIN_COMPLAINTS
+    }
+    fn migrate(&self, _old: Option<[u8; 32]>, _new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move { Ok(0) })
+    }
+    fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::complaints::unlock(key) })
+    }
+    fn lock(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::complaints::lock() })
+    }
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::complaints::erase() })
+    }
+}
+
 /// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
 pub struct ProxyConsumer;
 

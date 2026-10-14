@@ -97,6 +97,14 @@ fn link_ranges(text: &str) -> Vec<(usize, usize)> {
     out
 }
 
+/// Имена, которыми нельзя называться: так подписывает сообщения сам узел («Администрация узла»), подделка этого имени — обман.
+pub fn is_reserved_name(s: &str) -> bool {
+    let l = s.to_lowercase();
+    ["администрац", "administrat", "служба узла", "служба поддержки", "техподдержк", "support", "moderator узла"]
+        .iter()
+        .any(|k| l.contains(k))
+}
+
 /// Первая найденная ссылка (для сообщения отправителю), если есть.
 pub fn find_link(text: &str) -> Option<String> {
     link_ranges(text).first().map(|&(s, e)| text[s..e].to_string())
@@ -247,6 +255,14 @@ mod tests {
         assert_eq!(strip_links("без ссылок"), "без ссылок");
         assert!(check_text("тут example.com").is_err());
         assert!(check_text("всё чисто").is_ok());
+    }
+
+    #[test]
+    fn administration_names_are_reserved() {
+        assert!(is_reserved_name("Администрация узла"));
+        assert!(is_reserved_name("ADMINISTRATOR Yandi"));
+        assert!(is_reserved_name("Техподдержка"));
+        assert!(!is_reserved_name("Аня"));
     }
 
     #[test]

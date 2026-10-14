@@ -193,6 +193,9 @@ pub struct StartReq {
 /// Начать передачу: узел выдаёт номер, под которым отправитель заливает куски.
 pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<StartReq>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     // получатель — другой телефон владельца или сам компьютер (переписка телефона с веб-чатом узла, см. mobile_self)
     if req.to_peer_id == me || !(is_device_peer(&req.to_peer_id) || crate::mobile_api::is_node_peer(&req.to_peer_id)) {
         return err(StatusCode::BAD_REQUEST, "файлы можно отправлять только на другое сопряжённое устройство");
