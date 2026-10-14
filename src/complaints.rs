@@ -183,6 +183,17 @@ pub fn submit(
         return Err((StatusCode::CONFLICT, "жалоба на это уже рассматривается".into()));
     }
     if s.items.len() >= MAX_COMPLAINTS {
+        // закрытые и без действующей меры уходят из очереди — самые старые первыми, чтобы она не забивалась навсегда
+        let mut gone: Vec<(u64, String)> = s.items.iter()
+            .filter(|c| c.status == "closed" && !c.measures.iter().any(|m| m.until_ms > now))
+            .map(|c| (c.ts, c.id.clone()))
+            .collect();
+        gone.sort();
+        let drop_n = (s.items.len() + 1 - MAX_COMPLAINTS).min(gone.len());
+        let ids: Vec<String> = gone.into_iter().take(drop_n).map(|(_, id)| id).collect();
+        s.items.retain(|c| !ids.contains(&c.id));
+    }
+    if s.items.len() >= MAX_COMPLAINTS {
         return Err((StatusCode::INSUFFICIENT_STORAGE, "очередь жалоб переполнена".into()));
     }
     let id = new_id();
@@ -319,6 +330,38 @@ pub(crate) mod tests {
         let _ = std::fs::remove_file(path());
         std::mem::forget(d);
         unlock([7; 32]);
+    }
+
+    #[test]
+    fn closed_complaints_do_not_fill_the_queue_for_good() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        fresh();
+        {
+            let mut s = lock_state();
+            for i in 0..MAX_COMPLAINTS {
+                let mut c = s.items.first().cloned().unwrap_or_else(|| Complaint {
+                    id: String::new(), ts: 0, reporter: String::new(), target_kind: "user".into(), target_id: String::new(),
+                    target_name: String::new(), reason: "spam".into(), text: "x".into(), evidence: vec![], status: "closed".into(),
+                    thread: vec![], measures: vec![],
+                });
+                c.id = format!("c{i}");
+                c.ts = i as u64 + 1;
+                c.reporter = format!("rep{i}");
+                c.status = "closed".into();
+                s.items.push(c);
+            }
+        }
+        let a = "a".repeat(64);
+        assert!(submit(&a, "user", &"b".repeat(64), "Боб", "spam", "спамит", &[]).is_ok(), "закрытые вытесняются");
+        assert!(lock_state().items.len() <= MAX_COMPLAINTS);
+        // открытые не вытесняются: очередь из открытых жалоб остаётся переполненной
+        {
+            let mut s = lock_state();
+            for c in s.items.iter_mut() {
+                c.status = "new".into();
+            }
+        }
+        assert_eq!(submit(&a, "user", &"c".repeat(64), "Вика", "spam", "тоже", &[]).unwrap_err().0, StatusCode::INSUFFICIENT_STORAGE);
     }
 
     #[test]
