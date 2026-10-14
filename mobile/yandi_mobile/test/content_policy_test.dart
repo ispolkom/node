@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/content_policy.dart';
 
@@ -61,5 +62,14 @@ void main() {
     }
     expect(stripLinks('зайди на site.xn--p1ai тут').contains('xn--'), isFalse, reason: 'зона вычищается целиком');
     expect(findLink('мы встретились. потом разошлись'), isNull);
+  });
+
+  test('текстовое содержимое: единое правило с Rust', () {
+    expect(contentProblem('a.txt', 'hello'.codeUnits), isNull);
+    expect(contentProblem('a.txt', 'привет'.codeUnits.isEmpty ? [] : utf8.encode('привет')), isNull);
+    expect(contentProblem('a.txt', utf8.encode('привет').sublist(0, 5)), isNull, reason: 'обрыв знака на краю головы');
+    expect(contentProblem('a.txt', []), isNotNull);
+    expect(contentProblem('a.txt', [0xff, 0xff, 0xff, 0xff]), isNotNull);
+    expect(contentProblem('a.txt', [0x61, 0, 0x62]), isNotNull);
   });
 }

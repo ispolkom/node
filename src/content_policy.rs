@@ -210,7 +210,14 @@ pub fn attachment_allowed(name: &str) -> Result<(), String> {
 }
 
 fn is_text_like(head: &[u8]) -> bool {
-    !head.is_empty() && !head.contains(&0) && std::str::from_utf8(head).is_ok() || head.iter().all(|b| *b != 0) && head.len() < 4
+    // единое правило для Rust и обеих Dart-копий: непустое, без NUL, корректный UTF-8 (обрыв многобайтового знака на краю головы допустим)
+    if head.is_empty() || head.contains(&0) {
+        return false;
+    }
+    match std::str::from_utf8(head) {
+        Ok(_) => true,
+        Err(e) => e.error_len().is_none(),
+    }
 }
 
 /// Первая запись ZIP-контейнера должна быть из набора документа: произвольный архив, переименованный в .docx, не проходит.
@@ -290,6 +297,16 @@ mod tests {
         v.extend_from_slice(first.as_bytes());
         v.extend_from_slice(&[0u8; 20]);
         v
+    }
+
+    #[test]
+    fn text_like_rule_is_the_same_everywhere() {
+        assert!(is_text_like(b"hello"));
+        assert!(is_text_like("привет".as_bytes()));
+        assert!(is_text_like(&"привет".as_bytes()[..5]), "обрыв многобайтового знака на краю головы");
+        assert!(!is_text_like(b""), "пустое");
+        assert!(!is_text_like(&[0xff, 0xff, 0xff, 0xff]), "не UTF-8");
+        assert!(!is_text_like(b"ab\0cd"), "NUL");
     }
 
     #[test]

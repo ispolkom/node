@@ -2,6 +2,8 @@
 /// Те же правила, что у узла (src/content_policy.rs) и у оболочки ПК: менять только вместе.
 library;
 
+import 'dart:convert';
+
 import 'dart:io';
 
 const String linkRemoved = '[ссылка удалена]';
@@ -120,8 +122,29 @@ String? attachmentProblem(String name) {
 }
 
 bool _textLike(List<int> head) {
-  if (head.isEmpty) return false;
-  return !head.contains(0);
+  if (head.isEmpty || head.contains(0)) return false;
+  // корректный UTF-8; обрыв многобайтового знака на краю головы допустим (как в Rust)
+  for (var cut = 0; cut <= 3 && cut < head.length; cut++) {
+    try {
+      utf8.decode(head.sublist(0, head.length - cut));
+      return cut == 0 || _tailIsPartialChar(head, cut);
+    } on FormatException {
+      continue;
+    }
+  }
+  return false;
+}
+
+/// Хвост из `cut` байт — начало многобайтового знака, оборванного границей головы (а не испорченные данные).
+bool _tailIsPartialChar(List<int> head, int cut) {
+  final start = head.length - cut;
+  final lead = head[start];
+  final need = lead >= 0xF0 ? 4 : lead >= 0xE0 ? 3 : lead >= 0xC0 ? 2 : 0;
+  if (need == 0 || cut >= need) return false;
+  for (var i = start + 1; i < head.length; i++) {
+    if (head[i] & 0xC0 != 0x80) return false;
+  }
+  return true;
 }
 
 /// Первая запись ZIP-контейнера должна быть из набора документа: произвольный архив под видом .docx не проходит.
