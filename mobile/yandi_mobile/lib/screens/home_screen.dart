@@ -6,6 +6,7 @@ import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
+import '../widgets/secure_text_field.dart';
 import 'chat_screen.dart';
 import 'add_contact_screen.dart';
 import 'qr_scan_screen.dart';
@@ -154,7 +155,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
         title: const Text('Переименовать контакт', style: TextStyle(color: AppTheme.text)),
-        content: TextField(
+        content: SecureTextField(
           key: const ValueKey('rename-field'),
           controller: ctrl,
           autofocus: true,

@@ -5,6 +5,7 @@ import '../services/app_state.dart';
 import '../services/vault_lock.dart';
 import 'vault_screens.dart';
 import '../theme.dart';
+import '../widgets/secure_text_field.dart';
 import '../widgets/avatar_circle.dart';
 
 const _emojis = ['😀','😎','🤓','🥳','😇','🤠','😺','🐱','🐶','🦊','🐼','🦁','🐯','🐸','🐵','🦉','🐧','🐢','🦄','🐙',
@@ -21,7 +22,7 @@ class SettingsScreen extends StatelessWidget {
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
         title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
-        content: TextField(
+        content: SecureTextField(
           key: const ValueKey('nick-field'),
           controller: ctl,
           maxLength: 40,

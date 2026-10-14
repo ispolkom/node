@@ -5,6 +5,7 @@ import '../models/group_invite.dart';
 import '../services/app_state.dart';
 import '../services/group_api.dart';
 import '../theme.dart';
+import '../widgets/secure_text_field.dart';
 import 'group_chat_screen.dart';
 
 /// Вкладка «Группы»: мои группы, открытые группы узла, вступление по приглашению.
@@ -39,7 +40,7 @@ class _GroupsTabState extends State<GroupsTab> {
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
         title: Text(title, style: const TextStyle(color: AppTheme.text)),
-        content: TextField(controller: c, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: 'Ваше имя', helperText: hint)),
+        content: SecureTextField(controller: c, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: 'Ваше имя', helperText: hint)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
           TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Продолжить')),
@@ -53,7 +54,11 @@ class _GroupsTabState extends State<GroupsTab> {
     final messenger = ScaffoldMessenger.of(context);
     final name = await _askName(g.isOpen ? 'Вступить в «${g.name}»' : 'Попросить приглашение в «${g.name}»',
         g.isOpen ? 'Узел его не видит: оно пишется зашифрованно' : 'Владелец группы увидит ваше имя и решит, прислать ли приглашение');
-    if (name == null || name.isEmpty) return;
+    if (name == null) return;
+    if (name.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('Введите имя: без него владелец не поймёт, кто просит')));
+      return;
+    }
     try {
       if (g.isOpen) {
         await state.groups!.join(g.id, displayName: name);
@@ -228,13 +233,13 @@ class _GroupsTabState extends State<GroupsTab> {
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             const Text('Новая группа', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
             const SizedBox(height: 12),
-            TextField(controller: nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
-            TextField(controller: topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика (обязательно)', hintText: 'например: Садоводство')),
+            SecureTextField(controller: nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
+            SecureTextField(controller: topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика (обязательно)', hintText: 'например: Садоводство')),
             Wrap(spacing: 6, runSpacing: 0, children: [
               for (final t in const ['Семья', 'Друзья', 'Работа', 'Новости', 'Политика', 'Юмор', 'Садоводство', 'Технологии', 'Музыка', 'Игры', 'Авто', 'Спорт'])
                 ActionChip(label: Text(t, style: const TextStyle(fontSize: 12)), visualDensity: VisualDensity.compact, onPressed: () => setS(() => topicCtrl.text = t)),
             ]),
-            TextField(controller: aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Описание (необязательно)')),
+            SecureTextField(controller: aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Описание (необязательно)')),
             const SizedBox(height: 8),
             RadioListTile<String>(
               value: 'invite', groupValue: kind, activeColor: AppTheme.accent, dense: true,
@@ -303,10 +308,10 @@ class _GroupsTabState extends State<GroupsTab> {
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text('Вступить в группу', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
-              TextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text),
+              SecureTextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text),
                   decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
               const SizedBox(height: 8),
-              TextField(controller: codeCtrl, style: const TextStyle(color: AppTheme.text),
+              SecureTextField(controller: codeCtrl, style: const TextStyle(color: AppTheme.text),
                   decoration: const InputDecoration(labelText: 'Приглашение', hintText: 'YANDI-GROUP-1:…')),
               const SizedBox(height: 8),
               if (error != null) Padding(padding: const EdgeInsets.only(bottom: 8), child: Text(error!, style: const TextStyle(color: AppTheme.incoming))),
@@ -354,7 +359,7 @@ Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
     builder: (ctx) => AlertDialog(
       backgroundColor: AppTheme.surface,
       title: Text('Вступить в «${m.name.isEmpty ? 'группу' : m.name}»?', style: const TextStyle(color: AppTheme.text)),
-      content: TextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
+      content: SecureTextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
       actions: [
         TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
         TextButton(onPressed: () => Navigator.pop(ctx, nameCtrl.text.trim()), child: const Text('Вступить')),
