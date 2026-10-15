@@ -483,9 +483,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (connectedHere || activeNode == null) {
       final next = await nodeManager.selectBest();
       if (next != null) {
-        _api?.switchNode(next);
-        _ws?.switchNode(next);
-        chatBg.start(next);
+        _switchTo(next);
       } else {
         _ws?.disconnect();
         chatBg.stop();
@@ -495,14 +493,24 @@ class AppState extends ChangeNotifier implements FilesHost {
     notifyListeners();
   }
 
+  /// Единственный способ сменить узел у живых служб. Сервис групп привязан к номеру узла (список «известных групп» у каждого свой),
+  /// поэтому при смене он пересоздаётся: старый, оставшись с чужим списком, принял бы группы прежнего узла за удалённые и стёр ключи.
+  void _switchTo(TrustedNode next) {
+    groups?.retire();
+    _api?.switchNode(next);
+    _ws?.switchNode(next);
+    if (_api != null) {
+      groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), nodeKey: next.id);
+    }
+    chatBg.start(next);
+  }
+
   // ── Failover ───────────────────────────────────────────────────────────────
 
   Future<void> _onConnectionLost() async {
     final next = await nodeManager.failover();
     if (next != null) {
-      _api?.switchNode(next);
-      _ws?.switchNode(next);
-      chatBg.start(next);
+      _switchTo(next);
       unawaited(_syncInbox());
     }
   }

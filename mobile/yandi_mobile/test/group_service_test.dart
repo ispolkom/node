@@ -400,6 +400,23 @@ void main() {
     expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи группы узла A на месте');
   });
 
+  test('снятый с работы сервис (узел сменился) не стирает группы, даже если его API уже смотрит на другой узел', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    await a.syncAndAnnounce();
+    await a.send(node.gid, GroupKind.text, {'t': 'привет'});
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull);
+    a.retire();
+    node.members.remove('bob'); // «узел» (уже другой) этих групп не показывает
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история на месте');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи на месте');
+  });
+
   test('группа удалена на узле (или участника исключили): пропадает из списка, данные на телефоне стираются сами', () async {
     await owner.sync();
     await bobJoins();

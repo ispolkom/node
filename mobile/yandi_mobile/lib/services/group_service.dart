@@ -30,6 +30,11 @@ class GroupService {
 
   GroupService(this.api, this.store, {this.onChanged, this.nodeKey = ''});
 
+  bool _retired = false;
+
+  /// Сервис снят с работы (узел сменился): его незавершённая синхронизация больше ничего не стирает.
+  void retire() => _retired = true;
+
   String get _knownKey => nodeKey.isEmpty ? 'grp_known' : 'grp_known_$nodeKey';
 
   List<GroupInfo> groups = const [];
@@ -516,6 +521,7 @@ class GroupService {
     // Предохранитель: пустой список при многих известных группах — скорее сбой, чем исчезновение всех сразу.
     if (gone.isNotEmpty && !(listed.isEmpty && known.length > 3)) {
       for (final g in List.of(gone)) {
+        if (_retired) return;
         try { await forgetLocal(g.$1); } catch (_) {}
       }
     }
