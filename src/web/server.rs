@@ -3406,9 +3406,14 @@ fn is_owner_content_path(path: &str) -> bool {
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
 
+/// Звонки: начать, принять, входящие, список и сокет сигнализации требуют открытой среды; завершить и отклонить можно всегда (очистка).
+fn is_locked_media_path(path: &str) -> bool {
+    path.starts_with("/api/media/") && !path.ends_with("/end") && !path.ends_with("/reject")
+}
+
 async fn locked_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     #[cfg(unix)]
-    if is_owner_content_path(req.uri().path()) && crate::closed_api::is_locked() {
+    if (is_owner_content_path(req.uri().path()) || is_locked_media_path(req.uri().path())) && crate::closed_api::is_locked() {
         return (StatusCode::LOCKED, Json(serde_json::json!({"status": "locked", "message": "закрытая среда заперта: введите пароль"}))).into_response();
     }
     next.run(req).await
@@ -6093,6 +6098,16 @@ mod gateways_file_tests {
 #[cfg(test)]
 mod step_up_tests {
     use super::*;
+
+    #[test]
+    fn calls_need_an_open_environment_but_can_always_be_ended() {
+        for p in ["/api/media/call/start", "/api/media/video/call/start", "/api/media/ws/abc", "/api/media/incoming-call", "/api/media/call/x/accept", "/api/media/calls"] {
+            assert!(is_locked_media_path(p), "{p}");
+        }
+        for p in ["/api/media/call/end", "/api/media/call/x/end", "/api/media/call/x/reject", "/api/media/video/call/end", "/api/status"] {
+            assert!(!is_locked_media_path(p), "{p}");
+        }
+    }
 
     /// Меры жалобы, уничтожающие группу, требуют пароль узла: без него — 403, с неверным — отказ, группа цела.
     #[tokio::test]

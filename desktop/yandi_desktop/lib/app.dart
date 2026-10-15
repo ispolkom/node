@@ -745,7 +745,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     ? null
                     : () async {
                         final v = vault;
-                        if (v != null && v.configured && v.unlocked) {
+                        // состояние ещё неизвестно (быстрый вход-выход) — запираем на всякий случай: блокировка идемпотентна
+                        if (v == null || (v.configured && v.unlocked)) {
                           await act('/api/vault/lock', {});
                           if (!mounted || lockUnconfirmed) return;
                         }
