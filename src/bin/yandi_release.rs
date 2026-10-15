@@ -152,14 +152,9 @@ async fn main() {
             );
             let names = yandi::update_check::download(&found, &channels, &out).await.unwrap_or_else(|e| die(&format!("ОШИБКА: {e}")));
             // манифест и подпись кладутся рядом: каталог проверяется командой verify как обычный выпуск
-            let c = reqwest::Client::new();
-            for n in [MANIFEST_NAME, SIGNATURE_NAME] {
-                let body = c.get(format!("{}{}", found.channel.base, n)).send().await.and_then(|r| r.error_for_status());
-                match body {
-                    Ok(r) => std::fs::write(out.join(n), r.bytes().await.unwrap_or_default()).unwrap_or_else(|e| die(&e.to_string())),
-                    Err(e) => die(&format!("{n}: {e}")),
-                }
-            }
+            // исходные проверенные байты, не повторный запрос к сети
+            std::fs::write(out.join(MANIFEST_NAME), &found.raw_manifest).unwrap_or_else(|e| die(&e.to_string()));
+            std::fs::write(out.join(SIGNATURE_NAME), found.raw_sig.as_bytes()).unwrap_or_else(|e| die(&e.to_string()));
             println!("скачано и проверено по сумме: {} (каталог {})", names.join(", "), out.display());
             println!("проверка целиком: yandi-release verify {} --pubkey <ключ> --min-seq {}", out.display(), min_seq);
         }

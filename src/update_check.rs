@@ -63,6 +63,9 @@ pub fn is_newer(candidate: &str, own: &str) -> bool {
 pub struct Found {
     pub manifest: Manifest,
     pub channel: Channel,
+    /// Исходные проверенные байты манифеста и подпись (hex): сохраняются как есть, повторно из сети не берутся.
+    pub raw_manifest: Vec<u8>,
+    pub raw_sig: String,
 }
 
 /// Сколько ждать манифест и подпись одного канала целиком.
@@ -122,6 +125,11 @@ async fn get_limited(c: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<u
 
 /// Манифест одного канала: скачан, подпись и срок проверены.
 pub async fn fetch_manifest(channel: &Channel, vk: &VerifyingKey, min_seq: u64, now: u64) -> Result<Manifest, String> {
+    fetch_manifest_raw(channel, vk, min_seq, now).await.map(|(m, _, _)| m)
+}
+
+/// То же, но вместе с проверенными исходными байтами манифеста и подписью.
+pub async fn fetch_manifest_raw(channel: &Channel, vk: &VerifyingKey, min_seq: u64, now: u64) -> Result<(Manifest, Vec<u8>, String), String> {
     let c = client()?;
     let bytes = get_limited(&c, &format!("{}{}", channel.base, MANIFEST_NAME), MAX_MANIFEST as u64).await?;
     let sig = get_limited(&c, &format!("{}{}", channel.base, SIGNATURE_NAME), 512).await?;
@@ -130,7 +138,7 @@ pub async fn fetch_manifest(channel: &Channel, vk: &VerifyingKey, min_seq: u64, 
     if m.expires != 0 && now > m.expires {
         return Err("срок действия манифеста истёк (свежего подписанного файла нет)".into());
     }
-    Ok(m)
+    Ok((m, bytes, sig))
 }
 
 /// Опросить все каналы; вернуть самый новый (по seq) манифест с верной подписью и ошибки по каналам.
@@ -139,14 +147,14 @@ pub async fn check(channels: &[Channel], vk: &VerifyingKey, min_seq: u64, now: u
     let mut errors = Vec::new();
     for ch in channels {
         // у каждого канала свой срок: медлительный первый не откладывает резервный
-        let r = match tokio::time::timeout(Duration::from_secs(CHANNEL_DEADLINE_SECS), fetch_manifest(ch, vk, min_seq, now)).await {
+        let r = match tokio::time::timeout(Duration::from_secs(CHANNEL_DEADLINE_SECS), fetch_manifest_raw(ch, vk, min_seq, now)).await {
             Ok(r) => r,
             Err(_) => Err("канал не ответил за отведённое время".to_string()),
         };
         match r {
-            Ok(m) => {
+            Ok((m, raw_manifest, raw_sig)) => {
                 if best.as_ref().map_or(true, |b| m.seq > b.manifest.seq) {
-                    best = Some(Found { manifest: m, channel: ch.clone() });
+                    best = Some(Found { manifest: m, channel: ch.clone(), raw_manifest, raw_sig });
                 }
             }
             Err(e) => errors.push(format!("{}: {e}", ch.name)),

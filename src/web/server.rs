@@ -3618,8 +3618,8 @@ async fn api_files_upload(
     let file_size = file_data.len();
 
     info!(
-        "📤 File uploaded: {} ({} bytes) -> {:?}",
-        filename, file_size, file_path
+        "📤 File uploaded ({} bytes)",
+        file_size
     );
 
     Json(serde_json::json!({
@@ -3757,8 +3757,7 @@ async fn api_files_send_direct(
     }
 
     info!(
-        "📤 Sending file '{}' ({} bytes) to {} directly from memory",
-        filename,
+        "📤 Sending file ({} bytes) to {} directly from memory",
         file_size,
         crate::util::mask_hash_id(&peer_hash)
     );
@@ -3775,8 +3774,8 @@ async fn api_files_send_direct(
     {
         Ok(file_id) => {
             info!(
-                "✅ File transfer started: {} (file_id: {})",
-                filename, file_id
+                "✅ File transfer started (file_id: {})",
+                file_id
             );
             Json(serde_json::json!({
                 "status": "success",
@@ -4103,10 +4102,9 @@ async fn api_files_send_chunk(
     }
 
     info!(
-        "📦 Received chunk {}/{} for '{}' ({} bytes)",
+        "📦 Received chunk {}/{} ({} bytes)",
         chunk_index + 1,
         total_chunks,
-        upload.filename,
         chunk_data.len()
     );
 
@@ -4211,7 +4209,7 @@ async fn api_files_send_chunk(
             Ok(_) => {
                 info!(
                     "✅ Streaming P2P transfer finalized for file {}",
-                    upload_filename
+                    file_id
                 );
                 CHUNK_UPLOADS.lock().await.remove(&file_id);
                 return Json(serde_json::json!({
@@ -4305,8 +4303,7 @@ async fn api_files_send_uploaded(
         .to_string();
 
     info!(
-        "📤 Sending file '{}' ({} bytes) to {} with chunking",
-        filename,
+        "📤 Sending file ({} bytes) to {} with chunking",
         file_data.len(),
         crate::util::mask_hash_id(&peer_hash)
     );
@@ -4329,8 +4326,8 @@ async fn api_files_send_uploaded(
     {
         Ok(file_id) => {
             info!(
-                "✅ File transfer started: {} (file_id: {})",
-                filename, file_id
+                "✅ File transfer started (file_id: {})",
+                file_id
             );
             Json(serde_json::json!({
                 "status": "success",
@@ -4524,8 +4521,8 @@ async fn api_files_content(
                 .and_then(|v| v.to_str().ok())
             {
                 debug!(
-                    "📡 File content request: file_id={}, filename={}, range={}, media={}",
-                    file_id, filename, range_header, is_streaming_media
+                    "📡 File content request: file_id={}, range={}, media={}",
+                    file_id, range_header, is_streaming_media
                 );
 
                 if !is_streaming_media {
