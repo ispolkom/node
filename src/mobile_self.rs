@@ -255,7 +255,14 @@ fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
             }
         },
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); используется временная пара", enc.display());
+            // файл есть, но прочесть его нельзя: заменять нечем и нельзя — новая пара не записывается поверх (прежняя личность
+            // иначе была бы потеряна безвозвратно); работает временная пара, которая нигде не сохраняется
+            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); используется временная пара, файл не тронут", enc.display());
+            let mut x = [0u8; 32];
+            let mut e = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut x);
+            rand::thread_rng().fill_bytes(&mut e);
+            return make_keys(x, e);
         }
         Err(_) => {}
     }
@@ -1139,6 +1146,30 @@ mod tests {
         assert!(matches!(classify("\u{1}yandi-rcpt:{\"kind\":\"delivered\",\"ids\":[\"1791\"]}".into()), Envelope::Receipt { read: false, .. }));
         assert_eq!(incoming_id("d", "1"), incoming_id("d", "1"));
         assert_ne!(incoming_id("d", "1"), incoming_id("e", "1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_is_never_replaced_by_a_new_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let master = [9u8; 32];
+        // настоящая личность записывается как обычно
+        let first = load_protected(dir.path(), Some(&master));
+        let enc = dir.path().join("mobile_self.enc");
+        let before = std::fs::read(&enc).unwrap();
+        // файл временно нечитаем (режим 000): новая пара поверх него не пишется
+        std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&enc).is_ok() {
+            return; // запуск от root: режим не мешает чтению, проверять нечего
+        }
+        let temp = load_protected(dir.path(), Some(&master));
+        std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&enc).unwrap(), before, "прежний файл личности не заменён");
+        assert!(!dir.path().join("mobile_self.json").exists(), "открытый промежуточный файл не создан");
+        let again = load_protected(dir.path(), Some(&master));
+        assert_eq!(again.x_pub, first.x_pub, "после починки прав — прежняя личность");
+        assert_ne!(temp.x_pub, first.x_pub, "временная пара — другая");
     }
 
     #[test]
