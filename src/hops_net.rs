@@ -150,6 +150,38 @@ impl ExitStream {
     }
 }
 
+/// Запись в цель из очереди потока. И ожидание данных, и сама запись прерываются закрытием потока (watch): цель, перестав читать,
+/// не удерживает ни задачу, ни сокет.
+async fn exit_writer<W: tokio::io::AsyncWrite + Unpin>(
+    mut wr: W,
+    mut rx: mpsc::UnboundedReceiver<Option<Vec<u8>>>,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+    queued: Arc<std::sync::atomic::AtomicUsize>,
+    active: Arc<std::sync::atomic::AtomicU64>,
+    started: std::time::Instant,
+) {
+    use tokio::io::AsyncWriteExt;
+    loop {
+        let next = tokio::select! {
+            m = rx.recv() => m,
+            _ = cancel.changed() => break,
+        };
+        let Some(Some(d)) = next else { break };
+        let n = d.len();
+        let r = tokio::select! {
+            r = wr.write_all(&d) => Some(r),
+            _ = cancel.changed() => None,
+        };
+        queued.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
+        let Some(r) = r else { break };
+        active.store(started.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
+        if r.is_err() {
+            break;
+        }
+    }
+    let _ = wr.shutdown().await;
+}
+
 struct ExitCircuit {
     streams: HashMap<u16, ExitStream>,
     begins: (u64, u32),
@@ -393,18 +425,13 @@ impl Hops {
                 c.streams.insert(stream, ExitStream { to_target: tx, queued: queued.clone(), reorder: Reorder::default(), cancel: cancel_tx });
             }
             me.reply(handle, hops::CMD_CONNECTED, stream, &[]);
+            // последняя активность в любом направлении (секунды от начала потока): молчание цели не повод рвать идущую загрузку
+            let started = std::time::Instant::now();
+            let last_active = Arc::new(std::sync::atomic::AtomicU64::new(0));
             // от отправителя к цели
-            tokio::spawn(async move {
-                while let Some(Some(d)) = rx.recv().await {
-                    let n = d.len();
-                    let r = wr.write_all(&d).await;
-                    queued.fetch_sub(n, std::sync::atomic::Ordering::Relaxed);
-                    if r.is_err() {
-                        break;
-                    }
-                }
-                let _ = wr.shutdown().await;
-            });
+            let mut wcancel = cancel_rx.clone();
+            let w_active = last_active.clone();
+            tokio::spawn(exit_writer(wr, rx, wcancel, queued, w_active, started));
             // от цели к отправителю
             let mut seq = 0u32;
             let mut buf = vec![0u8; CHUNK];
@@ -413,15 +440,21 @@ impl Hops {
                 while OUT_QUEUED.load(std::sync::atomic::Ordering::Relaxed) > OUT_QUEUE_HIGH {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                // чтение прекращается при закрытии цепочки/потока и при долгом молчании цели
+                // чтение прекращается при закрытии цепочки/потока и при долгом простое (нет ни чтения, ни записи)
                 let read = tokio::select! {
                     r = tokio::time::timeout(EXIT_STREAM_IDLE, rd.read(&mut buf)) => r,
                     _ = cancel_rx.changed() => break,
                 };
                 match read {
-                    Err(_) => break,
+                    Err(_) => {
+                        let idle = started.elapsed().as_secs().saturating_sub(last_active.load(std::sync::atomic::Ordering::Relaxed));
+                        if idle >= EXIT_STREAM_IDLE.as_secs() {
+                            break;
+                        }
+                    }
                     Ok(Ok(0)) | Ok(Err(_)) => break,
                     Ok(Ok(n)) => {
+                        last_active.store(started.elapsed().as_secs(), std::sync::atomic::Ordering::Relaxed);
                         me.reply(handle, hops::CMD_DATA, stream, &with_seq(seq, &buf[..n]));
                         seq += 1;
                     }
@@ -845,5 +878,20 @@ mod exit_stream_tests {
         assert!(matches!(rx.recv().await, Some(None)), "писатель получает конец");
         cancel_rx.changed().await.unwrap();
         assert!(*cancel_rx.borrow(), "читатель получает отмену");
+    }
+
+    /// Цель перестала читать: зависшая запись прерывается закрытием потока, задача завершается.
+    #[tokio::test]
+    async fn a_stuck_write_to_the_target_is_cancelled_by_close() {
+        let (client_side, _server_side_never_reads) = tokio::io::duplex(8);
+        let (tx, rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+        let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let h = tokio::spawn(exit_writer(client_side, rx, cancel_rx, queued, Arc::new(std::sync::atomic::AtomicU64::new(0)), std::time::Instant::now()));
+        tx.send(Some(vec![7u8; 4096])).unwrap(); // не поместится в буфер на 8 байт: запись зависнет
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!h.is_finished(), "запись висит");
+        let _ = cancel_tx.send(true);
+        tokio::time::timeout(Duration::from_secs(2), h).await.expect("задача завершилась после закрытия").unwrap();
     }
 }
