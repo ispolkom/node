@@ -155,11 +155,15 @@ impl SessionToken {
     }
 }
 
-/// HMAC-resume: blake3 keyed hash от (session_id_be_16 || new_addr_utf8).
-/// Возвращает 32 байта, hex-кодируем для wire/store.
-pub fn compute_resume_mac(secret: &[u8; 32], session_id: u128, new_addr: &str) -> [u8; 32] {
+/// Длина свежих случайных значений возобновления (клиентского и серверного).
+pub const RESUME_NONCE_LEN: usize = 16;
+
+/// HMAC-resume: blake3 keyed hash от (session_id_be_16 || client_nonce || new_addr_utf8).
+/// Свежее значение клиента делает каждое RESUME новым: записанное RESUME нельзя проиграть заново и получить прежний ключ.
+pub fn compute_resume_mac(secret: &[u8; 32], session_id: u128, new_addr: &str, client_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
     let mut hasher = blake3::Hasher::new_keyed(secret);
     hasher.update(&session_id.to_be_bytes());
+    hasher.update(client_nonce);
     hasher.update(new_addr.as_bytes());
     *hasher.finalize().as_bytes()
 }
@@ -168,10 +172,35 @@ pub fn verify_resume_mac(
     secret: &[u8; 32],
     session_id: u128,
     new_addr: &str,
+    client_nonce: &[u8; RESUME_NONCE_LEN],
     provided: &[u8; 32],
 ) -> bool {
-    let expected = compute_resume_mac(secret, session_id, new_addr);
+    let expected = compute_resume_mac(secret, session_id, new_addr, client_nonce);
     constant_time_eq(&expected, provided)
+}
+
+/// Подпись ответа узла: связывает серверное значение с клиентским (запись прошлого ответа не подойдёт к новому RESUME).
+pub fn compute_resume_ack_mac(secret: &[u8; 32], session_id: u128, client_nonce: &[u8; RESUME_NONCE_LEN], server_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
+    let mut hasher = blake3::Hasher::new_keyed(secret);
+    hasher.update(b"yandi-resume-ack-v1");
+    hasher.update(&session_id.to_be_bytes());
+    hasher.update(client_nonce);
+    hasher.update(server_nonce);
+    *hasher.finalize().as_bytes()
+}
+
+/// Рабочий ключ этого возобновления: из сохранённого ключа сеанса и обоих свежих значений. Сохранённый ключ сам по себе пакеты не
+/// защищает — после каждого RESUME ключ другой, поэтому записанные пакеты прежнего возобновления не проходят проверку.
+pub fn derive_resume_key(session_key: &[u8; 32], client_nonce: &[u8; RESUME_NONCE_LEN], server_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
+    use hkdf::Hkdf;
+    use sha2::Sha256;
+    let mut salt = [0u8; 2 * RESUME_NONCE_LEN];
+    salt[..RESUME_NONCE_LEN].copy_from_slice(client_nonce);
+    salt[RESUME_NONCE_LEN..].copy_from_slice(server_nonce);
+    let hk = Hkdf::<Sha256>::new(Some(&salt), session_key);
+    let mut out = [0u8; 32];
+    hk.expand(b"yandi-resume-key-v1", &mut out).expect("hkdf 32 bytes");
+    out
 }
 
 fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
@@ -191,21 +220,22 @@ fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
 /// Mobile шлёт это плейнтекстом ДО Hello: anchor по session_id находит paired-token,
 /// проверяет HMAC, восстанавливает session-key через `EncryptionManager::restore_session`
 /// и отвечает 0xC1 ACK encrypted (используя восстановленный ключ).
-pub fn encode_resume(node_id: HashId, session_id: u128, new_addr: &str, mac: &[u8; 32]) -> Vec<u8> {
+pub fn encode_resume(node_id: HashId, session_id: u128, new_addr: &str, client_nonce: &[u8; RESUME_NONCE_LEN], mac: &[u8; 32]) -> Vec<u8> {
     let addr = new_addr.as_bytes();
     let alen = addr.len().min(255);
-    let mut buf = Vec::with_capacity(1 + 32 + 16 + 1 + alen + 32);
+    let mut buf = Vec::with_capacity(1 + 32 + 16 + 1 + alen + RESUME_NONCE_LEN + 32);
     buf.push(PKT_RESUME);
     buf.extend_from_slice(&node_id.0);
     buf.extend_from_slice(&session_id.to_be_bytes());
     buf.push(alen as u8);
     buf.extend_from_slice(&addr[..alen]);
+    buf.extend_from_slice(client_nonce);
     buf.extend_from_slice(mac);
     buf
 }
 
-pub fn decode_resume(data: &[u8]) -> Result<(HashId, u128, String, [u8; 32])> {
-    if data.len() < 1 + 32 + 16 + 1 + 32 {
+pub fn decode_resume(data: &[u8]) -> Result<(HashId, u128, String, [u8; RESUME_NONCE_LEN], [u8; 32])> {
+    if data.len() < 1 + 32 + 16 + 1 + RESUME_NONCE_LEN + 32 {
         anyhow::bail!("RESUME too short");
     }
     if data[0] != PKT_RESUME {
@@ -218,14 +248,16 @@ pub fn decode_resume(data: &[u8]) -> Result<(HashId, u128, String, [u8; 32])> {
     sid.copy_from_slice(&data[33..49]);
     let session_id = u128::from_be_bytes(sid);
     let alen = data[49] as usize;
-    if data.len() < 50 + alen + 32 {
+    if data.len() < 50 + alen + RESUME_NONCE_LEN + 32 {
         anyhow::bail!("RESUME truncated addr");
     }
     let addr = String::from_utf8(data[50..50 + alen].to_vec())
         .context("RESUME addr not utf8")?;
+    let mut cn = [0u8; RESUME_NONCE_LEN];
+    cn.copy_from_slice(&data[50 + alen..50 + alen + RESUME_NONCE_LEN]);
     let mut mac = [0u8; 32];
-    mac.copy_from_slice(&data[50 + alen..50 + alen + 32]);
-    Ok((node_id, session_id, addr, mac))
+    mac.copy_from_slice(&data[50 + alen + RESUME_NONCE_LEN..50 + alen + RESUME_NONCE_LEN + 32]);
+    Ok((node_id, session_id, addr, cn, mac))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -260,6 +292,29 @@ pub fn encode_resume_ack(status: ResumeStatus, new_secret: Option<&[u8; 32]>) ->
         buf.push(0);
     }
     buf
+}
+
+/// Успешный ответ на RESUME: `[C1][0][2][server_nonce:16][mac:32]` (открытым текстом: клиент проверяет подпись и сам выводит ключ).
+pub fn encode_resume_ack_grant(server_nonce: &[u8; RESUME_NONCE_LEN], mac: &[u8; 32]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(3 + RESUME_NONCE_LEN + 32);
+    buf.push(PKT_RESUME_ACK);
+    buf.push(ResumeStatus::Ok as u8);
+    buf.push(2);
+    buf.extend_from_slice(server_nonce);
+    buf.extend_from_slice(mac);
+    buf
+}
+
+/// Разобрать успешный ответ: серверное значение и подпись.
+pub fn decode_resume_ack_grant(data: &[u8]) -> Option<([u8; RESUME_NONCE_LEN], [u8; 32])> {
+    if data.len() < 3 + RESUME_NONCE_LEN + 32 || data[0] != PKT_RESUME_ACK || data[1] != ResumeStatus::Ok as u8 || data[2] != 2 {
+        return None;
+    }
+    let mut sn = [0u8; RESUME_NONCE_LEN];
+    sn.copy_from_slice(&data[3..3 + RESUME_NONCE_LEN]);
+    let mut mac = [0u8; 32];
+    mac.copy_from_slice(&data[3 + RESUME_NONCE_LEN..3 + RESUME_NONCE_LEN + 32]);
+    Some((sn, mac))
 }
 
 /// Hardening Step 3: 0xC2 SESSION_ISSUE — anchor выдаёт SessionToken после успешного
@@ -504,24 +559,48 @@ mod tests {
         let secret = [0xAFu8; 32];
         let sid: u128 = 0x1234_5678_9ABC_DEF0_1122_3344_5566_7788;
         let addr = "1.2.3.4:9000";
-        let mac = compute_resume_mac(&secret, sid, addr);
-        assert!(verify_resume_mac(&secret, sid, addr, &mac));
+        let cn = [0x11u8; RESUME_NONCE_LEN];
+        let mac = compute_resume_mac(&secret, sid, addr, &cn);
+        assert!(verify_resume_mac(&secret, sid, addr, &cn, &mac));
         // wrong addr — must fail
-        assert!(!verify_resume_mac(&secret, sid, "5.6.7.8:9000", &mac));
+        assert!(!verify_resume_mac(&secret, sid, "5.6.7.8:9000", &cn, &mac));
         // wrong secret — must fail
-        assert!(!verify_resume_mac(&[0u8; 32], sid, addr, &mac));
+        assert!(!verify_resume_mac(&[0u8; 32], sid, addr, &cn, &mac));
+        // другое свежее значение клиента — не подходит
+        assert!(!verify_resume_mac(&secret, sid, addr, &[0x22u8; RESUME_NONCE_LEN], &mac));
     }
 
     #[test]
     fn resume_packet_roundtrip() {
         let mac = [0x77u8; 32];
+        let cn = [0x33u8; RESUME_NONCE_LEN];
         let nid = HashId([0xCDu8; 32]);
-        let bytes = encode_resume(nid, 99u128, "1.2.3.4:5000", &mac);
-        let (nid2, sid, addr, mac2) = decode_resume(&bytes).unwrap();
+        let bytes = encode_resume(nid, 99u128, "1.2.3.4:5000", &cn, &mac);
+        let (nid2, sid, addr, cn2, mac2) = decode_resume(&bytes).unwrap();
         assert_eq!(nid2, nid);
         assert_eq!(sid, 99u128);
         assert_eq!(addr, "1.2.3.4:5000");
+        assert_eq!(cn2, cn);
         assert_eq!(mac2, mac);
+    }
+
+    /// Каждое возобновление даёт свой рабочий ключ: записанные пакеты прежнего возобновления нового ключа не проходят.
+    #[test]
+    fn every_resume_gets_its_own_working_key() {
+        let base = [0x42u8; 32];
+        let (cn1, sn1) = ([1u8; RESUME_NONCE_LEN], [2u8; RESUME_NONCE_LEN]);
+        let k1 = derive_resume_key(&base, &cn1, &sn1);
+        assert_eq!(k1, derive_resume_key(&base, &cn1, &sn1), "обе стороны выводят одно и то же");
+        assert_ne!(k1, base);
+        assert_ne!(k1, derive_resume_key(&base, &[9u8; RESUME_NONCE_LEN], &sn1), "другое значение клиента");
+        assert_ne!(k1, derive_resume_key(&base, &cn1, &[9u8; RESUME_NONCE_LEN]), "другое значение узла");
+        // ответ узла привязан к значению клиента: запись прошлого ответа не подойдёт к новому RESUME
+        let secret = [0xAAu8; 32];
+        let m1 = compute_resume_ack_mac(&secret, 7, &cn1, &sn1);
+        assert_ne!(m1, compute_resume_ack_mac(&secret, 7, &[8u8; RESUME_NONCE_LEN], &sn1));
+        let bytes = encode_resume_ack_grant(&sn1, &m1);
+        assert_eq!(decode_resume_ack_grant(&bytes), Some((sn1, m1)));
+        assert!(decode_resume_ack_grant(&encode_resume_ack(ResumeStatus::Ok, None)).is_none());
     }
 
     #[test]
