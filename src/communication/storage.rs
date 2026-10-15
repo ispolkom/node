@@ -392,6 +392,32 @@ impl ChatStorage {
         Ok(())
     }
 
+    /// Перевести журнал статусов на `candidates[0]`; `Ok(false)` — есть строка, которая не открывается ни одним ключом (файл не меняется).
+    fn rekey_status_log(path: &std::path::Path, candidates: &[[u8; 32]]) -> Result<bool> {
+        let text = std::fs::read_to_string(path)?;
+        let mut out = String::new();
+        let mut changed = false;
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            match Self::open_with_any(candidates, line) {
+                Some((0, _)) => {
+                    out.push_str(line.trim());
+                }
+                Some((_, plain)) => {
+                    out.push_str(&Self::seal_line(&candidates[0], &plain)?);
+                    changed = true;
+                }
+                None => return Ok(false),
+            }
+            out.push('\n');
+        }
+        if changed {
+            let tmp = path.with_extension("enc.rekey");
+            crate::util::private_file::write_private(&tmp, out.as_bytes())?;
+            std::fs::rename(&tmp, path)?;
+        }
+        Ok(true)
+    }
+
     /// Перенос всех файлов чатов и очереди на ключ закрытой среды и переключение хранилища на него. Идемпотентно: строка, уже
     /// открывающаяся новым ключом, остаётся; прочие открываются рабочим ключом машины (`old`), которым узел работал до пароля владельца.
     /// Файл с неоткрываемой строкой не меняется (счёт таких файлов возвращается).
@@ -415,6 +441,14 @@ impl ChatStorage {
                     continue;
                 }
                 let path = entry.path();
+                if name.ends_with(".status.enc") {
+                    // журнал статусов — построчный (hex), не YCH2: переводится построчно, неоткрываемая строка оставляет файл как есть
+                    match Self::rekey_status_log(&path, &candidates) {
+                        Ok(true) => {}
+                        Ok(false) | Err(_) => failed += 1,
+                    }
+                    continue;
+                }
                 let blobs = match Self::read_blobs(&path) {
                     Ok(v) => v,
                     Err(_) => {
@@ -1055,6 +1089,25 @@ mod closed_env_tests {
         ChatStorage::append_blob(&p, b"three").unwrap();
         let blobs = ChatStorage::read_blobs(&p).unwrap();
         assert_eq!(blobs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+    }
+
+    #[test]
+    fn setting_the_password_moves_the_status_log_too() {
+        let me = HashId::new_random();
+        let a = HashId::new_random();
+        let d = dir("rekey-status");
+        let st = ChatStorage::in_dir(me, d.clone()).unwrap();
+        st.set_master([7; 32]);
+        let m = ChatMessage::new(me, a, "привет".into());
+        st.save_outgoing(&a, &m).unwrap();
+        st.update_message_status(&a, &m.msg_id, crate::communication::MessageStatus::Read).unwrap();
+        assert!(d.join(format!("chat_{}.status.enc", hex::encode(a.0))).exists());
+        assert_eq!(st.rekey_to(Some([7; 32]), [1; 32]).unwrap(), 0, "журнал статусов не считается сбойным файлом");
+        let fresh = ChatStorage::in_dir_locked(me, d.clone()).unwrap();
+        fresh.set_master([1; 32]);
+        let h = fresh.load_history(&a, 10).unwrap();
+        assert_eq!(h[0].status, crate::communication::MessageStatus::Read, "статус пережил перенос");
+        fresh.update_message_status(&a, &m.msg_id, crate::communication::MessageStatus::Delivered).unwrap();
     }
 
     #[test]
