@@ -105,12 +105,22 @@ if command -v nft >/dev/null && nft list chain inet filter input >/dev/null 2>&1
   echo "    tcp dport $PORT accept"
   echo "    udp dport $PORT accept"
   echo "    udp dport $RELAY_MIN-$RELAY_MAX accept"
+  # служба на 0.0.0.0 этого компьютера не должна доставаться через релей по собственному внешнему адресу (пакет идёт через lo мимо
+  # входного файрвола): из портов релея на $EXT — только в порты релея
+  nft list chain inet filter output >/dev/null 2>&1 || \
+    nft add chain inet filter output '{ type filter hook output priority 0; policy accept; }'
+  OUT_RULE="ip daddr $EXT udp sport $RELAY_MIN-$RELAY_MAX udp dport != $RELAY_MIN-$RELAY_MAX drop"
+  nft list chain inet filter output | grep -q -- "udp sport $RELAY_MIN-$RELAY_MAX" || nft add rule inet filter output $OUT_RULE
+  echo "ЧТОБЫ ПРАВИЛО ВЫХОДА ОСТАЛОСЬ ПОСЛЕ ПЕРЕЗАГРУЗКИ добавьте в цепочку output в /etc/nftables.conf:"
+  echo "    $OUT_RULE"
 else
   echo "nftables с таблицей inet filter не найден: откройте порты $PORT (TCP и UDP) и $RELAY_MIN-$RELAY_MAX (UDP) своим брандмауэром."
 fi
 
 echo "== 5. секрет для узла"
-mkdir -p "$DATA_DIR"
+# каталог создаётся от имени владельца (иначе при чистой установке он достанется root, и узел не сможет в него писать)
+runuser -u "$OWNER" -- mkdir -p "$DATA_DIR"
+chmod 700 "$DATA_DIR"
 python3 - <<PY
 import json, os
 p = "$DATA_DIR/turn.json"
