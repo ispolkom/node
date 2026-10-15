@@ -4657,6 +4657,10 @@ impl P2PTransport {
     /// at most once every 5 seconds per peer. Before, such a pair stayed deaf for as long as it took some other event (the next
     /// periodic knock) to produce a handshake — a minute or more in the chaos test.
     pub async fn request_resync(&self, peer_id: HashId) {
+        // номер отправителя в пакете ещё не удостоверен: незнакомых узлов в кэш не заносим (иначе его можно раздуть выдуманными номерами)
+        let Some(addr) = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone()) else {
+            return;
+        };
         {
             let mut asked = self.resync_requested.lock().await;
             if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
@@ -4667,12 +4671,9 @@ impl P2PTransport {
                 asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
             }
         }
-        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
-        if let Some(addr) = addr {
-            println!("[transport] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
-            if let Err(e) = self.send_hello_request(&addr).await {
-                println!("[transport] ⚠️  resync request failed: {}", e);
-            }
+        println!("[transport] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+        if let Err(e) = self.send_hello_request(&addr).await {
+            println!("[transport] ⚠️  resync request failed: {}", e);
         }
     }
 

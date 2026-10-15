@@ -1381,6 +1381,11 @@ impl P2PTransport {
     /// ask the peer for a fresh handshake — at most once every 5 seconds per peer. Without this, two nodes whose keys ended up different
     /// (handshakes crossing, answers lost or reordered) stay unable to talk until something else happens to renew the key.
     pub async fn request_resync(&self, peer_id: HashId) {
+        // Номер отправителя в пакете ещё ничем не удостоверен: незнакомых узлов в кэш не заносим, иначе поток пакетов с выдуманными
+        // номерами раздувает его и заставляет чистить всю таблицу на каждый пакет.
+        let Some(addr) = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone()) else {
+            return;
+        };
         {
             let mut asked = self.resync_requested.lock().await;
             if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
@@ -1391,11 +1396,8 @@ impl P2PTransport {
                 asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
             }
         }
-        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
-        if let Some(addr) = addr {
-            println!("[P2P] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
-            let _ = self.send_hello_request(&addr).await;
-        }
+        println!("[P2P] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+        let _ = self.send_hello_request(&addr).await;
     }
 
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
