@@ -24,6 +24,9 @@ class ApiService {
     _client = _buildClient(_node.fingerprint);
   }
 
+  /// Номер узла, с которым соединён этот клиент сейчас.
+  String get nodeId => _node.id;
+
   void switchNode(TrustedNode node) {
     _client.close();
     _node   = node;

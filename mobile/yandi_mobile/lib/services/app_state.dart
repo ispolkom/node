@@ -448,10 +448,13 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   Future<void> unpairNode(String nodeId) async {
+    // с каким узлом соединены на самом деле — запоминаем ДО удаления: вычисляемый «активный» после удаления уже другой, и без
+    // этого соединение с удалённым узлом (и его токен) продолжали бы использоваться
+    final connectedHere = _api?.nodeId == nodeId || activeNode?.id == nodeId;
     await nodeManager.removeNode(nodeId);
 
     // Если удалили активную — переключаемся на следующую
-    if (activeNode?.id == nodeId || activeNode == null) {
+    if (connectedHere || activeNode == null) {
       final next = await nodeManager.selectBest();
       if (next != null) {
         _api?.switchNode(next);
