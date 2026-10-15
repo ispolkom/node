@@ -39,6 +39,9 @@ pub struct Train {
     /// How many distinct wagon numbers (original or clone) have arrived; keeps the completeness check O(1)
     received_distinct: u32,
 
+    /// Учтённый размер принятых вагонов (груз + служебное): растёт при вставке, убывает при чистке клонов — оценка за O(1)
+    accounted_bytes: usize,
+
     /// ⚡ Максимальный полученный offset
     pub max_received_offset: u64,
 
@@ -75,6 +78,9 @@ impl Train {
     /// Upper bound on wagons per train (131072 x 1200 B = 150 MB, above the depot's own 100 MB limit) — a hostile peer cannot ask for more
     pub const MAX_WAGONS: u32 = 131072;
 
+    /// Служебные расходы одного принятого вагона в учёте памяти
+    const WAGON_OVERHEAD: usize = 128;
+
     /// Создать новый поезд для отправки
     pub fn new(
         source: crate::util::HashId,
@@ -93,6 +99,7 @@ impl Train {
             wagons: HashMap::new(),
             wagons_clone: HashMap::new(),  // 🔄 DUAL-PATH: клоны
             received_distinct: 0,
+            accounted_bytes: 0,
             max_received_offset: 0,
             state: TrainState::Assembling,
             created_at: Instant::now(),
@@ -116,6 +123,7 @@ impl Train {
             wagons: HashMap::new(),
             wagons_clone: HashMap::new(),  // 🔄 DUAL-PATH
             received_distinct: 0,
+            accounted_bytes: 0,
             max_received_offset: 0,
             state: TrainState::Assembling,
             created_at: Instant::now(),
@@ -184,12 +192,19 @@ impl Train {
 
         // 🔄 DUAL-PATH: разделяем оригиналы и клоны
         let known = self.wagons.contains_key(&wagon_num) || self.wagons_clone.contains_key(&wagon_num);
+        let cost = wagon.cargo.len() + Self::WAGON_OVERHEAD;
         if is_clone {
             // Клон - сохраняем как запасной (повтор не перезаписывает первый)
-            self.wagons_clone.entry(wagon_num).or_insert(wagon);
+            if let std::collections::hash_map::Entry::Vacant(v) = self.wagons_clone.entry(wagon_num) {
+                v.insert(wagon);
+                self.accounted_bytes += cost;
+            }
         } else {
             // Оригинал - сохраняем как основной (повтор не перезаписывает первый)
-            self.wagons.entry(wagon_num).or_insert(wagon);
+            if let std::collections::hash_map::Entry::Vacant(v) = self.wagons.entry(wagon_num) {
+                v.insert(wagon);
+                self.accounted_bytes += cost;
+            }
         }
         if !known {
             self.received_distinct += 1;
@@ -215,7 +230,8 @@ impl Train {
         for wagon_num in 0..self.total_wagons {
             if self.wagons.contains_key(&wagon_num) {
                 // Есть оригинал - удаляем клон
-                if self.wagons_clone.remove(&wagon_num).is_some() {
+                if let Some(w) = self.wagons_clone.remove(&wagon_num) {
+                    self.accounted_bytes = self.accounted_bytes.saturating_sub(w.cargo.len() + Self::WAGON_OVERHEAD);
                     clone_count += 1;
                 }
             }
@@ -237,7 +253,17 @@ impl Train {
             return Err(TrainError::Incomplete);
         }
 
-        let mut data = Vec::with_capacity(self.total_wagons as usize * Wagon::MAX_CARGO_SIZE);
+        // ёмкость — по фактическому грузу (а не по предельному: 131072 пустых вагонов зарезервировали бы 7,5 ГиБ); отказ выделения —
+        // ошибка, а не аварийное завершение
+        let mut needed = 0usize;
+        for i in 0..self.total_wagons {
+            match self.wagons.get(&i).or_else(|| self.wagons_clone.get(&i)) {
+                Some(w) => needed = needed.saturating_add(w.cargo.len()),
+                None => return Err(TrainError::MissingWagon(i)),
+            }
+        }
+        let mut data: Vec<u8> = Vec::new();
+        data.try_reserve_exact(needed).map_err(|_| TrainError::TooLarge)?;
 
         // 🔄 Собираем вагоны по порядку (оригиналы + клоны)
         for i in 0..self.total_wagons {
@@ -362,17 +388,9 @@ impl Train {
         self.last_activity.elapsed() > self.timeout
     }
 
-    /// Оценить размер поезда в байтах
+    /// Оценить размер поезда в байтах (O(1): счёт ведётся при вставке и чистке)
     pub fn estimated_size(&self) -> usize {
-        let orig_size: usize = self.wagons
-            .values()
-            .map(|w| w.cargo.len() + 128)
-            .sum();
-        let clone_size: usize = self.wagons_clone
-            .values()
-            .map(|w| w.cargo.len() + 128)
-            .sum();
-        orig_size + clone_size
+        self.accounted_bytes
     }
 
     /// Получить прогресс сборки (0.0 - 1.0)
@@ -416,6 +434,9 @@ pub enum TrainError {
     #[error("Таймаут сборки поезда")]
     Timeout,
 
+    #[error("Не удалось выделить память под сборку поезда")]
+    TooLarge,
+
     /// ⚡ QUIC-style: отсутствует диапазон данных
     #[error("Отсутствует диапазон данных: {0}..{1}")]
     MissingRange(u64, u64),
@@ -452,6 +473,34 @@ mod tests {
         assert_eq!(t.wagons[&0].cargo, vec![1, 2, 3]);
         let (done, _) = t.add_wagon(Wagon::new(9, 1, 2, 3, vec![4], 0)).unwrap();
         assert!(done);
+    }
+
+    /// Учёт размера — за O(1), сборка резервирует фактический груз: поезд из 131072 пустых вагонов не стоит ни квадрата работы, ни 7,5 ГиБ.
+    #[test]
+    fn a_train_of_many_tiny_wagons_is_cheap_to_account_and_to_assemble() {
+        let src = crate::util::HashId::default();
+        let n = Train::MAX_WAGONS;
+        let mut t = Train::new_receiving(5, src, n);
+        let started = std::time::Instant::now();
+        for i in 0..n {
+            t.add_wagon(Wagon::new(5, i, n, i as u64, vec![(i % 251) as u8], 0)).unwrap();
+        }
+        assert!(started.elapsed() < std::time::Duration::from_secs(5), "приём 131072 вагонов за {:?}", started.elapsed());
+        assert_eq!(t.estimated_size(), n as usize * (1 + 128));
+        assert_eq!(t.state, TrainState::Complete);
+        let data = t.assemble().unwrap();
+        assert_eq!(data.len(), n as usize);
+        assert!(data.capacity() < 1 << 20, "ёмкость по факту, а не 7,5 ГиБ: {}", data.capacity());
+        // чистка клонов возвращает учёт
+        let mut c = Train::new_receiving(6, src, 2);
+        let mut w = Wagon::new(6, 0, 2, 0, vec![1, 2, 3], 0);
+        w.is_clone = true;
+        c.add_wagon(w).unwrap();
+        c.add_wagon(Wagon::new(6, 0, 2, 0, vec![1, 2, 3], 0)).unwrap();
+        c.add_wagon(Wagon::new(6, 1, 2, 3, vec![4], 0)).unwrap();
+        let before = c.estimated_size();
+        c.cleanup_clones();
+        assert!(c.estimated_size() < before);
     }
 
     #[test]
