@@ -448,13 +448,44 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// Для тестов других модулей: зарегистрировать устройство с данным токеном, вернуть его полный номер.
+#[cfg(test)]
+pub(crate) fn test_add_device(token: &str) -> String {
+    let dev = Device {
+        token_hash: token_hash(token),
+        name: "тест".into(),
+        created_ms: 1,
+        acked_ts: 0,
+        x25519_pub: None,
+        ed25519_pub: None,
+        key_sig: None,
+        last_seen_ms: 0,
+        role: owner_role(),
+    };
+    let peer = dev.peer_id();
+    devices_apply(|d| d.push(dev));
+    peer
+}
+
+/// Полный номер устройства по его началу (не короче 8 знаков). Неоднозначное начало — отказ.
+/// Все проверки прав (владение группами, пароль) надо делать над результатом, а не над сокращением.
+pub fn resolve_device(id: &str) -> Option<String> {
+    if id.len() < 8 {
+        return None;
+    }
+    with_devices(|d| {
+        let mut it = d.iter().map(|x| x.peer_id()).filter(|p| p.starts_with(id));
+        let first = it.next()?;
+        if it.next().is_some() {
+            return None;
+        }
+        Some(first)
+    })
+}
+
 /// Забыть устройство (его токен перестаёт действовать, очередь сообщений для него очищается). `id` — начало номера устройства, не короче 8 знаков.
 pub fn remove_device(id: &str) -> bool {
-    if id.len() < 8 {
-        return false;
-    }
-    let Some(peer) = with_devices(|d| d.iter().map(|x| x.peer_id()).find(|p| p.starts_with(id)))
-    else {
+    let Some(peer) = resolve_device(id) else {
         return false;
     };
     // отзыв подтверждается, только если новый список лёг на диск: иначе после перезапуска токен снова бы действовал

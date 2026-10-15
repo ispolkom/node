@@ -5527,6 +5527,10 @@ async fn mobile_device_remove_handler(
     axum::extract::Path(id): axum::extract::Path<String>,
     body: axum::body::Bytes,
 ) -> Response {
+    // права проверяются над полным номером: по сокращению владение группами не находится
+    let Some(id) = crate::mobile_api::resolve_device(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    };
     let owned = crate::mobile_groups::owned_by(&id);
     if !owned.is_empty() {
         let password = serde_json::from_slice::<serde_json::Value>(&body)
@@ -5621,7 +5625,10 @@ async fn complaint_measure_handler(State(state): State<AppState>, axum::extract:
     // меры, уничтожающие группы, требуют того же повторного ввода пароля, что и прямое удаление группы
     let destroys_groups = match b.kind.as_str() {
         "delete_group" => !is_user,
-        "remove" => is_user && !crate::mobile_groups::owned_by(&c.target_id).is_empty(),
+        "remove" => {
+            let full = crate::mobile_api::resolve_device(&c.target_id).unwrap_or_else(|| c.target_id.clone());
+            is_user && !crate::mobile_groups::owned_by(&full).is_empty()
+        }
         _ => false,
     };
     if destroys_groups {
@@ -6104,5 +6111,23 @@ mod step_up_tests {
         let c = crate::complaints::find(&id).unwrap();
         assert!(c.measures.is_empty(), "мера в журнале не появилась");
     }
+    /// Прямой DELETE устройства-владельца групп по сокращённому номеру не обходит пароль.
+    #[tokio::test]
+    async fn removing_a_group_owner_by_id_prefix_needs_the_node_password() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let peer = crate::mobile_api::test_add_device("prefix-owner-token");
+        let gid = crate::mobile_groups::with_store(|s| {
+            s.create("Группа префикса", "тест", crate::mobile_groups::Kind::Open, &peer, &[]).unwrap()
+        });
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let web = WebServer::new_with_auth(0, auth);
+        let r = mobile_device_remove_handler(State(web.state.clone()), axum::extract::Path(peer[..8].to_string()), axum::body::Bytes::new()).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "префикс не должен обходить пароль");
+        assert!(!crate::mobile_groups::owned_by(&peer).is_empty(), "группа цела");
+        crate::mobile_groups::with_store(|s| { let _ = s.delete(&gid); });
+        crate::mobile_api::remove_device(&peer);
+    }
+
 }
 
