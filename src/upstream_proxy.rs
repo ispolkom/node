@@ -294,6 +294,9 @@ struct Pool {
     file: PoolFile,
     health: HashMap<String, Health>,
     assign: HashMap<String, Assign>,
+    /// настройки прокси есть, но сейчас недоступны (файл не читается, повреждён, не открывается ключом, среда заперта):
+    /// выход прямым соединением запрещён — иначе наружу ушёл бы реальный адрес узла
+    unavailable: bool,
 }
 
 fn path() -> std::path::PathBuf {
@@ -332,7 +335,7 @@ pub fn start_locked() {
 /// Заперто: настройки убираются из памяти, файл не меняется.
 pub fn lock() {
     *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Locked;
-    *pool() = Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new() };
+    *pool() = Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: configured_on_disk() };
 }
 
 /// Выдан ключ области: настройки читаются из запечатанного файла (открытого файла в этом режиме больше нет).
@@ -360,20 +363,41 @@ fn seal_existing_at(plain: &std::path::Path, sealed: &std::path::Path, key: &[u8
     Ok(())
 }
 
-fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path) -> Option<PoolFile> {
+/// Есть ли на диске настройки прокси (любого вида).
+fn configured_on_disk() -> bool {
+    path().exists() || sealed_path().exists()
+}
+
+/// `Ok(None)` — прокси не настраивались; `Err(())` — настройки есть, но прочитать их сейчас нельзя.
+fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path) -> Result<Option<PoolFile>, ()> {
+    use std::io::ErrorKind::NotFound;
     match mode {
-        Mode::Plain => std::fs::read(plain).ok().and_then(|b| parse_file(&b)),
-        Mode::Locked => None,
-        Mode::Sealed(key) => std::fs::read(sealed)
-            .ok()
-            .and_then(|b| crate::util::sealed::open(&key, SEAL_AAD, &b))
-            .and_then(|b| parse_file(&b)),
+        Mode::Plain => match std::fs::read(plain) {
+            Ok(b) => parse_file(&b).map(Some).ok_or(()),
+            Err(e) if e.kind() == NotFound => Ok(None),
+            Err(_) => Err(()),
+        },
+        // заперто: настройки не читаются; если они есть — выход прямым соединением закрыт до входа владельца
+        Mode::Locked => {
+            if plain.exists() || sealed.exists() {
+                Err(())
+            } else {
+                Ok(None)
+            }
+        }
+        Mode::Sealed(key) => match std::fs::read(sealed) {
+            Ok(b) => crate::util::sealed::open(&key, SEAL_AAD, &b).and_then(|b| parse_file(&b)).map(Some).ok_or(()),
+            Err(e) if e.kind() == NotFound => Ok(None),
+            Err(_) => Err(()),
+        },
     }
 }
 
 fn load_pool() -> Pool {
-    let file = read_pool_file(mode(), &path(), &sealed_path());
-    Pool { file: file.unwrap_or_default(), health: HashMap::new(), assign: HashMap::new() }
+    match read_pool_file(mode(), &path(), &sealed_path()) {
+        Ok(file) => Pool { file: file.unwrap_or_default(), health: HashMap::new(), assign: HashMap::new(), unavailable: false },
+        Err(()) => Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: true },
+    }
 }
 
 /// Прочитать файл: новый формат (со списком) или прежний (один прокси).
@@ -405,6 +429,16 @@ fn persist(p: &Pool) -> Result<(), String> {
         Mode::Locked => Err("закрытая среда заперта: введите пароль владельца".into()),
         Mode::Sealed(key) => crate::util::sealed::write(&sealed_path(), &key, SEAL_AAD, &bytes).map_err(|e| format!("не удалось записать настройки: {e}")),
     }
+}
+
+/// Сохранить; при отказе записи вернуть прежнюю настройку в память — иначе операция, которая «не удалась», действовала бы до
+/// перезапуска (например, отказавшее удаление или выключение прокси включило бы прямой выход).
+fn persist_or_rollback(p: &mut Pool, backup: PoolFile) -> Result<(), String> {
+    let r = persist(p);
+    if r.is_err() {
+        p.file = backup;
+    }
+    r
 }
 
 impl Pool {
@@ -521,7 +555,8 @@ fn proxy_fault(e: &std::io::Error) -> bool {
 /// Включён ли выход через прокси: общий выключатель и хотя бы один включённый прокси.
 pub fn is_active() -> bool {
     let g = pool();
-    g.file.enabled && g.file.proxies.iter().any(|e| e.enabled)
+    // недоступные настройки считаются включённым прокси без единого рабочего: соединения не выходят напрямую
+    g.unavailable || (g.file.enabled && g.file.proxies.iter().any(|e| e.enabled))
 }
 
 /// Соединиться с целью от имени клиента через подходящий прокси. Если выбранный прокси не отвечает, пробуются другие (до трёх).
@@ -581,6 +616,7 @@ pub fn current() -> Option<Settings> {
 pub fn save(s: Settings) -> Result<(), String> {
     s.check()?;
     let mut g = pool();
+    let backup = g.file.clone();
     match g.file.proxies.first_mut() {
         Some(e) => {
             e.enabled = s.enabled;
@@ -594,7 +630,7 @@ pub fn save(s: Settings) -> Result<(), String> {
     if s.enabled {
         g.file.enabled = true;
     }
-    persist(&g)
+    persist_or_rollback(&mut g, backup)
 }
 
 /// Для проверок: подменить пул одним прокси в памяти, не трогая файл настроек.
@@ -688,7 +724,9 @@ fn parse_line(line: &str, default_kind: Kind) -> Result<Settings, String> {
     if let Some((scheme, r)) = line.split_once("://") {
         kind = match scheme.to_ascii_lowercase().as_str() {
             "socks5" | "socks5h" | "socks" => Kind::Socks5,
-            "http" | "https" => Kind::HttpConnect,
+            "http" => Kind::HttpConnect,
+            // TLS до прокси не реализован: принять https:// значило бы молча послать логин и пароль открытым текстом
+            "https" => return Err("https:// (TLS до прокси) не поддерживается: используйте http:// или socks5://".to_string()),
             // саму «схему» не повторяем: при ошибке вставки там может оказаться логин и пароль
             _ => return Err("неизвестная схема (поддерживаются socks5:// и http://)".to_string()),
         };
@@ -856,6 +894,7 @@ async fn add_proxies(Json(r): Json<AddReq>) -> Response {
         }
     }
     let mut g = pool();
+    let backup = g.file.clone();
     let mut added = 0usize;
     for s in found {
         if g.file.proxies.len() >= MAX_PROXIES {
@@ -871,7 +910,7 @@ async fn add_proxies(Json(r): Json<AddReq>) -> Response {
     }
     if added > 0 {
         g.file.enabled = true;
-        if let Err(e) = persist(&g) {
+        if let Err(e) = persist_or_rollback(&mut g, backup) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response();
         }
     }
@@ -895,6 +934,7 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
         }
     }
     let mut g = pool();
+    let backup = g.file.clone();
     let Some(e) = g.file.proxies.iter_mut().find(|e| e.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response() };
     if let Some(on) = r.enabled {
         e.enabled = on;
@@ -902,7 +942,7 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
     if let Some(m) = r.max_clients {
         e.max_clients = (m > 0).then_some(m);
     }
-    match persist(&g) {
+    match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
@@ -910,6 +950,7 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
 
 async fn delete_proxy(Path(id): Path<String>) -> Response {
     let mut g = pool();
+    let backup = g.file.clone();
     let before = g.file.proxies.len();
     g.file.proxies.retain(|e| e.id != id);
     if g.file.proxies.len() == before {
@@ -917,7 +958,7 @@ async fn delete_proxy(Path(id): Path<String>) -> Response {
     }
     g.health.remove(&id);
     g.assign.retain(|_, a| a.proxy != id);
-    match persist(&g) {
+    match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
@@ -949,6 +990,7 @@ async fn pool_settings(Json(r): Json<PoolSettingsReq>) -> Response {
         }
     }
     let mut g = pool();
+    let backup = g.file.clone();
     if let Some(v) = r.enabled {
         g.file.enabled = v;
     }
@@ -958,7 +1000,7 @@ async fn pool_settings(Json(r): Json<PoolSettingsReq>) -> Response {
     if let Some(v) = r.strict {
         g.file.strict = v;
     }
-    match persist(&g) {
+    match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
@@ -1183,6 +1225,7 @@ mod tests {
             file: PoolFile { enabled: true, max_clients: cap, strict, proxies: ids.iter().enumerate().map(|(i, id)| entry(id, 1000 + i as u16)).collect() },
             health: HashMap::new(),
             assign: HashMap::new(),
+            unavailable: false,
         }
     }
 
@@ -1437,16 +1480,41 @@ mod tests {
         let file = br#"{"proxies":[{"id":"a","enabled":true,"kind":"socks5","host":"proxy.example","port":1080,"auth":{"type":"password","user":"u","password":"hunter2-secret"}}]}"#;
         std::fs::write(&plain, file).unwrap();
         assert!(parse_file(file).is_some(), "образец разбирается");
-        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none(), "заперто: открытый файл не читается");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_err(), "заперто: открытый файл не читается, а выход закрыт");
         assert!(plain.exists());
 
         let key = [3u8; 32];
         seal_existing_at(&plain, &sealed, &key).unwrap();
         assert!(!plain.exists(), "открытая копия затёрта");
         assert!(!String::from_utf8_lossy(&std::fs::read(&sealed).unwrap()).contains("hunter2"));
-        assert_eq!(read_pool_file(Mode::Sealed(key), &plain, &sealed).unwrap().proxies[0].host, "proxy.example");
-        assert!(read_pool_file(Mode::Sealed([4u8; 32]), &plain, &sealed).is_none(), "чужой ключ");
-        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none());
+        assert_eq!(read_pool_file(Mode::Sealed(key), &plain, &sealed).unwrap().unwrap().proxies[0].host, "proxy.example");
+        assert!(read_pool_file(Mode::Sealed([4u8; 32]), &plain, &sealed).is_err(), "чужой ключ: настройки есть, но не открываются — выход закрыт");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_err());
         seal_existing_at(&plain, &sealed, &key).unwrap(); // повтор: файла нет — не ошибка
+    }
+
+    /// Нет настроек — прямой выход разрешён; есть, но не читаются — запрещён (иначе наружу уходит реальный адрес).
+    #[test]
+    fn unreadable_settings_close_the_direct_exit_instead_of_opening_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, sealed) = (dir.path().join("upstream_proxy.json"), dir.path().join("upstream_proxy.enc"));
+        assert!(matches!(read_pool_file(Mode::Plain, &plain, &sealed), Ok(None)), "ничего не настраивали");
+        assert!(matches!(read_pool_file(Mode::Locked, &plain, &sealed), Ok(None)));
+        assert!(matches!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed), Ok(None)));
+        std::fs::write(&plain, b"{broken").unwrap();
+        assert!(read_pool_file(Mode::Plain, &plain, &sealed).is_err(), "повреждённый файл — выход закрыт");
+        std::fs::remove_file(&plain).unwrap();
+        std::fs::write(&sealed, b"garbage garbage garbage garbage garbage").unwrap();
+        assert!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed).is_err());
+    }
+
+    #[test]
+    fn an_https_proxy_is_refused_instead_of_being_downgraded_to_plain_http() {
+        let (ok, errors) = parse_lines("https://user:pw@proxy.example:443\nhttp://proxy.example:8080", Kind::Socks5);
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].port, 8080);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("https://"), "{errors:?}");
+        assert!(!errors[0].contains("pw"), "пароль в сообщение не попадает");
     }
 }
