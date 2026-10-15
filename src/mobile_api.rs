@@ -146,8 +146,6 @@ fn is_user_role(peer: &str) -> bool {
 fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     path == "/mobile/contacts"
-        || path == "/mobile/inbox"
-        || path == "/mobile/inbox/ack"
         || path.starts_with("/mobile/chat/")
         || path.starts_with("/mobile/files")
         || (path == "/mobile/profile" && method != Method::GET)
@@ -1377,7 +1375,9 @@ async fn inbox(
     });
     let after: u64 = q.get("after").and_then(|v| v.parse().ok()).unwrap_or(0);
     let mut out: Vec<(u64, serde_json::Value)> = Vec::new();
-    for peer in st.chat.list_chats().unwrap_or_default() {
+    // посторонний пользователь узла получает только свою почту устройства: переписка ПК с внешним миром принадлежит владельцу
+    let own_mail_only = is_user_role(&me_peer_of(&dev));
+    for peer in if own_mail_only { Vec::new() } else { st.chat.list_chats().unwrap_or_default() } {
         if device_by_peer(&hex::encode(peer.0)).is_some() {
             continue; // переписка компьютера с телефоном владельца: ответы уходят телефону зашифрованной почтой, а не отсюда
         }
@@ -1410,6 +1410,11 @@ async fn inbox(
     out.sort_by_key(|(t, _)| *t);
     out.truncate(limit);
     Json(json!({"messages": out.into_iter().map(|(_, v)| v).collect::<Vec<_>>()}))
+}
+
+/// Номер устройства по хэшу его токена (пусто, если токен неизвестен).
+fn me_peer_of(token_hash: &str) -> String {
+    device_peer_of(token_hash).unwrap_or_default()
 }
 
 fn base64_of(b: &[u8]) -> String {
@@ -2382,13 +2387,13 @@ mod hardening_tests {
     #[test]
     fn user_role_is_kept_away_from_the_owners_correspondence() {
         use axum::http::Method;
-        for (m, p) in [(Method::GET, "/mobile/chat/abc"), (Method::POST, "/mobile/chat/abc"), (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack"),
-                       (Method::GET, "/mobile/contacts"), (Method::POST, "/mobile/contacts"), (Method::PUT, "/mobile/profile"), (Method::GET, "/mobile/files")] {
+        for (m, p) in [(Method::GET, "/mobile/chat/abc"), (Method::POST, "/mobile/chat/abc"),                        (Method::GET, "/mobile/contacts"), (Method::POST, "/mobile/contacts"), (Method::PUT, "/mobile/profile"), (Method::GET, "/mobile/files")] {
             assert!(owner_only_path(&m, p), "{m} {p}");
         }
         for (m, p) in [(Method::GET, "/mobile/groups"), (Method::POST, "/mobile/complaints"), (Method::GET, "/mobile/me/profile"),
                        (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y"),
-                       (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc")] {
+                       (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc"),
+                       (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack")] {
             assert!(!owner_only_path(&m, p), "{m} {p}");
         }
         // роль в старом devices.json отсутствует — это владелец
