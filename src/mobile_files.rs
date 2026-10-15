@@ -138,6 +138,12 @@ async fn store_chunk(m: &Meta, idx: u32, body: &[u8]) -> Result<(), (StatusCode,
     let d = dir_of(&m.id);
     let tmp = d.join(format!("{}.{:016x}.tmp", chunk_name(idx), rand::random::<u64>()));
     let _g = PUT.lock().await;
+    // состояние перечитывается под замком: пока запрос ждал, DONE мог завершить передачу и открыть её получателю
+    match load_meta(&m.id).await {
+        Some(cur) if !cur.done => {}
+        Some(_) => return Err((StatusCode::CONFLICT, "передача уже завершена")),
+        None => return Err((StatusCode::NOT_FOUND, "передача не найдена")),
+    }
     if stored_bytes(&m.id, idx).await + body.len() as u64 > reserved(m) {
         return too_big;
     }
@@ -288,6 +294,8 @@ pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, P
     if m.from != me {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // завершение и запись куска исключают друг друга: набор кусков в момент DONE — окончательный
+    let _g = PUT.lock().await;
     let have = present(&id).await;
     let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
     if !missing.is_empty() {

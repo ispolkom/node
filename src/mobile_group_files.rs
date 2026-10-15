@@ -279,6 +279,10 @@ pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
         return err(StatusCode::BAD_REQUEST, "неверный номер или размер куска");
     }
     let _guard = PUT.lock().await;
+    // состояние перечитывается под замком: DONE мог завершить заливку, пока запрос ждал
+    if load_meta(&gid, &id).await.map_or(true, |cur| cur.done) {
+        return err(StatusCode::CONFLICT, "заливка уже завершена");
+    }
     if !fits(&gid, &id, &m, idx, body.len()).await {
         return err(StatusCode::BAD_REQUEST, "куски больше заявленного размера файла");
     }
@@ -315,6 +319,8 @@ pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, P
     if m.by != key {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // завершение и запись куска исключают друг друга: набор кусков в момент DONE — окончательный
+    let _guard = PUT.lock().await;
     let have = present(&gid, &id).await;
     let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
     if !missing.is_empty() {
@@ -390,6 +396,9 @@ pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &
         return Err("кусок не принят".into());
     }
     let _guard = PUT.lock().await;
+    if load_meta(gid, id).await.map_or(true, |cur| cur.done) {
+        return Err("заливка уже завершена".into());
+    }
     if !fits(gid, id, &m, idx, bytes.len()).await {
         return Err("куски больше заявленного размера файла".into());
     }
@@ -405,6 +414,7 @@ pub(crate) async fn pc_done(gid: &str, device: &str, id: &str) -> Result<(), Str
     if m.by != key {
         return Err("чужая заливка".into());
     }
+    let _guard = PUT.lock().await;
     let have = present(gid, id).await;
     if (0..m.total_chunks).any(|i| have.binary_search(&i).is_err()) {
         return Err("не хватает кусков".into());
