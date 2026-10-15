@@ -1022,7 +1022,9 @@ impl P2PTransport {
                 let mut server = match parsed {
                     Some(addr) => match WsServer::bind(addr, &tls).await {
                         Ok(s) => s,
-                        Err(e) if addr != fallback => {
+                        // запасной порт — только когда и так слушаем на всех интерфейсах (например, нет прав на 443). Заданный
+                        // адрес интерфейса (127.0.0.1, VPN, LAN) в «все интерфейсы» не превращается: вход просто не запускается
+                        Err(e) if ws_fallback_allowed(addr) => {
                             eprintln!("[ws-server] ⚠️  bind {} failed: {} — fallback на {}",
                                       addr, e, fallback);
                             match WsServer::bind(fallback, &tls).await {
@@ -1040,16 +1042,9 @@ impl P2PTransport {
                         }
                     },
                     None => {
-                        eprintln!("[ws-server] ⚠️  не парсится ws-bind {:?} — fallback на {}",
-                                  configured, fallback);
-                        match WsServer::bind(fallback, &tls).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("[ws-server] fallback bind {} failed: {} — disabled",
-                                          fallback, e);
-                                return;
-                            }
-                        }
+                        eprintln!("[ws-server] ⚠️  не парсится ws-bind {:?} — вход WSS не запущен (запасной адрес не подставляется)",
+                                  configured);
+                        return;
                     }
                 };
                 println!("[ws-server] 🌐 listening on {} (wss://...)", server.local_addr);
@@ -6858,9 +6853,24 @@ mod identity_pin_tests {
     }
 }
 
+/// Запасной порт WSS допустим, только если и заданный адрес — «все интерфейсы» (конкретный интерфейс не расширяется до wildcard).
+fn ws_fallback_allowed(addr: std::net::SocketAddr) -> bool {
+    let fallback: std::net::SocketAddr = "0.0.0.0:8443".parse().unwrap();
+    addr != fallback && addr.ip().is_unspecified()
+}
+
 #[cfg(test)]
 mod relay_policy_tests {
     use super::*;
+
+    #[test]
+    fn the_wss_fallback_never_widens_a_chosen_interface() {
+        for a in ["127.0.0.1:9443", "192.168.1.5:443", "10.8.0.2:8443", "[::1]:443"] {
+            assert!(!ws_fallback_allowed(a.parse().unwrap()), "{a}");
+        }
+        assert!(ws_fallback_allowed("0.0.0.0:443".parse().unwrap()));
+        assert!(!ws_fallback_allowed("0.0.0.0:8443".parse().unwrap()), "это уже запасной адрес");
+    }
 
     #[test]
     fn a_relay_forwards_only_to_public_socket_addresses() {
