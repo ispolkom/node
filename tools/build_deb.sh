@@ -9,9 +9,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 BIN=target/release
 for f in yandi yandi-keys; do [ -x "$BIN/$f" ] || { echo "нет $BIN/$f: сначала cargo build --release --offline"; exit 1; }; done
-BASE=$(grep -m1 '^version' Cargo.toml | sed -E 's/version *= *"([^"]+)".*/\1/')
-N=$(git rev-list --count HEAD 2>/dev/null || echo 0)
-VERSION="${BASE}+g${N}"
+# версия — та, что вшита в сам бинарь (метка YANDI-VERSION-MARK): пакет и узел обязаны называть себя одинаково
+VERSION=$(strings -a "$BIN/yandi" | sed -n 's/^YANDI-VERSION-MARK://p' | head -1)
+[ -n "$VERSION" ] || { echo "в бинаре нет метки версии: пересоберите cargo build --release"; exit 1; }
 ARCH=$(dpkg --print-architecture)
 PKG="yandi-node_${VERSION}_${ARCH}"
 W=$(mktemp -d)

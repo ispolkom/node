@@ -28,8 +28,12 @@ pub fn default_channels() -> Vec<Channel> {
 
 /// Версия этого бинаря: `<Cargo>+g<число коммитов>` (число подставляет build.rs; 0 — сборка вне git).
 pub fn own_version() -> String {
-    format!("{}+g{}", env!("CARGO_PKG_VERSION"), env!("YANDI_BUILD_COUNT"))
+    VERSION_MARK.trim_start_matches("YANDI-VERSION-MARK:").to_string()
 }
+
+/// Метка версии в самом бинаре: сборщик пакета читает её (`strings`), чтобы версия пакета была в точности версией внутри него,
+/// а не числом коммитов на момент упаковки.
+pub static VERSION_MARK: &str = concat!("YANDI-VERSION-MARK:", env!("CARGO_PKG_VERSION"), "+g", env!("YANDI_BUILD_COUNT"));
 
 /// `A.B.C+gN` → (A, B, C, N); нераспознанное — None.
 fn parse_version(v: &str) -> Option<(u64, u64, u64, u64)> {
