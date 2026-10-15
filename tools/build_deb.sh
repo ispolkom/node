@@ -10,7 +10,7 @@ cd "$(dirname "$0")/.."
 BIN=target/release
 for f in yandi yandi-keys; do [ -x "$BIN/$f" ] || { echo "нет $BIN/$f: сначала cargo build --release --offline"; exit 1; }; done
 # версия — та, что вшита в сам бинарь (метка YANDI-VERSION-MARK): пакет и узел обязаны называть себя одинаково
-VERSION=$(strings -a "$BIN/yandi" | sed -n 's/^YANDI-VERSION-MARK://p' | head -1)
+VERSION=$(grep -ao 'YANDI-VERSION-MARK:[0-9]\+\.[0-9]\+\.[0-9]\++g[0-9]\+' "$BIN/yandi" | head -1 | cut -d: -f2)
 [ -n "$VERSION" ] || { echo "в бинаре нет метки версии: пересоберите cargo build --release"; exit 1; }
 ARCH=$(dpkg --print-architecture)
 PKG="yandi-node_${VERSION}_${ARCH}"
