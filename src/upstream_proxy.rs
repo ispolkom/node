@@ -374,7 +374,8 @@ fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path)
     match mode {
         Mode::Plain => match std::fs::read(plain) {
             Ok(b) => parse_file(&b).map(Some).ok_or(()),
-            Err(e) if e.kind() == NotFound => Ok(None),
+            // остался только запечатанный файл: настройки есть, но в этом режиме не открываются — выход закрыт
+            Err(e) if e.kind() == NotFound => if sealed.exists() { Err(()) } else { Ok(None) },
             Err(_) => Err(()),
         },
         // заперто: настройки не читаются; если они есть — выход прямым соединением закрыт до входа владельца
@@ -387,7 +388,8 @@ fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path)
         }
         Mode::Sealed(key) => match std::fs::read(sealed) {
             Ok(b) => crate::util::sealed::open(&key, SEAL_AAD, &b).and_then(|b| parse_file(&b)).map(Some).ok_or(()),
-            Err(e) if e.kind() == NotFound => Ok(None),
+            // открытый файл не перенесён (сбой миграции): настройки есть, прямой выход открывать нельзя
+            Err(e) if e.kind() == NotFound => if plain.exists() { Err(()) } else { Ok(None) },
             Err(_) => Err(()),
         },
     }
@@ -1501,11 +1503,16 @@ mod tests {
         assert!(matches!(read_pool_file(Mode::Plain, &plain, &sealed), Ok(None)), "ничего не настраивали");
         assert!(matches!(read_pool_file(Mode::Locked, &plain, &sealed), Ok(None)));
         assert!(matches!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed), Ok(None)));
+        // перенос не удался: есть только открытый файл — в режиме запечатанного он не «отсутствие настроек», а закрытый выход
+        std::fs::write(&plain, br#"{"host":"proxy.example","port":1080,"kind":"socks5"}"#).unwrap();
+        assert!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed).is_err(), "не перенесённый открытый файл: выход закрыт");
+        std::fs::remove_file(&plain).unwrap();
         std::fs::write(&plain, b"{broken").unwrap();
         assert!(read_pool_file(Mode::Plain, &plain, &sealed).is_err(), "повреждённый файл — выход закрыт");
         std::fs::remove_file(&plain).unwrap();
         std::fs::write(&sealed, b"garbage garbage garbage garbage garbage").unwrap();
         assert!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed).is_err());
+        assert!(read_pool_file(Mode::Plain, &plain, &sealed).is_err(), "есть только запечатанный файл, режим открытого: выход закрыт");
     }
 
     #[test]
