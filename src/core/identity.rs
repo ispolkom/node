@@ -430,24 +430,21 @@ impl NodeIdentity {
     ///
     /// **A failure to open an existing identity is an error, never a new identity.** The identity file is only ever created when
     /// nothing identity-like exists in the key directory, never over an existing file, and a file that cannot be opened (wrong
-    /// password, another machine, a damaged file, an unknown format, unsafe permissions) is left byte-for-byte as it was.
-    /// `root` is the node's root key when it has one (needed for the recoverable format); the legacy format needs none.
+    /// root, another machine, a damaged file, an unknown format, unsafe permissions) is left byte-for-byte as it was.
+    /// `root` is the node's root key when it has one (an identity is created and opened only with it).
     /// The error's `category()` is what may be shown outside.
     pub fn load_or_create_with_root(port: u16, root: Option<&[u8; 32]>) -> Result<Self, key_root::KeyRootError> {
         let dir = key_root::KeyDir::open(Self::get_keys_directory().map_err(|_| key_root::KeyRootError::Io)?)?;
-        let env_password = std::env::var("YANDI_KEY_PASSWORD").ok();
-        Self::load_or_create_in(&dir, &key_root::SystemMachine, env_password.as_deref(), port, root)
+        Self::load_or_create_in(&dir, port, root)
     }
 
-    /// The same, with the directory, the machine and the environment password given (so that it can be tested in a temporary directory).
+    /// The same, with the directory given (so that it can be tested in a temporary directory).
     pub(crate) fn load_or_create_in(
         dir: &key_root::KeyDir,
-        machine: &dyn key_root::MachineContext,
-        env_password: Option<&str>,
         port: u16,
         root: Option<&[u8; 32]>,
     ) -> Result<Self, key_root::KeyRootError> {
-        let ctx = key_root::OpenContext { machine, env_password, root };
+        let ctx = key_root::OpenContext { root };
         let loaded = key_root::load_or_initialize(dir, port, &ctx, || Self::new().to_material())?;
         let id = hex::encode(&loaded.identity.address[..8]);
         if loaded.created {
@@ -462,7 +459,7 @@ impl NodeIdentity {
 #[cfg(all(test, unix))]
 mod key_root_tests {
     use super::*;
-    use key_root::{FixedMachine, KeyDir, KeyRootError};
+    use key_root::{KeyDir, KeyRootError};
 
     fn dir() -> (std::path::PathBuf, KeyDir) {
         let path = std::env::temp_dir().join(format!("yandi-identity-test-{}-{}", std::process::id(), rand::random::<u32>()));
@@ -477,27 +474,25 @@ mod key_root_tests {
     #[test]
     fn a_first_run_creates_the_identity_and_every_later_start_loads_the_same_one() {
         let (root, dir) = dir();
-        let m = FixedMachine("machine-A".into());
-        let first = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
-        let again = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let key = [7u8; 32];
+        let first = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
+        let again = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         assert!(same(&first, &again), "a second start produced a different identity");
-        // with a root (the recoverable format) it is the same identity object, stored differently only after migration
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn an_existing_identity_that_cannot_be_opened_stops_the_node_and_changes_nothing() {
         let (root, dir) = dir();
-        let m = FixedMachine("machine-A".into());
-        let original = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let key = [7u8; 32];
+        let original = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         let file = dir.identity_file(9000);
         let before = std::fs::read(&file).unwrap();
-        // another machine, a password set later: both must fail closed and leave the file alone
-        let other = FixedMachine("machine-B".into());
-        assert!(matches!(NodeIdentity::load_or_create_in(&dir, &other, None, 9000, None), Err(KeyRootError::DecryptFailed)));
-        assert!(matches!(NodeIdentity::load_or_create_in(&dir, &m, Some("set later"), 9000, None), Err(KeyRootError::DecryptFailed)));
+        // no root, or another root: both must fail closed and leave the file alone
+        assert!(matches!(NodeIdentity::load_or_create_in(&dir, 9000, None), Err(KeyRootError::RecoveryRequired)));
+        assert!(matches!(NodeIdentity::load_or_create_in(&dir, 9000, Some(&[8u8; 32])), Err(KeyRootError::DecryptFailed)));
         assert_eq!(std::fs::read(&file).unwrap(), before, "a failed load changed the identity file");
-        let back = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let back = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         assert!(same(&original, &back));
         let _ = std::fs::remove_dir_all(root);
     }

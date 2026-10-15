@@ -387,14 +387,8 @@ pub fn load_auth_state() -> AuthState {
     // ключ устройства запечатан под железо (плата, процессор, карты, диски); прежний файл запечатывается при первой загрузке
     let device = HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
     match unlock_root(&dir, &SystemMachine, &device) {
-        Ok((root, source)) => {
-            match source {
-                RootSource::LegacyMachineId => {
-                    println!("[auth] ✅ Master key loaded (machine verified)");
-                    println!("[auth] ⚠️  legacy key format: the master key is protected only by the public machine id. Run `yandi-keys migrate` (see docs/KEY_RECOVERY.md)");
-                }
-                RootSource::Device => println!("[auth] ✅ Master key loaded (device key)"),
-            }
+        Ok((root, RootSource::Device)) => {
+            println!("[auth] ✅ Master key loaded (device key)");
             state
                 .is_setup
                 .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -678,7 +672,7 @@ pub fn verify_login(login_password: &str) -> Result<bool, String> {
 pub fn rebind_to_machine(_state: &AuthState, _master_password: &str) -> Result<(), String> {
     // The former implementation derived a NEW random master key from the password (its salt was never stored), which is not the old
     // key: everything encrypted under the old one became unreadable, and the password proved nothing. Recovery is now done by
-    // `yandi-keys recover` with the recovery password of a migrated key directory (docs/KEY_RECOVERY.md); nothing is changed here.
+    // `yandi-keys recover` with the recovery password (docs/KEY_RECOVERY.md); nothing is changed here.
     Err("Recovery is done on the command line: run `yandi-keys recover` (see docs/KEY_RECOVERY.md). Nothing was changed.".to_string())
 }
 
@@ -897,11 +891,7 @@ mod key_root_integration_tests {
     }
 
     #[test]
-    fn the_login_hash_is_read_from_both_auth_formats() {
-        assert_eq!(
-            login_hash_of(r#"{"version":1,"login_hash":"h1","master_key_encrypted":{}}"#).unwrap(),
-            "h1"
-        );
+    fn the_login_hash_is_read_from_the_auth_file() {
         assert_eq!(
             login_hash_of(r#"{"version":2,"login_hash":"h2","root_id":"x"}"#).unwrap(),
             "h2"
@@ -992,7 +982,7 @@ mod key_root_integration_tests {
         }
 
         #[test]
-        fn a_wrong_code_a_typo_a_weak_password_and_a_legacy_directory_change_nothing() {
+        fn a_wrong_code_a_typo_a_weak_password_change_nothing() {
             let code = RecoveryCode::generate();
             let (base, dir) = store(&code);
             let before = std::fs::read(dir.auth_file()).unwrap();
@@ -1018,25 +1008,7 @@ mod key_root_integration_tests {
                 "a refused reset changed auth.json"
             );
             assert!(st.verify_session(&token), "a refused reset ended a session");
-            // a legacy (v1) directory has no recovery wrapper
-            let legacy = std::env::temp_dir().join(format!(
-                "yandi-recover-legacy-{}-{}",
-                std::process::id(),
-                rand::random::<u32>()
-            ));
-            let ldir = KeyDir::open(legacy.join("keys")).unwrap();
-            let v1 =
-                key_root::legacy::seal_legacy_auth(&[7u8; 32], "$h", &FixedMachine("m".into()))
-                    .unwrap();
-            key_root::atomic::create_new_file(&ldir.auth_file(), &v1).unwrap();
-            assert!(
-                recover_login_in(&st, &ldir, &code.display(), "a brand new password", &pol)
-                    .unwrap_err()
-                    .contains("migrate")
-            );
-            assert_eq!(std::fs::read(ldir.auth_file()).unwrap(), v1);
             let _ = std::fs::remove_dir_all(base);
-            let _ = std::fs::remove_dir_all(legacy);
         }
     }
 
@@ -1046,7 +1018,7 @@ mod key_root_integration_tests {
         use crate::core::identity::NodeIdentity;
         use key_root::{
             unlock_root, FileDeviceKey, FixedMachine, IdentityFormat, KdfParams, KdfPolicy, KeyDir,
-            KeyRootError, OpenContext, Recovery, RootDocument, RootSource,
+            KeyRootError, Recovery, RootDocument, RootSource,
         };
         use std::os::unix::fs::PermissionsExt;
 
@@ -1216,7 +1188,7 @@ mod key_root_integration_tests {
             let state = AuthState::default();
             let root = setup(&dir, &m, &state).unwrap();
             // the identity is created UNDER the new keys (format v3), at first start
-            let id = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root)).unwrap();
+            let id = NodeIdentity::load_or_create_in(&dir, 9000, Some(&root)).unwrap();
             let file = std::fs::read(dir.identity_file(9000)).unwrap();
             assert_eq!(
                 key_root::identity_store::identity_format(&file).unwrap(),
@@ -1226,7 +1198,7 @@ mod key_root_integration_tests {
             let device = FileDeviceKey::new(dir.file("device.key"));
             let (root2, _) = unlock_root(&dir, &m, &device).unwrap();
             let again =
-                NodeIdentity::load_or_create_in(&dir, &m, None, 9000, Some(&root2)).unwrap();
+                NodeIdentity::load_or_create_in(&dir, 9000, Some(&root2)).unwrap();
             assert_eq!(again.node_id().0, id.node_id().0);
             // ANOTHER MACHINE, the device key gone: only the two files and the master password the person typed
             let other = std::env::temp_dir().join(format!(
@@ -1271,7 +1243,7 @@ mod key_root_integration_tests {
             .unwrap();
             let (root3, _) = unlock_root(&odir, &mb, &device_b).unwrap();
             let back =
-                NodeIdentity::load_or_create_in(&odir, &mb, None, 9000, Some(&root3)).unwrap();
+                NodeIdentity::load_or_create_in(&odir, 9000, Some(&root3)).unwrap();
             assert_eq!(
                 back.node_id().0,
                 id.node_id().0,
@@ -1291,11 +1263,6 @@ mod key_root_integration_tests {
                 "a new login password",
                 &doc.login_hash
             ));
-            let _ = OpenContext {
-                machine: &mb,
-                env_password: None,
-                root: None,
-            };
             let _ = std::fs::remove_dir_all(base);
             let _ = std::fs::remove_dir_all(other);
         }
