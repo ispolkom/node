@@ -177,14 +177,8 @@ impl Consumer for FilesConsumer {
     }
     fn migrate(&self, _old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
         Box::pin(async move {
-            // файлы прежних версий (открытые) запечатываются на месте; уже запечатанные не трогаются
             crate::file_vault::unlock(new);
-            tokio::task::spawn_blocking(move || {
-                let root = crate::util::data_dir::data_dir().join("files");
-                Ok(crate::file_vault::seal_dir(&root))
-            })
-            .await
-            .map_err(|e| e.to_string())?
+            Ok(0)
         })
     }
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
@@ -403,20 +397,17 @@ mod files_consumer_tests {
     use super::*;
 
     #[tokio::test]
-    async fn legacy_open_files_are_sealed_on_migrate_and_erased_with_the_environment() {
-        let root = crate::util::data_dir::data_dir().join("files");
-        let down = root.join("downloads");
+    async fn erase_removes_conversation_files_with_the_environment() {
+        let down = crate::util::data_dir::data_dir().join("files").join("downloads");
         std::fs::create_dir_all(&down).unwrap();
-        let p = down.join("legacy-consumer-test__a.txt");
-        std::fs::write(&p, "открытый файл прежней версии").unwrap();
+        let p = down.join("consumer-test__a.txt");
         let c = FilesConsumer;
         assert_eq!(c.migrate(None, [0x5a; 32]).await.unwrap(), 0);
-        assert!(crate::file_vault::is_sealed(&p));
-        assert_eq!(crate::file_vault::read_all(&p).unwrap(), "открытый файл прежней версии".as_bytes());
+        crate::file_vault::write_all(&p, "файл".as_bytes()).unwrap();
         let raw = std::fs::read(&p).unwrap();
-        assert!(!String::from_utf8_lossy(&raw).contains("открытый"));
+        assert!(!String::from_utf8_lossy(&raw).contains("файл"));
         c.erase().await;
         assert!(!p.exists(), "стирание среды удаляет и файлы переписки");
-        crate::file_vault::unlock([0x5a; 32]); // erase запер хранилище; остальные тесты процесса работают с тем же ключом
+        crate::file_vault::unlock([0x5a; 32]);
     }
 }

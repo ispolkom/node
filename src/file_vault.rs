@@ -284,35 +284,6 @@ pub fn assemble(parts: &[std::path::PathBuf], out: &Path, plain_size: u64) -> st
     r
 }
 
-/// Старый открытый файл → запечатанный (на месте). Уже запечатанный не трогается. Ok(true) — файл был перенесён.
-pub fn seal_existing(path: &Path) -> std::io::Result<bool> {
-    if is_sealed(path) {
-        return Ok(false);
-    }
-    let plain = std::fs::read(path)?;
-    write_all(path, &plain)?;
-    Ok(true)
-}
-
-/// Все открытые файлы папки (рекурсивно) → запечатанные; число файлов, которые не удалось перенести.
-pub fn seal_dir(dir: &Path) -> usize {
-    let mut failed = 0;
-    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-    for e in rd.flatten() {
-        let p = e.path();
-        match e.file_type() {
-            Ok(t) if t.is_dir() => failed += seal_dir(&p),
-            Ok(t) if t.is_file() => {
-                if seal_existing(&p).is_err() {
-                    failed += 1;
-                }
-            }
-            _ => {}
-        }
-    }
-    failed
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,21 +344,6 @@ mod tests {
         ra[HEAD + sz..HEAD + 2 * sz].copy_from_slice(&rb[HEAD + sz..HEAD + 2 * sz]);
         std::fs::write(&a, &ra).unwrap();
         assert!(read_block(&a, 1).is_err(), "блок чужого файла не проходит");
-    }
-
-    #[test]
-    fn legacy_plain_file_is_sealed_in_place_once() {
-        let d = tempfile::tempdir().unwrap();
-        let p = d.path().join("old.txt");
-        std::fs::write(&p, "старый открытый файл").unwrap();
-        assert!(!is_sealed(&p));
-        assert!(seal_existing(&p).unwrap());
-        assert!(!seal_existing(&p).unwrap(), "второй раз не трогается");
-        assert_eq!(read_all(&p).unwrap(), "старый открытый файл".as_bytes());
-        std::fs::create_dir_all(d.path().join("sub")).unwrap();
-        std::fs::write(d.path().join("sub/x"), b"1").unwrap();
-        assert_eq!(seal_dir(d.path()), 0);
-        assert!(is_sealed(&d.path().join("sub/x")));
     }
 
     #[test]
