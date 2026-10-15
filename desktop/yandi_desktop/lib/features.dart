@@ -64,6 +64,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   /// Голосовое, которое не удалось отправить: хранится только в памяти (открытого файла в tmp не остаётся), пока открыт экран;
   /// можно повторить отправку. Для получателя это новое сообщение.
   Uint8List? failedVoice;
+  /// Кому предназначалась неудавшаяся запись: повтор доступен только в этом чате, чужому адресату она не уходит.
+  String? failedVoicePeer;
   // «Файлы чата»: отдельный вид без сообщений, как в телефоне.
   bool filesView = false;
   int fileTab = 0;
@@ -358,10 +360,14 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         try {
           copy = await f.readAsBytes();
         } catch (_) {}
+        final target = peer(selected!);
         setState(() => pickedFile = f);
         await sendFile();
         if (mounted && pickedFile?.path == f.path && copy != null) {
-          setState(() => failedVoice = copy);   // pickedFile не сброшен успехом — отправка не удалась
+          setState(() {
+            failedVoice = copy;
+            failedVoicePeer = target;
+          });   // pickedFile не сброшен успехом — отправка не удалась
         } else if (mounted && failedVoice != null) {
           setState(() => failedVoice = null);
         }
@@ -377,7 +383,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   /// Повторить отправку неудавшегося голосового: запись из памяти кладётся во временный файл только на время отправки.
   Future<void> retryVoice() async {
     final bytes = failedVoice;
-    if (bytes == null || sending || selected == null) return;
+    if (bytes == null || sending || selected == null || failedVoicePeer != peer(selected!)) return;
     final f = File(await voicePathFactory());
     try {
       await f.parent.create(recursive: true);
@@ -1404,7 +1410,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               onTap: () => setState(() => replyTo = null),
             ),
           ),
-        if (failedVoice != null && !voice.active)
+        if (failedVoice != null && !voice.active && selected != null && failedVoicePeer == peer(selected!))
           Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
             children: [
