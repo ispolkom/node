@@ -1212,27 +1212,43 @@ struct StepUpDelete {
     password: String,
 }
 
-/// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
-/// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
-async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
+/// Повторная проверка пароля владельца перед разрушительным действием (удаление групп). `Err` — готовый ответ: пароль не передан
+/// (403 `password_required`), неверен (401), слишком частые попытки (429). Попытки считаются тем же счётчиком, что и вход.
+async fn require_step_up(state: &AppState, password: Option<&str>) -> Result<(), Response> {
+    let Some(password) = password else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"status": "error", "error": "password_required", "message": "для этого действия нужен пароль узла"})),
+        )
+            .into_response());
+    };
     if let Some(remaining) = state.auth_state.login_backoff_remaining() {
-        return (
+        return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         )
-            .into_response();
+            .into_response());
     }
-    match crate::web::auth::verify_login(&body.password) {
+    match crate::web::auth::verify_login(password) {
         Ok(true) => {
             state.auth_state.record_login_success();
-            crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
+            Ok(())
         }
         Ok(false) => {
             state.auth_state.record_login_failure();
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response()
+            Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()),
     }
+}
+
+/// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
+/// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
+async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
+    if let Err(resp) = require_step_up(&state, Some(&body.password)).await {
+        return resp;
+    }
+    crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
 }
 
 async fn login_page_handler() -> Html<&'static str> {
@@ -5514,28 +5530,16 @@ async fn mobile_device_remove_handler(
         let password = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
             .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string));
-        let Some(password) = password else {
+        if password.is_none() {
             let names: Vec<String> = owned.iter().map(|(_, name, _)| name.clone()).collect();
             return (
                 StatusCode::FORBIDDEN,
                 Json(serde_json::json!({"status": "error", "error": "password_required", "message": "устройство владеет группами; для удаления нужен пароль узла", "groups": names})),
             )
                 .into_response();
-        };
-        if let Some(remaining) = state.auth_state.login_backoff_remaining() {
-            return (
-                StatusCode::TOO_MANY_REQUESTS,
-                Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
-            )
-                .into_response();
         }
-        match crate::web::auth::verify_login(&password) {
-            Ok(true) => state.auth_state.record_login_success(),
-            Ok(false) => {
-                state.auth_state.record_login_failure();
-                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response();
-            }
-            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        if let Err(resp) = require_step_up(&state, password.as_deref()).await {
+            return resp;
         }
     }
     if crate::mobile_api::remove_device(&id) {
@@ -5604,11 +5608,25 @@ struct ComplaintMeasure {
     /// для `restrict`: на сколько часов (1–720)
     #[serde(default)]
     hours: u64,
+    /// пароль узла: нужен мерам, которые удаляют группы (`delete_group`, и `remove` устройства-владельца групп)
+    #[serde(default)]
+    password: Option<String>,
 }
 
-async fn complaint_measure_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintMeasure>) -> Response {
+async fn complaint_measure_handler(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintMeasure>) -> Response {
     let Some(c) = crate::complaints::find(&id) else { return complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()) };
     let is_user = c.target_kind == "user";
+    // меры, уничтожающие группы, требуют того же повторного ввода пароля, что и прямое удаление группы
+    let destroys_groups = match b.kind.as_str() {
+        "delete_group" => !is_user,
+        "remove" => is_user && !crate::mobile_groups::owned_by(&c.target_id).is_empty(),
+        _ => false,
+    };
+    if destroys_groups {
+        if let Err(resp) = require_step_up(&state, b.password.as_deref()).await {
+            return resp;
+        }
+    }
     let until = if b.kind == "restrict" { crate::complaints::now_ms() + b.hours.clamp(1, 720) * 3600 * 1000 } else { 0 };
     let result: Result<(), String> = match b.kind.as_str() {
         "warn" if is_user => {
@@ -6062,3 +6080,27 @@ mod gateways_file_tests {
         assert_eq!(std::fs::read(&p).unwrap(), b"{broken");
     }
 }
+
+#[cfg(test)]
+mod step_up_tests {
+    use super::*;
+
+    /// Меры жалобы, уничтожающие группу, требуют пароль узла: без него — 403, с неверным — отказ, группа цела.
+    #[tokio::test]
+    async fn deleting_a_group_through_a_complaint_needs_the_node_password() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let id = crate::complaints::submit(&"a".repeat(64), "group", &"b".repeat(32), "G", "abuse", "плохая группа", &[]).unwrap();
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let web = WebServer::new_with_auth(0, auth);
+        let measure = |password: Option<&str>| ComplaintMeasure { kind: "delete_group".into(), note: String::new(), hours: 0, password: password.map(String::from) };
+        let r = complaint_measure_handler(State(web.state.clone()), axum::extract::Path(id.clone()), Json(measure(None))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "без пароля мера не выполняется");
+        let r = complaint_measure_handler(State(web.state.clone()), axum::extract::Path(id.clone()), Json(measure(Some("точно неверный пароль")))).await;
+        assert_ne!(r.status(), StatusCode::OK, "с неверным паролем — тоже нет");
+        let c = crate::complaints::find(&id).unwrap();
+        assert!(c.measures.is_empty(), "мера в журнале не появилась");
+    }
+}
+

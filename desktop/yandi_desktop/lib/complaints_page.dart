@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'preferences.dart';
 import 'transport/api.dart';
+import 'groups.dart';
 
 /// Страница «Жалобы»: слева обращения (кто пожаловался и на кого), справа текст, переписка и меры владельца узла.
 /// Ответы уходят от имени узла («Администрация узла»), не от владельца лично.
@@ -76,6 +77,39 @@ class _ComplaintsFeatureState extends State<ComplaintsFeature> {
         loading = false;
         error = e is ApiFailure ? e.message : 'Не удалось получить жалобы. Если закрытая среда заперта, войдите.';
       });
+    }
+  }
+
+  /// Мера, уничтожающая группы: пароль узла спрашивается заново (как при прямом удалении группы). [ask] — спросить сразу;
+  /// иначе — только если узел потребует (устройство владеет группами).
+  Future<void> stepUpMeasure(Map<String, dynamic> c, String kind, {required bool ask}) async {
+    Future<void> send([String? password]) => widget.api
+        .request('/api/complaints/${c['id']}/measure',
+            body: {'kind': kind, 'note': note.text, if (password != null) 'password': password})
+        .then((_) {});
+    Future<String?> askPassword() async {
+      final v = await showDialog<List<String>>(
+        context: context,
+        builder: (_) => const GroupForm(
+          title: 'Эта мера удаляет группы. Пароль входа узла',
+          labels: ['Пароль входа узла'],
+          secret: true,
+        ),
+      );
+      return v == null || v.isEmpty ? null : v[0];
+    }
+    if (ask) {
+      final pw = await askPassword();
+      if (pw == null) return;
+      return send(pw);
+    }
+    try {
+      await send();
+    } on ApiFailure catch (e) {
+      if (e.status != 403) rethrow;
+      final pw = await askPassword();
+      if (pw == null) return;
+      await send(pw);
     }
   }
 
@@ -196,12 +230,12 @@ class _ComplaintsFeatureState extends State<ComplaintsFeature> {
                     child: const UiText('Ограничить'),
                   ),
                   TextButton(
-                    onPressed: busy ? null : () => act(() => widget.api.request('/api/complaints/${c['id']}/measure', body: {'kind': 'remove', 'note': note.text}).then((_) {}), ok: 'Устройство удалено с узла.'),
+                    onPressed: busy ? null : () => act(() => stepUpMeasure(c, 'remove', ask: false), ok: 'Устройство удалено с узла.'),
                     child: const UiText('Удалить с узла'),
                   ),
                 ] else
                   TextButton(
-                    onPressed: busy ? null : () => act(() => widget.api.request('/api/complaints/${c['id']}/measure', body: {'kind': 'delete_group', 'note': note.text}).then((_) {}), ok: 'Группа удалена с узла.'),
+                    onPressed: busy ? null : () => act(() => stepUpMeasure(c, 'delete_group', ask: true), ok: 'Группа удалена с узла.'),
                     child: const UiText('Удалить группу с узла'),
                   ),
                 TextButton(
