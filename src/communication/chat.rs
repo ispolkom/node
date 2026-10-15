@@ -377,6 +377,31 @@ impl ChatManager {
         // 2. Сохранить у себя (outgoing)
         self.storage.save_outgoing(&to, &msg)?;
 
+        // Ожидание подтверждения заводится ДО первой отправки: быстрый ACK, пришедший, пока отправка ещё в сети, находит запись и
+        // снимает её, а не теряется (иначе запись появилась бы потом и сообщение отправлялось бы повторно, а статус Read
+        // затирался бы на Shipping).
+        {
+            let mut pending = self.pending_acks.lock().await;
+            // среду могли запереть, пока отправка ждала очередь: возвращать в неё открытый текст нельзя
+            // (проверка под замком очереди: lock() сначала отзывает ключ, потом чистит очередь)
+            if self.storage.is_locked() {
+                return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+            }
+            pending.insert(
+                msg.msg_id,
+                PendingAck {
+                    peer: to,
+                    sent_at: Instant::now(),
+                    first_sent: unix_now(),
+                    attempts: 0,
+                    next_try: Instant::now() + retry_delay(1),
+                    msg: msg.clone(),
+                },
+            );
+        }
+        self.outbox_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+
         // 3-6. Отправить; что не ушло или не подтверждено — остаётся в очереди и отправляется снова (см. PendingAck)
         let first_try = self.send_once(&msg).await;
         let attempts = if first_try.is_ok() { 1 } else { 0 };
@@ -395,31 +420,31 @@ impl ChatManager {
                 self.transport.request_punch(to).await; // no way to the peer yet: ask a mutual acquaintance to introduce us
             }
         }
-        {
+        // запись могла быть снята подтверждением, пришедшим во время отправки: тогда статус уже Read, и его не понижаем
+        let still_waiting = {
             let mut pending = self.pending_acks.lock().await;
-            // среду могли запереть, пока отправка ждала сеть: lock() уже очистил очередь, и возвращать в неё открытый текст нельзя
-            // (проверка под замком очереди: lock() сначала отзывает ключ, потом чистит очередь)
-            if self.storage.is_locked() {
-                return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+            match pending.get_mut(&msg.msg_id) {
+                Some(p) => {
+                    p.attempts = attempts;
+                    p.next_try = Instant::now() + retry_delay(attempts.max(1));
+                    p.msg.status = msg.status.clone();
+                    true
+                }
+                None => false,
             }
-            pending.insert(
-                msg.msg_id,
-                PendingAck {
-                    peer: to,
-                    sent_at: Instant::now(),
-                    first_sent: unix_now(),
-                    attempts,
-                    next_try: Instant::now() + retry_delay(attempts.max(1)),
-                    msg: msg.clone(),
-                },
-            );
+        };
+        if still_waiting {
+            self.outbox_dirty
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // 7. Обновить статус в файле
+            self.storage
+                .update_message_status(&to, &msg.msg_id, msg.status.clone())?;
+        } else if self.storage.is_locked() {
+            // среду заперли, пока шла отправка: очередь очищена замком, историю обновить нечем
+            return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+        } else {
+            msg.status = MessageStatus::Read;
         }
-        self.outbox_dirty
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        // 7. Обновить статус в файле
-        self.storage
-            .update_message_status(&to, &msg.msg_id, msg.status.clone())?;
 
         Ok(msg)
     }
