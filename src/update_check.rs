@@ -81,7 +81,11 @@ fn client() -> Result<reqwest::Client, String> {
 
 /// Только HTTPS (для проверок можно разрешить http переменной `YANDI_UPDATE_ALLOW_HTTP=1`).
 fn allowed(url: &str) -> bool {
-    url.starts_with("https://") || (url.starts_with("http://") && std::env::var("YANDI_UPDATE_ALLOW_HTTP").is_ok_and(|v| v == "1"))
+    allowed_with(url, std::env::var("YANDI_UPDATE_ALLOW_HTTP").is_ok_and(|v| v == "1"))
+}
+
+fn allowed_with(url: &str, allow_http: bool) -> bool {
+    url.starts_with("https://") || (allow_http && url.starts_with("http://"))
 }
 
 async fn get_limited(c: &reqwest::Client, url: &str, limit: u64) -> Result<Vec<u8>, String> {
@@ -195,9 +199,10 @@ mod tests {
 
     #[test]
     fn channels_must_be_https_unless_the_test_switch_is_set() {
-        assert!(allowed("https://yandi.su/update/deb/MANIFEST.json"));
-        assert!(!allowed("http://yandi.su/update/deb/MANIFEST.json"));
-        assert!(!allowed("ftp://x/y"));
+        assert!(allowed_with("https://yandi.su/update/deb/MANIFEST.json", false));
+        assert!(!allowed_with("http://yandi.su/update/deb/MANIFEST.json", false));
+        assert!(allowed_with("http://127.0.0.1:1/", true));
+        assert!(!allowed_with("ftp://x/y", true));
     }
 
     fn key() -> ed25519_dalek::SigningKey {
