@@ -101,7 +101,8 @@ class CallService extends ChangeNotifier {
           // встречные звонки друг другу: побеждает звонок с меньшим номером, второй уступает и принимается автоматически
           if (phase == CallPhase.calling && from == peerId && s.cid.compareTo(cid!) < 0) {
             _stopRing(); _ringTimer?.cancel();
-            cid = s.cid; video = s.video; incoming = true; phase = CallPhase.ringing;
+            // режим (аудио/видео) остаётся тем, на который согласился пользователь: чужое поле video не включает камеру
+            cid = s.cid; incoming = true; phase = CallPhase.ringing;
             notifyListeners();
             await accept();
           } else if (!(from == peerId && s.cid == cid)) {
@@ -197,10 +198,15 @@ class CallService extends ChangeNotifier {
   }
 
   Future<void> _startMedia({required bool offerer}) async {
+    // звонок мог закончиться, пока шли асинхронные шаги (окно разрешений, сеть): всё, что открыто позже, закрывается сразу
+    final myCid = cid;
+    bool cancelled() => cid != myCid || phase == CallPhase.idle || phase == CallPhase.ended;
     try {
       localRenderer = RTCVideoRenderer();  remoteRenderer = RTCVideoRenderer();
       await localRenderer!.initialize();   await remoteRenderer!.initialize();
-      _pc = await createPeerConnection(await _iceConfig());
+      final pc = await createPeerConnection(await _iceConfig());
+      if (cancelled()) { await pc.close(); return; }
+      _pc = pc;
       _pc!.onIceCandidate = (c) {
         if (c.candidate == null) return;
         _signal('ice', cand: {'candidate': c.candidate, 'sdpMid': c.sdpMid, 'sdpMLineIndex': c.sdpMLineIndex});
@@ -209,11 +215,17 @@ class CallService extends ChangeNotifier {
         if (e.streams.isNotEmpty) { remoteRenderer?.srcObject = e.streams.first; notifyListeners(); }
       };
       _pc!.onConnectionState = _onConnState;
-      _local = await navigator.mediaDevices.getUserMedia({
+      final stream = await navigator.mediaDevices.getUserMedia({
         'audio': {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true},
         // старт с умеренного 360p: на слабом канале видео деградирует плавно, а не замирает
         'video': video ? {'facingMode': 'user', 'width': {'ideal': 480}, 'height': {'ideal': 360}, 'frameRate': {'ideal': 20}} : false,
       });
+      if (cancelled()) {
+        for (final t in stream.getTracks()) { await t.stop(); }
+        await stream.dispose();
+        return;
+      }
+      _local = stream;
       for (final t in _local!.getTracks()) { await _pc!.addTrack(t, _local!); }
       localRenderer!.srcObject = _local;
       if (video) await _tuneVideoSender();   // лимит битрейта и поведение при нехватке канала
