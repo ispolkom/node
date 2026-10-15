@@ -727,6 +727,10 @@ impl ChatStorage {
     /// Очистить историю чата с конкретным peer
     pub fn clear_history(&self, peer_id: &HashId) -> Result<()> {
         let _g = self.locked();
+        // запертая среда: историю нельзя стереть без входа владельца (стирание среды целиком — отдельный путь `erase_encrypted`)
+        if self.is_locked() {
+            return Err(anyhow::anyhow!("закрытая среда заперта: историю нельзя очистить"));
+        }
         let chat_file = self.chat_file_path_enc(peer_id);
         if chat_file.exists() {
             std::fs::remove_file(chat_file)?;
@@ -738,6 +742,9 @@ impl ChatStorage {
     /// Очистить всю историю
     pub fn clear_all(&self) -> Result<()> {
         let _g = self.locked();
+        if self.is_locked() {
+            return Err(anyhow::anyhow!("закрытая среда заперта: историю нельзя очистить"));
+        }
         if self.chats_dir.exists() {
             std::fs::remove_dir_all(&self.chats_dir)?;
             std::fs::create_dir_all(&self.chats_dir)?;
@@ -1051,6 +1058,8 @@ mod closed_env_tests {
         assert!(st.load_history(&peer, 10).is_err());
         assert!(st.delete_message(&peer, &msg.msg_id).is_err());
         assert!(st.update_message_text(&peer, &msg.msg_id, "x".into()).is_err());
+        assert!(st.clear_history(&peer).is_err(), "очистка запертой истории отказывает");
+        assert!(st.clear_all().is_err());
         assert_eq!(std::fs::read(&file).unwrap(), before, "файл не изменён");
         st.set_master([5; 32]);
         assert_eq!(st.load_history(&peer, 10).unwrap().len(), 1);
