@@ -126,6 +126,10 @@ bool validApiPath(String path) {
   if (RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path)) return true;
   if (RegExp(r'^/api/mobile/call/events\?after=[0-9]{1,20}$').hasMatch(path))
     return true;
+  // код сопряжения для постороннего пользователя узла (роль — из закрытого списка)
+  if (RegExp(r'^/api/mobile/pairing\?role=(owner|user)$').hasMatch(path)) {
+    return true;
+  }
   final match = RegExp(
     r'^/api/files/(content|status)/[a-zA-Z0-9_-]{1,128}/([^/?#]+)$',
   ).firstMatch(path);

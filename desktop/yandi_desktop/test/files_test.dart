@@ -238,6 +238,13 @@ void main() {
       await m1.stop(t);
     },
   );
+  test('pairing codes: only the two known roles pass the path check', () {
+    expect(validApiPath('/api/mobile/pairing'), true);
+    expect(validApiPath('/api/mobile/pairing?role=user'), true);
+    expect(validApiPath('/api/mobile/pairing?role=owner'), true);
+    expect(validApiPath('/api/mobile/pairing?role=admin'), false);
+    expect(validApiPath('/api/mobile/pairing?role=user&x=1'), false);
+  });
   test(
     'encoded filenames allow unicode, reject traversal and executable URIs',
     () {
