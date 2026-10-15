@@ -105,16 +105,26 @@ if command -v nft >/dev/null && nft list chain inet filter input >/dev/null 2>&1
   echo "    tcp dport $PORT accept"
   echo "    udp dport $PORT accept"
   echo "    udp dport $RELAY_MIN-$RELAY_MAX accept"
-  # служба на 0.0.0.0 этого компьютера не должна доставаться через релей по собственному внешнему адресу (пакет идёт через lo мимо
-  # входного файрвола): из портов релея на $EXT — только в порты релея
-  nft list chain inet filter output >/dev/null 2>&1 || \
-    nft add chain inet filter output '{ type filter hook output priority 0; policy accept; }'
-  OUT_RULE="ip daddr $EXT udp sport $RELAY_MIN-$RELAY_MAX udp dport != $RELAY_MIN-$RELAY_MAX drop"
-  nft list chain inet filter output | grep -q -- "udp sport $RELAY_MIN-$RELAY_MAX" || nft add rule inet filter output $OUT_RULE
-  echo "ЧТОБЫ ПРАВИЛО ВЫХОДА ОСТАЛОСЬ ПОСЛЕ ПЕРЕЗАГРУЗКИ добавьте в цепочку output в /etc/nftables.conf:"
-  echo "    $OUT_RULE"
 else
   echo "nftables с таблицей inet filter не найден: откройте порты $PORT (TCP и UDP) и $RELAY_MIN-$RELAY_MAX (UDP) своим брандмауэром."
+fi
+# служба на 0.0.0.0 этого компьютера не должна доставаться через релей по собственному внешнему адресу (пакет идёт через lo мимо
+# входного файрвола): из портов релея на $EXT — только в порты релея. Правило ставится в СВОЕЙ таблице, независимо от чужого файрвола.
+OUT_RULE="ip daddr $EXT udp sport $RELAY_MIN-$RELAY_MAX udp dport != $RELAY_MIN-$RELAY_MAX drop"
+if command -v nft >/dev/null; then
+  nft add table inet yandi_turn
+  nft flush table inet yandi_turn
+  nft add chain inet yandi_turn output '{ type filter hook output priority 0; policy accept; }'
+  nft add rule inet yandi_turn output $OUT_RULE
+  nft list chain inet yandi_turn output | grep -q "udp sport $RELAY_MIN-$RELAY_MAX" || { echo "не удалось поставить защиту релея от самого себя"; exit 1; }
+  echo "защита релея от доступа к службам этого компьютера поставлена (таблица inet yandi_turn)."
+  echo "ЧТОБЫ ОНА ОСТАЛАСЬ ПОСЛЕ ПЕРЕЗАГРУЗКИ, добавьте в /etc/nftables.conf:"
+  echo "    table inet yandi_turn { chain output { type filter hook output priority 0; policy accept; $OUT_RULE } }"
+elif [ "${YANDI_TURN_ALLOW_SELF_RELAY:-0}" != "1" ]; then
+  echo "nft не найден: без правила на выходе релей достаёт службы этого компьютера по его внешнему адресу ($EXT)."
+  echo "Установите nftables или поставьте эквивалентное правило своим брандмауэром и запустите скрипт с YANDI_TURN_ALLOW_SELF_RELAY=1."
+  systemctl stop coturn 2>/dev/null || true
+  exit 1
 fi
 
 echo "== 5. секрет для узла"
