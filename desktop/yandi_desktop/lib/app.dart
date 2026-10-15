@@ -29,6 +29,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   AuthStage? auth;
   VaultState? vault;
   bool connected = false, entered = false, busy = false, visible = true;
+  /// Сообщение «Доступно обновление …» из /api/update/status (null — нет).
+  String? updateNotice;
   bool polling = false, lockUnconfirmed = false;
   int epoch = 0, tick = 0, formVersion = 0, operation = 0;
   String? error, notice;
@@ -231,6 +233,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         setState(() {
           speed = result;
         });
+      }
+      if (force || current % 60 == 0) {
+        // подписанное обновление, найденное узлом (сам узел ничего не ставит): только сообщение владельцу
+        try {
+          final u = await widget.api.request('/api/update/status');
+          if (!mounted || own != epoch) return;
+          final a = u['available'];
+          setState(() {
+            updateNotice = a is Map && a['version'] is String ? 'Доступно обновление YANDI ${a['version']}' : null;
+          });
+        } catch (_) {}
       }
       if (force || current % 10 == 0) {
         final result = await widget.api.request('/api/nodes');
@@ -553,6 +566,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (updateNotice != null) UiText(updateNotice!),
         if (background.unread.isNotEmpty)
           UiText('Новых чатов: ${background.unread.length}'),
         if (lockUnconfirmed) ...[
