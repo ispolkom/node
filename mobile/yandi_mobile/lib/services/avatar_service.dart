@@ -50,6 +50,8 @@ class AvatarService extends ChangeNotifier {
   /// Запрошенные картинки: принимаем только то, что просили (иначе контакт мог бы забивать нам память чем угодно).
   final Map<String, DateTime> _pending = {};
   static const _pendingTtl = Duration(minutes: 5);
+  static const _pendingPerPeer = 4;
+  static const _pendingTotal = 64;
 
   String? get myHash => _mine;
   Uint8List? get myBytes => _mine == null ? null : _bytes[_mine!];
@@ -176,8 +178,22 @@ class AvatarService extends ChangeNotifier {
       await _save();
       return;
     }
-    _pending['$from|$hash'] = DateTime.now();
+    _notePending(from, hash);
     await send(AvatarMsg.request(hash));
+  }
+
+  /// Запомнить запрос. Просроченные убираются; от одного контакта живых запросов не больше [_pendingPerPeer] (старейшие уступают
+  /// новым), а всего — [_pendingTotal]: поток объявлений с новыми хэшами не наращивает таблицу без предела.
+  void _notePending(String from, String hash) {
+    final now = DateTime.now();
+    _pending.removeWhere((_, t) => now.difference(t) > _pendingTtl);
+    final mine = _pending.keys.where((k) => k.startsWith('$from|')).toList()
+      ..sort((x, y) => _pending[x]!.compareTo(_pending[y]!));
+    while (mine.length >= _pendingPerPeer) {
+      _pending.remove(mine.removeAt(0));
+    }
+    if (_pending.length >= _pendingTotal) return;   // таблица полна живыми запросами: новый не принимаем
+    _pending['$from|$hash'] = now;
   }
 
   /// Контакт просит нашу картинку: отдаём только если просит именно ту, что у нас сейчас.

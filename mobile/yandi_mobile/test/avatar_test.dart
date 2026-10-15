@@ -189,4 +189,13 @@ void main() {
     expect(File('${dir.path}/avatars/$hq.png').existsSync(), isFalse, reason: 'открытый оригинал стёрт');
     expect(File('${dir.path}/avatars/$hq.yav').existsSync(), isTrue);
   });
+
+  test('поток объявлений с новыми хэшами не наращивает очередь запросов без предела', () async {
+    final images = [for (var i = 0; i < 10; i++) fakePng(100 + i)];
+    final hashes = images.map(AvatarMsg.hashOf).toList();
+    for (final h in hashes) { await svc.onAnnounce('peerA', h, (t) async {}); }
+    // принята может быть только картинка из последних запросов этого контакта: самые старые вытеснены
+    expect(await svc.onImage('peerA', hashes.first, images.first), isFalse, reason: 'старейший запрос вытеснен');
+    expect(await svc.onImage('peerA', hashes.last, images.last), isTrue, reason: 'свежий запрос жив');
+  });
 }
