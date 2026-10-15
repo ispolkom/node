@@ -385,6 +385,11 @@ fn mail_path() -> std::path::PathBuf {
 }
 
 fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
+    with_mail_saved(f).0
+}
+
+/// То же, но говорит, удалось ли записать очередь на диск.
+fn with_mail_saved<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> (R, bool) {
     let mut g = MAIL.lock().unwrap_or_else(|e| e.into_inner());
     let list = g.get_or_insert_with(|| {
         std::fs::read_to_string(mail_path())
@@ -393,14 +398,17 @@ fn with_mail<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> R {
             .unwrap_or_default()
     });
     let r = f(list);
-    if let Ok(s) = serde_json::to_string(&*list) {
-        let p = mail_path();
-        if let Some(d) = p.parent() {
-            let _ = std::fs::create_dir_all(d);
-        }
-        let _ = crate::util::private_file::write_private(&p, s.as_bytes());
-    }
-    r
+    let saved = serde_json::to_string(&*list)
+        .ok()
+        .map(|s| {
+            let p = mail_path();
+            if let Some(d) = p.parent() {
+                let _ = std::fs::create_dir_all(d);
+            }
+            crate::util::private_file::write_private(&p, s.as_bytes()).is_ok()
+        })
+        .unwrap_or(false);
+    (r, saved)
 }
 
 /// Спаренные устройства и их состояние: для страницы узла (кто в сети, когда был виден).
@@ -563,9 +571,14 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
     };
     // отправитель (устройство или сам узел) проверяется под замком очереди: remove_device сначала убирает устройство, потом чистит его
     // письма, поэтому письмо забытого устройства либо не попадёт в очередь, либо будет вычищено вместе с остальными
-    let accepted = with_mail(|l| (is_node_peer(from) || device_by_peer(from).is_some()) && mail_accept(l, m.clone(), now_ms()));
+    let (accepted, saved) = with_mail_saved(|l| (is_node_peer(from) || device_by_peer(from).is_some()) && mail_accept(l, m.clone(), now_ms()));
     if !accepted {
         return false; // очередь переполнена этим отправителем или вообще: новое письмо не принимаем, чужие старые не трогаем
+    }
+    if !saved {
+        // на диск не легло: письмо существовало бы только в памяти и пропало при перезапуске — честно «не принято»
+        with_mail(|l| l.retain(|x| !(x.ts == m.ts && x.from == m.from && x.to == m.to)));
+        return false;
     }
     let _ = bus().send(Event::Mail(Arc::new(m)));
     true
@@ -2367,6 +2380,18 @@ mod hardening_tests {
         // роль в старом devices.json отсутствует — это владелец
         let old: Device = serde_json::from_str(r#"{"token_hash":"t","name":"n","created_ms":7,"acked_ts":0}"#).unwrap();
         assert_eq!(old.role, "owner");
+    }
+
+    #[test]
+    fn mail_that_did_not_reach_the_disk_is_not_accepted() {
+        let p = mail_path();
+        let _ = std::fs::remove_file(&p);
+        std::fs::create_dir_all(&p).unwrap(); // запись в файл невозможна
+        let m = Mail { ts: 1, from: "a".into(), to: "b".into(), payload_b64: "eA==".into() };
+        let (_, saved) = with_mail_saved(|l| mail_accept(l, m.clone(), now_ms()));
+        assert!(!saved, "сбой записи виден вызывающему");
+        std::fs::remove_dir_all(&p).unwrap();
+        with_mail(|l| l.clear());
     }
 
     #[test]
