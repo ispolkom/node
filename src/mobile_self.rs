@@ -425,6 +425,40 @@ pub fn open(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -
     Some(text)
 }
 
+/// Как [`open`], но номер письма в журнале повторов НЕ занимается: письмо проверено (подпись, AEAD, срок) и ещё не виденное.
+/// Занять номер — отдельно, [`commit_replay`], когда результат обработки уже долговечен (сообщение сохранено): иначе сбой
+/// сохранения после занятия номера терял бы сообщение (повтор отвергался бы как «уже виденное»).
+pub fn open_deferred(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -> Option<String> {
+    let k = keys()?;
+    let text = open_with(&k.x_secret, blob, from, to, kind, sender_ed, now_ms())?;
+    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
+    match replay_seen(&path, blob, now_ms()) {
+        Ok(false) => Some(text),
+        _ => None, // уже видели либо журнал повреждён (закрытый отказ, как у open)
+    }
+}
+
+/// Занять номер письма после успешной обработки. `false` — не удалось записать журнал: письмо надо обработать повторно
+/// (повтор безопасен: сохранение сообщения идемпотентно по номеру).
+pub fn commit_replay(blob: &[u8]) -> bool {
+    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
+    claim_replay(&path, blob, now_ms()).is_ok()
+}
+
+fn replay_seen(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, String> {
+    let _lock = REPLAY_LOCK.lock().map_err(|_| "replay lock poisoned")?;
+    let seen: std::collections::BTreeMap<String, u64> = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt replay ledger")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e.to_string()),
+    };
+    if blob.len() < 82 {
+        return Err("short blob".into());
+    }
+    let id = hex::encode(&blob[2..82]);
+    Ok(seen.get(&id).is_some_and(|expires| *expires >= now))
+}
+
 fn open_with(secret: &StaticSecret, blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32], now: u64) -> Option<String> {
     use ed25519_dalek::{Signature, VerifyingKey};
     if blob.len() < HEADER + 16 + 64 || blob[0] != MAGIC || blob[1] != kind || !matches!(kind, 1 | 2) {
@@ -445,27 +479,6 @@ fn open_with(secret: &StaticSecret, blob: &[u8], from: &str, to: &str, kind: u8,
 }
 
 static REPLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// Письмо принято (подпись проверена), но сохранить сообщение не удалось: вернуть его номер из журнала повторов, иначе повторная
-/// попытка будет отвергнута как повтор и сообщение потеряется.
-pub fn release_replay(blob: &[u8]) {
-    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
-    release_replay_at(&path, blob);
-}
-
-fn release_replay_at(path: &std::path::Path, blob: &[u8]) {
-    if blob.len() < 82 {
-        return;
-    }
-    let _lock = REPLAY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let Ok(bytes) = std::fs::read(path) else { return };
-    let Ok(mut seen) = serde_json::from_slice::<std::collections::BTreeMap<String, u64>>(&bytes) else { return };
-    if seen.remove(&hex::encode(&blob[2..82])).is_some() {
-        if let Ok(b) = serde_json::to_vec(&seen) {
-            let _ = crate::util::private_file::write_private(path, &b);
-        }
-    }
-}
 
 /// Called only after successful signature and AEAD checks. Never evict unexpired IDs.
 fn claim_replay(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, String> {
@@ -1172,16 +1185,20 @@ mod tests {
         assert_ne!(temp.x_pub, first.x_pub, "временная пара — другая");
     }
 
+    /// Номер письма занимается после обработки: пока не занят, письмо «не виденное» и повтор проходит; после — отвергается.
     #[test]
-    fn a_released_envelope_can_be_claimed_again() {
+    fn a_letter_is_seen_only_after_its_number_is_committed() {
         let phone = make_keys([7; 32], [8; 32]);
         let blob = seal_with(&phone, "x", &phone.x_pub, &hex::encode([1;32]), &hex::encode([2;32]), 1, now_ms()).unwrap();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("replays.json");
+        assert!(!replay_seen(&path, &blob, now_ms()).unwrap(), "ещё не видели");
+        // обработка сорвалась до фиксации: повтор допустим
+        assert!(!replay_seen(&path, &blob, now_ms()).unwrap());
         assert!(claim_replay(&path, &blob, now_ms()).unwrap());
-        release_replay_at(&path, &blob); // сообщение не сохранилось — номер возвращён
-        assert!(claim_replay(&path, &blob, now_ms()).unwrap(), "повтор принимается");
-        assert!(!claim_replay(&path, &blob, now_ms()).unwrap(), "а после успешной обработки — уже нет");
+        assert!(replay_seen(&path, &blob, now_ms()).unwrap(), "после фиксации — уже виденное");
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(replay_seen(&path, &blob, now_ms()).is_err(), "повреждённый журнал — закрытый отказ");
     }
 
     #[test]

@@ -686,10 +686,16 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
         return true; // заблокированное устройство: ни сообщений, ни файлов, ни звонков компьютеру
     }
     let Ok(ed) = device_ed25519(from_device) else { return true };
-    let (Some(text), Some(from)) = (crate::mobile_self::open(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return true };
+    // номер письма занимается только после долговечной обработки (для сообщения — после записи в историю), см. open_deferred
+    let (Some(text), Some(from)) = (crate::mobile_self::open_deferred(blob, from_device, &hex::encode(st.my_id.0), 1, &ed), hex32(from_device)) else { return true };
     let device = HashId(from);
     crate::mobile_self::unhide_phone(from_device);
-    let text = match crate::mobile_self::classify(text) {
+    let envelope = crate::mobile_self::classify(text);
+    // всё, кроме сообщения, обрабатывается «в памяти»: номер занимается сразу (отказ записи журнала — повтор письма позже)
+    if !matches!(envelope, crate::mobile_self::Envelope::Message { .. }) && !crate::mobile_self::commit_replay(blob) {
+        return false;
+    }
+    let text = match envelope {
         crate::mobile_self::Envelope::Receipt { read, ids } => {
             let status = if read { crate::communication::MessageStatus::Read } else { crate::communication::MessageStatus::Delivered };
             for id in ids {
@@ -731,9 +737,12 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
             });
             msg.mark_delivered();
             if st.chat.store_local_incoming(&device, &msg).is_err() {
-                // не сохранили: номер письма возвращается из журнала повторов, иначе повтор отвергнется как «уже виденное»
-                crate::mobile_self::release_replay(blob);
-                return false; // квитанции «доставлено» не будет, письмо остаётся в очереди на повтор
+                return false; // номер письма не занят: повтор пройдёт; квитанции «доставлено» не будет, письмо остаётся в очереди
+            }
+            // сообщение долговечно сохранено; номер письма занимается теперь. Не записался журнал — письмо обработается ещё раз
+            // (сохранение идемпотентно по номеру сообщения), но квитанцию телефону не шлём до успешной фиксации
+            if !crate::mobile_self::commit_replay(blob) {
+                return false;
             }
             crate::mobile_self::remember_unread(&local, from_device, &cmid);
             node_mail_to_device(st, from_device, &crate::mobile_self::receipt(false, &[cmid]));
