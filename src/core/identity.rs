@@ -55,23 +55,6 @@ struct StoredIdentityV2 {
     encrypted_private_keys: EncryptedPrivateKeys,
 }
 
-// ── On-disk format v1 (legacy plaintext) ──────────────────────────────────
-// Kept only for migration; never written by this code.
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredIdentityV1 {
-    address: [u8; 32],
-    pub public_key: [u8; 32],
-    pub private_key: [u8; 32],
-    pub signing_public_key: [u8; 32],
-    pub signing_private_key: [u8; 32],
-    #[serde(default = "default_created_at")]
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-// Keep the old name available so call sites that reference `StoredIdentity` still compile.
-pub type StoredIdentity = StoredIdentityV1;
-
 fn default_created_at() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
@@ -316,7 +299,6 @@ impl NodeIdentity {
     }
 
     /// Load identity from disk, decrypting private keys.
-    /// Automatically migrates v1 (plaintext) files to v2 (encrypted) format.
     #[cfg(not(unix))]
     pub fn load_from_file(port: u16) -> Result<Self, String> {
         let keys_dir = Self::get_keys_directory()?;
@@ -330,19 +312,7 @@ impl NodeIdentity {
         let json = fs::read_to_string(&file_path)
             .map_err(|e| format!("Failed to read identity file: {}", e))?;
 
-        // Detect format by checking for 'version' field in JSON
-        let raw: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| format!("Invalid JSON in identity file: {}", e))?;
-
-        let version = raw.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
-
-        if version >= 2 {
-            Self::load_v2(&json, port, &file_path)
-        } else {
-            // V1 legacy file — load then immediately migrate
-            println!("[identity] ⚠️  Migrating plaintext identity to encrypted format (SEC-04)");
-            Self::load_v1_and_migrate(&json, port)
-        }
+        Self::load_v2(&json, port, &file_path)
     }
 
     #[cfg(not(unix))]
@@ -385,30 +355,6 @@ impl NodeIdentity {
             signing_private_key,
             _private_guard: (),
         })
-    }
-
-    #[cfg(not(unix))]
-    fn load_v1_and_migrate(json: &str, port: u16) -> Result<Self, String> {
-        let stored: StoredIdentityV1 = serde_json::from_str(json)
-            .map_err(|e| format!("Failed to parse legacy identity: {}", e))?;
-
-        let identity = Self {
-            address: bound_address(stored.address, &stored.signing_public_key),
-            public_key: stored.public_key,
-            private_key: stored.private_key,
-            signing_public_key: stored.signing_public_key,
-            signing_private_key: stored.signing_private_key,
-            _private_guard: (),
-        };
-
-        // Re-save in v2 encrypted format
-        if let Err(e) = identity.save_to_file(port) {
-            eprintln!("[identity] ❌ Migration to encrypted format failed: {}", e);
-        } else {
-            println!("[identity] ✅ Migrated to encrypted identity format");
-        }
-
-        Ok(identity)
     }
 
     pub fn get_keys_directory() -> Result<PathBuf, String> {
