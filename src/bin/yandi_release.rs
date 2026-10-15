@@ -261,6 +261,10 @@ async fn main() {
                 min_seq.unwrap_or_else(|| die("нужен --min-seq")),
             )
             .unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            if m.expires != 0 && now > m.expires {
+                die("ПРОВЕРКА НЕ ПРОЙДЕНА: срок действия выпуска истёк (подпись верна, но свежего подписанного файла нет)");
+            }
             check_files(&dir, &m).unwrap_or_else(|e| die(&format!("ПРОВЕРКА НЕ ПРОЙДЕНА: {e}")));
             println!(
                 "ВЫПУСК ВЕРЕН: {} {} (№{}), файлов {}, ключ {}",

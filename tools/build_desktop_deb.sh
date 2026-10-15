@@ -23,6 +23,8 @@ R="$W/$PKG"
 install -d "$R/DEBIAN" "$R/opt/yandi" "$R/usr/bin" "$R/usr/share/applications" "$R/usr/share/doc/yandi-desktop"
 cp -a "$BUNDLE/." "$R/opt/yandi/"
 chmod -R u+rwX,go+rX,go-w "$R/opt/yandi"
+# в пакете не должно остаться путей сборочного дерева в RUNPATH плагинов
+python3 tools/fix_runpath.py "$R/opt/yandi"
 ln -s /opt/yandi/yandi_desktop "$R/usr/bin/yandi-desktop"
 # значки: исходник — JPEG под именем .png, поэтому пересобираем настоящие PNG нужных размеров
 for s in 48 64 128 256 512; do
@@ -43,8 +45,19 @@ Terminal=false
 Categories=Network;InstantMessaging;
 StartupWMClass=org.yandi.desktop
 DESK
-# зависимости: системные библиотеки, которые берёт сборка Flutter (свои лежат в /opt/yandi/lib)
-DEPS=$( { ldd "$BUNDLE/yandi_desktop" || true; } | awk '/=> \/(usr\/)?lib/ {print $3}' | while read -r l; do dpkg -S "$l" 2>/dev/null | cut -d: -f1 | head -1; done | sort -u | grep -v '^libc6$' | tr '\n' ',' | sed 's/,$//; s/,/, /g' || true)
+# зависимости: системные библиотеки, которые нужны ВСЕМ ELF бандла (прямые NEEDED, кроме лежащих в самом бандле)
+BUNDLED=$(cd "$R/opt/yandi" && find . -name '*.so*' -printf '%f\n' | sort -u)
+NEEDED=$(find "$R/opt/yandi" -type f \( -name '*.so*' -o -name yandi_desktop \) -exec env LC_ALL=C readelf -d {} + 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u)
+DEPS=""
+for lib in $NEEDED; do
+  echo "$BUNDLED" | grep -qx "$lib" && continue
+  path=$(/sbin/ldconfig -p | awk -v l="$lib" '$1==l {print $NF}' | head -1 || true)
+  [ -n "$path" ] || { echo "ОШИБКА: нужной библиотеки $lib нет в системе и нет в бандле"; exit 1; }
+  pkg=$({ dpkg -S "$path" 2>/dev/null || dpkg -S "$(readlink -f "$path")" 2>/dev/null || true; } | cut -d: -f1 | head -1)
+  [ -n "$pkg" ] || { echo "ОШИБКА: $lib ($path) не принадлежит ни одному пакету"; exit 1; }
+  DEPS="$DEPS $pkg"
+done
+DEPS=$(echo "$DEPS" | tr ' ' '\n' | sort -u | grep -v -E '^(libc6|)$' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
 SIZE=$(du -sk "$R/opt" "$R/usr" | awk '{s+=$1} END {print s}')
 cat > "$R/DEBIAN/control" <<CTL
 Package: yandi-desktop
@@ -69,7 +82,15 @@ if [ "$1" = configure ]; then
 fi
 exit 0
 POST
-cp "$R/DEBIAN/postinst" "$R/DEBIAN/postrm"
+cat > "$R/DEBIAN/postrm" <<'POST'
+#!/bin/sh
+set -e
+case "$1" in remove|purge|upgrade|disappear)
+  command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database -q /usr/share/applications || true
+  command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -q -t -f /usr/share/icons/hicolor || true
+;; esac
+exit 0
+POST
 chmod 0755 "$R/DEBIAN/postinst" "$R/DEBIAN/postrm"
 mkdir -p dist
 fakeroot dpkg-deb --build --root-owner-group -Zxz "$R" "dist/${PKG}.deb" >/dev/null
