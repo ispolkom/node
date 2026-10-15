@@ -340,3 +340,34 @@ fn the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prin
         );
     }
 }
+
+/// Отказ при создании корня после создания аппаратного ключа убирает и device.seal: настройку можно повторить.
+#[test]
+fn a_failed_first_setup_with_a_hardware_key_leaves_nothing_behind_and_can_be_repeated() {
+    use key_root::hw_print::HwPrint;
+    let d = dir();
+    let hw = || {
+        HardwareDeviceKey::with_print(
+            d.dir.file("device.seal"),
+            d.dir.file("device.key"),
+            Box::new(|| HwPrint {
+                parts: [
+                    vec!["Gigabyte".into(), "Z390".into()],
+                    vec!["i5".into()],
+                    vec!["aa:aa".into()],
+                    vec!["ata-SSD_1".into()],
+                ],
+            }),
+            8 * 1024,
+            1,
+        )
+    };
+    // слишком слабый KDF для боевой политики: корень не создаётся уже после создания ключа устройства
+    let failed = create_keys(&d.dir, &machine(), &hw(), LOGIN, MASTER, FAST, &KdfPolicy::production());
+    assert!(failed.is_err());
+    assert!(!d.dir.file("device.seal").exists(), "ключ устройства убран");
+    assert!(!d.dir.auth_file().exists());
+    // повтор проходит
+    create_keys(&d.dir, &machine(), &hw(), LOGIN, MASTER, FAST, &KdfPolicy::for_tests()).expect("повторная настройка");
+    assert!(d.dir.file("device.seal").exists());
+}

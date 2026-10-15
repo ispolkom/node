@@ -42,6 +42,9 @@ pub trait DeviceKeyProvider {
     fn create(&self) -> Result<Zeroizing<[u8; 32]>>;
     /// Replace the key (recovery): the old one is kept as a backup, never destroyed.
     fn replace(&self) -> Result<Zeroizing<[u8; 32]>>;
+    /// Undo `create` of THIS call (a first-time setup failed afterwards): removes the key material just made, so the setup can be
+    /// repeated. Called only when nothing existed before (the caller checked that); never for a key that was already there.
+    fn discard_created(&self) {}
 }
 
 pub struct FileDeviceKey {
@@ -88,6 +91,10 @@ impl DeviceKeyProvider for FileDeviceKey {
         let key = Zeroizing::new(random_bytes::<32>());
         write_atomic(&self.path, key.as_slice(), |bytes| bytes == key.as_slice())?;
         Ok(key)
+    }
+
+    fn discard_created(&self) {
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -221,6 +228,12 @@ impl DeviceKeyProvider for HardwareDeviceKey {
         let key = Zeroizing::new(random_bytes::<32>());
         self.write_seal(&key, true)?;
         Ok(key)
+    }
+
+    fn discard_created(&self) {
+        // созданное этим вызовом: печать-запечатанный ключ и (на случай обратного перехода) открытый файл
+        let _ = std::fs::remove_file(&self.seal_path);
+        let _ = std::fs::remove_file(&self.file.path);
     }
 }
 

@@ -143,6 +143,9 @@ pub fn create_keys(
     if let Err(e) = created {
         // undo only what this call has just created (nothing existed before: that was checked above)
         let _ = std::fs::remove_file(&auth_path);
+        // ключ устройства убирает его провайдер: у аппаратного это device.seal, а не только прежний device.key — иначе после
+        // сбоя остался бы ключ без корня, и повторная настройка навсегда отказывала бы
+        device.discard_created();
         let _ = std::fs::remove_file(dir.file("device.key"));
         return Err(e);
     }
