@@ -140,12 +140,17 @@ class YandiVpnService : VpnService() {
     override fun onDestroy() { teardown(); super.onDestroy() }
 }
 
+private const val MAX_CONNECTIONS = 64
+private const val HANDSHAKE_MS = 15_000
+
 /** Прокси на 127.0.0.1: HTTP CONNECT / обычный HTTP / SOCKS5 -> TLS до компьютера -> `CONNECT цель`. */
 class LocalProxy(
     private val host: String, private val port: Int, private val fingerprint: String, private val token: String,
     private val protect: (Socket) -> Boolean,
 ) {
     @Volatile private var server: ServerSocket? = null
+    /** Принятые соединения: при остановке закрываются все, а число одновременных ограничено (loopback доступен любому приложению телефона). */
+    private val open = java.util.concurrent.ConcurrentHashMap.newKeySet<java.io.Closeable>()
 
     fun start(preferred: Int): Int {
         val s = try { ServerSocket(preferred, 64, InetAddress.getByName("127.0.0.1")) }
@@ -154,27 +159,42 @@ class LocalProxy(
         thread(name = "yandi-proxy-accept", isDaemon = true) {
             while (!s.isClosed) {
                 val c = try { s.accept() } catch (_: Exception) { break }
-                thread(name = "yandi-proxy-conn", isDaemon = true) { runCatching { handle(c) }; runCatching { c.close() } }
+                if (open.size >= MAX_CONNECTIONS) { runCatching { c.close() }; continue }
+                open.add(c)
+                thread(name = "yandi-proxy-conn", isDaemon = true) {
+                    val owned = mutableListOf<java.io.Closeable>()
+                    try { handle(c, owned) } catch (_: Exception) {
+                    } finally {
+                        owned.forEach { runCatching { it.close() } }
+                        runCatching { c.close() }
+                        open.remove(c)
+                    }
+                }
             }
         }
         return s.localPort
     }
 
-    fun stop() { runCatching { server?.close() }; server = null }
+    fun stop() {
+        runCatching { server?.close() }; server = null
+        open.toList().forEach { runCatching { it.close() } }   // принятые соединения не остаются висеть после остановки VPN
+        open.clear()
+    }
 
-    private fun handle(c: Socket) {
+    private fun handle(c: Socket, owned: MutableList<java.io.Closeable>) {
         c.tcpNoDelay = true
+        c.soTimeout = HANDSHAKE_MS   // молчащий клиент не держит поток: срок снимается, когда пошли данные
         val cin = BufferedInputStream(c.getInputStream(), 8192)
         val cout = c.getOutputStream()
         cin.mark(1)
         val first = cin.read()
         if (first < 0) return
         cin.reset()
-        if (first == 5) socks5(c, cin, cout) else http(c, cin, cout)
+        if (first == 5) socks5(c, cin, cout, owned) else http(c, cin, cout, owned)
     }
 
     // ── SOCKS5 (без пароля: слушаем только на самом телефоне) ──────────────────
-    private fun socks5(c: Socket, cin: InputStream, cout: OutputStream) {
+    private fun socks5(c: Socket, cin: InputStream, cout: OutputStream, owned: MutableList<java.io.Closeable>) {
         cin.read(); val n = cin.read(); skip(cin, n)
         cout.write(byteArrayOf(5, 0)); cout.flush()
         val h = readN(cin, 4)
@@ -185,7 +205,7 @@ class LocalProxy(
             4 -> { val a = readN(cin, 16); val p = readN(cin, 2); "[" + InetAddress.getByAddress(a).hostAddress + "]:" + port16(p) }
             else -> return
         }
-        val up = try { openTunnel(target) } catch (e: Exception) {
+        val up = try { openTunnel(target, owned) } catch (e: Exception) {
             cout.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); return
         }
         cout.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); cout.flush()
@@ -193,13 +213,13 @@ class LocalProxy(
     }
 
     // ── HTTP: CONNECT или обычный запрос с полным адресом ──────────────────────
-    private fun http(c: Socket, cin: InputStream, cout: OutputStream) {
+    private fun http(c: Socket, cin: InputStream, cout: OutputStream, owned: MutableList<java.io.Closeable>) {
         val head = readHead(cin) ?: return
         val lines = head.split("\r\n")
         val parts = lines[0].split(" ")
         if (parts.size < 3) return
         if (parts[0].equals("CONNECT", true)) {
-            val up = try { openTunnel(parts[1]) } catch (e: Exception) {
+            val up = try { openTunnel(parts[1], owned) } catch (e: Exception) {
                 cout.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".toByteArray()); return
             }
             cout.write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray()); cout.flush()
@@ -214,7 +234,7 @@ class LocalProxy(
         val hostPort = if (slash < 0) rest else rest.substring(0, slash)
         val path = if (slash < 0) "/" else rest.substring(slash)
         val target = if (hostPort.contains(':')) hostPort else "$hostPort:80"
-        val up = try { openTunnel(target) } catch (e: Exception) {
+        val up = try { openTunnel(target, owned) } catch (e: Exception) {
             cout.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".toByteArray()); return
         }
         val fixed = StringBuilder("${parts[0]} $path ${parts[2]}\r\n")
@@ -225,26 +245,31 @@ class LocalProxy(
     }
 
     // ── канал до компьютера ─────────────────────────────────────────────────────
-    private fun openTunnel(target: String): Pair<InputStream, OutputStream> {
+    private fun openTunnel(target: String, owned: MutableList<java.io.Closeable>): Pair<InputStream, OutputStream> {
         val raw = Socket()
+        owned.add(raw)   // закрывается при любом исходе (в том числе при отказе узла и обрыве рукопожатия)
         protect(raw)
         raw.connect(InetSocketAddress(host, port), 10_000)
+        raw.soTimeout = HANDSHAKE_MS
         raw.tcpNoDelay = true
         val ctx = SSLContext.getInstance("TLS")
         // Тот же строгий пин, что у сокета сообщений (YandiService): пустой/неверный отпечаток — отказ ДО отправки токена, а не «доверять любому».
         ctx.init(null, arrayOf(PinnedTrustManager(fingerprint)), null)
         val tls = ctx.socketFactory.createSocket(raw, host, port, true) as javax.net.ssl.SSLSocket
+        owned.add(tls)
         tls.startHandshake()
         val out = tls.outputStream
         out.write("CONNECT $target HTTP/1.1\r\nHost: $target\r\nProxy-Authorization: Bearer $token\r\n\r\n".toByteArray()); out.flush()
         val inp = BufferedInputStream(tls.inputStream, 16384)
         val head = readHead(inp) ?: throw java.io.IOException("нет ответа")
         if (!head.startsWith("HTTP/1.1 200")) throw java.io.IOException(head.lineSequence().first())
+        raw.soTimeout = 0   // дальше — обычная передача данных без срока на чтение
         YandiVpnService.connections.incrementAndGet()
         return Pair(inp, out)
     }
 
     private fun pump(c: Socket, upIn: InputStream, upOut: OutputStream) {
+        c.soTimeout = 0
         val t = thread(isDaemon = true) {
             runCatching { copy(upIn, c.getOutputStream(), YandiVpnService.bytesDown) }
             runCatching { c.shutdownOutput() }
