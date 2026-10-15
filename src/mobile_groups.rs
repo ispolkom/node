@@ -92,6 +92,9 @@ struct Member {
     /// подпись личным ключом человека под (группа, мой групповой ключ): её проверяют его контакты, остальным это просто байты
     #[serde(default)]
     proof: Option<String>,
+    /// когда участник последний раз писал в группу (хранится у него, а не выводится из журнала: журнал обрезается)
+    #[serde(default)]
+    last_post_ms: u64,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -198,6 +201,10 @@ struct Group {
     /// автоочистка: сколько дней без единой записи в группе терпеть рядового участника (0 — выключена); настраивает владелец
     #[serde(default)]
     auto_clean_days: u32,
+    /// когда журнал последний раз обрезался: активность старше этого момента из журнала не восстановить, поэтому автоочистка
+    /// не считает молчанием время до обрезки
+    #[serde(default)]
+    trimmed_ms: u64,
     /// логотип группы: маленький PNG (пересобран из пикселей), base64; виден всем в каталоге, как название и тематика
     #[serde(default)]
     logo: Option<String>,
@@ -689,6 +696,7 @@ impl Store {
             modlog: Vec::new(),
             requests: Vec::new(),
             auto_clean_days: 0,
+            trimmed_ms: 0,
             logo: None,
         };
         let owner = Member {
@@ -700,6 +708,7 @@ impl Store {
             member_pub: None,
             card: None,
             proof: None,
+            last_post_ms: 0,
         };
         g.members.push(owner);
         for d in members {
@@ -715,6 +724,7 @@ impl Store {
                     member_pub: None,
                     card: None,
             proof: None,
+                    last_post_ms: 0,
                 });
             }
         }
@@ -800,12 +810,13 @@ impl Store {
                 *e = (*e).max(l.ts);
             }
             let Some(g) = self.groups.get_mut(&gid) else { continue };
+            let trimmed = g.trimmed_ms;
             let gone: Vec<(String, String)> = g
                 .members
                 .iter()
                 .filter(|m| m.role == Role::Member && !m.muted)
                 .filter(|m| {
-                    let seen = last.get(&m.alias).copied().unwrap_or(0).max(m.joined_ms);
+                    let seen = last.get(&m.alias).copied().unwrap_or(0).max(m.joined_ms).max(m.last_post_ms).max(trimmed);
                     now.saturating_sub(seen) > ttl
                 })
                 .map(|m| (m.key.clone(), m.alias.clone()))
@@ -933,6 +944,7 @@ impl Store {
             member_pub,
             card: None,
             proof: None,
+            last_post_ms: 0,
         });
         g.log(
             via.as_deref().unwrap_or(&alias),
@@ -1137,6 +1149,9 @@ impl Store {
         self.offsets(gid).push(pos);
         let g = self.get_mut(gid)?;
         g.next_seq = seq + 1;
+        if let Some(mm) = g.members.iter_mut().find(|x| x.alias == line.from) {
+            mm.last_post_ms = mm.last_post_ms.max(line.ts);
+        }
         let to = g.keys();
         if pos + bytes.len() as u64 > MAX_JOURNAL_BYTES {
             self.trim(gid);
@@ -1164,6 +1179,7 @@ impl Store {
         if self.rewrite(gid, rest).is_ok() {
             if let Ok(g) = self.get_mut(gid) {
                 g.first_seq = rest.first().map(|l| l.seq).unwrap_or(g.next_seq);
+                g.trimmed_ms = now_ms();
             }
         }
     }
@@ -2997,6 +3013,33 @@ mod tests {
         assert_eq!(s.clean_inactive(now + 100 * day).unwrap(), 2, "bob и fay");
         assert!(s.groups[&gid].members.iter().any(|m| m.role == Role::Owner));
         assert!(s.groups[&gid].members.iter().any(|m| m.alias == carol));
+    }
+
+    /// Обрезка журнала не делает недавно писавшего «молчуном»: время последней записи хранится у участника.
+    #[test]
+    fn trimming_the_journal_does_not_turn_a_recent_writer_into_a_silent_member() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        s.join(&gid, "bb", None, Some(&pubk())).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.joined_ms = now - 60 * day;
+        }
+        s.set_auto_clean(&gid, OWNER, 30).unwrap();
+        s.append(&gid, "bb", 0, &b64(b"yesterday")).unwrap();
+        // журнал обрезан: записей bob в нём больше нет
+        s.rewrite(&gid, &[]).unwrap();
+        s.get_mut(&gid).unwrap().trimmed_ms = now;
+        assert_eq!(s.clean_inactive(now + 20 * day).unwrap(), 0, "писал только что — не молчун");
+        // без сведений об активности (старая запись без last_post_ms и без обрезки) прежний порядок: 60 дней молчания — исключён
+        s.get_mut(&gid).unwrap().trimmed_ms = 0;
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.last_post_ms = 0;
+        }
+        assert_eq!(s.clean_inactive(now + 20 * day).unwrap(), 1);
     }
 
     #[test]
