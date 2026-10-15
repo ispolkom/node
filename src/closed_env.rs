@@ -219,11 +219,17 @@ impl ClosedEnv {
         if phrase.as_deref().map_or(true, |p| p.trim().is_empty()) {
             bail!("нужны четыре секретных слова");
         }
+        // счётчик без среды остаётся только от оборванной прежней настройки (стирание убирает и его): снимаем, иначе повторная
+        // настройка навсегда упрётся в «нельзя сбрасывать счётчики существующей среды». Существующую среду abort_setup не трогает.
+        let _ = self.store.abort_setup();
         let (envelope, vault) = EnvelopeStore::create_unlocked_async(password, phrase).await?;
         self.store.prepare_attempts(&envelope)?;
         // метка ДО публикации: оборванный перенос будет доделан при следующем входе
         let marker = self.dir.join(MARKER);
-        crate::util::private_file::write_private(&marker, b"1")?;
+        if let Err(e) = crate::util::private_file::write_private(&marker, b"1") {
+            let _ = self.store.abort_setup();
+            return Err(e.into());
+        }
         if let Err(e) = self.store.save(None, &envelope, &vault) {
             let _ = std::fs::remove_file(&marker);
             let _ = self.store.abort_setup();
@@ -466,6 +472,20 @@ mod tests {
         env.register(a.clone());
         env.register(b.clone());
         (env, a, b)
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_first_setup_can_be_repeated() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, _chat, _groups) = env(base.path(), None);
+        // метку записать нельзя (на её месте каталог): настройка обрывается уже после создания счётчика
+        let marker = base.path().join("closed").join(MARKER);
+        std::fs::create_dir_all(&marker).unwrap();
+        let _ = e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await;
+        assert!(!e.configured(), "обрыв: среды нет");
+        std::fs::remove_dir_all(&marker).unwrap();
+        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.expect("повторная настройка проходит");
+        assert!(e.configured() && e.unlocked());
     }
 
     #[tokio::test]
