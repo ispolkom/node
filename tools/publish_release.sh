@@ -43,12 +43,14 @@ VERSION=$(dpkg-deb --field "$DEB" Version)
 # оболочка ПК — вторым пакетом той же версии (если собрана flutter build linux --release)
 DDEB=""; DNAME=""
 BUNDLE_BIN=desktop/yandi_desktop/build/linux/x64/release/bundle/yandi_desktop
+# код Dart лежит в libapp.so: файл-запускатель при правках Dart не меняется, сверять надо с ним
+BUNDLE_APP=desktop/yandi_desktop/build/linux/x64/release/bundle/lib/libapp.so
 if [ "$NODE_ONLY" = 1 ]; then
   echo "режим --node-only: выпуск БЕЗ оболочки ПК (так задумано)"
 else
-  [ -x "$BUNDLE_BIN" ] || { echo "нет собранной оболочки $BUNDLE_BIN: соберите (--build) или объявите выпуск только узла ключом --node-only"; exit 1; }
+  [ -x "$BUNDLE_BIN" ] && [ -f "$BUNDLE_APP" ] || { echo "нет собранной оболочки $BUNDLE_BIN: соберите (--build) или объявите выпуск только узла ключом --node-only"; exit 1; }
   # бандл должен быть новее исходников оболочки: иначе под новой версией подписалась бы старая сборка
-  STALE=$(find desktop/yandi_desktop/lib desktop/yandi_desktop/linux desktop/yandi_desktop/pubspec.yaml -type f -newer "$BUNDLE_BIN" 2>/dev/null | grep -v '/ephemeral/' | head -3)
+  STALE=$(find desktop/yandi_desktop/lib desktop/yandi_desktop/linux desktop/yandi_desktop/pubspec.yaml -type f -newer "$BUNDLE_APP" 2>/dev/null | grep -v '/ephemeral/' | head -3)
   [ -z "$STALE" ] || { echo "оболочка пересобрана не после правок исходников (например: $STALE): выполните --build"; exit 1; }
   bash tools/build_desktop_deb.sh >/dev/null
   DDEB="dist/yandi-desktop_${VERSION//+/-}_$(dpkg --print-architecture).deb"
