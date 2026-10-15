@@ -1324,7 +1324,9 @@ impl P2PTransport {
                     }
                     // Есть ли уже live-link к какому-нибудь из наших anchor'ов?
                     let live = {
-                        let ws = transport_arc_watchdog.ws_outgoing.lock().await;
+                        let mut ws = transport_arc_watchdog.ws_outgoing.lock().await;
+                        // закрытые каналы — не соединение: убираем их, иначе переподключение никогда не начнётся
+                        ws.retain(|_, tx| !tx.is_closed());
                         store_snapshot.iter().any(|e| ws.contains_key(&e.payload.anchor_id))
                     };
                     if live {
@@ -4899,12 +4901,22 @@ impl P2PTransport {
             println!("[ws-client] 🔁 RESUME sent (session {:#x})", session_id);
 
             // Ждём 0xC1 ACK (encrypted). Один decrypt-проход.
-            let ack_bytes = tokio::time::timeout(
+            // маршрут опубликован заранее, поэтому на ЛЮБОМ раннем выходе он снимается: иначе мёртвый канал остался бы в ws_outgoing,
+            // а сторож переподключения счёл бы соединение живым
+            let ack_bytes = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 conn.incoming.recv(),
-            ).await
-                .map_err(|_| "RESUME_ACK timeout".to_string())?
-                .ok_or_else(|| "RESUME_ACK: connection closed".to_string())?;
+            ).await {
+                Ok(Some(b)) => b,
+                Ok(None) => {
+                    self.ws_outgoing.lock().await.remove(&anchor_id);
+                    return Err("RESUME_ACK: connection closed".to_string());
+                }
+                Err(_) => {
+                    self.ws_outgoing.lock().await.remove(&anchor_id);
+                    return Err("RESUME_ACK timeout".to_string());
+                }
+            };
 
             // ответ узла: значение узла и подпись, привязанная к нашему свежему значению
             let verified_grant = decode_resume_ack_grant(&ack_bytes)
