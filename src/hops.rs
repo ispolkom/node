@@ -389,15 +389,16 @@ impl Router {
     }
 
     /// Забыть цепочки, на которых давно ничего не было.
-    pub fn gc(&mut self, now: u64) -> Vec<Out> {
+    /// Возвращает пакеты и события закрытия: верхний слой (выход) по ним закрывает сокеты и убирает записи, как при полученном DESTROY.
+    pub fn gc(&mut self, now: u64) -> (Vec<Out>, Vec<Event>) {
         let old: Vec<(NodeId, u64)> = self.by_prev.iter().filter(|(_, r)| now.saturating_sub(r.last) > IDLE_SECS).map(|(k, _)| *k).collect();
         let mut out = vec![];
+        let mut events = vec![];
         for (from, cid) in old {
-            let mut ev = vec![];
-            self.on_destroy(from, cid, &mut out, &mut ev);
+            self.on_destroy(from, cid, &mut out, &mut events);
             out.push(Out { to: from, bytes: small(PKT_DESTROY, cid, &[2]) });
         }
-        out
+        (out, events)
     }
 }
 
@@ -762,8 +763,10 @@ mod tests {
         let (_s, x) = Circuit::fresh();
         r.on_packet(id(9), &small(PKT_CREATE, 5, &x), 100);
         assert_eq!(r.circuits(), 1);
-        assert!(r.gc(100 + IDLE_SECS).is_empty());
-        assert!(!r.gc(100 + IDLE_SECS + 1).is_empty());
+        assert!(r.gc(100 + IDLE_SECS).0.is_empty());
+        let (out, events) = r.gc(100 + IDLE_SECS + 1);
+        assert!(!out.is_empty());
+        assert!(events.iter().any(|e| matches!(e, Event::Closed { .. })), "событие закрытия не теряется");
         assert_eq!(r.circuits(), 0);
         for i in 0..MAX_CIRCUITS as u64 {
             r.on_packet(id(9), &small(PKT_CREATE, i, &x), 0);

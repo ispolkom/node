@@ -220,9 +220,13 @@ pub fn start(transport: Arc<P2PTransport>, me: NodeId, key: SigningKey) {
         async move {
         loop {
             tokio::time::sleep(Duration::from_secs(60)).await;
-            let outs = hh.router.lock().unwrap_or_else(|e| e.into_inner()).gc(now());
+            let (outs, events) = hh.router.lock().unwrap_or_else(|e| e.into_inner()).gc(now());
             for o in outs {
                 let _ = push_out(&hh.out, o);
+            }
+            // забытая цепочка закрывается так же, как по DESTROY: выходные сокеты и записи не копятся
+            for e in events {
+                hh.exit_event(e);
             }
             let t = now();
             hh.clients.lock().unwrap_or_else(|e| e.into_inner()).retain(|_, c| {
