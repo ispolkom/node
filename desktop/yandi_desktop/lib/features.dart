@@ -61,6 +61,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   final drafts = <String, String>{};
   List<Map<String, dynamic>> contacts = [], messages = [], trusted = [];
   late final voice = VoiceRecording(voiceBackendFactory(), () => voicePathFactory());
+  /// Голосовое, которое не удалось отправить: хранится только в памяти (открытого файла в tmp не остаётся), пока открыт экран;
+  /// можно повторить отправку. Для получателя это новое сообщение.
+  Uint8List? failedVoice;
   // «Файлы чата»: отдельный вид без сообщений, как в телефоне.
   bool filesView = false;
   int fileTab = 0;
@@ -114,6 +117,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     revision++;
     timer?.cancel();
     voice.dispose();
+    failedVoice = null;
     PlatformFiles.cancel().catchError((Object _) {});
     pickedFile = null;
     drafts.clear();
@@ -349,13 +353,40 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final f = File(path);
     try {
       if (send && secs >= 1 && active && selected != null) {
+        // запись держим в памяти до результата: отправка не удалась — её можно повторить, а файл в tmp всё равно затирается
+        Uint8List? copy;
+        try {
+          copy = await f.readAsBytes();
+        } catch (_) {}
         setState(() => pickedFile = f);
         await sendFile();
+        if (mounted && pickedFile?.path == f.path && copy != null) {
+          setState(() => failedVoice = copy);   // pickedFile не сброшен успехом — отправка не удалась
+        } else if (mounted && failedVoice != null) {
+          setState(() => failedVoice = null);
+        }
       }
     } finally {
       if (mounted && pickedFile?.path == f.path) {
         setState(() => pickedFile = null);
       }
+      await wipeVoice(f);
+    }
+  }
+
+  /// Повторить отправку неудавшегося голосового: запись из памяти кладётся во временный файл только на время отправки.
+  Future<void> retryVoice() async {
+    final bytes = failedVoice;
+    if (bytes == null || sending || selected == null) return;
+    final f = File(await voicePathFactory());
+    try {
+      await f.parent.create(recursive: true);
+      await f.writeAsBytes(bytes, flush: true);
+      setState(() => pickedFile = f);
+      await sendFile();
+      if (mounted && pickedFile?.path != f.path) setState(() => failedVoice = null);
+    } finally {
+      if (mounted && pickedFile?.path == f.path) setState(() => pickedFile = null);
       await wipeVoice(f);
     }
   }
@@ -1372,6 +1403,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               'Отмена',
               onTap: () => setState(() => replyTo = null),
             ),
+          ),
+        if (failedVoice != null && !voice.active)
+          Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              const UiText('Голосовое не отправлено.'),
+              TextButton(onPressed: sending ? null : retryVoice, child: const UiText('Повторить отправку')),
+              TextButton(onPressed: () => setState(() => failedVoice = null), child: const UiText('Удалить запись')),
+            ],
           ),
         if (voice.active)
           VoiceBar(
