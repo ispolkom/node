@@ -2746,7 +2746,14 @@ fn load_gateways(path: &str) -> Result<Vec<serde_json::Value>, String> {
     match std::fs::read_to_string(path) {
         Ok(content) => {
             let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("gateways.json повреждён: {e}"))?;
-            Ok(data.get("gateways").and_then(|v| v.as_array()).cloned().unwrap_or_default())
+            // структура проверяется: «gateways» не массив — повреждение, а не пустой список (иначе следующая запись затёрла бы документ)
+            match data.get("gateways") {
+                None => Ok(Vec::new()),
+                Some(v) => match v.as_array() {
+                    Some(a) if a.iter().all(|x| x.is_object()) => Ok(a.clone()),
+                    _ => Err("gateways.json повреждён: поле gateways должно быть списком объектов".to_string()),
+                },
+            }
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
         Err(e) => Err(format!("gateways.json не читается: {e}")),
@@ -6086,6 +6093,11 @@ mod gateways_file_tests {
         update_gateways(ps, |g| g.push(serde_json::json!({"id": "1"}))).unwrap();
         update_gateways(ps, |g| g.push(serde_json::json!({"id": "2"}))).unwrap();
         assert_eq!(load_gateways(ps).unwrap().len(), 2);
+        // валидный JSON с неверной схемой — тоже повреждение, а не пустой список
+        std::fs::write(&p, br#"{"gateways":{"saved":[]}}"#).unwrap();
+        assert!(load_gateways(ps).is_err(), "gateways не массив");
+        assert!(update_gateways(ps, |g| g.clear()).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), br#"{"gateways":{"saved":[]}}"#.to_vec(), "файл не затёрт");
         std::fs::write(&p, b"{broken").unwrap();
         assert!(update_gateways(ps, |g| g.clear()).is_err(), "повреждённый список не заменяется пустым");
         assert_eq!(std::fs::read(&p).unwrap(), b"{broken");

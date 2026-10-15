@@ -670,14 +670,17 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     // Выбор, удаление вытесняемого и добавление нового — одним действием под замком списка (параллельные сопряжения не дадут 17);
     // остальное «забывание» (группы, почта, сокеты) — после, вне замка
     let mut evicted: Option<String> = None;
-    let before = with_devices(|d| d.clone());
+    let mut evicted_device: Option<Device> = None;
+    let th = token_hash(&token);
     let ((), saved) = devices_apply(|d| {
         if d.len() >= MAX_DEVICES {
             if let Some(i) = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
-                evicted = Some(d.remove(i).peer_id());
+                let gone = d.remove(i);
+                evicted = Some(gone.peer_id());
+                evicted_device = Some(gone);
             }
         }
-        let th = token_hash(&token);
+        let th = th.clone();
         if d.iter()
             .any(|x| x.name == name || x.name.starts_with(&format!("{name} (")))
         {
@@ -698,7 +701,13 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     if !saved {
         // сопряжение подтверждается только после записи списка: иначе токен не пережил бы перезапуск, а вытесненное устройство
         // осталось бы в списке уже без своих групп
-        devices_apply(|d| *d = before);
+        // откатывается только собственное изменение: чужое успешное (отзыв, другое сопряжение) за это время не затрагивается
+        devices_apply(|d| {
+            d.retain(|x| x.token_hash != th);
+            if let Some(e) = evicted_device.take() {
+                d.push(e);
+            }
+        });
         return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "не удалось сохранить сопряжение; попробуйте ещё раз"}))).into_response();
     }
     if let Some(peer) = evicted {

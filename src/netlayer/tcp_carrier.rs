@@ -368,6 +368,19 @@ impl Carrier {
                     if body.len() != 2 + cnt * 2 || cnt > 16 {
                         return Err(io::Error::other("bad ports frame"));
                     }
+                    // та же квота source-портов соединения, что и для датаграмм: объявления не обходят её
+                    {
+                        let mut claimed = conn.claimed.lock().unwrap_or_else(|e| e.into_inner());
+                        for i in 0..cnt {
+                            let p = u16::from_be_bytes([body[2 + 2 * i], body[3 + 2 * i]]);
+                            if !claimed.contains(&p) {
+                                if claimed.len() >= MAX_SRC_PORTS_PER_CONN {
+                                    return Err(io::Error::other("too many source ports on one connection"));
+                                }
+                                claimed.insert(p);
+                            }
+                        }
+                    }
                     let mut g = self.lock();
                     for i in 0..cnt {
                         let p = u16::from_be_bytes([body[2 + 2 * i], body[3 + 2 * i]]);
@@ -609,6 +622,27 @@ mod tests {
         let r = carrier.read_loop(&mut rd, &conn).await;
         assert!(r.unwrap_err().to_string().contains("too many source ports"));
         assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN);
+    }
+
+    /// Кадры FRAME_PORTS не обходят квоту source-портов соединения.
+    #[tokio::test]
+    async fn ports_frames_are_capped_by_the_same_connection_quota() {
+        let (carrier, _sock, _addr) = node(Mode::Auto, "dd55dd55").await;
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let conn = Arc::new(Conn { id: 9, tx, remote_ip: "198.51.100.10".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
+        let mut bytes = Vec::new();
+        for chunk in 0..8u16 {
+            let mut f = vec![FRAME_PORTS, 16];
+            for i in 0..16u16 {
+                f.extend_from_slice(&(1000 + chunk * 16 + i).to_be_bytes());
+            }
+            bytes.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&f);
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.unwrap_err().to_string().contains("too many source ports"));
+        assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN, "маршрутов занято не больше квоты");
     }
 
     async fn node(mode: Mode, name: &str) -> (Arc<Carrier>, Arc<CSocket>, SocketAddr) {
