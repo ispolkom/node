@@ -84,6 +84,21 @@ pub struct HttpProxyGateway {
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
     /// Active tunnels: tunnel_id -> bounded writer queue
     active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// CONNECT, который уже принят, но туннель ещё не создан (идёт соединение): учитывается в квоте, иначе параллельные запросы
+    /// все видят «свободно» до await и превышают предел или заменяют друг друга
+    connecting: Arc<std::sync::Mutex<std::collections::HashSet<(HashId, u64)>>>,
+}
+
+/// Бронь места под CONNECT; снимается при выходе из функции.
+struct ConnectSlot {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<(HashId, u64)>>>,
+    key: (HashId, u64),
+}
+
+impl Drop for ConnectSlot {
+    fn drop(&mut self) {
+        self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+    }
 }
 
 impl HttpProxyGateway {
@@ -107,6 +122,7 @@ impl HttpProxyGateway {
             request_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            connecting: Arc::new(std::sync::Mutex::new(Default::default())),
         }
     }
 
@@ -181,6 +197,7 @@ impl HttpProxyGateway {
             request_rx: self.request_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            connecting: self.connecting.clone(),
         }
     }
 
@@ -235,16 +252,24 @@ impl HttpProxyGateway {
         let addr_str = request.url.clone();
 
         // туннелей от одного узла не больше предела; повторный номер поверх живого туннеля не принимается
-        {
+        let key = (source_node, request.request_id);
+        let reserved = {
             let tunnels = self.active_tunnels.lock().await;
-            let mine = tunnels.keys().filter(|(n, _)| *n == source_node).count();
-            if mine >= MAX_TUNNELS_PER_PEER || tunnels.contains_key(&(source_node, request.request_id)) {
-                drop(tunnels);
-                let busy = ProxyResponse { request_id: request.request_id, status: 429, headers: vec![], body: Vec::new() };
-                self.send_response(source_node, busy).await?;
-                return Ok(());
+            let mut pending = self.connecting.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = tunnels.keys().filter(|(n, _)| *n == source_node).count() + pending.iter().filter(|(n, _)| *n == source_node).count();
+            if mine >= MAX_TUNNELS_PER_PEER || tunnels.contains_key(&key) || pending.contains(&key) {
+                false
+            } else {
+                pending.insert(key);
+                true
             }
+        };
+        if !reserved {
+            let busy = ProxyResponse { request_id: request.request_id, status: 429, headers: vec![], body: Vec::new() };
+            self.send_response(source_node, busy).await?;
+            return Ok(());
         }
+        let slot = ConnectSlot { set: self.connecting.clone(), key };
 
         info!("🔌 Connecting to {} ...", addr_str);
 
@@ -295,6 +320,7 @@ impl HttpProxyGateway {
             let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), (source_node, tunnel_id), Some(credit));
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, tunnel_id), writer);
+            drop(slot); // бронь снята: место теперь занято самим туннелем
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
 
