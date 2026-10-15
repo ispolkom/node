@@ -1373,11 +1373,13 @@ impl P2PTransport {
             println!("[transport] тренировочная сеть: NAT-PMP выключен");
         } else {
         let transport_arc_pmp = transport_arc.clone();
-        let pmp_internal_port = DEFAULT_DATA_PORT;
         tokio::spawn(async move {
             // Первая попытка: тёплый старт через 3 с после стартапа.
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             loop {
+                // пробрасывается порт, который сокет действительно держит сейчас (настроенный и возможно сменившийся при ротации),
+                // а не константа по умолчанию — иначе наружу открылась бы посторонняя служба на 10000
+                let pmp_internal_port = transport_arc_pmp.port_manager.current_state().data_port;
                 match crate::netlayer::nat_pmp::request_mapping(pmp_internal_port, 3600).await {
                     Ok(mapping) => {
                         let new_ip = mapping.external_ip.to_string();
