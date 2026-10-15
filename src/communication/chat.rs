@@ -251,7 +251,19 @@ impl ChatManager {
             self.outbox_dirty
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.send_due(due).await;
+        self.persist_outbox_if_dirty().await;
+    }
+
+    /// Отправить снимок «пора повторить». Перед каждой отправкой проверяется замок среды: снимок взят на открытой среде,
+    /// а запирание, случившееся во время отправки предыдущих, не должно выпускать оставшиеся копии. Возвращает число отправок.
+    async fn send_due(&self, due: Vec<(HashId, HashId, ChatMessage)>) -> usize {
+        let mut sent = 0usize;
         for (msg_id, peer, msg) in due {
+            if self.storage.is_locked() {
+                break;
+            }
+            sent += 1;
             match self.send_once(&msg).await {
                 Ok(()) => debug!(
                     "🔁 resent message {} to {}",
@@ -270,7 +282,7 @@ impl ChatManager {
             // and the way to the peer may be closed (a NAT that has forgotten us, a new outside address): ask for an introduction (rate-limited inside)
             self.transport.request_punch(peer).await;
         }
-        self.persist_outbox_if_dirty().await;
+        sent
     }
 
     /// Write the outgoing queue to disk if it changed.
@@ -1167,6 +1179,8 @@ mod tests {
         cm.sweep_expired_acks().await;
         assert_eq!(cm.pending_acks.lock().await[&stray.msg_id].attempts, 1, "запертая очередь не отправляется");
         cm.pending_acks.lock().await.clear();
+        // снимок, взятый до lock, после него не отправляется
+        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())]).await, 0, "после lock копии из снимка не уходят");
 
         cm.unlock([9; 32]).await;
         assert_eq!(cm.pending_acks.lock().await.len(), 1, "очередь поднята с диска после разблокировки");
