@@ -726,7 +726,9 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
             });
             msg.mark_delivered();
             if st.chat.store_local_incoming(&device, &msg).is_err() {
-                return false; // не сохранили — квитанции «доставлено» не будет, телефон пришлёт снова
+                // не сохранили: номер письма возвращается из журнала повторов, иначе повтор отвергнется как «уже виденное»
+                crate::mobile_self::release_replay(blob);
+                return false; // квитанции «доставлено» не будет, письмо остаётся в очереди на повтор
             }
             crate::mobile_self::remember_unread(&local, from_device, &cmid);
             node_mail_to_device(st, from_device, &crate::mobile_self::receipt(false, &[cmid]));
