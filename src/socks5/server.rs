@@ -129,11 +129,13 @@ impl Socks5Server {
 
     /// Phase 1: Authentication selection
     async fn do_auth_selection(stream: &mut TcpStream, config: &Socks5Config) -> Result<Socks5AuthMethod> {
-        let mut buf = [0u8; 256];
-
-        // Read client hello
-        let n = stream.read(&mut buf).await?;
-        let auth_select = Socks5AuthSelect::from_bytes(&buf[..n])?;
+        // Read client hello: [ver][nmethods][methods…] — ровно столько байт, сколько заявлено (TCP может дробить сообщение)
+        let mut hello = [0u8; 2];
+        stream.read_exact(&mut hello).await?;
+        let mut buf = vec![hello[0], hello[1]];
+        buf.resize(2 + hello[1] as usize, 0);
+        stream.read_exact(&mut buf[2..]).await?;
+        let auth_select = Socks5AuthSelect::from_bytes(&buf)?;
 
         // Select auth method
         let method = if config.auth_required {
@@ -166,26 +168,20 @@ impl Socks5Server {
     /// Username/password authentication (RFC 1929)
     /// Возвращает «закрепление выхода»: имя `yandi.<начало номера узла>` просит именно этот выход (так узел проверяет страну выхода).
     async fn do_username_password_auth(stream: &mut TcpStream, config: &Socks5Config) -> Result<Option<String>> {
-        let mut buf = [0u8; 512];
-
-        let n = stream.read(&mut buf).await?;
-        if n < 2 {
-            return Err(anyhow!("Auth packet too short"));
+        // RFC 1929: [ver][ulen][user][plen][pass] — читаем по заявленным длинам
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await?;
+        if head[0] != 0x01 {
+            return Err(anyhow!("Invalid auth subnegotiation version"));
         }
-
-        let ulen = buf[1] as usize;
-        if n < 2 + ulen {
-            return Err(anyhow!("Username too long"));
-        }
-
-        let username = String::from_utf8_lossy(&buf[2..2+ulen]).to_string();
-
-        let plen = buf[2+ulen] as usize;
-        if n < 2 + ulen + 1 + plen {
-            return Err(anyhow!("Password too long"));
-        }
-
-        let password = String::from_utf8_lossy(&buf[2+ulen+1..2+ulen+1+plen]).to_string();
+        let mut user = vec![0u8; head[1] as usize];
+        stream.read_exact(&mut user).await?;
+        let mut plen = [0u8; 1];
+        stream.read_exact(&mut plen).await?;
+        let mut pass = vec![0u8; plen[0] as usize];
+        stream.read_exact(&mut pass).await?;
+        let username = String::from_utf8_lossy(&user).to_string();
+        let password = String::from_utf8_lossy(&pass).to_string();
 
         // Verify credentials
         let mut pin: Option<String> = None;
@@ -214,10 +210,24 @@ impl Socks5Server {
 
     /// Read connection request
     async fn read_request(stream: &mut TcpStream) -> Result<Socks5Request> {
-        let mut buf = [0u8; 512];
-
-        let n = stream.read(&mut buf).await?;
-        let request = Socks5Request::from_bytes(&buf[..n])?;
+        // [ver][cmd][rsv][atyp] и адрес заявленной длины — по частям, TCP может дробить запрос
+        let mut buf = vec![0u8; 4];
+        stream.read_exact(&mut buf).await?;
+        let rest = match buf[3] {
+            0x01 => 4 + 2,
+            0x04 => 16 + 2,
+            0x03 => {
+                let mut l = [0u8; 1];
+                stream.read_exact(&mut l).await?;
+                buf.push(l[0]);
+                l[0] as usize + 2
+            }
+            other => return Err(anyhow!("Unsupported address type: {}", other)),
+        };
+        let at = buf.len();
+        buf.resize(at + rest, 0);
+        stream.read_exact(&mut buf[at..]).await?;
+        let request = Socks5Request::from_bytes(&buf)?;
 
         Ok(request)
     }
@@ -808,5 +818,46 @@ impl Socks5ProxyServer {
         debug!("🚇 Tunnel #{}: background task started, returning from handle_connect_p2p", request_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fragmented_handshake_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (c, s) = tokio::join!(TcpStream::connect(addr), l.accept());
+        (c.unwrap(), s.unwrap().0)
+    }
+
+    async fn dribble(mut c: TcpStream, parts: Vec<Vec<u8>>) {
+        for p in parts {
+            c.write_all(&p).await.unwrap();
+            c.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_split_across_reads_is_still_one_request() {
+        let (c, mut s) = pair().await;
+        let req = vec![0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'o', b'r', b'g', 0x01, 0xbb];
+        let parts = vec![req[..4].to_vec(), req[4..8].to_vec(), req[8..].to_vec()];
+        tokio::spawn(dribble(c, parts));
+        let r = Socks5Server::read_request(&mut s).await.expect("request");
+        assert_eq!(r.command, Socks5Command::Connect);
+        assert!(matches!(r.address, Socks5Address::Domain(ref d, 443) if d == "example.org"));
+    }
+
+    #[tokio::test]
+    async fn a_greeting_split_across_reads_is_accepted() {
+        let (c, mut s) = pair().await;
+        tokio::spawn(dribble(c, vec![vec![0x05, 0x02], vec![0x00], vec![0x02]]));
+        let cfg = Socks5Config::default();
+        let m = Socks5Server::do_auth_selection(&mut s, &cfg).await.expect("greeting");
+        assert_eq!(m, Socks5AuthMethod::UserPass, "методы 00 и 02 получены целиком; по умолчанию пароль обязателен");
     }
 }
