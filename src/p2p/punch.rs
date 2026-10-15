@@ -40,6 +40,8 @@ struct Attempt {
     ips: Vec<IpAddr>,
     expires: Instant,
     hello_sent: bool,
+    /// на пробу по порту данных уже отвечено (по одному ответу на токен: иначе стороны бесконечно гоняют пробы друг другу)
+    data_answered: bool,
     introducer: HashId,
 }
 
@@ -282,7 +284,7 @@ impl P2PTransport {
             if ex.len() >= MAX_ATTEMPTS || ex.contains_key(&token) {
                 return; // too many at once, or the same introduction arriving a second time (the two paths of a dual send)
             }
-            ex.insert(token, Attempt { peer, ips: vec![data.ip(), disc.ip()], expires: Instant::now() + ATTEMPT_LIFE, hello_sent: false, introducer });
+            ex.insert(token, Attempt { peer, ips: vec![data.ip(), disc.ip()], expires: Instant::now() + ATTEMPT_LIFE, hello_sent: false, data_answered: false, introducer });
         }
         if self.punch.running.fetch_add(1, Ordering::Relaxed) >= MAX_ATTEMPTS {
             self.punch.running.fetch_sub(1, Ordering::Relaxed);
@@ -338,24 +340,36 @@ impl P2PTransport {
             if a.expires <= Instant::now() || a.peer != sender || !a.ips.contains(&from.ip()) {
                 return;
             }
-            if on_discovery && !a.hello_sent {
-                a.hello_sent = true;
-                true
+            if on_discovery {
+                if !a.hello_sent {
+                    a.hello_sent = true;
+                    (true, true)
+                } else {
+                    (false, false)
+                }
+            } else if !a.data_answered {
+                a.data_answered = true;
+                (false, true)
             } else {
-                false
+                (false, false)
             }
         };
+        let (send_hello, answer) = send_hello;
         let me = self.identity.node_id();
         if on_discovery {
-            // answer so that our own NAT opens towards them too, then do the ordinary introduction
-            let _ = self.discovery_socket.send_to(&probe(&token, &me), from).await;
+            // answer (once) so that our own NAT opens towards them too, then do the ordinary introduction
+            if answer {
+                let _ = self.discovery_socket.send_to(&probe(&token, &me), from).await;
+            }
             if send_hello {
                 println!("[punch] ✅ the way is open to {} ({}): starting the hello", hex::encode(&sender.0[..8]), from);
                 let _ = self.send_hello_request(&from.to_string()).await;
             }
         } else {
             self.punch.data_seen.lock().unwrap().insert(sender, (from, Instant::now()));
-            let _ = self.data_send_socket.send_to(&probe(&token, &me), from).await;
+            if answer {
+                let _ = self.data_send_socket.send_to(&probe(&token, &me), from).await;
+            }
         }
     }
 }
