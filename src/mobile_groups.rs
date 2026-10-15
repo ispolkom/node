@@ -482,6 +482,9 @@ pub struct Store {
     broken: Option<String>,
     dir: PathBuf,
     groups: BTreeMap<String, Group>,
+    /// состояние, записанное на диск последним: при сбое записи в память возвращается оно (права и приглашения не «действуют до
+    /// перезапуска»)
+    committed: BTreeMap<String, Group>,
     /// смещения строк журнала (индекс i — запись first_seq + i), строятся при первом обращении
     offsets: HashMap<String, Vec<u64>>,
 }
@@ -501,17 +504,27 @@ impl Store {
         if let Some(b) = &broken {
             eprintln!("[groups] ⚠️  хранилище групп: {b}. Изменения групп отключены до восстановления.");
         }
-        Self {
-            dir,
-            groups: groups.into_iter().map(|g| (g.id.clone(), g)).collect(),
-            offsets: HashMap::new(),
-            broken,
-        }
+        let groups: BTreeMap<String, Group> = groups.into_iter().map(|g| (g.id.clone(), g)).collect();
+        Self { dir, committed: groups.clone(), groups, offsets: HashMap::new(), broken }
     }
 
     /// Сохранить описание групп. Ошибка записи (диск заполнен, нет прав) и повреждённый при открытии индекс — это ошибка операции, а не
     /// «успех только в памяти» (после перезапуска изменение пропало бы).
-    fn save(&self) -> R<()> {
+    fn save(&mut self) -> R<()> {
+        let r = self.write_index();
+        match &r {
+            Ok(()) => self.committed = self.groups.clone(),
+            Err(_) => {
+                // изменение не зафиксировано: откат к записанному. Кэш смещений журналов сбрасывается — номера записей
+                // пересчитываются из самих журналов (а запись, уже дописанная в журнал, остаётся в нём)
+                self.groups = self.committed.clone();
+                self.offsets.clear();
+            }
+        }
+        r
+    }
+
+    fn write_index(&self) -> R<()> {
         if self.broken.is_some() {
             return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено; изменения отключены до восстановления"));
         }
@@ -2868,6 +2881,20 @@ mod tests {
         assert_eq!(p["first_seq"].as_u64().unwrap(), 3);
         let seqs: Vec<u64> = p["entries"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect();
         assert_eq!(seqs, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_failed_save_rolls_membership_back() {
+        let (d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let idx = d.path().join("groups/index.json");
+        std::fs::remove_file(&idx).unwrap();
+        std::fs::create_dir_all(&idx).unwrap(); // запись индекса невозможна
+        let before = s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().len();
+        assert!(s.join(&gid, "bb", None, None).is_err(), "вступление не записалось — ошибка");
+        assert_eq!(s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().len(), before, "членство не действует в памяти");
+        std::fs::remove_dir_all(&idx).unwrap();
+        assert!(s.join(&gid, "bb", None, None).is_ok(), "после починки диска вступление проходит");
     }
 
     #[test]
