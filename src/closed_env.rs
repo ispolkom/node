@@ -356,7 +356,13 @@ impl ClosedEnv {
                     return Ok(()); // заперто, пока шёл перенос: ключи не выдаём
                 }
                 c.lock().await;
-                match c.migrate(old, **key).await {
+                // служебная часть живёт под своим ключом (из рабочего ключа устройства), а не под ключом владельца: переносим
+                // сразу в него, иначе её данные не открываются ни прежним, ни ключом владельца и перенос не завершается никогда
+                let target: [u8; 32] = match (c.is_service(), old.as_ref()) {
+                    (true, Some(m)) => service_key_for(m, c.domain()),
+                    _ => **key,
+                };
+                match c.migrate(old, target).await {
                     Ok(n) => failures += n,
                     Err(e) => {
                         failures += 1;
