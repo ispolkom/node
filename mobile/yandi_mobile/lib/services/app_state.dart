@@ -557,7 +557,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final epoch = _lockEpoch;
     try {
       // Сначала из локального SQLite (быстро, без сети)
-      final local = await StorageService.loadMessages(peerId);
+      final local = await _backfillRids(await StorageService.loadMessages(peerId));
       if (epoch != _lockEpoch) return;
       if (local.isNotEmpty) {
         _chats[peerId] = local;
@@ -570,12 +570,28 @@ class AppState extends ChangeNotifier implements FilesHost {
         for (final msg in remote) {
           await StorageService.saveMessage(msg);
         }
-        final merged = await StorageService.loadMessages(peerId);
+        final merged = await _backfillRids(await StorageService.loadMessages(peerId));
         if (epoch != _lockEpoch) return;
         _chats[peerId] = merged;
         notifyListeners();
       }
     } catch (_) {}
+  }
+
+  /// Сообщения, полученные до схемы v7, не имеют remote_id в БД, но номер у отправителя сохранён в словаре `_rids`:
+  /// подставляем его и дописываем в БД, чтобы «прочитано» и правки работали и для старой переписки.
+  Future<List<ChatMessage>> _backfillRids(List<ChatMessage> list) async {
+    var out = list;
+    for (var i = 0; i < list.length; i++) {
+      final m = list[i];
+      if (m.outgoing || m.remoteId != null) continue;
+      final rid = _rids[m.id];
+      if (rid == null) continue;
+      if (identical(out, list)) out = List.of(list);
+      out[i] = m.copyWith(remoteId: rid);
+      try { await StorageService.saveMessage(out[i]); } catch (_) {}
+    }
+    return out;
   }
 
   // ── Звонки ─────────────────────────────────────────────────────────────────

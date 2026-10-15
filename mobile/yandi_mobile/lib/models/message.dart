@@ -37,14 +37,14 @@ class ChatMessage {
     return '$ts-$rand';
   }
 
-  ChatMessage copyWith({MessageStatus? status}) => ChatMessage(
+  ChatMessage copyWith({MessageStatus? status, String? remoteId}) => ChatMessage(
     id:        id,
     peerId:    peerId,
     outgoing:  outgoing,
     text:      text,
     timestamp: timestamp,
     status:    status ?? this.status,
-    remoteId:  remoteId,
+    remoteId:  remoteId ?? this.remoteId,
     replyId:   replyId,
     replyText: replyText,
   );
