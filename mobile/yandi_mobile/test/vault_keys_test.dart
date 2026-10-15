@@ -257,13 +257,24 @@ void main() {
     be.blob = good;
     be.now += 100000;
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
-    // файл прежнего вида (без заверения): открывается, метку не поднимает, затем заверяется
+    // заверение уже было: файл без `gt` — подмена (даже с корректным замком), а не прежний формат
+    final stripped = jsonDecode(good) as Map<String, dynamic>..remove('gt');
+    be.blob = jsonEncode(stripped);
+    be.now += 100000;
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    // поколение «в долг»: прежний формат с gen выше метки больше чем на 1 не принимается
+    be.secure.remove('vault_gt');
     final legacy = jsonDecode(good) as Map<String, dynamic>..remove('gt');
     legacy['gen'] = 9;
     be.blob = jsonEncode(legacy);
     be.now += 100000;
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята');
+    // обычный прежний файл (поколение не выше метки): открывается и заверяется
+    legacy['gen'] = 1;
+    be.blob = jsonEncode(legacy);
+    be.now += 100000;
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
-    expect(be.secure['vault_gen'], '1', reason: 'незаверенный файл метку не поднимает');
     expect((jsonDecode(be.blob!) as Map)['gt'], isNotNull, reason: 'файл заверен при входе');
   });
 }
