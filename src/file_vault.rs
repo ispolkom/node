@@ -1,7 +1,9 @@
 //! Файлы переписки (принятые, отправляемые, части передач) лежат на диске только запечатанными ключом защитной среды.
 //!
-//! Формат: `"YFV1" || id(16) || блок₀ || блок₁ …`, блок = `nonce(12) || AES-256-GCM(до BLOCK байт)`; к проверке подлинности
-//! привязаны номер блока и случайный номер файла (блоки нельзя переставлять или переносить между файлами). Размер блока равен
+//! Формат: `"YFV1" || id(16) || nonce(12) || tag(16) || блок₀ || блок₁ …`, блок = `nonce(12) || AES-256-GCM(до BLOCK байт)`;
+//! к проверке подлинности привязаны номер блока и случайный номер файла (блоки нельзя переставлять или переносить между файлами).
+//! `tag` в заголовке — AEAD над пустым текстом с id и полным открытым размером файла: усечение (даже по границе блока) или
+//! удлинение файла не проходит проверку. Размер блока равен
 //! размеру куска передачи, поэтому кусок, пришедший не по порядку, записывается на своё место без перезаписи остального, а
 //! отправка читает ровно нужный блок.
 //!
@@ -17,7 +19,7 @@ use zeroize::Zeroizing;
 /// Открытых байт в блоке (= размер куска передачи файла).
 pub const BLOCK: usize = 700;
 const MAGIC: &[u8; 4] = b"YFV1";
-const HEAD: usize = 4 + 16;
+const HEAD: usize = 4 + 16 + 12 + 16;
 const OVERHEAD: usize = 12 + 16;
 
 static KEY: RwLock<Option<Zeroizing<[u8; 32]>>> = RwLock::new(None);
@@ -80,6 +82,30 @@ fn aad(id: &[u8; 16], index: u64) -> [u8; 24] {
     a
 }
 
+fn head_aad(id: &[u8; 16], total: u64) -> [u8; 24] {
+    let mut a = [0u8; 24];
+    a[..16].copy_from_slice(id);
+    a[16..].copy_from_slice(&total.to_be_bytes());
+    a
+}
+
+/// Заголовок файла для открытого размера `total`: magic, id, nonce, tag.
+fn make_head(c: &Aes256Gcm, total: u64) -> std::io::Result<Vec<u8>> {
+    let mut id = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut id);
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    let tag = c
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: b"", aad: &head_aad(&id, total) })
+        .map_err(|_| bad("шифрование заголовка"))?;
+    let mut head = Vec::with_capacity(HEAD);
+    head.extend_from_slice(MAGIC);
+    head.extend_from_slice(&id);
+    head.extend_from_slice(&nonce);
+    head.extend_from_slice(&tag);
+    Ok(head)
+}
+
 fn bad(msg: &str) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, msg.to_string())
 }
@@ -113,26 +139,31 @@ pub fn is_sealed(path: &Path) -> bool {
     f.read_exact(&mut m).is_ok() && &m == MAGIC
 }
 
-fn read_id(f: &mut std::fs::File) -> std::io::Result<[u8; 16]> {
+/// Прочитать заголовок и проверить его против фактического размера файла (усечение/удлинение не проходит).
+fn read_id(f: &mut std::fs::File, c: &Aes256Gcm) -> std::io::Result<[u8; 16]> {
     let mut h = [0u8; HEAD];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut h)?;
     if &h[..4] != MAGIC {
         return Err(bad("файл не запечатан"));
     }
+    let total = plain_from_sealed(f.metadata()?.len()).ok_or_else(|| bad("файл переписки повреждён"))?;
     let mut id = [0u8; 16];
-    id.copy_from_slice(&h[4..]);
+    id.copy_from_slice(&h[4..20]);
+    c.decrypt(Nonce::from_slice(&h[20..32]), Payload { msg: &h[32..], aad: &head_aad(&id, total) })
+        .map_err(|_| bad("заголовок файла не проходит проверку: размер изменён или файл повреждён"))?;
     Ok(id)
+}
+
+/// Проверить заголовок файла (нужно и пустому файлу, у которого блоков для проверки нет).
+fn check_head(path: &Path, c: &Aes256Gcm) -> std::io::Result<()> {
+    let mut f = std::fs::File::open(path)?;
+    read_id(&mut f, c).map(|_| ())
 }
 
 /// Создать пустой запечатанный файл под `plain_size` открытых байт: блоки заполняются по мере прихода (в любом порядке).
 pub fn create(path: &Path, plain_size: u64) -> std::io::Result<()> {
-    cipher()?; // заперто — не создаём
-    let mut head = Vec::with_capacity(HEAD);
-    head.extend_from_slice(MAGIC);
-    let mut id = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut id);
-    head.extend_from_slice(&id);
+    let head = make_head(&cipher()?, plain_size)?;
     crate::util::private_file::write_private(path, &head)?;
     let f = std::fs::OpenOptions::new().write(true).open(path)?;
     f.set_len(sealed_len(plain_size))?;
@@ -146,7 +177,7 @@ pub fn write_block(path: &Path, index: u64, data: &[u8]) -> std::io::Result<()> 
     }
     let c = cipher()?;
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-    let id = read_id(&mut f)?;
+    let id = read_id(&mut f, &c)?;
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ct = c
@@ -168,7 +199,7 @@ pub fn read_block(path: &Path, index: u64) -> std::io::Result<Vec<u8>> {
     }
     let plain = if index + 1 == blocks { (total - index * BLOCK as u64) as usize } else { BLOCK };
     let mut f = std::fs::File::open(path)?;
-    let id = read_id(&mut f)?;
+    let id = read_id(&mut f, &c)?;
     f.seek(SeekFrom::Start(HEAD as u64 + index * (BLOCK + OVERHEAD) as u64))?;
     let mut buf = vec![0u8; plain + OVERHEAD];
     f.read_exact(&mut buf)?;
@@ -179,11 +210,10 @@ pub fn read_block(path: &Path, index: u64) -> std::io::Result<Vec<u8>> {
 /// Записать файл целиком (атомарно: временный файл рядом и переименование).
 pub fn write_all(path: &Path, plain: &[u8]) -> std::io::Result<()> {
     let c = cipher()?;
+    let mut out = make_head(&c, plain.len() as u64)?;
+    out.reserve(sealed_len(plain.len() as u64) as usize);
     let mut id = [0u8; 16];
-    rand::rngs::OsRng.fill_bytes(&mut id);
-    let mut out = Vec::with_capacity(sealed_len(plain.len() as u64) as usize);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&id);
+    id.copy_from_slice(&out[4..20]);
     for (i, part) in plain.chunks(BLOCK).enumerate() {
         let mut nonce = [0u8; 12];
         rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -198,6 +228,7 @@ pub fn write_all(path: &Path, plain: &[u8]) -> std::io::Result<()> {
 
 /// Прочитать файл целиком.
 pub fn read_all(path: &Path) -> std::io::Result<Vec<u8>> {
+    check_head(path, &cipher()?)?;
     let total = plain_len(path)?;
     let mut out = Vec::with_capacity(total as usize);
     for i in 0..total.div_ceil(BLOCK as u64) {
@@ -208,6 +239,7 @@ pub fn read_all(path: &Path) -> std::io::Result<Vec<u8>> {
 
 /// Прочитать диапазон открытых байт `[offset, offset+len)` (за концом файла — короче).
 pub fn read_range(path: &Path, offset: u64, len: usize) -> std::io::Result<Vec<u8>> {
+    check_head(path, &cipher()?)?;
     let total = plain_len(path)?;
     if offset >= total || len == 0 {
         return Ok(Vec::new());
@@ -363,6 +395,30 @@ mod tests {
         assert!(assemble(&parts, &bad_out, 3999).is_err(), "размер не совпал");
         assert!(!bad_out.exists());
         assert!(assemble(&parts, &bad_out, 4001).is_err());
+    }
+
+    #[test]
+    fn truncation_even_at_a_block_boundary_is_detected() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("t");
+        write_all(&p, &vec![3u8; BLOCK * 3]).unwrap();
+        let raw = std::fs::read(&p).unwrap();
+        // отрезан хвост ровно по границе блока
+        std::fs::write(&p, &raw[..HEAD + BLOCK + OVERHEAD]).unwrap();
+        assert!(read_all(&p).is_err(), "усечение по границе блока");
+        assert!(read_range(&p, 0, 10).is_err());
+        assert!(read_block(&p, 0).is_err());
+        // оставлен один заголовок
+        std::fs::write(&p, &raw[..HEAD]).unwrap();
+        assert!(read_all(&p).is_err(), "усечение до заголовка");
+        // допись лишнего блока
+        let mut more = raw.clone();
+        more.extend_from_slice(&raw[HEAD..HEAD + BLOCK + OVERHEAD]);
+        std::fs::write(&p, &more).unwrap();
+        assert!(read_all(&p).is_err(), "удлинение");
+        // целый файл читается
+        std::fs::write(&p, &raw).unwrap();
+        assert_eq!(read_all(&p).unwrap().len(), BLOCK * 3);
     }
 
     #[test]
