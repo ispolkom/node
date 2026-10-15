@@ -198,6 +198,9 @@ pub enum Event {
     Closed { handle: Handle },
 }
 
+/// Сколько разных меток узлов принимает обратное направление одного звена (длина цепочки намного меньше).
+const MAX_BWD_TAGS: usize = 16;
+
 /// Как верхний слой называет цепочку на этом узле.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Handle(pub NodeId, pub u64);
@@ -328,7 +331,13 @@ impl Router {
         // назад (от выхода к отправителю): звено «впереди»
         if let Some(prev) = self.by_next.get(&(from, cid)).copied() {
             if let Some(r) = self.by_prev.get_mut(&prev) {
-                if !r.bwd.entry((seq >> 32) as u32).or_default().accept(seq & 0xFFFF_FFFF) {
+                let tag = (seq >> 32) as u32;
+                // у каждого узла цепочки своя метка, а цепочка коротка: больше MAX_BWD_TAGS разных меток — это не узлы цепочки,
+                // а попытка раздуть таблицу окон повторов (ячейка не аутентифицируется на промежуточном узле)
+                if !r.bwd.contains_key(&tag) && r.bwd.len() >= MAX_BWD_TAGS {
+                    return;
+                }
+                if !r.bwd.entry(tag).or_default().accept(seq & 0xFFFF_FFFF) {
                     return;
                 }
                 r.last = now;
@@ -639,6 +648,26 @@ mod tests {
             }
             cev
         }
+    }
+
+    #[test]
+    fn a_neighbour_cannot_inflate_the_replay_windows_with_new_tags() {
+        let mut net = Net::new(&[1, 2]);
+        let (_c, ev) = net.build(&[1, 2]);
+        assert_eq!(ev, vec![ClientEvent::Ready]);
+        let (key, prev) = {
+            let r1 = &net.routers[&id(1)];
+            let (k, p) = r1.by_next.iter().next().expect("звено вперёд есть");
+            (*k, *p)
+        };
+        assert_eq!(key.0, id(2));
+        let body = [0u8; BODY];
+        for t in 0..200u64 {
+            let seq = ((1000 + t) << 32) | 1;
+            net.routers.get_mut(&id(1)).unwrap().on_packet(id(2), &cell_packet(key.1, seq, &body), 5);
+        }
+        let n = net.routers[&id(1)].by_prev[&prev].bwd.len();
+        assert!(n <= MAX_BWD_TAGS, "окон повторов {n}");
     }
 
     #[test]
