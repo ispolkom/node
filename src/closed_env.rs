@@ -241,7 +241,7 @@ impl ClosedEnv {
         self.configured.store(true, std::sync::atomic::Ordering::SeqCst);
         // по умолчанию среда запирается сама через 15 минут бездействия; владелец меняет это в «Настройках»
         let _ = self.set_auto_lock(DEFAULT_AUTO_LOCK_SECS);
-        self.install(vault).await
+        self.install(vault, None).await
     }
 
     pub async fn unlock(&self, password: String) -> Result<()> {
@@ -262,7 +262,7 @@ impl ClosedEnv {
         if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
             return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
         }
-        self.install(vault).await
+        self.install(vault, Some(epoch)).await
     }
 
     /// После неудачного входа: если среда стёрта (пять неверных сид-фраз), она считается не созданной,
@@ -300,7 +300,7 @@ impl ClosedEnv {
         if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
             return Err(anyhow!("восстановление отменено: среда была заперта, пока оно выполнялось"));
         }
-        self.install(vault).await
+        self.install(vault, Some(epoch)).await
     }
 
     /// Смена пароля: старый проверяется заново (с теми же счётчиками и паузами). Данные не перешифровываются: DK тот же.
@@ -348,7 +348,9 @@ impl ClosedEnv {
     }
 
     /// Принять открытый сеанс и выдать ключи потребителям.
-    async fn install(&self, vault: NodeVault) -> Result<()> {
+    /// `epoch` — поколение блокировок, с которого начался вход: оно проверяется под тем же замком, под которым `lock` отзывает сеанс,
+    /// иначе запирание между проверкой и публикацией открывало бы среду заново без пароля.
+    async fn install(&self, vault: NodeVault, epoch: Option<u64>) -> Result<()> {
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut keys: Vec<(Arc<dyn Consumer>, Zeroizing<[u8; 32]>)> = Vec::new();
         for c in consumers {
@@ -357,6 +359,9 @@ impl ClosedEnv {
         }
         let generation = {
             let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if epoch.is_some_and(|e| self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != e) {
+                return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
+            }
             i.generation += 1;
             i.vault = Some(vault);
             i.last_activity = Instant::now();
@@ -513,6 +518,20 @@ mod tests {
         assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
         e.unlock("owner password".into()).await.expect("новый вход проходит");
         assert!(e.unlocked());
+    }
+
+    /// Блокировка между проверкой поколения и публикацией сеанса: install сам сверяет поколение и не открывает среду заново.
+    #[tokio::test]
+    async fn install_with_a_stale_epoch_does_not_reopen_a_locked_environment() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.lock().await;
+        let vault = e.store.clone().unlock_async("owner password".into(), false).await.unwrap();
+        let stale = e.lock_epoch.load(Ordering::SeqCst);
+        e.lock().await; // запирание, случившееся уже после проверки поколения вызывающим
+        assert!(e.install(vault, Some(stale)).await.is_err());
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
     }
 
     #[tokio::test]
