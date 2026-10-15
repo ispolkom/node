@@ -206,6 +206,9 @@ impl ChatManager {
     /// One round of the outgoing queue: messages whose time has come are sent again; messages older than `MAX_DELIVERY_AGE`
     /// are marked `Failed`. (Split out so it can be called directly, e.g. from tests.)
     async fn sweep_expired_acks(&self) {
+        if self.storage.is_locked() {
+            return; // при запертой среде очередь не отправляется (она и так пуста после lock)
+        }
         let now = Instant::now();
         let mut due: Vec<(HashId, HashId, ChatMessage)> = Vec::new();
         let mut gave_up: Vec<(HashId, HashId)> = Vec::new();
@@ -392,17 +395,25 @@ impl ChatManager {
                 self.transport.request_punch(to).await; // no way to the peer yet: ask a mutual acquaintance to introduce us
             }
         }
-        self.pending_acks.lock().await.insert(
-            msg.msg_id,
-            PendingAck {
-                peer: to,
-                sent_at: Instant::now(),
-                first_sent: unix_now(),
-                attempts,
-                next_try: Instant::now() + retry_delay(attempts.max(1)),
-                msg: msg.clone(),
-            },
-        );
+        {
+            let mut pending = self.pending_acks.lock().await;
+            // среду могли запереть, пока отправка ждала сеть: lock() уже очистил очередь, и возвращать в неё открытый текст нельзя
+            // (проверка под замком очереди: lock() сначала отзывает ключ, потом чистит очередь)
+            if self.storage.is_locked() {
+                return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+            }
+            pending.insert(
+                msg.msg_id,
+                PendingAck {
+                    peer: to,
+                    sent_at: Instant::now(),
+                    first_sent: unix_now(),
+                    attempts,
+                    next_try: Instant::now() + retry_delay(attempts.max(1)),
+                    msg: msg.clone(),
+                },
+            );
+        }
         self.outbox_dirty
             .store(true, std::sync::atomic::Ordering::Relaxed);
 
@@ -1080,6 +1091,13 @@ mod tests {
         let bytes = serde_json::to_vec(&incoming).unwrap();
         assert!(cm.handle_incoming_message(from, bytes.clone()).await.is_err());
         assert!(cm.storage.save_outbox(&[]).is_err(), "пустая очередь не стирает файл у запертого хранилища");
+
+        // отправка, прервавшая lock, могла оставить в очереди открытый текст: запертая очередь не отправляется
+        let stray = ChatMessage::new(cm.my_node_id, peer, "секрет".to_string());
+        cm.pending_acks.lock().await.insert(stray.msg_id, pending(peer, stray.clone(), Duration::from_secs(5), Duration::ZERO));
+        cm.sweep_expired_acks().await;
+        assert_eq!(cm.pending_acks.lock().await[&stray.msg_id].attempts, 1, "запертая очередь не отправляется");
+        cm.pending_acks.lock().await.clear();
 
         cm.unlock([9; 32]).await;
         assert_eq!(cm.pending_acks.lock().await.len(), 1, "очередь поднята с диска после разблокировки");
