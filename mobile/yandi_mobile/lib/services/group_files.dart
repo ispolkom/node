@@ -74,6 +74,8 @@ class GroupFiles {
     final fid = d['f'] as String, chunks = d['c'] as int, size = d['z'] as int;
     final key = base64.decode(d['k'] as String);
     if (chunks < 1 || size < 1 || size > maxSize || key.length != 32) throw const FormatException('bad file description');
+    // число кусков однозначно задаётся размером: описание с огромным `c` при малом размере не вызывает миллионы запросов
+    if (chunks != (size + chunkSize - 1) ~/ chunkSize) throw const FormatException('bad file description');
     // с ключом хранилища файл пишется сразу зашифрованным; без него — как раньше (тесты)
     final name = d['n'] is String ? d['n'] as String : 'file';
     final w = vault == null ? null : await vault!.create(out, name: name, mime: FileTransferService.guessMime(name), size: size);
@@ -83,7 +85,11 @@ class GroupFiles {
     var written = 0;
     try {
       var n = 0;
+      var idx = 0;   // номер куска: onProgress может быть не задан, поэтому по n считать нельзя
       await for (final plain in orderedPrefetch<Uint8List>(chunks, 4, (i) async => FileCrypto.decryptChunk(key, fid, i, chunks, await api.fileGet(gid, fid, i)))) {
+        // точная длина каждого куска: все полные, кроме последнего, и пустых не бывает
+        final expectLen = idx < chunks - 1 ? chunkSize : size - (chunks - 1) * chunkSize;
+        if (plain.length != expectLen) throw const FormatException('файл повреждён или подменён');
         hasher.add(plain);
         written += plain.length;
         if (written > size) throw const FormatException('файл повреждён или подменён');
@@ -92,6 +98,7 @@ class GroupFiles {
         } else {
           sink!.add(plain);
         }
+        idx++;
         onProgress?.call(++n, chunks);
       }
       hasher.close();

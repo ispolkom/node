@@ -346,6 +346,9 @@ void main() {
     final out = File('${dir.path}/out.bin');
     await GroupFiles(node.as('bob')).download(node.gid, d, out);
     expect(out.readAsBytesSync(), src.readAsBytesSync());
+    // описание с числом кусков, не соответствующим размеру, отвергается до первого запроса
+    final fake = {...d, 'c': 5000000, 'z': 1};
+    await expectLater(GroupFiles(node.as('bob')).download(node.gid, fake, File('${dir.path}/fake.bin')), throwsA(isA<FormatException>()));
     // чужой (не участник) не скачивает
     await expectLater(GroupFiles(node.as('eve')).download(node.gid, d, File('${dir.path}/e.bin')), throwsA(anything));
     // подмена куска узлом
