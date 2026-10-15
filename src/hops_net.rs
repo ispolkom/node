@@ -431,7 +431,7 @@ impl Hops {
             // от отправителя к цели
             let mut wcancel = cancel_rx.clone();
             let w_active = last_active.clone();
-            tokio::spawn(exit_writer(wr, rx, wcancel, queued, w_active, started));
+            tokio::task::spawn(exit_writer(wr, rx, wcancel, queued, w_active, started));
             // от цели к отправителю
             let mut seq = 0u32;
             let mut buf = vec![0u8; CHUNK];
@@ -887,7 +887,7 @@ mod exit_stream_tests {
         let (tx, rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
         let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let h = tokio::spawn(exit_writer(client_side, rx, cancel_rx, queued, Arc::new(std::sync::atomic::AtomicU64::new(0)), std::time::Instant::now()));
+        let h = tokio::task::spawn(exit_writer(client_side, rx, cancel_rx, queued, Arc::new(std::sync::atomic::AtomicU64::new(0)), std::time::Instant::now()));
         tx.send(Some(vec![7u8; 4096])).unwrap(); // не поместится в буфер на 8 байт: запись зависнет
         tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(!h.is_finished(), "запись висит");
