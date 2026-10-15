@@ -702,6 +702,23 @@ impl FileTransferManager {
             }
         }
 
+        let downloads_dir = crate::communication::files_dir("downloads");
+        std::fs::create_dir_all(&downloads_dir)?;
+        let local_name = storage_filename(&start.file_id, &start.filename);
+        let final_path = downloads_dir.join(&local_name);
+        let temp_path = downloads_dir.join(format!("{}.part", &local_name));
+
+        // принятое вложение неизменяемо: повтор начала с теми же номером и именем не подменяет уже сохранённый файл
+        // (сообщение продолжает на него ссылаться). Тот же узел получает повторное «принято», другой — отказ.
+        if final_path.exists() {
+            let by_same = self.completed_incoming.lock().await.get(&start.file_id) == Some(&from);
+            if by_same {
+                info!("🔁 start of an already received transfer {}: re-sending FileComplete", start.file_id);
+                return self.send_transfer_complete(from, &start.file_id).await;
+            }
+            return Err(anyhow::anyhow!("rejected file transfer from {}: such a file is already stored", hex::encode(&from.0[..8])));
+        }
+
         {
             let mut done = self.completed_incoming.lock().await;
             match done.get(&start.file_id) {
@@ -713,12 +730,6 @@ impl FileTransferManager {
                 }
             }
         }
-
-        let downloads_dir = crate::communication::files_dir("downloads");
-        std::fs::create_dir_all(&downloads_dir)?;
-        let local_name = storage_filename(&start.file_id, &start.filename);
-        let final_path = downloads_dir.join(&local_name);
-        let temp_path = downloads_dir.join(format!("{}.part", &local_name));
 
         // принятые части — сразу запечатанными блоками: открытого файла на диске нет ни во время приёма, ни после
         crate::file_vault::create(&temp_path, start.file_size)?;
