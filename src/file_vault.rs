@@ -227,6 +227,17 @@ fn read_block_with(c: &Aes256Gcm, path: &Path, index: u64) -> std::io::Result<Ve
         .map_err(|_| bad("блок не открывается: файл повреждён или записан не полностью"))
 }
 
+/// Блок целиком из нулевых байт (nonce и шифртекст): в него ещё ничего не записано.
+fn block_is_unwritten(path: &Path, index: u64, total: u64) -> std::io::Result<bool> {
+    let blocks = total.div_ceil(BLOCK as u64);
+    let plain = if index + 1 == blocks { (total - index * BLOCK as u64) as usize } else { BLOCK };
+    let mut f = std::fs::File::open(path)?;
+    f.seek(SeekFrom::Start(HEAD as u64 + index * (BLOCK + OVERHEAD) as u64))?;
+    let mut buf = vec![0u8; plain + OVERHEAD];
+    f.read_exact(&mut buf)?;
+    Ok(buf.iter().all(|b| *b == 0))
+}
+
 /// Перезапечатать один файл с `old` на `new` (блок за блоком во временный файл, затем замена). `Ok(false)` — файл уже под `new`.
 fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bool> {
     let (co, cn) = (cipher_of(old)?, cipher_of(new)?);
@@ -248,6 +259,11 @@ fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bo
         let mut tf = std::fs::OpenOptions::new().read(true).write(true).open(&tmp)?;
         let id = read_id(&mut tf, &cn)?;
         for i in 0..total.div_ceil(BLOCK as u64) {
+            // ещё не полученный блок незавершённой передачи — нули (файл создаётся полного размера): остаётся нулями под новым
+            // ключом, чтобы передачу можно было продолжить; открыть его невозможно, и это не повреждение
+            if block_is_unwritten(path, i, total)? {
+                continue;
+            }
             let data = read_block_with(&co, path, i)?;
             let mut nonce = [0u8; 12];
             rand::rngs::OsRng.fill_bytes(&mut nonce);
@@ -272,7 +288,12 @@ fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bo
 /// Файлы под `new` не трогаются, не запечатанные (чужие/частичные без заголовка) пропускаются.
 pub fn rekey_dir(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
     let mut failed = 0usize;
-    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let rd = match std::fs::read_dir(dir) {
+        Ok(r) => r,
+        // нет каталога — переносить нечего; иная ошибка — перенос не выполнен, метку миграции снимать нельзя
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
+        Err(_) => return 1,
+    };
     for e in rd.flatten() {
         let p = e.path();
         match e.file_type() {
@@ -479,6 +500,21 @@ mod tests {
         assert!(assemble(&parts, &bad_out, 3999).is_err(), "размер не совпал");
         assert!(!bad_out.exists());
         assert!(assemble(&parts, &bad_out, 4001).is_err());
+    }
+
+    /// Незавершённая передача (часть блоков ещё не получена) переносится на новый ключ без отказа и остаётся достраиваемой.
+    #[test]
+    fn a_partially_received_file_is_resealed_and_keeps_its_empty_blocks() {
+        let d = tempfile::tempdir().unwrap();
+        let (old, new) = ([0x5au8; 32], [3u8; 32]);
+        let p = d.path().join("in.part");
+        let data: Vec<u8> = (0..(BLOCK * 3)).map(|i| (i % 97) as u8).collect();
+        create(&p, data.len() as u64).unwrap();
+        write_block(&p, 0, &data[..BLOCK]).unwrap();
+        assert_eq!(rekey_dir(d.path(), &old, &new), 0, "перенос не отказал из-за неполученных блоков");
+        let cn = cipher_of(&new).unwrap();
+        assert_eq!(read_block_with(&cn, &p, 0).unwrap(), data[..BLOCK], "полученный блок под новым ключом");
+        assert!(block_is_unwritten(&p, 1, data.len() as u64).unwrap(), "неполученный блок остался пустым");
     }
 
     #[test]
