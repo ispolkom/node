@@ -210,7 +210,12 @@ fn geo_target() -> (String, u16) {
             }
         }
     }
-    ("ipinfo.io".to_string(), 80)
+    ("ipinfo.io".to_string(), 443)
+}
+
+/// Подменён ли адрес проверки (только для проверок: ответ по открытому TCP без TLS).
+fn geo_override() -> bool {
+    std::env::var("YANDI_GEO_PROBE").is_ok()
 }
 
 /// Разобрать ответ службы: двухбуквенная страна в теле.
@@ -218,6 +223,19 @@ pub fn parse_geo_reply(reply: &[u8]) -> Option<String> {
     let text = String::from_utf8_lossy(reply);
     let body = text.split("\r\n\r\n").nth(1)?;
     crate::network_offers::normalise_country(body.trim())
+}
+
+/// Конфигурация TLS-клиента для проверки: сертификат службы проверяется по встроенным корням (внутри туннеля до конечной службы:
+/// сам проверяемый выход подделать ответ не может — у него нет ключа службы).
+fn geo_tls() -> tokio_rustls::TlsConnector {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let cfg = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions()
+        .expect("TLS-версии по умолчанию")
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    tokio_rustls::TlsConnector::from(std::sync::Arc::new(cfg))
 }
 
 /// Спросить страну через закреплённый выход: соединение с локальным прокси под именем `yandi.<начало номера>`.
@@ -251,9 +269,19 @@ pub async fn probe_country(proxy: std::net::SocketAddr, password: &str, exit_id:
         if rep[1] != 0 {
             return Err(format!("выход не соединил: {}", rep[1]));
         }
-        s.write_all(format!("GET /country HTTP/1.1\r\nHost: {host}\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n").as_bytes()).await.map_err(|e| e.to_string())?;
+        let request = format!("GET /country HTTP/1.1\r\nHost: {host}\r\nUser-Agent: curl/8\r\nConnection: close\r\n\r\n");
         let mut buf = Vec::new();
-        let _ = (&mut s).take(4096).read_to_end(&mut buf).await;
+        if geo_override() {
+            // проверочная подмена адреса (тесты): открытый TCP
+            s.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
+            let _ = (&mut s).take(4096).read_to_end(&mut buf).await;
+        } else {
+            // настоящая проверка: TLS с проверкой сертификата службы внутри туннеля — ответ нельзя подделать выходом
+            let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| e.to_string())?;
+            let mut tls = geo_tls().connect(name, s).await.map_err(|e| format!("TLS до службы: {e}"))?;
+            tls.write_all(request.as_bytes()).await.map_err(|e| e.to_string())?;
+            let _ = (&mut tls).take(4096).read_to_end(&mut buf).await;
+        }
         parse_geo_reply(&buf).ok_or_else(|| "ответ без страны".to_string())
     };
     tokio::time::timeout(std::time::Duration::from_secs(25), work).await.map_err(|_| "время вышло".to_string())?
@@ -290,6 +318,37 @@ pub fn start_verifier(pool: std::sync::Arc<ExitPool>, proxy: std::net::SocketAdd
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Выход, подставляющий открытый HTTP-ответ «NL» вместо TLS службы, страну не подтверждает.
+    #[tokio::test]
+    async fn an_exit_that_answers_in_plain_text_cannot_confirm_a_country() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut c, _) = l.accept().await.unwrap();
+            let mut b = [0u8; 3];
+            c.read_exact(&mut b).await.unwrap();
+            c.write_all(&[5, 2]).await.unwrap();
+            let mut hdr = [0u8; 2];
+            c.read_exact(&mut hdr).await.unwrap();
+            let mut rest = vec![0u8; hdr[1] as usize + 1];
+            c.read_exact(&mut rest).await.unwrap();
+            let mut plen = vec![0u8; *rest.last().unwrap() as usize];
+            c.read_exact(&mut plen).await.unwrap();
+            c.write_all(&[1, 0]).await.unwrap();
+            let mut req = [0u8; 5];
+            c.read_exact(&mut req).await.unwrap();
+            let mut tail = vec![0u8; req[4] as usize + 2];
+            c.read_exact(&mut tail).await.unwrap();
+            c.write_all(&[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await.unwrap();
+            // «служба» отвечает открытым текстом без TLS
+            let _ = c.write_all(b"HTTP/1.1 200 OK\r\n\r\nNL").await;
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let r = probe_country(addr, "pw", &"ab".repeat(32)).await;
+        assert!(r.is_err(), "открытый ответ не принимается как подтверждение: {r:?}");
+    }
 
     fn offer(n: u8, country: Option<&str>, power: &str, latency: Option<u32>, exit: bool) -> NodeOffer {
         NodeOffer {
