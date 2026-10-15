@@ -129,6 +129,8 @@ static void my_application_activate(GApplication* application) {
   }
 
   gtk_window_set_default_size(window, 1280, 720);
+  // значок из темы значков (ставится пакетом yandi-desktop в hicolor): окно и панель задач показывают логотип YANDI
+  gtk_window_set_icon_name(window, "yandi");
 
   g_autoptr(FlDartProject) project = fl_dart_project_new();
   fl_dart_project_set_dart_entrypoint_arguments(

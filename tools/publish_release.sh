@@ -37,6 +37,14 @@ bash tools/build_deb.sh >/dev/null
 DEB=$(ls -t dist/yandi-node_*_*.deb | head -1)
 NAME=$(basename "$DEB")
 VERSION=$(dpkg-deb --field "$DEB" Version)
+# оболочка ПК — вторым пакетом той же версии (если собрана flutter build linux --release)
+DDEB=""; DNAME=""
+if [ -x desktop/yandi_desktop/build/linux/x64/release/bundle/yandi_desktop ]; then
+  bash tools/build_desktop_deb.sh >/dev/null
+  DDEB="dist/yandi-desktop_${VERSION}_$(dpkg --print-architecture).deb"
+  [ -f "$DDEB" ] || { echo "не собрался $DDEB"; exit 1; }
+  DNAME=$(basename "$DDEB")
+fi
 SEQ=$(python3 -I tools/release_seq.py release)
 
 SITE=dist/site/update/deb
@@ -44,14 +52,16 @@ GH=dist/github
 rm -rf dist/site dist/github
 mkdir -p "$SITE" "$GH"
 cp "$DEB" "$SITE/$NAME"
-YANDI_RELEASE_PLATFORM=deb "$REL" manifest "$SITE" "$VERSION" "$SEQ" --pubkey "$KEY" "$NAME"
+FILES=("$NAME")
+if [ -n "$DDEB" ]; then cp "$DDEB" "$SITE/$DNAME"; FILES+=("$DNAME"); fi
+YANDI_RELEASE_PLATFORM=deb "$REL" manifest "$SITE" "$VERSION" "$SEQ" --pubkey "$KEY" "${FILES[@]}"
 printf '%s\n' "$PHRASE_IN" | "$REL" sign "$SITE"
 unset PHRASE_IN
 # самопроверка тем же инструментом, как это сделает установщик
 "$REL" verify "$SITE" --pubkey "$KEY" --min-seq "$SEQ"
 
 # ассеты GitHub: те же файлы с префиксом «deb-»
-for f in MANIFEST.json MANIFEST.json.sig "$NAME"; do cp "$SITE/$f" "$GH/deb-$f"; done
+for f in MANIFEST.json MANIFEST.json.sig "${FILES[@]}"; do cp "$SITE/$f" "$GH/deb-$f"; done
 (cd "$GH" && sha256sum deb-* > SHA256SUMS)
 
 OUT="$HOME/Рабочий стол/Релизы"
@@ -59,6 +69,11 @@ mkdir -p "$OUT"
 ARCH="yandi-update-site_${VERSION}.tar.gz"
 tar -C dist/site --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT/$ARCH" update
 cp "$DEB" "$OUT/$NAME"
+[ -n "$DDEB" ] && cp "$DDEB" "$OUT/$DNAME"
+# плоский архив ровно для заливки в update/deb/: только файлы, без вложенных папок
+ZIP="$HOME/Рабочий стол/yandi-su_update-deb.zip"
+rm -f "$ZIP"
+(cd "$SITE" && zip -q -X "$ZIP" MANIFEST.json MANIFEST.json.sig "${FILES[@]}")
 rm -rf "$OUT/github-assets_${VERSION}" && cp -r "$GH" "$OUT/github-assets_${VERSION}"
 cat > "$OUT/ПАМЯТКА.txt" <<TXT
 Выпуск ${VERSION} (номер ${SEQ}), платформа deb.
