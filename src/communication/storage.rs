@@ -388,7 +388,14 @@ impl ChatStorage {
         }
         chunk.extend_from_slice(&(blob.len() as u32).to_be_bytes());
         chunk.extend_from_slice(blob);
-        file.write_all(&chunk)?;
+        let before = file.metadata()?.len();
+        if let Err(e) = file.write_all(&chunk) {
+            // частичная запись (диск заполнен): хвост откатывается, а при невозможности — файл будет проверен заново при следующей записи
+            if file.set_len(before).is_err() {
+                CHECKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).remove(path);
+            }
+            return Err(e.into());
+        }
         Ok(())
     }
 
@@ -585,6 +592,10 @@ impl ChatStorage {
         if std::fs::metadata(&chat_file).map_or(false, |m| m.len() > MAX_CHAT_FILE_BYTES) {
             return Err(anyhow::anyhow!("chat history of this peer is full"));
         }
+        // повтор того же письма (replay не успел зафиксироваться, параллельный приём) не плодит дубль: запись идемпотентна по msg_id
+        if self.load_history_unlocked(from, 500).map(|h| h.iter().any(|m| m.msg_id == msg.msg_id)).unwrap_or(false) {
+            return Ok(());
+        }
         self.append_encrypted_message(&chat_file, msg)
     }
 
@@ -689,6 +700,23 @@ impl ChatStorage {
             return Ok(());
         }
 
+        // статус только вперёд: поздняя запись «отправляется» не затирает уже пришедшее подтверждение
+        fn rank(s: &crate::communication::MessageStatus) -> u8 {
+            use crate::communication::MessageStatus::*;
+            match s {
+                Pending => 0,
+                Shipping | Failed => 1,
+                Delivered => 2,
+                Read => 3,
+            }
+        }
+        if let Ok(key) = self.get_encryption_key() {
+            if let Ok(log) = self.read_status_log(peer_id, &key, false) {
+                if log.get(msg_id).is_some_and(|cur| rank(cur) > rank(&status)) {
+                    return Ok(());
+                }
+            }
+        }
         self.append_status(peer_id, msg_id, &status)?;
         let big = std::fs::metadata(self.status_log_path(peer_id)).map_or(false, |m| m.len() > Self::STATUS_LOG_FOLD_BYTES);
         if big {
@@ -1015,6 +1043,27 @@ mod closed_env_tests {
         let d = std::env::temp_dir().join(format!("yandi-closed-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         d
+    }
+
+    /// Повторная запись того же входящего письма не плодит дубль; статус не идёт назад.
+    #[test]
+    fn incoming_save_is_idempotent_and_status_only_moves_forward() {
+        use crate::communication::MessageStatus;
+        let d = tempfile::tempdir().unwrap();
+        let me = HashId([7u8; 32]);
+        let st = ChatStorage::in_dir(me, d.path().to_path_buf()).unwrap();
+        let peer = HashId([9u8; 32]);
+        let m = ChatMessage::new(peer, me, "раз".to_string());
+        st.save_incoming(&peer, &m).unwrap();
+        st.save_incoming(&peer, &m).unwrap();
+        assert_eq!(st.load_history(&peer, 10).unwrap().len(), 1, "повтор не создал дубль");
+        let out = ChatMessage::new(me, peer, "исходящее".to_string());
+        st.save_outgoing(&peer, &out).unwrap();
+        st.update_message_status(&peer, &out.msg_id, MessageStatus::Read).unwrap();
+        st.update_message_status(&peer, &out.msg_id, MessageStatus::Shipping).unwrap();
+        let h = st.load_history(&peer, 10).unwrap();
+        let got = h.iter().find(|x| x.msg_id == out.msg_id).unwrap();
+        assert_eq!(got.status, MessageStatus::Read, "подтверждение не затёрто поздним «отправляется»");
     }
 
     #[test]
