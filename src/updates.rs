@@ -60,14 +60,48 @@ fn state_path() -> std::path::PathBuf {
     dir().join("update_state.json")
 }
 
+/// Прочитать состояние: основной файл, при порче — копию. Второе значение: файл был, но прочитать не удалось ни его, ни копию.
+fn load_state() -> (State, bool) {
+    let main = state_path();
+    let bak = main.with_extension("json.bak");
+    let mut damaged = false;
+    for p in [&main, &bak] {
+        match std::fs::read(p) {
+            Ok(b) => match serde_json::from_slice::<State>(&b) {
+                Ok(mut st) => {
+                    // «доступное обновление» с диска — не проверенное предложение: заново оно берётся из подписанного манифеста
+                    st.available = None;
+                    return (st, false);
+                }
+                Err(_) => damaged = true,
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => damaged = true,
+        }
+    }
+    (State::default(), damaged)
+}
+
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let st = g.get_or_insert_with(|| {
-        std::fs::read(state_path()).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+        let (mut st, damaged) = load_state();
+        if damaged {
+            st.errors = vec!["состояние проверки обновлений повреждено: защита от отката начата заново".into()];
+            eprintln!("[update] update_state.json повреждён, порог номера выпуска сброшен");
+        }
+        st
     });
     let r = f(st);
     if let Ok(bytes) = serde_json::to_vec_pretty(&*st) {
-        let _ = crate::util::private_file::write_private(&state_path(), &bytes);
+        let main = state_path();
+        // прежний исправный файл остаётся копией на случай порчи нового
+        if main.exists() {
+            let _ = std::fs::copy(&main, main.with_extension("json.bak"));
+        }
+        if let Err(e) = crate::util::private_file::write_private(&main, &bytes) {
+            eprintln!("[update] не удалось сохранить состояние проверки: {e}");
+        }
     }
     r
 }
@@ -89,11 +123,18 @@ fn pubkey() -> Option<ed25519_dalek::VerifyingKey> {
 pub fn status_json() -> Value {
     let s = settings();
     let st = with_state(|s| s.clone());
+    // предложение с истёкшим сроком или не новее запущенного узла не выдаётся как доступное
+    let t = now();
+    let current = own_version();
+    let available = st.available.clone().filter(|a| {
+        let live = a["expires"].as_u64().is_none_or(|e| e == 0 || t <= e);
+        live && a["version"].as_str().is_some_and(|v| is_newer(v, &current))
+    });
     json!({
         "enabled": s.enabled,
         "current": own_version(),
         "last_check": st.last_check,
-        "available": st.available,
+        "available": available,
         "errors": st.errors,
         "channels": if s.channels.is_empty() { default_channels() } else { s.channels },
     })
@@ -158,6 +199,26 @@ pub fn spawn() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Порча файла состояния не молчит и не принимается за чистый первый запуск; копия возвращает порог.
+    #[test]
+    fn a_damaged_state_file_is_reported_and_the_backup_restores_the_floor() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let main = state_path();
+        let bak = main.with_extension("json.bak");
+        let _ = std::fs::create_dir_all(main.parent().unwrap());
+        let _ = std::fs::remove_file(&bak);
+        std::fs::write(&main, b"{not json").unwrap();
+        let (st, damaged) = load_state();
+        assert!(damaged && st.max_seq == 0, "порча замечена");
+        std::fs::write(&bak, br#"{"max_seq":7}"#).unwrap();
+        let (st, damaged) = load_state();
+        assert!(!damaged && st.max_seq == 7, "порог взят из копии");
+        let _ = std::fs::remove_file(&main);
+        let _ = std::fs::remove_file(&bak);
+        let (_, damaged) = load_state();
+        assert!(!damaged, "чистый первый запуск — не порча");
+    }
 
     #[test]
     fn the_pinned_release_key_is_a_valid_public_key() {

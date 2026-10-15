@@ -65,6 +65,9 @@ pub struct Found {
     pub channel: Channel,
 }
 
+/// Сколько ждать манифест и подпись одного канала целиком.
+const CHANNEL_DEADLINE_SECS: u64 = 60;
+
 fn client() -> Result<reqwest::Client, String> {
     let mut b = reqwest::Client::builder();
     // в проверках (разрешён http) системные прокси не нужны: адреса местные
@@ -74,7 +77,14 @@ fn client() -> Result<reqwest::Client, String> {
     // без общего срока (пакет оболочки — десятки мегабайт, на медленном канале дольше минуты): оборвать надо молчание, а не размер
     b.read_timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15))
-        .redirect(reqwest::redirect::Policy::limited(5))
+        .redirect(reqwest::redirect::Policy::custom(|a| {
+            // каждый переход проверяется так же, как исходный адрес: https (в проверках — http по переменной)
+            if a.previous().len() >= 5 || !allowed(a.url().as_str()) {
+                a.stop()
+            } else {
+                a.follow()
+            }
+        }))
         .user_agent(concat!("yandi-update/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| e.to_string())
@@ -128,7 +138,12 @@ pub async fn check(channels: &[Channel], vk: &VerifyingKey, min_seq: u64, now: u
     let mut best: Option<Found> = None;
     let mut errors = Vec::new();
     for ch in channels {
-        match fetch_manifest(ch, vk, min_seq, now).await {
+        // у каждого канала свой срок: медлительный первый не откладывает резервный
+        let r = match tokio::time::timeout(Duration::from_secs(CHANNEL_DEADLINE_SECS), fetch_manifest(ch, vk, min_seq, now)).await {
+            Ok(r) => r,
+            Err(_) => Err("канал не ответил за отведённое время".to_string()),
+        };
+        match r {
             Ok(m) => {
                 if best.as_ref().map_or(true, |b| m.seq > b.manifest.seq) {
                     best = Some(Found { manifest: m, channel: ch.clone() });
