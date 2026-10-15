@@ -45,7 +45,8 @@ fn get_ipv6_from_interfaces() -> Result<Option<String>> {
             let parts: Vec<&str> = line.split_whitespace().collect();
             if parts.len() >= 6 {
                 let addr_hex = parts[0];
-                let scope_id = parts[2]; // Scope ID (0 = global)
+                // столбцы: адрес, номер интерфейса, длина префикса, область (00 — глобальная), флаги, имя
+                let scope_id = parts[3];
 
                 // Skip non-global addresses
                 if scope_id != "00" {
@@ -137,22 +138,17 @@ fn get_ipv6_from_interfaces() -> Result<Option<String>> {
     }
 }
 
-/// Parse IPv6 address from /proc/net/if_inet6 format
+/// Parse IPv6 address from /proc/net/if_inet6 format: 32 hex digits, bytes in network order
+/// (for example `20010db8000000000000000000000001` -> `2001:db8::1`).
 fn parse_proc_ipv6(hex_addr: &str) -> Result<Ipv6Addr> {
-    // /proc/net/if_inet6 stores addresses in reverse nibble order
-    // For example: 00000000000000000000000000000001 -> ::1
-    let mut bytes = [0u8; 16];
-
-    for (i, chunk) in (0..32).step_by(4).enumerate() {
-        let nibble = &hex_addr[chunk..chunk + 4];
-        let byte = u8::from_str_radix(nibble, 16)
-            .map_err(|e| anyhow!("Failed to parse IPv6 byte: {}", e))?;
-
-        // Reverse byte order for each pair
-        let octet_index = if i % 2 == 0 { i + 1 } else { i - 1 };
-        bytes[octet_index] = byte;
+    if hex_addr.len() != 32 || !hex_addr.is_ascii() {
+        return Err(anyhow!("Unexpected IPv6 field length: {}", hex_addr.len()));
     }
-
+    let mut bytes = [0u8; 16];
+    for (i, b) in bytes.iter_mut().enumerate() {
+        *b = u8::from_str_radix(&hex_addr[2 * i..2 * i + 2], 16)
+            .map_err(|e| anyhow!("Failed to parse IPv6 byte: {}", e))?;
+    }
     Ok(Ipv6Addr::from(bytes))
 }
 
@@ -381,5 +377,19 @@ mod tests {
             println!("Discovered external IPv6: {}", ip);
             assert!(ip.parse::<Ipv6Addr>().is_ok());
         }
+    }
+}
+
+#[cfg(test)]
+mod proc_format_tests {
+    use super::*;
+
+    #[test]
+    fn a_global_address_from_proc_is_parsed_in_network_order() {
+        let a = parse_proc_ipv6("20010db8000000000000000000000001").unwrap();
+        assert_eq!(a, "2001:db8::1".parse::<Ipv6Addr>().unwrap());
+        assert!(is_global_ipv6(&a));
+        assert_eq!(parse_proc_ipv6("00000000000000000000000000000001").unwrap(), Ipv6Addr::LOCALHOST);
+        assert!(parse_proc_ipv6("2001").is_err());
     }
 }
