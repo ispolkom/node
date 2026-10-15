@@ -159,15 +159,20 @@ class LocalProxy(
         thread(name = "yandi-proxy-accept", isDaemon = true) {
             while (!s.isClosed) {
                 val c = try { s.accept() } catch (_: Exception) { break }
-                if (open.size >= MAX_CONNECTIONS) { runCatching { c.close() }; continue }
+                // каждое соединение занимает две записи: принятый сокет и «хозяйство» его upstream (raw/tls)
+                if (open.size >= MAX_CONNECTIONS * 2) { runCatching { c.close() }; continue }
+                val owned = java.util.concurrent.CopyOnWriteArrayList<java.io.Closeable>()
+                // stop() закрывает и upstream-сокеты: иначе читатель молчащего TLS держится до конца join (пять минут)
+                val upstream = java.io.Closeable { owned.forEach { runCatching { it.close() } } }
                 open.add(c)
+                open.add(upstream)
                 thread(name = "yandi-proxy-conn", isDaemon = true) {
-                    val owned = mutableListOf<java.io.Closeable>()
                     try { handle(c, owned) } catch (_: Exception) {
                     } finally {
                         owned.forEach { runCatching { it.close() } }
                         runCatching { c.close() }
                         open.remove(c)
+                        open.remove(upstream)
                     }
                 }
             }
