@@ -35,7 +35,9 @@ class IncomingChatEvent {
   final String   fromPeerId;
   final DateTime timestamp;
   final String   text;
-  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text});
+  /// Занять номер письма в журнале повторов: вызывается ПОСЛЕ сохранения сообщения (до этого повтор не считается «виденным»).
+  final Future<bool> Function()? commit;
+  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text, this.commit});
 }
 
 /// Живой сигнал от другого телефона (звонок): расшифрованный текст.
@@ -241,6 +243,9 @@ class WsService {
     }
   }
 
+  /// Письма, у которых номер уже проверен, но ещё не занят (идёт сохранение): параллельный повтор не обрабатывается дважды.
+  final Set<String> _replayInFlight = {};
+
   Future<void> _handleChatMsg(Uint8List data) async {
     // [1B type][32B from][8B ts_ms_LE][4B payload_len_LE][payload]
     if (data.length < 45) return;
@@ -251,13 +256,37 @@ class WsService {
     final payload = data.sublist(45, 45 + pLen);
     if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
 
-    final text = await decryptIncoming(payload, fromPeerId: from);
+    // номер письма занимается после сохранения (см. IncomingChatEvent.commit): сбой между расшифровкой и записью не теряет сообщение
+    String? pendingId;
+    var pendingExp = 0;
+    final ledger = StorageService.replayLedger;
+    final text = await decryptIncoming(payload, fromPeerId: from,
+      claimOverride: ledger == null ? null : (rid, exp) async {
+        if (_replayInFlight.contains(rid) || await ledger.seen(rid)) return false;
+        _replayInFlight.add(rid);
+        pendingId = rid;
+        pendingExp = exp;
+        return true;
+      },
+    );
     if (text == null) return;
 
     _chatCtrl.add(IncomingChatEvent(
       fromPeerId: from,
       timestamp:  DateTime.fromMillisecondsSinceEpoch(tsMs),
       text:       text,
+      commit: () async {
+        final rid = pendingId;
+        if (rid == null || ledger == null) return true;
+        try {
+          await ledger.claim(rid, pendingExp);
+          return true;
+        } catch (_) {
+          return false;
+        } finally {
+          _replayInFlight.remove(rid);
+        }
+      },
     ));
   }
 

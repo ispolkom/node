@@ -1513,14 +1513,15 @@ class AppState extends ChangeNotifier implements FilesHost {
   // ── WebSocket события ─────────────────────────────────────────────────────
 
   void _onIncomingChat(IncomingChatEvent e) async {
-    if (isBlocked(e.fromPeerId)) return;   // чёрный список: не показываем и не подтверждаем
+    if (isBlocked(e.fromPeerId)) { await e.commit?.call(); return; }   // чёрный список: не показываем и не подтверждаем
     // незнакомый человек: до принятия в контакты принимаются только первые несколько сообщений (защита от спама)
     if (!isSaved(e.fromPeerId) && e.fromPeerId != _nodePeerId &&
         (_chats[e.fromPeerId]?.where((m) => !m.outgoing).length ?? 0) >= introLimit) {
+      await e.commit?.call();
       return;
     }
     final res = _classifyIncoming(e.fromPeerId, e.text);
-    if (res == null) { notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
+    if (res == null) { await e.commit?.call(); notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
     final showText = res.$1;
     final remoteId = res.$2;
     final msg = ChatMessage(
@@ -1536,6 +1537,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     );
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
     await StorageService.saveMessage(msg);
+    await e.commit?.call();   // номер письма занимается только после записи в БД
     if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
     if (activeChatPeerId != e.fromPeerId) _bumpUnread(e.fromPeerId);
     if (remoteId != null) {
