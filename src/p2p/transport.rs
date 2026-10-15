@@ -565,6 +565,12 @@ impl P2PTransport {
                         if prev != 0 && now.saturating_sub(prev) > 1000 {
                             println!("[P2P] ⚠️ Gap in receive: {} ms", now - prev);
                         }
+                    // Проба hole punching (49 байт) — не P2PPacket: распознаётся ДО разбора, иначе парсер (минимум 54 байта) её
+                    // отбрасывал, и настоящий внешний порт канала данных не запоминался
+                    if len == punch::PROBE_LEN && buf[0] == punch::PROBE_MAGIC {
+                        self.on_punch_probe(&buf[..len], from_addr, false).await;
+                        continue;
+                    }
                     // Парсим P2PPacket из сырых байт
                     if let Some(p2p_packet) = P2PPacket::from_bytes(&buf[..len]) {
                         let packet_id = p2p_packet.packet_id;
