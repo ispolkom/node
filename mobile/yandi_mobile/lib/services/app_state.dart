@@ -511,10 +511,17 @@ class AppState extends ChangeNotifier implements FilesHost {
     } catch (_) {}
   }
 
+  /// Растёт при каждой блокировке: незавершённые асинхронные чтения прежнего сеанса узнают, что их результат уже не нужен.
+  int _lockEpoch = 0;
+
   Future<void> loadChatHistory(String peerId) async {
+    // поколение блокировки: ответ запроса, начатого до блокировки, в память не кладётся (иначе расшифрованная история
+    // вернулась бы в _chats уже после lockDown)
+    final epoch = _lockEpoch;
     try {
       // Сначала из локального SQLite (быстро, без сети)
       final local = await StorageService.loadMessages(peerId);
+      if (epoch != _lockEpoch) return;
       if (local.isNotEmpty) {
         _chats[peerId] = local;
         notifyListeners();
@@ -522,10 +529,13 @@ class AppState extends ChangeNotifier implements FilesHost {
       // Потом delta с ноды
       if (_api != null && myPeerId != null) {
         final remote = await _api!.getHistory(peerId, myPeerId!);
+        if (epoch != _lockEpoch) return;
         for (final msg in remote) {
           await StorageService.saveMessage(msg);
         }
-        _chats[peerId] = await StorageService.loadMessages(peerId);
+        final merged = await StorageService.loadMessages(peerId);
+        if (epoch != _lockEpoch) return;
+        _chats[peerId] = merged;
         notifyListeners();
       }
     } catch (_) {}
@@ -1538,6 +1548,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Блокировка приложения: связь с узлом закрывается, всё расшифрованное из памяти убирается, база закрывается.
   /// (Уведомления о новых сообщениях при этом приходят: служба в фоне ничего не расшифровывает; почта ждёт на узле до входа.)
   Future<void> lockDown() async {
+    _lockEpoch++;
     _presenceTimer?.cancel();
     _ws?.dispose();
     _ws = null;
