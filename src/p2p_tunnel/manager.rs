@@ -116,8 +116,9 @@ impl P2PTunnelManager {
 
         // Сохранить: один тоннель на узла (новый запрос заменяет старый), всего не больше MAX_TUNNELS
         {
-            let mut tunnels = self.tunnels.write().await;
+            // порядок замков везде один: сначала peer_tunnels, потом tunnels (иначе встречные операции блокируют друг друга навсегда)
             let mut peer_tunnels = self.peer_tunnels.lock().await;
+            let mut tunnels = self.tunnels.write().await;
             if let Some(old) = peer_tunnels.get(&from).copied() {
                 tunnels.remove(&old);
             }
