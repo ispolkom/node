@@ -67,7 +67,14 @@ struct Conn {
     alive: AtomicBool,
     /// порт, на который мы стучались (для входящих — не задан)
     dialed: Option<u16>,
+    /// порты-источники, объявленные в кадрах этого соединения: их число ограничено (иначе один клиент занимает тысячи маршрутов)
+    claimed: Mutex<std::collections::HashSet<u16>>,
 }
+
+/// Сколько разных портов-источников принимается от одного TCP-соединения.
+const MAX_SRC_PORTS_PER_CONN: usize = 32;
+/// Жёсткий предел таблицы «получали по TCP».
+const MAX_TCP_RX: usize = 4096;
 
 struct Health {
     first_unanswered: Option<Instant>,
@@ -320,7 +327,7 @@ impl Carrier {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(QUEUE);
-        let conn = Arc::new(Conn { id: self.next_id.fetch_add(1, Ordering::Relaxed), tx, remote_ip, alive: AtomicBool::new(true), dialed });
+        let conn = Arc::new(Conn { id: self.next_id.fetch_add(1, Ordering::Relaxed), tx, remote_ip, alive: AtomicBool::new(true), dialed, claimed: Default::default() });
         self.lock().conns.push(conn.clone());
         let (mut rd, mut wr) = tokio::io::split(stream);
         // сразу сообщаем свои порты
@@ -376,18 +383,33 @@ impl Carrier {
                     let dst = u16::from_be_bytes([body[1], body[2]]);
                     let src = u16::from_be_bytes([body[3], body[4]]);
                     let from = SocketAddr::new(conn.remote_ip, src);
+                    // состояние (маршрут, «получали по TCP») меняется только для кадра, у которого есть получатель: пустой
+                    // неаутентифицированный кадр с выдуманным dst ничего не занимает
                     let tx = {
                         let mut g = self.lock();
-                        Self::claim_route(&mut g, from, conn);
-                        g.tcp_rx.insert(from, Instant::now());
-                        if g.tcp_rx.len() > 4096 {
-                            g.tcp_rx.retain(|_, t| t.elapsed() < TCP_RX_FRESH);
-                        }
                         g.sockets.get(&dst).cloned()
                     };
-                    if let Some(tx) = tx {
-                        let _ = tx.try_send((body[5..].to_vec(), from));
+                    let Some(tx) = tx else { continue };
+                    {
+                        let mut claimed = conn.claimed.lock().unwrap_or_else(|e| e.into_inner());
+                        if !claimed.contains(&src) {
+                            if claimed.len() >= MAX_SRC_PORTS_PER_CONN {
+                                return Err(io::Error::other("too many source ports on one connection"));
+                            }
+                            claimed.insert(src);
+                        }
                     }
+                    {
+                        let mut g = self.lock();
+                        Self::claim_route(&mut g, from, conn);
+                        if g.tcp_rx.len() >= MAX_TCP_RX {
+                            g.tcp_rx.retain(|_, t| t.elapsed() < TCP_RX_FRESH);
+                        }
+                        if g.tcp_rx.len() < MAX_TCP_RX || g.tcp_rx.contains_key(&from) {
+                            g.tcp_rx.insert(from, Instant::now());
+                        }
+                    }
+                    let _ = tx.try_send((body[5..].to_vec(), from));
                 }
                 _ => return Err(io::Error::other("unknown frame")),
             }
@@ -536,7 +558,7 @@ mod tests {
     fn a_live_route_is_not_stolen_by_another_connection_but_a_dead_one_is_replaced() {
         let mk = |id: u64| {
             let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
-            Arc::new(Conn { id, tx, remote_ip: "198.51.100.1".parse().unwrap(), alive: AtomicBool::new(true), dialed: None })
+            Arc::new(Conn { id, tx, remote_ip: "198.51.100.1".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() })
         };
         let (a, b) = (mk(1), mk(2));
         let addr: SocketAddr = "198.51.100.1:10000".parse().unwrap();
@@ -550,6 +572,44 @@ mod tests {
     }
 
     use super::*;
+
+    /// Кадры без получателя ничего не занимают; источников у одного соединения ограниченное число.
+    #[tokio::test]
+    async fn frames_without_a_recipient_claim_nothing_and_source_ports_are_capped() {
+        let (carrier, sock, _addr) = node(Mode::Auto, "cc44cc44").await;
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let conn = Arc::new(Conn { id: 7, tx, remote_ip: "198.51.100.9".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
+        let known_dst = sock.local_addr().unwrap().port();
+        let frame = |dst: u16, src: u16| {
+            let mut f = vec![FRAME_DGRAM];
+            f.extend_from_slice(&dst.to_be_bytes());
+            f.extend_from_slice(&src.to_be_bytes());
+            let mut out = (f.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(&f);
+            out
+        };
+        // 300 кадров на несуществующий порт с разными источниками
+        let mut bytes = Vec::new();
+        for src in 1..=300u16 {
+            bytes.extend(frame(1, src));
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.is_err(), "поток кончился");
+        {
+            let g = carrier.lock();
+            assert!(g.by_dest.is_empty() && g.tcp_rx.is_empty(), "маршруты и таблица приёма не заняты");
+        }
+        // кадры на существующий порт: источников принимается не больше предела, потом соединение закрывается
+        let mut bytes = Vec::new();
+        for src in 1..=(MAX_SRC_PORTS_PER_CONN as u16 + 5) {
+            bytes.extend(frame(known_dst, src));
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.unwrap_err().to_string().contains("too many source ports"));
+        assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN);
+    }
 
     async fn node(mode: Mode, name: &str) -> (Arc<Carrier>, Arc<CSocket>, SocketAddr) {
         // порт UDP должен быть пригоден и для TCP (на Windows часть портов закрыта правилами: WSAEACCES 10013) — берём другой
@@ -636,7 +696,7 @@ mod tests {
             let mut g = ca.lock();
             g.health.insert(ip, Health { first_unanswered: Some(Instant::now() - UNHEALTHY_AFTER - Duration::from_secs(1)), unanswered: 3, last_udp_probe: Instant::now() });
             let (tx, _rx) = mpsc::channel(8);
-            let c = Arc::new(Conn { id: 1, tx, remote_ip: ip, alive: AtomicBool::new(true), dialed: None });
+            let c = Arc::new(Conn { id: 1, tx, remote_ip: ip, alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
             g.by_dest.insert(dest, c);
         }
         assert!(matches!(ca.route(dest), Route::Tcp(_)), "no replies over UDP: use the TCP connection");
