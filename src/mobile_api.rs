@@ -149,7 +149,6 @@ fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
         || path == "/mobile/inbox"
         || path == "/mobile/inbox/ack"
         || path.starts_with("/mobile/chat/")
-        || path.starts_with("/mobile/pubkey")
         || path.starts_with("/mobile/files")
         || (path == "/mobile/profile" && method != Method::GET)
         || path == "/mobile/proxy/info"
@@ -1432,8 +1431,17 @@ async fn proxy_info() -> Json<serde_json::Value> {
 }
 
 /// Публичный ключ телефона владельца (чтобы телефон шифровал сообщение для другого телефона сам); у обычных собеседников ключа нет — 404.
-async fn pubkey(State(st): State<Arc<MobileState>>, Path(peer): Path<String>) -> Response {
+async fn pubkey(
+    State(st): State<Arc<MobileState>>,
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(peer): Path<String>,
+) -> Response {
     if peer == hex::encode(st.my_id.0) {
+        // собеседником «сам компьютер» бывает только владелец: пользователю узла переписка с ПК закрыта
+        let user = with_devices(|d| d.iter().any(|x| same(&x.token_hash, &dev) && x.role == "user"));
+        if user {
+            return StatusCode::NOT_FOUND.into_response();
+        }
         // сам компьютер как собеседник телефона (переписка с веб-чатом узла)
         return Json(crate::mobile_self::bundle_json()).into_response();
     }
@@ -1660,6 +1668,8 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                     if sock.send(Message::Binary(vec![FT_PROFILE])).await.is_err() { break; }
                 }
                 Ok(Event::Node(m)) => {
+                    // личная переписка ПК — только владельцу; пользователю узла она по WebSocket не уходит
+                    if is_user_role(&me) { continue; }
                     if seen.len() > 4096 {
                         seen.clear(); // «уже показанные» не должны расти без предела на долгом соединении
                     }
@@ -1718,7 +1728,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
                         let to = hex::encode(id);
                         if HashId(id) == st.my_id {
-                            if crate::mobile_self::is_blocked_phone(&me) {
+                            if is_user_role(&me) || crate::mobile_self::is_blocked_phone(&me) {
                                 continue; // заблокированное устройство: и звонки, и сигналы компьютеру не доходят
                             }
                             // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
@@ -2345,7 +2355,8 @@ mod hardening_tests {
             assert!(owner_only_path(&m, p), "{m} {p}");
         }
         for (m, p) in [(Method::GET, "/mobile/groups"), (Method::POST, "/mobile/complaints"), (Method::GET, "/mobile/me/profile"),
-                       (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y")] {
+                       (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y"),
+                       (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc")] {
             assert!(!owner_only_path(&m, p), "{m} {p}");
         }
         // роль в старом devices.json отсутствует — это владелец
