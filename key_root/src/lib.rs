@@ -2,7 +2,7 @@
 //!
 //! * [`root`] — one root key, two independent ways in: the device key (normal boot) and a recovery password (a new machine, a lost device).
 //! * [`identity_store`] — the identity file formats and the loading policy: a failure to open an existing identity is never a reason to make a new one.
-//! * [`migrate`] — legacy → new format on the machine where everything still opens, and recovery elsewhere; both keep the originals.
+//! * [`migrate`] — recovery on a new machine or after a lost device key, and a new recovery code; both keep the originals.
 //! * [`unlock`] — how the node opens the root at start, and a read-only status.
 //!
 //! `/etc/machine-id` is public. Here it is only associated data (a binding label), never a key and never a source of entropy.
@@ -14,7 +14,6 @@ pub mod error;
 pub mod hw_print;
 pub mod identity_store;
 pub mod keydir;
-pub mod legacy;
 pub mod login;
 pub mod machine;
 pub mod migrate;
@@ -31,7 +30,7 @@ pub use identity_store::{
 pub use keydir::KeyDir;
 pub use machine::{FixedMachine, MachineContext, SystemMachine};
 pub use migrate::{
-    Migration, MigrationReport, NewRecoveryCode, PendingRecovery, Recovery, RecoveryReport,
+    NewRecoveryCode, PendingRecovery, Recovery, RecoveryReport,
 };
 pub use recovery_code::{recovery_secret, RecoveryCode};
 pub use root::RootDocument;

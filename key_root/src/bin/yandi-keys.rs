@@ -1,7 +1,6 @@
-//! yandi-keys — look at, migrate and recover the node's key directory.
+//! yandi-keys — look at and recover the node's key directory.
 //!
 //!   yandi-keys status
-//!   yandi-keys migrate           legacy → recoverable root; YOU choose the master password (typed twice); --generate-code makes a recovery code instead
 //!   yandi-keys new-recovery-code replace the recovery secret by a fresh recovery code (the device opens the key; identity and chats untouched)
 //!   yandi-keys recover           new machine / lost device key: type the recovery code
 //!   yandi-keys login-check       (used by the assistant's web page) is the line on standard input the web login password? exit 0 yes, 1 no
@@ -10,17 +9,16 @@
 //!   yandi-keys core-key          print the key the Core is given (base64), for `python -m agent.db.sql.protect`; only into a pipe, never a terminal
 //!
 //!   options: --dir D (default ~/.yandi_keys)  --port N (9000)  --machine-id ID
-//!            --generate-code  (migrate: make and show a recovery code instead of choosing a password)
 //!            --show           (show what you type; by default a secret is typed with no echo)
 //!            --password-stdin (read every answer as a line from standard input; for scripts and tests)
 //!
 //! It prints no key, with one exception: `core-key` writes the derived Core key to a pipe, for the tool that seals the personal memory.
-//! The recovery code is printed once, on purpose, by `migrate` and `new-recovery-code`; it is never stored.
+//! The recovery code is printed once, on purpose, by `new-recovery-code`; it is never stored.
 use base64::Engine;
 use key_root::{
     derive_domain, recovery_code::looks_like_code, status, unlock_root, DeviceKeyProvider,
     HardwareDeviceKey, FixedMachine, KdfParams, KdfPolicy, KeyDir, KeyRootError, MachineContext,
-    Migration, NewRecoveryCode, Recovery, RecoveryCode, SystemMachine, DOMAIN_CORE,
+    NewRecoveryCode, Recovery, RecoveryCode, SystemMachine, DOMAIN_CORE,
 };
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
@@ -31,7 +29,6 @@ struct Args {
     dir: PathBuf,
     port: u16,
     stdin: bool,
-    generate_code: bool,
     show: bool,
     machine_id: Option<String>,
 }
@@ -40,7 +37,7 @@ fn parse_args() -> Result<Args, String> {
     let mut it = std::env::args().skip(1);
     let command = it
         .next()
-        .ok_or("usage: yandi-keys status|migrate|new-recovery-code|recover [options]")?;
+        .ok_or("usage: yandi-keys status|new-recovery-code|recover [options]")?;
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .ok_or("HOME is not set")?;
@@ -49,7 +46,6 @@ fn parse_args() -> Result<Args, String> {
         dir: home.join(".yandi_keys"),
         port: 9000,
         stdin: false,
-        generate_code: false,
         show: false,
         machine_id: None,
     };
@@ -67,7 +63,6 @@ fn parse_args() -> Result<Args, String> {
                 args.machine_id = Some(it.next().ok_or("--machine-id needs a value")?)
             }
             "--password-stdin" | "--stdin" => args.stdin = true,
-            "--generate-code" => args.generate_code = true,
             "--show" => args.show = true,
             "--own-password" | "--hidden" => {} // the defaults now; accepted so that older instructions still work
             other => return Err(format!("unknown option {other}")),
@@ -130,28 +125,6 @@ fn show_code(code: &RecoveryCode) {
     println!();
 }
 
-/// Show the code, then require it to be typed back (visible) before anything is written: proof that it was copied correctly.
-fn confirmed_code(args: &Args) -> Result<Option<RecoveryCode>, String> {
-    let code = RecoveryCode::generate();
-    show_code(&code);
-    for attempt in 1..=3 {
-        let typed = ask(
-            "Type the code back to confirm you have written it down: ",
-            args.stdin,
-            false,
-        )?;
-        match RecoveryCode::parse(&typed) {
-            Ok(t) if t.same_as(&code) => return Ok(Some(code)),
-            Ok(_) => eprintln!(
-                "That is a valid code, but not the one shown. Check what you wrote ({attempt}/3)."
-            ),
-            Err(e) => eprintln!("{e} ({attempt}/3)."),
-        }
-    }
-    eprintln!("yandi-keys: the code was not confirmed; nothing was changed");
-    Ok(None)
-}
-
 fn run() -> Result<i32, String> {
     let args = parse_args()?;
     let machine: Box<dyn MachineContext> = match &args.machine_id {
@@ -204,59 +177,6 @@ fn run() -> Result<i32, String> {
                 device.protection().describe()
             );
             Ok(0)
-        }
-        "migrate" => {
-            let env_pw = std::env::var("YANDI_KEY_PASSWORD").ok();
-            let secret: Zeroizing<String> = if !args.generate_code {
-                let pw = ask(
-                    "New master password, your own recovery secret (at least 12 characters): ",
-                    args.stdin,
-                    !args.show,
-                )?;
-                let again = ask("Repeat it: ", args.stdin, !args.show)?;
-                if *pw != *again {
-                    eprintln!("yandi-keys: the two passwords differ; nothing was changed");
-                    return Ok(2);
-                }
-                pw
-            } else {
-                match confirmed_code(&args)? {
-                    Some(code) => Zeroizing::new(code.secret().to_owned()),
-                    None => return Ok(2),
-                }
-            };
-            let m = Migration {
-                dir: &dir,
-                port: args.port,
-                machine: machine.as_ref(),
-                env_password: env_pw.as_deref(),
-                device: &device,
-                recovery_password: &secret,
-                params: KdfParams::RECOMMENDED,
-                policy: &policy,
-            };
-            match m.run() {
-                Ok(r) => {
-                    println!("migrated. node id {} is unchanged.", r.node_id);
-                    println!(
-                        "recovery wrapper written (Argon2id, {} MiB); device key {}.",
-                        KdfParams::RECOMMENDED.memory_kib / 1024,
-                        if r.device_key_created {
-                            "created"
-                        } else {
-                            "reused"
-                        }
-                    );
-                    println!("device key protection: {}", r.device_protection.describe());
-                    for b in &r.backups {
-                        println!("backup kept: {}", b.display());
-                    }
-                    println!("The backups are the OLD files, protected only by the public machine id. Keep them until you have restarted the node and checked it,");
-                    println!("then move them somewhere safe or delete them yourself; this tool never deletes them.");
-                    Ok(0)
-                }
-                Err(e) => Ok(fail(&e)),
-            }
         }
         "new-recovery-code" => {
             let op = NewRecoveryCode {

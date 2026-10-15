@@ -2,10 +2,7 @@
 //! the owner's real key directory.
 #![cfg(unix)]
 use key_root::atomic::{backup_copy, create_new_file, write_atomic};
-use key_root::identity_store::{
-    legacy_passphrase, seal_identity_legacy, seal_identity_v3, IdentityFormat,
-};
-use key_root::legacy::seal_legacy_auth;
+use key_root::identity_store::seal_identity_v3;
 use key_root::recovery_code::{looks_like_code, recovery_secret, RecoveryCode};
 use key_root::wrap::{derive_kek, KdfParams, KdfPolicy};
 use key_root::*;
@@ -74,48 +71,37 @@ fn snapshot_dir(path: &Path) -> Vec<(String, Vec<u8>)> {
     all
 }
 
-/// A legacy key directory: auth.json v1 (machine-id wrapped master key) and a legacy v2 identity.
-fn legacy_store(
+/// A key directory as the node makes it: auth.json v2 (device + recovery wrappers), the device key and a v3 identity.
+fn new_store(machine: &str, master: [u8; 32], seed: u8) -> (Store, IdentityMaterial) {
+    new_store_with(machine, master, seed, FAST, &policy())
+}
+
+fn new_store_with(
     machine: &str,
     master: [u8; 32],
-    env_password: Option<&str>,
     seed: u8,
+    params: KdfParams,
+    pol: &KdfPolicy,
 ) -> (Store, IdentityMaterial) {
     let s = Store::new();
     let m = FixedMachine(machine.into());
-    create_new_file(
-        &s.dir.auth_file(),
-        &seal_legacy_auth(&master, "$argon2id$login-hash", &m).unwrap(),
+    let device = FileDeviceKey::new(s.dir.file("device.key"));
+    let device_key = device.create().unwrap();
+    let doc = RootDocument::create(
+        &master,
+        "$argon2id$login-hash",
+        &device_key,
+        device.name(),
+        &m,
+        PASSWORD,
+        params,
+        pol,
     )
     .unwrap();
+    create_new_file(&s.dir.auth_file(), &doc.to_json()).unwrap();
     let id = material(seed);
-    create_new_file(
-        &s.dir.identity_file(PORT),
-        &seal_identity_legacy(&id, &legacy_passphrase(env_password, &m, &id.address)).unwrap(),
-    )
-    .unwrap();
+    create_new_file(&s.dir.identity_file(PORT), &seal_identity_v3(&master, &id)).unwrap();
     (s, id)
-}
-
-fn migrate(
-    s: &Store,
-    machine: &str,
-    env_password: Option<&str>,
-    device: &dyn DeviceKeyProvider,
-) -> Result<MigrationReport> {
-    let m = FixedMachine(machine.into());
-    let pol = policy();
-    Migration {
-        dir: &s.dir,
-        port: PORT,
-        machine: &m,
-        env_password,
-        device,
-        recovery_password: PASSWORD,
-        params: FAST,
-        policy: &pol,
-    }
-    .run()
 }
 
 fn recover(s: &Store, machine: &str, password: &str) -> Result<RecoveryReport> {
@@ -143,11 +129,7 @@ fn open_identity_with(
     key_root::identity_store::load_identity(
         &s.dir,
         PORT,
-        &OpenContext {
-            machine: &m,
-            env_password: env,
-            root,
-        },
+        &OpenContext { root },
     )
 }
 
@@ -307,11 +289,7 @@ fn the_password_goes_through_argon2id_and_stored_parameters_below_the_policy_are
 }
 
 fn ctx<'a>(m: &'a FixedMachine, root: Option<&'a [u8; 32]>) -> OpenContext<'a> {
-    OpenContext {
-        machine: m,
-        env_password: None,
-        root,
-    }
+    OpenContext { root }
 }
 
 fn flip_hex(value: &mut serde_json::Value, path: &[&str]) {
@@ -442,11 +420,8 @@ fn identity_v3_opens_only_with_its_root_and_authenticates_its_public_fields() {
 fn an_absent_identity_is_created_once_and_then_loaded_never_replaced() {
     let s = Store::new();
     let m = FixedMachine("machine-A".into());
-    let ctx = OpenContext {
-        machine: &m,
-        env_password: None,
-        root: None,
-    };
+    let root = [3u8; 32];
+    let ctx = OpenContext { root: Some(&root) };
     let first = load_or_initialize(&s.dir, PORT, &ctx, || material(1)).unwrap();
     assert!(first.created);
     let bytes = fs::read(s.dir.identity_file(PORT)).unwrap();
@@ -469,11 +444,7 @@ fn assert_fails_closed(
 ) {
     let before = s.snapshot();
     let m = FixedMachine(machine.into());
-    let ctx = OpenContext {
-        machine: &m,
-        env_password: env,
-        root,
-    };
+    let ctx = OpenContext { root };
     let made = Cell::new(false);
     let err = load_or_initialize(&s.dir, PORT, &ctx, || {
         made.set(true);
@@ -494,63 +465,8 @@ fn assert_fails_closed(
 }
 
 #[test]
-fn f11_setting_yandi_key_password_never_destroys_a_legacy_identity() {
-    let (s, id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    assert_fails_closed(&s, "machine-A", None, Some("a password set later"), |e| {
-        *e == KeyRootError::DecryptFailed
-    });
-    // and the identity is still there, intact, for the ordinary start
-    assert!(open_identity_with(&s, "machine-A", None, None)
-        .unwrap()
-        .same_identity(&id));
-}
-
-#[test]
-fn f11_a_changed_machine_id_never_replaces_a_legacy_identity() {
-    let (s, id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    assert_fails_closed(&s, "machine-B", None, None, |e| {
-        *e == KeyRootError::DecryptFailed
-    });
-    assert!(open_identity_with(&s, "machine-A", None, None)
-        .unwrap()
-        .same_identity(&id));
-}
-
-#[test]
-fn f11_a_damaged_identity_is_never_replaced() {
-    let (s, _id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    let path = s.dir.identity_file(PORT);
-    let good = fs::read(&path).unwrap();
-    // flip a bit of the ciphertext
-    let mut v: serde_json::Value = serde_json::from_slice(&good).unwrap();
-    flip_hex(&mut v, &["encrypted_private_keys", "ciphertext"]);
-    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
-    assert_fails_closed(&s, "machine-A", None, None, |e| {
-        *e == KeyRootError::DecryptFailed
-    });
-    fs::write(&path, &good[..good.len() / 3]).unwrap();
-    assert_fails_closed(&s, "machine-A", None, None, |e| *e == KeyRootError::Corrupt);
-    fs::write(&path, b"").unwrap();
-    assert_fails_closed(&s, "machine-A", None, None, |e| *e == KeyRootError::Corrupt);
-    let mut v: serde_json::Value = serde_json::from_slice(&good).unwrap();
-    v["version"] = 42.into();
-    fs::write(&path, serde_json::to_vec(&v).unwrap()).unwrap();
-    assert_fails_closed(&s, "machine-A", None, None, |e| {
-        *e == KeyRootError::UnsupportedVersion(42)
-    });
-    // a v3 file with no root available is "recovery required", not "absent"
-    fs::write(&path, seal_identity_v3(&[7u8; 32], &material(5))).unwrap();
-    assert_fails_closed(&s, "machine-A", None, None, |e| {
-        *e == KeyRootError::RecoveryRequired
-    });
-    assert_fails_closed(&s, "machine-A", Some(&[8u8; 32]), None, |e| {
-        *e == KeyRootError::DecryptFailed
-    });
-}
-
-#[test]
 fn f11_an_unsafe_identity_file_is_refused_and_left_alone() {
-    let (s, _id) = legacy_store("machine-A", [7u8; 32], None, 5);
+    let (s, _id) = new_store("machine-A", [7u8; 32], 5);
     let path = s.dir.identity_file(PORT);
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
     assert_fails_closed(&s, "machine-A", None, None, |e| {
@@ -568,55 +484,18 @@ fn f11_an_unsafe_identity_file_is_refused_and_left_alone() {
 #[test]
 fn an_identity_for_another_port_blocks_creating_a_second_one() {
     let s = Store::new();
-    let m = FixedMachine("machine-A".into());
     create_new_file(
         &s.dir.identity_file(9001),
-        &seal_identity_legacy(
-            &material(2),
-            &legacy_passphrase(None, &m, &material(2).address),
-        )
-        .unwrap(),
+        &seal_identity_v3(&[1u8; 32], &material(2)),
     )
     .unwrap();
     let before = s.snapshot();
-    let ctx = OpenContext {
-        machine: &m,
-        env_password: None,
-        root: None,
-    };
+    let ctx = OpenContext { root: None };
     let err = load_or_initialize(&s.dir, PORT, &ctx, || material(9))
         .err()
         .unwrap();
     assert!(matches!(err, KeyRootError::Refused(_)));
     assert_eq!(s.snapshot(), before);
-}
-
-#[test]
-fn a_plaintext_identity_is_upgraded_in_place_only_after_the_new_file_opens() {
-    let s = Store::new();
-    let id = material(3);
-    let plain = serde_json::json!({
-        "address": id.address, "public_key": id.public_key, "private_key": *id.private_key,
-        "signing_public_key": id.signing_public_key, "signing_private_key": *id.signing_private_key,
-    });
-    create_new_file(&s.dir.identity_file(PORT), plain.to_string().as_bytes()).unwrap();
-    let m = FixedMachine("machine-A".into());
-    let ctx = OpenContext {
-        machine: &m,
-        env_password: None,
-        root: None,
-    };
-    let loaded = load_or_initialize(&s.dir, PORT, &ctx, || panic!("no")).unwrap();
-    assert!(loaded.identity.same_identity(&id) && !loaded.created);
-    let after = fs::read(s.dir.identity_file(PORT)).unwrap();
-    assert_eq!(
-        key_root::identity_store::identity_format(&after).unwrap(),
-        IdentityFormat::LegacyV2
-    );
-    assert!(!String::from_utf8_lossy(&after).contains(&hex::encode(*id.private_key)));
-    assert!(open_identity_with(&s, "machine-A", None, None)
-        .unwrap()
-        .same_identity(&id));
 }
 
 // ── atomic writes and backups ────────────────────────────────────────────────────────────────────────────────────
@@ -708,96 +587,6 @@ fn the_device_key_file_is_private_and_a_loose_one_is_refused() {
 
 // ── migration ────────────────────────────────────────────────────────────────────────────────────────────────────
 
-#[test]
-fn migration_keeps_the_same_root_the_same_identity_and_every_original() {
-    let master = [7u8; 32];
-    let (s, id) = legacy_store("machine-A", master, None, 5);
-    let auth_before = fs::read(s.dir.auth_file()).unwrap();
-    let identity_before = fs::read(s.dir.identity_file(PORT)).unwrap();
-    let device = FileDeviceKey::new(s.dir.file("device.key"));
-    let report = migrate(&s, "machine-A", None, &device).unwrap();
-    assert_eq!(report.node_id, hex::encode(&id.address[..8]));
-    assert!(report.device_key_created && !report.resumed);
-    // originals kept, byte for byte
-    assert_eq!(report.backups.len(), 2);
-    let kept: Vec<Vec<u8>> = report
-        .backups
-        .iter()
-        .map(|b| fs::read(b).unwrap())
-        .collect();
-    assert!(kept.contains(&auth_before) && kept.contains(&identity_before));
-    // the new state: the SAME root (so the chat store and the Core key are unaffected), the SAME identity
-    let m = FixedMachine("machine-A".into());
-    let (root, source) = unlock_root(&s.dir, &m, &device).unwrap();
-    assert_eq!((*root, source), (master, RootSource::Device));
-    assert!(open_identity_with(&s, "machine-A", Some(&root), None)
-        .unwrap()
-        .same_identity(&id));
-    assert_eq!(
-        *derive_domain(&root, DOMAIN_CORE),
-        *derive_domain(&master, DOMAIN_CORE),
-        "the Node→Core key changed"
-    );
-    assert_eq!(
-        status(&s.dir, PORT).identity.unwrap(),
-        Some(IdentityFormat::RootV3)
-    );
-    assert!(
-        !String::from_utf8_lossy(&fs::read(s.dir.auth_file()).unwrap())
-            .contains(&hex::encode(master))
-    );
-    // running it again is refused, not repeated
-    assert!(matches!(
-        migrate(&s, "machine-A", None, &device),
-        Err(KeyRootError::Refused(_))
-    ));
-}
-
-#[test]
-fn migration_of_an_identity_that_will_not_open_changes_nothing_at_all() {
-    let (s, _id) = legacy_store(
-        "machine-A",
-        [7u8; 32],
-        Some("the password it was made with"),
-        5,
-    );
-    let before = s.snapshot();
-    let device = FileDeviceKey::new(s.dir.file("device.key"));
-    // the wrong (missing) env password: the legacy identity cannot be opened
-    assert_eq!(
-        migrate(&s, "machine-A", None, &device).err().unwrap(),
-        KeyRootError::DecryptFailed
-    );
-    assert_eq!(
-        s.snapshot(),
-        before,
-        "a refused migration left traces (a device key, a backup, a changed file)"
-    );
-    // a short recovery password is refused before anything is written
-    let short = Migration {
-        dir: &s.dir,
-        port: PORT,
-        machine: &FixedMachine("machine-A".into()),
-        env_password: Some("the password it was made with"),
-        device: &device,
-        recovery_password: "short",
-        params: FAST,
-        policy: &policy(),
-    }
-    .run();
-    assert!(matches!(short, Err(KeyRootError::Invalid(_))));
-    assert_eq!(s.snapshot(), before);
-    // the wrong machine id: the legacy master key cannot be opened
-    assert!(migrate(
-        &s,
-        "machine-B",
-        Some("the password it was made with"),
-        &device
-    )
-    .is_err());
-    assert_eq!(s.snapshot(), before);
-}
-
 /// A device provider that hands out a wrong key after a few calls, so that the verification from disk fails.
 struct Flaky {
     inner: FileDeviceKey,
@@ -827,74 +616,6 @@ impl DeviceKeyProvider for Flaky {
     }
 }
 
-#[test]
-fn a_migration_that_fails_verification_restores_the_originals_and_keeps_the_backups() {
-    let (s, _id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    let auth_before = fs::read(s.dir.auth_file()).unwrap();
-    let identity_before = fs::read(s.dir.identity_file(PORT)).unwrap();
-    // loads: 1 = "is there a key" (none), 2 = the in-memory check; the 3rd (the check from disk) gets a wrong key
-    let device = Flaky {
-        inner: FileDeviceKey::new(s.dir.file("device.key")),
-        loads: Cell::new(0),
-        good_loads: 2,
-    };
-    assert!(migrate(&s, "machine-A", None, &device).is_err());
-    assert_eq!(
-        fs::read(s.dir.auth_file()).unwrap(),
-        auth_before,
-        "the legacy auth.json was not restored"
-    );
-    assert_eq!(
-        fs::read(s.dir.identity_file(PORT)).unwrap(),
-        identity_before,
-        "the legacy identity was not restored"
-    );
-    let backups: Vec<String> = s
-        .snapshot()
-        .into_iter()
-        .map(|(n, _)| n)
-        .filter(|n| n.contains(".legacy-"))
-        .collect();
-    assert_eq!(
-        backups.len(),
-        2,
-        "the backups must survive a failed migration: {backups:?}"
-    );
-    // the legacy node still works exactly as before
-    let m = FixedMachine("machine-A".into());
-    assert_eq!(
-        *key_root::legacy::legacy_master_key(&fs::read(s.dir.auth_file()).unwrap(), &m).unwrap(),
-        [7u8; 32]
-    );
-    assert!(open_identity_with(&s, "machine-A", None, None).is_ok());
-}
-
-#[test]
-fn a_migration_interrupted_after_the_identity_was_converted_can_be_finished() {
-    let master = [7u8; 32];
-    let (s, id) = legacy_store("machine-A", master, None, 5);
-    write_atomic(
-        &s.dir.identity_file(PORT),
-        &seal_identity_v3(&master, &id),
-        |_| true,
-    )
-    .unwrap();
-    // auth.json is still v1: the node can still open the root (legacy) and therefore the v3 identity
-    let device = FileDeviceKey::new(s.dir.file("device.key"));
-    let m = FixedMachine("machine-A".into());
-    let (root, source) = unlock_root(&s.dir, &m, &device).unwrap();
-    assert_eq!((*root, source), (master, RootSource::LegacyMachineId));
-    assert!(open_identity_with(&s, "machine-A", Some(&root), None)
-        .unwrap()
-        .same_identity(&id));
-    let report = migrate(&s, "machine-A", None, &device).unwrap();
-    assert!(report.resumed);
-    assert_eq!(
-        unlock_root(&s.dir, &m, &device).unwrap().1,
-        RootSource::Device
-    );
-}
-
 // ── recovery: the main benchmark ─────────────────────────────────────────────────────────────────────────────────
 
 fn copy_dir(from: &KeyDir, skip: &[&str]) -> Store {
@@ -911,15 +632,8 @@ fn copy_dir(from: &KeyDir, skip: &[&str]) -> Store {
 #[test]
 fn losing_the_device_is_not_losing_the_identity() {
     let master = [7u8; 32];
-    let (a, id) = legacy_store("machine-A", master, None, 5);
+    let (a, id) = new_store("machine-A", master, 5);
     let node_id_a = id.address;
-    migrate(
-        &a,
-        "machine-A",
-        None,
-        &FileDeviceKey::new(a.dir.file("device.key")),
-    )
-    .unwrap();
 
     // Machine B: a different machine id, and NO device key (only the files the owner backed up)
     let b = copy_dir(
@@ -988,14 +702,7 @@ fn losing_the_device_is_not_losing_the_identity() {
 
 #[test]
 fn a_lost_device_key_on_the_same_machine_is_recovered_the_same_way() {
-    let (a, id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    migrate(
-        &a,
-        "machine-A",
-        None,
-        &FileDeviceKey::new(a.dir.file("device.key")),
-    )
-    .unwrap();
+    let (a, id) = new_store("machine-A", [7u8; 32], 5);
     fs::remove_file(a.dir.file("device.key")).unwrap();
     let m = FixedMachine("machine-A".into());
     let device = FileDeviceKey::new(a.dir.file("device.key"));
@@ -1013,14 +720,7 @@ fn a_lost_device_key_on_the_same_machine_is_recovered_the_same_way() {
 #[test]
 fn copying_the_whole_directory_to_another_machine_does_not_open_by_itself_and_recovery_keeps_the_old_device_key(
 ) {
-    let (a, id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    migrate(
-        &a,
-        "machine-A",
-        None,
-        &FileDeviceKey::new(a.dir.file("device.key")),
-    )
-    .unwrap();
+    let (a, id) = new_store("machine-A", [7u8; 32], 5);
     let b = copy_dir(&a.dir, &[]); // includes device.key
     let mb = FixedMachine("machine-B".into());
     let device_b = FileDeviceKey::new(b.dir.file("device.key"));
@@ -1046,14 +746,7 @@ fn copying_the_whole_directory_to_another_machine_does_not_open_by_itself_and_re
 
 #[test]
 fn recovery_needs_the_identity_to_open_with_the_recovered_root_and_changes_nothing_otherwise() {
-    let (a, _id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    migrate(
-        &a,
-        "machine-A",
-        None,
-        &FileDeviceKey::new(a.dir.file("device.key")),
-    )
-    .unwrap();
+    let (a, _id) = new_store("machine-A", [7u8; 32], 5);
     let b = copy_dir(
         &a.dir,
         &[
@@ -1077,17 +770,6 @@ fn recovery_needs_the_identity_to_open_with_the_recovered_root_and_changes_nothi
         KeyRootError::NotFound
     );
     assert_eq!(b.snapshot(), before);
-}
-
-#[test]
-fn a_legacy_directory_cannot_be_recovered_and_is_not_touched() {
-    let (s, _id) = legacy_store("machine-A", [7u8; 32], None, 5);
-    let before = s.snapshot();
-    assert!(matches!(
-        recover(&s, "machine-B", PASSWORD),
-        Err(KeyRootError::Refused(_))
-    ));
-    assert_eq!(s.snapshot(), before);
 }
 
 // ── no secrets in what is printed ────────────────────────────────────────────────────────────────────────────────
@@ -1158,65 +840,9 @@ fn run_tool(args: &[&str], stdin: &str) -> (i32, String, String) {
 }
 
 #[test]
-fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
+fn the_tool_recovers_and_never_prints_a_secret() {
     let master = [0x5Au8; 32];
-    let (a, id) = legacy_store("machine-A", master, None, 5);
-    let dir_a = a.path().to_str().unwrap().to_owned();
-    let (code, out, err) = run_tool(
-        &[
-            "migrate",
-            "--own-password",
-            "--dir",
-            &dir_a,
-            "--port",
-            "9000",
-            "--machine-id",
-            "machine-A",
-            "--password-stdin",
-        ],
-        &format!("{PASSWORD}\n{PASSWORD}\n"),
-    );
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(
-        out.contains(&hex::encode(&id.address[..8])),
-        "the node id must be reported: {out}"
-    );
-    let device_hex = hex::encode(
-        *HardwareDeviceKey::new(a.dir.file("device.seal"), a.dir.file("device.key"))
-            .load()
-            .unwrap()
-            .unwrap(),
-    );
-    for secret in [
-        PASSWORD.to_owned(),
-        hex::encode(master),
-        device_hex.clone(),
-        hex::encode(*id.private_key),
-    ] {
-        assert!(
-            !out.contains(&secret) && !err.contains(&secret),
-            "the tool printed a secret"
-        );
-    }
-    // mismatching confirmation: nothing changes
-    let (b_store, _) = legacy_store("machine-A", master, None, 5);
-    let dir_b = b_store.path().to_str().unwrap().to_owned();
-    let before = b_store.snapshot();
-    let (code, _out, err) = run_tool(
-        &[
-            "migrate",
-            "--own-password",
-            "--dir",
-            &dir_b,
-            "--machine-id",
-            "machine-A",
-            "--password-stdin",
-        ],
-        &format!("{PASSWORD}\nsomething else entirely\n"),
-    );
-    assert_eq!(code, 2);
-    assert!(!err.contains(PASSWORD));
-    assert_eq!(b_store.snapshot(), before);
+    let (a, id) = new_store_with("machine-A", master, 5, KdfParams::RECOMMENDED, &KdfPolicy::production());
     // recovery on "another machine": copy without the device key
     let c = copy_dir(&a.dir, &["device.key", ".legacy-"]);
     let dir_c = c.path().to_str().unwrap().to_owned();
@@ -1264,7 +890,7 @@ fn the_tool_migrates_and_recovers_and_never_prints_a_secret() {
     let (code, out, _) = run_tool(&["status", "--dir", &dir_c], "");
     assert_eq!(code, 0);
     assert!(
-        out.contains("RootV2") && out.contains("RootV3") && out.contains("present"),
+        out.contains("RootV3"),
         "{out}"
     );
 }
@@ -1358,15 +984,7 @@ fn a_typed_code_is_read_forgivingly_but_a_typo_is_named_as_a_typo() {
 }
 
 fn migrated_store(machine: &str) -> (Store, IdentityMaterial) {
-    let (s, id) = legacy_store(machine, [7u8; 32], None, 5);
-    migrate(
-        &s,
-        machine,
-        None,
-        &FileDeviceKey::new(s.dir.file("device.key")),
-    )
-    .unwrap();
-    (s, id)
+    new_store(machine, [7u8; 32], 5)
 }
 
 fn new_code_op<'a>(
@@ -1568,140 +1186,6 @@ fn run_tool_with_code(
         err_thread.join().unwrap(),
         shown,
     )
-}
-
-#[test]
-fn the_tool_makes_shows_and_confirms_a_recovery_code_and_it_restores_the_identity() {
-    let (a, id) = legacy_store("machine-A", [0x5A; 32], None, 5);
-    let dir_a = a.path().to_str().unwrap().to_owned();
-    // the owner mistypes the confirmation first: nothing is written
-    let before = a.snapshot();
-    let (code, _out, err, _shown) = run_tool_with_code(
-        &[
-            "migrate",
-            "--generate-code",
-            "--dir",
-            &dir_a,
-            "--machine-id",
-            "machine-A",
-            "--stdin",
-        ],
-        |c| c.replacen('-', "", 1).chars().rev().collect::<String>(),
-    );
-    assert_eq!(code, 2, "{err}");
-    assert!(
-        err.contains("not confirmed") || err.contains("(3/3)"),
-        "{err}"
-    );
-    assert_eq!(
-        a.snapshot(),
-        before,
-        "an unconfirmed code changed the key directory"
-    );
-    // typed back in lower case with spaces: accepted
-    let (code, out, err, shown) = run_tool_with_code(
-        &[
-            "migrate",
-            "--generate-code",
-            "--dir",
-            &dir_a,
-            "--machine-id",
-            "machine-A",
-            "--stdin",
-        ],
-        |c| c.to_lowercase().replace('-', " "),
-    );
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(out.contains(&hex::encode(&id.address[..8])) && RecoveryCode::parse(&shown).is_ok());
-    let device_hex = hex::encode(
-        *HardwareDeviceKey::new(a.dir.file("device.seal"), a.dir.file("device.key"))
-            .load()
-            .unwrap()
-            .unwrap(),
-    );
-    for secret in [hex::encode([0x5Au8; 32]), device_hex] {
-        assert!(
-            !out.contains(&secret) && !err.contains(&secret),
-            "the tool printed a key"
-        );
-    }
-    // recovery on another machine with the code, typed sloppily; and a typo is reported as a typo
-    let c = copy_dir(&a.dir, &["device.key", ".legacy-"]);
-    let dir_c = c.path().to_str().unwrap().to_owned();
-    let before = c.snapshot();
-    let mut typo = shown.clone();
-    typo.replace_range(0..1, if typo.starts_with('A') { "B" } else { "A" });
-    let (code, _out, err) = run_tool(
-        &[
-            "recover",
-            "--dir",
-            &dir_c,
-            "--machine-id",
-            "machine-C",
-            "--stdin",
-        ],
-        &format!("{typo}\n"),
-    );
-    assert_eq!(code, 2);
-    assert!(
-        err.contains("typo"),
-        "a typo must be named as a typo: {err}"
-    );
-    assert_eq!(c.snapshot(), before);
-    let (code, out, err) = run_tool(
-        &[
-            "recover",
-            "--dir",
-            &dir_c,
-            "--machine-id",
-            "machine-C",
-            "--stdin",
-        ],
-        &format!("{}\n", shown.to_lowercase().replace('-', " ")),
-    );
-    assert_eq!(code, 0, "{out}{err}");
-    assert!(out.contains(&hex::encode(&id.address[..8])));
-    // replace the code again with the tool (the device opens the key), and the previous code is dead
-    let (code, out, err, shown2) = run_tool_with_code(
-        &[
-            "new-recovery-code",
-            "--dir",
-            &dir_a,
-            "--machine-id",
-            "machine-A",
-            "--stdin",
-        ],
-        |c| c.to_owned(),
-    );
-    assert_eq!(code, 0, "{out}{err}");
-    assert_ne!(shown, shown2);
-    let d = copy_dir(&a.dir, &["device.key", ".legacy-", ".before-new-code-"]);
-    let dir_d = d.path().to_str().unwrap().to_owned();
-    let (code, _out, err) = run_tool(
-        &[
-            "recover",
-            "--dir",
-            &dir_d,
-            "--machine-id",
-            "machine-D",
-            "--stdin",
-        ],
-        &format!("{shown}\n"),
-    );
-    assert_eq!(code, 2, "the previous code still worked");
-    assert!(err.contains("identity_recovery_failed"), "{err}");
-    let (code, out, err) = run_tool(
-        &[
-            "recover",
-            "--dir",
-            &dir_d,
-            "--machine-id",
-            "machine-D",
-            "--stdin",
-        ],
-        &format!("{shown2}\n"),
-    );
-    assert_eq!(code, 0, "{out}{err}");
 }
 
 #[test]

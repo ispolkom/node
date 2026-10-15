@@ -163,15 +163,6 @@ pub fn reset_login(
     }
     let bytes = crate::keydir::read_private_file(&dir.auth_file())
         .map_err(|_| "Файл ключей недоступен".to_string())?;
-    match crate::legacy::auth_format(&bytes) {
-        Ok(crate::legacy::AuthFormat::RootV2) => {}
-        Ok(_) => {
-            return Err(
-                "Ключи в старом формате: сначала выполните `yandi-keys migrate`".to_string(),
-            )
-        }
-        Err(_) => return Err("Файл ключей повреждён".to_string()),
-    }
     // Text shaped like a recovery code that fails the code's own check may be a typo in a code — or a password that merely looks like
     // one (a pass-phrase of words joined by hyphens has the same shape). It is therefore tried as typed FIRST; only if that does not
     // open the keys is it reported as a typo (rather than as "wrong").

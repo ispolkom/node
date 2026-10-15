@@ -67,10 +67,7 @@ fn snapshot(d: &Dir) -> Vec<(String, Vec<u8>)> {
 fn the_keys_made_from_what_the_person_typed_open_two_ways_and_the_login_password_checks() {
     let (d, root) = made();
     let bytes = key_root::keydir::read_private_file(&d.dir.auth_file()).unwrap();
-    assert_eq!(
-        key_root::legacy::auth_format(&bytes).unwrap(),
-        key_root::legacy::AuthFormat::RootV2
-    );
+    assert_eq!(RootDocument::parse(&bytes).unwrap().version, 2);
     let doc = RootDocument::parse(&bytes).unwrap();
     let key = device(&d).load().unwrap().unwrap();
     assert_eq!(
