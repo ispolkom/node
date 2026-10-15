@@ -110,7 +110,7 @@ class StorageService {
     final hasEnc = await File(encPath).exists();
     final hasPlain = await _isPlainSqlite(plainPath);
     if (hasPlain && !hasEnc) await _migratePlain(plainPath, encPath, pass);
-    _db = await openDatabase(encPath, version: 6, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+    _db = await openDatabase(encPath, version: 7, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
     if (hasPlain && hasEnc) {
       // Зашифрованная база уже есть и открылась (оборванный прежний перенос или вернувшаяся копия): открытая — устаревшая, поверх
       // действующей её не переносим (новые записи пропали бы), а затираем.
@@ -154,7 +154,7 @@ class StorageService {
     Database? dst;
     try {
       final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
-      dst = await openDatabase(tmp, version: 6, onCreate: _createTables, password: pass);
+      dst = await openDatabase(tmp, version: 7, onCreate: _createTables, password: pass);
       final tables = (await src.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'"))
           .map((row) => row['name']).toSet();
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
@@ -171,7 +171,7 @@ class StorageService {
         if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
       }
       // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
-      if (srcVersion > 0 && srcVersion < 6) await _onUpgrade(dst, srcVersion, 6);
+      if (srcVersion > 0 && srcVersion < 7) await _onUpgrade(dst, srcVersion, 7);
     } finally {
       try { await src.close(); } finally { await dst?.close(); }
     }
@@ -218,6 +218,10 @@ class StorageService {
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 7) {
+      // номер сообщения у отправителя: без него после перезапуска не работают «прочитано» и правки входящих
+      try { await db.execute('ALTER TABLE messages ADD COLUMN remote_id TEXT'); } catch (_) {}
+    }
     if (oldVersion < 6) {
       for (final c in const ['reply_id', 'reply_text']) {
         try { await db.execute('ALTER TABLE messages ADD COLUMN $c TEXT'); } catch (_) {}
@@ -283,7 +287,8 @@ class StorageService {
         timestamp INTEGER NOT NULL,
         status    TEXT NOT NULL DEFAULT 'pending',
         reply_id  TEXT,
-        reply_text TEXT
+        reply_text TEXT,
+        remote_id TEXT
       )
     ''');
 
@@ -526,6 +531,7 @@ class StorageService {
               status:    _parseStatus(r['status'] as String),
               replyId:   r['reply_id']   as String?,
               replyText: r['reply_text'] as String?,
+              remoteId:  r['remote_id']  as String?,
             ))
         .toList();
   }
@@ -542,6 +548,7 @@ class StorageService {
         'status':    msg.status.name,
         'reply_id':  msg.replyId,
         'reply_text': msg.replyText,
+        'remote_id': msg.remoteId,
       },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
