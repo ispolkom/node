@@ -100,6 +100,8 @@ pub struct ClosedEnv {
     legacy_master: Box<dyn Fn() -> Option<[u8; 32]> + Send + Sync>,
     configured: std::sync::atomic::AtomicBool,
     load_error: Mutex<Option<String>>,
+    /// растёт при каждой блокировке: вход, начатый до неё (ждёт очередь или считает парольный ключ), по завершении не открывает среду
+    lock_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl ClosedEnv {
@@ -130,6 +132,7 @@ impl ClosedEnv {
             legacy_master,
             configured: std::sync::atomic::AtomicBool::new(configured),
             load_error: Mutex::new(load_error),
+            lock_epoch: std::sync::atomic::AtomicU64::new(0),
         }))
     }
 
@@ -242,6 +245,8 @@ impl ClosedEnv {
     }
 
     pub async fn unlock(&self, password: String) -> Result<()> {
+        // поколение блокировок фиксируется ДО ожидания очереди и вычисления ключа
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if !self.configured() {
             bail!("закрытая среда не создана");
@@ -254,6 +259,9 @@ impl ClosedEnv {
             Ok(v) => v,
             Err(e) => return Err(self.after_failed_entry(e).await),
         };
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
+        }
         self.install(vault).await
     }
 
@@ -276,6 +284,7 @@ impl ClosedEnv {
 
     /// Забыли пароль: открыть словами и сразу задать новый.
     pub async fn recover(&self, phrase: String, new_password: String) -> Result<()> {
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if !self.configured() {
             bail!("закрытая среда не создана");
@@ -284,7 +293,13 @@ impl ClosedEnv {
             Ok(v) => v,
             Err(e) => return Err(self.after_failed_entry(e).await),
         };
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("восстановление отменено: среда была заперта, пока оно выполнялось"));
+        }
         let vault = self.save_new_password(vault, new_password).await?;
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("восстановление отменено: среда была заперта, пока оно выполнялось"));
+        }
         self.install(vault).await
     }
 
@@ -310,6 +325,7 @@ impl ClosedEnv {
 
     /// Отозвать ключи сразу (синхронно для вызывающего), затем стереть состояние у потребителей.
     pub async fn lock(&self) {
+        self.lock_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         {
             let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             i.vault = None; // Drop стирает DK
@@ -478,6 +494,25 @@ mod tests {
         env.register(a.clone());
         env.register(b.clone());
         (env, a, b)
+    }
+
+    /// Блокировка, пришедшая во время вычисления ключа входа, отменяет этот вход: он не открывает среду заново.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lock_during_the_key_derivation_cancels_the_pending_unlock() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.lock().await;
+        assert!(!e.unlocked());
+        let e2 = e.clone();
+        let pending = tokio::spawn(async move { e2.unlock("owner password".into()).await });
+        tokio::time::sleep(Duration::from_millis(100)).await; // вход уже в очереди/вычислении
+        e.lock().await;
+        let r = pending.await.unwrap();
+        assert!(r.is_err(), "вход, начатый до блокировки, отменён");
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+        e.unlock("owner password".into()).await.expect("новый вход проходит");
+        assert!(e.unlocked());
     }
 
     #[tokio::test]
