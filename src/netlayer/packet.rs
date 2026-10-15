@@ -623,7 +623,7 @@ impl HelloPacket {
 
     /// Deserialize Hello packet from bytes
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() < 4 {
+        if data.len() < 6 {
             return Err("Packet too short".to_string());
         }
 
@@ -1096,6 +1096,22 @@ mod hello_jurisdiction_tests {
             [0x33u8; 8],
             0u16,
         )
+    }
+
+    /// Датаграмма из `NET1` и обрезки настоящего Hello не паникуют (разбор идёт до проверки подписи, вход открыт всем).
+    #[test]
+    fn truncated_hello_never_panics() {
+        assert!(HelloPacket::from_bytes(b"NET1").is_err());
+        assert!(HelloPacket::from_bytes(b"NET1\x00").is_err());
+        let bytes = fake_hello_request().with_jurisdiction("DE".to_string()).to_bytes().unwrap();
+        for n in 0..bytes.len() {
+            let _ = HelloPacket::from_bytes(&bytes[..n]);
+        }
+        let mut junk = bytes.clone();
+        for i in 6..junk.len() {
+            junk[i] = 0xff;
+        }
+        let _ = HelloPacket::from_bytes(&junk);
     }
 
     #[test]
