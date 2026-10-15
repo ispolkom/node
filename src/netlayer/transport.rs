@@ -1221,10 +1221,23 @@ impl P2PTransport {
                             let my_node_id = transport_for_pump.identity.node_id();
                             let mut cid8 = [0u8; 8];
                             cid8.copy_from_slice(&my_node_id.0[..8]);
+                            // Сеанс поднимается так же, как по UDP: одноразовые ключи обеих сторон (прямая секретность). Раньше здесь
+                            // оба узла считали соединение установленным, а ключа сеанса не было — первая же отправка падала.
+                            let our_ephemeral = {
+                                let mut enc = transport_for_pump.encryption.lock().await;
+                                match enc.complete_hello_responder(hello.node_id, &hello.x25519_public) {
+                                    Ok(k) => k,
+                                    Err(e) => {
+                                        eprintln!("[ws-server] {} session not established: {}", conn.peer_addr, e);
+                                        transport_for_pump.ws_outgoing.lock().await.remove(&hello.node_id);
+                                        return;
+                                    }
+                                }
+                            };
                             let ack = HelloPacket::new_ack(
                                 my_node_id,
                                 transport_for_pump.identity.signing_public_key,
-                                transport_for_pump.identity.public_key,
+                                our_ephemeral,
                                 cid8,
                                 transport_for_pump.capabilities,
                                 hello.nonce,
@@ -4947,13 +4960,19 @@ impl P2PTransport {
         let my_node_id = self.identity.node_id();
         let mut cid8 = [0u8; 8];
         cid8.copy_from_slice(&my_node_id.0[..8]);
-        let hello = HelloPacket::new_request(
+        let mut hello = HelloPacket::new_request(
             my_node_id,
             self.identity.signing_public_key,
-            self.identity.public_key,
+            [0u8; 32],
             cid8,
             self.capabilities,
         );
+        // одноразовый ключ этого приглашения (до подписи: он входит в подписываемые данные)
+        hello.x25519_public = {
+            let mut enc = self.encryption.lock().await;
+            enc.generate_hello_ephemeral(hello.nonce)
+        };
+        let hello_nonce = hello.nonce;
         let hello = self.sign_hello(hello)?;
         let hello_bytes = hello.to_bytes()
             .map_err(|e| format!("Hello to_bytes: {}", e))?;
@@ -4975,6 +4994,12 @@ impl P2PTransport {
         }
         let anchor_id = ack.node_id;
         println!("[ws-client] 👋 Hello-Ack from {}", hex::encode(&anchor_id.0[..8]));
+        // сеанс из одноразового ключа приглашения и ключа ответчика
+        {
+            let mut enc = self.encryption.lock().await;
+            enc.complete_hello_initiator(hello_nonce, anchor_id, &ack.x25519_public)
+                .map_err(|e| format!("session not established: {}", e))?;
+        }
 
         // Регистрируем anchor как peer и проставляем ws_outgoing.
         let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
