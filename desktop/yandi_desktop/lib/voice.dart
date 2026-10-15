@@ -49,8 +49,28 @@ Future<String> newVoicePath() async {
   String two(int n) => n.toString().padLeft(2, '0');
   final name =
       'Голосовое_${t.year}${two(t.month)}${two(t.day)}_${two(t.hour)}${two(t.minute)}${two(t.second)}.m4a';
+  await _sweepOldVoice();
   final dir = await Directory.systemTemp.createTemp('yandi_voice');
   return '${dir.path}/$name';
+}
+
+bool _swept = false;
+
+/// Остатки прежних запусков (аварийное завершение): каталоги `yandi_voice*` старше минуты затираются один раз за запуск.
+Future<void> _sweepOldVoice() async {
+  if (_swept) return;
+  _swept = true;
+  try {
+    await for (final e in Directory.systemTemp.list(followLinks: false)) {
+      if (e is! Directory || !e.path.split('/').last.startsWith('yandi_voice')) continue;
+      final age = DateTime.now().difference((await e.stat()).modified);
+      if (age < const Duration(minutes: 1)) continue;
+      await for (final f in e.list(followLinks: false)) {
+        if (f is File) await wipeVoice(f);
+      }
+      if (await e.exists()) await e.delete(recursive: true);
+    }
+  } catch (_) {}
 }
 
 /// Подменяется в тестах (настоящая файловая система в виджет-тестах не нужна).
@@ -82,6 +102,7 @@ class VoiceRecording extends ChangeNotifier {
   int seconds = 0;
   String? path;
   Timer? _timer;
+  bool _disposed = false;
 
   /// Достигнут предел длины: вызывающий должен завершить запись.
   VoidCallback? onLimit;
@@ -98,6 +119,12 @@ class VoiceRecording extends ChangeNotifier {
       await backend.start(p);
     } catch (e) {
       return 'Не удалось начать запись: $e';
+    }
+    if (_disposed) {
+      // экран закрылся, пока запись начиналась: сразу остановить и затереть, ничего не оставляя в tmp
+      try { await backend.stop(); } catch (_) {}
+      await wipeVoice(File(p));
+      return null;
     }
     path = p;
     active = true;
@@ -131,8 +158,20 @@ class VoiceRecording extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
     _timer?.cancel();
-    backend.dispose();
+    // запись, не доведённая до отправки/отмены (вкладка закрыта, блокировка, обрыв), не остаётся открытым файлом в tmp
+    final leftover = path;
+    final wasActive = active;
+    active = false;
+    path = null;
+    unawaited(() async {
+      if (wasActive) {
+        try { await backend.stop(); } catch (_) {}
+      }
+      try { await backend.dispose(); } catch (_) {}
+      if (leftover != null) await wipeVoice(File(leftover));
+    }());
     super.dispose();
   }
 }
