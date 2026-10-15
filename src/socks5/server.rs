@@ -863,7 +863,7 @@ mod fragmented_handshake_tests {
         let (c, mut s) = pair().await;
         let req = vec![0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'o', b'r', b'g', 0x01, 0xbb];
         let parts = vec![req[..4].to_vec(), req[4..8].to_vec(), req[8..].to_vec()];
-        tokio::spawn(dribble(c, parts));
+        tokio::task::spawn(dribble(c, parts));
         let r = Socks5Server::read_request(&mut s).await.expect("request");
         assert_eq!(r.command, Socks5Command::Connect);
         assert!(matches!(r.address, Socks5Address::Domain(ref d, 443) if d == "example.org"));
@@ -872,7 +872,7 @@ mod fragmented_handshake_tests {
     #[tokio::test]
     async fn a_greeting_split_across_reads_is_accepted() {
         let (c, mut s) = pair().await;
-        tokio::spawn(dribble(c, vec![vec![0x05, 0x02], vec![0x00], vec![0x02]]));
+        tokio::task::spawn(dribble(c, vec![vec![0x05, 0x02], vec![0x00], vec![0x02]]));
         let cfg = Socks5Config::default();
         let m = Socks5Server::do_auth_selection(&mut s, &cfg).await.expect("greeting");
         assert_eq!(m, Socks5AuthMethod::UserPass, "методы 00 и 02 получены целиком; по умолчанию пароль обязателен");

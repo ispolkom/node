@@ -662,6 +662,13 @@ async fn main() -> anyhow::Result<()> {
         yandi::closed_api::install_global(env.clone());
         // служебные части (ключи «Компьютера», группы ПК, жалобы) поднимаются сами, без владельца у экрана
         env.start_service().await;
+        // пароль владельца ещё не задан: файлы переписки запечатываются рабочим ключом машины (как и чаты), чтобы узел принимал
+        // и отправлял файлы; при установке пароля они перезапечатываются ключом владельца (FilesConsumer::migrate)
+        if !closed_configured {
+            if let Some(mk) = auth_state.get_master_key() {
+                yandi::file_vault::unlock(yandi::closed_env::service_key_for(&mk, yandi::closed_env::DOMAIN_FILES));
+            }
+        }
     }
 
     // Spawn Chat packet handler

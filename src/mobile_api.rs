@@ -941,6 +941,7 @@ pub fn pc_edit_for_device(peer: &str, msg_id: &HashId, text: String) -> Result<(
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
     // служебный ключ подписи при запертой среде жив, а история личной переписки — нет: без этой проверки сообщение уходило бы
     // телефону, и только потом запись в историю падала с ошибкой
+    #[cfg(unix)]
     if crate::closed_api::is_locked() {
         return Err("закрытая среда заперта: разблокируйте её, чтобы писать".into());
     }
@@ -978,6 +979,10 @@ pub async fn pc_send_to_device(peer: &str, text: String) -> Result<ChatMessage, 
 /// То же с ответом-цитатой: телефон получает в конверте номер сообщения на узле и выдержку.
 pub async fn pc_send_to_device_reply(peer: &str, text: String, reply: Option<crate::communication::ReplyRef>) -> Result<ChatMessage, String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    #[cfg(unix)]
+    if crate::closed_api::is_locked() {
+        return Err("закрытая среда заперта: разблокируйте её, чтобы писать".into());
+    }
     if crate::mobile_self::is_blocked_phone(peer) {
         return Err("устройство заблокировано".into());
     }

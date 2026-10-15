@@ -146,23 +146,31 @@ async fn people_talk_and_send_files_only_over_encrypted_links() {
         .header("content-type", format!("multipart/form-data; boundary={boundary}")).body(body).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["status"], "success", "{r}");
     let downloads = stand.join("node2/home/.local/share/yandi/files/downloads");
-    let mut got = None;
+    let mut sealed = None;
     for _ in 0..120 {
         if let Ok(rd) = std::fs::read_dir(&downloads) {
             for e in rd.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 // на диске имя — «<номер передачи>__<имя без не-латинских знаков>»
                 if name.starts_with(r["file_id"].as_str().unwrap()) && !name.ends_with(".part") {
-                    got = std::fs::read(e.path()).ok();
+                    sealed = Some(e.path());
                 }
             }
         }
-        if got.as_ref().map(|g| g.len() == data.len()).unwrap_or(false) {
-            break;
+        if let Some(p) = &sealed {
+            // файл на диске запечатан ключом узла: открытый размер читается из самой структуры
+            if yandi::file_vault::plain_len(p).map(|n| n == data.len() as u64).unwrap_or(false) {
+                break;
+            }
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    let got = got.expect("the file arrived in the receiver's own data folder");
+    let sealed = sealed.expect("the file arrived in the receiver's own data folder");
+    let raw = std::fs::read(&sealed).unwrap();
+    assert!(raw.windows(64).all(|w| w != &data[1000..1064]), "на диске нет открытого содержимого");
+    // содержимое — через узел получателя (он открывает файл своим ключом): байт в байт
+    let url = reqwest::Url::parse(&format!("{}/api/files/content/{}/{}", b.web, r["file_id"].as_str().unwrap(), "проверка.bin")).unwrap();
+    let got = http.get(url).header("cookie", &b.cookie).send().await.unwrap().bytes().await.unwrap().to_vec();
     assert_eq!(got.len(), data.len());
     assert!(got == data, "byte for byte");
 

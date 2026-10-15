@@ -207,6 +207,90 @@ pub fn read_block(path: &Path, index: u64) -> std::io::Result<Vec<u8>> {
         .map_err(|_| bad("блок не открывается: файл повреждён или записан не полностью"))
 }
 
+fn cipher_of(key: &[u8; 32]) -> std::io::Result<Aes256Gcm> {
+    Aes256Gcm::new_from_slice(key).map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+fn read_block_with(c: &Aes256Gcm, path: &Path, index: u64) -> std::io::Result<Vec<u8>> {
+    let total = plain_len(path)?;
+    let blocks = total.div_ceil(BLOCK as u64);
+    if index >= blocks {
+        return Err(bad("нет такого блока"));
+    }
+    let plain = if index + 1 == blocks { (total - index * BLOCK as u64) as usize } else { BLOCK };
+    let mut f = std::fs::File::open(path)?;
+    let id = read_id(&mut f, c)?;
+    f.seek(SeekFrom::Start(HEAD as u64 + index * (BLOCK + OVERHEAD) as u64))?;
+    let mut buf = vec![0u8; plain + OVERHEAD];
+    f.read_exact(&mut buf)?;
+    c.decrypt(Nonce::from_slice(&buf[..12]), Payload { msg: &buf[12..], aad: &aad(&id, index) })
+        .map_err(|_| bad("блок не открывается: файл повреждён или записан не полностью"))
+}
+
+/// Перезапечатать один файл с `old` на `new` (блок за блоком во временный файл, затем замена). `Ok(false)` — файл уже под `new`.
+fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bool> {
+    let (co, cn) = (cipher_of(old)?, cipher_of(new)?);
+    {
+        let mut f = std::fs::File::open(path)?;
+        if read_id(&mut f, &cn).is_ok() {
+            return Ok(false);
+        }
+        read_id(&mut f, &co)?; // не открывается ни тем, ни другим — ошибка
+    }
+    let total = plain_len(path)?;
+    let tmp = path.with_extension("rekey.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let run = || -> std::io::Result<()> {
+        std::fs::write(&tmp, make_head(&cn, total)?)?;
+        let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
+        f.set_len(sealed_len(total))?;
+        drop(f);
+        let mut tf = std::fs::OpenOptions::new().read(true).write(true).open(&tmp)?;
+        let id = read_id(&mut tf, &cn)?;
+        for i in 0..total.div_ceil(BLOCK as u64) {
+            let data = read_block_with(&co, path, i)?;
+            let mut nonce = [0u8; 12];
+            rand::rngs::OsRng.fill_bytes(&mut nonce);
+            let ct = cn
+                .encrypt(Nonce::from_slice(&nonce), Payload { msg: &data, aad: &aad(&id, i) })
+                .map_err(|_| bad("шифрование блока"))?;
+            tf.seek(SeekFrom::Start(HEAD as u64 + i * (BLOCK + OVERHEAD) as u64))?;
+            tf.write_all(&nonce)?;
+            tf.write_all(&ct)?;
+        }
+        tf.sync_all()?;
+        std::fs::rename(&tmp, path)
+    };
+    let r = run();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    r.map(|_| true)
+}
+
+/// Перезапечатать все файлы каталога с ключа `old` на `new` (рекурсивно); возвращает число файлов, которые не удалось перенести.
+/// Файлы под `new` не трогаются, не запечатанные (чужие/частичные без заголовка) пропускаются.
+pub fn rekey_dir(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
+    let mut failed = 0usize;
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    for e in rd.flatten() {
+        let p = e.path();
+        match e.file_type() {
+            Ok(t) if t.is_dir() => failed += rekey_dir(&p, old, new),
+            Ok(t) if t.is_file() => {
+                if !is_sealed(&p) {
+                    continue;
+                }
+                if rekey_file(&p, old, new).is_err() {
+                    failed += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    failed
+}
+
 /// Записать файл целиком (атомарно: временный файл рядом и переименование).
 pub fn write_all(path: &Path, plain: &[u8]) -> std::io::Result<()> {
     let c = cipher()?;
@@ -395,6 +479,31 @@ mod tests {
         assert!(assemble(&parts, &bad_out, 3999).is_err(), "размер не совпал");
         assert!(!bad_out.exists());
         assert!(assemble(&parts, &bad_out, 4001).is_err());
+    }
+
+    #[test]
+    fn files_are_resealed_from_the_working_key_to_the_owners_key() {
+        // общий ключ процесса не трогаем (параллельные проверки): файл пишется тестовым ключом 0x5a, проверка — явными ключами
+        let d = tempfile::tempdir().unwrap();
+        let (old, new) = ([0x5au8; 32], [2u8; 32]);
+        let p = d.path().join("sub").join("a.bin");
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        let data: Vec<u8> = (0..(BLOCK * 2 + 77)).map(|i| (i % 211) as u8).collect();
+        write_all(&p, &data).unwrap();
+        let read_with = |key: &[u8; 32]| -> std::io::Result<Vec<u8>> {
+            let c = cipher_of(key)?;
+            let mut out = Vec::new();
+            for i in 0..plain_len(&p)?.div_ceil(BLOCK as u64) {
+                out.extend(read_block_with(&c, &p, i)?);
+            }
+            Ok(out)
+        };
+        assert_eq!(read_with(&old).unwrap(), data);
+        assert_eq!(rekey_dir(d.path(), &old, &new), 0);
+        assert!(read_with(&old).is_err(), "под прежним ключом файл больше не открывается");
+        assert_eq!(read_with(&new).unwrap(), data);
+        assert_eq!(rekey_dir(d.path(), &old, &new), 0, "повтор: файл уже под новым ключом");
+        assert_eq!(read_with(&new).unwrap(), data);
     }
 
     #[test]

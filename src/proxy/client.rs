@@ -717,7 +717,7 @@ mod request_reading_tests {
     async fn read_from(parts: Vec<Vec<u8>>) -> Result<Vec<u8>> {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
+        tokio::task::spawn(async move {
             let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
             for p in parts {
                 c.write_all(&p).await.unwrap();
@@ -757,7 +757,7 @@ mod early_tunnel_data_tests {
         let _g = establishing.begin(5);
         let (tx, rx) = tokio::sync::mpsc::channel(16);
         let rx = Arc::new(Mutex::new(Some(rx)));
-        tokio::spawn(HttpProxyClient::handle_tunnel_data(active, rx, gateway, establishing.clone()));
+        tokio::task::spawn(HttpProxyClient::handle_tunnel_data(active, rx, gateway, establishing.clone()));
         for off in 0..3u64 {
             tx.send((gateway, ProxyTunnelData { tunnel_id: 5, data: vec![off as u8; 10], close: false, byte_offset: off * 10 })).await.unwrap();
         }

@@ -325,7 +325,7 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap();
-        tokio::spawn(async move {
+        tokio::task::spawn(async move {
             let (mut c, _) = l.accept().await.unwrap();
             let mut b = [0u8; 3];
             c.read_exact(&mut b).await.unwrap();

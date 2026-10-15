@@ -55,6 +55,8 @@ async fn valid_peer_file_transfer_content_validation() {
     // файлы узла — в папке данных; у теста она временная (не папка владельца)
     let data = tempfile::tempdir().unwrap();
     std::env::set_var("XDG_DATA_HOME", data.path());
+    // файлы переписки запечатываются ключом среды: у теста среды нет — выдаём ключ сами
+    yandi::file_vault::unlock([0x5a; 32]);
     std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19601");
     std::env::set_var("YANDI_P2P_DATA_PORT", "19602");
     let target = P2PTransport::new(NodeIdentity::new(), 0).await.expect("start target transport");

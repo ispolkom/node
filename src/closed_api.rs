@@ -175,10 +175,24 @@ impl Consumer for FilesConsumer {
     fn domain(&self) -> &'static str {
         crate::closed_env::DOMAIN_FILES
     }
-    fn migrate(&self, _old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+    fn migrate(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
         Box::pin(async move {
+            // до пароля файлы запечатаны рабочим ключом машины (он нужен, чтобы узел принимал файлы и без владельца): при
+            // установке пароля они перезапечатываются ключом владельца
+            let failed = match old {
+                Some(m) => {
+                    let old_key = crate::closed_env::service_key_for(&m, crate::closed_env::DOMAIN_FILES);
+                    tokio::task::spawn_blocking(move || {
+                        let root = crate::util::data_dir::data_dir().join("files");
+                        crate::file_vault::rekey_dir(&root, &old_key, &new)
+                    })
+                    .await
+                    .map_err(|e| e.to_string())?
+                }
+                None => 0,
+            };
             crate::file_vault::unlock(new);
-            Ok(0)
+            Ok(failed)
         })
     }
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {

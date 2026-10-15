@@ -55,7 +55,7 @@ pub trait Consumer: Send + Sync {
 }
 
 /// Служебный ключ области: из рабочего ключа устройства (он доступен при старте без пароля), своя область — свой ключ.
-fn service_key_for(master: &[u8; 32], domain: &str) -> [u8; 32] {
+pub fn service_key_for(master: &[u8; 32], domain: &str) -> [u8; 32] {
     use sha2::Sha256;
     let mut out = [0u8; 32];
     hkdf::Hkdf::<Sha256>::new(Some(b"yandi-service-v1"), master)
@@ -505,7 +505,7 @@ mod tests {
         e.lock().await;
         assert!(!e.unlocked());
         let e2 = e.clone();
-        let pending = tokio::spawn(async move { e2.unlock("owner password".into()).await });
+        let pending = tokio::task::spawn(async move { e2.unlock("owner password".into()).await });
         tokio::time::sleep(Duration::from_millis(100)).await; // вход уже в очереди/вычислении
         e.lock().await;
         let r = pending.await.unwrap();
@@ -641,7 +641,7 @@ mod tests {
         chat.unlock_delay_ms.store(1500, Ordering::SeqCst);
         let before = e.status().generation;
         let late = e.clone();
-        let unlocking = tokio::spawn(async move { late.unlock("owner password".into()).await });
+        let unlocking = tokio::task::spawn(async move { late.unlock("owner password".into()).await });
         // ждём момента, когда сеанс уже принят и ключи выдаются (с задержкой), и только тогда блокируем
         while e.status().generation == before {
             tokio::time::sleep(Duration::from_millis(20)).await;

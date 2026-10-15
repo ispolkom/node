@@ -163,6 +163,8 @@ fn child_decoder() {
     let (_, f) = all.iter().find(|(n, _)| *n == name).expect("unknown decoder");
     std::panic::set_hook(Box::new(|_| {}));
     let mut bad: Vec<String> = vec![];
+    // прогрев: первая ошибка в процессе может стоить секунду на разворачивании отладочных сведений (macOS) — это не медленный разбор
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&[0u8; 1])));
     for input in corpus() {
         let t = Instant::now();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&input)));
