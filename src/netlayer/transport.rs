@@ -3792,6 +3792,13 @@ impl P2PTransport {
 
                                                 let target = HashId(target_bytes);
 
+                                                // [0xF2][target:32][request_id:8]: номер запроса возвращается в ответе (0 — запрос без номера)
+                                                let rpc_id: [u8; 8] = if decrypted.len() >= 41 {
+                                                    decrypted[33..41].try_into().unwrap_or([0u8; 8])
+                                                } else {
+                                                    [0u8; 8]
+                                                };
+
                                                 
 
                                                 // Ищем ближайшие узлы в ktable
@@ -3817,6 +3824,8 @@ impl P2PTransport {
                                                 if let Some(peer_info) = peer {
 
                                                     let mut resp_packet = vec![0xF3u8];
+
+                                                    resp_packet.extend_from_slice(&rpc_id);
 
                                                     let data = serde_json::to_vec(&nodes)
 
@@ -3853,6 +3862,18 @@ impl P2PTransport {
                                         0xF3 => {
 
                                             println!("[transport] 📋 DHT FindNode Response from {}", crate::util::mask_hash_id(&peer_id));
+
+                                            // [0xF3][request_id:8][json nodes]: ответ передаётся ожидающему запросу
+                                            if decrypted.len() > 9 {
+                                                let rpc_id = u64::from_be_bytes(decrypted[1..9].try_into().unwrap_or([0u8; 8]));
+                                                if let Ok(nodes) = serde_json::from_slice::<Vec<(HashId, String)>>(&decrypted[9..]) {
+                                                    let bytes = crate::dht::messages::DhtResponse::new(None, nodes).to_bytes();
+                                                    let delivered = dht.lock().await.handle_response(rpc_id, bytes);
+                                                    if !delivered {
+                                                        println!("[transport] ⚠️  DHT response without a waiting request (id {rpc_id:#x})");
+                                                    }
+                                                }
+                                            }
 
                                         }
 
@@ -5428,9 +5449,11 @@ impl P2PTransport {
 
     /// Send DHT RPC FindNode response
 
-    pub async fn dht_rpc_find_node_response(&self, peer_id: HashId, nodes: Vec<(HashId, String)>) -> Result<(), String> {
+    pub async fn dht_rpc_find_node_response(&self, peer_id: HashId, request_id: u64, nodes: Vec<(HashId, String)>) -> Result<(), String> {
 
         let mut packet = vec![0xF3u8];
+
+        packet.extend_from_slice(&request_id.to_be_bytes());
 
         let data = serde_json::to_vec(&nodes)
 
@@ -6411,17 +6434,20 @@ impl P2PTransport {
     pub async fn send_dht_query(&self, peer_id: HashId, query: &crate::dht::messages::DhtQuery) -> Result<crate::dht::messages::DhtResponse, String> {
         use crate::dht::messages::DhtResponse;
         
-        let request_id = self.dht.lock().await.next_request_id();
-        
-        // Create query with request_id
-        let mut query_with_id = query.clone();
-        query_with_id.request_id = request_id;
-        
+        // по этому каналу ходит только поиск узлов (формат на проводе: [0xF2][цель:32][номер запроса:8])
+        if query.query_type != crate::dht::messages::DhtQueryType::FindNode {
+            return Err("DHT RPC: over this channel only FindNode is supported".to_string());
+        }
+        // номер запроса случайный: ответ подставить нельзя, не зная его (ответ приходит по сеансу, номер — единственная привязка)
+        let request_id: u64 = rand::random();
+
         // Register pending response
         let rx = self.dht.lock().await.register_pending(request_id);
-        
-        // Serialize query to binary
-        let data = query_with_id.to_bytes();
+
+        let mut data = Vec::with_capacity(1 + 32 + 8);
+        data.push(0xF2u8);
+        data.extend_from_slice(query.key.as_ref());
+        data.extend_from_slice(&request_id.to_be_bytes());
         
         // Send encrypted
         if let Err(e) = self.send_encrypted(peer_id, &data).await {
