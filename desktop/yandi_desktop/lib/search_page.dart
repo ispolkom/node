@@ -44,11 +44,15 @@ class _SearchFeatureState extends State<SearchFeature> {
   Future<void> refresh() async {
     if (!active) return;
     try {
-      final d = await widget.api.request('/api/mobile/devices');
+      final d = await widget.api.request('/api/mobile/other-devices');
       final g = await widget.api.request('/api/groups');
       if (!active) return;
       setState(() {
         users = listOf(d['devices']);
+        hiddenUsers
+          ..clear()
+          ..addAll([for (final u in users) if (u['status'] == 'hidden') '${u['peer_id']}']);
+        showHidden = true;
         groups = listOf(g['catalog']);
         loading = false;
         error = null;
@@ -89,13 +93,18 @@ class _SearchFeatureState extends State<SearchFeature> {
         title: Text(name.isEmpty ? id.substring(0, 12) : name),
         children: [
           SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'add'), child: const UiText('Добавить в контакты')),
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'hide'), child: UiText(hidden ? 'Показать' : 'Скрыть')),
+          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'hide'), child: UiText(hidden ? 'Показать в чате' : 'Скрыть в чате')),
         ],
       ),
     );
     if (!active || pick == null) return;
     if (pick == 'hide') {
-      setState(() => hidden ? hiddenUsers.remove(id) : hiddenUsers.add(id));
+      try {
+        await widget.api.request('/api/mobile/phone-action', body: {'peer': id, 'action': hidden ? 'unhide' : 'hide'});
+        await refresh();
+      } catch (e) {
+        if (active) setState(() => notice = 'Не получилось: ${e is ApiFailure ? e.message : e}');
+      }
       return;
     }
     // добавление: сразу предлагаем дать имя (аватар не меняется — он принадлежит владельцу аккаунта)
@@ -253,7 +262,7 @@ class _SearchFeatureState extends State<SearchFeature> {
         if (error != null) UiText(error!),
         if (notice != null) UiText(notice!),
         if (view == null) ...[
-          hubCard('Пользователи', 'Сопряжённые с узлом: ники, аватарки, статус', visibleUsers, 'users'),
+          hubCard('Пользователи', 'Устройства узла, которых нет в контактах: ники, статус', visibleUsers, 'users'),
           hubCard('Группы', 'Все группы узла: вступить или попросить приглашение', visibleGroups, 'groups'),
         ] else ...[
           Row(

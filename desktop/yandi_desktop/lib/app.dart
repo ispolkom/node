@@ -738,12 +738,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             if (entered)
               IconButton(
                 tooltip: preferences.english
-                    ? 'Exit shell (does not lock the vault)'
-                    : 'Выйти из оболочки (закрытую среду не запирает)',
+                    ? 'Log out (locks the vault)'
+                    : 'Выйти (запирает закрытую среду)',
                 icon: const Icon(Icons.logout, size: 18),
                 onPressed: busy
                     ? null
-                    : () {
+                    : () async {
+                        final v = vault;
+                        if (v != null && v.configured && v.unlocked) {
+                          await act('/api/vault/lock', {});
+                          if (!mounted || lockUnconfirmed) return;
+                        }
                         setState(() {
                           wipe();
                           entered = false;

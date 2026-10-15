@@ -9,7 +9,7 @@ class _Api implements Api {
   @override
   Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) async {
     calls.add(path);
-    if (path == '/api/mobile/devices') {
+    if (path == '/api/mobile/other-devices') {
       return {
         'devices': [
           {'peer_id': 'a' * 64, 'name': 'Телефон Ани', 'online': true},
