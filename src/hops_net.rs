@@ -131,10 +131,23 @@ const STREAM_QUEUE_MAX: usize = 2 * 1024 * 1024;
 const OUT_QUEUE_HIGH: usize = 8 * 1024 * 1024;
 static OUT_QUEUED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Сколько поток к цели может молчать со стороны цели, прежде чем выход его закроет (иначе исчезнувший отправитель оставлял бы сокет
+/// и задачу чтения навсегда).
+const EXIT_STREAM_IDLE: Duration = Duration::from_secs(900);
+
 struct ExitStream {
     to_target: mpsc::UnboundedSender<Option<Vec<u8>>>,
     queued: Arc<std::sync::atomic::AtomicUsize>,
     reorder: Reorder,
+    /// сигнал задаче чтения цели: цепочка/поток закрыты, чтение прекратить
+    cancel: tokio::sync::watch::Sender<bool>,
+}
+
+impl ExitStream {
+    fn close(self) {
+        let _ = self.to_target.send(None);
+        let _ = self.cancel.send(true);
+    }
 }
 
 struct ExitCircuit {
@@ -278,7 +291,7 @@ impl Hops {
             Event::Closed { handle } => {
                 if let Some(c) = self.exit_circuits.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle) {
                     for (_, s) in c.streams {
-                        let _ = s.to_target.send(None);
+                        s.close();
                     }
                 }
             }
@@ -292,6 +305,7 @@ impl Hops {
                             // the destination is not keeping up: do not buffer without limit, close the stream
                             if s.queued.fetch_add(d.len(), std::sync::atomic::Ordering::Relaxed) + d.len() > STREAM_QUEUE_MAX {
                                 let _ = s.to_target.send(None);
+                                let _ = s.cancel.send(true);
                                 break;
                             }
                             let _ = s.to_target.send(Some(d));
@@ -300,7 +314,7 @@ impl Hops {
                 }
                 hops::CMD_END => {
                     if let Some(s) = self.exit_circuits.lock().unwrap_or_else(|e| e.into_inner()).get_mut(&handle).and_then(|c| c.streams.remove(&stream)) {
-                        let _ = s.to_target.send(None);
+                        s.close();
                     }
                 }
                 _ => {}
@@ -372,10 +386,11 @@ impl Hops {
             let (mut rd, mut wr) = stream_conn.into_split();
             let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
             let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
             {
                 let mut g = me.exit_circuits.lock().unwrap_or_else(|e| e.into_inner());
                 let Some(c) = g.get_mut(&handle) else { return };
-                c.streams.insert(stream, ExitStream { to_target: tx, queued: queued.clone(), reorder: Reorder::default() });
+                c.streams.insert(stream, ExitStream { to_target: tx, queued: queued.clone(), reorder: Reorder::default(), cancel: cancel_tx });
             }
             me.reply(handle, hops::CMD_CONNECTED, stream, &[]);
             // от отправителя к цели
@@ -398,9 +413,15 @@ impl Hops {
                 while OUT_QUEUED.load(std::sync::atomic::Ordering::Relaxed) > OUT_QUEUE_HIGH {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
-                match rd.read(&mut buf).await {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => {
+                // чтение прекращается при закрытии цепочки/потока и при долгом молчании цели
+                let read = tokio::select! {
+                    r = tokio::time::timeout(EXIT_STREAM_IDLE, rd.read(&mut buf)) => r,
+                    _ = cancel_rx.changed() => break,
+                };
+                match read {
+                    Err(_) => break,
+                    Ok(Ok(0)) | Ok(Err(_)) => break,
+                    Ok(Ok(n)) => {
                         me.reply(handle, hops::CMD_DATA, stream, &with_seq(seq, &buf[..n]));
                         seq += 1;
                     }
@@ -807,5 +828,22 @@ mod tests {
     fn only_web_ports_by_default() {
         assert!(web_port(80) && web_port(443));
         assert!(!web_port(22) && !web_port(25) && !web_port(3306));
+    }
+}
+
+#[cfg(test)]
+mod exit_stream_tests {
+    use super::*;
+
+    /// Закрытие выходного потока сообщает задаче чтения цели прекратить чтение, а записи — завершиться.
+    #[tokio::test]
+    async fn closing_an_exit_stream_stops_both_tasks() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let s = ExitStream { to_target: tx, queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)), reorder: Reorder::default(), cancel: cancel_tx };
+        s.close();
+        assert!(matches!(rx.recv().await, Some(None)), "писатель получает конец");
+        cancel_rx.changed().await.unwrap();
+        assert!(*cancel_rx.borrow(), "читатель получает отмену");
     }
 }
