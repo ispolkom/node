@@ -503,6 +503,8 @@ impl WebServer {
             .route("/media/*path", get(media_handler))
             // API endpoints (protected)
             .route("/api/status", get(api_status))
+            .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
+            .route("/api/update/check", post(|| async { Json(crate::updates::check_now().await) }))
             .route("/api/speed", get(api_speed))
             .route("/api/nodes", get(api_nodes))
             .route("/api/connect/:short_id", post(api_connect))

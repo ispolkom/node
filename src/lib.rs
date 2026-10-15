@@ -75,6 +75,8 @@ pub mod reachability;
 pub mod reciprocity;
 pub mod release;
 #[cfg(target_os = "linux")]
+pub mod update_check;
+pub mod updates;
 pub mod updater;
 pub mod relay_net;
 pub mod route_rules;

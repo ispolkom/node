@@ -118,6 +118,51 @@ async fn main() {
                 println!("выпуск ещё не установлен");
             }
         }
+        Some("fetch") => {
+            // fetch --channel БАЗА [--channel БАЗА...] --pubkey HEX --min-seq N --out КАТАЛОГ   (БАЗА: адрес с «/» или префиксом на конце)
+            let mut channels = Vec::new();
+            let mut pubkey = None;
+            let mut min_seq = 0u64;
+            let mut out = None;
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                let v = it.next().unwrap_or_else(|| die("нужно значение параметра"));
+                match a.as_str() {
+                    "--channel" => channels.push(yandi::update_check::Channel { name: v.clone(), base: v.clone() }),
+                    "--pubkey" => pubkey = Some(v.clone()),
+                    "--min-seq" => min_seq = v.parse().unwrap_or_else(|_| die("--min-seq: число")),
+                    "--out" => out = Some(PathBuf::from(v)),
+                    other => die(&format!("неизвестный параметр: {other}")),
+                }
+            }
+            if channels.is_empty() {
+                die("нужен хотя бы один --channel");
+            }
+            let vk = parse_pubkey(&pubkey.unwrap_or_else(|| die("нужен --pubkey")));
+            let out = out.unwrap_or_else(|| die("нужен --out"));
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+            let (found, errors) = yandi::update_check::check(&channels, &vk, min_seq, now).await;
+            for e in &errors {
+                eprintln!("канал недоступен или не прошёл проверку: {e}");
+            }
+            let found = found.unwrap_or_else(|| die("ни один канал не дал подписанного манифеста"));
+            println!(
+                "манифест: {} {} (№{}) из канала {}, платформа {}",
+                found.manifest.product, found.manifest.version, found.manifest.seq, found.channel.name, found.manifest.platform
+            );
+            let names = yandi::update_check::download(&found, &channels, &out).await.unwrap_or_else(|e| die(&format!("ОШИБКА: {e}")));
+            // манифест и подпись кладутся рядом: каталог проверяется командой verify как обычный выпуск
+            let c = reqwest::Client::new();
+            for n in [MANIFEST_NAME, SIGNATURE_NAME] {
+                let body = c.get(format!("{}{}", found.channel.base, n)).send().await.and_then(|r| r.error_for_status());
+                match body {
+                    Ok(r) => std::fs::write(out.join(n), r.bytes().await.unwrap_or_default()).unwrap_or_else(|e| die(&e.to_string())),
+                    Err(e) => die(&format!("{n}: {e}")),
+                }
+            }
+            println!("скачано и проверено по сумме: {} (каталог {})", names.join(", "), out.display());
+            println!("проверка целиком: yandi-release verify {} --pubkey <ключ> --min-seq {}", out.display(), min_seq);
+        }
         Some("pubkey") => {
             let k = phrase_key();
             println!("{}", hex::encode(k.verifying_key().to_bytes()));
@@ -141,8 +186,17 @@ async fn main() {
                     .map(|d| d.as_secs())
                     .unwrap_or(0),
             };
-            let m = build_manifest(&dir, &args[2], seq, now, &key_id(&vk), &args[6..])
+            let mut m = build_manifest(&dir, &args[2], seq, now, &key_id(&vk), &args[6..])
                 .unwrap_or_else(|e| die(&e));
+            // платформа, срок действия (дней от создания; по умолчанию 120) и описание изменений — из окружения
+            m.platform = std::env::var("YANDI_RELEASE_PLATFORM").unwrap_or_default();
+            let days: u64 = std::env::var("YANDI_RELEASE_EXPIRES_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(120);
+            m.expires = if days == 0 { 0 } else { now + days * 86_400 };
+            m.notes = std::env::var("YANDI_RELEASE_NOTES").unwrap_or_default().chars().take(2000).collect();
+            validate_manifest(&m).unwrap_or_else(|e| die(&e.to_string()));
             std::fs::write(dir.join(MANIFEST_NAME), manifest_bytes(&m))
                 .unwrap_or_else(|e| die(&e.to_string()));
             println!(
@@ -217,6 +271,6 @@ async fn main() {
                 m.key_id
             );
         }
-        _ => die("команды: pubkey | manifest | sign | verify | update | rollback | status"),
+        _ => die("команды: pubkey | manifest | sign | verify | fetch | update | rollback | status"),
     }
 }

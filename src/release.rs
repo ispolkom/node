@@ -38,6 +38,16 @@ pub struct Manifest {
     /// первые 16 hex SHA-256 открытого ключа: чтобы сразу видеть, чьей подписью выпуск
     pub key_id: String,
     pub files: Vec<FileEntry>,
+    /// платформа выпуска (`deb`, `android`, `win`…); пусто — прежний манифест без платформы
+    #[serde(default)]
+    pub platform: String,
+    /// срок действия манифеста (секунды Unix; 0 — без срока): защита от «замораживания» — свежего подписанного файла нет, а
+    /// старый вечно подсовывают
+    #[serde(default)]
+    pub expires: u64,
+    /// краткое описание изменений для уведомления об обновлении (до 2000 знаков)
+    #[serde(default)]
+    pub notes: String,
 }
 
 /// Release phrase normalization v1: NFC (ICU4X 2.2.0), then Unicode whitespace collapse.
@@ -280,6 +290,9 @@ pub fn build_manifest(
         created,
         key_id: key_id.into(),
         files,
+        platform: String::new(),
+        expires: 0,
+        notes: String::new(),
     };
     validate_manifest(&m).map_err(|e| e.to_string())?;
     Ok(m)
@@ -376,6 +389,9 @@ pub fn validate_manifest(m: &Manifest) -> Result<(), VerifyError> {
         || !lower_hex(&m.key_id, 16)
         || m.files.is_empty()
         || m.files.len() > MAX_FILES
+        || m.platform.len() > 32
+        || !m.platform.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        || m.notes.chars().count() > 2000
     {
         return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
     }
@@ -692,6 +708,9 @@ mod tests {
                 sha256: "0".repeat(64),
                 size: 1,
             }],
+            platform: String::new(),
+            expires: 0,
+            notes: String::new(),
         };
         let eb = manifest_bytes(&evil);
         let es = hex::encode(k.sign(&[SIG_DOMAIN, &eb].concat()).to_bytes());
