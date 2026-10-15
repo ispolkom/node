@@ -1149,10 +1149,11 @@ impl P2PTransport {
                             let mut peer = PeerInfo::new(embedded_node_id, &conn.peer_addr);
                             peer.touch();
                             transport_for_pump.peers.lock().await.insert(embedded_node_id, peer);
+                            // ответ открытым текстом с подписью: клиент проверит её и выведет тот же ключ. Он уходит ДО публикации маршрута:
+                            // иначе зашифрованный кадр фонового обмена мог обогнать его, а клиент ждёт grant первым
+                            let _ = conn.outgoing.send(encode_resume_ack_grant(&server_nonce, &grant_mac)).await;
                             transport_for_pump.ws_outgoing.lock().await
                                 .insert(embedded_node_id, conn.outgoing.clone());
-                            // ответ открытым текстом с подписью: клиент проверит её и выведет тот же ключ
-                            let _ = conn.outgoing.send(encode_resume_ack_grant(&server_nonce, &grant_mac)).await;
                             embedded_node_id
                         } else {
                             // ----- classical Hello flow -----
@@ -1210,8 +1211,7 @@ impl P2PTransport {
                             peer.verified_signing_pubkey = Some(hello.public_key);
                             peer.touch();
                             transport_for_pump.peers.lock().await.insert(hello.node_id, peer);
-                            transport_for_pump.ws_outgoing.lock().await
-                                .insert(hello.node_id, conn.outgoing.clone());
+                            // маршрут для общего трафика (gossip и т. п.) публикуется только ПОСЛЕ Hello-Ack: клиент ждёт его первым кадром
 
                             let my_node_id = transport_for_pump.identity.node_id();
                             let mut cid8 = [0u8; 8];
@@ -1250,6 +1250,8 @@ impl P2PTransport {
                                         eprintln!("[ws-server] failed to send Hello-Ack: {}", e);
                                         return;
                                     }
+                                    transport_for_pump.ws_outgoing.lock().await
+                                        .insert(hello.node_id, conn.outgoing.clone());
                                 }
                                 Err(e) => {
                                     eprintln!("[ws-server] Hello-Ack to_bytes: {}", e);
