@@ -917,6 +917,11 @@ pub fn pc_react_device(peer: &str, msg_hex: &str, emoji: &str) -> Result<(), Str
 /// Правка своего сообщения со страницы: в истории узла и у телефона (конверт правки с тем же номером).
 pub fn pc_edit_for_device(peer: &str, msg_id: &HashId, text: String) -> Result<(), String> {
     let st = STATE.get().cloned().ok_or("узел ещё не готов")?;
+    // служебный ключ подписи при запертой среде жив, а история личной переписки — нет: без этой проверки сообщение уходило бы
+    // телефону, и только потом запись в историю падала с ошибкой
+    if crate::closed_api::is_locked() {
+        return Err("закрытая среда заперта: разблокируйте её, чтобы писать".into());
+    }
     if crate::mobile_self::is_blocked_phone(peer) {
         return Err("устройство заблокировано".into());
     }
