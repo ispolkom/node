@@ -1175,11 +1175,26 @@ impl Store {
             }
             keep += 1;
         }
+        // последняя запись каждого участника сохраняется в нём самом до того, как строки исчезнут из журнала
+        let mut last: HashMap<String, u64> = HashMap::new();
+        for l in &lines {
+            let e = last.entry(l.from.clone()).or_insert(0);
+            *e = (*e).max(l.ts);
+        }
         let rest = &lines[lines.len() - keep..];
         if self.rewrite(gid, rest).is_ok() {
             if let Ok(g) = self.get_mut(gid) {
                 g.first_seq = rest.first().map(|l| l.seq).unwrap_or(g.next_seq);
-                g.trimmed_ms = now_ms();
+                for m in g.members.iter_mut() {
+                    if let Some(&ts) = last.get(&m.alias) {
+                        m.last_post_ms = m.last_post_ms.max(ts);
+                    }
+                }
+                // общая дата — только начало наблюдения для прежних участников без собственных сведений: одна, при первой обрезке;
+                // повторные обрезки не продлевают молчунам срок
+                if g.trimmed_ms == 0 {
+                    g.trimmed_ms = now_ms();
+                }
             }
         }
     }
@@ -3040,6 +3055,26 @@ mod tests {
             m.last_post_ms = 0;
         }
         assert_eq!(s.clean_inactive(now + 20 * day).unwrap(), 1);
+    }
+
+    /// Повторная обрезка журнала не продлевает срок молчуну: общая дата ставится один раз.
+    #[test]
+    fn repeated_trimming_does_not_keep_a_silent_member_alive() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        s.join(&gid, "bb", None, Some(&pubk())).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.joined_ms = now - 100 * day;
+        }
+        s.set_auto_clean(&gid, OWNER, 30).unwrap();
+        s.get_mut(&gid).unwrap().trimmed_ms = now - 50 * day; // первая обрезка была давно
+        s.trim(&gid);
+        assert_eq!(s.groups[&gid].trimmed_ms, now - 50 * day, "повторная обрезка дату не двигает");
+        assert_eq!(s.clean_inactive(now).unwrap(), 1, "молчун исключён, хотя журнал обрезается");
     }
 
     #[test]
