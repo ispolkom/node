@@ -562,6 +562,11 @@ fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str, card: &(String, S
     // 1) мой ключ группы опубликован на узле
     if !c.gstate(gid).pub_sent {
         let p = c.gstate(gid).pubk.clone();
+        // закрытая часть ключа должна лежать на диске раньше, чем публичная уйдёт на узел (иначе после перезапуска ключ новый,
+        // а опубликован старый — конверты не откроются)
+        if !c.save() {
+            return Err("не удалось сохранить закрытый ключ группы на диск".to_string());
+        }
         with_store(|st| st.set_pub(gid, dev, &p)).map_err(fail)?;
         c.gstate(gid).pub_sent = true;
         let _ = c.save();
@@ -617,7 +622,10 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
         }
     }
     c.gstate(gid).keys.insert(new_epoch, b64(&key));
-    let _ = c.save();
+    if !c.save() {
+        c.gstate(gid).keys.remove(&new_epoch); // не записали — не раздаём: ключ, которого нет на диске, не должен уйти участникам
+        return Err("не удалось сохранить ключ группы на диск".to_string());
+    }
     with_store(|st| st.put_keys(gid, dev, new_epoch, &boxes)).map_err(fail)?;
     Ok(())
 }
@@ -998,6 +1006,9 @@ pub fn join(gid: &str, code: Option<&str>, name: &str) -> Result<(), String> {
     let dev = pc_device()?;
     with_client(|c| {
         let p = c.gstate(gid).pubk.clone();
+        if !c.save() {
+            return Err("не удалось сохранить закрытый ключ группы на диск".to_string());
+        }
         with_store(|st| st.join(gid, &dev, code, Some(&p))).map_err(fail)?;
         let g = c.gstate(gid);
         g.pub_sent = true;
