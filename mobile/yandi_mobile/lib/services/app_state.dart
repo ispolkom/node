@@ -743,12 +743,10 @@ class AppState extends ChangeNotifier implements FilesHost {
     // Источник отправки — всегда зашифрованная копия в хранилище под номером передачи: открытая копия из выбора файла не остаётся,
     // а отправленный файл виден во вкладке «Файлы» и в чате.
     var source = path;
-    var created = false;
     if (!FileVault.isVaultPath(path)) {
       try {
         final vf = await vaultFiles();
         source = (await vf.importAs(path, offer.tid, name: name, mime: offer.mime)).path;
-        created = true;
       } catch (e) {
         try { await _api!.deleteTransfer(offer.tid); } catch (_) {}
         return 'Не удалось положить файл в защищённое хранилище: $e';
@@ -778,10 +776,8 @@ class AppState extends ChangeNotifier implements FilesHost {
       await StorageService.updateMessageStatus(msg.id, MessageStatus.delivered);
     } catch (e) {
       fileStates[offer.tid] = FileState.failed(e is TransferException ? e.message : '$e');
-      if (created) {
-        try { await (await vaultFiles()).deleteForever(source); } catch (_) {}
-        _outgoingPaths.remove(offer.tid);
-      }
+      // зашифрованная копия остаётся: сетевой сбой не должен уничтожать единственный экземпляр (например, голосового); она видна во
+      // вкладке «Файлы», откуда её можно отправить заново или удалить. Открытая копия из выбора файла затирается как обычно.
       final failed = msg.copyWith(status: MessageStatus.failed);
       _replaceMessage(peerId, msg.id, failed);
       await StorageService.updateMessageStatus(msg.id, MessageStatus.failed);
