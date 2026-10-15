@@ -5502,16 +5502,46 @@ async fn mobile_devices_handler() -> impl IntoResponse {
     resp
 }
 
+/// Забыть устройство. Если оно владеет группами, удаление уносит и их (журналы, файлы), поэтому нужен повторный ввод пароля узла,
+/// как при прямом удалении группы; устройство без групп забывается без пароля.
 async fn mobile_device_remove_handler(
+    State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
+    body: axum::body::Bytes,
+) -> Response {
+    let owned = crate::mobile_groups::owned_by(&id);
+    if !owned.is_empty() {
+        let password = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string));
+        let Some(password) = password else {
+            let names: Vec<String> = owned.iter().map(|(_, name, _)| name.clone()).collect();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"status": "error", "error": "password_required", "message": "устройство владеет группами; для удаления нужен пароль узла", "groups": names})),
+            )
+                .into_response();
+        };
+        if let Some(remaining) = state.auth_state.login_backoff_remaining() {
+            return (
+                StatusCode::TOO_MANY_REQUESTS,
+                Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
+            )
+                .into_response();
+        }
+        match crate::web::auth::verify_login(&password) {
+            Ok(true) => state.auth_state.record_login_success(),
+            Ok(false) => {
+                state.auth_state.record_login_failure();
+                return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response();
+            }
+            Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        }
+    }
     if crate::mobile_api::remove_device(&id) {
-        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"status": "error", "message": "нет такого устройства"})),
-        )
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response()
     }
 }
 

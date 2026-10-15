@@ -139,10 +139,28 @@ class _DevicesPanelState extends State<DevicesPanel> {
     clear();
     await widget.mutate(() async {
       if (widget.paired) {
-        await widget.api.request(
-          '/api/mobile/devices/${d['peer_id']}',
-          method: 'DELETE',
-        );
+        final path = '/api/mobile/devices/${d['peer_id']}';
+        try {
+          await widget.api.request(path, method: 'DELETE');
+        } on ApiFailure catch (e) {
+          // устройство владеет группами: их удаление требует повторного ввода пароля узла
+          if (e.status != 403) rethrow;
+          if (!mounted) return;
+          final value = await showDialog<List<String>>(
+            context: context,
+            builder: (_) => const GroupForm(
+              title: 'Устройство владеет группами. Они будут удалены',
+              labels: ['Пароль входа узла'],
+              secret: true,
+            ),
+          );
+          if (!active || value == null) return;
+          await widget.api.request(
+            path,
+            method: 'DELETE',
+            body: {'password': value[0]},
+          );
+        }
       } else {
         await widget.api.request(
           '/api/mobile/phone-action',

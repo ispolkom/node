@@ -713,7 +713,16 @@
         box.addEventListener('click', function (e) {
             var id = e.target && e.target.getAttribute && e.target.getAttribute('data-del');
             if (!id || !confirm('Забыть это устройство? Ему придётся сопрягаться заново.')) return;
-            fetch('/api/mobile/devices/' + encodeURIComponent(id), { method: 'DELETE' }).then(load);
+            var url = '/api/mobile/devices/' + encodeURIComponent(id);
+            fetch(url, { method: 'DELETE' }).then(function (r) {
+                if (r.status !== 403) return r;
+                // устройство владеет группами: их удаление требует пароль узла
+                return r.json().then(function (j) {
+                    var pw = prompt('Устройство владеет группами (' + ((j.groups || []).join(', ') || '…') + '). Они будут удалены вместе с ним. Введите пароль узла:');
+                    if (!pw) return r;
+                    return fetch(url, { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+                });
+            }).then(load);
         });
         load();
         setInterval(load, 5000);
