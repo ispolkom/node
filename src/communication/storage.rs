@@ -340,9 +340,47 @@ impl ChatStorage {
         out
     }
 
-    /// Дописать запись. Одной записью: оборванное питанием дописывание оставляет не больше одного неполного хвоста.
+    /// Длина файла без оборванного хвоста — только если хвост именно оборван (не хватает байт до конца записи или её заголовка).
+    /// Запись с неверной длиной в середине файла — не обрыв, её не трогаем (иначе срезали бы всё, что за ней).
+    fn torn_tail_start(raw: &[u8]) -> Option<usize> {
+        let mut at = Self::MAGIC.len();
+        while at < raw.len() {
+            let start = at;
+            if at + 4 > raw.len() {
+                return Some(start);
+            }
+            let len = u32::from_be_bytes(raw[at..at + 4].try_into().unwrap()) as usize;
+            at += 4;
+            if len > Self::MAX_RECORD {
+                return None;
+            }
+            if at + len > raw.len() {
+                return Some(start);
+            }
+            at += len;
+        }
+        None
+    }
+
+    /// Дописать запись. Одной записью: оборванное питанием дописывание оставляет не больше одного неполного хвоста; при первой
+    /// записи в файл за процесс такой хвост срезается — иначе новые записи легли бы за ним и читались бы как его продолжение.
     fn append_blob(path: &std::path::Path, blob: &[u8]) -> Result<()> {
         use std::io::Write;
+        static CHECKED: std::sync::Mutex<Option<std::collections::HashSet<std::path::PathBuf>>> = std::sync::Mutex::new(None);
+        let first = CHECKED
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .insert(path.to_path_buf());
+        if first {
+            if let Ok(raw) = std::fs::read(path) {
+                if raw.starts_with(Self::MAGIC) {
+                    if let Some(keep) = Self::torn_tail_start(&raw) {
+                        std::fs::OpenOptions::new().write(true).open(path)?.set_len(keep as u64)?;
+                    }
+                }
+            }
+        }
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
         let mut chunk = Vec::new();
         if file.metadata()?.len() == 0 {
@@ -1001,6 +1039,22 @@ mod closed_env_tests {
         // удаление «видимого» сообщения не должно потерять строку, которую этот ключ не открывает
         assert!(st.delete_message(&peer, &new.msg_id).is_err());
         assert_eq!(std::fs::read(&file).unwrap(), before);
+    }
+
+    #[test]
+    fn a_torn_tail_does_not_swallow_the_records_appended_after_it() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c.chat");
+        let mut raw = Vec::from(&ChatStorage::MAGIC[..]);
+        raw.extend_from_slice(&3u32.to_be_bytes());
+        raw.extend_from_slice(b"one");
+        raw.extend_from_slice(&100u32.to_be_bytes()); // оборванная запись: обещано 100 байт, записано 10
+        raw.extend_from_slice(&[7u8; 10]);
+        std::fs::write(&p, &raw).unwrap();
+        ChatStorage::append_blob(&p, b"two").unwrap();
+        ChatStorage::append_blob(&p, b"three").unwrap();
+        let blobs = ChatStorage::read_blobs(&p).unwrap();
+        assert_eq!(blobs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
     }
 
     #[test]
