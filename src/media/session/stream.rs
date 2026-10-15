@@ -160,10 +160,10 @@ impl MediaStream {
             .map_err(|e| format!("Encryption failed: {}", e))?;
         let mut result = nonce_bytes.to_vec();
         result.extend_from_slice(&ciphertext);
-        let counter = self.ratchet_counter.fetch_add(1, Ordering::Relaxed);
-        if counter % 100 == 0 && counter > 0 {
-            let _ = self.rotate_ratchet();
-        }
+        // Ротации ключа здесь нет: прежняя «каждые 100 пакетов» брала запись, пока читалась та же блокировка (взаимная блокировка), и
+        // меняла ключи сторон независимо, без согласования поколения (расхождение при несимметричном трафике). Слой не подключён к
+        // рабочим звонкам; до подключения ротацию нужно проектировать заново (поколение в заголовке пакета).
+        self.ratchet_counter.fetch_add(1, Ordering::Relaxed);
         Ok(result)
     }
 
@@ -182,18 +182,6 @@ impl MediaStream {
             .decrypt(nonce, ciphertext)
             .map_err(|e| format!("Decryption failed: {}", e))?;
         Ok(plaintext)
-    }
-
-    fn rotate_ratchet(&self) -> Result<(), String> {
-        let old_key_opt = self.media_encryption_key.read().unwrap();
-        let old_key = old_key_opt.as_ref().ok_or("No key to rotate")?;
-        let mut hasher = Sha256::new();
-        hasher.update(old_key);
-        let mut new_key = [0u8; 32];
-        new_key.copy_from_slice(&hasher.finalize());
-        *self.media_encryption_key.write().unwrap() = Some(new_key);
-        *self.media_decryption_key.write().unwrap() = Some(new_key);
-        Ok(())
     }
 
     pub fn is_encrypted(&self) -> bool {
@@ -296,6 +284,21 @@ mod tests {
         let alice_key = alice.establish_shared_secret(&bob_public).unwrap();
         let bob_key = bob.establish_shared_secret(&alice_public).unwrap();
         assert_eq!(alice_key, bob_key);
+    }
+
+    /// Больше сотни пакетов подряд: прежняя ротация ключа зависала на 101-м и расходила ключи сторон.
+    #[test]
+    fn more_than_a_hundred_packets_pass_both_ways_with_the_same_key() {
+        let alice = MediaStream::new(1, MediaType::Audio, "bob".to_string());
+        let bob = MediaStream::new(2, MediaType::Audio, "alice".to_string());
+        let (ap, bp) = (alice.generate_ephemeral_key().unwrap(), bob.generate_ephemeral_key().unwrap());
+        alice.establish_shared_secret(&bp).unwrap();
+        bob.establish_shared_secret(&ap).unwrap();
+        for i in 0..250u32 {
+            let msg = i.to_be_bytes();
+            let wire = alice.encrypt_media(&msg).unwrap();
+            assert_eq!(bob.decrypt_media(&wire).unwrap(), msg, "пакет {i}");
+        }
     }
 
     #[test]
