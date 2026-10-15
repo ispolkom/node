@@ -172,7 +172,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       return;
     }
     nodeError = null;
-    groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners());
+    groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), nodeKey: node.id);
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,

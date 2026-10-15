@@ -379,6 +379,24 @@ void main() {
     expect(owner.byId(gid)!.epoch, 1);
   });
 
+  test('переключение на другой узел не стирает группы прежнего узла: «известные группы» ведутся по узлам', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    await a.syncAndAnnounce();
+    await a.send(node.gid, GroupKind.text, {'t': 'привет'});
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull);
+    // телефон переключился на узел B, где этих групп нет (список пуст)
+    final b = GroupService(FakeNode('other').as('bob'), bobStore, nodeKey: 'B');
+    await b.sync();
+    expect(b.groups, isEmpty);
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история группы узла A на месте');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи группы узла A на месте');
+  });
+
   test('группа удалена на узле (или участника исключили): пропадает из списка, данные на телефоне стираются сами', () async {
     await owner.sync();
     await bobJoins();

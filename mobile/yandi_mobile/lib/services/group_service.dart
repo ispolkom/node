@@ -24,7 +24,13 @@ class GroupService {
   /// Вызывается, когда в группе появилось что-то новое (запись, состав, правила).
   final void Function(String gid)? onChanged;
 
-  GroupService(this.api, this.store, {this.onChanged});
+  /// Номер узла, с которым работает сервис: список «известных групп» ведётся отдельно для каждого узла. Иначе переключение на
+  /// другой узел (его список групп не содержит групп прежнего) выглядело бы как удаление групп и стирало их ключи и историю.
+  final String nodeKey;
+
+  GroupService(this.api, this.store, {this.onChanged, this.nodeKey = ''});
+
+  String get _knownKey => nodeKey.isEmpty ? 'grp_known' : 'grp_known_$nodeKey';
 
   List<GroupInfo> groups = const [];
   final Map<String, GroupRules> _rules = {};
@@ -498,13 +504,13 @@ class GroupService {
   Future<void> _trackGone(List<GroupInfo> list) async {
     final known = <String, String>{};
     try {
-      final raw = await store.read('grp_known');
+      final raw = await store.read(_knownKey);
       if (raw != null) { (jsonDecode(raw) as Map).forEach((k, v) => known['$k'] = '$v'); }
     } catch (_) {}
     final listed = {for (final g in list) g.id: g.name};
     var changed = false;
     listed.forEach((id, name) { if (known[id] != name) { known[id] = name; changed = true; } });
-    if (changed) await store.write('grp_known', jsonEncode(known));
+    if (changed) await store.write(_knownKey, jsonEncode(known));
     gone = [for (final e in known.entries) if (!listed.containsKey(e.key)) (e.key, e.value)];
     // Группы, которых на узле больше нет (владелец ушёл с узла), с телефона стираются сами: ключи, записи и файлы.
     // Предохранитель: пустой список при многих известных группах — скорее сбой, чем исчезновение всех сразу.
@@ -519,10 +525,10 @@ class GroupService {
   Future<void> forgetLocal(String gid) async {
     await store.forgetGroup(gid);
     try {
-      final raw = await store.read('grp_known');
+      final raw = await store.read(_knownKey);
       if (raw != null) {
         final m = (jsonDecode(raw) as Map)..remove(gid);
-        await store.write('grp_known', jsonEncode(m));
+        await store.write(_knownKey, jsonEncode(m));
       }
     } catch (_) {}
     gone = [for (final g in gone) if (g.$1 != gid) g];
