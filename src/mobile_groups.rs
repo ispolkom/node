@@ -545,6 +545,8 @@ impl Store {
     fn offsets(&mut self, gid: &str) -> &mut Vec<u64> {
         if !self.offsets.contains_key(gid) {
             let mut v = Vec::new();
+            let mut first_in_log: Option<u64> = None;
+            let mut last_in_log: Option<u64> = None;
             let path = self.log_path(gid);
             if let Ok(f) = std::fs::File::open(&path) {
                 let mut pos = 0u64;
@@ -561,14 +563,26 @@ impl Store {
                         }
                         break;
                     }
+                    if let Ok(l) = serde_json::from_slice::<JournalLine>(&line) {
+                        first_in_log.get_or_insert(l.seq);
+                        last_in_log = Some(l.seq);
+                    }
                     v.push(pos);
                     pos += n as u64;
                     line.clear();
                 }
             }
             // номер следующей записи берём из журнала: описание могло не успеть сохраниться после дописывания
+            // и первый номер — тоже из журнала: сбой мог случиться между обрезкой журнала и записью описания (тогда в индексе
+            // прежний first_seq, а в файле уже начало с середины), и тогда номера записей съехали бы
             if let Some(g) = self.groups.get_mut(gid) {
+                if let Some(first) = first_in_log {
+                    g.first_seq = first;
+                }
                 g.next_seq = g.first_seq + v.len() as u64;
+                if let Some(last) = last_in_log {
+                    g.next_seq = g.next_seq.max(last + 1);
+                }
             }
             self.offsets.insert(gid.to_string(), v);
         }
@@ -2835,6 +2849,25 @@ mod tests {
             s.pull(&gid, OWNER, seq - 1, 5).unwrap()["entries"][0]["payload_b64"],
             b64(b"tail")
         );
+    }
+
+    #[test]
+    fn a_crash_between_trimming_the_log_and_saving_the_index_keeps_the_numbers() {
+        let (_d, mut s) = store();
+        let gid = s.create("G", "", Kind::Invite, OWNER, &[]).unwrap();
+        for i in 0..5 {
+            s.append(&gid, OWNER, 0, &b64(format!("m{i}").as_bytes())).unwrap();
+        }
+        // журнал уже обрезан до записей 3..5, а описание группы (first_seq = 1) сохранить не успели
+        let lines = s.read_lines(&gid);
+        assert_eq!(lines.len(), 5);
+        s.rewrite(&gid, &lines[2..]).unwrap();
+        let next = s.append(&gid, OWNER, 0, &b64(b"after")).unwrap();
+        assert_eq!(next, 6, "новая запись не получает повторный номер");
+        let p = s.pull(&gid, OWNER, 2, 10).unwrap();
+        assert_eq!(p["first_seq"].as_u64().unwrap(), 3);
+        let seqs: Vec<u64> = p["entries"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, vec![3, 4, 5, 6]);
     }
 
     #[test]
