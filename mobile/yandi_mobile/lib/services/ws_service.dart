@@ -344,7 +344,8 @@ class WsService {
 
   /// Единственный вход для входящих блобов (сокет и почтовый ящик): только E2E-конверт текущего формата, с общим окном повторов.
   /// null — не E2E (открытый текст, старый формат 0xE2), не расшифровалось или повтор: такое пользователю не показываем.
-  Future<String?> decryptIncoming(List<int> payload, {required String fromPeerId, int kind = 1, void Function()? onDuplicate}) async {
+  Future<String?> decryptIncoming(List<int> payload, {required String fromPeerId, int kind = 1, void Function()? onDuplicate,
+      Future<bool> Function(String id, int expiresMs)? claimOverride}) async {
     try {
     if (!E2ECrypto.isEncrypted(payload)) return null;
     final bundle = await _getPeerBundle?.call(fromPeerId);
@@ -355,7 +356,7 @@ class WsService {
       Uint8List.fromList(payload),
       (theirPub) => _identity.ecdh(theirPub),
       from: fromPeerId, to: self, kind: kind, senderEd: bundle.ed25519,
-      claimReplay: ledger.claim,
+      claimReplay: claimOverride ?? ledger.claim,
       onDuplicate: onDuplicate,
     );
     } catch (_) { return null; }

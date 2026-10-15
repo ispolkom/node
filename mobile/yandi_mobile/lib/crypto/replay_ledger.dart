@@ -44,6 +44,26 @@ class ReplayLedger {
     return result.future;
   }
 
+  /// Видели ли уже этот номер (без записи). Нужен, чтобы занимать номер только после того, как письмо долговечно обработано
+  /// (сохранено): иначе сбой сохранения терял бы сообщение — повтор отвергался бы как «уже виденное».
+  Future<bool> seen(String id, {int? nowMs}) {
+    final result = Completer<bool>();
+    _tail = _tail.then((_) async {
+      try {
+        final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+        final Map<String, dynamic> m = await file.exists()
+            ? jsonDecode(open != null ? await open!(await file.readAsString()) : await file.readAsString()) as Map<String, dynamic>
+            : (open != null ? jsonDecode(await open!('')) as Map<String, dynamic> : {});
+        if (m.values.any((v) => v is! int)) throw StateError('Corrupt replay ledger');
+        final exp = m[id];
+        result.complete(exp is int && exp >= now);
+      } catch (e, st) {
+        result.completeError(e, st);
+      }
+    });
+    return result.future;
+  }
+
   Future<bool> claim(String id, int expiresMs, {int? nowMs}) {
     final result = Completer<bool>();
     _tail = _tail.then((_) async {

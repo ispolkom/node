@@ -334,7 +334,21 @@ class AppState extends ChangeNotifier implements FilesHost {
         // Как и в сокете: только E2E-конверт, общее окно повторов. Открытый текст, старый формат, подделку или повтор (то же
         // сообщение уже пришло вживую) не показываем, но подтверждаем, чтобы узел не присылал его снова.
         var duplicate = false;
-        final text = await ws.decryptIncoming(payloadBytes,fromPeerId:fromPeerId,onDuplicate:()=>duplicate=true);
+        // номер письма занимается ПОСЛЕ сохранения: здесь только проверка «не виденное» и запоминание номера
+        String? pendingReplayId;
+        int pendingReplayExp = 0;
+        final ledger = StorageService.replayLedger;
+        final text = await ws.decryptIncoming(
+          payloadBytes,
+          fromPeerId: fromPeerId,
+          onDuplicate: () => duplicate = true,
+          claimOverride: ledger == null ? null : (rid, exp) async {
+            if (await ledger.seen(rid)) return false;
+            pendingReplayId = rid;
+            pendingReplayExp = exp;
+            return true;
+          },
+        );
         if (text == null) {
           // Only a verified persisted replay may be ACKed. Missing keys, offline
           // info or disk errors must not silently delete valid queued mail.
@@ -342,9 +356,20 @@ class AppState extends ChangeNotifier implements FilesHost {
           continue;
         }
 
-        if (isBlocked(fromPeerId)) { ackIds.add(id); continue; }   // чёрный список
+        // фиксация номера письма после обработки; не записалась — письмо остаётся на узле и придёт снова (сохранение идемпотентно)
+        Future<bool> commitReplay() async {
+          final rid = pendingReplayId;
+          if (rid == null || ledger == null) return true;
+          try {
+            await ledger.claim(rid, pendingReplayExp);
+            return true;
+          } catch (_) {
+            return false;
+          }
+        }
+        if (isBlocked(fromPeerId)) { if (await commitReplay()) ackIds.add(id); continue; }   // чёрный список
         final res = _classifyIncoming(fromPeerId, text);
-        if (res == null) { ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
+        if (res == null) { if (await commitReplay()) ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
         final showText = res.$1;
         final remoteId = res.$2;
         final msg = ChatMessage(
@@ -362,6 +387,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         await StorageService.saveMessage(msg);
         if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
         if (activeChatPeerId != fromPeerId) _bumpUnread(fromPeerId);
+        if (!await commitReplay()) continue;   // сохранено, но номер не занят: подтверждение — в следующий проход
         if (remoteId != null) _sendDeliveredReceipt(fromPeerId, remoteId);
         ackIds.add(id);
       }

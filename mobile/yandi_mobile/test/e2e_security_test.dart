@@ -144,4 +144,14 @@ void main() {
     await expectLater(trust.accept('peer', List.filled(32, 1)),
         throwsA(isA<FileSystemException>()));
   });
+
+  test('replay ledger: «seen» reads without writing; the number is taken only by claim', () async {
+    final ledger = ReplayLedger(File('${dir.path}/replay.json'));
+    final exp = DateTime.now().millisecondsSinceEpoch + 60000;
+    expect(await ledger.seen('aa'), isFalse);
+    expect(await ledger.seen('aa'), isFalse, reason: 'проверка ничего не занимает');
+    expect(await ledger.claim('aa', exp), isTrue);
+    expect(await ledger.seen('aa'), isTrue);
+    expect(await ledger.claim('aa', exp), isFalse);
+  });
 }
