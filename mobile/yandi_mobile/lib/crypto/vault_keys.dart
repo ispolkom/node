@@ -220,6 +220,7 @@ class VaultKeys {
       dk = await _unwrap(base64.decode(pw['wrap'] as String), kek, 'pw');
     }
     if (dk == null) throw VaultWrongSecret(failures);
+    await _adoptGeneration(b, f);
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -242,6 +243,7 @@ class VaultKeys {
     final kek = await _kekPhrase(phrase, base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
     final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
     if (dk == null) throw VaultWrongSecret(failures);
+    await _adoptGeneration(b, f);
     try {
       beforeCommit?.call();
       await _setPassword(b, f, dk, newPassword, beforeCommit: beforeCommit);
@@ -348,6 +350,13 @@ class VaultKeys {
     final fg = (f['gen'] as int?) ?? 0;
     final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
     if (sg != null && fg < sg) throw VaultCorrupt('файл ключей старее текущего: возвращена прежняя копия');
+  }
+
+  /// Поколение файла запоминается только после того, как замок в нём реально открылся: изменённый, но не проходящий проверку файл
+  /// не может поднять метку и сделать исправную копию «устаревшей».
+  static Future<void> _adoptGeneration(VaultBackend b, Map<String, dynamic> f) async {
+    final fg = (f['gen'] as int?) ?? 0;
+    final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
     if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
   }
 

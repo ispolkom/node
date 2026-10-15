@@ -228,4 +228,19 @@ void main() {
     expect(be.secure['vault_gen'], '0');
     expect(be.secure['vault_cnt'], '1');
   });
+
+  test('изменённый файл с завышенным поколением не поднимает метку: исправная копия после этого открывается', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final good = be.blob!;
+    final m = jsonDecode(good) as Map<String, dynamic>;
+    m['gen'] = 50;
+    (m['pw'] as Map<String, dynamic>)['wrap'] = base64.encode(List.filled(60, 1));   // замок не раскроется
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultWrongSecret>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята по файлу, который не открылся');
+    be.blob = good;
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue, reason: 'исходная исправная копия не стала «устаревшей»');
+  });
 }
