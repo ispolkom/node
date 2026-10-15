@@ -62,6 +62,7 @@ pub mod profile_sync;
 pub mod chat_reactions;
 pub mod mobile_self;
 pub mod mobile_tls;
+#[cfg(unix)]
 pub mod node_vault;
 pub mod netlayer;
 pub mod network_offers;
