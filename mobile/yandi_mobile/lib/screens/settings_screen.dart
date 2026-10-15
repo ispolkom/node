@@ -210,7 +210,7 @@ class SettingsScreen extends StatelessWidget {
             leading: const Icon(Icons.lock_outline, color: AppTheme.textSecondary),
             title: const Text('Заблокировать сейчас', style: TextStyle(color: AppTheme.text)),
             subtitle: const Text('Иначе приложение блокируется само через минуту после выхода из него.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-            onTap: () => VaultLockObserver.instance?.lockNow(),
+            onTap: () => VaultLockObserver.instance?.lockNow(manual: true),
           ),
           ListTile(
             tileColor: AppTheme.surface,

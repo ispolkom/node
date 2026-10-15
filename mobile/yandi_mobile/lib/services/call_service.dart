@@ -54,7 +54,7 @@ class CallService extends ChangeNotifier {
   MediaStream? _local;
   final List<RTCIceCandidate> _pendingIce = [];
   bool _remoteSet = false;
-  Timer? _ringTimer, _lostTimer, _endTimer;
+  Timer? _ringTimer, _lostTimer, _endTimer, _connectTimer;
   final AudioPlayer _ring = AudioPlayer();
   bool _ringing = false;
 
@@ -122,7 +122,7 @@ class CallService extends ChangeNotifier {
       case 'accept':
         if (_mine(from, s) && !incoming && phase == CallPhase.calling) {
           _stopRing(); _ringTimer?.cancel();
-          phase = CallPhase.connecting; notifyListeners();
+          phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
           await _startMedia(offerer: true);
         }
       case 'offer':
@@ -148,12 +148,24 @@ class CallService extends ChangeNotifier {
     if (id == peerId && phase == CallPhase.calling) _finish('Абонент не в сети', log: true);
   }
 
+  /// Срок установления соединения: собеседник мог принять звонок и не прислать SDP — без срока звонок вечно «соединяется» и держит
+  /// приложение от блокировки.
+  void _armConnectDeadline() {
+    _connectTimer?.cancel();
+    _connectTimer = Timer(const Duration(seconds: 45), () {
+      if (phase == CallPhase.connecting) {
+        unawaited(_signal('hangup'));
+        _finish('Не удалось соединиться', log: true);
+      }
+    });
+  }
+
   bool _mine(String from, CallSignal s) => from == peerId && s.cid == cid && phase != CallPhase.idle && phase != CallPhase.ended;
 
   Future<void> accept() async {
     if (phase != CallPhase.ringing || !incoming) return;
     _stopRing(); _ringTimer?.cancel(); onIncomingCancel();
-    phase = CallPhase.connecting; notifyListeners();
+    phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
     final ok = await sendSignal(peerId!, CallSignal.now('accept', cid!, video: video).encode());
     if (!ok) { _finish('Нет связи с узлом', log: false); return; }
     await _startMedia(offerer: false);
@@ -302,6 +314,7 @@ class CallService extends ChangeNotifier {
     if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _lostTimer?.cancel();
       if (phase != CallPhase.active) {
+        _connectTimer?.cancel();
         phase = CallPhase.active; startedAt = DateTime.now();
         notifyListeners();
       }
@@ -344,7 +357,7 @@ class CallService extends ChangeNotifier {
 
   void _finish(String reason, {required bool log}) {
     if (phase == CallPhase.idle || phase == CallPhase.ended) return;
-    _ringTimer?.cancel(); _lostTimer?.cancel(); _stopRing(); onIncomingCancel();
+    _ringTimer?.cancel(); _lostTimer?.cancel(); _connectTimer?.cancel(); _stopRing(); onIncomingCancel();
     final wasActive = phase == CallPhase.active;
     final dur = elapsed;
     final p = peerId, out = !incoming, v = video;
