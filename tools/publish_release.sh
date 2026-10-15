@@ -50,7 +50,7 @@ if [ "$NODE_ONLY" = 1 ]; then
 else
   [ -x "$BUNDLE_BIN" ] && [ -f "$BUNDLE_APP" ] || { echo "нет собранной оболочки $BUNDLE_BIN: соберите (--build) или объявите выпуск только узла ключом --node-only"; exit 1; }
   # бандл должен быть новее исходников оболочки: иначе под новой версией подписалась бы старая сборка
-  STALE=$(find desktop/yandi_desktop/lib desktop/yandi_desktop/linux desktop/yandi_desktop/pubspec.yaml -type f -newer "$BUNDLE_APP" 2>/dev/null | grep -v '/ephemeral/' | head -3)
+  STALE=$(find desktop/yandi_desktop/lib desktop/yandi_desktop/linux desktop/yandi_desktop/pubspec.yaml -type f -newer "$BUNDLE_APP" 2>/dev/null | { grep -v '/ephemeral/' || true; } | head -3)
   [ -z "$STALE" ] || { echo "оболочка пересобрана не после правок исходников (например: $STALE): выполните --build"; exit 1; }
   bash tools/build_desktop_deb.sh >/dev/null
   DDEB="dist/yandi-desktop_${VERSION//+/-}_$(dpkg --print-architecture).deb"
