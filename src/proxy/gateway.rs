@@ -288,30 +288,15 @@ impl HttpProxyGateway {
             }
         };
 
-        // Send "200 Connection Established" back to client
-        let proxy_response = ProxyResponse {
-            request_id: request.request_id,
-            status: 200,
-            headers: vec![
-                ("Connection".to_string(), "keep-alive".to_string()),
-            ],
-            body: Vec::new(),
-        };
-
-        self.send_response(source_node, proxy_response).await?;
-        info!("📤 Sent 200 Connection Established");
-
-        // Start bi-directional forwarding
+        // Приёмник данных клиента (writer) публикуется ДО подтверждения: клиент начинает передачу сразу после 200, и первые байты
+        // не должны находить пустую таблицу
         let tunnel_id = request.request_id;
         let transport = self.transport.clone();
         let source_node_clone = source_node;
 
-        info!("🚇 Starting tunnel #{} bi-directional forwarding", tunnel_id);
-
         // Split TCP stream
         let (mut read_half, write_half) = target_stream.into_split();
 
-        // Store write_half in active_tunnels
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
@@ -323,6 +308,25 @@ impl HttpProxyGateway {
             drop(slot); // бронь снята: место теперь занято самим туннелем
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
+
+        // Send "200 Connection Established" back to client
+        let proxy_response = ProxyResponse {
+            request_id: request.request_id,
+            status: 200,
+            headers: vec![
+                ("Connection".to_string(), "keep-alive".to_string()),
+            ],
+            body: Vec::new(),
+        };
+
+        if let Err(e) = self.send_response(source_node, proxy_response).await {
+            // ответ не ушёл: туннель никому не нужен, writer снимается (иначе занимал бы место до простоя)
+            self.active_tunnels.lock().await.remove(&(source_node, tunnel_id));
+            return Err(e);
+        }
+        info!("📤 Sent 200 Connection Established");
+
+        info!("🚇 Starting tunnel #{} bi-directional forwarding", tunnel_id);
 
         let active_tunnels_for_reader = self.active_tunnels.clone();
 

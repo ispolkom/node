@@ -43,6 +43,8 @@ pub struct Socks5ProxyServer {
     pending_requests: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
     /// Active tunnels: tunnel_id -> bounded writer queue
     active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// туннели в процессе установки: ранние данные выхода ждут публикации приёмника (см. `proxy::early_tunnel`)
+    establishing: Arc<crate::proxy::early_tunnel::EarlyTunnels>,
     /// Какому выходу отправлен каждый запрос: ответы и данные принимаются только от него
     expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     /// Channels for responses and tunnel data
@@ -352,6 +354,7 @@ impl Socks5ProxyServer {
             next_request_id: Arc::new(RwLock::new(1)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            establishing: crate::proxy::early_tunnel::EarlyTunnels::new(),
             expected: Arc::new(crate::proxy::expected_peers::ExpectedPeers::new()),
             response_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
@@ -423,8 +426,9 @@ impl Socks5ProxyServer {
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
         let expected_tunnels = self.expected.clone();
+        let establishing_clone = self.establishing.clone();
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, expected_tunnels).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, expected_tunnels, establishing_clone).await;
         });
 
         // Accept incoming connections
@@ -460,6 +464,7 @@ impl Socks5ProxyServer {
             next_request_id: self.next_request_id.clone(),
             pending_requests: self.pending_requests.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            establishing: self.establishing.clone(),
             expected: self.expected.clone(),
             response_rx: self.response_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
@@ -504,6 +509,7 @@ impl Socks5ProxyServer {
         active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
         expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
+        establishing: Arc<crate::proxy::early_tunnel::EarlyTunnels>,
     ) {
         let rx = tunnel_rx.lock().await.take();
         if let Some(mut rx) = rx {
@@ -520,6 +526,9 @@ impl Socks5ProxyServer {
                         warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
                         tunnels.remove(&key); // abort writer and wake paired reader
                     }
+                } else {
+                    // туннель ещё устанавливается: данные ждут публикации приёмника
+                    establishing.offer(key, tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset);
                 }
             }
         }
@@ -698,10 +707,12 @@ impl Socks5ProxyServer {
         {
             let mut pending = self.pending_requests.lock().await;
             let tunnels = self.active_tunnels.lock().await;
-            self.expected.retain_live(|id| pending.contains_key(&id) || tunnels.contains_key(&id));
+            self.expected.retain_live(|id| pending.contains_key(&id) || tunnels.contains_key(&id) || self.establishing.is_establishing(id));
             self.expected.expect(request_id, exit_node);
             pending.insert(request_id, tx);
         }
+        // отметка «устанавливается» живёт до публикации приёмника (снимается при любом выходе)
+        let _establishing = self.establishing.begin(request_id);
 
         // 7. Сериализуем и отправляем через YTP
         let request_bytes = serde_json::to_vec(&proxy_request)
@@ -750,6 +761,12 @@ impl Socks5ProxyServer {
             let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::SOCKS5, exit_node, request_id);
             let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(client_write, self.active_tunnels.clone(), request_id, Some(credit));
             writer_closed = writer.subscribe();
+            // ранние данные выхода передаются приёмнику по порядку
+            for (data, close, offset) in self.establishing.take(request_id) {
+                if writer.enqueue_offset(data, close, offset).is_err() {
+                    break;
+                }
+            }
             tunnels.insert(request_id, writer);
         }
 

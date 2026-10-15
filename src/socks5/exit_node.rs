@@ -178,21 +178,18 @@ impl ExitNodeHandler {
             }
         };
 
-        // Send success response
-        let proxy_response = Socks5ProxyResponse::success(request.request_id);
-        self.send_response(source_node, proxy_response).await?;
-
-        info!("✅ SOCKS5 CONNECT established for tunnel #{}", request.request_id);
-
         // Split TCP stream
         let (mut target_read, target_write) = target_stream.into_split();
 
-        // Store write half in active_tunnels
+        // Приёмник данных клиента публикуется ДО подтверждения: клиент начинает передачу сразу после успеха, и первые байты не
+        // должны находить пустую таблицу
         let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
             // повторная проверка под замком: за время соединения мог прийти параллельный запрос
             if !tunnel_admissible(&tunnels, &source_node, request.request_id) {
+                drop(tunnels);
+                let _ = self.send_response(source_node, Socks5ProxyResponse::error(request.request_id, 0x01)).await;
                 return Err(anyhow!("tunnel limit reached"));
             }
             // соединения разных узлов — раздельно (номер туннеля выбирает сам узел)
@@ -201,6 +198,15 @@ impl ExitNodeHandler {
             writer_closed = writer.subscribe();
             tunnels.insert((source_node, request.request_id), writer);
         }
+
+        // Send success response
+        let proxy_response = Socks5ProxyResponse::success(request.request_id);
+        if let Err(e) = self.send_response(source_node, proxy_response).await {
+            self.active_tunnels.lock().await.remove(&(source_node, request.request_id));
+            return Err(e.into());
+        }
+
+        info!("✅ SOCKS5 CONNECT established for tunnel #{}", request.request_id);
 
         // Start reading from target and sending to client
         let station_clone = self.station.clone();

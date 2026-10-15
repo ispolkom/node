@@ -76,6 +76,7 @@
 //! ```
 
 pub mod client;
+pub mod early_tunnel;
 pub mod expected_peers;
 pub mod gateway;
 pub mod url_mapper;

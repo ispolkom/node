@@ -53,6 +53,8 @@ pub struct HttpProxyClient {
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
     /// Active tunnels: tunnel_id -> bounded writer queue
     active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// Туннели в процессе установки: ранние данные шлюза ждут здесь публикации приёмника (см. `early_tunnel`)
+    establishing: Arc<super::early_tunnel::EarlyTunnels>,
     pub station: Arc<Station>,
 }
 
@@ -73,6 +75,7 @@ impl HttpProxyClient {
             response_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            establishing: super::early_tunnel::EarlyTunnels::new(),
             station: Arc::new(station),
         }
     }
@@ -120,8 +123,9 @@ impl HttpProxyClient {
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
         let gateway_for_tunnels = self.gateway_node;
+        let establishing_clone = self.establishing.clone();
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, gateway_for_tunnels).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, gateway_for_tunnels, establishing_clone).await;
         });
 
         // Accept incoming connections
@@ -164,6 +168,7 @@ impl HttpProxyClient {
             response_rx: self.response_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            establishing: self.establishing.clone(),
             station: self.station.clone(),
         }
     }
@@ -446,6 +451,9 @@ impl HttpProxyClient {
             pending.insert(request_id, tx);
         }
 
+        // отметка до отправки: ответ шлюза и его первые данные могут прийти раньше, чем будет опубликован приёмник
+        let _establishing = self.establishing.begin(request_id);
+
         debug!("📤 Sending CONNECT request via YTP to gateway");
 
         // Now send the request (response handler is already registered)
@@ -497,6 +505,12 @@ impl HttpProxyClient {
             let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::HTTP_CONNECT, gateway_node, tunnel_id);
             let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), tunnel_id, Some(credit));
             writer_closed = writer.subscribe();
+            // данные, пришедшие до публикации, передаются приёмнику по порядку (снимаем отметку под замком таблицы)
+            for (data, close, offset) in self.establishing.take(tunnel_id) {
+                if writer.enqueue_offset(data, close, offset).is_err() {
+                    break;
+                }
+            }
             tunnels.insert(tunnel_id, writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
@@ -611,6 +625,7 @@ impl HttpProxyClient {
         active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
         gateway: HashId,
+        establishing: Arc<super::early_tunnel::EarlyTunnels>,
     ) {
         let rx = tunnel_rx.lock().await.take();
         if let Some(mut rx) = rx {
@@ -627,6 +642,10 @@ impl HttpProxyClient {
                         warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
                         tunnels.remove(&key); // abort writer and wake paired reader
                     }
+                } else {
+                    // туннель ещё устанавливается: данные ждут публикации приёмника (проверка — под замком таблицы, как и
+                    // публикация, поэтому между ними кусок не потеряется)
+                    establishing.offer(key, tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset);
                 }
             }
         }
@@ -723,5 +742,30 @@ mod request_reading_tests {
         assert_eq!(got, all);
         let e = HttpProxyClient::header_end(&got).unwrap();
         assert_eq!(&got[e..], b"hello world");
+    }
+}
+
+#[cfg(test)]
+mod early_tunnel_data_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn data_that_arrives_while_a_tunnel_is_establishing_is_kept_and_unknown_tunnels_are_dropped() {
+        let gateway = HashId([9u8; 32]);
+        let active: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>> = Arc::new(Mutex::new(HashMap::new()));
+        let establishing = super::super::early_tunnel::EarlyTunnels::new();
+        let _g = establishing.begin(5);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let rx = Arc::new(Mutex::new(Some(rx)));
+        tokio::spawn(HttpProxyClient::handle_tunnel_data(active, rx, gateway, establishing.clone()));
+        for off in 0..3u64 {
+            tx.send((gateway, ProxyTunnelData { tunnel_id: 5, data: vec![off as u8; 10], close: false, byte_offset: off * 10 })).await.unwrap();
+        }
+        tx.send((gateway, ProxyTunnelData { tunnel_id: 6, data: vec![1; 10], close: false, byte_offset: 0 })).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!establishing.is_establishing(6), "неизвестный туннель ничего не занимает");
+        let got = establishing.take(5);
+        assert_eq!(got.len(), 3, "три куска ждали публикации приёмника");
+        assert_eq!(got[2].2, 20, "порядок сохранён");
     }
 }
