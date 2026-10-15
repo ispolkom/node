@@ -641,7 +641,8 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     // Выбор, удаление вытесняемого и добавление нового — одним действием под замком списка (параллельные сопряжения не дадут 17);
     // остальное «забывание» (группы, почта, сокеты) — после, вне замка
     let mut evicted: Option<String> = None;
-    with_devices(|d| {
+    let before = with_devices(|d| d.clone());
+    let ((), saved) = devices_apply(|d| {
         if d.len() >= MAX_DEVICES {
             if let Some(i) = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
                 evicted = Some(d.remove(i).peer_id());
@@ -665,6 +666,12 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             role,
         });
     });
+    if !saved {
+        // сопряжение подтверждается только после записи списка: иначе токен не пережил бы перезапуск, а вытесненное устройство
+        // осталось бы в списке уже без своих групп
+        devices_apply(|d| *d = before);
+        return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "не удалось сохранить сопряжение; попробуйте ещё раз"}))).into_response();
+    }
     if let Some(peer) = evicted {
         after_forget(peer);
     }
@@ -2394,6 +2401,25 @@ mod hardening_tests {
         assert!(!saved, "сбой записи виден вызывающему");
         std::fs::remove_dir_all(&p).unwrap();
         with_mail(|l| l.clear());
+    }
+
+    #[tokio::test]
+    async fn a_pairing_that_cannot_be_saved_is_refused_and_leaves_no_trace() {
+        let p = devices_path();
+        let before = with_devices(|d| d.len());
+        let code = issue_pairing_code();
+        let _ = std::fs::remove_file(&p);
+        std::fs::create_dir_all(&p).unwrap(); // записать список невозможно
+        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into() })).await;
+        assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        assert_eq!(with_devices(|d| d.len()), before, "устройство не осталось в памяти");
+        assert!(with_devices(|d| d.iter().all(|x| x.name != "тест-сохранения")));
+        std::fs::remove_dir_all(&p).unwrap();
+        // исправно записываемое сопряжение проходит
+        let code = issue_pairing_code();
+        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into() })).await;
+        assert_eq!(r.status(), StatusCode::OK);
+        with_devices(|d| d.retain(|x| x.name != "тест-сохранения"));
     }
 
     #[test]
