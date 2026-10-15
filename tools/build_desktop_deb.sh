@@ -17,7 +17,7 @@ ICON=desktop/yandi_desktop/linux/packaging/icon_logo.png
 VERSION=$(grep -ao 'YANDI-VERSION-MARK:[0-9]\+\.[0-9]\+\.[0-9]\++g[0-9]\+' target/release/yandi | head -1 | cut -d: -f2)
 [ -n "$VERSION" ] || { echo "в target/release/yandi нет метки версии: cargo build --release"; exit 1; }
 ARCH=$(dpkg --print-architecture)
-PKG="yandi-desktop_${VERSION}_${ARCH}"
+PKG="yandi-desktop_${VERSION//+/-}_${ARCH}"   # имя файла без «+»; версия внутри пакета прежняя
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 R="$W/$PKG"
 install -d "$R/DEBIAN" "$R/opt/yandi" "$R/usr/bin" "$R/usr/share/applications" "$R/usr/share/doc/yandi-desktop"

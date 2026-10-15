@@ -13,7 +13,8 @@ for f in yandi yandi-keys; do [ -x "$BIN/$f" ] || { echo "нет $BIN/$f: сна
 VERSION=$(grep -ao 'YANDI-VERSION-MARK:[0-9]\+\.[0-9]\+\.[0-9]\++g[0-9]\+' "$BIN/yandi" | head -1 | cut -d: -f2)
 [ -n "$VERSION" ] || { echo "в бинаре нет метки версии: пересоберите cargo build --release"; exit 1; }
 ARCH=$(dpkg --print-architecture)
-PKG="yandi-node_${VERSION}_${ARCH}"
+# имя файла без «+» (панели хостингов ломаются на таком имени); версия внутри пакета прежняя
+PKG="yandi-node_${VERSION//+/-}_${ARCH}"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 R="$W/$PKG"

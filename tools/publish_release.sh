@@ -41,7 +41,7 @@ VERSION=$(dpkg-deb --field "$DEB" Version)
 DDEB=""; DNAME=""
 if [ -x desktop/yandi_desktop/build/linux/x64/release/bundle/yandi_desktop ]; then
   bash tools/build_desktop_deb.sh >/dev/null
-  DDEB="dist/yandi-desktop_${VERSION}_$(dpkg --print-architecture).deb"
+  DDEB="dist/yandi-desktop_${VERSION//+/-}_$(dpkg --print-architecture).deb"
   [ -f "$DDEB" ] || { echo "не собрался $DDEB"; exit 1; }
   DNAME=$(basename "$DDEB")
 fi
