@@ -236,7 +236,7 @@ impl HttpProxyClient {
             url: target_url.clone(),
             method,
             headers,
-            body: Vec::new(),
+            body: Self::header_end(&request_data).map(|e| request_data[e..].to_vec()).unwrap_or_default(),
         };
 
         // Serialize and send via YTP
@@ -277,37 +277,57 @@ impl HttpProxyClient {
         Ok(())
     }
 
-    /// Read HTTP request from stream
+    /// Границы тела запроса: сколько байт занимает заголовок вместе с пустой строкой.
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    }
+
+    /// Заявленная длина тела (`Content-Length`) в заголовке запроса.
+    fn content_length(head: &[u8]) -> usize {
+        String::from_utf8_lossy(head)
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Read HTTP request from stream: заголовок целиком (граница ищется во всём прочитанном, а не только в последних четырёх
+    /// байтах) и тело по `Content-Length` (не больше MAX_REQUEST_BODY). Тело без Content-Length (chunked) не поддерживается.
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
+        const MAX_HEAD: usize = 64 * 1024;
+        const MAX_REQUEST_BODY: usize = 1 << 20;
 
-        let mut buffer = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for HTTP requests
-        let mut total_read = 0;
+        let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut chunk = [0u8; 16 * 1024];
+        let mut want: Option<usize> = None; // сколько всего байт нужно (заголовок + тело)
 
         loop {
-            let n = stream.read(&mut buffer[total_read..]).await
-                .context("Failed to read from socket")?;
-
-            if n == 0 {
-                break;
-            }
-
-            total_read += n;
-
-            // Check if we have complete headers (double CRLF)
-            if total_read >= 4 {
-                let window = &buffer[total_read.saturating_sub(4)..total_read];
-                if window == b"\r\n\r\n" {
+            if let Some(w) = want {
+                if buffer.len() >= w {
                     break;
                 }
             }
-
-            if total_read >= buffer.len() {
+            let n = stream.read(&mut chunk).await.context("Failed to read from socket")?;
+            if n == 0 {
                 break;
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if want.is_none() {
+                if let Some(end) = Self::header_end(&buffer) {
+                    let len = Self::content_length(&buffer[..end]);
+                    if len > MAX_REQUEST_BODY {
+                        return Err(anyhow::anyhow!("request body too large"));
+                    }
+                    want = Some(end + len);
+                } else if buffer.len() > MAX_HEAD {
+                    return Err(anyhow::anyhow!("request header too large"));
+                }
             }
         }
 
-        buffer.truncate(total_read);
         Ok(buffer)
     }
 
@@ -668,4 +688,40 @@ impl HttpProxyClient {
         }
     }
 
+}
+
+#[cfg(test)]
+mod request_reading_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn read_from(parts: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::spawn(async move {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            for p in parts {
+                c.write_all(&p).await.unwrap();
+                c.flush().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let (mut s, _) = l.accept().await.unwrap();
+        HttpProxyClient::read_http_request(&mut s).await
+    }
+
+    #[tokio::test]
+    async fn the_body_of_a_post_is_read_whether_or_not_it_came_with_the_headers() {
+        let head = b"POST http://example.org/x HTTP/1.1\r\nHost: example.org\r\nContent-Length: 11\r\n\r\n".to_vec();
+        // заголовок и тело одним куском
+        let all = [head.clone(), b"hello world".to_vec()].concat();
+        let got = read_from(vec![all.clone()]).await.unwrap();
+        assert_eq!(got, all);
+        // заголовок отдельно, тело отдельно
+        let got = read_from(vec![head.clone(), b"hello ".to_vec(), b"world".to_vec()]).await.unwrap();
+        assert_eq!(got, all);
+        let e = HttpProxyClient::header_end(&got).unwrap();
+        assert_eq!(&got[e..], b"hello world");
+    }
 }
