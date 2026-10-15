@@ -23,6 +23,18 @@ pub const OFFER_TTL_SECS: u64 = 2 * 3600;
 /// Срок карточки узла с динамическим адресом: сеть перепроверяет такой адрес чаще.
 pub const DYNAMIC_OFFER_TTL_SECS: u64 = 15 * 60;
 pub const RESIGN_EVERY_SECS: u64 = 30 * 60;
+/// Пора ли подписать собственную карточку заново: изменилось содержимое, прошёл период или до срока осталось меньше трети жизни.
+/// (Карточка динамического узла живёт 15 минут — перевыпуск раз в 30 оставлял её просроченной половину времени.)
+pub fn resign_due(changed: bool, now: u64, last_sign: u64, expires: Option<u64>) -> bool {
+    if changed || now.saturating_sub(last_sign) >= RESIGN_EVERY_SECS {
+        return true;
+    }
+    match expires {
+        Some(e) => e.saturating_sub(now) < DYNAMIC_OFFER_TTL_SECS / 3 * 2,
+        None => true,
+    }
+}
+
 /// Сколько карточек в одном пакете обмена (своя + чужие).
 pub const GOSSIP_BATCH: usize = 24;
 pub const MAX_DIRECTORY: usize = 5000;
@@ -561,7 +573,7 @@ pub fn start(
             // или сменился адрес
             let fresh = build_own(&node_id, &key, &a.lock().unwrap_or_else(|e| e.into_inner()).clone(), now);
             let changed = own().map(|o| o.exit != fresh.exit || o.addr != fresh.addr).unwrap_or(true);
-            if changed || now - last_sign >= RESIGN_EVERY_SECS {
+            if resign_due(changed, now, last_sign, own().map(|o| o.expires)) {
                 set_own(fresh);
                 last_sign = now;
             }
@@ -780,5 +792,25 @@ mod tests {
         assert_eq!(normalise_country("Unknown"), None);
         assert_eq!(normalise_country(""), None);
         assert_eq!(normalise_country("R1"), None);
+    }
+}
+
+#[cfg(test)]
+mod resign_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_lived_card_is_renewed_before_it_expires() {
+        let now = 10_000;
+        // обычная карточка (2 часа): до срока далеко, период не прошёл — не трогаем
+        assert!(!resign_due(false, now, now - 60, Some(now + OFFER_TTL_SECS)));
+        // динамическая (15 минут): подписана 10 минут назад, осталось 5 — пора, хотя период в 30 минут ещё не прошёл
+        assert!(resign_due(false, now, now - 600, Some(now + DYNAMIC_OFFER_TTL_SECS - 600)));
+        // свежая динамическая — рано
+        assert!(!resign_due(false, now, now - 10, Some(now + DYNAMIC_OFFER_TTL_SECS - 10)));
+        // изменилось содержимое — сразу; нет карточки — сразу; прошёл период — сразу
+        assert!(resign_due(true, now, now, Some(now + OFFER_TTL_SECS)));
+        assert!(resign_due(false, now, now, None));
+        assert!(resign_due(false, now, now - RESIGN_EVERY_SECS, Some(now + OFFER_TTL_SECS)));
     }
 }
