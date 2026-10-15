@@ -48,6 +48,7 @@ impl CommControlPacket {
             0xA1 => Some(Self::ChatAck),
             0xA2 => Some(Self::ChatRead),
             0xA3 => Some(Self::ChatTyping),
+            0xA4 => Some(Self::ChatDeleteMessage),
 
             0xB0 => Some(Self::VoiceCallRequest),
             0xB1 => Some(Self::VoiceCallAccept),

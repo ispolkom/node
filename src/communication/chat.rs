@@ -631,6 +631,11 @@ impl ChatManager {
                 debug!("⌨️  ChatTyping from {}", hex::encode(&from.0[..8]));
                 // TODO: Показать индикатор "печатает..."
             }
+            CommControlPacket::ChatDeleteMessage => {
+                if let Err(e) = self.handle_remote_delete(from, &packet.data) {
+                    debug!("🗑️ delete request from {} ignored: {}", hex::encode(&from.0[..8]), e);
+                }
+            }
             CommControlPacket::FileTransferStart => {
                 info!("🚀 FileTransferStart from {}", hex::encode(&from.0[..8]));
                 if let Some(ref ftm) = self.file_transfer_manager {
@@ -810,6 +815,31 @@ impl ChatManager {
             hex::encode(&peer_id.0[..8])
         );
         Ok(())
+    }
+
+    /// «Удалить для всех» от собеседника: стирается только сообщение, которое написал сам этот собеседник (`from` — проверенный
+    /// узел-отправитель пакета), и только в переписке с ним.
+    fn handle_remote_delete(&self, from: HashId, data: &[u8]) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            msg_id: String,
+            #[serde(default)]
+            delete_for_everyone: bool,
+        }
+        let req: Req = serde_json::from_slice(data)?;
+        if !req.delete_for_everyone {
+            return Err(anyhow::anyhow!("not a delete-for-everyone request"));
+        }
+        let msg_id = HashId::from_hex(&req.msg_id).map_err(|_| anyhow::anyhow!("bad msg_id"))?;
+        let authored = self
+            .storage
+            .load_history(&from, usize::MAX)?
+            .iter()
+            .any(|m| m.msg_id == msg_id && m.from == from);
+        if !authored {
+            return Err(anyhow::anyhow!("no such message written by this peer"));
+        }
+        self.storage.delete_message(&from, &msg_id)
     }
 
     /// Получить список всех чатов
@@ -1071,6 +1101,20 @@ mod tests {
             1,
             "a resend is not stored twice"
         );
+
+        // «удалить для всех»: чужое сообщение (написанное нами) собеседник стереть не может, своё — может
+        let ours = ChatMessage::new(cm.my_node_id, from, "наше".to_string());
+        cm.storage.save_outgoing(&from, &ours).unwrap();
+        let del = |id: &HashId| crate::communication::CommPacket {
+            packet_type: crate::communication::CommControlPacket::ChatDeleteMessage,
+            data: serde_json::to_vec(&serde_json::json!({"msg_id": hex::encode(id.0), "delete_for_everyone": true})).unwrap(),
+        };
+        cm.handle_comm_packet(from, del(&ours.msg_id)).await.unwrap();
+        assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 2, "чужое сообщение не стёрто");
+        cm.handle_comm_packet(from, del(&incoming.msg_id)).await.unwrap();
+        let left = cm.storage.load_history(&from, 10).unwrap();
+        assert_eq!(left.len(), 1, "своё сообщение собеседника стёрто по его просьбе");
+        assert_eq!(left[0].msg_id, ours.msg_id);
     }
 
     /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
