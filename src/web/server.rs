@@ -2723,94 +2723,67 @@ struct GatewayRequest {
     id: Option<String>,
 }
 
+/// Прочитать список шлюзов строго: нет файла — пусто; файл есть, но не читается или не разбирается — ошибка (его не затираем).
+fn load_gateways(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("gateways.json повреждён: {e}"))?;
+            Ok(data.get("gateways").and_then(|v| v.as_array()).cloned().unwrap_or_default())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("gateways.json не читается: {e}")),
+    }
+}
+
+/// Изменить список шлюзов: один замок на чтение-изменение-запись (два окна не затирают друг друга), строгое чтение, атомарная запись.
+fn update_gateways(path: &str, f: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(), String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut gateways = load_gateways(path)?;
+    f(&mut gateways);
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "gateways": gateways })).map_err(|e| e.to_string())?;
+    crate::util::private_file::write_private(std::path::Path::new(path), content.as_bytes()).map_err(|e| format!("не удалось записать gateways.json: {e}"))
+}
+
 async fn api_gateways_post(
     axum::extract::Json(payload): axum::extract::Json<GatewayRequest>,
-) -> impl IntoResponse {
-    // Загружаем текущие шлюзы
-    let gateways_path = "gateways.json";
-    let mut gateways: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(gateways_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(gateways_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("gateways").and_then(|v| v.as_array()) {
-                    gateways = arr.clone();
-                }
+) -> axum::response::Response {
+    let r = update_gateways("gateways.json", |gateways| {
+        // Проверяем, это новый шлюз или редактирование
+        if let Some(id) = &payload.id {
+            // Редактирование существующего шлюза
+            if let Some(gateway) = gateways.iter_mut().find(|g| g.get("id").and_then(|v| v.as_str()) == Some(id)) {
+                gateway["name"] = serde_json::json!(payload.name);
+                gateway["short_id"] = serde_json::json!(payload.short_id);
+                gateway["country"] = serde_json::json!(payload.country);
             }
+        } else {
+            // Добавление нового шлюза
+            gateways.push(serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": payload.name,
+                "short_id": payload.short_id,
+                "country": payload.country,
+                "connected": false
+            }));
         }
-    }
-
-    // Проверяем, это новый шлюз или редактирование
-    if let Some(id) = &payload.id {
-        // Редактирование существующего шлюза
-        if let Some(gateway) = gateways
-            .iter_mut()
-            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(id))
-        {
-            gateway["name"] = serde_json::json!(payload.name);
-            gateway["short_id"] = serde_json::json!(payload.short_id);
-            gateway["country"] = serde_json::json!(payload.country);
-        }
-    } else {
-        // Добавление нового шлюза
-        let new_gateway = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
-            "name": payload.name,
-            "short_id": payload.short_id,
-            "country": payload.country,
-            "connected": false
-        });
-        gateways.push(new_gateway);
-    }
-
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "gateways": gateways
     });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(gateways_path, content).await;
+    match r {
+        Ok(()) => Json(serde_json::json!({"status": "success", "message": "Gateway saved"})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
     }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway saved"
-    }))
 }
 
 async fn api_gateways_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
-) -> impl IntoResponse {
-    // Загружаем текущие шлюзы
-    let gateways_path = "gateways.json";
-    let mut gateways: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(gateways_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(gateways_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("gateways").and_then(|v| v.as_array()) {
-                    gateways = arr.clone();
-                }
-            }
-        }
-    }
-
-    // Удаляем шлюз
-    gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
-
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "gateways": gateways
+) -> axum::response::Response {
+    let r = update_gateways("gateways.json", |gateways| {
+        gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
     });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(gateways_path, content).await;
+    match r {
+        Ok(()) => Json(serde_json::json!({"status": "success", "message": "Gateway deleted"})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
     }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway deleted"
-    }))
 }
 
 async fn api_settings_get() -> impl IntoResponse {
@@ -6039,5 +6012,23 @@ mod contacts_and_avatar_tests {
         std::fs::write(d.path().join("keep.png"), b"x").unwrap();
         remove_avatar_files_in(d.path(), "../keep", None);
         assert!(d.path().join("keep.png").exists());
+    }
+}
+
+#[cfg(test)]
+mod gateways_file_tests {
+    use super::*;
+
+    #[test]
+    fn gateways_are_changed_under_a_lock_and_a_broken_file_is_not_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("gateways.json");
+        let ps = p.to_str().unwrap();
+        update_gateways(ps, |g| g.push(serde_json::json!({"id": "1"}))).unwrap();
+        update_gateways(ps, |g| g.push(serde_json::json!({"id": "2"}))).unwrap();
+        assert_eq!(load_gateways(ps).unwrap().len(), 2);
+        std::fs::write(&p, b"{broken").unwrap();
+        assert!(update_gateways(ps, |g| g.clear()).is_err(), "повреждённый список не заменяется пустым");
+        assert_eq!(std::fs::read(&p).unwrap(), b"{broken");
     }
 }
