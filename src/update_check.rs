@@ -71,7 +71,8 @@ fn client() -> Result<reqwest::Client, String> {
     if std::env::var("YANDI_UPDATE_ALLOW_HTTP").is_ok_and(|v| v == "1") {
         b = b.no_proxy();
     }
-    b.timeout(Duration::from_secs(60))
+    // без общего срока (пакет оболочки — десятки мегабайт, на медленном канале дольше минуты): оборвать надо молчание, а не размер
+    b.read_timeout(Duration::from_secs(30))
         .connect_timeout(Duration::from_secs(15))
         .redirect(reqwest::redirect::Policy::limited(5))
         .user_agent(concat!("yandi-update/", env!("CARGO_PKG_VERSION")))
