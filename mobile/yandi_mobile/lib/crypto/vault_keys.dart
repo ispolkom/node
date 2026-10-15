@@ -194,6 +194,7 @@ class VaultKeys {
     await b.writeBlob(jsonEncode({
       'v': 1,
       'gen': 1,
+      'gt': await _genTag(dk, 1),
       'pw': {'kdf': pwKdf.toJson(), 'salt': base64.encode(saltPw), 'wrap': base64.encode(wrapPw)},
       'ph': hasPhrase
           ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!), if (!legacyPhraseEncoding) 'enc': 2}
@@ -220,7 +221,7 @@ class VaultKeys {
       dk = await _unwrap(base64.decode(pw['wrap'] as String), kek, 'pw');
     }
     if (dk == null) throw VaultWrongSecret(failures);
-    await _adoptGeneration(b, f);
+    await _adoptGeneration(b, f, dk);
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -243,7 +244,7 @@ class VaultKeys {
     final kek = await _kekPhrase(phrase, base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
     final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
     if (dk == null) throw VaultWrongSecret(failures);
-    await _adoptGeneration(b, f);
+    await _adoptGeneration(b, f, dk);
     try {
       beforeCommit?.call();
       await _setPassword(b, f, dk, newPassword, beforeCommit: beforeCommit);
@@ -338,6 +339,7 @@ class VaultKeys {
     f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
     final gen = ((f['gen'] as int?) ?? 0) + 1;
     f['gen'] = gen;
+    f['gt'] = await _genTag(dk, gen);
     beforeCommit?.call();   // после всех вычислений, непосредственно перед записью нового замка
     await b.writeBlob(jsonEncode(f));      // сначала файл, потом метка: оборвёт между ними — файл новее метки, это допустимо
     await b.secureWrite(_kGen, '$gen');
@@ -354,10 +356,27 @@ class VaultKeys {
 
   /// Поколение файла запоминается только после того, как замок в нём реально открылся: изменённый, но не проходящий проверку файл
   /// не может поднять метку и сделать исправную копию «устаревшей».
-  static Future<void> _adoptGeneration(VaultBackend b, Map<String, dynamic> f) async {
+  /// Номер поколения в файле заверен ключом данных (`gt` = HMAC(DK, «gen:N»)): изменить только `gen` и поднять метку нельзя.
+  /// Файл прежнего вида без заверения метку не поднимает (только заводит, когда её ещё нет) и заверяется при первом входе.
+  static Future<void> _adoptGeneration(VaultBackend b, Map<String, dynamic> f, Uint8List dk) async {
     final fg = (f['gen'] as int?) ?? 0;
     final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
-    if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
+    final tag = f['gt'];
+    if (tag is String) {
+      if (tag != await _genTag(dk, fg)) throw VaultCorrupt('поколение файла ключей не заверено: файл изменён');
+      if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
+      return;
+    }
+    if (sg == null) await b.secureWrite(_kGen, '$fg');
+    try {
+      f['gt'] = await _genTag(dk, fg);
+      await b.writeBlob(jsonEncode(f));   // заверяем прежний файл (то же поколение)
+    } catch (_) {}
+  }
+
+  static Future<String> _genTag(Uint8List dk, int gen) async {
+    final mac = await Hmac.sha256().calculateMac(utf8.encode('yandi-vault:gen:v1:$gen'), secretKey: SecretKey(dk));
+    return base64.encode(mac.bytes);
   }
 
   /// Сколько неверных подряд. Метка заведена, а счётчика нет — его стёрли: засчитываем как несколько ошибок (с паузой).

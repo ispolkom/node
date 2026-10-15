@@ -220,6 +220,7 @@ void main() {
     (await _make(be)).lock();
     final m = jsonDecode(be.blob!) as Map<String, dynamic>;
     m.remove('gen');
+    m.remove('gt');   // прежний файл: ни поколения, ни заверения
     be.blob = jsonEncode(m);
     be.secure.remove('vault_gen');
     be.secure.remove('vault_cnt');
@@ -242,5 +243,27 @@ void main() {
     be.blob = good;
     be.now += 100000;
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue, reason: 'исходная исправная копия не стала «устаревшей»');
+  });
+
+  test('изменён только номер поколения (замок цел): вход отвергается, метка не поднимается, исходная копия открывается', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final good = be.blob!;
+    final m = jsonDecode(good) as Map<String, dynamic>;
+    m['gen'] = 50;
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята незаверенным номером');
+    be.blob = good;
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
+    // файл прежнего вида (без заверения): открывается, метку не поднимает, затем заверяется
+    final legacy = jsonDecode(good) as Map<String, dynamic>..remove('gt');
+    legacy['gen'] = 9;
+    be.blob = jsonEncode(legacy);
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
+    expect(be.secure['vault_gen'], '1', reason: 'незаверенный файл метку не поднимает');
+    expect((jsonDecode(be.blob!) as Map)['gt'], isNotNull, reason: 'файл заверен при входе');
   });
 }
