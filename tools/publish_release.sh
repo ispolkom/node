@@ -66,7 +66,8 @@ for f in MANIFEST.json MANIFEST.json.sig "${FILES[@]}"; do cp "$SITE/$f" "$GH/de
 
 OUT="$HOME/Рабочий стол/Релизы"
 mkdir -p "$OUT"
-ARCH="yandi-update-site_${VERSION}.tar.gz"
+VSAFE="${VERSION//+/-}"
+ARCH="yandi-update-site_${VSAFE}.tar.gz"
 tar -C dist/site --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT/$ARCH" update
 cp "$DEB" "$OUT/$NAME"
 [ -n "$DDEB" ] && cp "$DDEB" "$OUT/$DNAME"
@@ -74,7 +75,7 @@ cp "$DEB" "$OUT/$NAME"
 ZIP="$HOME/Рабочий стол/yandi-su_update-deb.zip"
 rm -f "$ZIP"
 (cd "$SITE" && zip -q -X "$ZIP" MANIFEST.json MANIFEST.json.sig "${FILES[@]}")
-rm -rf "$OUT/github-assets_${VERSION}" && cp -r "$GH" "$OUT/github-assets_${VERSION}"
+rm -rf "$OUT/github-assets_${VSAFE}" && cp -r "$GH" "$OUT/github-assets_${VSAFE}"
 cat > "$OUT/ПАМЯТКА.txt" <<TXT
 Выпуск ${VERSION} (номер ${SEQ}), платформа deb.
 
@@ -85,7 +86,7 @@ cat > "$OUT/ПАМЯТКА.txt" <<TXT
   Старые файлы в update/deb/ заменить целиком: манифест и пакет должны быть одной версии.
 
 GITHUB:
-  Создать релиз (Releases → Draft a new release) и приложить файлы из папки github-assets_${VERSION}/
+  Создать релиз (Releases → Draft a new release) и приложить файлы из папки github-assets_${VSAFE}/
   (deb-MANIFEST.json, deb-MANIFEST.json.sig, deb-${NAME}). Релиз должен быть «latest».
 
 УСТАНОВКА ВРУЧНУЮ:
