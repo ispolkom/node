@@ -44,7 +44,7 @@ Categories=Network;InstantMessaging;
 StartupWMClass=org.yandi.desktop
 DESK
 # зависимости: системные библиотеки, которые берёт сборка Flutter (свои лежат в /opt/yandi/lib)
-DEPS=$(ldd "$BUNDLE/yandi_desktop" | awk '/=> \/(usr\/)?lib/ {print $3}' | xargs -r dpkg -S 2>/dev/null | cut -d: -f1 | sort -u | grep -v '^libc6' | tr '\n' ',' | sed 's/,$//; s/,/, /g')
+DEPS=$( { ldd "$BUNDLE/yandi_desktop" || true; } | awk '/=> \/(usr\/)?lib/ {print $3}' | while read -r l; do dpkg -S "$l" 2>/dev/null | cut -d: -f1 | head -1; done | sort -u | grep -v '^libc6$' | tr '\n' ',' | sed 's/,$//; s/,/, /g' || true)
 SIZE=$(du -sk "$R/opt" "$R/usr" | awk '{s+=$1} END {print s}')
 cat > "$R/DEBIAN/control" <<CTL
 Package: yandi-desktop
@@ -54,7 +54,7 @@ Maintainer: YANDI <yandi-world@outlook.com>
 Section: net
 Priority: optional
 Installed-Size: ${SIZE}
-Depends: yandi-node (>= ${VERSION}), libc6 (>= 2.36)${DEPS:+, $DEPS}
+Depends: yandi-node (>= ${VERSION}), libc6 (>= 2.36), libgtk-3-0, libglib2.0-0, libstdc++6${DEPS:+, $DEPS}
 Homepage: https://github.com/ispolkom/node
 Description: YANDI — оболочка для компьютера
  Окно управления узлом YANDI: чаты, файлы, звонки, группы, настройки. Запускается из меню «Интернет»
