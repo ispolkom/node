@@ -384,15 +384,26 @@ impl ReliableStream {
                 None
             }
             StreamMsgType::Fin => {
-                // Graceful close
-                self.state = StreamState::Closing;
-                Some(StreamFrame::new(
-                    StreamMsgType::Fin,
-                    self.stream_id,
-                    0,
-                    0,
-                    vec![]
-                ))
+                // Graceful close. FIN отвечают РОВНО один раз и только на чужой первый FIN: ответ на FIN сам FIN, и прежнее
+                // «всегда отвечать» гоняло FIN между двумя штатными узлами бесконечно. Инициатор (FinSent), получив ответный FIN,
+                // закрывается без ответа; уже закрывшиеся и закрывающиеся FIN не отвечают.
+                match self.state {
+                    StreamState::Established | StreamState::SynSent => {
+                        self.state = StreamState::Closed;
+                        Some(StreamFrame::new(
+                            StreamMsgType::Fin,
+                            self.stream_id,
+                            0,
+                            0,
+                            vec![]
+                        ))
+                    }
+                    StreamState::FinSent | StreamState::Closing => {
+                        self.state = StreamState::Closed;
+                        None
+                    }
+                    StreamState::Closed | StreamState::Reset => None,
+                }
             }
             StreamMsgType::Reset => {
                 // Immediate close
@@ -522,6 +533,27 @@ mod receive_tests {
 
     fn data(seq: u32, bytes: &[u8]) -> StreamFrame {
         StreamFrame::new(StreamMsgType::Data, 1, seq, 0, bytes.to_vec())
+    }
+
+    /// Закрытие: FIN, ответный FIN — и тишина (раньше FIN отвечали на каждый FIN бесконечно).
+    #[test]
+    fn closing_ends_with_one_reply_and_not_an_endless_fin_exchange() {
+        let mut opener = ReliableStream::new(1, HashId([1; 32]));
+        let mut acceptor = ReliableStream::new(1, HashId([2; 32]));
+        let syn = opener.connect();
+        let synack = acceptor.handle_frame(&syn).expect("accept");
+        opener.handle_frame(&synack);
+        assert_eq!(opener.state, StreamState::Established);
+        let fin = opener.close().expect("fin");
+        assert_eq!(fin.header.msg_type, StreamMsgType::Fin);
+        // ответ на FIN — один FIN
+        let reply = acceptor.handle_frame(&fin).expect("ответный FIN");
+        assert_eq!(reply.header.msg_type, StreamMsgType::Fin);
+        // инициатор, получив ответный FIN, закрывается и больше ничего не шлёт
+        assert!(opener.handle_frame(&reply).is_none(), "обмен FIN на этом кончается");
+        assert!(opener.is_closed() && acceptor.is_closed());
+        // повторный FIN (потерян ответ) ответа не вызывает
+        assert!(acceptor.handle_frame(&fin).is_none());
     }
 
     #[test]
