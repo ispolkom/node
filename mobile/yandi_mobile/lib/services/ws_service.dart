@@ -38,7 +38,9 @@ class IncomingChatEvent {
   final String   text;
   /// Занять номер письма в журнале повторов: вызывается ПОСЛЕ сохранения сообщения (до этого повтор не считается «виденным»).
   final Future<bool> Function()? commit;
-  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text, this.commit});
+  /// Обработка не удалась (сохранение не прошло): письмо снимается с «в работе», его повтор будет обработан заново.
+  final void Function()? abort;
+  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text, this.commit, this.abort});
 }
 
 /// Живой сигнал от другого телефона (звонок): расшифрованный текст.
@@ -293,6 +295,7 @@ class WsService {
       fromPeerId: from,
       timestamp:  DateTime.fromMillisecondsSinceEpoch(tsMs),
       text:       text,
+      abort: () { final rid = pendingId; if (rid != null) _replayInFlight.remove(rid); },
       commit: () async {
         final rid = pendingId;
         if (rid == null || ledger == null) return true;

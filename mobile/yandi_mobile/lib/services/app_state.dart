@@ -1514,6 +1514,14 @@ class AppState extends ChangeNotifier implements FilesHost {
   // ── WebSocket события ─────────────────────────────────────────────────────
 
   void _onIncomingChat(IncomingChatEvent e) async {
+    try {
+      await _handleIncomingChat(e);
+    } catch (_) {
+      e.abort?.call();   // например, не записалась база: повтор этого письма не должен считаться «уже в работе»
+    }
+  }
+
+  Future<void> _handleIncomingChat(IncomingChatEvent e) async {
     if (isBlocked(e.fromPeerId)) { await e.commit?.call(); return; }   // чёрный список: не показываем и не подтверждаем
     // незнакомый человек: до принятия в контакты принимаются только первые несколько сообщений (защита от спама)
     if (!isSaved(e.fromPeerId) && e.fromPeerId != _nodePeerId &&
