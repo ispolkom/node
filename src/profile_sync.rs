@@ -304,6 +304,14 @@ pub fn peer_seen(id: &crate::util::HashId) {
 
 type Sent = HashMap<String, (String, String)>;
 
+/// Отправка профиля не подтверждается получателем (он мог быть заперт или потерять пакет): раз в этот срок, при встрече с контактом,
+/// профиль отправляется заново целиком. После перезапуска узла «когда отправлял» неизвестно, и первая встреча тоже шлёт заново.
+const RESEND_AFTER: Duration = Duration::from_secs(3600);
+
+fn resend_due(last_sent: Option<Instant>) -> bool {
+    last_sent.map_or(true, |t| t.elapsed() >= RESEND_AFTER)
+}
+
 fn sent_path() -> PathBuf {
     base_dir().join("profile_sent.json")
 }
@@ -330,6 +338,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
         let p2p = p2p.clone();
         async move {
             let mut sent = load_sent();
+            let mut sent_at: HashMap<String, Instant> = HashMap::new();
             let mut last_cleanup: Option<Instant> = None;
             loop {
                 WAKE.notified().await;
@@ -347,7 +356,9 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                     if !contacts.contains(&short) || (!full && !seen.contains(&peer.id.0)) {
                         continue;
                     }
-                    let texts = plan(sent.get(&short), &hash, &nick);
+                    // подтверждения доставки нет: давно не отправленный профиль (и первая встреча после старта) уходит заново целиком
+                    let prev = if seen.contains(&peer.id.0) && resend_due(sent_at.get(&short).copied()) { None } else { sent.get(&short) };
+                    let texts = plan(prev, &hash, &nick);
                     if texts.is_empty() {
                         continue;
                     }
@@ -359,6 +370,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                         }
                     }
                     if ok {
+                        sent_at.insert(short.clone(), Instant::now());
                         sent.insert(short, (hash.clone(), nick.clone()));
                         changed = true;
                     }
@@ -484,6 +496,15 @@ mod tests {
         assert_eq!(plan(Some(&st), "h2", "Ник").len(), 1);
         assert_eq!(plan(Some(&st), "", "Ник").len(), 1, "картинку убрали — сообщаем пустой хэш");
         assert_eq!(plan(Some(&st), "h1", "").len(), 1);
+    }
+
+    #[test]
+    fn a_profile_not_sent_for_an_hour_or_since_start_is_sent_again() {
+        assert!(resend_due(None), "после старта узла отправка неизвестна");
+        assert!(!resend_due(Some(Instant::now())));
+        if let Some(old) = Instant::now().checked_sub(RESEND_AFTER + Duration::from_secs(1)) {
+            assert!(resend_due(Some(old)));
+        }
     }
 
     #[test]
