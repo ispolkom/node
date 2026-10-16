@@ -295,6 +295,17 @@ pub async fn media_websocket_handler(
     ws.on_upgrade(move |socket| handle_media_socket(socket, peer_id, app_state))
 }
 
+fn media_session_locked() -> bool {
+    #[cfg(unix)]
+    {
+        crate::closed_api::is_locked()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 async fn handle_media_socket(
     socket: axum::extract::ws::WebSocket,
     target_short_id: String,
@@ -326,12 +337,23 @@ async fn handle_media_socket(
     let mut signal_rx = app_state.media_signal_bus.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let target_short = hex::encode(&target_hash.0[..8]);
+    // запирание среды закрывает уже открытый сеанс (middleware проверяет только апгрейд): раз в секунду и перед каждой пересылкой
+    let mut lock_watch = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
+            _ = lock_watch.tick() => {
+                if media_session_locked() {
+                    println!("🔒 media signaling closed: environment locked");
+                    break;
+                }
+            }
             incoming = ws_receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        if media_session_locked() {
+                            break;
+                        }
                         // Browser → P2P: forward signaling as VoiceData
                         let packet = P2PPacket::new(
                             P2PPacketType::VoiceData,
