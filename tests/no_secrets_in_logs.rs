@@ -33,9 +33,13 @@ fn call_args(s: &str, open: usize) -> Option<(String, usize)> {
     let (mut depth, mut k, mut in_str, mut esc) = (0i32, open, false, false);
     let mut args = String::new();
     let mut first_string_done = false;
+    let mut fmt = String::new();
     while k < b.len() {
         let c = b[k] as char;
         if in_str {
+            if !first_string_done {
+                fmt.push(c);
+            }
             if esc {
                 esc = false;
             } else if c == '\\' {
@@ -43,6 +47,11 @@ fn call_args(s: &str, open: usize) -> Option<(String, usize)> {
             } else if c == '"' {
                 in_str = false;
                 first_string_done = true;
+                // неявный захват: `{имя}` / `{имя:?}` в строке формата печатает переменную, хотя среди аргументов её нет
+                args.push(' ');
+                args.push_str(&implicit_captures(&fmt));
+                args.push(' ');
+                fmt.clear();
             }
         } else {
             match c {
@@ -72,6 +81,35 @@ fn call_args(s: &str, open: usize) -> Option<(String, usize)> {
         k += 1;
     }
     None
+}
+
+/// Имена переменных, захваченных строкой формата неявно: `{password}`, `{master_key:?}`; `{}`, `{0}` и `{{` не считаются.
+fn implicit_captures(fmt: &str) -> String {
+    let mut out = String::new();
+    let b: Vec<char> = fmt.chars().collect();
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == '{' {
+            if b.get(i + 1) == Some(&'{') {
+                i += 2;
+                continue;
+            }
+            let mut j = i + 1;
+            let mut name = String::new();
+            while j < b.len() && (b[j].is_alphanumeric() || b[j] == '_') {
+                name.push(b[j]);
+                j += 1;
+            }
+            if !name.is_empty() && !name.chars().next().unwrap().is_ascii_digit() && matches!(b.get(j), Some('}') | Some(':')) {
+                out.push_str(&name);
+                out.push(' ');
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 /// Подвыражения, которые безопасны: булевы признаки и длины.
@@ -118,6 +156,22 @@ fn logs_never_contain_key_material() {
         }
     }
     assert!(bad.is_empty(), "\nключевой материал в журнале ({}):\n  {}\n", bad.len(), bad.join("\n  "));
+}
+
+/// Неявный захват переменной форматом Rust тоже ловится: `println!("{password}")`, `info!("{master_key:?}")`.
+#[test]
+fn the_guard_catches_implicit_format_captures() {
+    for bad in ["fn f() { println!(\"{password}\"); }", "fn f() { tracing::info!(\"k = {master_key:?}\"); }", "fn f() { eprintln!(\"x {seed:x} y\"); }"] {
+        let m = ["println!", "info!", "eprintln!"].iter().find(|m| bad.contains(**m)).unwrap();
+        let at = bad.find(m).unwrap();
+        let (args, _) = call_args(bad, at + m.len()).unwrap();
+        assert!(SECRET_NAMES.iter().any(|n| sanitize(&args).contains(n)), "не поймана утечка: {bad}");
+    }
+    for ok in ["fn f() { println!(\"{} {0} {{password}} {count}\", 1); }"] {
+        let at = ok.find("println!").unwrap();
+        let (args, _) = call_args(ok, at + "println!".len()).unwrap();
+        assert!(!SECRET_NAMES.iter().any(|n| sanitize(&args).contains(n)), "ложное срабатывание: {ok} -> {args}");
+    }
 }
 
 /// Проверка самого сторожа: он обязан ловить заведомо плохие примеры.
