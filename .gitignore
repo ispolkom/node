@@ -49,3 +49,5 @@ __pycache__/
 /.repro-check.*/
 /dist/
 dist/
+release/.lock
+release/.SEQ.lock
