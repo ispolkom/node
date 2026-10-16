@@ -29,6 +29,10 @@ use tokio::sync::mpsc;
 
 const FRAME_PORTS: u8 = 1;
 const FRAME_DGRAM: u8 = 2;
+/// Срок на первый кадр после TLS, простой между кадрами и дочитывание начатого кадра (секунды).
+const FIRST_FRAME_SECS: u64 = if cfg!(test) { 1 } else { 15 };
+const IDLE_SECS: u64 = 600;
+const BODY_SECS: u64 = if cfg!(test) { 1 } else { 30 };
 const MAX_FRAME: usize = 70_000;
 const QUEUE: usize = 2048;
 pub const MAX_CONNS: usize = 256;
@@ -353,15 +357,20 @@ impl Carrier {
     }
 
     async fn read_loop<R: tokio::io::AsyncRead + Unpin>(&self, rd: &mut R, conn: &Arc<Conn>) -> io::Result<()> {
+        let mut first = true;
         loop {
             let mut len = [0u8; 4];
-            rd.read_exact(&mut len).await?;
+            // обе стороны сразу после TLS шлют кадр портов: молчащий клиент не держит слот дольше FIRST_FRAME_SECS;
+            // дальше — предел простоя, а начатый кадр обязан дойти целиком за BODY_SECS
+            let wait = Duration::from_secs(if first { FIRST_FRAME_SECS } else { IDLE_SECS });
+            tokio::time::timeout(wait, rd.read_exact(&mut len)).await.map_err(|_| io::Error::other("carrier read timeout"))??;
+            first = false;
             let n = u32::from_be_bytes(len) as usize;
             if n == 0 || n > MAX_FRAME {
                 return Err(io::Error::other("bad frame length"));
             }
             let mut body = vec![0u8; n];
-            rd.read_exact(&mut body).await?;
+            tokio::time::timeout(Duration::from_secs(BODY_SECS), rd.read_exact(&mut body)).await.map_err(|_| io::Error::other("carrier frame timeout"))??;
             match body[0] {
                 FRAME_PORTS => {
                     let cnt = *body.get(1).unwrap_or(&0) as usize;
@@ -622,6 +631,25 @@ mod tests {
         let r = carrier.read_loop(&mut rd, &conn).await;
         assert!(r.unwrap_err().to_string().contains("too many source ports"));
         assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN);
+    }
+
+    /// Молчащий после TLS клиент и обрыв посреди кадра не держат слот соединения бесконечно.
+    #[tokio::test]
+    async fn a_silent_client_and_a_half_sent_frame_are_dropped_by_deadline() {
+        let (carrier, _sock, _addr) = node(Mode::Auto, "ee66ee66").await;
+        let mk = || {
+            let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+            Arc::new(Conn { id: 9, tx, remote_ip: "198.51.100.7".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() })
+        };
+        // клиент ничего не шлёт
+        let (_keep_open, mut silent) = tokio::io::duplex(64);
+        let r = carrier.read_loop(&mut silent, &mk()).await;
+        assert!(r.unwrap_err().to_string().contains("carrier read timeout"));
+        // клиент прислал длину кадра и замолчал
+        let (mut client, mut server) = tokio::io::duplex(64);
+        tokio::io::AsyncWriteExt::write_all(&mut client, &100u32.to_be_bytes()).await.unwrap();
+        let r = carrier.read_loop(&mut server, &mk()).await;
+        assert!(r.unwrap_err().to_string().contains("carrier frame timeout"));
     }
 
     /// Кадры FRAME_PORTS не обходят квоту source-портов соединения.
