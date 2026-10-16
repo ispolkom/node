@@ -490,10 +490,12 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
 pub struct BackupState {
     /// номер последней сделанной копии
     pub counter: u64,
-    /// отпечаток содержимого последней копии (для «изменилось ли»)
+    /// отпечаток содержимого последней копии, сохранённой В ПАПКУ (для «изменилось ли»); выгрузка по кнопке без папки его не трогает
     pub last_digest: String,
-    /// время последней успешной копии (мс)
+    /// время последней успешной копии любого вида (мс)
     pub last_ok_ms: u64,
+    /// время последней копии, записанной в папку (мс); 0 — в папку ещё ничего не записано
+    pub last_saved_ms: u64,
     /// время последней проверки (мс): копия могла не понадобиться
     pub last_check_ms: u64,
     pub last_error: Option<String>,
@@ -582,11 +584,88 @@ pub enum Decision {
 }
 
 pub fn decide(state: &BackupState, current_digest: &str, force: bool) -> Decision {
-    if force || state.last_digest != current_digest || state.last_ok_ms == 0 {
+    if force || state.last_digest != current_digest || state.last_saved_ms == 0 {
         Decision::Make
     } else {
         Decision::Unchanged
     }
+}
+
+// ── Запуск копии ────────────────────────────────────────────────────────────
+
+/// Как запущена копия.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// плановая/по событию: только если папка задана и содержимое изменилось
+    Auto,
+    /// по кнопке: всегда делается, файл отдаётся владельцу (и кладётся в папку, если она задана)
+    Now,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Skip {
+    NoFolder,
+    Unchanged,
+}
+
+#[derive(Debug)]
+pub struct Outcome {
+    pub skipped: Option<Skip>,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub saved: Option<PathBuf>,
+    pub counter: u64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Сделать копию: собрать, при плановом запуске сравнить с прошлой, зашифровать, записать в папку (с проверкой), обновить состояние.
+pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u64) -> Result<Outcome, String> {
+    let mut state = load_state(l);
+    state.last_check_ms = now;
+    let result = (|| -> Result<Outcome, String> {
+        let dir = state.dir.clone().filter(|d| !d.trim().is_empty()).map(PathBuf::from);
+        if mode == Mode::Auto && dir.is_none() {
+            return Ok(Outcome { skipped: Some(Skip::NoFolder), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
+        }
+        let entries = collect(l)?;
+        let dg = digest(&entries);
+        if mode == Mode::Auto && decide(&state, &dg, false) == Decision::Unchanged {
+            return Ok(Outcome { skipped: Some(Skip::Unchanged), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
+        }
+        let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
+        let counter = state.counter + 1;
+        let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
+        let name = file_name(node_id, counter, now);
+        let saved = match &dir {
+            Some(d) => Some(write_to_dir(d, &name, &bytes, root, node_id)?),
+            None => None,
+        };
+        state.counter = counter;
+        state.last_ok_ms = now;
+        state.last_error = None;
+        if let Some(p) = &saved {
+            // только копия, лежащая в папке, сдвигает «последнее сохранённое»: выгрузка по кнопке на флешку-в-руке — другое дело
+            state.last_digest = dg;
+            state.last_saved_ms = now;
+            state.last_file = Some(p.display().to_string());
+        }
+        Ok(Outcome { skipped: None, name, bytes, saved, counter })
+    })();
+    if let Err(e) = &result {
+        state.last_error = Some(e.clone());
+    }
+    let _ = save_state(l, &state);
+    result
+}
+
+/// Короткий номер узла (первые 8 байт адреса) по файлу личности, открытому корнем.
+pub fn node_id_from_files(l: &Layout, root: &[u8; 32]) -> Result<String, String> {
+    let bytes = std::fs::read(l.keys.join(format!("node_identity_{}.json", l.port))).map_err(|e| format!("файл личности узла: {e}"))?;
+    let m = key_root::identity_store::open_identity(&bytes, &key_root::OpenContext { root: Some(root) }).map_err(|e| e.to_string())?;
+    Ok(hex::encode(&m.address[..8]))
 }
 
 #[cfg(test)]
@@ -763,7 +842,7 @@ mod tests {
         );
         assert_ne!(digest(&collect(&l).unwrap()), with_contact, "смена роли — изменение");
         // решение
-        let st = BackupState { last_digest: base.clone(), last_ok_ms: 5, ..Default::default() };
+        let st = BackupState { last_digest: base.clone(), last_ok_ms: 5, last_saved_ms: 5, ..Default::default() };
         assert_eq!(decide(&st, &base, false), Decision::Unchanged);
         assert_eq!(decide(&st, &base, true), Decision::Make);
         assert_eq!(decide(&st, "other", false), Decision::Make);
@@ -791,6 +870,47 @@ mod tests {
         assert!(ours.first().unwrap().contains("-000004-"), "остались последние: {ours:?}");
         assert!(names.contains(&"photo.jpg".to_string()));
         assert!(!names.iter().any(|n| n.ends_with(".part")), "временных файлов нет");
+    }
+
+    #[test]
+    fn run_backup_skips_without_a_folder_or_changes_and_counts_copies() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, _auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &_auth).unwrap();
+        let t = 1_700_000_000_000u64;
+        // папка не задана: плановая копия не делается, по кнопке — делается и отдаётся
+        let o = run_backup(&l, &root, "nodeid00", Mode::Auto, t).unwrap();
+        assert_eq!(o.skipped, Some(Skip::NoFolder));
+        let manual = run_backup(&l, &root, "nodeid00", Mode::Now, t + 1).unwrap();
+        assert!(manual.skipped.is_none() && manual.counter == 1 && !manual.bytes.is_empty() && manual.saved.is_none());
+        // папку задали: первая плановая — делается
+        let mut st = load_state(&l);
+        st.dir = Some(d.path().join("flash").display().to_string());
+        save_state(&l, &st).unwrap();
+        let first = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 2).unwrap();
+        assert!(first.skipped.is_none() && first.counter == 2 && first.saved.as_ref().unwrap().exists());
+        // ничего не менялось (подвижные поля не в счёт) — вторая не делается
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Алиса","short_id":"aaaa","online":false}]}"#.as_bytes());
+        let again = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 3).unwrap();
+        assert_eq!(again.skipped, Some(Skip::Unchanged));
+        assert_eq!(load_state(&l).counter, 2, "счётчик не растёт без изменений");
+        // новый контакт — делается
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Боб","short_id":"bbbb"}]}"#.as_bytes());
+        let third = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 4).unwrap();
+        assert!(third.skipped.is_none() && third.counter == 3);
+        let st = load_state(&l);
+        assert_eq!((st.counter, st.last_ok_ms, st.last_saved_ms, st.last_error), (3, t + 4, t + 4, None));
+        // сбой (папку нельзя создать) запоминается и не портит счётчик
+        let mut bad = load_state(&l);
+        bad.dir = Some("/proc/definitely/not/writable".into());
+        bad.last_digest = String::new();
+        save_state(&l, &bad).unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, t + 5).is_err());
+        let st = load_state(&l);
+        assert_eq!(st.counter, 3);
+        assert!(st.last_error.is_some());
     }
 
     #[test]
