@@ -95,7 +95,25 @@ async fn handle(tcp: TcpStream, acceptor: TlsAcceptor, socks_port: u16, slot: cr
     drop(slot);
     // первые байты решают: приветствие SOCKS5 (0x05) — свой, всё остальное — посетитель сайта
     let mut first = vec![0u8; 4096];
-    let n = tokio::time::timeout(Duration::from_secs(10), tls.read(&mut first)).await.map_err(|_| std::io::Error::other("no data"))??;
+    // TLS не обещает отдать всю первую строку запроса одним чтением (`CON` + `NECT …`): копим до перевода строки, но не дольше 10 с
+    // и не больше буфера; SOCKS5 решает первый же байт
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut n = 0usize;
+    loop {
+        match tokio::time::timeout_at(deadline, tls.read(&mut first[n..])).await {
+            Ok(Ok(0)) | Ok(Err(_)) => break,
+            Ok(Ok(got)) => n += got,
+            Err(_) => {
+                if n == 0 {
+                    return Err(std::io::Error::other("no data"));
+                }
+                break;
+            }
+        }
+        if first[0] == 0x05 || first[..n].contains(&b'\n') || n == first.len() {
+            break;
+        }
+    }
     if n == 0 {
         return Ok(());
     }
@@ -211,6 +229,17 @@ mod tests {
             assert!(text.starts_with(&format!("HTTP/1.1 {want}")), "{req:?} → {text}");
             assert!(text.contains("Server: nginx"));
         }
+
+        // первая строка запроса, разбитая между записями TLS, собирается целиком (P7-14): `/index.ht` + `ml` — это `/index.html`
+        let tcp = TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut v = good.connect(name.clone(), tcp).await.unwrap();
+        v.write_all(b"GET /index.ht").await.unwrap();
+        v.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        v.write_all(b"ml HTTP/1.1\r\nHost: x\r\n\r\n").await.unwrap();
+        let mut all = Vec::new();
+        let _ = tokio::time::timeout(Duration::from_secs(5), v.read_to_end(&mut all)).await;
+        assert!(String::from_utf8_lossy(&all).starts_with("HTTP/1.1 200 OK"), "разбитая первая строка: {}", String::from_utf8_lossy(&all));
 
         // чужой отпечаток (подмена узла): рукопожатие не проходит
         let bad = TlsConnector::from(crate::netlayer::tls_cert::build_client_config_pinned(&"00".repeat(32)).unwrap());

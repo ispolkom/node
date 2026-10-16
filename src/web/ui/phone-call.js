@@ -99,7 +99,11 @@
     function startMedia(offerer) {
         var c = call;
         return Promise.all([iceConfig(), getMedia(c.video)]).then(function (r) {
-            if (call !== c) return;
+            if (call !== c || c.phase === 'ended') {
+                // звонок закончился, пока браузер ждал разрешения на микрофон/камеру: полученный захват сразу отпускается
+                try { if (r[1]) r[1].getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+                return;
+            }
             var pc = new RTCPeerConnection(r[0]);
             c.pc = pc; c.local = r[1];
             pc.onicecandidate = function (e) { if (e.candidate) sig('ice', { cand: { candidate: e.candidate.candidate, sdpMid: e.candidate.sdpMid, sdpMLineIndex: e.candidate.sdpMLineIndex } }).catch(function () {}); };
