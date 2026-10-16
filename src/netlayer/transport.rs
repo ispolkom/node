@@ -4901,34 +4901,26 @@ impl P2PTransport {
             let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
             peer.touch();
             self.peers.lock().await.insert(anchor_id, peer);
-            self.ws_outgoing.lock().await.insert(anchor_id, conn.outgoing.clone());
+            // маршрут ws_outgoing публикуется только после проверенного grant и нового ключа: до этого общий трафик не должен
+            // уходить в соединение, где сервер ждёт именно RESUME
 
             let my_node_id = self.identity.node_id();
             let client_nonce: [u8; crate::netlayer::pairing::RESUME_NONCE_LEN] = rand::random();
             let mac = compute_resume_mac(&resume_secret, session_id, &conn.peer_addr, &client_nonce);
             let resume_bytes = encode_resume(my_node_id, session_id, &conn.peer_addr, &client_nonce, &mac);
             if let Err(e) = conn.outgoing.send(resume_bytes).await {
-                self.ws_outgoing.lock().await.remove(&anchor_id);
                 return Err(format!("RESUME send: {}", e));
             }
             println!("[ws-client] 🔁 RESUME sent (session {:#x})", session_id);
 
             // Ждём 0xC1 ACK (encrypted). Один decrypt-проход.
-            // маршрут опубликован заранее, поэтому на ЛЮБОМ раннем выходе он снимается: иначе мёртвый канал остался бы в ws_outgoing,
-            // а сторож переподключения счёл бы соединение живым
             let ack_bytes = match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
                 conn.incoming.recv(),
             ).await {
                 Ok(Some(b)) => b,
-                Ok(None) => {
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
-                    return Err("RESUME_ACK: connection closed".to_string());
-                }
-                Err(_) => {
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
-                    return Err("RESUME_ACK timeout".to_string());
-                }
+                Ok(None) => return Err("RESUME_ACK: connection closed".to_string()),
+                Err(_) => return Err("RESUME_ACK timeout".to_string()),
             };
 
             // ответ узла: значение узла и подпись, привязанная к нашему свежему значению
@@ -4944,6 +4936,7 @@ impl P2PTransport {
                         let mut enc = self.encryption.lock().await;
                         let _ = enc.restore_session(anchor_id, working);
                     }
+                    self.ws_outgoing.lock().await.insert(anchor_id, conn.outgoing.clone());
                     println!("[ws-client] ✅ RESUME accepted, skipping Hello");
 
                     // Spawn decrypt pump — тот же что и в Hello-flow.
@@ -4984,14 +4977,11 @@ impl P2PTransport {
                 }
                 Ok((status, _)) => {
                     eprintln!("[ws-client] RESUME rejected: {:?}; fallback на Hello", status);
-                    // Удалим то что заранее зарегистрировали — Hello-flow зарегистрирует заново.
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
                     // Conn потерян — нужно переподключиться. Сообщаем caller'у что нужен retry.
                     return Err(format!("RESUME status {:?}, reconnect for Hello", status));
                 }
                 Err(e) => {
                     eprintln!("[ws-client] RESUME_ACK decode failed: {}", e);
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
                     return Err(format!("RESUME_ACK decode: {}", e));
                 }
             }
