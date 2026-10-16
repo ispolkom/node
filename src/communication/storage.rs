@@ -99,6 +99,8 @@ pub struct ChatStorage {
     /// Номера уже сохранённых сообщений по собеседникам вместе с длиной файла, для которой набор построен: любое иное изменение файла
     /// (перезапись, удаление, исходящее) меняет длину, и набор строится заново. Нужен, чтобы повтор входящего распознавался по ВСЕЙ истории,
     /// а не по последним N записям.
+    /// Поколение запираний: растёт при каждом `lock`. Снимки открытого текста (очередь повторов) сверяют его перед каждой отправкой.
+    lock_gen: std::sync::atomic::AtomicU64,
     seen_ids: std::sync::Mutex<std::collections::HashMap<HashId, (u64, std::collections::HashSet<HashId>)>>,
 }
 
@@ -115,7 +117,7 @@ impl ChatStorage {
             my_node_id,
             chats_dir: base_dir,
             key_mode: std::sync::RwLock::new(KeyMode::Locked),
-            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(),
+            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(), lock_gen: Default::default(),
         })
     }
 
@@ -123,7 +125,7 @@ impl ChatStorage {
     #[cfg(test)]
     pub(crate) fn in_dir(my_node_id: HashId, dir: std::path::PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { my_node_id, chats_dir: dir, key_mode: std::sync::RwLock::new(KeyMode::Master([0x5a; 32])), write_lock: std::sync::Mutex::new(()), seen_ids: Default::default() })
+        Ok(Self { my_node_id, chats_dir: dir, key_mode: std::sync::RwLock::new(KeyMode::Master([0x5a; 32])), write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(), lock_gen: Default::default() })
     }
 
     /// Создать хранилище с мастер-ключом (HKDF-derived encryption key)
@@ -138,7 +140,7 @@ impl ChatStorage {
             my_node_id,
             chats_dir: base_dir,
             key_mode: std::sync::RwLock::new(KeyMode::Master(master_key)),
-            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(),
+            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(), lock_gen: Default::default(),
         })
     }
 
@@ -162,7 +164,13 @@ impl ChatStorage {
     }
 
     /// Отозвать ключ: дальше любое чтение и запись возвращает ошибку, файлы не трогаются.
+    /// Поколение запираний (см. `lock_gen`).
+    pub fn lock_generation(&self) -> u64 {
+        self.lock_gen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub fn lock(&self) {
+        self.lock_gen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         let mut mode = self.key_mode.write().unwrap_or_else(|e| e.into_inner());
         if let KeyMode::Master(k) = &mut *mode {
             k.fill(0);

@@ -217,6 +217,8 @@ impl ChatManager {
             return; // при запертой среде очередь не отправляется (она и так пуста после lock)
         }
         let now = Instant::now();
+        // поколение запираний — до снятия снимка: lock/unlock во время отправки не оживляет снимок прошлого сеанса
+        let generation = self.storage.lock_generation();
         let mut due: Vec<(HashId, HashId, ChatMessage)> = Vec::new();
         let mut gave_up: Vec<(HashId, HashId)> = Vec::new();
         {
@@ -258,16 +260,16 @@ impl ChatManager {
             self.outbox_dirty
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
-        self.send_due(due).await;
+        self.send_due(due, generation).await;
         self.persist_outbox_if_dirty().await;
     }
 
     /// Отправить снимок «пора повторить». Перед каждой отправкой проверяется замок среды: снимок взят на открытой среде,
     /// а запирание, случившееся во время отправки предыдущих, не должно выпускать оставшиеся копии. Возвращает число отправок.
-    async fn send_due(&self, due: Vec<(HashId, HashId, ChatMessage)>) -> usize {
+    async fn send_due(&self, due: Vec<(HashId, HashId, ChatMessage)>, generation: u64) -> usize {
         let mut sent = 0usize;
         for (msg_id, peer, msg) in due {
-            if self.storage.is_locked() {
+            if self.storage.is_locked() || self.storage.lock_generation() != generation {
                 break;
             }
             sent += 1;
@@ -1203,10 +1205,15 @@ mod tests {
         assert_eq!(cm.pending_acks.lock().await[&stray.msg_id].attempts, 1, "запертая очередь не отправляется");
         cm.pending_acks.lock().await.clear();
         // снимок, взятый до lock, после него не отправляется
-        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())]).await, 0, "после lock копии из снимка не уходят");
+        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())], cm.storage.lock_generation()).await, 0, "после lock копии из снимка не уходят");
 
         cm.unlock([9; 32]).await;
         assert_eq!(cm.pending_acks.lock().await.len(), 1, "очередь поднята с диска после разблокировки");
+        // снимок прошлого сеанса не оживает после полного цикла lock/unlock
+        let old_session = cm.storage.lock_generation();
+        cm.lock().await;
+        cm.unlock([9; 32]).await;
+        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())], old_session).await, 0, "снимок до lock/unlock не отправляется");
         let _ = cm.handle_incoming_message(from, bytes).await;
         assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 1, "повтор после отказа сохранён, а не принят за дубль");
     }
