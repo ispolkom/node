@@ -516,14 +516,39 @@ class GroupService {
     listed.forEach((id, name) { if (known[id] != name) { known[id] = name; changed = true; } });
     if (changed) await store.write(_knownKey, jsonEncode(known));
     gone = [for (final e in known.entries) if (!listed.containsKey(e.key)) (e.key, e.value)];
-    // Группы, которых на узле больше нет (владелец ушёл с узла), с телефона стираются сами: ключи, записи и файлы.
-    // Предохранитель: пустой список при многих известных группах — скорее сбой, чем исчезновение всех сразу.
-    if (gone.isNotEmpty && !(listed.isEmpty && known.length > 3)) {
-      for (final g in List.of(gone)) {
-        if (_retired) return;
+    // Пропавшая с узла группа НЕ стирается сразу: узел могли потерять и восстановить из копии (группа тогда вернётся в список), а
+    // единственная оставшаяся копия ключей и ленты — на телефоне. В списке она остаётся заглушкой «пропала на узле»; стирается сама
+    // только через [goneGrace] непрерывного отсутствия или по нажатию человека.
+    final missing = await _loadMissing();
+    var mChanged = false;
+    final nowMs = clock().millisecondsSinceEpoch;
+    for (final id in List.of(missing.keys)) {
+      if (listed.containsKey(id)) { missing.remove(id); mChanged = true; }   // вернулась (например, узел восстановлен из копии)
+    }
+    for (final g in List.of(gone)) {
+      if (_retired) return;
+      final since = missing.putIfAbsent(g.$1, () { mChanged = true; return nowMs; });
+      if (nowMs - since > goneGrace.inMilliseconds) {
         try { await forgetLocal(g.$1); } catch (_) {}
+        missing.remove(g.$1);
+        mChanged = true;
       }
     }
+    if (mChanged && !_retired) await store.write(_missingKey, jsonEncode(missing));
+  }
+
+  /// Через сколько непрерывного отсутствия на узле группа стирается с телефона сама.
+  static const goneGrace = Duration(days: 30);
+  /// Часы (в проверках подменяются).
+  DateTime Function() clock = DateTime.now;
+  String get _missingKey => nodeKey.isEmpty ? 'grp_missing' : 'grp_missing_$nodeKey';
+
+  Future<Map<String, int>> _loadMissing() async {
+    try {
+      final raw = await store.read(_missingKey);
+      if (raw != null) return {for (final e in (jsonDecode(raw) as Map).entries) '${e.key}': (e.value as num).toInt()};
+    } catch (_) {}
+    return {};
   }
 
   /// Убрать с телефона всё о группе, которой на узле уже нет.
@@ -537,6 +562,10 @@ class GroupService {
       }
     } catch (_) {}
     gone = [for (final g in gone) if (g.$1 != gid) g];
+    try {
+      final m = await _loadMissing();
+      if (m.remove(gid) != null) await store.write(_missingKey, jsonEncode(m));
+    } catch (_) {}
   }
 
   /// Намёк узла «запись №seq изменена» (например, стёрта модератором): перечитать именно её.

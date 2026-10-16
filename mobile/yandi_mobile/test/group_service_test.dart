@@ -431,21 +431,35 @@ void main() {
     expect(old.groups, isEmpty);
   });
 
-  test('группа удалена на узле (или участника исключили): пропадает из списка, данные на телефоне стираются сами', () async {
+  test('группа пропала с узла: остаётся заглушкой и данные целы 30 дней (узел могли потерять и восстановить); потом стираются сами', () async {
+    var t = DateTime(2026, 10, 16, 12);
+    bob.clock = () => t;
     await owner.sync();
     await bobJoins();
     await bob.send(node.gid, GroupKind.text, {'t': 'привет'});
     await bob.sync();                                 // своя запись вернулась из журнала
     expect(bob.gone, isEmpty);
     expect(bobStore.log[node.gid], isNotNull);
-    node.members.remove('bob');                       // узел группу для Боба больше не показывает
+    final savedBob = node.members.remove('bob')!;       // узел группу для Боба больше не показывает
     await bob.sync();
     expect(bob.groups, isEmpty);
-    expect(bob.gone, isEmpty, reason: 'заглушки «удалена» нет: данные группы стёрты сразу');
-    expect(bobStore.log[node.gid], isNull, reason: 'история стёрта');
-    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty, reason: 'ключи группы стёрты');
+    expect(bob.gone.map((g) => g.$1), [node.gid], reason: 'заглушка «пропала на узле»: единственная копия ключей и ленты — на телефоне');
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история цела');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи группы целы');
+    // узел восстановлен из копии — группа вернулась: заглушка исчезает, ничего не потеряно
+    t = t.add(const Duration(days: 10));
+    node.members['bob'] = savedBob;
     await bob.sync();
-    expect(bob.gone, isEmpty, reason: 'забытая группа не возвращается');
+    expect(bob.gone, isEmpty);
+    // снова пропала и не вернулась больше 30 дней — стирается сама
+    node.members.remove('bob');
+    await bob.sync();
+    expect(bob.gone, isNotEmpty);
+    t = t.add(const Duration(days: 31));
+    await bob.sync();
+    expect(bob.gone, isEmpty, reason: 'через 30 дней отсутствия группа стёрта сама');
+    expect(bobStore.log[node.gid], isNull);
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty);
   });
 
   test('просьба о приглашении: гость видит группу, просит, владелец видит и закрывает; рядовой участник не видит', () async {

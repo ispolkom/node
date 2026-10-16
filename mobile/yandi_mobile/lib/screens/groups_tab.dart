@@ -128,7 +128,7 @@ class _GroupsTabState extends State<GroupsTab> {
                     return ListTile(
                       leading: const CircleAvatar(backgroundColor: AppTheme.surface, child: Icon(Icons.link_off, color: AppTheme.incoming)),
                       title: Text(name.isEmpty ? 'Группа' : name, style: const TextStyle(color: AppTheme.textSecondary)),
-                      subtitle: const Text('Удалена на узле или вас выгнали · нажмите, чтобы убрать с телефона', style: TextStyle(color: AppTheme.incoming, fontSize: 12)),
+                      subtitle: const Text('Пропала на узле (удалена, вас выгнали или узел восстанавливается). Данные хранятся на телефоне до 30 дней · нажмите, чтобы убрать сейчас', style: TextStyle(color: AppTheme.incoming, fontSize: 12)),
                       onTap: () async {
                         final ok = await showDialog<bool>(
                           context: context,
