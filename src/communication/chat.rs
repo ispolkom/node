@@ -537,9 +537,6 @@ impl ChatManager {
 
         info!("✅ Message saved from {}", hex::encode(&from.0[..8]));
 
-        // 6. Отправить подтверждение доставки (ACK)
-        self.send_ack(from, msg.msg_id).await?;
-
         // профиль контакта (ник, аватар): разбираем на узле; телефоны получат то же сообщение сами
         for reply in crate::profile_sync::on_incoming(&from, &msg.text) {
             let _ = self.send_service(from, reply).await;
@@ -551,6 +548,10 @@ impl ChatManager {
         // 7. Уведомить Web UI (через канал)
         let _ = self.incoming_tx.send(msg.clone());
         crate::mobile_api::publish(&msg);
+
+        // 6. Подтверждение доставки (ACK) — ПОСЛЕ локальных действий: номер уже считается виденным, и повторная доставка (ветка
+        // дубля) их не повторит; сетевой сбой ACK не должен лишать телефоны события, а реакцию/профиль — применения.
+        self.send_ack(from, msg.msg_id).await?;
 
         Ok(msg)
     }
