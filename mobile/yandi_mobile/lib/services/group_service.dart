@@ -468,14 +468,18 @@ class GroupService {
 
   /// Список групп + ключи + новые записи. Безопасно вызывать по намёку из сокета и по таймеру; параллельные вызовы схлопываются.
   Future<void> sync({String? only}) async {
-    if (_syncing) return;
+    if (_syncing || _retired) return;
     _syncing = true;
     try {
-      final list = GroupInfo.listOf(await api.list());
+      final raw = await api.list();
+      // снятый сервис делит ApiService с новым: ответ мог прийти уже от другого узла — ничего из него не принимаем
+      if (_retired) return;
+      final list = GroupInfo.listOf(raw);
       groups = list;
       await _trackGone(list);
       var relist = false;
       for (final g in list) {
+        if (_retired) return;
         if (only != null && g.id != only) continue;
         try {
           await _publishPub(g.id);
@@ -499,7 +503,10 @@ class GroupService {
           // кривой ответ узла по одной группе (неверные типы полей и т. п.) тоже не останавливает остальные
         }
       }
-      if (relist) groups = GroupInfo.listOf(await api.list());
+      if (relist && !_retired) {
+        final again = await api.list();
+        if (!_retired) groups = GroupInfo.listOf(again);
+      }
     } finally {
       _syncing = false;
     }
@@ -512,6 +519,7 @@ class GroupService {
       final raw = await store.read(_knownKey);
       if (raw != null) { (jsonDecode(raw) as Map).forEach((k, v) => known['$k'] = '$v'); }
     } catch (_) {}
+    if (_retired) return;
     final listed = {for (final g in list) g.id: g.name};
     var changed = false;
     listed.forEach((id, name) { if (known[id] != name) { known[id] = name; changed = true; } });

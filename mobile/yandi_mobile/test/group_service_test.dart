@@ -417,6 +417,20 @@ void main() {
     expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи на месте');
   });
 
+  test('снятый сервис не принимает список групп и не пишет «известные группы» нового узла', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    final fresh = MemoryGroupStore();
+    final old = GroupService(node.as('bob'), fresh, nodeKey: 'OLD');
+    old.retire();
+    await old.sync();
+    expect(fresh.kv.containsKey('grp_known_OLD'), isFalse, reason: 'снятый сервис ничего не записал о чужом узле');
+    expect(old.groups, isEmpty);
+  });
+
   test('группа удалена на узле (или участника исключили): пропадает из списка, данные на телефоне стираются сами', () async {
     await owner.sync();
     await bobJoins();
