@@ -150,6 +150,7 @@ mod tests {
 
     #[test]
     fn local_name_and_avatar_are_set_cleared_and_kept_separate_from_each_other() {
+        unlock([4; 32]); // закрытая среда в проверках может быть создана другим тестом: выдаём хранилищу ключ области
         let id = "c1".repeat(32);
         assert!(name(&id).is_none() && avatar(&id).is_none());
         set(&id, Some("Вася"), None).unwrap();
