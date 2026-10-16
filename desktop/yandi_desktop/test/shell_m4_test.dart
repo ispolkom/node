@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
+import 'package:yandi_desktop/message_actions.dart';
 import 'package:yandi_desktop/voice.dart';
 
 void main() {
@@ -106,6 +107,54 @@ void main() {
     expect(find.text('Очистить историю'), findsNothing);   // слов-ссылок в шапке чата больше нет
     expect(find.textContaining('«Клуб»'), findsOneWidget);
     expect(find.text('Вступить в группу'), findsWidgets);
+    await m1.stop(t);
+  });
+  test('карточка контакта: разбор отбрасывает чужое и чистит имя', () {
+    final ok = ContactCardMessage.tryParse(ContactCardMessage.encode('d' * 16, 'd' * 64, 'Кор\u0007'));
+    expect(ok?.shortId, 'd' * 16);
+    expect(ok?.fullId, 'd' * 64);
+    expect(ok?.name, 'Кор');
+    expect(ContactCardMessage.tryParse('\u0001yandi-ct:{"s":"zz"}'), isNull);
+    expect(ContactCardMessage.tryParse('\u0001yandi-ct:не json'), isNull);
+    expect(ContactCardMessage.tryParse('обычный текст'), isNull);
+    // полный ID, не начинающийся с короткого, отбрасывается — остаётся только короткий
+    final mismatch = ContactCardMessage.tryParse('\u0001yandi-ct:{"s":"${'d' * 16}","i":"${'e' * 64}","n":"x"}');
+    expect(mismatch?.fullId, '');
+  });
+  testWidgets('поделиться контактом: выбор, подтверждение, карточка уходит в личный чат', (t) async {
+    final api = m2.FeatureApi();
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await m1.click(t, 'Поделиться контактом');
+    expect(find.text('Алиса'), findsWidgets);
+    expect(find.byKey(const ValueKey('share-0')), findsOneWidget);
+    expect(find.byKey(const ValueKey('share-1')), findsNothing);   // собеседнику не предлагают его самого
+    await t.tap(find.byKey(const ValueKey('share-0')));
+    await t.pumpAndSettle();
+    await m1.click(t, 'ОК');
+    final sent = api.bodies.where((b) => '${b['text'] ?? ''}'.startsWith(ContactCardMessage.marker)).toList();
+    expect(sent.length, 1);
+    final card = ContactCardMessage.tryParse('${sent.first['text']}')!;
+    expect(card.shortId, 'b' * 16);
+    expect(card.name, 'Боб');
+    await m1.stop(t);
+  });
+  testWidgets('полученный контакт: карточка и «Сохранить» с изменением имени только у себя', (t) async {
+    final api = m2.FeatureApi();
+    api.historyRows.add({
+      'msg_id': 'ct',
+      'from': m2.alice,
+      'timestamp': DateTime.now().millisecondsSinceEpoch,
+      'text': ContactCardMessage.encode('d' * 16, '', 'Кор'),
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    expect(find.text('Кор'), findsOneWidget);
+    expect(find.text('Контакт от собеседника'), findsOneWidget);
+    await m1.tip(t, 'Сохранить контакт');
+    await t.enterText(find.byType(TextField).last, 'Вася');
+    await m1.click(t, 'Сохранить');
+    expect(api.bodies.any((b) => b['short_id'] == 'd' * 16 && b['name'] == 'Вася'), true);
     await m1.stop(t);
   });
   testWidgets('emoji panel inserts into the composer in chat', (t) async {

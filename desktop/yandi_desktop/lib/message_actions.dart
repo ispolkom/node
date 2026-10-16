@@ -12,6 +12,7 @@ const commandEdit = 'Изменить',
     commandHideAuthor = 'Скрыть сообщения этого пользователя',
     commandSelect = 'Выбрать',
     commandShare = 'Переслать',
+    commandSaveContact = 'Сохранить контакт',
     commandThread = 'Вся цепочка ответов',
     commandMute = 'Заглушить',
     commandReact = 'Смайл…',
@@ -289,6 +290,73 @@ class GroupInviteCard extends StatelessWidget {
           )
         else
           CommandText('Вступить в группу', onTap: onJoin),
+      ],
+    ),
+  );
+}
+
+/// Контакт, которым поделились в личном чате: `\u0001yandi-ct:{"s":16 hex,"i":64 hex?,"n":имя}`. В группы не передаётся.
+class ContactCardMessage {
+  static const marker = '\u0001yandi-ct:';
+  final String shortId, fullId, name;
+  const ContactCardMessage(this.shortId, this.fullId, this.name);
+
+  static String encode(String shortId, String fullId, String name) =>
+      '$marker${jsonEncode({'s': shortId, if (fullId.length == 64) 'i': fullId, 'n': name})}';
+
+  static ContactCardMessage? tryParse(String text) {
+    if (!text.startsWith(marker)) return null;
+    try {
+      final j = jsonDecode(text.substring(marker.length));
+      if (j is! Map) return null;
+      final short = '${j['s'] ?? ''}'.toLowerCase();
+      if (!RegExp(r'^[0-9a-f]{16}$').hasMatch(short)) return null;
+      var full = '${j['i'] ?? ''}'.toLowerCase();
+      if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(full) || !full.startsWith(short)) full = '';
+      var n = '${j['n'] ?? ''}'.replaceAll(RegExp(r'[\x00-\x1f]'), '').trim();
+      if (n.length > 64) n = n.substring(0, 64);
+      return ContactCardMessage(short, full, n);
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// Карточка «Контакт» в ленте личного чата; сохранить можно только осознанно (окно с именем).
+class ContactCard extends StatelessWidget {
+  final ContactCardMessage card;
+  final bool outgoing, known;
+  final VoidCallback? onSave;
+  const ContactCard({super.key, required this.card, required this.outgoing, required this.known, this.onSave});
+  @override
+  Widget build(BuildContext context) => Container(
+    margin: const EdgeInsets.symmetric(vertical: 4),
+    padding: const EdgeInsets.all(8),
+    decoration: BoxDecoration(
+      color: const Color(0x14000000),
+      border: Border.all(color: Icq.dark.withValues(alpha: 0.35)),
+    ),
+    child: Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        InitialBadge(card.name.isEmpty ? '?' : card.name, size: 32),
+        const SizedBox(width: 10),
+        Flexible(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(card.name.isEmpty ? tr(context, 'Контакт') : card.name, style: const TextStyle(fontWeight: FontWeight.bold)),
+              UiText(
+                outgoing ? 'Контакт отправлен' : known ? 'Уже в ваших контактах' : 'Контакт от собеседника',
+                style: const TextStyle(fontSize: 12, color: Icq.dark),
+              ),
+            ],
+          ),
+        ),
+        if (!outgoing && !known && onSave != null) ...[
+          const SizedBox(width: 10),
+          IconAction(icon: Icons.person_add_alt_1, tip: 'Сохранить контакт', onTap: onSave),
+        ],
       ],
     ),
   );

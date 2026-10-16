@@ -1,5 +1,6 @@
 import 'message_actions.dart';
 import 'contact_avatar.dart';
+import 'nick.dart';
 import 'theme.dart';
 import 'search_page.dart';
 import 'complaints_page.dart';
@@ -534,13 +535,55 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     return active && rev == revision && answer == true;
   }
 
-  Future<void> joinInvited(GroupInviteMessage inv) async {
+  /// Сохранить контакт, которым поделился собеседник: имя и (позже) картинку задаёт человек, только у себя.
+  Future<void> saveSharedContact(ContactCardMessage card) async {
+    if (contacts.any((c) => '${c['short_id']}' == card.shortId)) return;
     final rev = revision;
     final value = await showDialog<String>(
       context: context,
-      builder: (_) => const ContactNameDialog(initial: '', joiningGroup: true),
+      builder: (_) => ContactNameDialog(initial: card.name, savingContact: true),
     );
     if (!active || rev != revision || value == null || value.isEmpty) return;
+    await mutate(() async {
+      await widget.api.request('/api/contacts', body: {'name': value, 'short_id': card.shortId});
+    });
+  }
+
+  /// Поделиться контактами с собеседником: выбор из своей книжки, подтверждение, по сообщению на каждый.
+  Future<void> shareContacts() async {
+    final to = selected;
+    if (to == null || sending) return;
+    final candidates = [
+      for (final c in contacts)
+        if (c['is_phone'] != true && '${c['short_id']}' != '${to['short_id']}') c,
+    ];
+    final rev = revision;
+    final chosen = await showDialog<List<Map<String, dynamic>>>(
+      context: context,
+      builder: (_) => ShareContactsDialog(contacts: candidates, recipient: '${to['name']}'),
+    );
+    if (!active || rev != revision || chosen == null || chosen.isEmpty) return;
+    final target = peer(to);
+    await mutate(() async {
+      for (final c in chosen) {
+        final id = peer(c);
+        await repo.send(
+          target,
+          ContactCardMessage.encode('${c['short_id']}', id.length == 64 ? id : '', '${c['name']}'.replaceFirst(RegExp('^[\\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '')),
+        );
+      }
+    });
+  }
+
+  Future<void> joinInvited(GroupInviteMessage inv) async {
+    // имя в группе — ник профиля (одно имя на человека); отдельное имя не спрашивается
+    final rev = revision;
+    final value = await loadNick(widget.api);
+    if (!active || rev != revision) return;
+    if (value == null) {
+      setState(() => error = 'Сначала задайте ник в профиле.');
+      return;
+    }
     await mutate(() async {
       await widget.api.request(
         '/api/groups/${inv.gid}/join',
@@ -981,8 +1024,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       if (own && m['attachment'] == null) commandEdit,
       commandReply,
       commandReact,
-      if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
-      if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
+      if (!own && ContactCardMessage.tryParse('${m['text'] ?? ''}') != null) commandSaveContact,
+      if ('${m['text'] ?? ''}'.isNotEmpty && ContactCardMessage.tryParse('${m['text'] ?? ''}') == null) commandCopy,
+      if (('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map) &&
+          ContactCardMessage.tryParse('${m['text'] ?? ''}') == null)
         commandShare,
       commandSelect,
       if (own) commandDelete,
@@ -1019,6 +1064,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         await mutate(() => repo.react(target, '${m['msg_id']}', emoji));
       case commandEdit:
         editMessage(m);
+      case commandSaveContact:
+        final card = ContactCardMessage.tryParse('${m['text'] ?? ''}');
+        if (card != null) await saveSharedContact(card);
+        break;
       case commandShare:
         await forward([m]);
       case commandSelect:
@@ -1134,6 +1183,14 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     invite: inv,
                     outgoing: own,
                     onJoin: () => joinInvited(inv),
+                  )
+                else if (ContactCardMessage.tryParse('${m['text'] ?? ''}')
+                    case final card?)
+                  ContactCard(
+                    card: card,
+                    outgoing: own,
+                    known: contacts.any((c) => '${c['short_id']}' == card.shortId),
+                    onSave: () => saveSharedContact(card),
                   )
                 else
                   Text(stripLinks('${m['text'] ?? ''}')),
@@ -1605,6 +1662,22 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       children: [
                         if (addingContact) ownCardPanel(),
                         if (addingContact) contactImport(),
+                        if (widget.page == 'Чат' && selected != null)
+                          Padding(
+                            padding: const EdgeInsets.only(bottom: 8),
+                            child: FilledButton.icon(
+                              key: const ValueKey('share-contacts'),
+                              onPressed: sending ? null : shareContacts,
+                              icon: const Icon(Icons.share_outlined, size: 18),
+                              label: const UiText('Поделиться контактом'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Icq.header,
+                                foregroundColor: Colors.white,
+                                shape: const RoundedRectangleBorder(),
+                                textStyle: const TextStyle(fontSize: 14, fontFamily: 'Tahoma', decoration: TextDecoration.none),
+                              ),
+                            ),
+                          ),
                         contactList(),
                       ],
                     ),
@@ -1647,15 +1720,62 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         );
 }
 
+class ShareContactsDialog extends StatefulWidget {
+  final List<Map<String, dynamic>> contacts;
+  final String recipient;
+  const ShareContactsDialog({super.key, required this.contacts, required this.recipient});
+  @override
+  State<ShareContactsDialog> createState() => _ShareContactsDialogState();
+}
+
+class _ShareContactsDialogState extends State<ShareContactsDialog> {
+  final picked = <int>{};
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: UiText('Поделиться контактами с «${widget.recipient}»'),
+    content: SizedBox(
+      width: 360,
+      child: widget.contacts.isEmpty
+          ? const UiText('Нет контактов, которыми можно поделиться.')
+          : ListView(
+              shrinkWrap: true,
+              children: [
+                const UiText(
+                  'Собеседник получит карточки с адресом и именем и сам решит, сохранять ли их. В группы контакты не передаются.',
+                  style: TextStyle(fontSize: 12, color: Icq.dark),
+                ),
+                for (var i = 0; i < widget.contacts.length; i++)
+                  CheckboxListTile(
+                    key: ValueKey('share-$i'),
+                    dense: true,
+                    value: picked.contains(i),
+                    title: Text('${widget.contacts[i]['name']}'),
+                    onChanged: (v) => setState(() => v == true ? picked.add(i) : picked.remove(i)),
+                  ),
+              ],
+            ),
+    ),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(context), child: const UiText('Отмена')),
+      FilledButton(
+        onPressed: picked.isEmpty
+            ? null
+            : () => Navigator.pop(context, [for (final i in (picked.toList()..sort())) widget.contacts[i]]),
+        child: const UiText('ОК'),
+      ),
+    ],
+  );
+}
+
 class ContactNameDialog extends StatefulWidget {
   final String initial;
   final bool editingMessage;
-  final bool joiningGroup;
+  final bool savingContact;
   const ContactNameDialog({
     super.key,
     required this.initial,
     this.editingMessage = false,
-    this.joiningGroup = false,
+    this.savingContact = false,
   });
   @override
   State<ContactNameDialog> createState() => _ContactNameDialogState();
@@ -1673,8 +1793,8 @@ class _ContactNameDialogState extends State<ContactNameDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: UiText(
-      widget.joiningGroup
-          ? 'Вступить в группу'
+      widget.savingContact
+          ? 'Сохранить контакт'
           : widget.editingMessage
           ? 'Изменить сообщение'
           : 'Переименовать контакт',
