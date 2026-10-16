@@ -1076,6 +1076,27 @@ pub fn vote(gid: &str, seq: u64, v: i64) -> Result<(), String> {
 }
 
 /// Лента группы: видимые записи (стёртые, служебные и запрещённые правилами не показываются) и сведения о группе.
+/// Предел размера списка записей в одном ответе оболочке ПК (её транспорт принимает не больше 1 МиБ): старые записи отбрасываются.
+const MESSAGES_MAX_BYTES: usize = 700_000;
+
+/// Оставить самые новые записи, чьё общее JSON-представление не больше `max` байт. true — что-то отброшено.
+fn cap_newest(items: &mut Vec<Value>, max: usize) -> bool {
+    let mut total = 0usize;
+    let mut keep_from = items.len();
+    for (i, it) in items.iter().enumerate().rev() {
+        total += it.to_string().len() + 1;
+        if total > max {
+            break;
+        }
+        keep_from = i;
+    }
+    if keep_from == 0 {
+        return false;
+    }
+    items.drain(..keep_from);
+    true
+}
+
 pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
     let dev = pc_device()?;
     with_client(|c| {
@@ -1086,7 +1107,7 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
         let deny = c.rules.get(gid).cloned().unwrap_or_default();
         let log = c.load_log(gid).clone();
         let tally = tally_votes(&log, &my);
-        let items: Vec<Value> = log
+        let mut items: Vec<Value> = log
             .iter()
             .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && e.kind != KIND_REACTION && !deny.contains(&e.kind))
             .map(|e| {
@@ -1094,8 +1115,9 @@ pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
                 json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": ui_body(&e.body), "coins": coins, "my_vote": mine_vote})
             })
             .collect();
+        let truncated = cap_newest(&mut items, MESSAGES_MAX_BYTES);
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
-        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items}))
+        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items, "truncated": truncated}))
     })
 }
 
@@ -1660,6 +1682,18 @@ mod tests {
         assert_eq!(a.open("gid", &sealed).unwrap(), b"secret message");
         assert!(b.open("gid", &sealed).is_none(), "чужой мастер-ключ");
         assert!(a.open("other", &sealed).is_none(), "строка привязана к своей группе");
+    }
+
+    #[test]
+    fn a_long_history_is_cut_to_the_newest_entries_that_fit_the_shell_limit() {
+        let mut items: Vec<Value> = (1..=300u64).map(|i| json!({"seq": i, "body": {"t": "x".repeat(8000)}})).collect();
+        assert!(cap_newest(&mut items, MESSAGES_MAX_BYTES));
+        assert!(items.len() < 300 && !items.is_empty());
+        assert_eq!(items.last().unwrap()["seq"], 300, "самая новая запись осталась");
+        assert!(serde_json::to_vec(&items).unwrap().len() <= MESSAGES_MAX_BYTES + items.len());
+        let mut small = vec![json!({"seq": 1})];
+        assert!(!cap_newest(&mut small, MESSAGES_MAX_BYTES));
+        assert_eq!(small.len(), 1);
     }
 
     #[test]
