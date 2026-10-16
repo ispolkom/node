@@ -918,9 +918,18 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Пришла правка от собеседника: находим его сообщение по remoteId и заменяем текст + метка «изменено».
   void _applyEdit(String from, String cmid, String newText) {
     final list = _chats[from];
-    if (list == null) return;
-    final i = list.indexWhere((m) => !m.outgoing && m.remoteId == cmid);
-    if (i < 0) return;
+    final i = list == null ? -1 : list.indexWhere((m) => !m.outgoing && m.remoteId == cmid);
+    if (list == null || i < 0) {
+      // история этого чата не загружена (или сообщение вытеснено из последних 50): правка применяется прямо в базе, а не теряется
+      unawaited(() async {
+        final id = await StorageService.applyIncomingEdit(from, cmid, newText);
+        if (id != null) {
+          _editedIds.add(id);
+          await StorageService.saveEditedIds(_editedIds);
+        }
+      }());
+      return;
+    }
     final local = list[i];
     list[i] = _withText(local, newText);
     _editedIds.add(local.id);
@@ -1252,9 +1261,11 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   void _applyReceipt(String from, String kind, List<String> ids) {
+    final target = kind == 'read' ? MessageStatus.read : MessageStatus.delivered;
+    // и в базу — независимо от того, загружен ли чат: иначе квитанция «подтверждена», а статус остался старым
+    unawaited(StorageService.raiseOutgoingStatus(from, ids, target));
     final list = _chats[from];
     if (list == null) return;
-    final target = kind == 'read' ? MessageStatus.read : MessageStatus.delivered;
     var changed = false;
     for (var i = 0; i < list.length; i++) {
       final m = list[i];

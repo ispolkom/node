@@ -570,6 +570,25 @@ class StorageService {
     await db.update('messages', {'remote_id': remoteId}, where: 'id = ? AND remote_id IS NULL', whereArgs: [id]);
   }
 
+  /// Правка входящего сообщения собеседником прямо в базе (история чата может быть не загружена): возвращает локальный id или null.
+  static Future<String?> applyIncomingEdit(String peerId, String remoteId, String text) async {
+    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ?', whereArgs: [peerId, remoteId], limit: 1);
+    if (rows.isEmpty) return null;
+    final id = '${rows.first['id']}';
+    await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
+    return id;
+  }
+
+  /// Квитанция собеседника прямо в базе: статус только растёт (pending/failed → delivered → read).
+  static Future<void> raiseOutgoingStatus(String peerId, List<String> ids, MessageStatus target) async {
+    if (ids.isEmpty || target == MessageStatus.pending || target == MessageStatus.failed) return;
+    final lower = target == MessageStatus.read ? ['pending', 'failed', 'delivered'] : ['pending', 'failed'];
+    final q = List.filled(ids.length, '?').join(',');
+    final w = List.filled(lower.length, '?').join(',');
+    await db.update('messages', {'status': target.name},
+        where: 'peer_id = ? AND outgoing = 1 AND id IN ($q) AND status IN ($w)', whereArgs: [peerId, ...ids, ...lower]);
+  }
+
   static Future<void> updateMessageText(String id, String text) async {
     await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
   }

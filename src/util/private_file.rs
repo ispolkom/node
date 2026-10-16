@@ -21,10 +21,11 @@ fn sweep_stale_temps(path: &Path, name: &str) {
         if pid == me {
             continue;
         }
-        #[cfg(unix)]
+        // жизнь процесса проверяется только там, где есть procfs (Linux); на macOS/Windows состояние неизвестно — чужие временные файлы не трогаем
+        #[cfg(target_os = "linux")]
         let alive = std::path::Path::new(&format!("/proc/{pid}")).exists();
-        #[cfg(not(unix))]
-        let alive = true; // без /proc: чужие временные файлы не трогаем
+        #[cfg(not(target_os = "linux"))]
+        let alive = true;
         if !alive {
             let _ = std::fs::remove_file(e.path());
         }
