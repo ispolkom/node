@@ -7,7 +7,7 @@ import 'domain/file_repository.dart';
 import 'media_player.dart';
 import 'message_actions.dart';
 import 'platform_files.dart';
-import 'voice.dart' show ramTempRoot;
+import 'voice.dart' show ramTempRoot, hasRamTemp, openedCopies;
 import 'theme.dart';
 import 'transport/api.dart';
 
@@ -189,12 +189,20 @@ class _AttachmentViewState extends State<AttachmentView> {
     try {
       // «Открыть»: расшифрованная копия кладётся в оперативную память (не на диск) и стирается при следующем запуске/выходе из сеанса;
       // «Сохранить как» — осознанный вывод файла туда, куда указал человек
-      path = open
-          ? '${(await ramTempRoot().createTemp('yandi_open')).path}/${'${widget.attachment['filename']}'.replaceAll(RegExp(r'[/\\]'), '_')}'
-          : await PlatformFiles.choose(
-              save: true,
-              name: '${widget.attachment['filename']}',
-            );
+      if (open && !hasRamTemp) {
+        if (active) setState(() => error = 'Открыть без сохранения нельзя: нет оперативного хранилища. Используйте «Скачать».');
+        return;
+      }
+      if (open) {
+        final dir = await ramTempRoot().createTemp('yandi_open');
+        openedCopies.add(dir);
+        path = '${dir.path}/${'${widget.attachment['filename']}'.replaceAll(RegExp(r'[/\\]'), '_')}';
+      } else {
+        path = await PlatformFiles.choose(
+          save: true,
+          name: '${widget.attachment['filename']}',
+        );
+      }
     } catch (_) {
       if (active)
         setState(() {

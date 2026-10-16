@@ -4,6 +4,7 @@ import 'relay_card.dart';
 import 'preferences.dart';
 import 'nick.dart';
 import 'member_badge.dart';
+import 'voice.dart' show wipeOpenedCopies;
 import 'background_alerts.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -90,6 +91,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     vault = null;
     nickAsked = false;
     MemberBadge.forget(); // визитки участников (картинки) в памяти не переживают запирание
+    unawaited(wipeOpenedCopies()); // открытые копии вложений («Сохранить и открыть») затираются при запирании и выходе
   }
 
   void disconnect(ApiFailure failure) {

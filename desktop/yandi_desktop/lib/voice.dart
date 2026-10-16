@@ -52,6 +52,31 @@ Directory ramTempRoot() {
   return Directory.systemTemp;
 }
 
+/// Есть ли оперативная память под временные файлы (иначе «Сохранить и открыть» не делается: открытая копия легла бы на накопитель).
+bool get hasRamTemp {
+  for (final p in [Platform.environment['XDG_RUNTIME_DIR'], '/dev/shm']) {
+    if (p != null && p.isNotEmpty && Directory(p).existsSync()) return true;
+  }
+  return false;
+}
+
+/// Открытые копии вложений этого сеанса: при запирании и выходе затираются сразу, а не при следующем запуске.
+final Set<Directory> openedCopies = {};
+
+Future<void> wipeOpenedCopies() async {
+  final dirs = openedCopies.toList();
+  openedCopies.clear();
+  for (final d in dirs) {
+    try {
+      if (!await d.exists()) continue;
+      await for (final f in d.list(followLinks: false)) {
+        if (f is File) await wipeVoice(f);
+      }
+      if (await d.exists()) await d.delete(recursive: true);
+    } catch (_) {}
+  }
+}
+
 /// Куда писать голосовое: временный файл с понятным именем (как «Голосовое_…» в телефоне).
 Future<String> newVoicePath() async {
   final t = DateTime.now();
