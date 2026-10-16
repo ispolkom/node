@@ -254,6 +254,19 @@ pub fn init(master: [u8; 32]) {
 
 static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Поколение запирания: растёт при каждом `lock`. Долгие операции (скачивание файла) сверяют его после каждого await.
+static LOCK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn lock_gen() -> u64 {
+    LOCK_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn check_session(gen: u64) -> Result<(), String> {
+    if lock_gen() != gen || LOCKED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("закрытая среда заперта: операция прервана".into());
+    }
+    Ok(())
+}
 
 /// Среда стёрта: состояние групп ПК и зашифрованные ленты без ключа бесполезны — удаляются (группы начнутся с чистого листа).
 pub fn erase_encrypted() {
@@ -341,6 +354,7 @@ fn rekey_dir(dir: &Path, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize, 
 
 /// Закрытая среда: убрать ключ и расшифрованное состояние из памяти; файлы на диске не трогаются, фоновая синхронизация ждёт.
 pub fn lock() {
+    LOCK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     LOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
     *cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
@@ -1446,6 +1460,7 @@ pub async fn upload_file(gid: &str, name: &str, data: Vec<u8>) -> Result<u64, St
 /// Скачать, расшифровать и проверить файл записи №seq. Подмена, перестановка или обрезка кусков и несовпадение суммы — ошибка.
 pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), String> {
     use sha2::Digest;
+    let gen = lock_gen();
     let dev = pc_device()?;
     let body = with_client(|c| {
         let log = c.load_log(gid).clone();
@@ -1460,20 +1475,23 @@ pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), Str
     let name = body["n"].as_str().unwrap_or("file").to_string();
     let size = body["z"].as_u64().unwrap_or(0);
     let total = body["c"].as_u64().unwrap_or(0) as u32;
-    let key = body["k"].as_str().and_then(unb64).and_then(|k| arr32(&k)).ok_or("неверный ключ файла")?;
+    let key = zeroize::Zeroizing::new(body["k"].as_str().and_then(unb64).and_then(|k| arr32(&k)).ok_or("неверный ключ файла")?);
     if total == 0 || size == 0 || size > crate::mobile_group_files::MAX_GROUP_FILE {
         return Err("неверное описание файла".into());
     }
-    let mut out = Vec::with_capacity(size as usize);
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(size as usize));
     for i in 0..total {
         let wire = crate::mobile_group_files::pc_chunk(gid, &dev, &fid, i).await?;
+        // запирание среды, пока шёл запрос: ключ файла и накопленное открытое содержимое стираются (Zeroizing), ответ не отдаётся
+        check_session(gen)?;
         let part = aead_open(&key, &file_aad(&fid, i, total), &wire).ok_or("кусок файла повреждён или подменён")?;
         out.extend_from_slice(&part);
     }
+    check_session(gen)?;
     if out.len() as u64 != size || body["h"].as_str() != Some(hex::encode(sha2::Sha256::digest(&out)).as_str()) {
         return Err("файл повреждён или подменён".into());
     }
-    Ok((name, out))
+    Ok((name, std::mem::take(&mut *out)))
 }
 
 #[cfg(test)]
@@ -1642,6 +1660,14 @@ mod tests {
         assert_eq!(a.open("gid", &sealed).unwrap(), b"secret message");
         assert!(b.open("gid", &sealed).is_none(), "чужой мастер-ключ");
         assert!(a.open("other", &sealed).is_none(), "строка привязана к своей группе");
+    }
+
+    #[test]
+    fn a_lock_after_the_operation_started_invalidates_its_session() {
+        let gen = lock_gen();
+        lock(); // запирание посреди скачивания
+        LOCKED.store(false, std::sync::atomic::Ordering::SeqCst); // даже мгновенное повторное открытие не оживляет старую операцию
+        assert!(check_session(gen).is_err());
     }
 
     #[test]
