@@ -115,7 +115,7 @@ NFT
     exit 1
   fi
   mkdir -p /etc/systemd/system/coturn.service.d
-  printf '[Service]\nExecStartPre=%s -f %s\n' "$NFT_BIN" "$NFT_FILE" > /etc/systemd/system/coturn.service.d/yandi-nft.conf
+  printf '[Service]\nExecStartPre=+%s -f %s\n' "$NFT_BIN" "$NFT_FILE" > /etc/systemd/system/coturn.service.d/yandi-nft.conf
   systemctl daemon-reload
   echo "защита релея поставлена (таблица inet yandi_turn) и применяется при каждом запуске coturn."
 elif [ "${YANDI_TURN_ALLOW_SELF_RELAY:-0}" != "1" ]; then
