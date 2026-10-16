@@ -215,6 +215,8 @@ impl ClosedEnv {
     /// Первичная настройка: пароль и четыре слова (обязательны: пять неверных паролей оставляют только сид).
     /// Создаёт среду, переносит данные, открывает сеанс.
     pub async fn setup(&self, password: String, phrase: Option<String>) -> Result<()> {
+        // поколение блокировок фиксируется ДО очереди и вычисления ключа, как в unlock: запирание во время настройки отменяет вход
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if self.configured() {
             bail!("закрытая среда уже создана");
@@ -241,7 +243,7 @@ impl ClosedEnv {
         self.configured.store(true, std::sync::atomic::Ordering::SeqCst);
         // по умолчанию среда запирается сама через 15 минут бездействия; владелец меняет это в «Настройках»
         let _ = self.set_auto_lock(DEFAULT_AUTO_LOCK_SECS);
-        self.install(vault, None).await
+        self.install(vault, Some(epoch)).await
     }
 
     pub async fn unlock(&self, password: String) -> Result<()> {
@@ -532,6 +534,23 @@ mod tests {
         e.lock().await; // запирание, случившееся уже после проверки поколения вызывающим
         assert!(e.install(vault, Some(stale)).await.is_err());
         assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+    }
+
+    /// Запирание во время первичной настройки отменяет открытие сеанса: среда создана, но остаётся запертой до пароля.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lock_during_the_first_setup_does_not_open_the_environment() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        let e2 = e.clone();
+        let pending = tokio::task::spawn(async move {
+            e2.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await; // настройка уже зафиксировала поколение и считает ключ
+        e.lock().await;
+        let r = pending.await.unwrap();
+        assert!(r.is_err(), "настройка, начатая до блокировки, не открывает среду");
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+        e.unlock("owner password".into()).await.expect("созданная среда открывается паролем");
     }
 
     #[tokio::test]
