@@ -565,6 +565,11 @@ class StorageService {
     );
   }
 
+  /// Дописать номер сообщения у отправителя в уже сохранённую строку (saveMessage с IGNORE существующую строку не меняет).
+  static Future<void> setRemoteIdIfMissing(String id, String remoteId) async {
+    await db.update('messages', {'remote_id': remoteId}, where: 'id = ? AND remote_id IS NULL', whereArgs: [id]);
+  }
+
   static Future<void> updateMessageText(String id, String text) async {
     await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
   }

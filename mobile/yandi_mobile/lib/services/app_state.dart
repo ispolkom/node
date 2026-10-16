@@ -590,7 +590,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (rid == null) continue;
       if (identical(out, list)) out = List.of(list);
       out[i] = m.copyWith(remoteId: rid);
-      try { await StorageService.saveMessage(out[i]); } catch (_) {}
+      try { await StorageService.setRemoteIdIfMissing(m.id, rid); } catch (_) {}
     }
     return out;
   }
