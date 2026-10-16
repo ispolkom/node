@@ -175,6 +175,9 @@ struct GState {
     pub_sent: bool,
     #[serde(default)]
     owner_pub: Option<String>,
+    /// псевдоним закреплённого владельца: по нему передача владения подтверждается и тогда, когда прежний владелец уже вышел из группы
+    #[serde(default)]
+    owner_alias: Option<String>,
     #[serde(default)]
     keys: BTreeMap<u32, String>,
     #[serde(default)]
@@ -647,7 +650,7 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
 /// Следующий ключ владельца по цепочке передач: служебная запись `handover` с ключом из `wanted`, написанная тем, чей ключ закреплён
 /// (его member_pub по списку узла совпадает с закреплённым). Сам новый владелец и рядовой участник такую запись не подтвердят.
 /// Граница: узел в сговоре с участником может выдать чужую запись за запись прежнего владельца (личных подписей нет) — см. аудит №5.
-fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &str, wanted: &HashSet<String>) -> Option<String> {
+fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &str, pinned_alias: Option<&str>, wanted: &HashSet<String>) -> Option<(String, Option<String>)> {
     log.iter().find_map(|e| {
         if e.deleted || e.kind != KIND_SYSTEM || e.body["op"] != "handover" {
             return None;
@@ -656,8 +659,13 @@ fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &s
         if !wanted.contains(p) || p == pinned {
             return None;
         }
-        let author_pub = members.iter().find(|(alias, _, _)| alias == &e.from).map(|(_, _, p)| p.as_str())?;
-        (author_pub == pinned).then(|| p.to_string())
+        // автор есть в составе — его ключ обязан совпасть с закреплённым; автора уже нет (вышел после передачи) — принимается запись
+        // под тем псевдонимом, который был у закреплённого владельца (псевдоним заверяет узел при записи)
+        let ok = match members.iter().find(|(alias, _, _)| alias == &e.from) {
+            Some((_, _, author_pub)) => author_pub == pinned,
+            None => pinned_alias == Some(e.from.as_str()),
+        };
+        ok.then(|| (p.to_string(), e.body["to"].as_str().map(str::to_string)))
     })
 }
 
@@ -676,6 +684,9 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
             }
             let Some(p) = top_owner.clone() else { return Ok(()) };
             c.gstate(gid).owner_pub = Some(p.clone()); // закрепляю при первом получении
+            c.gstate(gid).owner_alias = with_store(|st| st.members(gid, dev)).ok().and_then(|m| {
+                m["members"].as_array().and_then(|l| l.iter().find(|x| s(x, "member_pub") == p).map(|x| s(x, "alias")))
+            });
             let _ = c.save();
             p
         }
@@ -721,10 +732,12 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
             .and_then(|m| m["members"].as_array().map(|l| l.iter().map(|x| (s(x, "alias"), s(x, "role"), s(x, "member_pub"))).collect()))
             .unwrap_or_default();
         let log = c.load_log(gid).clone();
-        match handover_next(&log, &members, &pinned, &wanted) {
-            Some(next) => {
+        let pinned_alias = c.gstate(gid).owner_alias.clone();
+        match handover_next(&log, &members, &pinned, pinned_alias.as_deref(), &wanted) {
+            Some((next, next_alias)) => {
                 pinned = next.clone();
                 c.gstate(gid).owner_pub = Some(next);
+                c.gstate(gid).owner_alias = next_alias;
                 let _ = c.save();
             }
             None => {
@@ -1604,13 +1617,18 @@ mod tests {
         ];
         let h = |from: &str, pubk: &str| Entry { seq: 1, ts: 0, epoch: 1, kind: KIND_SYSTEM, from: from.to_string(), body: json!({"op": "handover", "to": "Новый", "pub": pubk}), deleted: false };
         let want: HashSet<String> = ["NEW".to_string()].into_iter().collect();
-        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &want).as_deref(), Some("NEW"), "от закреплённого (прежнего) владельца");
-        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &members, "OLD", &want), None, "рядовой не подтверждает");
-        assert_eq!(handover_next(&[h("Новый", "NEW")], &members, "OLD", &want), None, "сам новый себя не подтверждает");
-        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &HashSet::new()), None, "этот ключ не нужен");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", Some("Старый"), &want).map(|x| x.0).as_deref(), Some("NEW"), "от закреплённого (прежнего) владельца");
+        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &members, "OLD", Some("Старый"), &want), None, "рядовой не подтверждает");
+        assert_eq!(handover_next(&[h("Новый", "NEW")], &members, "OLD", Some("Старый"), &want), None, "сам новый себя не подтверждает");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", Some("Старый"), &HashSet::new()), None, "этот ключ не нужен");
         let mut gone = h("Старый", "NEW");
         gone.deleted = true;
-        assert_eq!(handover_next(&[gone], &members, "OLD", &want), None, "стёртая запись не считается");
+        assert_eq!(handover_next(&[gone], &members, "OLD", Some("Старый"), &want), None, "стёртая запись не считается");
+        // прежний владелец вышел из группы: передача подтверждается по его закреплённому псевдониму, чужой псевдоним не подходит
+        let left = vec![("Новый".to_string(), "owner".to_string(), "NEW".to_string()), ("Рядовой".to_string(), "member".to_string(), "MEM".to_string())];
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &left, "OLD", Some("Старый"), &want).map(|x| x.0).as_deref(), Some("NEW"), "автор вышел, псевдоним закреплён");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &left, "OLD", None, &want), None, "псевдоним не закреплён — не принимается");
+        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &left, "OLD", Some("Старый"), &want), None, "чужой псевдоним");
         // каждая запись несёт свой случайный номер (защита от повторов)
         let key = [7u8; 32];
         let a = decrypt_entry(&key, &encrypt_entry(&key, "g", 1, "x", KIND_TEXT, &json!({"t": "a"})).unwrap(), "g", 1, "x").unwrap().1;
