@@ -880,9 +880,10 @@ impl Store {
     pub fn delete(&mut self, gid: &str) -> R<()> {
         let g = self.groups.remove(gid).ok_or_else(not_found)?;
         self.offsets.remove(gid);
+        // сначала фиксируется новый индекс: при отказе записи save откатывает описание, а журнал и файлы остаются нетронутыми
+        self.save()?;
         let _ = std::fs::remove_file(self.log_path(gid));
         crate::mobile_group_files::drop_group(gid);
-        self.save()?;
         hint(gid, HINT_DELETED, 0, g.keys());
         Ok(())
     }
@@ -2518,6 +2519,22 @@ mod tests {
         std::fs::write(&file_dir, b"x").unwrap();
         let mut s2 = Store::open(file_dir);
         assert!(s2.create_as("Г", "т", Kind::Open, OWNER, &[], true).is_err());
+    }
+
+    #[test]
+    fn a_failed_index_write_does_not_destroy_the_history_of_a_group_being_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("groups");
+        let mut s = Store::open(dir.clone());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let log = s.log_path(&gid);
+        std::fs::write(&log, b"{\"seq\":1}\n").unwrap();
+        // индекс нельзя перезаписать: на его месте каталог
+        std::fs::remove_file(dir.join("index.json")).unwrap();
+        std::fs::create_dir_all(dir.join("index.json")).unwrap();
+        assert!(s.delete(&gid).is_err(), "удаление не зафиксировано");
+        assert!(s.groups.contains_key(&gid), "группа на месте");
+        assert!(log.exists(), "журнал цел: файлы удаляются только после фиксации индекса");
     }
 
     #[test]
