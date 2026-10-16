@@ -1007,8 +1007,10 @@ impl FileTransferManager {
                 }
                 done.insert(file_id.to_string(), from);
             }
-            self.send_transfer_complete(from, file_id).await?;
+            // активная запись снимается ДО сетевого подтверждения: если оно не ушло, повтор End найдёт передачу среди завершённых
+            // и подтвердит её (ветка already_completed), а не станет читать уже переименованный .part
             self.incoming.lock().await.remove(file_id);
+            self.send_transfer_complete(from, file_id).await?;
         } else {
             info!(
                 "📭 Missing {} ranges for {} after transfer pass",
