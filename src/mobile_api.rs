@@ -2322,7 +2322,7 @@ mod tests {
     #[tokio::test]
     async fn an_open_connect_ends_when_its_device_is_revoked_and_only_then() {
         let (tx, mut rx) = tokio::sync::broadcast::channel::<Event>(8);
-        let waiting = tokio::spawn(async move {
+        let waiting = tokio::task::spawn(async move {
             wait_revoked(&mut rx, "dev-a", || true).await;
         });
         let _ = tx.send(Event::Revoked("dev-b".into()));

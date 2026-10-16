@@ -585,6 +585,7 @@ mod tests {
     }
 
     /// Файл, который не удалось даже открыть для проверки заголовка, — неудача переноса, а не «чужой файл».
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_file_counts_as_a_failed_migration() {
         use std::os::unix::fs::PermissionsExt;
