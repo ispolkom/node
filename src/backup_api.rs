@@ -14,7 +14,6 @@ use axum::routing::{get, post};
 use axum::Router;
 use serde::Deserialize;
 use serde_json::json;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
 
 type RootGetter = Arc<dyn Fn() -> Option<[u8; 32]> + Send + Sync>;
@@ -25,7 +24,6 @@ struct Runtime {
 }
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
-static CRITICAL: AtomicBool = AtomicBool::new(false);
 
 /// Раз в сутки (с запасом на задержки).
 pub const DAILY_MS: u64 = 24 * 3600 * 1000;
@@ -38,7 +36,7 @@ pub fn install(layout: Layout, root: RootGetter) {
 /// Изменилось то, без чего восстановление опасно (устройство добавлено или отозвано, участник забанен, сменился владелец группы):
 /// плановая задача сделает копию в ближайшую минуту, не дожидаясь суток.
 pub fn notify_critical() {
-    CRITICAL.store(true, Ordering::Relaxed);
+    crate::backup_signal::notify_critical();
 }
 
 fn now_ms() -> u64 {
@@ -161,7 +159,7 @@ pub async fn scheduler() {
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         let Some(r) = RUNTIME.get() else { continue };
-        let critical = CRITICAL.swap(false, Ordering::Relaxed);
+        let critical = crate::backup_signal::take();
         let st = node_backup::load_state(&r.layout);
         if st.dir.as_ref().is_none_or(|d| d.trim().is_empty()) || !due(&st, now_ms(), critical) {
             continue;

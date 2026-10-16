@@ -868,6 +868,7 @@ impl Store {
                 m.muted = false;
             }
         }
+        crate::backup_signal::notify_critical(); // сменился владелец группы
         g.rekey_needed = true;
         g.log(&me_alias, "transfer", Some(&target.alias), None, None);
         let to = g.keys();
@@ -1347,6 +1348,7 @@ impl Store {
                 }
             }
             "promote" | "demote" => {
+                crate::backup_signal::notify_critical(); // смена роли: старая копия вернула бы прежние права
                 if by_role != Role::Owner && by_role != Role::Admin {
                     return Err(forbidden("роли назначают владелец и админ"));
                 }
@@ -1368,6 +1370,7 @@ impl Store {
                     alias: target.alias.clone(),
                     ts: now_ms(),
                 });
+                crate::backup_signal::notify_critical(); // бан: старая копия вернула бы участника
             }
             _ => return Err(bad("неизвестное действие")),
         }

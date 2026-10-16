@@ -35,6 +35,7 @@ pub mod bootstrap;
 pub mod closed_api;
 #[cfg(unix)]
 pub mod closed_env;
+pub mod backup_signal;
 #[cfg(unix)]
 pub mod node_backup;
 #[cfg(unix)]
