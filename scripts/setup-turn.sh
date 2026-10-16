@@ -88,13 +88,45 @@ if [ -f /etc/default/coturn ]; then
   grep -q '^TURNSERVER_ENABLED=1' /etc/default/coturn || echo 'TURNSERVER_ENABLED=1' >> /etc/default/coturn
 fi
 
-echo "== 3. служба"
+echo "== 3. защита релея от доступа к службам этого компьютера"
+# служба на 0.0.0.0 этого компьютера не должна доставаться через релей по собственному внешнему адресу (пакет идёт через lo мимо
+# входного файрвола): из портов релея на $EXT — только в порты релея. Правило в СВОЕЙ таблице, независимо от чужого файрвола.
+# Ставится ДО запуска coturn одной транзакцией (nft -f) и повторяется при каждом запуске службы (drop-in ExecStartPre): после
+# перезагрузки релей не поднимется без правила, а ошибка применения не оставляет его работающим.
+OUT_RULE="ip daddr $EXT udp sport $RELAY_MIN-$RELAY_MAX udp dport != $RELAY_MIN-$RELAY_MAX drop"
+NFT_FILE=/etc/yandi-turn.nft
+if command -v nft >/dev/null; then
+  NFT_BIN=$(command -v nft)
+  cat > "$NFT_FILE" <<NFT
+table inet yandi_turn
+flush table inet yandi_turn
+table inet yandi_turn { chain output { type filter hook output priority 0; policy accept; $OUT_RULE; } }
+NFT
+  chmod 644 "$NFT_FILE"
+  if ! "$NFT_BIN" -f "$NFT_FILE" || ! "$NFT_BIN" list chain inet yandi_turn output | grep -q "udp sport $RELAY_MIN-$RELAY_MAX"; then
+    echo "не удалось поставить защиту релея от самого себя: coturn остановлен и выключен"
+    systemctl stop coturn 2>/dev/null || true
+    systemctl disable coturn >/dev/null 2>&1 || true
+    exit 1
+  fi
+  mkdir -p /etc/systemd/system/coturn.service.d
+  printf '[Service]\nExecStartPre=%s -f %s\n' "$NFT_BIN" "$NFT_FILE" > /etc/systemd/system/coturn.service.d/yandi-nft.conf
+  systemctl daemon-reload
+  echo "защита релея поставлена (таблица inet yandi_turn) и применяется при каждом запуске coturn."
+elif [ "${YANDI_TURN_ALLOW_SELF_RELAY:-0}" != "1" ]; then
+  echo "nft не найден: без правила на выходе релей достаёт службы этого компьютера по его внешнему адресу ($EXT)."
+  echo "Установите nftables или поставьте эквивалентное правило своим брандмауэром и запустите скрипт с YANDI_TURN_ALLOW_SELF_RELAY=1."
+  systemctl stop coturn 2>/dev/null || true
+  exit 1
+fi
+
+echo "== 4. служба"
 systemctl enable coturn >/dev/null 2>&1 || true
 systemctl restart coturn
 sleep 2
 systemctl is-active --quiet coturn && echo "coturn работает" || { echo "coturn не запустился:"; journalctl -u coturn -n 20 --no-pager; exit 1; }
 
-echo "== 4. брандмауэр"
+echo "== 5. брандмауэр"
 if command -v nft >/dev/null && nft list chain inet filter input >/dev/null 2>&1; then
   add_rule() { nft list chain inet filter input | grep -q -- "$1" || nft add rule inet filter input $1; }
   add_rule "tcp dport $PORT accept"
@@ -108,26 +140,7 @@ if command -v nft >/dev/null && nft list chain inet filter input >/dev/null 2>&1
 else
   echo "nftables с таблицей inet filter не найден: откройте порты $PORT (TCP и UDP) и $RELAY_MIN-$RELAY_MAX (UDP) своим брандмауэром."
 fi
-# служба на 0.0.0.0 этого компьютера не должна доставаться через релей по собственному внешнему адресу (пакет идёт через lo мимо
-# входного файрвола): из портов релея на $EXT — только в порты релея. Правило ставится в СВОЕЙ таблице, независимо от чужого файрвола.
-OUT_RULE="ip daddr $EXT udp sport $RELAY_MIN-$RELAY_MAX udp dport != $RELAY_MIN-$RELAY_MAX drop"
-if command -v nft >/dev/null; then
-  nft add table inet yandi_turn
-  nft flush table inet yandi_turn
-  nft add chain inet yandi_turn output '{ type filter hook output priority 0; policy accept; }'
-  nft add rule inet yandi_turn output $OUT_RULE
-  nft list chain inet yandi_turn output | grep -q "udp sport $RELAY_MIN-$RELAY_MAX" || { echo "не удалось поставить защиту релея от самого себя"; exit 1; }
-  echo "защита релея от доступа к службам этого компьютера поставлена (таблица inet yandi_turn)."
-  echo "ЧТОБЫ ОНА ОСТАЛАСЬ ПОСЛЕ ПЕРЕЗАГРУЗКИ, добавьте в /etc/nftables.conf:"
-  echo "    table inet yandi_turn { chain output { type filter hook output priority 0; policy accept; $OUT_RULE } }"
-elif [ "${YANDI_TURN_ALLOW_SELF_RELAY:-0}" != "1" ]; then
-  echo "nft не найден: без правила на выходе релей достаёт службы этого компьютера по его внешнему адресу ($EXT)."
-  echo "Установите nftables или поставьте эквивалентное правило своим брандмауэром и запустите скрипт с YANDI_TURN_ALLOW_SELF_RELAY=1."
-  systemctl stop coturn 2>/dev/null || true
-  exit 1
-fi
-
-echo "== 5. секрет для узла"
+echo "== 6. секрет для узла"
 # каталог создаётся от имени владельца (иначе при чистой установке он достанется root, и узел не сможет в него писать)
 runuser -u "$OWNER" -- mkdir -p "$DATA_DIR"
 chmod 700 "$DATA_DIR"
