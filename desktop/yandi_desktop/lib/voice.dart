@@ -43,6 +43,15 @@ class RecordBackend implements VoiceBackend {
 /// Фабрика, которую подменяют в тестах.
 VoiceBackend Function() voiceBackendFactory = RecordBackend.new;
 
+/// Каталог для временных открытых файлов: оперативная память (tmpfs сеанса пользователя), а не диск. Так открытая копия не попадает на
+/// накопитель и исчезает при выходе из сеанса; без tmpfs — системный каталог (крайний случай).
+Directory ramTempRoot() {
+  for (final p in [Platform.environment['XDG_RUNTIME_DIR'], '/dev/shm']) {
+    if (p != null && p.isNotEmpty && Directory(p).existsSync()) return Directory(p);
+  }
+  return Directory.systemTemp;
+}
+
 /// Куда писать голосовое: временный файл с понятным именем (как «Голосовое_…» в телефоне).
 Future<String> newVoicePath() async {
   final t = DateTime.now();
@@ -50,9 +59,12 @@ Future<String> newVoicePath() async {
   final name =
       'Голосовое_${t.year}${two(t.month)}${two(t.day)}_${two(t.hour)}${two(t.minute)}${two(t.second)}.m4a';
   await _sweepOldVoice();
-  final dir = await Directory.systemTemp.createTemp('yandi_voice');
+  final dir = await ramTempRoot().createTemp('yandi_voice');
   return '${dir.path}/$name';
 }
+
+/// Затереть остатки прежних запусков (голосовые и открытые копии вложений): вызывается при старте оболочки.
+Future<void> sweepTempFiles() => _sweepOldVoice();
 
 bool _swept = false;
 
@@ -61,14 +73,18 @@ Future<void> _sweepOldVoice() async {
   if (_swept) return;
   _swept = true;
   try {
-    await for (final e in Directory.systemTemp.list(followLinks: false)) {
-      if (e is! Directory || !e.path.split('/').last.startsWith('yandi_voice')) continue;
+    // и прежние остатки в системном tmp (старые версии писали туда), и открытые копии вложений
+    for (final root in {ramTempRoot().path, Directory.systemTemp.path}) {
+    await for (final e in Directory(root).list(followLinks: false)) {
+      final base = e.path.split('/').last;
+      if (e is! Directory || !(base.startsWith('yandi_voice') || base.startsWith('yandi_open'))) continue;
       final age = DateTime.now().difference((await e.stat()).modified);
       if (age < const Duration(minutes: 1)) continue;
       await for (final f in e.list(followLinks: false)) {
         if (f is File) await wipeVoice(f);
       }
       if (await e.exists()) await e.delete(recursive: true);
+    }
     }
   } catch (_) {}
 }
@@ -87,7 +103,7 @@ Future<void> wipeVoice(File f) async {
       await f.delete();
     }
     final dir = f.parent;
-    if (dir.path.contains('yandi_voice') && await dir.exists()) {
+    if ((dir.path.contains('yandi_voice') || dir.path.contains('yandi_open')) && await dir.exists()) {
       await dir.delete(recursive: true);
     }
   } catch (_) {}

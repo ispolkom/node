@@ -873,17 +873,6 @@ class AppState extends ChangeNotifier implements FilesHost {
     }
   }
 
-  /// Скопировать полученный файл в общую папку «Загрузки», чтобы он был виден в файловом менеджере.
-  Future<String?> saveToDownloads(String path, String name, String mime) async {
-    try {
-      // наружу уходит расшифрованная копия (это и есть «вынести»); временный файл затирается сразу после сохранения
-      final vf = await vaultFiles();
-      return await vf.withPlain(path, (plain) => _filesChannel.invokeMethod<String>('saveToDownloads', {'path': plain, 'name': name, 'mime': mime}));
-    } catch (_) {
-      return null;
-    }
-  }
-
   // ── Статусы доставки (квитанции, всё E2E, узел их не отличает от чата) ──────
   //
   // Квитанции ходят как обычные зашифрованные сообщения с меткой: «доставлено» шлёт получатель при приёме, «прочитано» — при

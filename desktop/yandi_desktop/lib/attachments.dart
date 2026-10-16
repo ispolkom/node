@@ -7,6 +7,7 @@ import 'domain/file_repository.dart';
 import 'media_player.dart';
 import 'message_actions.dart';
 import 'platform_files.dart';
+import 'voice.dart' show ramTempRoot;
 import 'theme.dart';
 import 'transport/api.dart';
 
@@ -173,10 +174,14 @@ class _AttachmentViewState extends State<AttachmentView> {
   Future<void> save(bool open) async {
     String? path;
     try {
-      path = await PlatformFiles.choose(
-        save: true,
-        name: '${widget.attachment['filename']}',
-      );
+      // «Открыть»: расшифрованная копия кладётся в оперативную память (не на диск) и стирается при следующем запуске/выходе из сеанса;
+      // «Сохранить как» — осознанный вывод файла туда, куда указал человек
+      path = open
+          ? '${(await ramTempRoot().createTemp('yandi_open')).path}/${'${widget.attachment['filename']}'.replaceAll(RegExp(r'[/\\]'), '_')}'
+          : await PlatformFiles.choose(
+              save: true,
+              name: '${widget.attachment['filename']}',
+            );
     } catch (_) {
       if (active)
         setState(() {

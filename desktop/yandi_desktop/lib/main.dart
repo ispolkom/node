@@ -4,9 +4,12 @@ import 'app.dart';
 import 'theme.dart';
 import 'transport/api.dart';
 
+import 'voice.dart' show sweepTempFiles;
+
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
   try {
+    sweepTempFiles();
     runApp(DesktopApp(api: UnixApi(resolveSocket(args, Platform.environment))));
   } on FormatException catch (e) {
     runApp(
