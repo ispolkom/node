@@ -27,7 +27,7 @@ pub const VERSION: u32 = 1;
 pub const FILE_EXT: &str = "yandibak";
 const INFO: &[u8] = b"yandi/backup/v1";
 /// Запас номеров журнала при восстановлении: копия могла отстать от жизни, а у телефонов в кеше записи до реального номера.
-pub const GROUP_SEQ_GAP: u64 = 100_000;
+pub const GROUP_SEQ_GAP: u64 = 1_000_000_000;
 const MAX_FILE: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL: usize = 64 * 1024 * 1024;
 /// Сколько последних автокопий хранится в папке.
@@ -513,29 +513,91 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
             ));
         }
     }
-    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let mut kept = Vec::new();
-    let mut written = Vec::new();
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
-    for (e, path) in entries.iter().zip(targets) {
-        if path.exists() {
-            let old = path.with_file_name(format!("{}.before-restore-{stamp}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
-            std::fs::rename(&path, &old).map_err(|er| format!("{}: {er}", e.path))?;
-            kept.push(old);
+    let mut staged: Vec<(PathBuf, PathBuf, String)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта)
+    let cleanup = |staged: &[(PathBuf, PathBuf, String)]| {
+        for (_, tmp, _) in staged {
+            let _ = std::fs::remove_file(tmp);
         }
+    };
+    for (i, (e, path)) in entries.iter().zip(targets).enumerate() {
         let data = if e.path == "groups/index.json" {
-            let d = rebase_groups(&e.data)?;
-            groups = serde_json::from_slice::<Value>(&d).ok().and_then(|v| v.as_array().map(|a| a.len())).unwrap_or(0);
-            d
+            match rebase_groups(&e.data) {
+                Ok(d) => {
+                    groups = serde_json::from_slice::<Value>(&d).ok().and_then(|v| v.as_array().map(|a| a.len())).unwrap_or(0);
+                    d
+                }
+                Err(er) => {
+                    cleanup(&staged);
+                    return Err(er);
+                }
+            }
         } else {
             e.data.clone()
         };
         if let Some(dir) = path.parent() {
             // каталоги — приватные (0700): узел не стартует с каталогом данных, доступным другим пользователям
-            private_dirs(dir).map_err(|er| format!("{}: {er}", e.path))?;
+            if let Err(er) = private_dirs(dir) {
+                cleanup(&staged);
+                return Err(format!("{}: {er}", e.path));
+            }
         }
-        crate::util::private_file::write_private(&path, &data).map_err(|er| format!("{}: {er}", e.path))?;
-        written.push(format!("{:?}/{}", e.area, e.path));
+        let tmp = path.with_file_name(format!(".{}.restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
+        if let Err(er) = crate::util::private_file::write_private(&tmp, &data) {
+            cleanup(&staged);
+            return Err(format!("{}: {er}", e.path));
+        }
+        staged.push((path, tmp, format!("{:?}/{}", e.area, e.path)));
+    }
+    // Фаза 2: замена. Прежние файлы переименовываются под уникальными именами, новые встают на место; при сбое всё возвращается.
+    let mut kept: Vec<PathBuf> = Vec::new();
+    let mut written: Vec<String> = Vec::new();
+    let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new(); // (рабочий путь, куда ушёл прежний)
+    let mut failure: Option<String> = None;
+    for (i, (path, tmp, label)) in staged.iter().enumerate() {
+        let old = if path.exists() {
+            let old = path.with_file_name(format!("{}.before-restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
+            if let Err(er) = std::fs::rename(path, &old) {
+                failure = Some(format!("{label}: {er}"));
+                break;
+            }
+            Some(old)
+        } else {
+            None
+        };
+        if let Err(er) = std::fs::rename(tmp, path) {
+            if let Some(o) = &old {
+                let _ = std::fs::rename(o, path);
+            }
+            failure = Some(format!("{label}: {er}"));
+            break;
+        }
+        done.push((path.clone(), old.clone()));
+        if let Some(o) = old {
+            kept.push(o);
+        }
+        written.push(label.clone());
+    }
+    if let Some(er) = failure {
+        // откат: уже заменённые файлы возвращаются, не дошедшие подготовленные — удаляются
+        for (path, old) in done.iter().rev() {
+            let _ = std::fs::remove_file(path);
+            if let Some(o) = old {
+                let _ = std::fs::rename(o, path);
+            }
+        }
+        cleanup(&staged);
+        return Err(format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними"));
+    }
+    // существующие каталоги назначения тоже должны быть приватными: узел не стартует с каталогом, открытым другим пользователям
+    #[cfg(unix)]
+    for base in [&l.keys, &l.data, &l.home] {
+        use std::os::unix::fs::PermissionsExt;
+        if base.is_dir() {
+            let _ = std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700));
+        }
     }
     if groups > 0 {
         // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
@@ -567,6 +629,23 @@ pub struct BackupState {
 
 fn state_path(l: &Layout) -> PathBuf {
     l.data.join("backup_state.json")
+}
+
+static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Операции над состоянием копий (копирование, смена папки) идут по одной: иначе завершившееся копирование возвращало бы старую настройку
+/// папки, а две выгрузки получали бы один номер.
+pub fn lock_state() -> std::sync::MutexGuard<'static, ()> {
+    STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Прочитать-изменить-записать состояние под замком; ошибка записи возвращается вызывающему.
+pub fn update_state(l: &Layout, f: impl FnOnce(&mut BackupState)) -> Result<BackupState, String> {
+    let _g = lock_state();
+    let mut s = load_state(l);
+    f(&mut s);
+    save_state(l, &s)?;
+    Ok(s)
 }
 
 pub fn load_state(l: &Layout) -> BackupState {
@@ -630,11 +709,42 @@ pub fn write_to_dir(dir: &Path, name: &str, bytes: &[u8], root: &[u8; 32], node_
         return Err("на месте файла копии лежит символическая ссылка".into());
     }
     std::fs::rename(&tmp, &target).map_err(|e| format!("запись копии: {e}"))?;
-    prune_dir(dir, node_id);
+    // имя файла живёт в каталоге: без его fsync после отключения питания запись об успехе могла бы пережить сам файл
+    sync_dir(dir).map_err(|e| format!("закрепление записи в папке: {e}"))?;
+    prune_dir(dir, node_id, name);
+    let _ = sync_dir(dir);
+    // успех — только если новая копия реально осталась в папке (ротация её не удалила)
+    if !target.is_file() {
+        return Err("новая копия не осталась в папке после записи".into());
+    }
     Ok(target)
 }
 
-fn prune_dir(dir: &Path, node_id: &str) {
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Наибольший номер копии этого узла, уже лежащей в папке: после восстановления на новой машине счётчик продолжается с него, а не с нуля
+/// (иначе ротация сочла бы свежую копию самой младшей).
+pub fn max_counter_in(dir: &Path, node_id: &str) -> u64 {
+    let prefix = format!("yandi-{node_id}-");
+    let suffix = format!(".{FILE_EXT}");
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    rd.flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix))
+        .filter_map(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()))
+        .max()
+        .unwrap_or(0)
+}
+
+fn prune_dir(dir: &Path, node_id: &str, keep: &str) {
     let prefix = format!("yandi-{node_id}-");
     let suffix = format!(".{FILE_EXT}");
     let Ok(rd) = std::fs::read_dir(dir) else { return };
@@ -643,10 +753,13 @@ fn prune_dir(dir: &Path, node_id: &str) {
         .filter_map(|e| e.file_name().into_string().ok())
         .filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix))
         .collect();
-    ours.sort();
+    // по номеру копии (а не по строке): старые удаляются, свежая ({keep}) не удаляется никогда
+    ours.sort_by_key(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0));
     while ours.len() > KEEP_AUTO {
         let old = ours.remove(0);
-        let _ = std::fs::remove_file(dir.join(old));
+        if old != keep {
+            let _ = std::fs::remove_file(dir.join(old));
+        }
     }
 }
 
@@ -699,20 +812,23 @@ fn now_ms() -> u64 {
 
 /// Сделать копию: собрать, при плановом запуске сравнить с прошлой, зашифровать, записать в папку (с проверкой), обновить состояние.
 pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u64) -> Result<Outcome, String> {
+    let _guard = lock_state();
     let mut state = load_state(l);
-    state.last_check_ms = now;
     let result = (|| -> Result<Outcome, String> {
         let dir = state.dir.clone().filter(|d| !d.trim().is_empty()).map(PathBuf::from);
         if mode == Mode::Auto && dir.is_none() {
+            state.last_check_ms = now;
             return Ok(Outcome { skipped: Some(Skip::NoFolder), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
         }
         let entries = collect(l)?;
         let dg = digest(&entries);
         if mode == Mode::Auto && decide(&state, &dg, false) == Decision::Unchanged {
+            state.last_check_ms = now; // проверили: ничего нового; неудачная попытка срок «следующей проверки» НЕ сдвигает
             return Ok(Outcome { skipped: Some(Skip::Unchanged), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
         }
         let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
-        let counter = state.counter + 1;
+        // номер — после наибольшего из известных: из состояния и из копий этого узла, уже лежащих в папке
+        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)) + 1;
         let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
         let name = file_name(node_id, counter, now);
         let saved = match &dir {
@@ -721,6 +837,7 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         };
         state.counter = counter;
         state.last_ok_ms = now;
+        state.last_check_ms = now;
         state.last_error = None;
         if let Some(p) = &saved {
             // только копия, лежащая в папке, сдвигает «последнее сохранённое»: выгрузка по кнопке на флешку-в-руке — другое дело
@@ -733,8 +850,12 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
     if let Err(e) = &result {
         state.last_error = Some(e.clone());
     }
-    let _ = save_state(l, &state);
-    result
+    // ошибка сохранения состояния не глотается: иначе «успех» не записан, а вызывающий об этом не знает
+    match (save_state(l, &state), result) {
+        (_, Err(e)) => Err(e),
+        (Err(e), Ok(_)) => Err(format!("копия записана, но состояние не сохранилось: {e}")),
+        (Ok(()), Ok(o)) => Ok(o),
+    }
 }
 
 /// Короткий номер узла (первые 8 байт адреса) по файлу личности, открытому корнем.
@@ -1085,5 +1206,94 @@ mod tests {
         let a = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":900}"#.to_vec() }]);
         let b = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":0}"#.to_vec() }]);
         assert_ne!(a, b, "смена настроек закрытой среды — изменение");
+    }
+
+    // ── ревью P8 ──
+
+    #[test]
+    fn after_a_restore_the_counter_continues_from_the_folder_and_the_new_copy_is_never_rotated_away() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        let out = d.path().join("cloud");
+        // в облачной папке остались копии №30–36 прежней машины
+        for n in 30..=36u64 {
+            let b = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "nodeid00", counter: n, now_ms: n }).unwrap();
+            write_to_dir(&out, &file_name("nodeid00", n, n), &b, &root, "nodeid00").unwrap();
+        }
+        assert_eq!(max_counter_in(&out, "nodeid00"), 36);
+        assert_eq!(max_counter_in(&out, "other"), 0, "чужие копии не считаются");
+        // новая машина: состояние пустое, папка выбрана снова
+        let mut st = load_state(&l);
+        st.dir = Some(out.display().to_string());
+        save_state(&l, &st).unwrap();
+        let o = run_backup(&l, &root, "nodeid00", Mode::Auto, 1_700_000_000_000).unwrap();
+        assert_eq!(o.counter, 37, "счётчик продолжился с папки, а не с единицы");
+        assert!(o.saved.as_ref().unwrap().is_file(), "свежая копия осталась после ротации");
+        assert_eq!(load_state(&l).counter, 37);
+    }
+
+    #[test]
+    fn a_failed_restore_changes_nothing_and_leaves_no_staged_files() {
+        let (_d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        // копия с повреждённым индексом групп: подготовка падает ДО замены любого файла
+        let mut entries = collect(&l).unwrap();
+        for e in entries.iter_mut() {
+            if e.path == "groups/index.json" {
+                e.data = b"{ not json".to_vec();
+            }
+        }
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&dst.keys).unwrap();
+        std::fs::create_dir_all(&dst.data).unwrap();
+        std::fs::write(dst.data.join("contacts.json"), b"MY CONTACTS").unwrap();
+        let err = restore(&opened, &dst, &RestoreOptions { force: true }).unwrap_err();
+        assert!(err.contains("groups/index.json"), "{err}");
+        assert_eq!(std::fs::read(dst.data.join("contacts.json")).unwrap(), b"MY CONTACTS", "активные файлы не тронуты");
+        assert!(!dst.keys.join("auth.json").exists());
+        let strays: Vec<_> = std::fs::read_dir(&dst.data).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| n.contains(".restore-") || n.contains(".before-restore")).collect();
+        assert!(strays.is_empty(), "подготовленные файлы убраны: {strays:?}");
+    }
+
+    #[test]
+    fn restoring_into_an_existing_world_readable_directory_makes_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        for p in [&dst.keys, &dst.data, &dst.home] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        restore(&opened, &dst, &RestoreOptions { force: false }).unwrap();
+        for p in [&dst.keys, &dst.data, &dst.home] {
+            assert_eq!(std::fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o700, "{} узел иначе не стартует", p.display());
+        }
+    }
+
+    #[test]
+    fn a_failed_attempt_does_not_postpone_the_next_check_and_state_changes_are_serialised() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        let mut st = load_state(&l);
+        st.dir = Some("/proc/definitely/not/writable".into());
+        save_state(&l, &st).unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, 5_000).is_err());
+        assert_eq!(load_state(&l).last_check_ms, 0, "неудача не превращается в «проверено»");
+        // смена папки идёт под замком состояния и не теряется
+        let s = update_state(&l, |s| s.dir = Some(d.path().join("ok").display().to_string())).unwrap();
+        assert!(s.dir.unwrap().ends_with("ok"));
     }
 }

@@ -130,12 +130,14 @@ async fn config(Json(b): Json<ConfigBody>) -> Response {
     let dir = b.dir;
     let res = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let chosen = check_dir(&l, &dir)?;
-        let mut s = node_backup::load_state(&l);
-        s.dir = chosen;
-        // новая папка — первая плановая копия в неё делается сразу, даже если содержимое не менялось
-        s.last_saved_ms = 0;
-        s.last_check_ms = 0;
-        node_backup::save_state(&l, &s)
+        // под общим замком состояния: параллельное копирование не вернёт старую папку
+        node_backup::update_state(&l, |s| {
+            s.dir = chosen;
+            // новая папка — первая плановая копия в неё делается сразу, даже если содержимое не менялось
+            s.last_saved_ms = 0;
+            s.last_check_ms = 0;
+        })
+        .map(|_| ())
     })
     .await;
     match res {
@@ -156,12 +158,15 @@ pub fn due(state: &node_backup::BackupState, now: u64, critical: bool) -> bool {
 
 /// Плановая задача: раз в минуту смотрит, не пора ли (сутки с прошлой проверки или критичное изменение), и тогда сверяет содержимое.
 pub async fn scheduler() {
+    // после сбоя копия повторяется (не через сутки): критичное изменение остаётся «в долгу» до успеха, повторы — не чаще раза в 5 минут
+    let (mut owed_critical, mut retry_at) = (false, 0u64);
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         let Some(r) = RUNTIME.get() else { continue };
-        let critical = crate::backup_signal::take();
+        owed_critical |= crate::backup_signal::take();
         let st = node_backup::load_state(&r.layout);
-        if st.dir.as_ref().is_none_or(|d| d.trim().is_empty()) || !due(&st, now_ms(), critical) {
+        let now = now_ms();
+        if st.dir.as_ref().is_none_or(|d| d.trim().is_empty()) || now < retry_at || !due(&st, now, owed_critical) {
             continue;
         }
         let Some(root) = (r.root)() else { continue };
@@ -172,12 +177,22 @@ pub async fn scheduler() {
         })
         .await;
         match res {
-            Ok(Ok(o)) => match o.skipped {
-                None => println!("💾 Резервная копия №{} записана: {}", o.counter, o.saved.map(|p| p.display().to_string()).unwrap_or_default()),
-                Some(Skip::Unchanged) | Some(Skip::NoFolder) => {}
-            },
-            Ok(Err(e)) => eprintln!("💾 Резервная копия не сделана: {e}"),
-            Err(e) => eprintln!("💾 Задача копирования упала: {e}"),
+            Ok(Ok(o)) => {
+                owed_critical = false;
+                retry_at = 0;
+                match o.skipped {
+                    None => println!("💾 Резервная копия №{} записана: {}", o.counter, o.saved.map(|p| p.display().to_string()).unwrap_or_default()),
+                    Some(Skip::Unchanged) | Some(Skip::NoFolder) => {}
+                }
+            }
+            Ok(Err(e)) => {
+                eprintln!("💾 Резервная копия не сделана, повтор через 5 минут: {e}");
+                retry_at = now_ms() + 5 * 60 * 1000;
+            }
+            Err(e) => {
+                eprintln!("💾 Задача копирования упала: {e}");
+                retry_at = now_ms() + 5 * 60 * 1000;
+            }
         }
     }
 }
