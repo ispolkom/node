@@ -139,6 +139,17 @@ pub fn is_sealed(path: &Path) -> bool {
     f.read_exact(&mut m).is_ok() && &m == MAGIC
 }
 
+/// Запечатан ли файл: `Ok(false)` — файл не нашего формата (в том числе короче заголовка); `Err` — прочитать не удалось (это не «чужой файл»).
+fn sealed_state(path: &Path) -> std::io::Result<bool> {
+    let mut f = std::fs::File::open(path)?;
+    let mut m = [0u8; 4];
+    match f.read_exact(&mut m) {
+        Ok(()) => Ok(&m == MAGIC),
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
 /// Прочитать заголовок и проверить его против фактического размера файла (усечение/удлинение не проходит).
 fn read_id(f: &mut std::fs::File, c: &Aes256Gcm) -> std::io::Result<[u8; 16]> {
     let mut h = [0u8; HEAD];
@@ -294,19 +305,26 @@ pub fn rekey_dir(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return 0,
         Err(_) => return 1,
     };
-    for e in rd.flatten() {
+    for e in rd {
+        // ошибка итератора, типа записи, открытия или заголовка — не «пропустить», а неудавшийся перенос: метку миграции снимать нельзя
+        let Ok(e) = e else {
+            failed += 1;
+            continue;
+        };
         let p = e.path();
         match e.file_type() {
             Ok(t) if t.is_dir() => failed += rekey_dir(&p, old, new),
-            Ok(t) if t.is_file() => {
-                if !is_sealed(&p) {
-                    continue;
+            Ok(t) if t.is_file() => match sealed_state(&p) {
+                Ok(false) => {}
+                Ok(true) => {
+                    if rekey_file(&p, old, new).is_err() {
+                        failed += 1;
+                    }
                 }
-                if rekey_file(&p, old, new).is_err() {
-                    failed += 1;
-                }
-            }
-            _ => {}
+                Err(_) => failed += 1,
+            },
+            Ok(_) => {}
+            Err(_) => failed += 1,
         }
     }
     failed
@@ -515,6 +533,24 @@ mod tests {
         let cn = cipher_of(&new).unwrap();
         assert_eq!(read_block_with(&cn, &p, 0).unwrap(), data[..BLOCK], "полученный блок под новым ключом");
         assert!(block_is_unwritten(&p, 1, data.len() as u64).unwrap(), "неполученный блок остался пустым");
+    }
+
+    /// Файл, который не удалось даже открыть для проверки заголовка, — неудача переноса, а не «чужой файл».
+    #[test]
+    fn an_unreadable_file_counts_as_a_failed_migration() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let (old, new) = ([0x5au8; 32], [2u8; 32]);
+        let p = d.path().join("locked.bin");
+        write_all(&p, b"data").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = std::fs::File::open(&p).is_err(); // под root права не мешают
+        let failed = rekey_dir(d.path(), &old, &new);
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        if unreadable {
+            assert_eq!(failed, 1, "нечитаемый файл — неудача переноса");
+        }
+        assert_eq!(rekey_dir(d.path(), &old, &new), 0, "после возврата прав перенос проходит");
     }
 
     #[test]
