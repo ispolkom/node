@@ -10,6 +10,7 @@ pub fn data_dir() -> PathBuf {
         if std::env::var_os("XDG_DATA_HOME").is_none() {
             return TEST_DIR
                 .get_or_init(|| {
+                    sweep_dead_test_dirs();
                     let d = std::env::temp_dir().join(format!("yandi-unit-test-data-{}", std::process::id()));
                     let _ = std::fs::create_dir_all(&d);
                     d
@@ -27,6 +28,27 @@ pub fn data_dir() -> PathBuf {
     match std::env::var_os("XDG_DATA_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x).join("yandi"),
         _ => home().join(".local/share/yandi"),
+    }
+}
+
+/// Каталоги прежних прогонов тестов (`yandi-unit-test-data-<pid>`, `yandi-chat-test-<pid>`, `yandi-closed-<имя>-<pid>`) убираются, если процесс,
+/// создавший их, уже не работает: тесты не копят мусор в системном tmp.
+#[cfg(test)]
+fn sweep_dead_test_dirs() {
+    let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("yandi-unit-test-data-") || name.starts_with("yandi-chat-test-") || name.starts_with("yandi-closed-")) {
+            continue;
+        }
+        let Some(pid) = name.rsplit('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        #[cfg(target_os = "linux")]
+        let alive = pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(not(target_os = "linux"))]
+        let alive = true; // без /proc судить о чужом процессе нельзя — не трогаем
+        if !alive {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
     }
 }
 
