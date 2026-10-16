@@ -13,13 +13,13 @@
 #   journalctl -u yandi-node -f           журнал (то, что узел печатает на экран)
 #   sudo systemctl restart yandi-node     перезапуск, например после новой сборки (cargo build --release)
 #
-# Пути и пользователь ниже — под этот компьютер (узел собран в /home/iam/node и работает от iam). Если папка или пользователь
+# Пути и пользователь ниже — под этот компьютер (узел ставится пакетом .deb в /usr/bin и работает от iam). Если папка или пользователь
 # другие, поправьте User=, Group=, WorkingDirectory= и ExecStart=.
 # Данные узла (ключи, сопряжённые устройства, файлы, настройки) лежат в ~/.local/share/yandi этого пользователя и от службы не зависят.
 
 [Unit]
 Description=YANDI node (P2P, TLS entry for phones, shell over the local owner socket)
-Documentation=file:///home/iam/node/DEPLOYMENT.md
+Documentation=file:///usr/share/doc/yandi-node/DEPLOYMENT.md
 # сеть и брандмауэр должны быть готовы до узла: порты телефонов и звонков открывает /etc/nftables.conf
 After=network-online.target nftables.service
 Wants=network-online.target
@@ -31,9 +31,11 @@ StartLimitBurst=10
 Type=simple
 User=iam
 Group=iam
-# узел читает часть файлов относительно рабочей папки (например contacts.json), поэтому она именно эта
-WorkingDirectory=/home/iam/node
-ExecStart=/home/iam/node/target/release/yandi
+# узел читает часть файлов относительно рабочей папки (например contacts.json)
+# рабочая папка — каталог данных узла: относительные файлы (contacts.json, nodes/…) лежат вместе с остальным и стираются вместе с ним
+WorkingDirectory=-/home/iam/.local/share/yandi
+ExecStartPre=/usr/bin/mkdir -p /home/iam/.local/share/yandi
+ExecStart=/usr/bin/yandi
 # у узла есть консоль, читающая стандартный ввод; под systemd ввода нет (/dev/null), консоль закрывается, узел продолжает работу
 StandardInput=null
 StandardOutput=journal
