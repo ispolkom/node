@@ -49,6 +49,8 @@ class _CallsFeatureState extends State<CallsFeature> {
   bool video = false, phone = false;
   /// Имя собеседника из моих контактов (то, что я ему дал), без значка устройства: кто именно отвечает, не важно.
   String resolvedPeer = '', resolvedName = '';
+  final nameNotifier = ValueNotifier<String>('');
+  Route<void>? overlay;
 
   static String cleanName(String name) => name
       .replaceFirst(RegExp('^[\\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '')
@@ -65,6 +67,7 @@ class _CallsFeatureState extends State<CallsFeature> {
         if (sid.isNotEmpty && (peerId.startsWith(sid) || sid.startsWith(peerId))) {
           if (mounted && coordinator.call?.peer == peerId) {
             setState(() => resolvedName = cleanName('${c['name'] ?? ''}'));
+            nameNotifier.value = resolvedName;
           }
           return;
         }
@@ -108,14 +111,41 @@ class _CallsFeatureState extends State<CallsFeature> {
     if (c != null && resolvedPeer != c.peer) {
       resolvedPeer = c.peer;
       resolvedName = cleanName(c.name);
+      nameNotifier.value = resolvedName;
       resolveName(c.peer);
     }
     if (mounted && widget.isActive()) setState(() {});
+    WidgetsBinding.instance.addPostFrameCallback((_) => syncOverlay());
+  }
+
+  /// Идёт звонок — экран звонка поверх всего окна (как в Skype); закончился — закрывается сам.
+  void syncOverlay() {
+    if (!widget.embedded || !mounted) return;
+    final inCall = coordinator.phase != CallPhase.idle;
+    if (inCall && overlay == null) {
+      final route = RawDialogRoute<void>(
+        barrierDismissible: false,
+        barrierColor: const Color(0xE60E2A12),
+        pageBuilder: (ctx, _, _) => PopScope(canPop: false, child: Center(child: callCard(ctx))),
+      );
+      overlay = route;
+      Navigator.of(context).push(route);
+    } else if (!inCall && overlay != null) {
+      closeOverlay();
+    }
+  }
+
+  void closeOverlay() {
+    final r = overlay;
+    overlay = null;
+    if (r != null && r.isActive) r.navigator?.removeRoute(r);
   }
 
   @override
   void dispose() {
     widget.controller?._start = null;
+    closeOverlay();
+    nameNotifier.dispose();
     timer?.cancel();
     coordinator.removeListener(update);
     coordinator.dispose();
@@ -134,6 +164,138 @@ class _CallsFeatureState extends State<CallsFeature> {
     CallPhase.ended => 'Звонок завершён',
     CallPhase.error => 'Ошибка звонка',
   };
+  String get clock =>
+      '${coordinator.seconds ~/ 60}:${(coordinator.seconds % 60).toString().padLeft(2, '0')}';
+
+  Widget round(IconData icon, String tip, VoidCallback? onTap, {Color color = const Color(0x33FFFFFF), bool big = true}) => Tooltip(
+    message: tr(context, tip),
+    waitDuration: const Duration(seconds: 2),
+    child: Material(
+      color: onTap == null ? color.withValues(alpha: 0.4) : color,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.all(big ? 18 : 14),
+          child: Icon(icon, size: big ? 30 : 26, color: Colors.white),
+        ),
+      ),
+    ),
+  );
+
+  /// Экран звонка: имя, состояние, видео, значки «принять/отклонить/микрофон/камера/завершить».
+  Widget callCard(BuildContext ctx) => ListenableBuilder(
+    listenable: Listenable.merge([coordinator, nameNotifier]),
+    builder: (_, _) {
+      final c = coordinator.call;
+      final video = c?.video == true;
+      final name = nameNotifier.value;
+      final media = coordinator.media;
+      final phase = coordinator.phase;
+      final status = phase == CallPhase.active ? clock : label;
+      return Material(
+        color: Colors.transparent,
+        child: Container(
+          key: const ValueKey('call-screen'),
+          constraints: BoxConstraints(maxWidth: video && phase == CallPhase.active ? 820 : 440),
+          margin: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(28),
+          decoration: BoxDecoration(
+            color: const Color(0xFF1E5226),
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: Colors.white24),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Image.asset('assets/logo.png', width: 24, height: 24),
+                  const SizedBox(width: 8),
+                  const Text('YANDI', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold, letterSpacing: 2, color: Colors.white70)),
+                ],
+              ),
+              const SizedBox(height: 18),
+              if (media is WebRtcCallMedia && video && phase == CallPhase.active)
+                Stack(
+                  children: [
+                    AspectRatio(aspectRatio: 16 / 9, child: ClipRRect(borderRadius: BorderRadius.circular(8), child: RTCVideoView(media.remoteRenderer))),
+                    Positioned(
+                      right: 10,
+                      bottom: 10,
+                      child: SizedBox(width: 160, height: 120, child: ClipRRect(borderRadius: BorderRadius.circular(6), child: RTCVideoView(media.localRenderer, mirror: true))),
+                    ),
+                  ],
+                )
+              else
+                CircleAvatar(
+                  radius: 52,
+                  backgroundColor: Colors.white24,
+                  child: name.isEmpty
+                      ? const Icon(Icons.person, size: 60, color: Colors.white)
+                      : Text(String.fromCharCodes(name.runes.take(1)).toUpperCase(), style: const TextStyle(fontSize: 44, color: Colors.white)),
+                ),
+              const SizedBox(height: 14),
+              if (name.isNotEmpty) Text(name, style: const TextStyle(fontSize: 24, color: Colors.white, fontWeight: FontWeight.bold)),
+              const SizedBox(height: 4),
+              UiText(video ? 'Видеозвонок' : 'Голосовой звонок', style: const TextStyle(color: Colors.white70)),
+              const SizedBox(height: 4),
+              UiText(status, key: const ValueKey('call-status'), style: const TextStyle(fontSize: 18, color: Colors.white)),
+              if (coordinator.error != null) ...[
+                const SizedBox(height: 8),
+                UiText(coordinator.error!, style: const TextStyle(color: Color(0xFFFFB4AB))),
+              ],
+              if (coordinator.mediaNote != null) ...[
+                const SizedBox(height: 8),
+                UiText(coordinator.mediaNote!, style: const TextStyle(color: Colors.white70)),
+              ],
+              if (phase == CallPhase.active && coordinator.microphoneLevel != null) ...[
+                const SizedBox(height: 10),
+                SizedBox(width: 200, child: LinearProgressIndicator(value: coordinator.microphoneLevel, color: Colors.white70, backgroundColor: Colors.white12)),
+              ],
+              const SizedBox(height: 22),
+              Wrap(
+                alignment: WrapAlignment.center,
+                spacing: 18,
+                runSpacing: 12,
+                children: [
+                  if (phase == CallPhase.incomingRinging) ...[
+                    round(Icons.call, 'Принять', coordinator.busy ? null : () => coordinator.accept(), color: const Color(0xFF2E9E3F)),
+                    round(Icons.call_end, 'Отклонить', () => coordinator.end(reject: true), color: const Color(0xFFD32F2F)),
+                  ] else if (coordinator.running) ...[
+                    if (phase == CallPhase.active) ...[
+                      round(
+                        coordinator.muted ? Icons.mic_off : Icons.mic,
+                        coordinator.muted ? 'Включить микрофон' : 'Выключить микрофон',
+                        coordinator.busy ? null : () => coordinator.mute(),
+                        color: coordinator.muted ? const Color(0xFFB26A00) : const Color(0x33FFFFFF),
+                      ),
+                      if (video)
+                        round(
+                          coordinator.cameraEnabled ? Icons.videocam : Icons.videocam_off,
+                          coordinator.cameraEnabled ? 'Выключить камеру' : 'Включить камеру',
+                          coordinator.busy || coordinator.mediaNote != null ? null : () => coordinator.camera(),
+                          color: coordinator.cameraEnabled ? const Color(0x33FFFFFF) : const Color(0xFFB26A00),
+                        ),
+                    ],
+                    round(
+                      Icons.call_end,
+                      'Завершить',
+                      phase == CallPhase.ending ? null : () => coordinator.end(),
+                      color: const Color(0xFFD32F2F),
+                    ),
+                  ],
+                ],
+              ),
+            ],
+          ),
+        ),
+      );
+    },
+  );
+
   Widget button(
     String title,
     VoidCallback action, {
@@ -145,8 +307,7 @@ class _CallsFeatureState extends State<CallsFeature> {
   );
   @override
   Widget build(BuildContext context) => widget.embedded &&
-          coordinator.phase == CallPhase.idle &&
-          coordinator.error == null
+          (coordinator.phase != CallPhase.idle || coordinator.error == null)
       ? const SizedBox.shrink()
       : PanelStack(
     children: [

@@ -465,8 +465,42 @@ void main() {
     await t.runAsync(() => c.start(peer, video: true));
     await t.pumpAndSettle();
     expect(s.commands, contains('start'));
-    expect(find.text('Завершить'), findsOneWidget);
+    expect(find.byKey(const ValueKey('call-screen')), findsOneWidget);   // экран звонка поверх окна, не полоска сверху
+    expect(find.byTooltip('Завершить'), findsOneWidget);
+    expect(find.byTooltip('Выключить микрофон'), findsNothing);          // пока идёт набор, микрофон не переключают
+    await t.tap(find.byTooltip('Завершить'));
+    await t.pump(const Duration(seconds: 4));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('call-screen')), findsNothing);      // после завершения экран закрылся
     await t.pumpWidget(const SizedBox());
     expect(c.ready, false);
+  });
+  testWidgets('входящий звонок: экран по центру с иконками «принять» и «отклонить»', (t) async {
+    final api = PhoneApi(), s = Signals();
+    await t.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CallsFeature(
+            embedded: true,
+            api: api,
+            isActive: () => true,
+            onLocked: () {},
+            onFailure: (_) {},
+            signaling: s,
+            mediaFactory: UnavailableMedia.new,
+          ),
+        ),
+      ),
+    );
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('call-screen')), findsNothing);
+    s.incoming = [const CallRef(peer, 'call0002', incoming: true)];
+    await t.pump(const Duration(seconds: 1));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('call-screen')), findsOneWidget);
+    expect(find.text('Входящий звонок'), findsOneWidget);
+    expect(find.byTooltip('Принять'), findsOneWidget);
+    expect(find.byTooltip('Отклонить'), findsOneWidget);
+    await t.pumpWidget(const SizedBox());
   });
 }

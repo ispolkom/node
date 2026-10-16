@@ -233,7 +233,7 @@ class _ProfilePanelState extends State<ProfilePanel> {
           width: 96,
           height: 96,
           fit: BoxFit.contain,
-          errorBuilder: (_, _, _) => const UiText('Не удалось показать аватар'),
+          errorBuilder: (_, _, _) => const Icon(Icons.person_outline, size: 48, color: Icq.header),   // не читается — обычная заглушка, без ошибки
         ),
       if (profile != null) ...[
         if (!own) Text('${profile!['display_name'] ?? widget.peer}'),
