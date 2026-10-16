@@ -714,24 +714,31 @@ impl Socks5ProxyServer {
         // отметка «устанавливается» живёт до публикации приёмника (снимается при любом выходе)
         let _establishing = self.establishing.begin(request_id);
 
-        // 7. Сериализуем и отправляем через YTP
-        let request_bytes = serde_json::to_vec(&proxy_request)
-            .map_err(|e| anyhow!("Failed to serialize SOCKS5 request: {}", e))?;
+        // 7–8. Сериализуем, отправляем через YTP и ждём ответа выхода. На любом неуспехе (сбой отправки, таймаут, обрыв) запись о запросе
+        // снимается: иначе она жила бы вечно (поздний ответ — единственный другой путь удаления) и копилась при молчащем выходе.
+        let proxy_response = {
+            let outcome: Result<Socks5ProxyResponse> = async {
+                let request_bytes = serde_json::to_vec(&proxy_request)
+                    .map_err(|e| anyhow!("Failed to serialize SOCKS5 request: {}", e))?;
 
-        debug!("📤 Sending SOCKS5 request via YTP to exit node");
+                debug!("📤 Sending SOCKS5 request via YTP to exit node");
 
-        self.station.send_train_batched(exit_node, request_bytes).await
-            .map_err(|e| { report(false); anyhow!("Failed to send SOCKS5 request: {}", e) })?;
+                self.station.send_train_batched(exit_node, request_bytes).await
+                    .map_err(|e| { report(false); anyhow!("Failed to send SOCKS5 request: {}", e) })?;
 
-        debug!("⏳ Waiting for SOCKS5 response...");
+                debug!("⏳ Waiting for SOCKS5 response...");
 
-        // 8. Ждём ответа от exit node
-        let proxy_response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            rx
-        ).await
-        .map_err(|_| { report(false); anyhow!("Timeout waiting for SOCKS5 response") })?
-        .map_err(|_| { report(false); anyhow!("Failed to receive SOCKS5 response") })?;
+                tokio::time::timeout(std::time::Duration::from_secs(10), rx).await
+                    .map_err(|_| { report(false); anyhow!("Timeout waiting for SOCKS5 response") })?
+                    .map_err(|_| { report(false); anyhow!("Failed to receive SOCKS5 response") })
+            }
+            .await;
+            if outcome.is_err() {
+                self.pending_requests.lock().await.remove(&request_id);
+                self.expected.forget(request_id);
+            }
+            outcome?
+        };
 
         // 9. Проверяем статус (2 = выход не пускает нас: отдыхает; остальное — беда цели, а не выхода)
         report(proxy_response.status != 2);
