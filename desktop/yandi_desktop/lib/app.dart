@@ -2,6 +2,7 @@ import 'theme.dart';
 import 'dashboard.dart';
 import 'relay_card.dart';
 import 'preferences.dart';
+import 'member_badge.dart';
 import 'background_alerts.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
@@ -86,6 +87,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     status = speed = null;
     nodes = [];
     vault = null;
+    MemberBadge.forget(); // визитки участников (картинки) в памяти не переживают запирание
   }
 
   void disconnect(ApiFailure failure) {

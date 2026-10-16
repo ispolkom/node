@@ -23,7 +23,18 @@ class MemberBadge extends StatefulWidget {
   });
 
   static final Map<String, (DateTime, Uint8List?)> _cache = {};
-  static void forget() => _cache.clear();
+  @visibleForTesting
+  static void cacheForTest(String key, Uint8List png) => _cache[key] = (DateTime.now(), png);
+  @visibleForTesting
+  static int get cachedCount => _cache.length;
+
+  static void forget() {
+    for (final v in _cache.values) {
+      final b = v.$2;
+      if (b != null) b.fillRange(0, b.length, 0);
+    }
+    _cache.clear();
+  }
 
   @override
   State<MemberBadge> createState() => _MemberBadgeState();

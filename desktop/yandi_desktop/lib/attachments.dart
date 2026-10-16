@@ -149,10 +149,23 @@ class _AttachmentViewState extends State<AttachmentView> {
       );
       media = m;
       final url = await m.start();
+      if (!active) {
+        // экран закрыт или оболочка заперта, пока поднимался сервер: поздний сервер закрывается, проигрыватель не запускается
+        await m.stop();
+        if (identical(media, m)) media = null;
+        return;
+      }
       final p = await MediaPlayerLauncher.launcher(
         url,
         '${widget.attachment['filename']}',
       );
+      if (!active) {
+        // запирание во время запуска проигрывателя: поздно полученный процесс убивается, а не теряется
+        p?.kill();
+        await m.stop();
+        if (identical(media, m)) media = null;
+        return;
+      }
       if (p == null) {
         await stopPlayback();
         if (active) {

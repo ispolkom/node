@@ -1626,6 +1626,18 @@ class AppState extends ChangeNotifier implements FilesHost {
     _readAcked.clear();
     pendingFileOffers.clear();
     activeChatPeerId = null;
+    // всё, что приложение держит о людях и группах в памяти: справочник, картинки, логотипы, ник, скрытые, квитанции
+    directory = const [];
+    for (final b in _directoryAvatars.values) { b.fillRange(0, b.length, 0); }
+    _directoryAvatars.clear();
+    _directoryHashes.clear();
+    for (final (_, png) in _groupLogos.values) { png.fillRange(0, png.length, 0); }
+    _groupLogos.clear();
+    myNick = '';
+    hiddenUsers.clear();
+    hiddenGroups.clear();
+    _rx.clear();
+    _rids.clear();
     notifyListeners();
   }
 

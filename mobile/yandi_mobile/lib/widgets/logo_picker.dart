@@ -1,4 +1,6 @@
 import 'dart:convert';
+import '../services/app_state.dart';
+import 'package:provider/provider.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
@@ -27,9 +29,12 @@ class _LogoPickerState extends State<LogoPicker> {
 
   Future<void> _pick() async {
     setState(() { _busy = true; _error = null; });
+    final app = context.read<AppState>();
+    String? picked;
     try {
       final r = await FilePicker.platform.pickFiles(type: FileType.image, withData: false);
       final path = r?.files.single.path;
+      picked = path;
       if (path == null) return;
       final raw = await File(path).readAsBytes();
       if (raw.length > 12 * 1024 * 1024) { _error = 'Картинка слишком большая'; return; }
@@ -39,6 +44,8 @@ class _LogoPickerState extends State<LogoPicker> {
     } catch (e) {
       _error = 'Не удалось подготовить картинку';
     } finally {
+      // исходное фото (с метаданными) — копия выбора файла в кеше приложения: стирается при любом исходе
+      if (picked != null) { try { await app.dropPickerCopy(picked); } catch (_) {} }
       if (mounted) setState(() => _busy = false);
     }
   }

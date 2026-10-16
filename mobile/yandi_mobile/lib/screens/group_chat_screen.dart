@@ -169,12 +169,13 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   /// Отправить файл в группу (выбранный или записанное голосовое); открытая копия затирается при любом исходе.
   Future<void> _sendFilePath(String path, String name) async {
     final svc = _svc!;
-    final bad = await attachmentVerdict(path, name);
-    if (bad != null) { _toast('«$name»: $bad'); return; }
-    final kind = GroupFiles.kindForName(name);
-    if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
-    setState(() => _progress['up'] = 0);
+    // вся работа с открытой копией — внутри try/finally: и отказ по имени/содержимому/правилам группы, и успех стирают её
     try {
+      final bad = await attachmentVerdict(path, name);
+      if (bad != null) { _toast('«$name»: $bad'); return; }
+      final kind = GroupFiles.kindForName(name);
+      if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
+      setState(() => _progress['up'] = 0);
       final d = await GroupFiles(svc.api, vault: await VaultService.instance.files()).upload(widget.gid, File(path), name, onProgress: (done, total) {
         if (mounted) setState(() => _progress['up'] = done / total);
       });
