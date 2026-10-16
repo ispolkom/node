@@ -95,6 +95,15 @@ pub struct WagonStats {
     pub duplicates_dropped: AtomicU64,
 }
 
+/// Убрать маршрут `id`, только если в карте лежит канал `mine`. true — убран.
+fn remove_route_if_same(routes: &mut HashMap<HashId, mpsc::Sender<Vec<u8>>>, id: &HashId, mine: &mpsc::Sender<Vec<u8>>) -> bool {
+    if routes.get(id).is_some_and(|s| s.same_channel(mine)) {
+        routes.remove(id);
+        return true;
+    }
+    false
+}
+
 impl WagonStats {
     pub fn new() -> Self {
         Self {
@@ -1295,8 +1304,8 @@ impl P2PTransport {
                                 }
                             }
                         }
-                        // Соединение закрылось — убираем peer из ws_outgoing.
-                        transport_for_pump.ws_outgoing.lock().await.remove(&peer_id);
+                        // Соединение закрылось — убираем из ws_outgoing только СВОЙ маршрут (новое соединение того же узла осталось)
+                        transport_for_pump.drop_ws_route(&peer_id, &conn.outgoing).await;
                         println!("[ws-server] 🛑 connection {} closed", conn.peer_addr);
                     });
                 }
@@ -4968,7 +4977,7 @@ impl P2PTransport {
                                 Err(e) => eprintln!("[ws-client/resume] decrypt failed: {}", e),
                             }
                         }
-                        transport_clone.ws_outgoing.lock().await.remove(&anchor_id);
+                        transport_clone.drop_ws_route(&anchor_id, &conn.outgoing).await;
                         println!("[ws-client/resume] 🛑 anchor connection closed");
                     });
                     return Ok(anchor_id);
@@ -5076,11 +5085,17 @@ impl P2PTransport {
                     }
                 }
             }
-            transport_clone.ws_outgoing.lock().await.remove(&anchor_id);
+            transport_clone.drop_ws_route(&anchor_id, &conn.outgoing).await;
             println!("[ws-client] 🛑 anchor connection closed");
         });
 
         Ok(anchor_id)
+    }
+
+    /// Снять WS-маршрут узла, но только если в карте лежит именно этот канал: завершение старого соединения не должно удалять
+    /// маршрут нового соединения того же узла.
+    async fn drop_ws_route(&self, id: &HashId, mine: &mpsc::Sender<Vec<u8>>) {
+        remove_route_if_same(&mut *self.ws_outgoing.lock().await, id, mine);
     }
 
     /// 🛰  Узнаём свою роль через capabilities bits.
@@ -6772,6 +6787,25 @@ impl PortUpdatePacket {
 // deliberately avoids in automated tests (constructing a real P2PTransport
 // binds fixed, well-known ports that could collide with an actual running
 // node — see the prior mandate's report).
+#[cfg(test)]
+mod ws_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_closing_old_connection_keeps_the_route_of_the_new_one() {
+        let id = HashId([9u8; 32]);
+        let (old_tx, _old_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (new_tx, _new_rx) = mpsc::channel::<Vec<u8>>(1);
+        let mut routes: HashMap<HashId, mpsc::Sender<Vec<u8>>> = HashMap::new();
+        routes.insert(id, old_tx.clone());
+        routes.insert(id, new_tx.clone()); // новое соединение заменило запись
+        assert!(!remove_route_if_same(&mut routes, &id, &old_tx), "старое соединение чужой маршрут не снимает");
+        assert!(routes.contains_key(&id));
+        assert!(remove_route_if_same(&mut routes, &id, &new_tx), "своё снимается");
+        assert!(routes.is_empty());
+    }
+}
+
 #[cfg(test)]
 mod identity_pin_tests {
     use super::*;
