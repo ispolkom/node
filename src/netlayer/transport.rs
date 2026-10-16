@@ -511,6 +511,9 @@ pub struct P2PTransport {
     /// Empty by default (fully permissive, matching prior behavior) until
     /// main.rs loads the peer directory and calls the setter.
     pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+    /// IP входного узла → ключ подписи из подписанного списка: Hello с этого адреса принимается только с этим ключом
+    /// (подмена узла по адресу — по DNS, маршруту — не пройдёт, как бы корректно она ни подписала Hello своим ключом).
+    bootstrap_pins: Arc<tokio::sync::RwLock<HashMap<String, [u8; 32]>>>,
 
     /// Node Identity Binding Fix — Barrier 3 (replay protection).
     /// Two-Phase Verification (`verify_peer_handshake_static`) already checks
@@ -982,6 +985,7 @@ impl P2PTransport {
             port_rotation_tx: port_rotation_tx.clone(),
             active_rotated_listeners: Arc::new(tokio::sync::Mutex::new(None)),
             pinned_identities: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            bootstrap_pins: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             resync_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -1753,6 +1757,7 @@ impl P2PTransport {
         let external_ip = transport.external_ip.clone();
         let jurisdiction_index = transport.jurisdiction_index.clone();
         let pinned_identities = transport.pinned_identities.clone();
+        let bootstrap_pins = transport.bootstrap_pins.clone();
         let seen_hello_nonces = transport.seen_hello_nonces.clone();
         let admission = transport.admission.clone();
 
@@ -1767,6 +1772,7 @@ impl P2PTransport {
                 external_ip,
                 jurisdiction_index,
                 pinned_identities,
+                bootstrap_pins,
                 seen_hello_nonces,
                 admission,
                 shutdown,
@@ -2342,6 +2348,7 @@ impl P2PTransport {
         external_ip: Arc<tokio::sync::RwLock<Option<String>>>,
         jurisdiction_index: Arc<crate::dht::JurisdictionIndex>,
         pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+        bootstrap_pins: Arc<tokio::sync::RwLock<HashMap<String, [u8; 32]>>>,
         seen_hello_nonces: Arc<tokio::sync::Mutex<HashMap<(HashId, u64), Instant>>>,
         admission: Arc<tokio::sync::Mutex<crate::netlayer::admission::Admission>>,
         mut shutdown: Option<oneshot::Receiver<()>>,
@@ -2476,6 +2483,13 @@ impl P2PTransport {
                             // Checked BEFORE any PeerInfo/DHT/online-state
                             // update, exactly like the IPv6-spoofing check
                             // right below it.
+                            {
+                                let pins = bootstrap_pins.read().await;
+                                if !Self::bootstrap_key_ok(&pins, &from.ip().to_string(), &hello_packet.public_key) {
+                                    println!("[transport] ⛔ REJECTED: BOOTSTRAP_KEY_MISMATCH — {} is a pinned bootstrap address, the Hello carries another signing key", from);
+                                    continue;
+                                }
+                            }
                             {
                                 let pins = pinned_identities.read().await;
                                 if Self::identity_conflict(&pins, hello_packet.node_id, &hello_packet.public_key) {
@@ -6073,6 +6087,17 @@ impl P2PTransport {
         *self.pinned_identities.write().await = pins;
     }
 
+    /// Привязать адреса входных узлов к их ключам подписи (из подписанного списка).
+    pub async fn set_bootstrap_pins(&self, pins: HashMap<String, [u8; 32]>) {
+        println!("[transport] 🔒 {} bootstrap address(es) pinned to a signing key", pins.len());
+        *self.bootstrap_pins.write().await = pins;
+    }
+
+    /// Hello с IP, закреплённого за входным узлом, обязан нести ключ этого узла; прочие адреса не затрагиваются.
+    pub(crate) fn bootstrap_key_ok(pins: &HashMap<String, [u8; 32]>, ip: &str, key: &[u8; 32]) -> bool {
+        pins.get(ip).map_or(true, |expected| expected == key)
+    }
+
     /// Bootstrap - connect to all nodes in the list
     pub async fn bootstrap(&self, bootstrap_addrs: Vec<String>, external_ip: Option<String>) -> Result<(), String> {
         println!("[bootstrap] 🚀 Starting bootstrap with {} nodes", bootstrap_addrs.len());
@@ -6777,6 +6802,20 @@ impl PortUpdatePacket {
 // deliberately avoids in automated tests (constructing a real P2PTransport
 // binds fixed, well-known ports that could collide with an actual running
 // node — see the prior mandate's report).
+#[cfg(test)]
+mod bootstrap_pin_tests {
+    use super::*;
+
+    #[test]
+    fn a_pinned_bootstrap_address_accepts_only_its_key() {
+        let mut pins = HashMap::new();
+        pins.insert("203.0.113.1".to_string(), [7u8; 32]);
+        assert!(P2PTransport::bootstrap_key_ok(&pins, "203.0.113.1", &[7u8; 32]));
+        assert!(!P2PTransport::bootstrap_key_ok(&pins, "203.0.113.1", &[8u8; 32]), "другой ключ на том же адресе");
+        assert!(P2PTransport::bootstrap_key_ok(&pins, "198.51.100.9", &[8u8; 32]), "незакреплённый адрес не затронут");
+    }
+}
+
 #[cfg(test)]
 mod ws_route_tests {
     use super::*;

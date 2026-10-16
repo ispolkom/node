@@ -1201,6 +1201,8 @@ async fn main() -> anyhow::Result<()> {
                     .map(|n| n.address.clone())
                     .collect();
 
+                // основной транспорт принимает Hello с адреса входного узла только с ключом из подписанного списка
+                transport.set_bootstrap_pins(config.fingerprint_map()).await;
                 if !bootstrap_nodes.is_empty() {
                     // Запускаем bootstrap с фильтрацией своего IP
                     if let Err(e) = transport.bootstrap(bootstrap_nodes, external_ip).await {
