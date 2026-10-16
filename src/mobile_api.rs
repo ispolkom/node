@@ -2150,6 +2150,8 @@ where
         }
     }
     let _g = Guard;
+    // отзыв устройства (удаление владельцем) обрывает и уже открытый CONNECT, а не только новые
+    let mut revoked_rx = bus().subscribe();
     let mut out =
         match crate::exit_policy::connect_public_for(&client, &target, Duration::from_secs(15))
             .await
@@ -2164,6 +2166,9 @@ where
                 return tls.write_all(reply(code).as_bytes()).await;
             }
         };
+    if device_peer_of(&h).is_none() {
+        return tls.write_all(reply("407 Proxy Authentication Required").as_bytes()).await; // отозвали, пока соединялись
+    }
     let _ = out.set_nodelay(true);
     tls.write_all(b"HTTP/1.1 200 Connection established\r\n\r\n")
         .await?;
@@ -2201,8 +2206,26 @@ where
         }
         let _ = tw.shutdown().await;
     };
-    tokio::select! { _ = up => {}, _ = down => {} }
+    let revoked = wait_revoked(&mut revoked_rx, &client, || device_peer_of(&h).is_some());
+    tokio::select! { _ = up => {}, _ = down => {}, _ = revoked => {} }
     Ok(())
+}
+
+/// Ждёт отзыва устройства `client`. Пропуск событий шины (переполнение) не считается отзывом: тогда сверяемся со списком устройств.
+async fn wait_revoked(rx: &mut tokio::sync::broadcast::Receiver<Event>, client: &str, still_registered: impl Fn() -> bool) {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+        match rx.recv().await {
+            Ok(Event::Revoked(p)) if p == client => return,
+            Ok(_) => {}
+            Err(RecvError::Lagged(_)) => {
+                if !still_registered() {
+                    return;
+                }
+            }
+            Err(RecvError::Closed) => std::future::pending::<()>().await,
+        }
+    }
 }
 
 /// Похож ли начальный кусок на запрос к `/mobile/...`.
@@ -2296,6 +2319,20 @@ mod mail_quota_tests {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn an_open_connect_ends_when_its_device_is_revoked_and_only_then() {
+        let (tx, mut rx) = tokio::sync::broadcast::channel::<Event>(8);
+        let waiting = tokio::spawn(async move {
+            wait_revoked(&mut rx, "dev-a", || true).await;
+        });
+        let _ = tx.send(Event::Revoked("dev-b".into()));
+        let _ = tx.send(Event::Profile);
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!waiting.is_finished(), "чужой отзыв не обрывает соединение");
+        let _ = tx.send(Event::Revoked("dev-a".into()));
+        tokio::time::timeout(Duration::from_secs(2), waiting).await.expect("отзыв своего устройства обрывает").unwrap();
+    }
+
     #[test]
     fn the_longest_silent_device_is_evicted_not_the_oldest_paired() {
         let mk = |name: &str, created: u64, seen: u64| Device { token_hash: name.into(), name: name.into(), created_ms: created, acked_ts: 0,
