@@ -20,8 +20,15 @@ struct State<T> {
     cache: Option<T>,
 }
 
+#[cfg(unix)]
 fn env_configured() -> bool {
     crate::closed_api::global().is_some_and(|e| e.configured())
+}
+
+/// Закрытой среды вне Unix нет: файл остаётся обычным.
+#[cfg(not(unix))]
+fn env_configured() -> bool {
+    false
 }
 
 impl<T: Serialize + DeserializeOwned + Default> SealedJson<T> {
