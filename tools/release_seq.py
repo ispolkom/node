@@ -1,9 +1,18 @@
 #!/usr/bin/env python3
 """Reserve a release number durably BEFORE signing; failures consume numbers."""
-import os, re, stat, sys, tempfile
+import fcntl, os, re, stat, sys, tempfile
 
 def reserve(directory):
+    """Чтение, увеличение и запись SEQ идут под эксклюзивным flock: два параллельных выпуска не получат один номер."""
     directory = os.path.abspath(directory)
+    lock_fd = os.open(os.path.join(directory, '.SEQ.lock'), os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    try:
+        fcntl.flock(lock_fd, fcntl.LOCK_EX)
+        return _reserve_locked(directory)
+    finally:
+        os.close(lock_fd)  # закрытие снимает блокировку
+
+def _reserve_locked(directory):
     path = os.path.join(directory, 'SEQ')
     try:
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)

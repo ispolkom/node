@@ -19,6 +19,10 @@ BUILD=0; NODE_ONLY=0
 for a in "$@"; do case "$a" in --build) BUILD=1;; --node-only) NODE_ONLY=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 PUB=release/yandi-release-pubkey.hex
 [ -f "$PUB" ] || { echo "нет $PUB"; exit 1; }
+# один выпуск за раз (общий замок с node_release.sh): номер, dist/site и dist/github не делятся между параллельными запусками
+[ ! -L release/.lock ] || { echo 'Недопустимый lock'; exit 1; }
+exec 9>release/.lock
+flock -x 9
 if [ "$BUILD" = 1 ]; then
   env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY cargo build --release --offline --bins
   if [ "$NODE_ONLY" = 0 ]; then

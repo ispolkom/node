@@ -60,6 +60,15 @@ class Scripts(unittest.TestCase):
         seq.symlink_to(self.root / 'Cargo.toml')
         self.assertNotEqual(self.shell('python3 -I tools/release_seq.py release').returncode, 0)
 
+    def test_parallel_reservations_get_distinct_numbers(self):
+        (self.root / 'release').mkdir(exist_ok=True)
+        (self.root / 'release/SEQ').write_text('0\n')
+        procs = [subprocess.Popen(['python3', '-I', 'tools/release_seq.py', 'release'], cwd=self.root, stdout=subprocess.PIPE, text=True)
+                 for _ in range(12)]
+        numbers = sorted(int(p.communicate()[0]) for p in procs)
+        self.assertEqual(numbers, list(range(1, 13)))
+        self.assertEqual((self.root / 'release/SEQ').read_text(), '12\n')
+
     def test_r4_signing_holds_exclusive_lock(self):
         # A stub build must see the signing lock already held.
         env = self.root / 'tools/release_build_env.sh'
