@@ -223,6 +223,7 @@ void main() {
     m.remove('gt');   // прежний файл: ни поколения, ни заверения
     be.blob = jsonEncode(m);
     be.secure.remove('vault_gen');
+    be.secure.remove('vault_gt');   // и метки заверения у старой установки не было
     be.secure.remove('vault_cnt');
     be.secure.remove('vault_fail_pw');
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
@@ -276,5 +277,16 @@ void main() {
     be.now += 100000;
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
     expect((jsonDecode(be.blob!) as Map)['gt'], isNotNull, reason: 'файл заверен при входе');
+  });
+
+  test('новый vault сразу помечен заверенным: до первого входа gt не снять и gen не поднять', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    expect(be.secure['vault_gt'], '1');
+    final m = jsonDecode(be.blob!) as Map<String, dynamic>..remove('gt');
+    m['gen'] = 2;
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята');
   });
 }

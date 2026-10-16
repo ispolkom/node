@@ -203,6 +203,7 @@ class VaultKeys {
           : null,
     }));
     await b.secureWrite(_kGen, '1');
+    await b.secureWrite(_kGt, '1');   // файл создан сразу заверенным: снять `gt` и поднять `gen` до первого входа уже нельзя
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -282,7 +283,7 @@ class VaultKeys {
   /// Удалить все ключи (кнопка «Удалить всё»): после этого данные нечитаемы навсегда.
   static Future<void> destroy(VaultBackend b) => _serial(() async {
     await b.writeBlob('');
-    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kCnt]) {
+    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kGt, _kCnt]) {
       await b.secureDelete(k);
     }
   });
