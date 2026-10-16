@@ -91,21 +91,35 @@ fn aad(id: &[u8; 16], index: u64) -> [u8; 24] {
     a
 }
 
-fn head_aad(id: &[u8; 16], total: u64) -> [u8; 24] {
-    let mut a = [0u8; 24];
-    a[..16].copy_from_slice(id);
-    a[16..].copy_from_slice(&total.to_be_bytes());
+/// Внешний контекст файла: имя без служебных суффиксов `.part`/`.rekey.tmp`. Входит в AAD заголовка, поэтому целый контейнер,
+/// скопированный под имя другого вложения, не открывается (подмена вложения B под видом A невозможна без ключа).
+fn context_of(path: &Path) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    for suffix in [".rekey.tmp", ".part"] {
+        if let Some(stripped) = name.strip_suffix(suffix) {
+            name = stripped.to_string();
+        }
+    }
+    Sha256::digest(name.as_bytes()).into()
+}
+
+fn head_aad(id: &[u8; 16], total: u64, ctx: &[u8; 32]) -> Vec<u8> {
+    let mut a = Vec::with_capacity(56);
+    a.extend_from_slice(id);
+    a.extend_from_slice(&total.to_be_bytes());
+    a.extend_from_slice(ctx);
     a
 }
 
 /// Заголовок файла для открытого размера `total`: magic, id, nonce, tag.
-fn make_head(c: &Aes256Gcm, total: u64) -> std::io::Result<Vec<u8>> {
+fn make_head(c: &Aes256Gcm, total: u64, path: &Path) -> std::io::Result<Vec<u8>> {
     let mut id = [0u8; 16];
     rand::rngs::OsRng.fill_bytes(&mut id);
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let tag = c
-        .encrypt(Nonce::from_slice(&nonce), Payload { msg: b"", aad: &head_aad(&id, total) })
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: b"", aad: &head_aad(&id, total, &context_of(path)) })
         .map_err(|_| bad("шифрование заголовка"))?;
     let mut head = Vec::with_capacity(HEAD);
     head.extend_from_slice(MAGIC);
@@ -160,7 +174,7 @@ fn sealed_state(path: &Path) -> std::io::Result<bool> {
 }
 
 /// Прочитать заголовок и проверить его против фактического размера файла (усечение/удлинение не проходит).
-fn read_id(f: &mut std::fs::File, c: &Aes256Gcm) -> std::io::Result<[u8; 16]> {
+fn read_id(f: &mut std::fs::File, c: &Aes256Gcm, path: &Path) -> std::io::Result<[u8; 16]> {
     let mut h = [0u8; HEAD];
     f.seek(SeekFrom::Start(0))?;
     f.read_exact(&mut h)?;
@@ -170,7 +184,7 @@ fn read_id(f: &mut std::fs::File, c: &Aes256Gcm) -> std::io::Result<[u8; 16]> {
     let total = plain_from_sealed(f.metadata()?.len()).ok_or_else(|| bad("файл переписки повреждён"))?;
     let mut id = [0u8; 16];
     id.copy_from_slice(&h[4..20]);
-    c.decrypt(Nonce::from_slice(&h[20..32]), Payload { msg: &h[32..], aad: &head_aad(&id, total) })
+    c.decrypt(Nonce::from_slice(&h[20..32]), Payload { msg: &h[32..], aad: &head_aad(&id, total, &context_of(path)) })
         .map_err(|_| bad("заголовок файла не проходит проверку: размер изменён или файл повреждён"))?;
     Ok(id)
 }
@@ -178,13 +192,13 @@ fn read_id(f: &mut std::fs::File, c: &Aes256Gcm) -> std::io::Result<[u8; 16]> {
 /// Проверить заголовок файла (нужно и пустому файлу, у которого блоков для проверки нет).
 fn check_head(path: &Path, c: &Aes256Gcm) -> std::io::Result<()> {
     let mut f = std::fs::File::open(path)?;
-    read_id(&mut f, c).map(|_| ())
+    read_id(&mut f, c, path).map(|_| ())
 }
 
 /// Создать пустой запечатанный файл под `plain_size` открытых байт: блоки заполняются по мере прихода (в любом порядке).
 pub fn create(path: &Path, plain_size: u64) -> std::io::Result<()> {
     let _io = io_shared();
-    let head = make_head(&cipher()?, plain_size)?;
+    let head = make_head(&cipher()?, plain_size, path)?;
     crate::util::private_file::write_private(path, &head)?;
     let f = std::fs::OpenOptions::new().write(true).open(path)?;
     f.set_len(sealed_len(plain_size))?;
@@ -199,7 +213,7 @@ pub fn write_block(path: &Path, index: u64, data: &[u8]) -> std::io::Result<()> 
     let _io = io_shared();
     let c = cipher()?;
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
-    let id = read_id(&mut f, &c)?;
+    let id = read_id(&mut f, &c, path)?;
     let mut nonce = [0u8; 12];
     rand::rngs::OsRng.fill_bytes(&mut nonce);
     let ct = c
@@ -221,7 +235,7 @@ pub fn read_block(path: &Path, index: u64) -> std::io::Result<Vec<u8>> {
     }
     let plain = if index + 1 == blocks { (total - index * BLOCK as u64) as usize } else { BLOCK };
     let mut f = std::fs::File::open(path)?;
-    let id = read_id(&mut f, &c)?;
+    let id = read_id(&mut f, &c, path)?;
     f.seek(SeekFrom::Start(HEAD as u64 + index * (BLOCK + OVERHEAD) as u64))?;
     let mut buf = vec![0u8; plain + OVERHEAD];
     f.read_exact(&mut buf)?;
@@ -241,7 +255,7 @@ fn read_block_with(c: &Aes256Gcm, path: &Path, index: u64) -> std::io::Result<Ve
     }
     let plain = if index + 1 == blocks { (total - index * BLOCK as u64) as usize } else { BLOCK };
     let mut f = std::fs::File::open(path)?;
-    let id = read_id(&mut f, c)?;
+    let id = read_id(&mut f, c, path)?;
     f.seek(SeekFrom::Start(HEAD as u64 + index * (BLOCK + OVERHEAD) as u64))?;
     let mut buf = vec![0u8; plain + OVERHEAD];
     f.read_exact(&mut buf)?;
@@ -265,21 +279,21 @@ fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bo
     let (co, cn) = (cipher_of(old)?, cipher_of(new)?);
     {
         let mut f = std::fs::File::open(path)?;
-        if read_id(&mut f, &cn).is_ok() {
+        if read_id(&mut f, &cn, path).is_ok() {
             return Ok(false);
         }
-        read_id(&mut f, &co)?; // не открывается ни тем, ни другим — ошибка
+        read_id(&mut f, &co, path)?; // не открывается ни тем, ни другим — ошибка
     }
     let total = plain_len(path)?;
     let tmp = path.with_extension("rekey.tmp");
     let _ = std::fs::remove_file(&tmp);
     let run = || -> std::io::Result<()> {
-        std::fs::write(&tmp, make_head(&cn, total)?)?;
+        std::fs::write(&tmp, make_head(&cn, total, path)?)?;
         let f = std::fs::OpenOptions::new().write(true).open(&tmp)?;
         f.set_len(sealed_len(total))?;
         drop(f);
         let mut tf = std::fs::OpenOptions::new().read(true).write(true).open(&tmp)?;
-        let id = read_id(&mut tf, &cn)?;
+        let id = read_id(&mut tf, &cn, path)?;
         for i in 0..total.div_ceil(BLOCK as u64) {
             // ещё не полученный блок незавершённой передачи — нули (файл создаётся полного размера): остаётся нулями под новым
             // ключом, чтобы передачу можно было продолжить; открыть его невозможно, и это не повреждение
@@ -350,7 +364,7 @@ fn rekey_dir_locked(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
 /// Записать файл целиком (атомарно: временный файл рядом и переименование).
 pub fn write_all(path: &Path, plain: &[u8]) -> std::io::Result<()> {
     let c = cipher()?;
-    let mut out = make_head(&c, plain.len() as u64)?;
+    let mut out = make_head(&c, plain.len() as u64, path)?;
     out.reserve(sealed_len(plain.len() as u64) as usize);
     let mut id = [0u8; 16];
     id.copy_from_slice(&out[4..20]);
@@ -586,6 +600,24 @@ mod tests {
             assert_eq!(failed, 1, "нечитаемый файл — неудача переноса");
         }
         assert_eq!(rekey_dir(d.path(), &old, &new), 0, "после возврата прав перенос проходит");
+    }
+
+    /// Целый контейнер, скопированный под имя другого вложения, не открывается; переименование .part → итоговое имя работает.
+    #[test]
+    fn a_whole_container_copied_under_another_name_does_not_open() {
+        let d = tempfile::tempdir().unwrap();
+        let a = d.path().join("id_a__report.pdf");
+        let b = d.path().join("id_b__photo.jpg");
+        write_all(&a, b"secret A").unwrap();
+        write_all(&b, b"secret B").unwrap();
+        std::fs::copy(&b, &a).unwrap(); // подмена: B под именем A
+        assert!(read_all(&a).is_err(), "подменённый контейнер отвергается");
+        assert_eq!(read_all(&b).unwrap(), b"secret B");
+        let part = d.path().join("id_c__x.bin.part");
+        write_all(&part, b"data").unwrap();
+        let fin = d.path().join("id_c__x.bin");
+        std::fs::rename(&part, &fin).unwrap();
+        assert_eq!(read_all(&fin).unwrap(), b"data", "после снятия .part файл читается");
     }
 
     #[test]
