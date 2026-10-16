@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
@@ -123,6 +124,58 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   }
 
   /// Долгое нажатие по контакту: открыть чат, очистить чат, удалить контакт.
+  /// Своя картинка контакту: из галереи, эмодзи или вернуть ту, что он задал себе. Видна только мне.
+  Future<void> _pickContactPicture(BuildContext context, AppState state, Contact c) async {
+    const emojis = ['😀', '😎', '🤓', '🥳', '😇', '🤠', '😺', '🐱', '🐶', '🦊', '🐼', '🦁', '🐸', '🦉', '🐧', '🦄'];
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      backgroundColor: AppTheme.surface,
+      builder: (ctx) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          ListTile(leading: const Icon(Icons.photo_library_outlined, color: AppTheme.accent), title: const Text('Из галереи', style: TextStyle(color: AppTheme.text)), onTap: () => Navigator.pop(ctx, 'photo')),
+          ListTile(leading: const Icon(Icons.emoji_emotions_outlined, color: AppTheme.accent), title: const Text('Эмодзи', style: TextStyle(color: AppTheme.text)), onTap: () => Navigator.pop(ctx, 'emoji')),
+          if (state.hasContactPicture(c.peerId))
+            ListTile(leading: const Icon(Icons.undo, color: AppTheme.text), title: const Text('Как он сам', style: TextStyle(color: AppTheme.text)), onTap: () => Navigator.pop(ctx, 'clear')),
+        ]),
+      ),
+    );
+    if (choice == null || !context.mounted) return;
+    String? err;
+    if (choice == 'clear') {
+      await state.clearContactPicture(c.peerId);
+    } else if (choice == 'photo') {
+      final res = await FilePicker.platform.pickFiles(type: FileType.image, withData: true);
+      if (res == null) return;
+      try {
+        final bytes = res.files.single.bytes;
+        if (bytes == null) return;
+        err = await state.setContactPicture(c.peerId, bytes);
+      } finally {
+        for (final f in res.files) {
+          if (f.path != null) await state.dropPickerCopy(f.path!);
+        }
+      }
+    } else {
+      final e = await showDialog<String>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          backgroundColor: AppTheme.surface,
+          title: const Text('Эмодзи для контакта', style: TextStyle(color: AppTheme.text)),
+          content: SizedBox(
+            width: 280,
+            child: GridView.count(
+              crossAxisCount: 4, shrinkWrap: true,
+              children: [for (final x in emojis) InkWell(onTap: () => Navigator.pop(ctx, x), child: Center(child: Text(x, style: const TextStyle(fontSize: 28))))],
+            ),
+          ),
+        ),
+      );
+      if (e == null) return;
+      err = await state.setContactPicture(c.peerId, null, emoji: e);
+    }
+    if (err != null && context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
+  }
+
   void _showContactMenu(BuildContext context, AppState state, Contact c) {
     showModalBottomSheet(
       context: context,
@@ -149,6 +202,13 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
                 leading: const Icon(Icons.edit_outlined, color: AppTheme.text),
                 title: const Text('Переименовать', style: TextStyle(color: AppTheme.text)),
                 onTap: () { Navigator.pop(ctx); _renameContact(context, state, c); },
+              ),
+            if (c.saved)
+              ListTile(
+                leading: const Icon(Icons.image_outlined, color: AppTheme.text),
+                title: const Text('Картинка контакта', style: TextStyle(color: AppTheme.text)),
+                subtitle: const Text('Только у вас; ему ничего не отправляется', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                onTap: () { Navigator.pop(ctx); _pickContactPicture(context, state, c); },
               ),
             ListTile(
               leading: const Icon(Icons.cleaning_services_outlined, color: AppTheme.text),

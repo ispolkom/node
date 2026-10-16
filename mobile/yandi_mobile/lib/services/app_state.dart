@@ -243,14 +243,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     final id = identity;
     if (id != null) {
       g.signer = id.sign;
+      g.contactAvatar = (p) => (avatars?.hasLocal(p) ?? false) ? avatars!.bytesForPeer(p) : null;
       g.contactKeys = () async {
         // ключ подписи контакта — тот, что закреплён при переписке (peer_ed25519_pin_*); нет закреплённого — контакт ещё не писал
-        final out = <(List<int>, String)>[];
+        final out = <(List<int>, String, String)>[];
         for (final c in contacts) {
           if (!c.saved) continue;
           final pin = await StorageService.secureRead('peer_ed25519_pin_${c.peerId}');
           if (pin == null) continue;
-          try { out.add((base64.decode(pin), c.displayName)); } catch (_) {}
+          try { out.add((base64.decode(pin), c.displayName, c.peerId)); } catch (_) {}
         }
         return out;
       };
@@ -1041,6 +1042,25 @@ class AppState extends ChangeNotifier implements FilesHost {
       return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
     }
   }
+
+  /// Своя картинка контакту (видна только мне).
+  Future<String?> setContactPicture(String peerId, Uint8List? source, {String? emoji}) async {
+    try {
+      final png = emoji != null ? await AvatarProcessor.fromEmoji(emoji) : await AvatarProcessor.fromImageBytes(source!);
+      await avatars!.setLocal(peerId, png);
+      notifyListeners();
+      return null;
+    } catch (e) {
+      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+    }
+  }
+
+  Future<void> clearContactPicture(String peerId) async {
+    await avatars?.clearLocal(peerId);
+    notifyListeners();
+  }
+
+  bool hasContactPicture(String peerId) => avatars?.hasLocal(peerId) ?? false;
 
   Future<void> clearMyAvatar() async {
     await avatars?.clearMine();

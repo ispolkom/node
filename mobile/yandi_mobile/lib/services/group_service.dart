@@ -60,7 +60,10 @@ class GroupService {
   /// Подпись личным ключом (ставит приложение); без неё доказательство «это я» не прикладывается.
   Future<List<int>> Function(List<int>)? signer;
   /// Ключи подписи моих контактов (открытый Ed25519, который я уже закрепил при переписке) и имя, которое я им дал.
-  Future<List<(List<int>, String)>> Function()? contactKeys;
+  Future<List<(List<int>, String, String)>> Function()? contactKeys;   // (ключ подписи, имя в книжке, номер контакта)
+  /// Моя локальная картинка контакта (видна только мне), если поставлена: главнее той, что он выложил в группе.
+  Uint8List? Function(String peerId)? contactAvatar;
+  final Map<String, Map<String, String>> _knownPeer = {};   // группа → псевдоним → номер моего контакта
 
   static const proofDomain = 'YANDI-GROUP-CARD-V1\u0000';
   static List<int> proofMessage(String gid, List<int> memberPub) => [...utf8.encode(proofDomain), ...utf8.encode(gid), 0, ...memberPub];
@@ -77,8 +80,9 @@ class GroupService {
 
   /// Чьи подписи в группе принадлежат моим контактам. Проверка по всем ключам контактов; посторонний подпись проверить не может.
   Future<void> _recognise(String gid, List members) async {
-    final keys = await (contactKeys?.call() ?? Future.value(const <(List<int>, String)>[]));
+    final keys = await (contactKeys?.call() ?? Future.value(const <(List<int>, String, String)>[]));
     final found = <String, String>{};
+    final foundPeer = <String, String>{};
     for (final x in members) {
       if (x is! Map || x['alias'] is! String || x['proof'] is! String || x['member_pub'] is! String) continue;
       List<int> sig, pub;
@@ -88,15 +92,17 @@ class GroupService {
       } catch (_) { continue; }
       if (sig.length != 64) continue;
       final msg = proofMessage(gid, pub);
-      for (final (key, name) in keys) {
+      for (final (key, name, peer) in keys) {
         if (key.length != 32) continue;
         if (await Identity.verify(message: msg, signature: sig, publicKey: key)) {
           found[x['alias'] as String] = name;
+          foundPeer[x['alias'] as String] = peer;
           break;
         }
       }
     }
     _known[gid] = found;
+    _knownPeer[gid] = foundPeer;
   }
 
   /// Мой профиль, из которого берётся визитка (ставит приложение при старте и при смене).
@@ -140,6 +146,11 @@ class GroupService {
 
   /// Картинка участника, раскрытая им в группе; null — нет (или ещё не загрузилась: по приходу вызовется onChanged).
   Uint8List? memberAvatar(String gid, String alias) {
+    final peer = _knownPeer[gid]?[alias];
+    if (peer != null) {
+      final mine = contactAvatar?.call(peer);   // я сам поставил этому контакту картинку — она главнее
+      if (mine != null) return mine;
+    }
     final key = '$gid/$alias';
     final want = _avatarWant[key];
     if (want != null && want.isNotEmpty && _avatarHash[key] != want && _avatarAsked.add(key)) {

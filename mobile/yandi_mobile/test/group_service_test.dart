@@ -671,7 +671,7 @@ void main() {
     owner.contactKeys = () async => const [];
     await owner.sync();
     expect(owner.isKnownContact(node.gid, bobAlias), isFalse);   // чужой ключ подпись не проверит
-    owner.contactKeys = () async => [(List<int>.filled(32, 0xff), 'Сосед'), (pub, 'Мама')];
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xff), 'Сосед', 'p-neighbour'), (pub, 'Мама', 'p-mama')];
     await owner.sync();
     expect(owner.isKnownContact(node.gid, bobAlias), isTrue);
     expect(owner.displayName(node.gid, bobAlias), 'Мама');
@@ -680,13 +680,18 @@ void main() {
     await bob.sync();
     await owner.sync();
     expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    // моя картинка контакту главнее той, что он выложил в группе; без неё — его собственная
+    expect(owner.memberAvatar(node.gid, bobAlias), isNot(equals(Uint8List.fromList([7, 7, 7]))));
+    owner.contactAvatar = (peer) => peer == 'p-mama' ? Uint8List.fromList([7, 7, 7]) : null;
+    expect(owner.memberAvatar(node.gid, bobAlias), [7, 7, 7], reason: 'локальная картинка контакта главнее');
+    owner.contactAvatar = null;
     owner.contactKeys = () async => const [];             // не мой контакт — виден его собственный ник
     await owner.sync();
     expect(owner.displayName(node.gid, bobAlias), 'Кор');
-    owner.contactKeys = () async => [(pub, 'Мама')];
+    owner.contactKeys = () async => [(pub, 'Мама', 'p-mama')];
     await owner.sync();
     // чужая подпись под тем же именем не годится: ключ контакта другой
-    owner.contactKeys = () async => [(List<int>.filled(32, 0xaa), 'Мама')];
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xaa), 'Мама', 'p-mama')];
     await owner.sync();
     expect(owner.isKnownContact(node.gid, bobAlias), isFalse);
   });
