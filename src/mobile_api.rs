@@ -1124,7 +1124,7 @@ async fn is_known_destination(st: &MobileState, h: &HashId) -> bool {
         return true;
     }
     let short = hex::encode(&h.0[..8]);
-    std::fs::read_to_string("contacts.json")
+    std::fs::read_to_string(crate::util::data_dir::data_dir().join("contacts.json"))
         .ok()
         .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
         .and_then(|v| v["contacts"].as_array().cloned())
@@ -1302,7 +1302,7 @@ async fn contacts(
         .into_iter()
         .map(|p| p.id)
         .collect();
-    let raw: serde_json::Value = std::fs::read_to_string("contacts.json")
+    let raw: serde_json::Value = std::fs::read_to_string(crate::util::data_dir::data_dir().join("contacts.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(json!({"contacts": []}));

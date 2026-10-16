@@ -59,7 +59,7 @@ fn base_dir() -> PathBuf {
 
 /// Сохранённые контакты (короткие номера) из contacts.json.
 fn contact_shorts() -> HashSet<String> {
-    let raw: serde_json::Value = std::fs::read_to_string("contacts.json")
+    let raw: serde_json::Value = std::fs::read_to_string(crate::util::data_dir::data_dir().join("contacts.json"))
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
         .unwrap_or(serde_json::json!({}));

@@ -445,6 +445,19 @@ pub struct RestoreOptions {
     pub force: bool,
 }
 
+/// Создать каталог (и недостающие родители) с правами 0700.
+fn private_dirs(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
 /// Записать файлы копии в каталоги узла. Узел при этом не должен работать. Журналы групп и переписка не восстанавливаются.
 pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
     let entries = opened.entries()?;
@@ -471,12 +484,8 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
             e.data.clone()
         };
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir).map_err(|er| format!("{}: {er}", e.path))?;
-            #[cfg(unix)]
-            if e.area != Area::Data || e.path.contains('/') {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
-            }
+            // каталоги — приватные (0700): узел не стартует с каталогом данных, доступным другим пользователям
+            private_dirs(dir).map_err(|er| format!("{}: {er}", e.path))?;
         }
         crate::util::private_file::write_private(&path, &data).map_err(|er| format!("{}: {er}", e.path))?;
         written.push(format!("{:?}/{}", e.area, e.path));
@@ -789,8 +798,16 @@ mod tests {
         let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
         let opened = open_with_root(&bytes, &root).unwrap();
 
-        let (_d2, fresh) = layout();
+        let d2 = tempfile::tempdir().unwrap();
+        // каталоги машины ещё не существуют: восстановление создаёт их само и обязано сделать приватными
+        let fresh = Layout { keys: d2.path().join("keys"), data: d2.path().join("share/yandi"), home: d2.path().join("dot-yandi"), port: 9000 };
         let report = restore(&opened, &fresh, &RestoreOptions { force: false }).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [&fresh.keys, &fresh.data, &fresh.home, &fresh.data.join("groups")] {
+                assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{} должен быть 0700: узел не стартует с открытым каталогом данных", dir.display());
+            }
+        }
         assert!(report.written.iter().any(|w| w == "Keys/auth.json"));
         assert_eq!(report.groups, 1);
         assert_eq!(std::fs::read(fresh.keys.join("auth.json")).unwrap(), b"{\"auth\":1}");

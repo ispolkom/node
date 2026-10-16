@@ -2481,7 +2481,8 @@ fn append_phone_contacts(data: &mut serde_json::Value) {
 
 async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
     // Загружаем из contacts.json
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     // Если файл не существует, возвращаем пустой список
     if !std::path::Path::new(contacts_path).exists() {
@@ -2546,7 +2547,8 @@ async fn api_contacts_post(
     State(_state): State<AppState>,
     axum::extract::Json(payload): axum::extract::Json<ContactRequest>,
 ) -> impl IntoResponse {
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
     let _guard = CONTACTS_LOCK.lock().await;
     let mut contacts = match load_contacts_for_edit(contacts_path).await {
         Ok(c) => c,
@@ -2592,7 +2594,8 @@ struct DeleteContactRequest {
 async fn api_contacts_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     // телефон владельца: он не в contacts.json (список строит узел из сопряжённых устройств) — прячем из чата
     if let Some(prefix) = payload.id.strip_prefix("phone-") {
@@ -2625,7 +2628,8 @@ async fn api_contacts_delete(
 
 /// Export contacts as a JSON file download (only short_id and name fields)
 async fn api_contacts_export() -> impl IntoResponse {
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     let contacts: Vec<serde_json::Value> = if std::path::Path::new(contacts_path).exists() {
         match tokio::fs::read_to_string(contacts_path).await {
@@ -2663,7 +2667,8 @@ async fn api_contacts_export() -> impl IntoResponse {
 
 async fn api_gateways_get(State(state): State<AppState>) -> impl IntoResponse {
     // Загружаем из gateways.json
-    let gateways_path = "gateways.json";
+    let gateways_path_owned = crate::util::data_dir::data_dir().join("gateways.json").display().to_string();
+    let gateways_path = gateways_path_owned.as_str();
 
     // Если файл не существует, возвращаем пустой список
     if !std::path::Path::new(gateways_path).exists() {
@@ -2774,7 +2779,7 @@ fn update_gateways(path: &str, f: impl FnOnce(&mut Vec<serde_json::Value>)) -> R
 async fn api_gateways_post(
     axum::extract::Json(payload): axum::extract::Json<GatewayRequest>,
 ) -> axum::response::Response {
-    let r = update_gateways("gateways.json", |gateways| {
+    let r = update_gateways(&crate::util::data_dir::data_dir().join("gateways.json").display().to_string(), |gateways| {
         // Проверяем, это новый шлюз или редактирование
         if let Some(id) = &payload.id {
             // Редактирование существующего шлюза
@@ -2803,7 +2808,7 @@ async fn api_gateways_post(
 async fn api_gateways_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> axum::response::Response {
-    let r = update_gateways("gateways.json", |gateways| {
+    let r = update_gateways(&crate::util::data_dir::data_dir().join("gateways.json").display().to_string(), |gateways| {
         gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
     });
     match r {
@@ -5084,12 +5089,12 @@ pub async fn contacts_upsert(short_id: &str, name: &str) -> Result<(), String> {
     }
     let short_id = short_id.to_ascii_lowercase();
     let _guard = CONTACTS_LOCK.lock().await;
-    let mut contacts = load_contacts_for_edit("contacts.json").await?;
+    let mut contacts = load_contacts_for_edit(&crate::util::data_dir::data_dir().join("contacts.json").display().to_string()).await?;
     match contacts.iter_mut().find(|c| c.get("short_id").and_then(|v| v.as_str()) == Some(short_id.as_str())) {
         Some(c) => c["name"] = serde_json::json!(name),
         None => contacts.push(serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "name": name, "short_id": short_id, "online": false})),
     }
-    save_contacts("contacts.json", &contacts).await
+    save_contacts(&crate::util::data_dir::data_dir().join("contacts.json").display().to_string(), &contacts).await
 }
 
 
@@ -5188,7 +5193,8 @@ async fn api_profile_get_by_short_id(
     if let Some(found) = phone_profile(&short_id) {
         return Json(found);
     }
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     if !std::path::Path::new(contacts_path).exists() {
         return Json(serde_json::json!({
