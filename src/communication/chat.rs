@@ -264,6 +264,20 @@ impl ChatManager {
         self.persist_outbox_if_dirty().await;
     }
 
+    /// Снять неподтверждённые исходящие с очереди повторов и из долговечного outbox: [peer] / [msg] — сузить выбор (оба None — всё).
+    async fn cancel_pending(&self, peer: Option<&HashId>, msg: Option<&HashId>) {
+        let removed = {
+            let mut pending = self.pending_acks.lock().await;
+            let before = pending.len();
+            pending.retain(|id, p| !(peer.is_none_or(|x| p.peer == *x) && msg.is_none_or(|m| id == m)));
+            before != pending.len()
+        };
+        if removed {
+            self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.persist_outbox_if_dirty().await;
+        }
+    }
+
     /// Отправить снимок «пора повторить». Перед каждой отправкой проверяется замок среды: снимок взят на открытой среде,
     /// а запирание, случившееся во время отправки предыдущих, не должно выпускать оставшиеся копии. Возвращает число отправок.
     async fn send_due(&self, due: Vec<(HashId, HashId, ChatMessage)>, generation: u64) -> usize {
@@ -271,6 +285,10 @@ impl ChatManager {
         for (msg_id, peer, msg) in due {
             if self.storage.is_locked() || self.storage.lock_generation() != generation {
                 break;
+            }
+            // сообщение могли удалить, пока шла предыдущая отправка: актуальность проверяется под очередью перед каждой отправкой
+            if !self.pending_acks.lock().await.contains_key(&msg_id) {
+                continue;
             }
             sent += 1;
             match self.send_once(&msg).await {
@@ -795,7 +813,8 @@ impl ChatManager {
     }
 
     /// Очистить историю чата
-    pub fn clear_history(&self, peer_id: &HashId) -> Result<()> {
+    pub async fn clear_history(&self, peer_id: &HashId) -> Result<()> {
+        self.cancel_pending(Some(peer_id), None).await; // неподтверждённые исходящие тоже снимаются с очереди повторов
         self.storage.clear_history(peer_id)?;
         // реакции этой переписки не должны пережить саму историю
         crate::chat_reactions::forget_peer(&hex::encode(&peer_id.0[..8]));
@@ -803,7 +822,8 @@ impl ChatManager {
     }
 
     /// Очистить ВСЮ историю
-    pub fn clear_all_history(&self) -> Result<()> {
+    pub async fn clear_all_history(&self) -> Result<()> {
+        self.cancel_pending(None, None).await;
         self.storage.clear_all()?;
         crate::chat_reactions::forget_all();
         Ok(())
@@ -820,12 +840,13 @@ impl ChatManager {
     }
 
     /// Удалить сообщение локально (только у себя)
-    pub fn delete_message_local(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
+    pub async fn delete_message_local(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
         info!(
             "🗑️ Deleting message {} locally for peer {}",
             hex::encode(&msg_id.0[..8]),
             hex::encode(&peer_id.0[..8])
         );
+        self.cancel_pending(Some(peer_id), Some(msg_id)).await;
         self.storage.delete_message(peer_id, msg_id)
     }
 
@@ -841,7 +862,8 @@ impl ChatManager {
             hex::encode(&peer_id.0[..8])
         );
 
-        // 1. Удалить локально
+        // 1. Снять с очереди повторов (иначе удалённое содержимое ушло бы адресату позже) и удалить локально
+        self.cancel_pending(Some(peer_id), Some(msg_id)).await;
         self.storage.delete_message(peer_id, msg_id)?;
 
         // 2. Отправить запрос на удаление пиру
@@ -1022,7 +1044,10 @@ mod tests {
     /// delivery-timeout scenarios below share ONE ChatManager/transport
     /// instead of racing each other over the same env vars in parallel
     /// test threads.
-    async fn test_chat_manager() -> ChatManager {
+    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>) {
+        // порты берутся из переменных окружения процесса: проверки, которым нужен транспорт, идут строго по одной
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let guard = SERIAL.lock().await;
         std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
         std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
         let identity = NodeIdentity::new();
@@ -1033,7 +1058,7 @@ mod tests {
         // чаты проверки — во временной папке, не в ~/.yandi/chats владельца
         let dir = std::env::temp_dir().join(format!("yandi-chat-test-{}", std::process::id()));
         let storage = ChatStorage::in_dir(my_node_id, dir).expect("storage");
-        ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager")
+        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard)
     }
 
     fn pending(peer: HashId, msg: ChatMessage, age: Duration, due_in: Duration) -> PendingAck {
@@ -1050,8 +1075,41 @@ mod tests {
     /// The outgoing queue: a message nobody confirmed for a whole day is marked Failed; a confirmed one is left alone; a young
     /// unconfirmed one is NOT failed — it stays in the queue and is sent again (it used to be marked Failed after 45 seconds, and lost).
     #[tokio::test]
+    async fn a_deleted_or_cleared_message_leaves_the_retry_queue_and_the_outbox() {
+        let (cm, _serial) = test_chat_manager().await;
+        let mk = |peer: HashId, text: &str| {
+            let m = ChatMessage::new(cm.my_node_id, peer, text.to_string());
+            (m.msg_id, m)
+        };
+        let (pa, pb) = (crate::util::HashId::new_random(), crate::util::HashId::new_random());
+        let (a1, m_a1) = mk(pa, "a1");
+        let (a2, m_a2) = mk(pa, "a2");
+        let (b1, m_b1) = mk(pb, "b1");
+        for (peer, id, m) in [(pa, a1, &m_a1), (pa, a2, &m_a2), (pb, b1, &m_b1)] {
+            cm.storage.save_outgoing(&peer, m).unwrap();
+            cm.pending_acks.lock().await.insert(id, pending(peer, m.clone(), Duration::from_secs(5), Duration::from_secs(3600)));
+        }
+        // удалили одно сообщение «у себя»: оно уходит из очереди, остальные остаются
+        cm.delete_message_local(&pa, &a1).await.unwrap();
+        {
+            let q = cm.pending_acks.lock().await;
+            assert!(!q.contains_key(&a1) && q.contains_key(&a2) && q.contains_key(&b1));
+        }
+        // очистили переписку с pa: её сообщения уходят из очереди, чужие остаются
+        cm.clear_history(&pa).await.unwrap();
+        {
+            let q = cm.pending_acks.lock().await;
+            assert!(!q.contains_key(&a2) && q.contains_key(&b1));
+        }
+        // снимок «пора повторить», взятый до удаления, не должен отправиться
+        assert_eq!(cm.send_due(vec![(a2, pa, m_a2.clone())], cm.storage.lock_generation()).await, 0);
+        cm.clear_all_history().await.unwrap();
+        assert!(cm.pending_acks.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn the_queue_fails_only_day_old_messages_and_keeps_young_ones_for_resending() {
-        let cm = test_chat_manager().await;
+        let (cm, _serial) = test_chat_manager().await;
 
         let old_peer = crate::util::HashId::new_random();
         let old_msg = ChatMessage::new(cm.my_node_id, old_peer, "hello?".to_string());
@@ -1187,7 +1245,7 @@ mod tests {
     /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
     #[tokio::test(flavor = "multi_thread")]
     async fn locked_chat_does_not_swallow_incoming_and_keeps_outbox() {
-        let cm = test_chat_manager().await;
+        let (cm, _serial) = test_chat_manager().await;
         cm.storage.set_master([9; 32]);
         let peer = crate::util::HashId::new_random();
         let queued = ChatMessage::new(cm.my_node_id, peer, "в очереди".to_string());

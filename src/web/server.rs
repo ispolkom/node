@@ -3234,7 +3234,7 @@ async fn api_chat_clear(
     };
 
     // Очистить историю
-    match chat_manager.clear_history(&peer_hash) {
+    match chat_manager.clear_history(&peer_hash).await {
         Ok(_) => Json(serde_json::json!({
             "status": "success",
             "message": "Chat history cleared"
@@ -3394,7 +3394,7 @@ async fn api_chat_delete(
         }
     } else {
         // Удалить только у себя
-        match chat_manager.delete_message_local(&peer_hash, &msg_id) {
+        match chat_manager.delete_message_local(&peer_hash, &msg_id).await {
             Ok(_) => Json(serde_json::json!({
                 "status": "success",
                 "message": "Message deleted locally"
