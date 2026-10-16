@@ -3,6 +3,7 @@ import 'member_badge.dart';
 import 'theme.dart';
 import 'content_policy.dart';
 import 'preferences.dart';
+import 'nick.dart';
 import 'dart:io';
 import 'dart:typed_data';
 import 'attachments.dart';
@@ -261,16 +262,20 @@ class _GroupsFeatureState extends State<GroupsFeature> {
   }
 
   Future<void> join({Map<String, dynamic>? entry}) async {
-    final values = await form(
-      'Вступить в группу',
-      entry == null
-          ? ['Приглашение YANDI-GROUP-1 или ID', 'Ваше имя']
-          : ['Ваше имя'],
-    );
+    final nick = await loadNick(widget.api);   // имя в группе — ник профиля, отдельное не спрашивается
+    if (!active) return;
+    if (nick == null) {
+      setState(() => error = 'Сначала задайте ник в профиле.');
+      return;
+    }
+    // со строки каталога вступают сразу (имя — ник профиля); по приглашению спрашивается только само приглашение
+    final values = entry != null
+        ? <String>[]
+        : await form('Вступить в группу', ['Приглашение YANDI-GROUP-1 или ID']);
     if (values == null) return;
-    var id = '${entry?['id'] ?? values[0].trim()}';
+    var id = '${entry?['id'] ?? (values.isEmpty ? '' : values[0].trim())}';
     String? code;
-    final name = values.last.trim();
+    final name = nick;
     if (entry == null && id.startsWith('YANDI-GROUP-1:')) {
       final parts = id.split(':');
       if (parts.length != 3) {

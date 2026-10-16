@@ -2,6 +2,7 @@ import 'theme.dart';
 import 'dashboard.dart';
 import 'relay_card.dart';
 import 'preferences.dart';
+import 'nick.dart';
 import 'member_badge.dart';
 import 'background_alerts.dart';
 import 'dart:async';
@@ -87,6 +88,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     status = speed = null;
     nodes = [];
     vault = null;
+    nickAsked = false;
     MemberBadge.forget(); // визитки участников (картинки) в памяти не переживают запирание
   }
 
@@ -185,6 +187,21 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       vault = next;
       lockUnconfirmed = false;
     });
+    if (entered && next.unlocked && !nickAsked) ensureNick();
+  }
+
+  bool nickAsked = false;
+
+  /// Ник обязателен: пока профиль не заполнен, показывается окно, которое нельзя закрыть без ника.
+  Future<void> ensureNick() async {
+    nickAsked = true;
+    if (!await nickMissing(widget.api) || !mounted) return;
+    final ctx = navigator.currentContext;
+    if (ctx == null || !ctx.mounted) {
+      nickAsked = false;
+      return;
+    }
+    await requireNick(ctx, widget.api);
   }
 
   Future<void> enter() async {

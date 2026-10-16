@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'contact_avatar.dart';
 import 'preferences.dart';
+import 'nick.dart';
 import 'transport/api.dart';
 
 /// Страница «Поиск»: две карточки — «Пользователи» и «Группы», в каждой количество.
@@ -147,8 +148,13 @@ class _SearchFeatureState extends State<SearchFeature> {
       setState(() => notice = 'Владелец группы отсутствует: ключ выдать некому, вступить нельзя.');
       return;
     }
-    final name = await askName(open ? 'Ваше имя в группе' : 'Ваше имя для запроса');
-    if (!active || name == null || name.isEmpty) return;
+    // имя в группе — ник профиля (одно имя на человека); отдельное имя не спрашивается
+    final name = await loadNick(widget.api);
+    if (!active) return;
+    if (name == null) {
+      setState(() => notice = 'Сначала задайте ник в профиле.');
+      return;
+    }
     try {
       await widget.api.request('/api/groups/$gid/${open ? 'join' : 'request'}', body: {'name': name});
       if (active) {

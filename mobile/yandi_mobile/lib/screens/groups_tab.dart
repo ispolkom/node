@@ -37,30 +37,12 @@ class _GroupsTabState extends State<GroupsTab> {
     if (mounted) setState(() { _loaded = true; _node = node; });
   }
 
-  Future<String?> _askName(String title, String hint) {
-    final c = TextEditingController();
-    return showDialog<String>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.surface,
-        title: Text(title, style: const TextStyle(color: AppTheme.text)),
-        content: SecureTextField(controller: c, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: 'Ваше имя', helperText: hint)),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(ctx, c.text.trim()), child: const Text('Продолжить')),
-        ],
-      ),
-    );
-  }
-
   Future<void> _joinOrAsk(DiscoverGroup g) async {
     final state = context.read<AppState>();
     final messenger = ScaffoldMessenger.of(context);
-    final name = await _askName(g.isOpen ? 'Вступить в «${g.name}»' : 'Попросить приглашение в «${g.name}»',
-        g.isOpen ? 'Узел его не видит: оно пишется зашифрованно' : 'Владелец группы увидит ваше имя и решит, прислать ли приглашение');
-    if (name == null) return;
+    final name = state.myNick;   // имя в группе — ник профиля, другого нет
     if (name.isEmpty) {
-      messenger.showSnackBar(const SnackBar(content: Text('Введите имя: без него владелец не поймёт, кто просит')));
+      messenger.showSnackBar(const SnackBar(content: Text('Сначала задайте ник в профиле')));
       return;
     }
     try {
@@ -287,7 +269,6 @@ class _GroupsTabState extends State<GroupsTab> {
   void _joinSheet(BuildContext context) {
     final state = context.read<AppState>();
     final codeCtrl = TextEditingController();
-    final nameCtrl = TextEditingController();
     String? error;
     bool busy = false;
     showModalBottomSheet(
@@ -296,8 +277,8 @@ class _GroupsTabState extends State<GroupsTab> {
       backgroundColor: AppTheme.surface,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setS) {
         Future<void> doJoin(String gid, String? code) async {
-          final name = nameCtrl.text.trim();
-          if (name.isEmpty) { setS(() => error = 'Введите имя, которое увидят в группе'); return; }
+          final name = state.myNick;   // имя в группе — ник профиля
+          if (name.isEmpty) { setS(() => error = 'Сначала задайте ник в профиле'); return; }
           setS(() { busy = true; error = null; });
           try {
             await state.groups!.join(gid, inviteCode: code, displayName: name);
@@ -314,9 +295,6 @@ class _GroupsTabState extends State<GroupsTab> {
             child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
               const Text('Вступить в группу', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
               const SizedBox(height: 12),
-              SecureTextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text),
-                  decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
-              const SizedBox(height: 8),
               SecureTextField(controller: codeCtrl, style: const TextStyle(color: AppTheme.text),
                   decoration: const InputDecoration(labelText: 'Приглашение', hintText: 'YANDI-GROUP-1:…')),
               const SizedBox(height: 8),
@@ -343,20 +321,11 @@ class _GroupsTabState extends State<GroupsTab> {
 /// Вступление по приглашению, пришедшему сообщением: спрашивает имя в группе и вступает.
 Future<void> joinInvited(BuildContext context, GroupInviteMsg m) async {
   final state = context.read<AppState>();
-  final nameCtrl = TextEditingController();
-  final name = await showDialog<String>(
-    context: context,
-    builder: (ctx) => AlertDialog(
-      backgroundColor: AppTheme.surface,
-      title: Text('Вступить в «${m.name.isEmpty ? 'группу' : m.name}»?', style: const TextStyle(color: AppTheme.text)),
-      content: SecureTextField(controller: nameCtrl, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Ваше имя в группе', helperText: 'Узел его не видит: оно пишется зашифрованно')),
-      actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена')),
-        TextButton(onPressed: () => Navigator.pop(ctx, nameCtrl.text.trim()), child: const Text('Вступить')),
-      ],
-    ),
-  );
-  if (name == null || name.isEmpty || !context.mounted) return;
+  final name = state.myNick;   // имя в группе — ник профиля
+  if (name.isEmpty) {
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Сначала задайте ник в профиле')));
+    return;
+  }
   final messenger = ScaffoldMessenger.of(context);
   try {
     await state.groups!.join(m.invite.gid, inviteCode: m.invite.code.isEmpty ? null : m.invite.code, displayName: name);

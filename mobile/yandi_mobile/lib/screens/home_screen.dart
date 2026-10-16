@@ -4,7 +4,6 @@ import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../models/contact.dart';
 import '../services/app_state.dart';
-import '../services/storage_service.dart';
 import '../services/notification_service.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
@@ -55,36 +54,43 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     });
   }
 
-  /// Первый вход: попросить ник, под которым человека увидят другие пользователи узла (один раз; можно пропустить).
+  /// Профиль: ник обязателен (его увидят другие пользователи узла и участники групп; другого имени в группах нет), аватар — по желанию
+  /// (в настройках). Окно не закрывается, пока ник не введён.
   Future<void> _askNickOnce() async {
     final state = context.read<AppState>();
-    if (state.myNick.isNotEmpty) return;
-    try {
-      if (await StorageService.secureRead('nick_prompted') == '1') return;
-    } catch (_) {}
-    if (!mounted) return;
+    if (state.myNick.isNotEmpty || !mounted) return;
     final ctrl = TextEditingController();
-    final nick = await showDialog<String>(
+    String? error;
+    await showDialog<void>(
       context: context,
       barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        backgroundColor: AppTheme.surface,
-        title: const Text('Как вас называть?', style: TextStyle(color: AppTheme.text)),
-        content: SingleChildScrollView(
-          child: SecureField(controller: ctrl, hint: 'Ник (его увидят другие пользователи узла)', onSubmitted: () => Navigator.pop(ctx, ctrl.text.trim())),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, ''), child: const Text('Позже', style: TextStyle(color: AppTheme.textSecondary))),
-          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('Сохранить', style: TextStyle(color: AppTheme.accent))),
-        ],
+      builder: (ctx) => PopScope(
+        canPop: false,
+        child: StatefulBuilder(builder: (ctx, setS) {
+          Future<void> save() async {
+            final nick = ctrl.text.trim();
+            if (nick.isEmpty) { setS(() => error = 'Введите ник: без него вас не увидят другие'); return; }
+            final err = await state.setMyNick(nick);
+            if (err != null) { setS(() => error = err); return; }
+            if (ctx.mounted) Navigator.pop(ctx);
+          }
+          return AlertDialog(
+            backgroundColor: AppTheme.surface,
+            title: const Text('Как вас называть?', style: TextStyle(color: AppTheme.text)),
+            content: SingleChildScrollView(
+              child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+                SecureField(controller: ctrl, hint: 'Ник (обязательно: его увидят пользователи узла и участники групп)', onSubmitted: save),
+                const SizedBox(height: 8),
+                const Text('Картинку профиля можно добавить позже в «Настройках» (не обязательно).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                if (error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(error!, style: const TextStyle(color: AppTheme.incoming))),
+              ]),
+            ),
+            actions: [TextButton(onPressed: save, child: const Text('Сохранить', style: TextStyle(color: AppTheme.accent)))],
+          );
+        }),
       ),
     );
     ctrl.dispose();
-    try { await StorageService.secureWrite('nick_prompted', '1'); } catch (_) {}
-    if (nick != null && nick.isNotEmpty && mounted) {
-      final err = await state.setMyNick(nick);
-      if (err != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(err)));
-    }
   }
 
   @override

@@ -70,6 +70,11 @@ class GroupApi extends m1.FakeApi {
       };
     }
     if (path == '/api/peers/trusted' && body == null) return {'peers': []};
+    if (path == '/api/profile/me' && body == null) {
+      return {
+        'profile': {'display_name': 'Ник', 'short_id': 'abc'},
+      };
+    }
     if (!path.startsWith('/api/groups') &&
         !path.startsWith('/api/mobile/groups')) {
       return super.request(path, body: body, method: method);
@@ -231,21 +236,19 @@ void main() {
     await open(t, api);
     await m1.click(t, 'Список групп');
     await m1.click(t, 'Вступить');
-    await t.enterText(field('Ваше имя'), 'Имя');
-    await m1.click(t, 'Подтвердить');
+    await t.pumpAndSettle();
     expect(api.calls.contains('/api/groups/${'c' * 32}/join'), true);
     await m1.click(t, 'Попросить приглашение');
-    await t.enterText(field('Ваше имя'), 'Имя');
-    await m1.click(t, 'Подтвердить');
+    await t.pumpAndSettle();
     expect(api.calls.contains('/api/groups/${'d' * 32}/request'), true);
     await m1.click(t, 'Вступить по приглашению');
     await t.enterText(
       field('Приглашение YANDI-GROUP-1 или ID'),
       'YANDI-GROUP-1:$gid:CODE',
     );
-    await t.enterText(field('Ваше имя'), 'Имя');
     await m1.click(t, 'Подтвердить');
     expect(api.bodies.any((b) => b['code'] == 'CODE'), true);
+    expect(api.bodies.where((b) => b.containsKey('name')).every((b) => b['name'] == 'Ник'), true, reason: 'имя в группе — ник профиля, отдельное не спрашивается');
     await m1.click(t, 'Мои группы');
     await m1.click(t, 'Забыть Ушедшая');
     await m1.click(t, 'Отмена');
