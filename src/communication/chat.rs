@@ -69,6 +69,13 @@ const MAX_OUTBOX: usize = 2000;
 /// Incoming message ids remembered to recognise repeats.
 const SEEN_INCOMING_MAX: usize = 20_000;
 
+/// Наибольший размер сообщения (JSON) для одного пакета: полезная нагрузка пакета ограничена u16, остаток — на шифрование и заголовки.
+const MAX_WIRE_MESSAGE: usize = 60_000;
+
+fn fits_one_packet(msg: &ChatMessage) -> bool {
+    serde_json::to_vec(msg).map_or(false, |b| b.len() <= MAX_WIRE_MESSAGE)
+}
+
 impl ChatManager {
     /// Создать новый ChatManager
     pub fn new(my_node_id: HashId, transport: Arc<P2PTransport>) -> Result<Self> {
@@ -378,6 +385,12 @@ impl ChatManager {
         if let Some(att) = attachment {
             info!("📎 With attachment: {} ({} bytes)", att.filename, att.size);
             msg.attachment = Some(att);
+        }
+
+        // заведомо не уйдёт одним пакетом (длина полезной нагрузки пакета — u16): отказ до сохранения и постановки в очередь, иначе
+        // запись застряла бы в outbox и при каждой отправке ломала бы фоновый цикл повторов
+        if !fits_one_packet(&msg) {
+            return Err(anyhow::anyhow!("сообщение слишком длинное для отправки собеседнику (не более {MAX_WIRE_MESSAGE} байт)"));
         }
 
         if self.pending_acks.lock().await.len() >= MAX_OUTBOX {
@@ -940,6 +953,15 @@ fn check_incoming(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_message_too_long_for_one_packet_is_refused_before_it_is_queued() {
+        let id = HashId([1u8; 32]);
+        let short = ChatMessage::new(id, id, "привет".into());
+        assert!(fits_one_packet(&short));
+        let long = ChatMessage::new(id, id, "x".repeat(65_536));
+        assert!(!fits_one_packet(&long));
+    }
+
     use super::*;
 
     fn plain_msg(from: u8, to: u8, text: &str) -> ChatMessage {
