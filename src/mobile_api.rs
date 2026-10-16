@@ -734,22 +734,27 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
     // всё, кроме сообщения, обрабатывается «в памяти»: номер занимается сразу (отказ записи журнала — повтор письма позже)
     // предложение файла — исключение: его номер занимается после записи файлового сообщения в историю (в фоновой задаче ниже)
     let is_file_offer = matches!(&envelope, crate::mobile_self::Envelope::Plain(t) if t.starts_with(crate::mobile_self::FILE_MARKER));
-    if !matches!(envelope, crate::mobile_self::Envelope::Message { .. }) && !is_file_offer && !crate::mobile_self::commit_replay(blob) {
+    // квитанция и правка меняют историю: их номер тоже занимается только после успешной записи (ошибка диска/замка — письмо на повтор)
+    let writes_history = matches!(&envelope, crate::mobile_self::Envelope::Message { .. } | crate::mobile_self::Envelope::Receipt { .. } | crate::mobile_self::Envelope::Edit { .. });
+    if !writes_history && !is_file_offer && !crate::mobile_self::commit_replay(blob) {
         return false;
     }
     let text = match envelope {
         crate::mobile_self::Envelope::Receipt { read, ids } => {
             let status = if read { crate::communication::MessageStatus::Read } else { crate::communication::MessageStatus::Delivered };
+            let mut stored = true;
             for id in ids {
                 if let Ok(mid) = HashId::from_hex(&id) {
-                    let _ = st.chat.store_local_status(&device, &mid, status.clone());
+                    stored &= st.chat.store_local_status(&device, &mid, status.clone()).is_ok();
                 }
             }
-            return true;
+            return stored && crate::mobile_self::commit_replay(blob);
         }
         crate::mobile_self::Envelope::Edit { cmid, text } => {
-            let _ = st.chat.edit_message(&device, &crate::mobile_self::incoming_id(from_device, &cmid), text);
-            return true;
+            if st.chat.edit_message(&device, &crate::mobile_self::incoming_id(from_device, &cmid), text).is_err() {
+                return false; // история не переписана: номер письма не занят, оно останется в очереди
+            }
+            return crate::mobile_self::commit_replay(blob);
         }
         crate::mobile_self::Envelope::CapPing => {
             node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
