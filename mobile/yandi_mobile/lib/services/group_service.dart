@@ -51,7 +51,8 @@ class GroupService {
   final Map<String, Map<String, String>> _nicks = {};       // группа → псевдоним → ник, раскрытый самим участником
   /// Участники, в которых я узнал своего контакта по подписи в визитке: группа → псевдоним → имя контакта (оно только у меня).
   final Map<String, Map<String, String>> _known = {};
-  String displayName(String gid, String alias) => _known[gid]?[alias] ?? _nicks[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
+  /// Ник, который человек сам раскрыл (он постоянный и следует за его профилем), главнее имени, под которым он записан у меня в контактах.
+  String displayName(String gid, String alias) => _nicks[gid]?[alias] ?? _known[gid]?[alias] ?? _names[gid]?[alias] ?? alias;
   /// true — это мой контакт (узнан по подписи): ему показывается моё имя для него.
   bool isKnownContact(String gid, String alias) => _known[gid]?.containsKey(alias) ?? false;
 
