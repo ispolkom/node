@@ -5,8 +5,8 @@
     python node/tests/ui/exit_section_check.py      (нужен node)
 """
 import json, os, re, subprocess, tempfile
-ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-html = open(os.path.join(ROOT, "node/src/web/ui/settings.html"), encoding="utf-8").read()
+ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))   # корень репозитория (tests/ui → ..)
+html = open(os.path.join(ROOT, "src/web/ui/settings.html"), encoding="utf-8").read()
 js = re.search(r"(        // === Выход в интернет через этот узел: кто может ===\n.*?\n        \}\)\(\);\n)", html, re.S).group(1)
 harness = """
 class El { constructor(){ this.value=''; this.textContent=''; this.l={}; } addEventListener(t,f){ (this.l[t]=this.l[t]||[]).push(f); } fire(t){ (this.l[t]||[]).forEach(f=>f()); } }

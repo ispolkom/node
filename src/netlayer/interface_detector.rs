@@ -159,29 +159,8 @@ impl NetworkTopology {
         let stdout = String::from_utf8_lossy(&output.stdout);
 
         // Parse ifconfig output (macOS format)
-        let mut current_interface: Option<String> = None;
-        let mut interface_details: Vec<String> = Vec::new();
-
-        for line in stdout.lines() {
-            if line.ends_with(':') && !line.starts_with('\t') {
-                // New interface
-                if let Some(ref name) = current_interface {
-                    if let Some(interface) = Self::parse_interface_macos(name, &interface_details) {
-                        interfaces.push(interface);
-                    }
-                }
-
-                let name = line.trim_end_matches(':').to_string();
-                current_interface = Some(name);
-                interface_details.clear();
-            } else if current_interface.is_some() {
-                interface_details.push(line.to_string());
-            }
-        }
-
-        // Process last interface
-        if let Some(ref name) = current_interface {
-            if let Some(interface) = Self::parse_interface_macos(name, &interface_details) {
+        for (name, details) in Self::split_ifconfig_macos(&stdout) {
+            if let Some(interface) = Self::parse_interface_macos(&name, &details) {
                 interfaces.push(interface);
             }
         }
@@ -427,7 +406,26 @@ impl NetworkTopology {
         Ok(gateways)
     }
 
-    #[cfg(target_os = "macos")]
+    /// Разбить вывод `ifconfig -a` по интерфейсам: заголовок — строка без отступа с двоеточием (`en0: flags=8863<UP,...> mtu 1500`),
+    /// имя — всё до первого двоеточия; остальные строки (с отступом) — подробности предыдущего интерфейса.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+    fn split_ifconfig_macos(text: &str) -> Vec<(String, Vec<String>)> {
+        let mut out: Vec<(String, Vec<String>)> = Vec::new();
+        for line in text.lines() {
+            let header = !line.is_empty() && !line.starts_with(char::is_whitespace);
+            match line.find(':') {
+                Some(i) if header => out.push((line[..i].to_string(), Vec::new())),
+                _ => {
+                    if let Some((_, details)) = out.last_mut() {
+                        details.push(line.to_string());
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     fn parse_interface_macos(name: &str, details: &[String]) -> Option<NetworkInterface> {
         // Skip loopback and virtual interfaces
         if name == "lo0" || name.starts_with("vmnet") || name.starts_with("utun") {
@@ -440,17 +438,16 @@ impl NetworkTopology {
         for detail in details {
             if detail.contains("inet ") && !detail.contains("inet6") {
                 let parts: Vec<&str> = detail.split_whitespace().collect();
-                for part in &parts {
-                    if part.contains('.') {
-                        if let Ok(addr) = part.parse::<IpAddr>() {
+                for (i, part) in parts.iter().enumerate() {
+                    if *part == "inet" {
+                        // адрес — слово сразу после `inet` (а не `broadcast`, `-->` и т. п. в той же строке)
+                        if let Some(addr) = parts.get(i + 1).and_then(|a| a.parse::<IpAddr>().ok()) {
                             ip_addr = Some(addr);
                         }
-                    } else if part.starts_with("netmask") {
-                        // netmask 0xffffff00 format
-                        if let Ok(mask) = part.trim_start_matches("netmask").parse::<u32>() {
-                            // Convert to CIDR (simplified)
-                            let cidr = mask.count_ones();
-                            netmask = Some(cidr.to_string());
+                    } else if *part == "netmask" {
+                        // `netmask 0xffffff00`: маска — следующее слово, шестнадцатеричная
+                        if let Some(mask) = parts.get(i + 1).and_then(|m| u32::from_str_radix(m.trim_start_matches("0x"), 16).ok()) {
+                            netmask = Some(mask.count_ones().to_string());
                         }
                     }
                 }
@@ -488,5 +485,27 @@ impl NetworkTopology {
             // Fallback to localhost
             IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))
         }
+    }
+}
+
+#[cfg(test)]
+mod macos_parse_tests {
+    use super::*;
+
+    const IFCONFIG: &str = "lo0: flags=8049<UP,LOOPBACK,RUNNING,MULTICAST> mtu 16384\n\tinet 127.0.0.1 netmask 0xff000000\nen0: flags=8863<UP,BROADCAST,SMART,RUNNING,SIMPLEX,MULTICAST> mtu 1500\n\tether 11:22:33:44:55:66\n\tinet6 fe80::1%en0 prefixlen 64 scopeid 0x6\n\tinet 192.168.1.23 netmask 0xffffff00 broadcast 192.168.1.255\n\tstatus: active\nutun0: flags=8051<UP,POINTOPOINT,RUNNING,MULTICAST> mtu 1380\n\tinet 10.8.0.2 --> 10.8.0.1 netmask 0xffffff00\n";
+
+    #[test]
+    fn real_ifconfig_headers_are_recognised_and_en0_gets_its_address_and_mask() {
+        let blocks = NetworkTopology::split_ifconfig_macos(IFCONFIG);
+        let names: Vec<&str> = blocks.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["lo0", "en0", "utun0"], "заголовок вида `en0: flags=…` — не только строка, оканчивающаяся двоеточием");
+        // строка `status: active` с отступом — подробность, а не новый интерфейс
+        let en0 = blocks.iter().find(|(n, _)| n == "en0").unwrap();
+        let iface = NetworkTopology::parse_interface_macos("en0", &en0.1).expect("en0 разобран");
+        assert_eq!(iface.ip, "192.168.1.23".parse::<IpAddr>().unwrap(), "адрес — после inet, а не broadcast");
+        assert_eq!(iface.netmask, "24");
+        assert!(iface.is_lan && !iface.is_wan);
+        assert!(NetworkTopology::parse_interface_macos("lo0", &blocks[0].1).is_none());
+        assert!(NetworkTopology::parse_interface_macos("utun0", &blocks[2].1).is_none());
     }
 }

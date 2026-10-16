@@ -173,12 +173,14 @@ async fn wait_ready(c: &reqwest::Client, p: &Ports, cookie: &str, secs: u64) -> 
     None
 }
 
-#[cfg(not(unix))]
+// Признак «процесс жив и это наш» читается из /proc/PID/cwd — он есть только в Linux. Без него `down`/`reset` не смогли бы остановить
+// копии и стёрли бы данные под работающими процессами, поэтому на других системах учебная сеть не запускается вовсе.
+#[cfg(not(target_os = "linux"))]
 fn spawn_node(_dir: &Path, _p: &Ports) -> std::io::Result<u32> {
-    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the training network (`yandi testnet`) runs on Linux and macOS only"))
+    Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "the training network (`yandi testnet`) runs on Linux only"))
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 fn spawn_node(dir: &Path, p: &Ports) -> std::io::Result<u32> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe()?;
