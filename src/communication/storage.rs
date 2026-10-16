@@ -755,12 +755,13 @@ impl ChatStorage {
                 Read => 3,
             }
         }
-        if let Ok(key) = self.get_encryption_key() {
-            if let Ok(log) = self.read_status_log(peer_id, &key, false) {
-                if log.get(msg_id).is_some_and(|cur| rank(cur) > rank(&status)) {
-                    return Ok(());
-                }
-            }
+        // действующий статус = журнал (свежее) либо, если журнал свёрнут в историю, статус из самой истории
+        let in_log = self.get_encryption_key().ok().and_then(|key| self.read_status_log(peer_id, &key, false).ok()).and_then(|log| log.get(msg_id).cloned());
+        let current = in_log.or_else(|| {
+            self.load_history_unlocked(peer_id, 2000).ok().and_then(|h| h.into_iter().find(|m| m.msg_id == *msg_id).map(|m| m.status))
+        });
+        if current.is_some_and(|cur| rank(&cur) > rank(&status)) {
+            return Ok(());
         }
         self.append_status(peer_id, msg_id, &status)?;
         let big = std::fs::metadata(self.status_log_path(peer_id)).map_or(false, |m| m.len() > Self::STATUS_LOG_FOLD_BYTES);
@@ -1210,6 +1211,26 @@ mod closed_env_tests {
         ChatStorage::append_blob(&p, b"three").unwrap();
         let blobs = ChatStorage::read_blobs(&p).unwrap();
         assert_eq!(blobs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+    }
+
+    #[test]
+    fn a_status_does_not_go_backwards_after_the_status_log_was_folded_into_the_history() {
+        let me = HashId::new_random();
+        let peer = HashId::new_random();
+        let d = dir("fold_status");
+        let st = ChatStorage::in_dir_locked(me, d).unwrap();
+        st.set_master([5; 32]);
+        let a = ChatMessage::new(me, peer, "первое".into());
+        let b = ChatMessage::new(me, peer, "второе".into());
+        st.save_outgoing(&peer, &a).unwrap();
+        st.save_outgoing(&peer, &b).unwrap();
+        st.update_message_status(&peer, &a.msg_id, crate::communication::MessageStatus::Read).unwrap();
+        st.update_message_text(&peer, &b.msg_id, "правка".into()).unwrap(); // перезапись истории сворачивает журнал статусов
+        assert!(!st.status_log_path(&peer).exists(), "журнал свёрнут");
+        st.update_message_status(&peer, &a.msg_id, crate::communication::MessageStatus::Shipping).unwrap(); // поздняя отправка
+        let h = st.load_history(&peer, 10).unwrap();
+        let got = h.iter().find(|m| m.msg_id == a.msg_id).unwrap();
+        assert_eq!(got.status, crate::communication::MessageStatus::Read, "«прочитано» не затёрто после свёртки");
     }
 
     #[test]
