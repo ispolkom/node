@@ -1,5 +1,6 @@
 import 'theme.dart';
 import 'preferences.dart';
+import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
@@ -15,8 +16,11 @@ class ProfilePanel extends StatefulWidget {
   final bool busy;
   final bool Function() isActive;
   final Future<void> Function(Future<void> Function()) mutate;
+  /// Изменить имя и аватар собеседника в моей книжке (только у меня).
+  final VoidCallback? onEdit;
   const ProfilePanel({
     super.key,
+    this.onEdit,
     required this.api,
     this.peer,
     required this.busy,
@@ -73,6 +77,10 @@ class _ProfilePanelState extends State<ProfilePanel> {
       setState(() {
         profile = result['profile'] as Map<String, dynamic>;
       });
+      // картинка собеседника показывается сразу, без отдельной кнопки «Просмотреть аватар»
+      if (!own || (profile?['avatar'] is String && (profile!['avatar'] as String).isNotEmpty)) {
+        unawaited(preview());
+      }
     } catch (e) {
       if (active)
         setState(() {
@@ -91,7 +99,7 @@ class _ProfilePanelState extends State<ProfilePanel> {
     if (id is! String ||
         !RegExp(r'^[a-fA-F0-9]{16}([a-fA-F0-9]{48})?$').hasMatch(id))
       return;
-    await widget.mutate(() async {
+    try {
       final bytes = await FileRepository(
         widget.api,
       ).binary.bytes('/api/avatar/$id', limit: 4 * 1024 * 1024);
@@ -108,7 +116,9 @@ class _ProfilePanelState extends State<ProfilePanel> {
         data = bytes;
         image = MemoryImage(bytes);
       });
-    });
+    } catch (_) {
+      // у собеседника может не быть картинки — остаётся заглушка
+    }
   }
 
   Future<void> upload() async {
@@ -233,33 +243,31 @@ class _ProfilePanelState extends State<ProfilePanel> {
         SelectableText('${profile!['short_id'] ?? widget.peer ?? ''}'),
         if (!own) UiText(profile!['online'] == true ? 'В сети' : 'Не в сети'),
       ],
+      const SizedBox(height: 8),
       Wrap(
+        spacing: 8,
+        runSpacing: 8,
         children: [
-          TextButton(
-            onPressed: widget.busy || loading ? null : load,
-            child: const UiText('Обновить профиль'),
-          ),
-          if (!own ||
-              profile?['avatar'] is String &&
-                  (profile!['avatar'] as String).isNotEmpty)
-            TextButton(
-              onPressed: widget.busy ? null : preview,
-              child: const UiText('Просмотреть аватар'),
-            ),
-          if (own)
-            TextButton(
-              onPressed: widget.busy || choosing ? null : upload,
-              child: const UiText('Загрузить аватар'),
-            ),
+          _btn(Icons.refresh, 'Обновить профиль', widget.busy || loading ? null : load),
+          if (!own && widget.onEdit != null)
+            _btn(Icons.edit_outlined, 'Изменить имя и аватар', widget.busy ? null : widget.onEdit),
+          if (own) _btn(Icons.image_outlined, 'Загрузить аватар', widget.busy || choosing ? null : upload),
           if (own &&
               profile?['avatar'] is String &&
               (profile!['avatar'] as String).isNotEmpty)
-            TextButton(
-              onPressed: widget.busy ? null : remove,
-              child: const UiText('Удалить аватар профиля'),
-            ),
+            _btn(Icons.delete_outline, 'Удалить аватар профиля', widget.busy ? null : remove),
         ],
       ),
     ],
+  );
+
+  Widget _btn(IconData icon, String label, VoidCallback? onTap) => OutlinedButton.icon(
+    onPressed: onTap,
+    icon: Icon(icon, size: 18),
+    label: UiText(label, style: const TextStyle(fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none)),
+    style: OutlinedButton.styleFrom(
+      side: const BorderSide(color: Icq.border),
+      textStyle: const TextStyle(fontSize: 13, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none),
+    ),
   );
 }

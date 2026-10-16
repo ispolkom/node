@@ -25,7 +25,7 @@ void main() {
     await m1.command(t, '<b>Текст</b>', 'Удалить');
     await m1.click(t, 'Подтвердить');
     expect(api.bodies.last, {'msg_id': 'new', 'for_everyone': false});
-    await m1.word(t, 'Очистить историю');
+    await m1.tip(t, 'Очистить историю');
     expect(api.calls.where((p) => p.contains('/clear/')), isEmpty);
     await m1.click(t, 'Подтвердить');
     expect(api.calls.where((p) => p.contains('/clear/')).length, 1);
@@ -100,8 +100,10 @@ void main() {
     });
     await m2.open(t, api, 'Чат');
     await m1.click(t, 'Открыть чат');
-    expect(find.text('Позвонить'), findsOneWidget);
-    expect(find.text('Видеозвонок'), findsOneWidget);
+    expect(find.byTooltip('Позвонить'), findsOneWidget);
+    expect(find.byTooltip('Видеозвонок'), findsOneWidget);
+    expect(t.widget<Tooltip>(find.byTooltip('Позвонить')).waitDuration, const Duration(seconds: 2)); // подсказка — после 2 с наведения
+    expect(find.text('Очистить историю'), findsNothing);   // слов-ссылок в шапке чата больше нет
     expect(find.textContaining('«Клуб»'), findsOneWidget);
     expect(find.text('Вступить в группу'), findsWidgets);
     await m1.stop(t);
@@ -152,7 +154,7 @@ void main() {
     await t.pumpAndSettle();
     await m1.click(t, 'Снять выбор');
     // «Файлы чата»: сообщений нет, разделы по видам, ссылки отдельно
-    await m1.word(t, 'Файлы чата');
+    await m1.tip(t, 'Файлы чата');
     expect(find.text('<b>Текст</b>'), findsNothing);
     expect(find.text('https://example.org/page'), findsOneWidget);
     expect(find.text('кот.png'), findsOneWidget);
@@ -162,7 +164,7 @@ void main() {
     await m1.word(t, 'Ссылки');
     expect(find.text('кот.png'), findsNothing);
     expect(find.text('https://example.org/page'), findsOneWidget);
-    await m1.word(t, 'Назад к сообщениям');
+    await m1.tip(t, 'Назад к сообщениям');
     expect(find.text('<b>Текст</b>'), findsOneWidget);
     await m1.stop(t);
   });

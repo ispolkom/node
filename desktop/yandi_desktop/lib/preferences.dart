@@ -307,6 +307,7 @@ const englishLabels = <String, String>{
   'Удалить аватар': 'Remove avatar',
   'Не удалось показать аватар': 'Cannot display avatar',
   'Обновить профиль': 'Refresh profile',
+  'Изменить имя и аватар': 'Change name and avatar',
   'Просмотреть аватар': 'View avatar',
   'Загрузить аватар': 'Upload avatar',
   'Удалить аватар профиля': 'Remove profile avatar',

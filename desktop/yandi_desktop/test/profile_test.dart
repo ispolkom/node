@@ -99,7 +99,7 @@ void main() {
     await m2.open(t, api, 'Чат');
     await m1.click(t, 'Открыть чат');
     expect(find.text('Профиль собеседника'), findsOneWidget);
-    await m1.click(t, 'Просмотреть аватар');
+    await t.pumpAndSettle();   // картинка собеседника загружается сама
     expect(
       find.byWidgetPredicate((w) => w is Image && w.image is MemoryImage && w.width == 96),
       findsOneWidget,

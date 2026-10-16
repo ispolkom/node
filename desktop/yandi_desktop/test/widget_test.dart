@@ -92,6 +92,13 @@ Future<void> word(WidgetTester tester, String label) async {
   await tester.pumpAndSettle();
 }
 
+/// Иконка-кнопка с подсказкой (в окне чата вместо слов-ссылок).
+Future<void> tip(WidgetTester tester, String label) async {
+  await tester.ensureVisible(find.byTooltip(label).first);
+  await tester.tap(find.byTooltip(label).first);
+  await tester.pumpAndSettle();
+}
+
 Future<void> vaultPage(WidgetTester tester) async {
   await click(tester, 'Войти');
   await click(tester, 'Настройки');

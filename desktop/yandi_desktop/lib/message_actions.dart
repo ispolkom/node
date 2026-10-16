@@ -72,6 +72,33 @@ class CommandText extends StatelessWidget {
   );
 }
 
+/// Кнопка-иконка с подсказкой: подсказка появляется, если держать мышь над кнопкой 2 секунды.
+class IconAction extends StatelessWidget {
+  final IconData icon;
+  final String tip;
+  final VoidCallback? onTap;
+  final bool active;
+  final Color? color;
+  const IconAction({super.key, required this.icon, required this.tip, this.onTap, this.active = false, this.color});
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: tr(context, tip),
+    waitDuration: const Duration(seconds: 2),
+    child: InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(4),
+      child: Container(
+        padding: const EdgeInsets.all(7),
+        decoration: BoxDecoration(
+          color: active ? Icq.active.withValues(alpha: 0.18) : null,
+          borderRadius: BorderRadius.circular(4),
+        ),
+        child: Icon(icon, size: 22, color: onTap == null ? Icq.dark : (color ?? Icq.header)),
+      ),
+    ),
+  );
+}
+
 /// The quoted message above a reply, or above the composer while replying.
 class QuoteCard extends StatelessWidget {
   final String? author;

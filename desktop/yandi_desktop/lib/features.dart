@@ -958,6 +958,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             busy: sending,
             isActive: () => active,
             mutate: (action) => mutate(action),
+            onEdit: () => rename(selected!),
           ),
           const SizedBox(height: 16),
           if (selected!['is_phone'] != true)
@@ -1279,20 +1280,20 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           'Чат: ${selected!['name']}',
           style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
         ),
-        Wrap(
-          crossAxisAlignment: WrapCrossAlignment.center,
-          spacing: 14,
+        Row(
           children: [
             if (widget.calls != null) ...[
-              CommandText(
-                'Позвонить',
+              IconAction(
+                icon: Icons.call,
+                tip: 'Позвонить',
                 onTap: () => widget.calls!.start(
                   peer(selected!),
                   phone: selected!['is_phone'] == true,
                 ),
               ),
-              CommandText(
-                'Видеозвонок',
+              IconAction(
+                icon: Icons.videocam,
+                tip: 'Видеозвонок',
                 onTap: () => widget.calls!.start(
                   peer(selected!),
                   video: true,
@@ -1300,20 +1301,27 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 ),
               ),
             ],
-            CommandText(
-              filesView ? 'Назад к сообщениям' : 'Файлы чата',
+            IconAction(
+              icon: filesView ? Icons.chat_bubble_outline : Icons.folder_outlined,
+              tip: filesView ? 'Назад к сообщениям' : 'Файлы чата',
+              active: filesView,
               onTap: () => setState(() {
                 filesView = !filesView;
                 fileTab = 0;
               }),
             ),
-            CommandText(
-              'Очистить историю',
+            IconAction(
+              icon: Icons.delete_sweep_outlined,
+              tip: 'Очистить историю',
+              color: Icq.danger,
               onTap: sending ? null : clearHistory,
             ),
-            const UiText(
-              'Показаны последние 100 сообщений не старше года.',
-              style: TextStyle(fontSize: 12, color: Icq.dark),
+            const SizedBox(width: 8),
+            const Expanded(
+              child: UiText(
+                'Показаны последние 100 сообщений не старше года.',
+                style: TextStyle(fontSize: 12, color: Icq.dark),
+              ),
             ),
           ],
         ),
