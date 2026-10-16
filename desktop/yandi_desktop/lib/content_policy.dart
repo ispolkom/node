@@ -99,6 +99,13 @@ String stripLinks(String text) {
 /// Текст без ссылок с удалённой ссылкой для отправителя («Удалить ссылку»).
 String removeLinks(String text) => stripLinks(text).replaceAll(linkRemoved, '').replaceAll(RegExp(r'[ \t]{2,}'), ' ').trim();
 
+/// Имя человека или контакта: без ссылок и управляющих знаков, один пробел между словами, не длиннее 64 знаков.
+String cleanPersonName(String raw) {
+  final t = removeLinks(raw).replaceAll(RegExp(r'[\x00-\x1f\x7f]'), ' ').replaceAll(RegExp(r'\s{2,}'), ' ').trim();
+  final runes = t.runes.toList();
+  return runes.length > 64 ? String.fromCharCodes(runes.take(64)).trim() : t;
+}
+
 String? _extOf(String name) {
   final base = name.split(RegExp(r'[/\\]')).last.trim();
   final i = base.lastIndexOf('.');

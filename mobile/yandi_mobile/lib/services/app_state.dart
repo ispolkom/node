@@ -436,8 +436,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Добавить в контакты: новый человек по Peer ID или уже видимое устройство.
   Future<void> addManualContact(String peerId, String name) async {
     final existing = contactFor(peerId);
-    final shown = name.trim().isNotEmpty
-        ? name.trim()
+    final clean = cleanPersonName(name);
+    final shown = clean.isNotEmpty
+        ? clean
         : (existing != null ? _plainName(existing.displayName) : '');
     final finalName = shown.isNotEmpty ? shown : peerId.substring(0, 12);
     await StorageService.saveManualContact(peerId, finalName);

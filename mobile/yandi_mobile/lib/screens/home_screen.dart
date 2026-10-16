@@ -623,7 +623,7 @@ void showSaveContactDialog(BuildContext context, String peerId, String currentNa
         ),
         TextButton(
           onPressed: () {
-            context.read<AppState>().addManualContact(peerId, ctrl.text.trim());
+            context.read<AppState>().addManualContact(peerId, ctrl.text);
             Navigator.pop(ctx);
           },
           child: const Text('Добавить', style: TextStyle(color: AppTheme.accent)),
@@ -693,10 +693,10 @@ class _ContactTile extends StatelessWidget {
                 children: [
                   Row(
                     children: [
-                      Text(displayName, style: const TextStyle(
+                      Flexible(child: Text(displayName, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(
                           color: AppTheme.text,
                           fontWeight: FontWeight.w600,
-                          fontSize: 15)),
+                          fontSize: 15))),
                       if (isManual) ...[
                         const SizedBox(width: 6),
                         const Icon(Icons.person, size: 12, color: AppTheme.accent),

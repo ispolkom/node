@@ -509,8 +509,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       context: context,
       builder: (_) => ContactNameDialog(initial: '${contact['name']}'),
     );
-    if (!active || rev != revision || value == null || value.isEmpty) return;
-    await mutate(() => repo.rename(contact, value));
+    final clean = value == null ? '' : cleanPersonName(value);
+    if (!active || rev != revision || clean.isEmpty) return;
+    await mutate(() => repo.rename(contact, clean));
   }
 
   Future<bool> confirm(String title, String explanation) async {
@@ -543,9 +544,10 @@ class _ShellFeaturesState extends State<ShellFeatures> {
       context: context,
       builder: (_) => ContactNameDialog(initial: card.name, savingContact: true),
     );
-    if (!active || rev != revision || value == null || value.isEmpty) return;
+    final clean = value == null ? '' : cleanPersonName(value);
+    if (!active || rev != revision || clean.isEmpty) return;
     await mutate(() async {
-      await widget.api.request('/api/contacts', body: {'name': value, 'short_id': card.shortId});
+      await widget.api.request('/api/contacts', body: {'name': clean, 'short_id': card.shortId});
     });
   }
 

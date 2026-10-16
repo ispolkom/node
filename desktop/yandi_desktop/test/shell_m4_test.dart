@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
 import 'package:yandi_desktop/message_actions.dart';
+import 'package:yandi_desktop/content_policy.dart';
 import 'package:yandi_desktop/voice.dart';
 
 void main() {
@@ -155,6 +156,7 @@ void main() {
     await t.enterText(find.byType(TextField).last, 'Вася');
     await m1.click(t, 'Сохранить');
     expect(api.bodies.any((b) => b['short_id'] == 'd' * 16 && b['name'] == 'Вася'), true);
+    expect(cleanPersonName('Корhttps://example.org/x'), 'Кор');   // ссылка из буфера в имя не попадает
     await m1.stop(t);
   });
   testWidgets('emoji panel inserts into the composer in chat', (t) async {
