@@ -226,6 +226,22 @@
                     </div>
                 </div>
 
+                <div class="card" id="backupCard">
+                    <div class="card-header">
+                        <h3 class="card-title">💾 Резервная копия связей</h3>
+                    </div>
+                    <div class="card-body">
+                        <p class="form-help">Копия хранит <b>связи</b>: ключи и сертификат узла, ваши сопряжённые телефоны, контакты и доверенные узлы, группы (название, участники, роли, эпоха ключей), аватарки и настройки маршрутов. <b>Не входят</b>: переписка, файлы любых видов (в том числе голосовые), история и итоги звонков, статусы доставки. После восстановления телефоны и узлы подключаются заново, а группы возвращаются без сообщений на узле (у участников полученное остаётся на телефонах).</p>
+                        <p class="form-help">Файл <code>.yandibak</code> зашифрован: открыть его можно только <b>кодом восстановления</b> (его показывают при первой настройке узла; подходит и мастер-пароль). Посторонним он бесполезен. Храните копию не на этом же диске: флешка, облако, другое устройство.</p>
+                        <p class="form-help" id="bkState">Загрузка…</p>
+                        <button class="btn" id="bkNow">Сохранить резервную копию</button>
+                        <p class="form-help">Автоматически раз в сутки, если что-то изменилось (и сразу при смене устройств, банах и владельца группы), копия записывается в папку:</p>
+                        <input type="text" id="bkDir" placeholder="Полный путь, например /media/usb/yandi (пусто — выключено)" autocomplete="off" style="width:100%">
+                        <button class="btn" id="bkSave">Сохранить папку</button>
+                        <p class="form-help" id="bkMsg" role="status"></p>
+                    </div>
+                </div>
+
                 <div class="card">
                     <div class="card-header">
                         <h3 class="card-title">Группы телефонов</h3>
@@ -779,6 +795,44 @@
         $('vlGo').onclick = function () { act('/api/vault/lock', {}, 'Заперто.'); };
         $('vcGo').onclick = function () { act('/api/vault/change_password', { old_password: $('vcOld').value, new_password: $('vcNew').value }, 'Пароль сменён.'); $('vcOld').value = ''; $('vcNew').value = ''; };
         $('vaGo').onclick = function () { act('/api/vault/auto_lock', { secs: Math.max(0, Math.round(Number($('vaMin').value) || 0)) * 60 }, 'Сохранено.'); };
+        load();
+    })();
+    </script>
+    <script>
+    (function () {
+        var $ = function (id) { return document.getElementById(id); };
+        if (!$('backupCard')) return;
+        function msg(t, bad) { $('bkMsg').textContent = t || ''; $('bkMsg').style.color = bad ? '#c0392b' : ''; }
+        function when(ms) { return ms ? new Date(ms).toLocaleString() : 'ещё не было'; }
+        function show(st) {
+            var t = 'Последняя успешная копия: ' + when(st.last_ok_ms) + (st.counter ? ' (№' + st.counter + ')' : '') + '.';
+            t += st.auto ? ' Автокопии: включены, папка ' + st.dir + (st.last_saved_ms ? ', последняя запись ' + when(st.last_saved_ms) : ', в папку ещё ничего не записано') + '.' : ' Автокопии выключены: папка не задана.';
+            if (st.last_error) t += ' Ошибка последней попытки: ' + st.last_error;
+            $('bkState').textContent = t;
+            $('bkDir').value = st.dir || '';
+        }
+        function load() { fetch('/api/backup/status').then(function (r) { return r.json(); }).then(show).catch(function () { $('bkState').textContent = 'Состояние недоступно'; }); }
+        $('bkNow').onclick = function () {
+            msg('Подождите…');
+            fetch('/api/backup/export', { method: 'POST' }).then(function (r) {
+                if (!r.ok) return r.json().then(function (j) { throw new Error(j.error || ('ошибка ' + r.status)); });
+                var cd = r.headers.get('Content-Disposition') || '';
+                var m = /filename="([^"]+)"/.exec(cd);
+                return r.blob().then(function (b) { return { b: b, name: m ? m[1] : 'yandi.yandibak' }; });
+            }).then(function (f) {
+                var a = document.createElement('a');
+                a.href = URL.createObjectURL(f.b); a.download = f.name; document.body.appendChild(a); a.click(); a.remove();
+                setTimeout(function () { URL.revokeObjectURL(a.href); }, 5000);
+                msg('Копия сохранена: ' + f.name + '. Положите её на флешку или в облако.'); load();
+            }).catch(function (e) { msg(e.message, true); });
+        };
+        $('bkSave').onclick = function () {
+            msg('Подождите…');
+            fetch('/api/backup/config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ dir: $('bkDir').value }) })
+                .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.error || ('ошибка ' + r.status)); return j; }); })
+                .then(function (j) { msg($('bkDir').value.trim() ? 'Папка сохранена. Первая копия будет записана в ближайшую минуту.' : 'Автокопии выключены.'); show(j); })
+                .catch(function (e) { msg(e.message, true); });
+        };
         load();
     })();
     </script>
