@@ -16,11 +16,8 @@ class ProfilePanel extends StatefulWidget {
   final bool busy;
   final bool Function() isActive;
   final Future<void> Function(Future<void> Function()) mutate;
-  /// Изменить имя и аватар собеседника в моей книжке (только у меня).
-  final VoidCallback? onEdit;
   const ProfilePanel({
     super.key,
-    this.onEdit,
     required this.api,
     this.peer,
     required this.busy,
@@ -240,7 +237,6 @@ class _ProfilePanelState extends State<ProfilePanel> {
         ),
       if (profile != null) ...[
         if (!own) Text('${profile!['display_name'] ?? widget.peer}'),
-        SelectableText('${profile!['short_id'] ?? widget.peer ?? ''}'),
         if (!own) UiText(profile!['online'] == true ? 'В сети' : 'Не в сети'),
       ],
       const SizedBox(height: 8),
@@ -249,8 +245,6 @@ class _ProfilePanelState extends State<ProfilePanel> {
         runSpacing: 8,
         children: [
           _btn(Icons.refresh, 'Обновить профиль', widget.busy || loading ? null : load),
-          if (!own && widget.onEdit != null)
-            _btn(Icons.edit_outlined, 'Изменить имя и аватар', widget.busy ? null : widget.onEdit),
           if (own) _btn(Icons.image_outlined, 'Загрузить аватар', widget.busy || choosing ? null : upload),
           if (own &&
               profile?['avatar'] is String &&

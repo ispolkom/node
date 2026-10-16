@@ -958,7 +958,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             busy: sending,
             isActive: () => active,
             mutate: (action) => mutate(action),
-            onEdit: () => rename(selected!),
           ),
           const SizedBox(height: 16),
           if (selected!['is_phone'] != true)
@@ -1276,10 +1275,6 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final history = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        UiText(
-          'Чат: ${selected!['name']}',
-          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-        ),
         Row(
           children: [
             if (widget.calls != null) ...[
@@ -1316,12 +1311,9 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               color: Icq.danger,
               onTap: sending ? null : clearHistory,
             ),
-            const SizedBox(width: 8),
-            const Expanded(
-              child: UiText(
-                'Показаны последние 100 сообщений не старше года.',
-                style: TextStyle(fontSize: 12, color: Icq.dark),
-              ),
+            const IconAction(
+              icon: Icons.info_outline,
+              tip: 'Показаны последние 100 сообщений не старше года.',
             ),
           ],
         ),

@@ -212,7 +212,7 @@ void main() {
     });
     await t.pump(const Duration(milliseconds: 30));
     await t.pumpAndSettle();
-    expect(find.text('Чат: Боб'), findsOneWidget);
+    expect(find.byTooltip('Файлы чата'), findsOneWidget);   // чат открыт (заголовка с именем в полосе иконок больше нет)
     expect(find.text('Чужой поздний ответ'), findsNothing);
     await t.enterText(field('Сообщение'), 'секретный черновик');
     api.unlocked = false;
