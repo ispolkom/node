@@ -200,6 +200,7 @@ const englishLabels = <String, String>{
   'Группы': 'Groups',
   'Шлюзы': 'Gateways',
   'Звонки': 'Calls',
+  'Позвонить': 'Call',
   'Видеозвонок': 'Video call',
   'Все': 'All',
   'Смотреть': 'Watch',
