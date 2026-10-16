@@ -100,7 +100,12 @@ if command -v nft >/dev/null; then
   cat > "$NFT_FILE" <<NFT
 table inet yandi_turn
 flush table inet yandi_turn
-table inet yandi_turn { chain output { type filter hook output priority 0; policy accept; $OUT_RULE; } }
+table inet yandi_turn {
+  chain output {
+    type filter hook output priority 0; policy accept;
+    $OUT_RULE
+  }
+}
 NFT
   chmod 644 "$NFT_FILE"
   if ! "$NFT_BIN" -f "$NFT_FILE" || ! "$NFT_BIN" list chain inet yandi_turn output | grep -q "udp sport $RELAY_MIN-$RELAY_MAX"; then
