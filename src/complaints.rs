@@ -105,7 +105,17 @@ pub fn unlock(key: [u8; 32]) {
     if s.key == Some(key) {
         return;
     }
-    let raw = std::fs::read(path()).ok();
+    // пустое хранилище допустимо только когда файла НЕТ; прочие ошибки чтения оставляют область запертой, а не пустой (иначе следующая
+    // жалоба перезаписала бы существующий файл пустым списком)
+    let raw = match std::fs::read(path()) {
+        Ok(b) => Some(b),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(_) => {
+            s.key = None;
+            s.items = Vec::new();
+            return;
+        }
+    };
     match raw.as_deref() {
         None => {
             s.key = Some(key);
@@ -127,7 +137,11 @@ pub fn unlock(key: [u8; 32]) {
 /// Перенос файла жалоб из-под ключа закрытой среды под служебный ключ (идемпотентно: уже открывающийся новым ключом остаётся).
 pub fn adopt(owner_key: [u8; 32], service_key: [u8; 32]) -> Result<(), String> {
     let _guard = lock_state(); // не пишем файл поверх одновременного сохранения жалобы
-    let Ok(raw) = std::fs::read(path()) else { return Ok(()) };
+    let raw = match std::fs::read(path()) {
+        Ok(b) => b,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("файл жалоб не читается: {e}")),
+    };
     if crate::util::sealed::open(&service_key, AAD, &raw).is_some() {
         return Ok(());
     }
@@ -366,6 +380,29 @@ pub(crate) mod tests {
         assert!(lock_state().key.is_none());
         unlock([7; 32]);
         assert_eq!(lock_state().items.len(), 1, "из файла возвращается то, что было сохранено");
+    }
+
+    #[test]
+    fn an_unreadable_complaints_file_is_not_taken_for_an_empty_store() {
+        let _g = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        fresh();
+        let (a, b) = ("a".repeat(64), "b".repeat(64));
+        submit(&a, "user", &b, "Боб", "spam", "спамит", &[]).unwrap();
+        lock();
+        let p = path();
+        let saved = std::fs::read(&p).unwrap();
+        let held = p.with_extension("held");
+        std::fs::rename(&p, &held).unwrap();
+        std::fs::create_dir_all(&p).unwrap(); // чтение даёт ошибку, не «нет файла»
+        unlock([7; 32]);
+        assert!(lock_state().key.is_none(), "область осталась запертой");
+        assert!(submit(&a, "group", "g1", "Группа", "abuse", "плохо", &[]).is_err(), "пустой список поверх файла не пишется");
+        assert!(adopt([1; 32], [7; 32]).is_err());
+        std::fs::remove_dir_all(&p).unwrap();
+        std::fs::rename(&held, &p).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), saved);
+        unlock([7; 32]);
+        assert_eq!(lock_state().items.len(), 1, "после починки жалобы на месте");
     }
 
     #[test]
