@@ -35,6 +35,8 @@ Group=iam
 # рабочая папка — каталог данных узла: относительные файлы (contacts.json, nodes/…) лежат вместе с остальным и стираются вместе с ним
 WorkingDirectory=-/home/iam/.local/share/yandi
 ExecStartPre=/usr/bin/mkdir -p -m 0700 /home/iam/.local/share/yandi
+# вход для телефонов по TLS (порт открывается в /etc/nftables.conf); без этой строки вход выключен
+Environment=YANDI_MOBILE_TLS_PORT=8444
 ExecStart=/usr/bin/yandi
 # у узла есть консоль, читающая стандартный ввод; под systemd ввода нет (/dev/null), консоль закрывается, узел продолжает работу
 StandardInput=null
