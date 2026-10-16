@@ -24,6 +24,15 @@ const OVERHEAD: usize = 12 + 16;
 
 static KEY: RwLock<Option<Zeroizing<[u8; 32]>>> = RwLock::new(None);
 
+/// Барьер файловых операций: запись блока/создание файла держат его в общем режиме на всё время ввода-вывода, перенос под новый ключ
+/// (`rekey_dir`) — в исключительном. Так перенос не пропускает блок, который в этот момент пишет старая операция со старым ключом,
+/// и она не пишет в уже заменённый файл.
+static IO_BARRIER: RwLock<()> = RwLock::new(());
+
+fn io_shared() -> std::sync::RwLockReadGuard<'static, ()> {
+    IO_BARRIER.read().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Ключ выдан (вход владельца или старт узла): файлы читаются и пишутся.
 pub fn unlock(key: [u8; 32]) {
     *KEY.write().unwrap_or_else(|e| e.into_inner()) = Some(Zeroizing::new(key));
@@ -174,6 +183,7 @@ fn check_head(path: &Path, c: &Aes256Gcm) -> std::io::Result<()> {
 
 /// Создать пустой запечатанный файл под `plain_size` открытых байт: блоки заполняются по мере прихода (в любом порядке).
 pub fn create(path: &Path, plain_size: u64) -> std::io::Result<()> {
+    let _io = io_shared();
     let head = make_head(&cipher()?, plain_size)?;
     crate::util::private_file::write_private(path, &head)?;
     let f = std::fs::OpenOptions::new().write(true).open(path)?;
@@ -186,6 +196,7 @@ pub fn write_block(path: &Path, index: u64, data: &[u8]) -> std::io::Result<()> 
     if data.is_empty() || data.len() > BLOCK {
         return Err(bad("неверный размер блока"));
     }
+    let _io = io_shared();
     let c = cipher()?;
     let mut f = std::fs::OpenOptions::new().read(true).write(true).open(path)?;
     let id = read_id(&mut f, &c)?;
@@ -298,6 +309,12 @@ fn rekey_file(path: &Path, old: &[u8; 32], new: &[u8; 32]) -> std::io::Result<bo
 /// Перезапечатать все файлы каталога с ключа `old` на `new` (рекурсивно); возвращает число файлов, которые не удалось перенести.
 /// Файлы под `new` не трогаются, не запечатанные (чужие/частичные без заголовка) пропускаются.
 pub fn rekey_dir(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
+    // исключительный режим: дожидаемся начатых записей и не пускаем новые, пока каталог переносится
+    let _io = IO_BARRIER.write().unwrap_or_else(|e| e.into_inner());
+    rekey_dir_locked(dir, old, new)
+}
+
+fn rekey_dir_locked(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
     let mut failed = 0usize;
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
@@ -313,7 +330,7 @@ pub fn rekey_dir(dir: &Path, old: &[u8; 32], new: &[u8; 32]) -> usize {
         };
         let p = e.path();
         match e.file_type() {
-            Ok(t) if t.is_dir() => failed += rekey_dir(&p, old, new),
+            Ok(t) if t.is_dir() => failed += rekey_dir_locked(&p, old, new),
             Ok(t) if t.is_file() => match sealed_state(&p) {
                 Ok(false) => {}
                 Ok(true) => {
@@ -533,6 +550,24 @@ mod tests {
         let cn = cipher_of(&new).unwrap();
         assert_eq!(read_block_with(&cn, &p, 0).unwrap(), data[..BLOCK], "полученный блок под новым ключом");
         assert!(block_is_unwritten(&p, 1, data.len() as u64).unwrap(), "неполученный блок остался пустым");
+    }
+
+    /// Перенос ждёт начатую запись блока и не стартует поверх неё (общий барьер ввода-вывода).
+    #[test]
+    fn rekey_waits_for_writes_in_flight() {
+        let d = tempfile::tempdir().unwrap();
+        let (old, new) = ([0x5au8; 32], [3u8; 32]);
+        let path = d.path().to_path_buf();
+        let in_flight = io_shared(); // как будто write_block уже идёт
+        let (tx, rx) = std::sync::mpsc::channel();
+        let h = std::thread::spawn(move || {
+            let r = rekey_dir(&path, &old, &new);
+            tx.send(r).unwrap();
+        });
+        assert!(rx.recv_timeout(std::time::Duration::from_millis(200)).is_err(), "перенос ждёт окончания записи");
+        drop(in_flight);
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)).unwrap(), 0);
+        h.join().unwrap();
     }
 
     /// Файл, который не удалось даже открыть для проверки заголовка, — неудача переноса, а не «чужой файл».
