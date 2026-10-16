@@ -35,6 +35,8 @@ pub mod bootstrap;
 pub mod closed_api;
 #[cfg(unix)]
 pub mod closed_env;
+#[cfg(unix)]
+pub mod node_backup;
 pub mod communication;
 pub mod core;
 pub mod crypto;
