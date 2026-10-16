@@ -79,6 +79,32 @@ impl Default for BootstrapConfig {
     }
 }
 
+/// IP-адреса, за которыми закрепляется отпечаток записи: `ip:port`, `[ipv6]:port`, `host:port` (имя разрешается) или голый адрес.
+pub(crate) fn pin_addresses(address: &str) -> Vec<String> {
+    use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+    if let Ok(sa) = address.parse::<SocketAddr>() {
+        return vec![sa.ip().to_string()];
+    }
+    if let Ok(ip) = address.trim_matches(|c| c == '[' || c == ']').parse::<IpAddr>() {
+        return vec![ip.to_string()];
+    }
+    let Some((host, port)) = address.rsplit_once(':') else { return Vec::new() };
+    let host = host.trim_matches(|c| c == '[' || c == ']');
+    let Ok(port) = port.parse::<u16>() else { return Vec::new() };
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return vec![ip.to_string()];
+    }
+    match (host, port).to_socket_addrs() {
+        Ok(it) => {
+            let mut v: Vec<String> = it.map(|a| a.ip().to_string()).collect();
+            v.sort();
+            v.dedup();
+            v
+        }
+        Err(_) => Vec::new(),
+    }
+}
+
 impl BootstrapConfig {
     /// Load bootstrap configuration from file
     pub fn load_from_file(path: &Path) -> Result<Self, String> {
@@ -120,9 +146,14 @@ impl BootstrapConfig {
             if bytes.len() != 32 { continue; }
             let mut key = [0u8; 32];
             key.copy_from_slice(&bytes);
-            // Key is the IP part only (strip port so port variants match)
-            let ip = node.address.split(':').next().unwrap_or(&node.address).to_string();
-            map.insert(ip, key);
+            // ключ карты — IP-адрес (без порта): отпечаток закрепляется за каждым адресом, на который указывает запись
+            let ips = pin_addresses(&node.address);
+            if ips.is_empty() {
+                eprintln!("[bootstrap] ⚠️ отпечаток задан для «{}», но адрес не удалось разобрать или разрешить: закрепление для этого узла НЕ действует", node.address);
+            }
+            for ip in ips {
+                map.insert(ip, key);
+            }
         }
         map
     }
@@ -240,6 +271,17 @@ impl BootstrapManager {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn pinned_fingerprints_follow_ipv4_ipv6_and_host_names() {
+        assert_eq!(pin_addresses("203.0.113.1:9001"), vec!["203.0.113.1".to_string()]);
+        assert_eq!(pin_addresses("[2001:db8::1]:9001"), vec!["2001:db8::1".to_string()], "IPv6 не обрезается по первому двоеточию");
+        assert_eq!(pin_addresses("2001:db8::7"), vec!["2001:db8::7".to_string()]);
+        let local = pin_addresses("localhost:9001");
+        assert!(local.iter().any(|a| a == "127.0.0.1" || a == "::1"), "имя разрешается в адреса: {local:?}");
+        assert!(pin_addresses("no-port-and-not-an-address").is_empty());
+        assert!(pin_addresses("host:notaport").is_empty());
+    }
+
     use super::*;
 
     #[test]
