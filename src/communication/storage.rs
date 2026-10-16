@@ -630,7 +630,7 @@ impl ChatStorage {
         };
         if known {
             // уже в истории, но прошлая попытка могла оборваться на fsync: до подтверждения повтора запись должна лежать на диске
-            std::fs::File::open(&chat_file)?.sync_data()?;
+            std::fs::OpenOptions::new().write(true).open(&chat_file)?.sync_data()?; // на Windows синхронизировать можно только файл, открытый на запись
             return Ok(());
         }
         self.append_encrypted_message(&chat_file, msg)?;
