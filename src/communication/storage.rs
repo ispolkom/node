@@ -96,6 +96,10 @@ pub struct ChatStorage {
     /// Все изменения файла чата идут под одним замком: «прочитать всё, удалить файл, записать заново» (смена статуса, правка, удаление)
     /// не должно пересекаться с дописыванием нового сообщения, иначе оно пропадает из истории.
     write_lock: std::sync::Mutex<()>,
+    /// Номера уже сохранённых сообщений по собеседникам вместе с длиной файла, для которой набор построен: любое иное изменение файла
+    /// (перезапись, удаление, исходящее) меняет длину, и набор строится заново. Нужен, чтобы повтор входящего распознавался по ВСЕЙ истории,
+    /// а не по последним N записям.
+    seen_ids: std::sync::Mutex<std::collections::HashMap<HashId, (u64, std::collections::HashSet<HashId>)>>,
 }
 
 impl ChatStorage {
@@ -111,7 +115,7 @@ impl ChatStorage {
             my_node_id,
             chats_dir: base_dir,
             key_mode: std::sync::RwLock::new(KeyMode::Locked),
-            write_lock: std::sync::Mutex::new(()),
+            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(),
         })
     }
 
@@ -119,7 +123,7 @@ impl ChatStorage {
     #[cfg(test)]
     pub(crate) fn in_dir(my_node_id: HashId, dir: std::path::PathBuf) -> Result<Self> {
         std::fs::create_dir_all(&dir)?;
-        Ok(Self { my_node_id, chats_dir: dir, key_mode: std::sync::RwLock::new(KeyMode::Master([0x5a; 32])), write_lock: std::sync::Mutex::new(()) })
+        Ok(Self { my_node_id, chats_dir: dir, key_mode: std::sync::RwLock::new(KeyMode::Master([0x5a; 32])), write_lock: std::sync::Mutex::new(()), seen_ids: Default::default() })
     }
 
     /// Создать хранилище с мастер-ключом (HKDF-derived encryption key)
@@ -134,7 +138,7 @@ impl ChatStorage {
             my_node_id,
             chats_dir: base_dir,
             key_mode: std::sync::RwLock::new(KeyMode::Master(master_key)),
-            write_lock: std::sync::Mutex::new(()),
+            write_lock: std::sync::Mutex::new(()), seen_ids: Default::default(),
         })
     }
 
@@ -164,6 +168,8 @@ impl ChatStorage {
             k.fill(0);
         }
         *mode = KeyMode::Locked;
+        drop(mode);
+        self.seen_ids.lock().unwrap_or_else(|e| e.into_inner()).clear();
     }
 
     pub fn is_locked(&self) -> bool {
@@ -596,10 +602,31 @@ impl ChatStorage {
             return Err(anyhow::anyhow!("chat history of this peer is full"));
         }
         // повтор того же письма (replay не успел зафиксироваться, параллельный приём) не плодит дубль: запись идемпотентна по msg_id
-        if self.load_history_unlocked(from, 500).map(|h| h.iter().any(|m| m.msg_id == msg.msg_id)).unwrap_or(false) {
+        // и распознаётся по всей истории, а не по окну последних записей
+        let len = std::fs::metadata(&chat_file).map_or(0, |m| m.len());
+        let known = {
+            let mut cache = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner());
+            let fresh = cache.get(from).is_some_and(|(l, _)| *l == len);
+            if !fresh {
+                let ids: std::collections::HashSet<HashId> = self.load_history_unlocked(from, usize::MAX)?.into_iter().map(|m| m.msg_id).collect();
+                cache.insert(*from, (len, ids));
+            }
+            cache.get(from).is_some_and(|(_, ids)| ids.contains(&msg.msg_id))
+        };
+        if known {
+            // уже в истории, но прошлая попытка могла оборваться на fsync: до подтверждения повтора запись должна лежать на диске
+            std::fs::File::open(&chat_file)?.sync_data()?;
             return Ok(());
         }
-        self.append_encrypted_message(&chat_file, msg)
+        self.append_encrypted_message(&chat_file, msg)?;
+        let new_len = std::fs::metadata(&chat_file).map_or(0, |m| m.len());
+        if let Some((l, ids)) = self.seen_ids.lock().unwrap_or_else(|e| e.into_inner()).get_mut(from) {
+            if *l == len {
+                ids.insert(msg.msg_id);
+                *l = new_len;
+            }
+        }
+        Ok(())
     }
 
     /// Добавить зашифрованное сообщение в файл
@@ -1091,6 +1118,24 @@ mod closed_env_tests {
         assert_eq!(left[0].msg_id, ids[3]);
         assert_eq!(left[1].msg_id, ids[2]);
         assert_eq!(st.prune_expired(now).unwrap(), 0);
+    }
+
+    #[test]
+    fn a_repeated_incoming_message_is_recognised_beyond_the_last_500_records() {
+        let me = HashId::new_random();
+        let peer = HashId::new_random();
+        let d = dir("dedupe_all");
+        let st = ChatStorage::in_dir_locked(me, d).unwrap();
+        st.set_master([5; 32]);
+        let first = ChatMessage::new(peer, me, "первое".into());
+        st.save_incoming(&peer, &first).unwrap();
+        for i in 0..520 {
+            st.save_incoming(&peer, &ChatMessage::new(peer, me, format!("m{i}"))).unwrap();
+        }
+        st.save_incoming(&peer, &first).unwrap(); // то же письмо повторилось через 520 других
+        let all = st.load_history(&peer, usize::MAX).unwrap();
+        assert_eq!(all.iter().filter(|m| m.msg_id == first.msg_id).count(), 1, "дубль не записан");
+        assert_eq!(all.len(), 521);
     }
 
     #[test]
