@@ -4134,7 +4134,12 @@ async fn api_files_send_chunk(
         let size = file_size;
         let built = tokio::task::spawn_blocking(move || {
             let r = crate::file_vault::assemble(&parts, &tp, size);
-            let _ = std::fs::remove_dir_all(upload_parts_dir(&tp));
+            // принятые части удаляются только после успешной сборки; при отказе (диск, замок) они остаются для повтора последней части
+            if r.is_ok() {
+                let _ = std::fs::remove_dir_all(upload_parts_dir(&tp));
+            } else {
+                let _ = std::fs::remove_file(&tp); // недособранный итоговый файл
+            }
             r
         })
         .await;
@@ -4142,7 +4147,7 @@ async fn api_files_send_chunk(
             Ok(Ok(())) => {}
             other => {
                 let why = match other { Ok(Err(e)) => e.to_string(), Err(e) => e.to_string(), Ok(Ok(())) => String::new() };
-                CHUNK_UPLOADS.lock().await.remove(&file_id);
+                // запись о загрузке остаётся: повтор последней части снова запустит сборку из сохранённых частей
                 error!("❌ Failed to assemble upload: {}", why);
                 return Json(serde_json::json!({"status": "error", "message": format!("Failed to assemble upload: {}", why)}));
             }
