@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import '../models/trusted_node.dart';
@@ -211,6 +212,16 @@ class WsService {
 
   // ── Входящие данные ────────────────────────────────────────────────────────
 
+  static const _maxLiveInFlight = 8;
+  int _liveInFlight = 0;
+
+  /// Только для тестов: подать кадр сокета так, как будто он пришёл с узла.
+  @visibleForTesting
+  Future<void> debugFeed(List<int> raw) async => _onData(raw);
+
+  @visibleForTesting
+  int get debugLiveInFlight => _liveInFlight;
+
   void _onData(dynamic raw) async {
     if (raw is! List<int>) return;
     final data = Uint8List.fromList(raw);
@@ -227,7 +238,14 @@ class WsService {
         _handlePeerStatus(data);
 
       case ftLiveMsg:
-        await _handleLiveMsg(data);
+        // живые сигналы эфемерны, а проверка каждого стоит запроса связки ключей и подписи: больше _maxLiveInFlight сразу не берём
+        if (_liveInFlight >= _maxLiveInFlight) return;
+        _liveInFlight++;
+        try {
+          await _handleLiveMsg(data);
+        } finally {
+          _liveInFlight--;
+        }
 
       case ftGroupHint:
         if (data.length >= 26) {

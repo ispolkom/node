@@ -234,7 +234,19 @@ class ApiService {
     return (await getPeerBundle(peerId))?.x25519;
   }
 
-  Future<PeerKeyBundle?> getPeerBundle(String peerId) async {
+  /// Одновременные запросы связки одного собеседника (поток живых кадров) схлопываются в один HTTPS-запрос.
+  final Map<String, Future<PeerKeyBundle?>> _bundleInFlight = {};
+
+  Future<PeerKeyBundle?> getPeerBundle(String peerId) {
+    final running = _bundleInFlight[peerId];
+    if (running != null) return running;
+    final f = _fetchPeerBundle(peerId);
+    _bundleInFlight[peerId] = f;
+    f.whenComplete(() { if (identical(_bundleInFlight[peerId], f)) _bundleInFlight.remove(peerId); });
+    return f;
+  }
+
+  Future<PeerKeyBundle?> _fetchPeerBundle(String peerId) async {
     try {
       final res = await _client
           .get(_url('/mobile/pubkey/$peerId'), headers: _headers)
