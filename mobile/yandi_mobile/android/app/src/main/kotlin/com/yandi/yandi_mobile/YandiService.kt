@@ -164,18 +164,23 @@ class YandiChatService : Service() {
         workerThread = thread(name = "yandi-ws", isDaemon = true) {
             var delay = 5_000L
             while (running) {
+                var client: RawWsClient? = null
                 try {
                     updateStatusNotif("Подключено к ноде")
-                    val client = RawWsClient(host, port, fingerprint)
-                    ws = client
+                    val c = RawWsClient(host, port, fingerprint)
+                    client = c
+                    ws = c
                     lastPongMs.set(System.currentTimeMillis())
-                    client.connect("/mobile/ws", token)
+                    c.connect("/mobile/ws", token)
                     delay = 5_000L
-                    readLoop(client)
+                    readLoop(c)
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
                     if (running) Log.w(TAG, "WS ошибка: $e")
+                } finally {
+                    // сокет закрывается на любом выходе (ошибка рукопожатия, кривой кадр, таймаут), иначе дескрипторы копятся до GC
+                    runCatching { client?.close() }
                 }
                 ws = null
                 if (!running) break
@@ -423,9 +428,9 @@ class RawWsClient(
         synchronized(writeLock) { output.write(buf.toByteArray()) }
     }
 
+    /** Закрывает транспорт безусловно: вежливый Close-кадр не отправляется, чтобы не ждать writeLock зависшей записи. */
     fun close() {
-        runCatching { sendFrame(0x08, byteArrayOf()) }
-        runCatching { ssl.close() }
+        if (::ssl.isInitialized) runCatching { ssl.close() }
     }
 
     private fun buildTlsSocket(): SSLSocket {
@@ -433,9 +438,14 @@ class RawWsClient(
         val ctx = SSLContext.getInstance("TLS")
         ctx.init(null, arrayOf(tm), null)
         val sock = ctx.socketFactory.createSocket() as SSLSocket
-        sock.connect(InetSocketAddress(host, port), 10_000)
-        sock.soTimeout = 120_000   // 2 мин — достаточно для 90s ping интервала
-        sock.startHandshake()
+        try {
+            sock.connect(InetSocketAddress(host, port), 10_000)
+            sock.soTimeout = 120_000   // 2 мин — достаточно для 90s ping интервала
+            sock.startHandshake()
+        } catch (e: Exception) {
+            runCatching { sock.close() }
+            throw e
+        }
         return sock
     }
 
