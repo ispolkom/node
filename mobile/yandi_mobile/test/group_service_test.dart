@@ -561,11 +561,16 @@ void main() {
       {'alias': 'Новый', 'role': 'owner', 'member_pub': 'NEW'},
       {'alias': 'Рядовой', 'role': 'member', 'member_pub': 'MEM'},
     ];
-    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), 'NEW', reason: 'от закреплённого (прежнего) владельца');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'NEW'})?.$1, 'NEW', reason: 'от закреплённого (прежнего) владельца');
     expect(GroupService.handoverNext([h('Рядовой', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'рядовой не подтверждает');
     expect(GroupService.handoverNext([h('Новый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'сам новый себя не подтверждает');
     expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'OTHER'}), isNull, reason: 'ключ не тот, что нужен');
     expect(GroupService.handoverNext([], members, 'OLD', {'NEW'}), isNull);
+    // прежний владелец вышел: передача подтверждается по закреплённому псевдониму, чужой псевдоним и отсутствие псевдонима — нет
+    final left = [for (final m in members) if (m['alias'] != 'Старый') m];
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], left, 'OLD', {'NEW'}, pinnedAlias: 'Старый')?.$1, 'NEW');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], left, 'OLD', {'NEW'}), isNull);
+    expect(GroupService.handoverNext([h('Рядовой', 'Новый', 'NEW')], left, 'OLD', {'NEW'}, pinnedAlias: 'Старый'), isNull);
   });
 ;
 

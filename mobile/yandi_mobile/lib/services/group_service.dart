@@ -274,6 +274,11 @@ class GroupService {
       if (asOwner || topOwner == null) return;
       pinned = topOwner;
       await store.write('grp_owner_${g.id}', pinned);
+      // псевдоним закреплённого владельца: нужен, чтобы подтвердить передачу владения, когда он сам уже вышел из группы
+      try {
+        final ms = (await api.members(g.id))['members'] as List? ?? const [];
+        for (final x in ms) { if ((x as Map)['member_pub'] == pinned) { await store.write('grp_owner_alias_${g.id}', '${x['alias']}'); break; } }
+      } catch (_) {}
     }
     final boxes = [for (final b in (k['boxes'] as List? ?? const [])) (b as Map).cast<String, dynamic>()]..sort((a, b) => (a['epoch'] as int).compareTo(b['epoch'] as int));
     var problem = false;
@@ -306,13 +311,14 @@ class GroupService {
       try { await _pull(g); } catch (_) {}
       final members = [for (final x in ((await api.members(g.id))['members'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
       final log = await store.entries(g.id, kind: GroupKind.system, limit: 5000);
-      final next = handoverNext(log, members, pinned!, wanted);
+      final next = handoverNext(log, members, pinned!, wanted, pinnedAlias: await store.read('grp_owner_alias_${g.id}'));
       if (next == null) {
         problem = true;
         break;
       }
-      pinned = next;
-      await store.write('grp_owner_${g.id}', next);
+      pinned = next.$1;
+      await store.write('grp_owner_${g.id}', next.$1);
+      if (next.$2 != null) await store.write('grp_owner_alias_${g.id}', next.$2!);
     }
     if (!asOwner) {
       problem ? _problems.add(g.id) : _problems.remove(g.id);
@@ -617,13 +623,16 @@ class GroupService {
   /// Следующий ключ владельца по цепочке передач: служебная запись `handover` с ключом из `wanted`, написанная тем, чей ключ я закрепил
   /// (его member_pub по списку узла совпадает с закреплённым). Сам новый владелец и рядовой участник такую запись не подтвердят.
   /// Остаётся граница: узел, сговорившийся с участником, может выдать чужую запись за запись прежнего владельца (личных подписей нет).
-  static String? handoverNext(List<GroupEntry> log, List<Map<String, dynamic>> members, String pinned, Set<String> wanted) {
+  /// Автор записи есть в составе — его ключ обязан совпасть с закреплённым; автора уже нет (прежний владелец вышел после передачи) —
+  /// принимается запись под тем псевдонимом, который был у закреплённого владельца [pinnedAlias]. Возвращает (новый ключ, псевдоним нового).
+  static (String, String?)? handoverNext(List<GroupEntry> log, List<Map<String, dynamic>> members, String pinned, Set<String> wanted, {String? pinnedAlias}) {
     for (final e in log) {
       if (e.deleted || e.kind != GroupKind.system || e.body['op'] != 'handover') continue;
       final p = e.body['pub'];
       if (p is! String || !wanted.contains(p) || p == pinned) continue;
       final author = members.where((m) => m['alias'] == e.from);
-      if (author.isNotEmpty && author.first['member_pub'] == pinned) return p;
+      final ok = author.isNotEmpty ? author.first['member_pub'] == pinned : (pinnedAlias != null && pinnedAlias == e.from);
+      if (ok) { final to = e.body['to']; return (p, to is String ? to : null); }
     }
     return null;
   }
