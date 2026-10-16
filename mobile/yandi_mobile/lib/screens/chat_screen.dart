@@ -122,6 +122,34 @@ class _ChatScreenState extends State<ChatScreen> {
     setState(() { _editingId = null; _inputCtrl.clear(); });
   }
 
+  /// Поделиться контактами с собеседником: выбор из своих контактов, подтверждение, по карточке на каждый. Только в личном чате; в группы
+  /// контакты не передаются. Уходит адрес и имя, под которым контакт сохранён у меня (получатель сам решит, сохранять ли).
+  Future<void> _shareContacts() async {
+    final state = context.read<AppState>();
+    final candidates = [
+      for (final c in state.contacts)
+        if (c.saved && c.peerId.length == 64 && c.peerId != widget.peerId && c.peerId != state.nodePeerId && !RegExp(r'^\s*[\u{1F4F1}\u{1F4BB}\u{1F5A5}]', unicode: true).hasMatch(c.displayName)) c,
+    ];
+    final picked = await pickRecipients(context, title: 'Поделиться контактами', contacts: candidates, max: 5);
+    if (picked == null || picked.isEmpty || !mounted) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Поделиться контактами?', style: TextStyle(color: AppTheme.text)),
+        content: Text('${picked.map((c) => c.displayName).join(', ')} — собеседник получит адрес и имя и сам решит, сохранять ли. Эти люди об этом не узнают.', style: const TextStyle(color: AppTheme.textSecondary)),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Поделиться', style: TextStyle(color: AppTheme.accent))),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    for (final c in picked) {
+      await state.sendMessage(widget.peerId, ContactCardMsg.encode(c.peerId.substring(0, 16), c.peerId, cleanPersonName(c.displayName)));
+    }
+  }
+
   /// Меню слов по нажатию на сообщение: Изменить, Ответить, Копировать, Удалить.
   Future<void> _messageMenu(ChatMessage m, Offset at) async {
     final card = ContactCardMsg.tryParse(m.text);
@@ -441,6 +469,7 @@ class _ChatScreenState extends State<ChatScreen> {
               ]),
               iconTheme: const IconThemeData(color: AppTheme.text),
               actions: [
+                IconButton(tooltip: 'Поделиться контактом', icon: const Icon(Icons.share_outlined), onPressed: _shareContacts),
                 IconButton(tooltip:'Проверить ключи',icon:const Icon(Icons.security),onPressed:_showFingerprints),
                 IconButton(
                   tooltip: 'Позвонить',
