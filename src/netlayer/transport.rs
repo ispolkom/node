@@ -4994,6 +4994,15 @@ impl P2PTransport {
                 }
                 Ok((status, _)) => {
                     eprintln!("[ws-client] RESUME rejected: {:?}; fallback на Hello", status);
+                    // Прежний токен этому якорю не подходит (забыт, просрочен, чужая подпись): локально он больше не используется,
+                    // и следующая попытка пойдёт обычным Hello, а не повторит тот же отказ до конца срока токена.
+                    {
+                        let mut store = self.paired_anchors.lock().await;
+                        for e in store.anchors.iter_mut().filter(|e| e.payload.anchor_id == anchor_id) {
+                            e.session = None;
+                        }
+                        let _ = store.save(&crate::netlayer::pairing::default_paired_anchors_path());
+                    }
                     // Conn потерян — нужно переподключиться. Сообщаем caller'у что нужен retry.
                     return Err(format!("RESUME status {:?}, reconnect for Hello", status));
                 }
