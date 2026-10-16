@@ -732,7 +732,9 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
     crate::mobile_self::unhide_phone(from_device);
     let envelope = crate::mobile_self::classify(text);
     // всё, кроме сообщения, обрабатывается «в памяти»: номер занимается сразу (отказ записи журнала — повтор письма позже)
-    if !matches!(envelope, crate::mobile_self::Envelope::Message { .. }) && !crate::mobile_self::commit_replay(blob) {
+    // предложение файла — исключение: его номер занимается после записи файлового сообщения в историю (в фоновой задаче ниже)
+    let is_file_offer = matches!(&envelope, crate::mobile_self::Envelope::Plain(t) if t.starts_with(crate::mobile_self::FILE_MARKER));
+    if !matches!(envelope, crate::mobile_self::Envelope::Message { .. }) && !is_file_offer && !crate::mobile_self::commit_replay(blob) {
         return false;
     }
     let text = match envelope {
@@ -794,6 +796,7 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
         // предложение файла: куски уже лежат на узле, расшифровать и показать на странице (может занять время — не держим сокет)
         let chat = st.chat.clone();
         let (node, dev, me) = (hex::encode(st.my_id.0), from_device.to_string(), st.my_id);
+        let blob = blob.to_vec();
         tokio::spawn(async move {
             let mut receipt_id = None;
             let mut msg = match crate::mobile_self::receive_file(&node, &dev, &text).await {
@@ -808,7 +811,19 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
             };
             msg.encrypted = true;
             msg.mark_delivered();
-            if chat.store_local_incoming(&HashId(from), &msg).is_ok() {
+            if chat.store_local_incoming(&HashId(from), &msg).is_err() {
+                // запись в историю не удалась (диск, замок среды): номер письма не занят, куски на узле целы — письмо вернуть в очередь
+                if !queue_for_pc(&dev, &blob) {
+                    eprintln!("[mobile] файл с телефона не записан в историю и не поставлен на повтор");
+                }
+                return;
+            }
+            // сообщение сохранено: теперь письмо окончательно обработано, а серверные куски больше не нужны
+            let _ = crate::mobile_self::commit_replay(&blob);
+            if let Some(id) = &receipt_id {
+                crate::mobile_files::drop_transfer(id.strip_prefix("file_").unwrap_or(id)).await;
+            }
+            {
                 if let Some(id) = receipt_id {
                     crate::mobile_self::remember_unread(&msg.msg_id, &dev, &id);
                     if let Ok(x) = device_x25519(&dev) {

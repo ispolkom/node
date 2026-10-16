@@ -603,7 +603,7 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
         return Err(e);
     }
     tokio::fs::rename(&part, dir.join(&stored)).await.map_err(|e| e.to_string())?;
-    crate::mobile_files::drop_transfer(&o.tid).await;
+    // серверные куски остаются: их удаляет вызывающий (`drop_transfer`) после записи сообщения в историю
     let mime = if o.mime.is_empty() { "application/octet-stream".to_string() } else { o.mime };
     Ok(ReceivedFile {
         receipt_id: format!("file_{}", o.tid),
@@ -1252,6 +1252,8 @@ mod tests {
         let saved = crate::communication::files_dir("downloads")
             .join(received.attachment.file_ref.unwrap().local_name.unwrap());
         assert_eq!(crate::file_vault::read_all(&saved).unwrap(), data);
+        assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_some(), "куски остаются до записи сообщения");
+        crate::mobile_files::drop_transfer(&tid).await;
         assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_none());
         let id = received.receipt_id;
         assert!(matches!(classify(receipt(false, &[id.clone()])), Envelope::Receipt { read: false, ids } if ids == [id.clone()]));
