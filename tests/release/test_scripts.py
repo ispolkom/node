@@ -69,6 +69,25 @@ class Scripts(unittest.TestCase):
         self.assertEqual(numbers, list(range(1, 13)))
         self.assertEqual((self.root / 'release/SEQ').read_text(), '12\n')
 
+    def test_postrm_purge_wipes_node_data_but_remove_and_neighbours_stay(self):
+        home = self.root / 'home'
+        for rel in ['.local/share/yandi/files', '.yandi_keys', '.config/yandi', '.local/share/yandi-testnet', 'keep']:
+            (home / rel).mkdir(parents=True)
+        (home / '.local/share/yandi/files/a.bin').write_bytes(b'secret' * 1000)
+        (home / '.yandi_keys/auth.json').write_text('k')
+        (home / '.config/yandi/yandi-config.yaml').write_text('c')
+        (home / '.local/share/yandi-testnet/p.txt').write_text('t')
+        (home / 'keep/x').write_text('x')
+        script = ROOT / 'deploy/yandi-node.postrm'
+        env = {'PATH': '/usr/bin:/bin', 'YANDI_PURGE_HOMES': str(home)}
+        subprocess.run(['sh', str(script), 'remove'], env=env, check=True)
+        self.assertTrue((home / '.yandi_keys/auth.json').exists(), 'remove данных не трогает')
+        subprocess.run(['sh', str(script), 'purge'], env=env, check=True)
+        for gone in ['.local/share/yandi', '.yandi_keys', '.config/yandi']:
+            self.assertFalse((home / gone).exists(), gone)
+        self.assertTrue((home / '.local/share/yandi-testnet/p.txt').exists(), 'чужой каталог остался')
+        self.assertTrue((home / 'keep/x').exists())
+
     def test_r4_signing_holds_exclusive_lock(self):
         # A stub build must see the signing lock already held.
         env = self.root / 'tools/release_build_env.sh'

@@ -21,6 +21,8 @@ R="$W/$PKG"
 install -d "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/doc/yandi-node"
 install -m 0755 "$BIN/yandi" "$R/usr/bin/yandi"
 install -m 0755 "$BIN/yandi-keys" "$R/usr/bin/yandi-keys"
+install -m 0755 deploy/yandi-node.prerm "$R/DEBIAN/prerm"
+install -m 0755 deploy/yandi-node.postrm "$R/DEBIAN/postrm"
 strip --strip-unneeded "$R/usr/bin/yandi" "$R/usr/bin/yandi-keys" 2>/dev/null || true
 for d in DEPLOYMENT.md README.md; do [ -f "$d" ] && install -m 0644 "$d" "$R/usr/share/doc/yandi-node/$d"; done
 SIZE=$(du -sk "$R/usr" | cut -f1)
@@ -39,7 +41,7 @@ Description: YANDI — узел сети личных соединений
  Узел P2P-сети: чаты, файлы, звонки, группы, выход в интернет для доверенных узлов.
  Пакет ставит только бинарники (/usr/bin/yandi, /usr/bin/yandi-keys). Служба systemd и правила брандмауэра
  настраиваются отдельно (см. /usr/share/doc/yandi-node/DEPLOYMENT.md). Данные узла лежат в каталоге пользователя
- (~/.local/share/yandi) и пакетом не затрагиваются.
+ (~/.local/share/yandi); обычное удаление их не трогает, а «dpkg --purge» затирает нулями и удаляет без следа.
 CTL
 mkdir -p dist
 fakeroot dpkg-deb --build --root-owner-group -Zxz "$R" "dist/${PKG}.deb" >/dev/null

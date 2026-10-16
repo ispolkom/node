@@ -1,0 +1,34 @@
+#!/bin/sh
+# postrm пакета yandi-node. Только purge (`sudo dpkg --purge yandi-node`) стирает данные узла: все файлы затираются нулями и удаляются,
+# каталоги убираются. Обычное удаление (remove) и обновление данных не трогают. Повторная установка начинает с чистого листа:
+# закрытая среда создаётся заново, старого нет.
+# Затирание нулями — дополнительная мера; настоящее стирание на SSD даёт уничтожение ключей (файлы запечатаны ключом среды).
+set -e
+
+wipe_dir() {
+    [ -e "$1" ] || return 0
+    find "$1" -type f -exec shred -n 0 -z -u -f {} + 2>/dev/null || true
+    rm -rf "$1" 2>/dev/null || true
+}
+
+case "$1" in
+purge)
+    if [ -n "$YANDI_PURGE_HOMES" ]; then
+        homes="$YANDI_PURGE_HOMES"          # только для проверки скрипта
+    else
+        homes=$(getent passwd | awk -F: '($3 >= 1000 && $3 < 65534) || $3 == 0 { print $6 }' | sort -u)
+    fi
+    for home in $homes; do
+        [ -d "$home" ] || continue
+        for d in .local/share/yandi .yandi .yandi_keys .config/yandi; do
+            wipe_dir "$home/$d"
+        done
+    done
+    # служба, поставленная вручную рядом с пакетом, без пакета не нужна
+    if [ -z "$YANDI_PURGE_HOMES" ]; then
+        rm -f /etc/systemd/system/yandi-node.service
+        systemctl daemon-reload >/dev/null 2>&1 || true
+    fi
+    ;;
+esac
+exit 0

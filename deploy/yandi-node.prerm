@@ -1,0 +1,10 @@
+#!/bin/sh
+# prerm пакета yandi-node: перед удалением служба останавливается (данные во время затирания никто не пишет). При обновлении — нет.
+set -e
+case "$1" in
+remove|purge)
+    systemctl stop yandi-node >/dev/null 2>&1 || true
+    systemctl disable yandi-node >/dev/null 2>&1 || true
+    ;;
+esac
+exit 0
