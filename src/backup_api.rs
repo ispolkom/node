@@ -153,20 +153,23 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
 
 /// Пора ли делать плановую проверку.
 pub fn due(state: &node_backup::BackupState, now: u64, critical: bool) -> bool {
-    critical || state.last_check_ms == 0 || now.saturating_sub(state.last_check_ms) >= DAILY_MS
+    critical || state.critical_pending || state.last_check_ms == 0 || now.saturating_sub(state.last_check_ms) >= DAILY_MS
 }
 
 /// Плановая задача: раз в минуту смотрит, не пора ли (сутки с прошлой проверки или критичное изменение), и тогда сверяет содержимое.
 pub async fn scheduler() {
     // после сбоя копия повторяется (не через сутки): критичное изменение остаётся «в долгу» до успеха, повторы — не чаще раза в 5 минут
-    let (mut owed_critical, mut retry_at) = (false, 0u64);
+    let mut retry_at = 0u64;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         let Some(r) = RUNTIME.get() else { continue };
-        owed_critical |= crate::backup_signal::take();
+        // критичный сигнал записывается в состояние как «долг» сразу: он переживает и сбой копирования, и перезапуск узла
+        if crate::backup_signal::take() {
+            let _ = node_backup::update_state(&r.layout, |s| s.critical_pending = true);
+        }
         let st = node_backup::load_state(&r.layout);
         let now = now_ms();
-        if st.dir.as_ref().is_none_or(|d| d.trim().is_empty()) || now < retry_at || !due(&st, now, owed_critical) {
+        if st.dir.as_ref().is_none_or(|d| d.trim().is_empty()) || now < retry_at || !due(&st, now, false) {
             continue;
         }
         let Some(root) = (r.root)() else { continue };
@@ -178,7 +181,6 @@ pub async fn scheduler() {
         .await;
         match res {
             Ok(Ok(o)) => {
-                owed_critical = false;
                 retry_at = 0;
                 match o.skipped {
                     None => println!("💾 Резервная копия №{} записана: {}", o.counter, o.saved.map(|p| p.display().to_string()).unwrap_or_default()),

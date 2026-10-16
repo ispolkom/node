@@ -119,7 +119,7 @@ impl<T: Serialize + DeserializeOwned + Default> SealedJson<T> {
                         }
                         Loaded::Missing => {
                             g.cache = Some(T::default());
-                            g.on_disk.clear();
+                            g.on_disk = serde_json::to_vec(&T::default()).unwrap_or_default(); // отсутствующий файл при чтении не создаётся
                             g.broken = false;
                         }
                         Loaded::Broken => {
@@ -165,10 +165,12 @@ impl<T: Serialize + DeserializeOwned + Default> SealedJson<T> {
                                 g.broken = true; // не разобран: исходник не затираем
                             }
                         },
-                        Err(_) => {
+                        // отсутствие файла — только NotFound; любая другая ошибка чтения (права, ввод-вывод) — файл есть, но нечитаем:
+                        // исходник не затираем пустым. Чистое чтение отсутствующего хранилища файл не создаёт.
+                        Err(e) => {
                             g.cache = Some(T::default());
-                            g.on_disk.clear();
-                            g.broken = false;
+                            g.broken = e.kind() != std::io::ErrorKind::NotFound;
+                            g.on_disk = if g.broken { Vec::new() } else { serde_json::to_vec(&T::default()).unwrap_or_default() };
                         }
                     }
                 }
@@ -331,5 +333,30 @@ mod tests {
         S.with(|m| assert!(m.is_empty(), "несохранённое значение не показывается как сохранённое"));
         let _ = std::fs::remove_dir_all(crate::util::data_dir::data_dir().join("sj_fail.enc"));
         S.lock();
+    }
+
+    #[test]
+    fn an_unreadable_plain_file_is_not_replaced_and_reading_a_missing_store_creates_nothing() {
+        use std::os::unix::fs::PermissionsExt;
+        static S: SealedJson<Map> = SealedJson::with_probe("sj_perm.json", "sj_perm.enc", "sj-perm", not_configured);
+        let p = crate::util::data_dir::data_dir().join("sj_perm.json");
+        // отсутствующий файл: чистое чтение его не создаёт
+        let _ = std::fs::remove_file(&p);
+        S.with(|m| assert!(m.is_empty()));
+        assert!(!p.exists(), "чтение несуществующего хранилища не создаёт файл");
+        // файл есть, но нечитаем (права): исходник не затирается пустым
+        std::fs::write(&p, br#"{"a":"1"}"#).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // кеш прошлого чтения сбрасываем
+        S.lock();
+        let unreadable = std::fs::read(&p).is_err(); // под root права не мешают — тогда проверка неприменима
+        S.with(|m| {
+            if unreadable {
+                assert!(m.is_empty());
+            }
+        });
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), br#"{"a":"1"}"#.to_vec(), "исходник цел");
+        let _ = std::fs::remove_file(&p);
     }
 }

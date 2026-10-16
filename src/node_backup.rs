@@ -514,6 +514,19 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         }
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    // Каталоги назначения должны быть приватными (0700) и наши: узел с другими правами не запустится. Проверка и исправление — ДО любых
+    // изменений; чужой каталог, права которого исправить нельзя, отвергается сразу, а не после «успешного» восстановления.
+    #[cfg(unix)]
+    for base in [&l.keys, &l.data, &l.home] {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(base) {
+            if m.is_dir() && m.permissions().mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700)).map_err(|er| {
+                    format!("каталог {} должен быть приватным (0700), но права исправить не удалось ({er}); создайте каталог от своего пользователя", base.display())
+                })?;
+            }
+        }
+    }
     // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
     let mut staged: Vec<(PathBuf, PathBuf, String)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта)
@@ -581,28 +594,35 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         written.push(label.clone());
     }
     if let Some(er) = failure {
-        // откат: уже заменённые файлы возвращаются, не дошедшие подготовленные — удаляются
+        // откат: уже заменённые файлы возвращаются (прежний — поверх нового одним rename), не дошедшие подготовленные удаляются;
+        // что вернуть не удалось — перечисляется, а не замалчивается
+        let mut stuck: Vec<String> = Vec::new();
         for (path, old) in done.iter().rev() {
-            let _ = std::fs::remove_file(path);
-            if let Some(o) = old {
-                let _ = std::fs::rename(o, path);
+            match old {
+                Some(o) => {
+                    if let Err(e2) = std::fs::rename(o, path) {
+                        stuck.push(format!("{} (прежний файл: {})", path.display(), o.display()));
+                        let _ = e2;
+                    }
+                }
+                None => {
+                    if let Err(e2) = std::fs::remove_file(path) {
+                        stuck.push(format!("{} (новый файл не убран: {e2})", path.display()));
+                    }
+                }
             }
         }
         cleanup(&staged);
-        return Err(format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними"));
-    }
-    // существующие каталоги назначения тоже должны быть приватными: узел не стартует с каталогом, открытым другим пользователям
-    #[cfg(unix)]
-    for base in [&l.keys, &l.data, &l.home] {
-        use std::os::unix::fs::PermissionsExt;
-        if base.is_dir() {
-            let _ = std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700));
-        }
+        return Err(if stuck.is_empty() {
+            format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними. Можно повторить команду")
+        } else {
+            format!("восстановление не завершено ({er}), откат прошёл не полностью: {}. Прежние файлы лежат рядом (*.before-restore-*); повторите команду с --force", stuck.join("; "))
+        });
     }
     if groups > 0 {
         // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
-        crate::util::private_file::write_private(&l.data.join("restored_notice.json"), format!("{{\"groups\":{groups}}}").as_bytes())
-            .map_err(|er| format!("restored_notice.json: {er}"))?;
+        // не обязательная часть: ключи и связи уже на месте, и сбой этой записи (диск) не должен превращать удачное восстановление в ошибку
+        let _ = crate::util::private_file::write_private(&l.data.join("restored_notice.json"), format!("{{\"groups\":{groups}}}").as_bytes());
     }
     Ok(RestoreReport { written, kept_old: kept, groups, node_id: opened.header.node_id.clone() })
 }
@@ -622,6 +642,10 @@ pub struct BackupState {
     /// время последней проверки (мс): копия могла не понадобиться
     pub last_check_ms: u64,
     pub last_error: Option<String>,
+    /// критичное изменение (устройство, бан, владелец) ещё не отражено в сохранённой копии; снимается только успехом или подтверждением
+    /// «изменений нет» и переживает перезапуск узла
+    #[serde(default)]
+    pub critical_pending: bool,
     /// папка для автокопий (флешка, синхронизируемая с облаком папка); пусто — автокопии выключены
     pub dir: Option<String>,
     pub last_file: Option<String>,
@@ -824,6 +848,7 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         let dg = digest(&entries);
         if mode == Mode::Auto && decide(&state, &dg, false) == Decision::Unchanged {
             state.last_check_ms = now; // проверили: ничего нового; неудачная попытка срок «следующей проверки» НЕ сдвигает
+            state.critical_pending = false;
             return Ok(Outcome { skipped: Some(Skip::Unchanged), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
         }
         let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
@@ -838,6 +863,7 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         state.counter = counter;
         state.last_ok_ms = now;
         state.last_check_ms = now;
+        state.critical_pending = false;
         state.last_error = None;
         if let Some(p) = &saved {
             // только копия, лежащая в папке, сдвигает «последнее сохранённое»: выгрузка по кнопке на флешку-в-руке — другое дело
@@ -1295,5 +1321,39 @@ mod tests {
         // смена папки идёт под замком состояния и не теряется
         let s = update_state(&l, |s| s.dir = Some(d.path().join("ok").display().to_string())).unwrap();
         assert!(s.dir.unwrap().ends_with("ok"));
+    }
+
+    // ── контрольный проход P9 ──
+
+    #[test]
+    fn the_notice_file_is_a_nicety_a_failure_to_write_it_does_not_fail_a_finished_restore() {
+        let (_d, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&dst.data).unwrap();
+        // на месте файла извещения — каталог: записать его нельзя
+        std::fs::create_dir_all(dst.data.join("restored_notice.json")).unwrap();
+        let r = restore(&opened, &dst, &RestoreOptions { force: false }).expect("ключи и связи установлены, извещение — не обязательная часть");
+        assert!(r.written.iter().any(|w| w == "Keys/auth.json"));
+    }
+
+    #[test]
+    fn a_critical_debt_survives_a_failure_and_clears_only_on_success() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        update_state(&l, |s| {
+            s.dir = Some("/proc/definitely/not/writable".into());
+            s.critical_pending = true;
+        })
+        .unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, 10).is_err());
+        assert!(load_state(&l).critical_pending, "сбой не снимает «долг»: он остаётся в файле состояния и переживёт перезапуск");
+        update_state(&l, |s| s.dir = Some(d.path().join("flash").display().to_string())).unwrap();
+        run_backup(&l, &root, "nodeid00", Mode::Auto, 20).unwrap();
+        assert!(!load_state(&l).critical_pending, "успех снимает долг");
     }
 }

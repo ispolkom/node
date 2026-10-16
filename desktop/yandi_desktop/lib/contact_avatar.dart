@@ -25,8 +25,11 @@ class ContactAvatar extends StatefulWidget {
   /// Картинку человека сменили (локально или он сам): забыть запомненный ответ, чтобы список запросил её заново.
   static void invalidate(String id) {
     _cache.remove(id);
+    _generation[id] = (_generation[id] ?? 0) + 1;   // запоздавший ответ прежнего запроса не должен вернуть старую картинку
     changes.value++;   // уже показанные картинки перечитываются
   }
+
+  static final Map<String, int> _generation = {};
 
   /// Счётчик смен картинок: показанные виджеты слушают его и перечитывают свою.
   static final ValueNotifier<int> changes = ValueNotifier<int>(0);
@@ -72,12 +75,15 @@ class _ContactAvatarState extends State<ContactAvatar> {
       if (hit.$2 != null && mounted) setState(() => png = hit.$2);
       return;
     }
+    final gen = ContactAvatar._generation[id] ?? 0;
     Uint8List? got;
     try {
       got = await FileRepository(widget.api).binary.bytes('/api/avatar/$id', limit: 256 * 1024);
     } catch (_) {
       got = null; // картинки нет
     }
+    // картинку сменили, пока шёл запрос: этот ответ устарел — ни в общий кеш, ни на экран
+    if (gen != (ContactAvatar._generation[id] ?? 0)) return;
     ContactAvatar._cache[id] = (DateTime.now(), got);
     if (mounted && got != null && id == widget.avatarId) setState(() => png = got);
   }
