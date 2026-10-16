@@ -34,8 +34,16 @@ class LoopbackMedia {
     ).join();
   }
 
+  bool _stopped = false;
+
   Future<Uri> start() async {
+    if (_stopped) throw StateError('медиасервер уже остановлен');
     final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    if (_stopped) {
+      // stop() пришёл, пока шёл bind: сервер, поздно созданный после закрытия, сразу закрывается
+      await server.close(force: true);
+      throw StateError('медиасервер остановлен во время запуска');
+    }
     _server = server;
     server.listen(_handle);
     return Uri.parse('http://127.0.0.1:${server.port}/$token');
@@ -109,6 +117,7 @@ class LoopbackMedia {
   }
 
   Future<void> stop() async {
+    _stopped = true;
     await _server?.close(force: true);
     _server = null;
     bytes?.fillRange(0, length, 0);

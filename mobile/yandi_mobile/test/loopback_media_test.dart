@@ -69,4 +69,12 @@ void main() {
     expect(part.$2, data.sublist(2000000, 2000010));
     await m.stop();
   });
+
+  test('stop во время запуска не оставляет слушающий сервер: поздний start отвергается', () async {
+    final m = LoopbackMedia(Uint8List.fromList([1, 2, 3]), 'video/mp4');
+    final starting = m.start();
+    await m.stop();
+    await expectLater(starting, throwsStateError);
+    await expectLater(m.start(), throwsStateError);
+  });
 }

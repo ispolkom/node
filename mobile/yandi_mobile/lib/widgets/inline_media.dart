@@ -205,9 +205,12 @@ class _InlineVideoState extends State<InlineVideo> {
       final file = File(widget.path);
       final m = LoopbackMedia.reader(widget.size, widget.mime, (s, n) => vault.readRange(file, s, n));
       _media = m;
-      final c = VideoPlayerController.networkUrl(await m.start());
+      final url = await m.start();
+      if (!mounted) { await m.stop(); return; }   // виджет закрыт, пока поднимался сервер: плеер не создаём
+      final c = VideoPlayerController.networkUrl(url);
       _c = c;
       await c.initialize();
+      if (!mounted) return;                         // dispose виджета уже освободил _c и _media
       c.addListener(() { if (mounted) setState(() {}); });
       if (mounted) setState(() {});
       await c.play();

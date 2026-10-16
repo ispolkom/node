@@ -71,9 +71,11 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       final m = LoopbackMedia.reader(f.size, f.mime, (start, len) => vault.readRange(file, start, len));
       _media = m;
       final url = await m.start();
+      if (!mounted) { await m.stop(); return; }   // экран закрыт, пока поднимался сервер: плеер не создаём
       final c = VideoPlayerController.networkUrl(url);
       _video = c;
       await c.initialize();
+      if (!mounted) return;                        // dispose экрана уже освободил _video и _media
       c.addListener(() { _videoValue.value = c.value; });
       _videoValue.value = c.value;
       if (mounted) setState(() {});
