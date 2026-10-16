@@ -384,12 +384,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   Future<void> retryVoice() async {
     final bytes = failedVoice;
     if (bytes == null || sending || selected == null || failedVoicePeer != peer(selected!)) return;
+    // получатель фиксируется до первого await: пока пишется временный файл, человек мог переключить чат
+    final contact = selected!, target = peer(contact);
     final f = File(await voicePathFactory());
     try {
       await f.parent.create(recursive: true);
       await f.writeAsBytes(bytes, flush: true);
+      if (!mounted || selected == null || peer(selected!) != target || failedVoicePeer != target) return;   // чат сменился: запись остаётся в памяти
       setState(() => pickedFile = f);
-      await sendFile();
+      await sendFile(toContact: contact);
       if (mounted && pickedFile?.path != f.path) setState(() => failedVoice = null);
     } finally {
       if (mounted && pickedFile?.path == f.path) setState(() => pickedFile = null);
@@ -397,8 +400,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     }
   }
 
-  Future<void> sendFile() async {
-    final file = pickedFile, contact = selected;
+  Future<void> sendFile({Map<String, dynamic>? toContact}) async {
+    final file = pickedFile, contact = toContact ?? selected;
     if (file == null || contact == null || sending) return;
     final rev = revision, target = peer(contact);
     await mutate(
