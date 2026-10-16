@@ -102,9 +102,11 @@ mod tests {
         let part_new = mk("downloads/f__half.bin.part", day / 4);
         let state_old = mk("cache/transfer_1.state", 3 * day);
         let state_new = mk("cache/transfer_2.state", day);
+        // время каталога можно выставить только в Unix (в Windows каталог как файл не открыть)
         let parts_dir_old = files.join("uploads/.g__big.bin.parts");
         std::fs::create_dir_all(&parts_dir_old).unwrap();
         std::fs::write(parts_dir_old.join("0"), b"p").unwrap();
+        #[cfg(unix)]
         aged(&parts_dir_old, 2 * day);
         // ссылка наружу не разыменовывается и не удаляется
         let outside = d.path().join("outside.txt");
@@ -114,15 +116,19 @@ mod tests {
         std::os::unix::fs::symlink(&outside, files.join("uploads/link")).unwrap();
 
         let n = sweep_all(d.path(), SystemTime::now());
-        assert_eq!(n, 5, "старые: отправленный, принятый, недокачанный, контрольная точка, недособранный каталог");
-        for gone in [&up_old, &down_old, &part_old, &state_old, &parts_dir_old] {
+        let expected = if cfg!(unix) { 5 } else { 4 };
+        assert_eq!(n, expected, "старые: отправленный, принятый, недокачанный, контрольная точка (и недособранный каталог — в Unix)");
+        for gone in [&up_old, &down_old, &part_old, &state_old] {
             assert!(!gone.exists(), "{} должен быть удалён", gone.display());
         }
+        #[cfg(unix)]
+        assert!(!parts_dir_old.exists(), "недособранный каталог удалён");
         for stay in [&up_new, &down_mid, &part_new, &state_new, &outside] {
             assert!(stay.exists(), "{} должен остаться", stay.display());
         }
         #[cfg(unix)]
         assert!(std::fs::symlink_metadata(files.join("uploads/link")).is_ok(), "ссылка не тронута");
+        #[cfg(unix)]
         assert_eq!(sweep_all(d.path(), SystemTime::now()), 0, "повторный проход ничего не находит");
     }
 
