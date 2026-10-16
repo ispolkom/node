@@ -251,6 +251,8 @@ fn spawn_pc_inbox_drain() {
                         eprintln!("[groups] удалено групп без владельца: {n}");
                     }
                     swept = true;
+                    // после восстановления из резервной копии участникам групп уходит извещение (метку оставляет `yandi backup restore`)
+                    announce_restored_groups().await;
                 }
             }
             #[cfg(unix)]
@@ -1193,6 +1195,30 @@ async fn complaints_mine(axum::Extension(DeviceKey(dev)): axum::Extension<Device
 pub async fn pc_admin_message(peer: &str, text: &str) -> Result<(), String> {
     let marked = format!("🛡 Администрация узла\n{text}");
     pc_send_to_device(peer, marked).await.map(|_| ())
+}
+
+/// Текст извещения участнику о группе, возвращённой из резервной копии.
+pub fn restored_group_notice(name: &str) -> String {
+    format!("Группа «{name}» восстановлена из резервной копии узла: переписка и файлы на узле не сохранены. У вас остаётся то, что вы получили раньше.")
+}
+
+/// После восстановления из копии (`yandi backup restore` оставляет метку) каждому участнику каждой группы уходит извещение от имени узла.
+/// Почта у устройства сохраняется, поэтому телефон прочтёт его, когда подключится. Метка снимается после постановки в очередь.
+pub async fn announce_restored_groups() {
+    let marker = crate::util::data_dir::data_dir().join("restored_notice.json");
+    if !marker.exists() {
+        return;
+    }
+    let groups = crate::mobile_groups::all_groups();
+    let devices: Vec<String> = with_devices(|d| d.iter().map(|x| x.peer_id()).collect());
+    for (gid, name, keys) in groups {
+        for device in &devices {
+            if keys.contains(&crate::mobile_groups::member_key_for(&gid, device)) {
+                let _ = pc_admin_message(device, &restored_group_notice(&name)).await;
+            }
+        }
+    }
+    let _ = std::fs::remove_file(&marker);
 }
 
 /// Ограничен ли человек сейчас (мера владельца): до какого времени, 0 — нет.

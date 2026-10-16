@@ -490,6 +490,11 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         crate::util::private_file::write_private(&path, &data).map_err(|er| format!("{}: {er}", e.path))?;
         written.push(format!("{:?}/{}", e.area, e.path));
     }
+    if groups > 0 {
+        // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
+        crate::util::private_file::write_private(&l.data.join("restored_notice.json"), format!("{{\"groups\":{groups}}}").as_bytes())
+            .map_err(|er| format!("restored_notice.json: {er}"))?;
+    }
     Ok(RestoreReport { written, kept_old: kept, groups, node_id: opened.header.node_id.clone() })
 }
 
@@ -810,6 +815,7 @@ mod tests {
         }
         assert!(report.written.iter().any(|w| w == "Keys/auth.json"));
         assert_eq!(report.groups, 1);
+        assert!(fresh.data.join("restored_notice.json").exists(), "метка для извещения участников о восстановленных группах");
         assert_eq!(std::fs::read(fresh.keys.join("auth.json")).unwrap(), b"{\"auth\":1}");
         assert!(!fresh.keys.join("device.seal").exists(), "машинная печать не переносится");
         assert!(!fresh.data.join("groups/g1.log").exists(), "журнал группы не восстанавливается");

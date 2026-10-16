@@ -1769,6 +1769,11 @@ pub fn forget_device(device: &str) {
     with_store(|s| s.forget_device(device));
 }
 
+/// Все группы узла: (номер, название, ключи участников). Нужны, чтобы известить участников о восстановлении из копии.
+pub fn all_groups() -> Vec<(String, String, Vec<String>)> {
+    with_store(|s| s.groups.values().map(|g| (g.id.clone(), g.name.clone(), g.members.iter().map(|m| m.key.clone()).collect())).collect())
+}
+
 /// Группы, которыми владеет устройство: (номер, название, ключи участников). Нужны, чтобы известить участников об удалении.
 pub fn owned_by(device: &str) -> Vec<(String, String, Vec<String>)> {
     with_store(|s| {
