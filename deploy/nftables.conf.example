@@ -1,0 +1,63 @@
+#!/usr/sbin/nft -f
+
+flush ruleset
+
+table inet filter {
+    chain input {
+        type filter hook input priority filter; policy drop;
+
+        iif "lo" accept
+        ct state established,related accept
+        ip protocol icmp accept
+
+        # было у вас
+        ip saddr 185.77.205.3 tcp dport 8888 accept
+        tcp dport 80 accept
+        tcp dport 443 accept
+        tcp dport 143 accept
+        tcp dport 587 accept
+        tcp dport 110 accept
+        tcp dport 25 accept
+
+        # YANDI: вход для приложения на телефонах (TLS)
+        tcp dport 8444 accept
+
+        # YANDI: сервер звонков (coturn): вход и релейные порты
+        tcp dport 3478 accept
+        udp dport 3478 accept
+        udp dport 50000-50199 accept
+
+        # YANDI: сеть узел-узел (обнаружение и P2P)
+        udp dport { 9000, 9001, 9998, 10000 } accept
+        tcp dport 9000 accept
+        tcp dport 8443 accept
+    }
+
+    chain forward {
+        type filter hook forward priority filter; policy drop;
+        ct state established,related accept
+        iifname "enp3s0" oifname "enp5s0" accept
+        iifname "enp5s0" oifname "enp3s0" ct state established,related accept
+    }
+
+    chain output {
+        type filter hook output priority filter; policy accept;
+    }
+}
+
+table ip nat {
+    chain postrouting {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "enp5s0" masquerade
+    }
+}
+
+# YANDI: защита релея звонков. Через релей coturn нельзя достучаться до служб этого компьютера по его внешнему адресу
+# (пакет идёт через lo мимо входного файрвола): из портов релея на внешний адрес разрешены только порты релея.
+# Таблица ВНУТРИ этого файла, иначе «flush ruleset» выше стирал бы её при каждой перезагрузке и перезапуске nftables.
+table inet yandi_turn {
+    chain output {
+        type filter hook output priority filter; policy accept;
+        ip daddr 185.77.205.3 udp sport 50000-50199 udp dport != 50000-50199 drop
+    }
+}
