@@ -93,22 +93,25 @@ pub fn set(id: &str, name: Option<&str>, avatar_b64: Option<&str>) -> Result<(),
         }
         None => None,
     };
-    STORE.with(|m| {
-        if !m.contains_key(&k) && m.len() >= MAX_ENTRIES {
-            return Err("слишком много локальных имён".to_string());
-        }
-        let e = m.entry(k.clone()).or_default();
-        if let Some(n) = new_name {
-            e.name = n;
-        }
-        if let Some(a) = new_avatar {
-            e.avatar_b64 = a;
-        }
-        if e.name.is_empty() && e.avatar_b64.is_empty() {
-            m.remove(&k);
-        }
-        Ok(())
-    })
+    // try_with: заперто, повреждённый файл или сбой записи — ошибка наружу (а не «успех», который пропадёт при перезапуске)
+    STORE
+        .try_with(|m| {
+            if !m.contains_key(&k) && m.len() >= MAX_ENTRIES {
+                return Err("слишком много локальных имён".to_string());
+            }
+            let e = m.entry(k.clone()).or_default();
+            if let Some(n) = new_name {
+                e.name = n;
+            }
+            if let Some(a) = new_avatar {
+                e.avatar_b64 = a;
+            }
+            if e.name.is_empty() && e.avatar_b64.is_empty() {
+                m.remove(&k);
+            }
+            Ok(())
+        })
+        .and_then(|r| r)
 }
 
 /// Человек удалён из контактов: локальные имя и картинка стираются.

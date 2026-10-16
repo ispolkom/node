@@ -35,7 +35,9 @@ pub fn sweep_dir(dir: &Path, ttl: Duration, now: SystemTime) -> usize {
         if ft.is_symlink() {
             continue;
         }
-        let partial = name.ends_with(".part") || name.contains(".tmp");
+        // служебное — только по форме имени, которую даёт сам узел (`….part`, `.<имя>.tmp<pid>-<n>`); обычное вложение, в имени которого
+        // случайно есть «.tmp», хранится весь свой срок
+        let partial = name.ends_with(".part") || (name.starts_with('.') && name.contains(".tmp"));
         if ft.is_dir() {
             if name.ends_with(".parts") && old(&path, PARTIAL_TTL, now) && std::fs::remove_dir_all(&path).is_ok() {
                 removed += 1;
@@ -100,6 +102,7 @@ mod tests {
         let down_old = mk("downloads/d__old.bin", 31 * day);
         let part_old = mk("downloads/e__half.bin.part", 2 * day);
         let part_new = mk("downloads/f__half.bin.part", day / 4);
+        let real_tmp = mk("downloads/h__report.tmp.txt", 20 * day); // настоящее вложение с «.tmp» в имени — хранится весь срок
         let state_old = mk("cache/transfer_1.state", 3 * day);
         let state_new = mk("cache/transfer_2.state", day);
         // время каталога можно выставить только в Unix (в Windows каталог как файл не открыть)
@@ -123,7 +126,7 @@ mod tests {
         }
         #[cfg(unix)]
         assert!(!parts_dir_old.exists(), "недособранный каталог удалён");
-        for stay in [&up_new, &down_mid, &part_new, &state_new, &outside] {
+        for stay in [&up_new, &down_mid, &part_new, &state_new, &outside, &real_tmp] {
             assert!(stay.exists(), "{} должен остаться", stay.display());
         }
         #[cfg(unix)]

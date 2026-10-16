@@ -2522,6 +2522,8 @@ async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
                             if let Some(short_id) = contact["short_id"].as_str().map(str::to_string) {
                                 let is_online = online_peers.contains(&short_id);
                                 contact["online"] = serde_json::json!(is_online);
+                                // локальная картинка есть — интерфейс покажет «Как он сам» (снять её)
+                                contact["avatar_local"] = serde_json::json!(crate::local_overrides::has_avatar(&short_id));
                                 if let Some(n) = crate::profile_sync::peer_nick(&short_id) {
                                     contact["nick"] = serde_json::json!(n);
                                 }
