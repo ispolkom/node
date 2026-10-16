@@ -412,6 +412,9 @@ class StorageService {
     return _unwrap(key, raw, migrated: (await _secure.read(key: _kMigrated)) == '1');
   }
 
+  /// В хранилище есть запись под этим именем (даже если её не удаётся расшифровать: повреждена, чужой ключ, заблокировано).
+  static Future<bool> secureHasStored(String key) async => (await _secure.read(key: key)) != null;
+
   static Future<void> secureWrite(String key, String value) async {
     await _secure.write(key: key, value: _isRaw(key) ? value : await _wrap(key, value));
     _secureCache?[key] = value;

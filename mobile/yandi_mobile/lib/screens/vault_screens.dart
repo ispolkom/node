@@ -28,7 +28,13 @@ class _ScreenGuard {
 Future<void> enterVaultedApp(BuildContext context) async {
   final state = context.read<AppState>();
   final nav = Navigator.of(context);
-  await state.init();
+  try {
+    await state.init();
+  } on StateError catch (e) {
+    // например, ключи личности не читаются: приложение не создаёт новую личность и не открывается, а говорит об этом
+    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${e.message}')));
+    return;
+  }
   nav.pushNamedAndRemoveUntil(state.isPaired ? '/home' : '/pair', (_) => false);
 }
 
