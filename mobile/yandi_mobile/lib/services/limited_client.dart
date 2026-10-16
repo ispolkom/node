@@ -50,3 +50,7 @@ class LimitedClient extends http.BaseClient {
   @override
   void close() => _inner.close();
 }
+
+/// Весь ответ — заголовки И тело — под одним сроком. Таймаут только на `send` не защищает: узел может отдать заголовки и замолчать.
+Future<http.Response> readWithDeadline(Future<http.StreamedResponse> Function() send, Duration limit) =>
+    (() async => http.Response.fromStream(await send()))().timeout(limit);

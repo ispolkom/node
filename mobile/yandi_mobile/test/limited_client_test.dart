@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:yandi_mobile/services/limited_client.dart';
@@ -26,5 +27,13 @@ void main() {
   test('заявленная длина сверх предела отвергается до чтения', () async {
     final c = LimitedClient(_Fake([[1]], declared: 1 << 40), maxBytes: 10);
     await expectLater(c.get(Uri.parse('https://x/y')), throwsA(isA<ResponseTooLarge>()));
+  });
+
+  test('узел отдал заголовки и замолчал: чтение тела обрывается по сроку, а не висит', () async {
+    final stalled = StreamController<List<int>>();
+    addTearDown(stalled.close);
+    stalled.add([1, 2, 3]);
+    final result = readWithDeadline(() async => http.StreamedResponse(stalled.stream, 200), const Duration(milliseconds: 200));
+    await expectLater(result, throwsA(isA<TimeoutException>()));
   });
 }

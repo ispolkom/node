@@ -424,7 +424,7 @@ class ApiService {
     final req = http.Request(method, _url(path));
     req.headers['Authorization'] = 'Bearer ${_node.token ?? ""}';
     if (body != null) { req.headers['Content-Type'] = 'application/octet-stream'; req.bodyBytes = body; }
-    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 60)));
+    final res = await readWithDeadline(() => _client.send(req), const Duration(seconds: 60));
     return (res.statusCode, res.bodyBytes);
   }
 
@@ -433,7 +433,7 @@ class ApiService {
     final req = http.Request(method, _url(path));
     _headers.forEach((k, v) => req.headers[k] = v);
     if (body != null) req.body = jsonEncode(body);
-    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 20)));
+    final res = await readWithDeadline(() => _client.send(req), const Duration(seconds: 20));
     dynamic parsed;
     try { parsed = res.body.isEmpty ? null : jsonDecode(res.body); } catch (_) { parsed = res.body; }
     return (res.statusCode, parsed);
