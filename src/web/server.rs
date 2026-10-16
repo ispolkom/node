@@ -3415,7 +3415,10 @@ fn is_owner_content_path(path: &str) -> bool {
 
 /// Звонки: начать, принять, входящие, список и сокет сигнализации требуют открытой среды; завершить и отклонить можно всегда (очистка).
 fn is_locked_media_path(path: &str) -> bool {
-    path.starts_with("/api/media/") && !path.ends_with("/end") && !path.ends_with("/reject")
+    // и звонки через /api/media/, и звонки телефонов владельца: события (расшифрованные сигналы), TURN и запись звонка в чат при запертой среде закрыты;
+    // /api/mobile/call/signal остаётся доступным — через него отправляется «положить трубку»
+    (path.starts_with("/api/media/") && !path.ends_with("/end") && !path.ends_with("/reject"))
+        || matches!(path, "/api/mobile/call/events" | "/api/mobile/call/turn" | "/api/mobile/call/log")
 }
 
 async fn locked_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
@@ -6118,7 +6121,10 @@ mod step_up_tests {
         for p in ["/api/media/call/start", "/api/media/video/call/start", "/api/media/ws/abc", "/api/media/incoming-call", "/api/media/call/x/accept", "/api/media/calls"] {
             assert!(is_locked_media_path(p), "{p}");
         }
-        for p in ["/api/media/call/end", "/api/media/call/x/end", "/api/media/call/x/reject", "/api/media/video/call/end", "/api/status"] {
+        for p in ["/api/mobile/call/events", "/api/mobile/call/turn", "/api/mobile/call/log"] {
+            assert!(is_locked_media_path(p), "{p}");
+        }
+        for p in ["/api/mobile/call/signal", "/api/media/call/end", "/api/media/call/x/end", "/api/media/call/x/reject", "/api/media/video/call/end", "/api/status"] {
             assert!(!is_locked_media_path(p), "{p}");
         }
     }
