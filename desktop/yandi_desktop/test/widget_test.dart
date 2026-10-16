@@ -314,6 +314,16 @@ void main() {
     expect(find.textContaining('Закрытая среда заперта'), findsOneWidget);
     await stop(t);
   });
+  testWidgets('logout locks the vault even when the cached state says it is already locked', (t) async {
+    final api = FakeApi()..configured = true..unlocked = false;
+    await start(t, api);
+    await click(t, 'Войти');
+    expect(api.calls.contains('/api/vault/lock'), false);
+    await t.tap(find.byTooltip('Выйти (запирает закрытую среду)'));
+    await t.pumpAndSettle();
+    expect(api.calls.contains('/api/vault/lock'), true, reason: 'выход всегда запирает среду');
+    await stop(t);
+  });
   testWidgets('password mismatch does not send setup command', (t) async {
     final api = FakeApi()..setup = true;
     await start(t, api);

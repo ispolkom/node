@@ -758,12 +758,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 onPressed: busy
                     ? null
                     : () async {
-                        final v = vault;
-                        // состояние ещё неизвестно (быстрый вход-выход) — запираем на всякий случай: блокировка идемпотентна
-                        if (v == null || (v.configured && v.unlocked)) {
-                          await act('/api/vault/lock', {});
-                          if (!mounted || lockUnconfirmed) return;
-                        }
+                        // выход ВСЕГДА запирает среду: кеш состояния оболочки мог устареть (среду открыл другой клиент), а блокировка идемпотентна
+                        await act('/api/vault/lock', {});
+                        if (!mounted || lockUnconfirmed) return;
                         setState(() {
                           wipe();
                           entered = false;
