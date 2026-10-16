@@ -290,6 +290,13 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
+    // Резервная копия связей: корень ключей есть только у работающего узла; плановая задача раз в сутки сверяет изменения
+    #[cfg(unix)]
+    {
+        let auth_for_backup = auth_state.clone();
+        yandi::backup_api::install(yandi::node_backup::Layout::live(discovery_port), std::sync::Arc::new(move || auth_for_backup.get_master_key()));
+        tokio::task::spawn(yandi::backup_api::scheduler());
+    }
     #[cfg(unix)]
     let closed_configured = closed_env.as_ref().is_some_and(|e| e.configured());
     #[cfg(not(unix))]

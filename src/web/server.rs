@@ -707,7 +707,7 @@ impl WebServer {
 
 #[cfg(unix)]
 fn vault_router() -> Router<AppState> {
-    crate::closed_api::router()
+    crate::closed_api::router().merge(crate::backup_api::router())
 }
 
 #[cfg(not(unix))]
