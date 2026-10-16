@@ -1,4 +1,3 @@
-import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
@@ -141,7 +140,6 @@ class VaultKeys {
   bool get unlocked => _dk != null;
 
   /// Только для проверок: прежний тег поколения (до заверения обёрток), каким его писали старые версии.
-  @visibleForTesting
   Future<String> legacyTagForTest(int gen) => _genTagV1(_dk!, gen);
 
   /// Подключ для конкретной цели (ключ базы, ключ файлов …): из DK одним HKDF, чтобы сам DK нигде не использовался напрямую.
