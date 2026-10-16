@@ -420,13 +420,13 @@ fn with_mail_saved<R>(f: impl FnOnce(&mut Vec<Mail>) -> R) -> (R, bool) {
 
 /// Спаренные устройства и их состояние: для страницы узла (кто в сети, когда был виден).
 /// Открытые ключи подписи сопряжённых телефонов (только с проверенной связкой) и их имена.
-pub fn device_ed_keys() -> Vec<([u8; 32], String)> {
+pub fn device_ed_keys() -> Vec<([u8; 32], String, String)> {
     use base64::Engine;
     with_devices(|d| {
         d.iter()
             .filter_map(|x| {
                 let raw = base64::engine::general_purpose::STANDARD.decode(x.key_sig.as_ref().and(x.ed25519_pub.as_deref())?).ok()?;
-                Some((<[u8; 32]>::try_from(raw.as_slice()).ok()?, x.name.clone()))
+                Some((<[u8; 32]>::try_from(raw.as_slice()).ok()?, x.name.clone(), x.peer_id()))
             })
             .collect()
     })

@@ -525,6 +525,7 @@ impl WebServer {
                     .delete(api_contacts_delete),
             )
             .route("/api/contacts/export", get(api_contacts_export))
+            .route("/api/contacts/local", post(api_contacts_local))
             .route("/api/network/relay", get(api_network_relay).post(api_network_relay_set))
             .route(
                 "/api/gateways",
@@ -2459,21 +2460,30 @@ async fn mobile_phone_action_handler(Json(b): Json<PhoneActionReq>) -> Response 
 
 fn append_phone_contacts(data: &mut serde_json::Value) {
     crate::mobile_self::init_phone_status();
-    // профиль общий на все мои устройства: у моего телефона в списке та же картинка, что у меня
-    let own_avatar = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
     if let Some(arr) = data["contacts"].as_array_mut() {
         for d in crate::mobile_api::devices_overview() {
             let Some(full) = d["peer_id"].as_str() else { continue };
             if crate::mobile_self::is_hidden_phone(full) || crate::mobile_self::is_blocked_phone(full) || !crate::mobile_self::is_saved_phone(full) {
                 continue; // «Удалить» на странице — спрятан; заблокированные и не добавленные в контакты — в списке «Другие устройства узла»
             }
+            // глобальное — то, что человек задал себе (ник и картинка его профиля); локальное — как я его назвал и какую картинку поставил.
+            // Локальное главнее; без него — его собственный ник; без ника — имя устройства.
+            let (nick, avatar_hash) = crate::device_profile::public(full);
+            let local_name = crate::local_overrides::name(full).unwrap_or_default();
+            let device_name = d["name"].as_str().unwrap_or("Телефон");
+            let name = crate::local_overrides::display_name(&local_name, &nick, &format!("📱 {device_name}"));
             arr.push(serde_json::json!({
                 "id": format!("phone-{}", &full[..16]),
-                "name": format!("📱 {}", d["name"].as_str().unwrap_or("Телефон")),
+                "name": name,
+                "local_name": local_name,
+                "global_name": nick,
                 "short_id": full,
                 "online": d["online"],
                 "is_phone": true,
-                "avatar_id": own_avatar,
+                // картинка именно этого телефона (локальная, иначе его собственная), а не картинка ПК
+                "avatar_id": full,
+                "avatar_local": crate::local_overrides::has_avatar(full),
+                "avatar_global": !avatar_hash.is_empty(),
             }));
         }
     }
@@ -2549,6 +2559,13 @@ async fn api_contacts_post(
 ) -> impl IntoResponse {
     let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
     let contacts_path = contacts_path_owned.as_str();
+    // телефон владельца в contacts.json не хранится: «Переименовать» задаёт ему локальное имя (его ник у него самого не меняется)
+    if payload.id.as_deref().is_some_and(|i| i.starts_with("phone-")) {
+        return match crate::local_overrides::set(&payload.short_id, Some(&payload.name), None) {
+            Ok(()) => Json(serde_json::json!({"status": "success", "message": "Contact saved"})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
+    }
     let _guard = CONTACTS_LOCK.lock().await;
     let mut contacts = match load_contacts_for_edit(contacts_path).await {
         Ok(c) => c,
@@ -2587,6 +2604,25 @@ async fn api_contacts_post(
 }
 
 #[derive(Deserialize)]
+struct LocalOverrideRequest {
+    /// номер человека (телефон — 64 знака, контакт — 16)
+    id: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// PNG/JPEG/GIF в base64; пустая строка — убрать свою картинку этому человеку
+    #[serde(default)]
+    avatar_b64: Option<String>,
+}
+
+/// Локальные имя и картинка контакта (видны только владельцу узла; человеку ничего не отправляется).
+async fn api_contacts_local(axum::extract::Json(b): axum::extract::Json<LocalOverrideRequest>) -> impl IntoResponse {
+    match crate::local_overrides::set(&b.id, b.name.as_deref(), b.avatar_b64.as_deref()) {
+        Ok(()) => Json(serde_json::json!({"status": "success"})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
 struct DeleteContactRequest {
     id: String,
 }
@@ -2609,6 +2645,12 @@ async fn api_contacts_delete(
         Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
     };
 
+    // локальные имя и картинка удаляемого контакта стираются вместе с ним
+    for c in contacts.iter().filter(|c| c.get("id").and_then(|v| v.as_str()) == Some(payload.id.as_str())) {
+        if let Some(sid) = c.get("short_id").and_then(|v| v.as_str()) {
+            crate::local_overrides::forget(sid);
+        }
+    }
     // Удаляем контакт (id в файле бывает строкой или числом)
     contacts.retain(|c| match c.get("id") {
         Some(serde_json::Value::String(s)) => s != &payload.id,
@@ -5364,6 +5406,16 @@ async fn api_avatar_get(PathExtractor(short_id): PathExtractor<String>) -> impl 
         || !short_id.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // сначала локальная картинка, которую владелец поставил этому человеку, потом картинка, заданная им самим (профиль устройства)
+    if let Some(png) = crate::local_overrides::avatar(&short_id) {
+        return (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response();
+    }
+    if short_id.len() == 64 {
+        if let Some(png) = crate::device_profile::avatar(&short_id) {
+            return (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response();
+        }
     }
 
     for ext in ["png", "jpg", "gif"] {

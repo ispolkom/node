@@ -1250,26 +1250,34 @@ pub fn set_auto_clean(gid: &str, days: u32) -> Result<u32, String> {
     with_store(|st| st.set_auto_clean(gid, &dev, days)).map_err(fail)
 }
 
-/// Ники, которые участники сами раскрыли в группе: псевдоним → ник.
+/// Ники, которые участники сами раскрыли в группе: псевдоним → ник. Для участника, опознанного как мой сопряжённый телефон, главнее то имя,
+/// которое Я ему задал локально (видно только мне); без локального имени виден его собственный ник, а без ника — имя устройства.
 fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
     let members = with_store(|st| st.members(gid, dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
     let mut out: HashMap<String, String> =
         members.iter().filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string()))).collect();
-    // имя, которое я сам дал контакту (опознан по подписи), главнее его ника — только у меня; у остальных остаётся его ник
-    for (alias, name) in recognised(gid, &members) {
-        out.insert(alias, name);
+    for (alias, (peer, device_name)) in recognised(gid, &members) {
+        match crate::local_overrides::name(&peer) {
+            Some(local) => {
+                out.insert(alias, local);
+            }
+            None => {
+                out.entry(alias).or_insert(device_name);
+            }
+        }
     }
     out
 }
 
 /// Подпись «это я» в визитке участника: проверяется ключами сопряжённых устройств; чужой ключ её не проверит.
 /// Сообщение — то же, что подписывает телефон: «YANDI-GROUP-CARD-V1\0» + группа + 0 + групповой ключ участника.
-fn recognised(gid: &str, members: &[Value]) -> HashMap<String, String> {
+/// Результат: псевдоним → (номер устройства, имя устройства «📱 …»).
+fn recognised(gid: &str, members: &[Value]) -> HashMap<String, (String, String)> {
     use base64::Engine;
     use ed25519_dalek::Verifier;
-    let keys: Vec<(ed25519_dalek::VerifyingKey, String)> = crate::mobile_api::device_ed_keys()
+    let keys: Vec<(ed25519_dalek::VerifyingKey, String, String)> = crate::mobile_api::device_ed_keys()
         .into_iter()
-        .filter_map(|(raw, name)| Some((ed25519_dalek::VerifyingKey::from_bytes(&raw).ok()?, format!("📱 {name}"))))
+        .filter_map(|(raw, name, peer)| Some((ed25519_dalek::VerifyingKey::from_bytes(&raw).ok()?, peer, format!("📱 {name}"))))
         .collect();
     let mut found = HashMap::new();
     if keys.is_empty() {
@@ -1284,8 +1292,8 @@ fn recognised(gid: &str, members: &[Value]) -> HashMap<String, String> {
         msg.extend_from_slice(gid.as_bytes());
         msg.push(0);
         msg.extend_from_slice(&pubk);
-        if let Some((_, name)) = keys.iter().find(|(k, _)| k.verify(&msg, &sig).is_ok()) {
-            found.insert(s(x, "alias"), name.clone());
+        if let Some((_, peer, name)) = keys.iter().find(|(k, _, _)| k.verify(&msg, &sig).is_ok()) {
+            found.insert(s(x, "alias"), (peer.clone(), name.clone()));
         }
     }
     found
@@ -1310,6 +1318,13 @@ pub fn share_card(gid: &str, on: bool) -> Result<(), String> {
 /// Картинка визитки участника (PNG) по псевдониму; нет визитки или картинки — `None`.
 pub fn member_avatar(gid: &str, alias: &str) -> Result<Option<Vec<u8>>, String> {
     let dev = pc_device()?;
+    // участник опознан как мой сопряжённый телефон и я поставил ему картинку — она главнее той, что он выложил в группе
+    let members = with_store(|st| st.members(gid, &dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
+    if let Some((peer, _)) = recognised(gid, &members).remove(alias) {
+        if let Some(local) = crate::local_overrides::avatar(&peer) {
+            return Ok(Some(local));
+        }
+    }
     let b64 = with_store(|st| st.card_avatar(gid, &dev, alias)).map_err(fail)?;
     Ok(b64.and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()))
 }

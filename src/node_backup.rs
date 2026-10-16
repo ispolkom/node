@@ -108,6 +108,8 @@ fn whitelist(l: &Layout) -> Vec<(Area, String)> {
         "upstream_proxy.enc",
         "upstream_proxy.json",
         "turn.json",
+        "local_overrides.enc",
+        "local_overrides.json",
     ] {
         v.push((Area::Data, p.into()));
     }

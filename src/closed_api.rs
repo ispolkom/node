@@ -45,18 +45,21 @@ impl Consumer for ChatConsumer {
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             crate::chat_reactions::unlock(key); // реакции личных чатов — на том же ключе, что и сама переписка
+            crate::local_overrides::unlock(key); // локальные имена и аватары контактов — там же
             self.0.unlock(key).await
         })
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             crate::chat_reactions::lock();
+            crate::local_overrides::lock();
             self.0.lock().await
         })
     }
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             crate::chat_reactions::erase();
+            crate::local_overrides::erase();
             let cm = self.0.clone();
             let _ = tokio::task::spawn_blocking(move || cm.erase_encrypted()).await;
         })
