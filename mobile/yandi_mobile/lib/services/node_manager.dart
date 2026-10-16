@@ -22,6 +22,9 @@ class NodeManager {
 
   TrustedNode? get preferredNode => activeNode;
 
+  /// Только для тестов: подставить список узлов без базы.
+  void setNodesForTest(List<TrustedNode> nodes) => _nodes = List.of(nodes);
+
   /// Блокировка / стирание: список узлов из памяти убираем.
   void clear() => _nodes = [];
 
@@ -80,10 +83,22 @@ class NodeManager {
     return activeNode;
   }
 
-  /// Failover: следующая лучшая нода кроме текущей активной.
-  Future<TrustedNode?> failover() async {
-    final current = activeNode;
-    final others  = rankedNodes.where((n) => n.id != current?.id).toList();
+  final Map<String, DateTime> _failedAt = {};
+
+  /// Failover: следующая лучшая нода кроме той, с которой связь только что потеряна ([currentId] — фактически подключённая, а не
+  /// «предпочтительная»), и кроме недавно отказавших: цепочка A → B → C доходит до C, а не крутится между A и B.
+  Future<TrustedNode?> failover({String? currentId, DateTime? now}) async {
+    final t = now ?? DateTime.now();
+    final lost = currentId ?? activeNode?.id;
+    if (lost != null) _failedAt[lost] = t;
+    _failedAt.removeWhere((_, at) => t.difference(at) > const Duration(minutes: 2));
+    final fresh = rankedNodes.where((n) => n.id != lost && !_failedAt.containsKey(n.id)).toList();
+    if (fresh.isNotEmpty) return fresh.first;
+    // все остальные недавно отказывали: пробуем лучший из них (кроме потерянного), список отказов начинается заново
+    final others = rankedNodes.where((n) => n.id != lost).toList();
+    _failedAt
+      ..clear()
+      ..[lost ?? ''] = t;
     return others.firstOrNull;
   }
 }

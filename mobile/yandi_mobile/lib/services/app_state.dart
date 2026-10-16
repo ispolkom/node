@@ -498,6 +498,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Единственный способ сменить узел у живых служб. Сервис групп привязан к номеру узла (список «известных групп» у каждого свой),
   /// поэтому при смене он пересоздаётся: старый, оставшись с чужим списком, принял бы группы прежнего узла за удалённые и стёр ключи.
   void _switchTo(TrustedNode next) {
+    _deviceProfilePublished = false;   // профиль публикуется на каждом узле отдельно
     groups?.retire();
     _api?.switchNode(next);
     _ws?.switchNode(next);
@@ -510,7 +511,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   // ── Failover ───────────────────────────────────────────────────────────────
 
   Future<void> _onConnectionLost() async {
-    final next = await nodeManager.failover();
+    final next = await nodeManager.failover(currentId: _api?.nodeId);
     if (next != null) {
       _switchTo(next);
       unawaited(_syncInbox());
@@ -1067,7 +1068,10 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> _saveProfileMeta() =>
       StorageService.secureWrite('profile_v1', jsonEncode({'nick': myNick, 'seen': _profileSeenMs, 'dirty': _profileDirty}));
 
+  int _profileRev = 0;   // номер правки профиля: «доставлено» снимается только для той правки, что действительно ушла
+
   void _profileChanged() {
+    _profileRev++;
     _profileDirty = true;
     unawaited(_saveProfileMeta());
     unawaited(syncProfile());
@@ -1174,11 +1178,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (api == null || _profileSyncing) return;
     _profileSyncing = true;
     try {
-      if (_profileDirty || !_deviceProfilePublished) {
+      // за время отправки человек мог сменить ник ещё раз: тогда отправляем снова, а не считаем новое значение доставленным
+      for (var attempt = 0; attempt < 4 && (_profileDirty || !_deviceProfilePublished); attempt++) {
+        final rev = _profileRev;
         await _publishDeviceProfile();
-        if (_deviceProfilePublished) {
+        if (!_deviceProfilePublished) break;
+        if (rev == _profileRev) {
           _profileDirty = false;
           await _saveProfileMeta();
+          break;
         }
       }
     } catch (_) {
