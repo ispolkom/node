@@ -11,6 +11,11 @@ void main() {
         .setMockMethodCallHandler(MethodChannel(ch), (call) async => null);
   }
 
+  // wakelock_plus (pigeon): любой вызов — пустой успех
+  TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger.setMockMessageHandler(
+      'dev.flutter.pigeon.wakelock_plus_platform_interface.WakelockPlusApi.toggle',
+      (message) async => const StandardMessageCodec().encodeMessage(<Object?>[]));
+
   test('встречный invite с video=true не превращает исходящий аудиозвонок в видео', () async {
     final sent = <String>[];
     final svc = CallService(

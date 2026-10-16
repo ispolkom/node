@@ -280,18 +280,25 @@ class CallService extends ChangeNotifier {
   }
 
   Future<void> _onOffer(String sdp) async {
+    // предложение принадлежит звонку, при котором пришло: если за время ожидания звонок сменился, оно ни к чему не применяется
+    final myCid = cid, myPeer = peerId;
+    bool same() => cid == myCid && peerId == myPeer && phase != CallPhase.idle && phase != CallPhase.ended;
     // предложение может прийти раньше, чем готов микрофон: ждём соединение
-    for (var i = 0; i < 100 && _pc == null && busy; i++) { await Future<void>.delayed(const Duration(milliseconds: 100)); }
+    for (var i = 0; i < 100 && _pc == null && busy && same(); i++) { await Future<void>.delayed(const Duration(milliseconds: 100)); }
     final pc = _pc;
-    if (pc == null) return;
+    if (pc == null || !same()) return;
     try {
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      if (!same()) return;
       await _remoteReady();
+      if (!same()) return;
       final a = await pc.createAnswer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': video ? 1 : 0});
+      if (!same()) return;
       await pc.setLocalDescription(a);
-      if (!await _signal('answer', sdp: a.sdp)) _finish('Нет связи с узлом', log: false);
+      if (!same()) return;
+      if (!await _signal('answer', sdp: a.sdp)) { if (same()) _finish('Нет связи с узлом', log: false); }
     } catch (e) {
-      _finish('Не удалось ответить: ${_short(e)}', log: false);
+      if (same()) _finish('Не удалось ответить: ${_short(e)}', log: false);
     }
   }
 
