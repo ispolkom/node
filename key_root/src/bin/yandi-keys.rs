@@ -217,12 +217,9 @@ fn run() -> Result<i32, String> {
                 args.stdin,
                 !args.show,
             )?;
-            if looks_like_code(&typed) {
-                if let Err(e) = RecoveryCode::parse(&typed) {
-                    eprintln!("yandi-keys: {e}. Nothing was changed.");
-                    return Ok(2);
-                }
-            }
+            // похожее на код, но с неверной контрольной суммой может быть и обычным мастер-паролем: сначала пробуем как пароль,
+            // про опечатку в коде говорим только если обёртка не открылась
+            let typo_in_code = if looks_like_code(&typed) { RecoveryCode::parse(&typed).err() } else { None };
             let secret = key_root::recovery_secret(&typed);
             let r = Recovery {
                 dir: &dir,
@@ -241,7 +238,12 @@ fn run() -> Result<i32, String> {
                     }
                     Ok(0)
                 }
-                Err(e) => Ok(fail(&e)),
+                Err(e) => {
+                    if let Some(why) = typo_in_code {
+                        eprintln!("yandi-keys: {why}. If this was a recovery code, check it for a typo.");
+                    }
+                    Ok(fail(&e))
+                }
             }
         }
         "login-check" => {

@@ -1290,3 +1290,53 @@ fn core_key_never_prints_into_a_terminal() {
         libc::close(master);
     }
 }
+
+/// Каталог ключей перенесён на другой компьютер: device.seal привязан к чужому железу, но пароль верен — восстановление завершается.
+#[test]
+fn recovery_on_another_machine_replaces_a_foreign_hardware_seal() {
+    use key_root::hw_print::HwPrint;
+    let (s, id) = migrated_store("machine-A");
+    let print = |nic: &str, board: &str| HwPrint {
+        parts: [vec![board.into()], vec!["cpu".into()], vec![nic.into()], vec!["disk".into()]],
+    };
+    let hw = |p: HwPrint| {
+        HardwareDeviceKey::with_print(s.dir.file("device.seal"), s.dir.file("device.key"), Box::new(move || p.clone()), 8 * 1024, 1)
+    };
+    // печать, сделанная на старом компьютере
+    hw(print("aa:aa", "Z390")).create().unwrap();
+    assert!(s.dir.file("device.seal").exists());
+    let new_machine = FixedMachine("machine-B".into());
+    let pol = policy();
+    let device = hw(print("cc:cc", "ASUS"));
+    assert!(device.load().unwrap().is_none(), "чужое железо: ключа нет");
+    let report = Recovery { dir: &s.dir, port: PORT, machine: &new_machine, device: &device, password: PASSWORD, policy: &pol }
+        .run()
+        .expect("верный пароль завершает восстановление и на другом железе");
+    assert!(device.load().unwrap().is_some(), "новая печать открывается на этом железе");
+    assert_eq!(report.node_id, hex::encode(&id.address[..8]));
+    assert!(std::fs::read_dir(s.dir.file(".")).unwrap().filter_map(|e| e.ok()).any(|e| e.file_name().to_string_lossy().contains("device.seal.replaced")), "старая печать сохранена копией");
+}
+
+/// Мастер-пароль, по виду похожий на код восстановления (буквы с дефисами нужной длины), восстанавливает как пароль, а не отвергается как опечатка.
+#[test]
+fn the_tool_accepts_a_master_password_that_only_looks_like_a_recovery_code() {
+    let look_alike = "abcdefgh-ijklmnop-qrstuvwx";
+    assert!(looks_like_code(look_alike) && RecoveryCode::parse(look_alike).is_err(), "условие теста");
+    let master = [0x5Au8; 32];
+    let s = Store::new();
+    let m = FixedMachine("machine-A".into());
+    let device = FileDeviceKey::new(s.dir.file("device.key"));
+    let device_key = device.create().unwrap();
+    let doc = RootDocument::create(&master, "$argon2id$login-hash", &device_key, device.name(), &m, look_alike, KdfParams::RECOMMENDED, &KdfPolicy::production()).unwrap();
+    create_new_file(&s.dir.auth_file(), &doc.to_json()).unwrap();
+    let id = material(5);
+    create_new_file(&s.dir.identity_file(PORT), &seal_identity_v3(&master, &id)).unwrap();
+    let c = copy_dir(&s.dir, &["device.key", ".legacy-"]);
+    let dir_c = c.path().to_str().unwrap().to_owned();
+    let (code, out, err) = run_tool(&["recover", "--dir", &dir_c, "--machine-id", "machine-C", "--password-stdin"], &format!("{look_alike}\n"));
+    assert_eq!(code, 0, "{out}{err}");
+    assert!(out.contains(&hex::encode(&id.address[..8])));
+    let (code, _out, err) = run_tool(&["recover", "--dir", &dir_c, "--machine-id", "machine-C", "--password-stdin"], "abcdefgh-ijklmnop-qrstuvww\n");
+    assert_ne!(code, 0);
+    assert!(err.contains("typo"), "неверный ввод, похожий на код, получает подсказку про опечатку: {err}");
+}

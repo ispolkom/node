@@ -49,7 +49,12 @@ impl Recovery<'_> {
         let mut backups = vec![backup_copy(&auth_path, "before-recovery")?];
         let new_key = match self.device.load() {
             Ok(Some(_)) => self.device.replace()?,
-            Ok(None) => self.device.create()?,
+            // нет ключа устройства — создать; но «печать есть, а железо чужое» тоже даёт None, и create не перезапишет её: тогда replace
+            // (с резервной копией печати), иначе правильный пароль не завершил бы восстановление на другом компьютере
+            Ok(None) => match self.device.create() {
+                Ok(k) => k,
+                Err(_) => self.device.replace()?,
+            },
             Err(KeyRootError::Corrupt) | Err(KeyRootError::PermissionDenied) => {
                 self.device.replace()?
             }
