@@ -140,6 +140,26 @@ class YandiVpnService : VpnService() {
     override fun onDestroy() { teardown(); super.onDestroy() }
 }
 
+/** Ресурсы одного проксируемого соединения (upstream-сокеты). После close() любая регистрация нового ресурса закрывает его сразу. */
+class Owned : java.io.Closeable {
+    private val items = ArrayList<java.io.Closeable>()
+    private var closed = false
+
+    @Synchronized fun add(c: java.io.Closeable): Boolean {
+        if (closed) {
+            runCatching { c.close() }
+            throw java.io.IOException("соединение закрыто")
+        }
+        return items.add(c)
+    }
+
+    @Synchronized override fun close() {
+        closed = true
+        items.forEach { runCatching { it.close() } }
+        items.clear()
+    }
+}
+
 private const val MAX_CONNECTIONS = 64
 private const val HANDSHAKE_MS = 15_000
 
@@ -161,18 +181,22 @@ class LocalProxy(
                 val c = try { s.accept() } catch (_: Exception) { break }
                 // каждое соединение занимает две записи: принятый сокет и «хозяйство» его upstream (raw/tls)
                 if (open.size >= MAX_CONNECTIONS * 2) { runCatching { c.close() }; continue }
-                val owned = java.util.concurrent.CopyOnWriteArrayList<java.io.Closeable>()
-                // stop() закрывает и upstream-сокеты: иначе читатель молчащего TLS держится до конца join (пять минут)
-                val upstream = java.io.Closeable { owned.forEach { runCatching { it.close() } } }
+                val owned = Owned()
+                // stop() закрывает и upstream-сокеты: иначе читатель молчащего TLS держится до конца join (пять минут);
+                // после закрытия owned регистрация нового ресурса его тут же закрывает
                 open.add(c)
-                open.add(upstream)
+                open.add(owned)
+                if (s.isClosed) { // stop() прошёл между accept и регистрацией
+                    runCatching { c.close() }; owned.close(); open.remove(c); open.remove(owned)
+                    break
+                }
                 thread(name = "yandi-proxy-conn", isDaemon = true) {
                     try { handle(c, owned) } catch (_: Exception) {
                     } finally {
-                        owned.forEach { runCatching { it.close() } }
+                        owned.close()
                         runCatching { c.close() }
                         open.remove(c)
-                        open.remove(upstream)
+                        open.remove(owned)
                     }
                 }
             }
@@ -186,7 +210,7 @@ class LocalProxy(
         open.clear()
     }
 
-    private fun handle(c: Socket, owned: MutableList<java.io.Closeable>) {
+    private fun handle(c: Socket, owned: Owned) {
         c.tcpNoDelay = true
         c.soTimeout = HANDSHAKE_MS   // молчащий клиент не держит поток: срок снимается, когда пошли данные
         val cin = BufferedInputStream(c.getInputStream(), 8192)
@@ -199,7 +223,7 @@ class LocalProxy(
     }
 
     // ── SOCKS5 (без пароля: слушаем только на самом телефоне) ──────────────────
-    private fun socks5(c: Socket, cin: InputStream, cout: OutputStream, owned: MutableList<java.io.Closeable>) {
+    private fun socks5(c: Socket, cin: InputStream, cout: OutputStream, owned: Owned) {
         cin.read(); val n = cin.read(); skip(cin, n)
         cout.write(byteArrayOf(5, 0)); cout.flush()
         val h = readN(cin, 4)
@@ -218,7 +242,7 @@ class LocalProxy(
     }
 
     // ── HTTP: CONNECT или обычный запрос с полным адресом ──────────────────────
-    private fun http(c: Socket, cin: InputStream, cout: OutputStream, owned: MutableList<java.io.Closeable>) {
+    private fun http(c: Socket, cin: InputStream, cout: OutputStream, owned: Owned) {
         val head = readHead(cin) ?: return
         val lines = head.split("\r\n")
         val parts = lines[0].split(" ")
@@ -250,7 +274,7 @@ class LocalProxy(
     }
 
     // ── канал до компьютера ─────────────────────────────────────────────────────
-    private fun openTunnel(target: String, owned: MutableList<java.io.Closeable>): Pair<InputStream, OutputStream> {
+    private fun openTunnel(target: String, owned: Owned): Pair<InputStream, OutputStream> {
         val raw = Socket()
         owned.add(raw)   // закрывается при любом исходе (в том числе при отказе узла и обрыве рукопожатия)
         protect(raw)
