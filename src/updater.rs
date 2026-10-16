@@ -132,6 +132,9 @@ async fn prepare_and_install(
     let sig = fetch(&client, &remote, &local, SIGNATURE_NAME, 256).await?;
     let m = verify_manifest(&bytes, std::str::from_utf8(&sig)?, vk, min_seq)
         .map_err(|e| anyhow::anyhow!(e))?;
+    // срок действия выпуска проверяется и на пути установки (так же, как в fetch/verify), до скачивания пакетов
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    ensure!(m.expires == 0 || now <= m.expires, "срок действия выпуска истёк (подпись верна, но свежего подписанного файла нет)");
     let mut total = 0u64;
     for f in &m.files {
         ensure!(f.size <= MAX_FILE, "файл слишком большой");
@@ -476,9 +479,12 @@ mod tests {
         gz.finish().unwrap();
     }
     fn signed(dir: &Path, seq: u64) -> VerifyingKey {
+        signed_until(dir, seq, 0)
+    }
+    fn signed_until(dir: &Path, seq: u64, expires: u64) -> VerifyingKey {
         let key = SigningKey::from_bytes(&[42; 32]);
         let vk = key.verifying_key();
-        let m = build_manifest(
+        let mut m = build_manifest(
             dir,
             &format!("v{seq}"),
             seq,
@@ -487,11 +493,27 @@ mod tests {
             &["node.tar.gz".into()],
         )
         .unwrap();
+        m.expires = expires;
         let bytes = manifest_bytes(&m);
         fs::write(dir.join(MANIFEST_NAME), &bytes).unwrap();
         fs::write(dir.join(SIGNATURE_NAME), sign(&bytes, &key).unwrap()).unwrap();
         vk
     }
+    #[tokio::test]
+    async fn an_expired_signed_release_is_not_installed() {
+        let source = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let install = root.path().join("install");
+        archive(source.path(), "yandi", b'0', b"old");
+        let vk = signed_until(source.path(), 5, 1_000_000_000); // 2001 год: давно истёк
+        let r = update(source.path().to_str().unwrap(), &vk, &install, 0).await;
+        assert!(r.unwrap_err().to_string().contains("срок действия"));
+        assert!(!install.join("yandi").exists(), "просроченный выпуск не установлен");
+        let vk = signed_until(source.path(), 6, 4_000_000_000); // 2096 год: действует
+        update(source.path().to_str().unwrap(), &vk, &install, 0).await.unwrap();
+        assert_eq!(std::fs::read(install.join("yandi")).unwrap(), b"old");
+    }
+
     #[tokio::test]
     async fn r8_repeated_seq_is_refused_after_install_and_rollback() {
         let source = tempfile::tempdir().unwrap();
