@@ -117,13 +117,29 @@ fn whitelist(l: &Layout) -> Vec<(Area, String)> {
     v
 }
 
+/// Путь `base/rel` без символических ссылок внутри `base` (сам каталог узла может быть ссылкой, например перенесённый на другой диск):
+/// иначе ссылка в родительском каталоге вывела бы чтение или запись за пределы каталогов узла.
+fn checked_path(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let mut cur = base.to_path_buf();
+    for part in rel.split('/') {
+        cur.push(part);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return Err(format!("{rel}: символическая ссылка в пути, копия её не примет")),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{rel}: {e}")),
+        }
+    }
+    Ok(cur)
+}
+
 /// Собрать файлы для копии. Отсутствующие пропускаются (узел мог не пользоваться возможностью); слишком большие и не-обычные файлы —
 /// ошибка, а не тихий пропуск: копия не должна молча получиться неполной.
 pub fn collect(l: &Layout) -> Result<Vec<Entry>, String> {
     let mut out = Vec::new();
     let mut total = 0usize;
     let mut take = |area: Area, rel: String| -> Result<(), String> {
-        let path = l.base(area).join(&rel);
+        let path = checked_path(l.base(area), &rel)?;
         let meta = match std::fs::symlink_metadata(&path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
@@ -163,6 +179,26 @@ pub fn collect(l: &Layout) -> Result<Vec<Entry>, String> {
             let big = std::fs::metadata(av.join(&n)).map(|m| m.len() > 512 * 1024).unwrap_or(true);
             if !big {
                 take(Area::Home, format!("avatars/{n}"))?;
+            }
+        }
+    }
+    // аватарки сопряжённых устройств: ~/.local/share/yandi/device_profiles/*.png (индекс уже в белом списке)
+    let dp = l.data.join("device_profiles");
+    if let Ok(rd) = std::fs::read_dir(&dp) {
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                [".png", ".jpg", ".jpeg", ".gif"].iter().any(|x| n.ends_with(x)) && !n.starts_with('.')
+            })
+            .collect();
+        names.sort();
+        for n in names {
+            let big = std::fs::metadata(dp.join(&n)).map(|m| m.len() > 512 * 1024).unwrap_or(true);
+            if !big {
+                take(Area::Data, format!("device_profiles/{n}"))?;
             }
         }
     }
@@ -207,7 +243,7 @@ fn normalized(e: &Entry) -> Vec<u8> {
 /// Файлы, которые перезаписываются самим узлом при обычной работе (счётчики, курсоры) и в запечатанном виде не разбираются:
 /// в копию входят, но изменением не считаются.
 fn counts_as_change(e: &Entry) -> bool {
-    !matches!(e.path.as_str(), "groups_pc/state.enc" | "mobile_self.enc" | "closed/settings.json")
+    !matches!(e.path.as_str(), "groups_pc/state.enc" | "mobile_self.enc")
 }
 
 /// Отпечаток логического содержимого: одинаковый, пока не изменились связи (а не шифртекст, который каждый раз другой).
@@ -461,16 +497,25 @@ fn private_dirs(dir: &Path) -> std::io::Result<()> {
 /// Записать файлы копии в каталоги узла. Узел при этом не должен работать. Журналы групп и переписка не восстанавливаются.
 pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
     let entries = opened.entries()?;
-    let auth_target = l.keys.join("auth.json");
-    if auth_target.exists() && !opt.force {
-        return Err("на этой машине уже есть ключи узла; восстановление не перезапишет их без явного разрешения (--force)".into());
+    // пути проверяются ДО любой записи: ни ссылок внутри каталогов узла, ни (без явного разрешения) уже существующих файлов
+    let mut targets = Vec::new();
+    for e in &entries {
+        targets.push(checked_path(l.base(e.area), &e.path)?);
+    }
+    if !opt.force {
+        let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
+        if !existing.is_empty() {
+            return Err(format!(
+                "на этой машине уже есть файлы узла ({}); восстановление не перезапишет их без явного разрешения (--force)",
+                existing.join(", ")
+            ));
+        }
     }
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let mut kept = Vec::new();
     let mut written = Vec::new();
     let mut groups = 0usize;
-    for e in &entries {
-        let path = l.base(e.area).join(&e.path);
+    for (e, path) in entries.iter().zip(targets) {
         if path.exists() {
             let old = path.with_file_name(format!("{}.before-restore-{stamp}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
             std::fs::rename(&path, &old).map_err(|er| format!("{}: {er}", e.path))?;
@@ -564,12 +609,23 @@ fn civil(secs: u64) -> (u64, u64, u64, u64, u64) {
 pub fn write_to_dir(dir: &Path, name: &str, bytes: &[u8], root: &[u8; 32], node_id: &str) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("папка копий: {e}"))?;
     let target = dir.join(name);
-    let tmp = dir.join(format!(".{name}.part"));
-    std::fs::write(&tmp, bytes).map_err(|e| format!("запись копии: {e}"))?;
+    // временное имя случайное, файл создаётся только заново (O_EXCL: заранее подложенная ссылка или файл — ошибка, а не перезапись чужого)
+    let mut rnd = [0u8; 6];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    let tmp = dir.join(format!(".{name}.{}.part", hex::encode(rnd)));
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| format!("запись копии: {e}"))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| format!("запись копии: {e}"))?;
+    }
     let back = std::fs::read(&tmp).map_err(|e| format!("проверка копии: {e}"))?;
     if back != bytes || open_with_root(&back, root).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return Err("проверка записанной копии не прошла".into());
+    }
+    if std::fs::symlink_metadata(&target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("на месте файла копии лежит символическая ссылка".into());
     }
     std::fs::rename(&tmp, &target).map_err(|e| format!("запись копии: {e}"))?;
     prune_dir(dir, node_id);
@@ -824,7 +880,7 @@ mod tests {
         assert_eq!(idx[0]["next_seq"], 43 + GROUP_SEQ_GAP);
         assert_eq!(idx[0]["first_seq"], 43 + GROUP_SEQ_GAP);
         // ключи уже есть: без явного разрешения не перезаписываем
-        assert!(restore(&opened, &fresh, &RestoreOptions { force: false }).unwrap_err().contains("уже есть ключи"));
+        assert!(restore(&opened, &fresh, &RestoreOptions { force: false }).unwrap_err().contains("уже есть файлы узла"));
         // с разрешением — прежние файлы остаются рядом
         let again = restore(&opened, &fresh, &RestoreOptions { force: true }).unwrap();
         assert!(!again.kept_old.is_empty() && again.kept_old.iter().all(|p| p.exists()));
@@ -943,5 +999,89 @@ mod tests {
     #[test]
     fn file_names_are_readable_and_sort_by_number() {
         assert_eq!(file_name("ab12", 7, 1_700_000_000_000), "yandi-ab12-000007-20231114-2213.yandibak");
+    }
+
+    // ── Найдено ревизией Codex (ANALYSIS8, пробами): все семь сценариев воспроизведены и закрыты ──
+
+    fn sealed_sample(l: &Layout) -> (Opened, [u8; 32]) {
+        sample(l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        (open_with_root(&bytes, &root).unwrap(), root)
+    }
+
+    #[test]
+    fn restore_never_overwrites_an_existing_identity_or_any_node_file_without_force() {
+        let (_d, l) = layout();
+        let (opened, _) = sealed_sample(&l);
+        let d2 = tempfile::tempdir().unwrap();
+        let other = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&other.keys).unwrap();
+        // на машине уже есть личность узла, auth.json нет — раньше это не останавливало запись
+        std::fs::write(other.keys.join("node_identity_9000.json"), b"MY OWN IDENTITY").unwrap();
+        let err = restore(&opened, &other, &RestoreOptions { force: false }).unwrap_err();
+        assert!(err.contains("node_identity_9000.json"), "{err}");
+        assert_eq!(std::fs::read(other.keys.join("node_identity_9000.json")).unwrap(), b"MY OWN IDENTITY");
+        assert!(!other.keys.join("auth.json").exists(), "до отказа ничего не записано");
+    }
+
+    #[test]
+    fn a_symlink_in_the_path_neither_leaks_files_out_of_the_copy_nor_lets_a_restore_write_outside() {
+        use std::os::unix::fs::symlink;
+        // сбор: каталог groups — ссылка наружу; чужой index.json в копию попасть не должен
+        let (d, l) = layout();
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("index.json"), b"[\"SECRET\"]").unwrap();
+        symlink(&outside, l.data.join("groups")).unwrap();
+        assert!(collect(&l).unwrap_err().contains("символическая ссылка"));
+        // восстановление: ссылка в каталоге назначения — отказ до записи
+        let (_d1, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let (d2, dst) = layout();
+        let escape = d2.path().join("escape");
+        std::fs::create_dir_all(&escape).unwrap();
+        symlink(&escape, dst.data.join("groups")).unwrap();
+        let err = restore(&opened, &dst, &RestoreOptions { force: true }).unwrap_err();
+        assert!(err.contains("символическая ссылка"), "{err}");
+        assert!(std::fs::read_dir(&escape).unwrap().next().is_none(), "за пределы каталогов узла ничего не записано");
+        assert!(!dst.keys.join("auth.json").exists(), "проверка путей — до любой записи");
+    }
+
+    #[test]
+    fn a_preplanted_temp_link_in_the_backup_folder_cannot_clobber_another_file() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("flash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, b"IMPORTANT").unwrap();
+        let name = file_name("node", 1, 1);
+        // старое имя временного файла (`.<имя>.part`) заранее подложено ссылкой на чужой файл
+        std::os::unix::fs::symlink(&victim, dir.join(format!(".{name}.part"))).unwrap();
+        let root = [7u8; 32];
+        let b = seal(&[], &SealParams { root: &root, auth_json: b"{}", node_id: "node", counter: 1, now_ms: 1 }).unwrap();
+        // имя временного файла случайное, создаётся только заново: подложенная ссылка не задета
+        write_to_dir(&dir, &name, &b, &root, "node").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"IMPORTANT");
+        // и сам файл копии на месте ссылки не принимается
+        let name2 = file_name("node", 2, 2);
+        std::os::unix::fs::symlink(&victim, dir.join(&name2)).unwrap();
+        assert!(write_to_dir(&dir, &name2, &b, &root, "node").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"IMPORTANT");
+    }
+
+    #[test]
+    fn device_avatars_are_collected_and_a_settings_change_counts_as_a_change() {
+        let (_d, l) = layout();
+        put(&l, Area::Data, "device_profiles/index.json", b"{}");
+        put(&l, Area::Data, "device_profiles/abc.png", b"image");
+        put(&l, Area::Data, "device_profiles/notes.txt", b"not an avatar");
+        let got = collect(&l).unwrap();
+        assert!(got.iter().any(|e| e.path == "device_profiles/abc.png"), "аватарки сопряжённых устройств входят");
+        assert!(!got.iter().any(|e| e.path.ends_with("notes.txt")));
+        let a = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":900}"#.to_vec() }]);
+        let b = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":0}"#.to_vec() }]);
+        assert_ne!(a, b, "смена настроек закрытой среды — изменение");
     }
 }

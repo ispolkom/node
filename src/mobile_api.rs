@@ -239,6 +239,7 @@ fn spawn_pc_inbox_drain() {
     crate::supervisor::supervise("pc-inbox-drain", crate::supervisor::Policy::restart(), move || async move {
         use base64::Engine;
         let mut swept = false;
+        let (mut announced, mut announce_tries) = (false, 0u32);
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             let Some(st) = STATE.get().cloned() else { continue };
@@ -251,13 +252,19 @@ fn spawn_pc_inbox_drain() {
                         eprintln!("[groups] удалено групп без владельца: {n}");
                     }
                     swept = true;
-                    // после восстановления из резервной копии участникам групп уходит извещение (метку оставляет `yandi backup restore`)
-                    announce_restored_groups().await;
                 }
             }
             #[cfg(unix)]
             if crate::closed_api::is_locked() {
                 continue;
+            }
+            // после восстановления из резервной копии участникам групп уходит извещение (метку оставляет `yandi backup restore`);
+            // отправка возможна только при открытой среде, поэтому — после проверки замка, с повторами, а не один раз при старте
+            if !announced {
+                announce_tries += 1;
+                if announce_restored_groups().await || announce_tries >= 40 {
+                    announced = true;
+                }
             }
             // по одному: письмо уходит из очереди только после обработки, сбой сохранения оставляет его на повтор
             while let Some(m) = with_pc_inbox(|l| l.first().cloned()) {
@@ -1204,21 +1211,24 @@ pub fn restored_group_notice(name: &str) -> String {
 
 /// После восстановления из копии (`yandi backup restore` оставляет метку) каждому участнику каждой группы уходит извещение от имени узла.
 /// Почта у устройства сохраняется, поэтому телефон прочтёт его, когда подключится. Метка снимается после постановки в очередь.
-pub async fn announce_restored_groups() {
+/// Возвращает true, когда делать больше нечего: метки нет или все извещения поставлены в очередь (метка снята). Если хоть одно не ушло
+/// (среда заперта, сбой), метка остаётся и вызов повторяется.
+pub async fn announce_restored_groups() -> bool {
     let marker = crate::util::data_dir::data_dir().join("restored_notice.json");
     if !marker.exists() {
-        return;
+        return true;
     }
     let groups = crate::mobile_groups::all_groups();
     let devices: Vec<String> = with_devices(|d| d.iter().map(|x| x.peer_id()).collect());
     for (gid, name, keys) in groups {
         for device in &devices {
-            if keys.contains(&crate::mobile_groups::member_key_for(&gid, device)) {
-                let _ = pc_admin_message(device, &restored_group_notice(&name)).await;
+            if keys.contains(&crate::mobile_groups::member_key_for(&gid, device)) && pc_admin_message(device, &restored_group_notice(&name)).await.is_err() {
+                return false; // метка остаётся: извещение повторится, когда отправка станет возможной
             }
         }
     }
     let _ = std::fs::remove_file(&marker);
+    true
 }
 
 /// Ограничен ли человек сейчас (мера владельца): до какого времени, 0 — нет.
