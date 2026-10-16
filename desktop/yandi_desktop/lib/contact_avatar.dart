@@ -23,7 +23,13 @@ class ContactAvatar extends StatefulWidget {
   static final Map<String, (DateTime, Uint8List?)> _cache = {};
 
   /// Картинку человека сменили (локально или он сам): забыть запомненный ответ, чтобы список запросил её заново.
-  static void invalidate(String id) => _cache.remove(id);
+  static void invalidate(String id) {
+    _cache.remove(id);
+    changes.value++;   // уже показанные картинки перечитываются
+  }
+
+  /// Счётчик смен картинок: показанные виджеты слушают его и перечитывают свою.
+  static final ValueNotifier<int> changes = ValueNotifier<int>(0);
 
   @override
   State<ContactAvatar> createState() => _ContactAvatarState();
@@ -32,10 +38,21 @@ class ContactAvatar extends StatefulWidget {
 class _ContactAvatarState extends State<ContactAvatar> {
   Uint8List? png;
 
+  void onChanged() {
+    if (mounted) unawaited(load());
+  }
+
   @override
   void initState() {
     super.initState();
+    ContactAvatar.changes.addListener(onChanged);
     unawaited(load());
+  }
+
+  @override
+  void dispose() {
+    ContactAvatar.changes.removeListener(onChanged);
+    super.dispose();
   }
 
   @override
