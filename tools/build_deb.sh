@@ -47,4 +47,4 @@ mkdir -p dist
 fakeroot dpkg-deb --build --root-owner-group -Zxz "$R" "dist/${PKG}.deb" >/dev/null
 ( cd dist && sha256sum "${PKG}.deb" > SHA256SUMS )
 echo "готово: dist/${PKG}.deb"
-dpkg-deb --info "dist/${PKG}.deb" | head -12
+dpkg-deb --info "dist/${PKG}.deb" | head -12 || true
