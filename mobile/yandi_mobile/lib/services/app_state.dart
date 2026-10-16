@@ -1645,6 +1645,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// «Удалить всё»: службы останавливаются, память очищается, затем стираются ключи, база, файлы и секреты.
   Future<String?> eraseEverything() async {
     try { await chatBg.stop(); } catch (_) {}
+    // VPN держит токен устройства в памяти службы: до стирания ключей он останавливается, иначе прежняя авторизация живёт вне стёртой среды
+    try { await vpn.stop(); } catch (_) {}
+    vpnRunning = false;
     try { await lockDown(); } catch (_) {}
     return VaultService.instance.eraseEverything();
   }

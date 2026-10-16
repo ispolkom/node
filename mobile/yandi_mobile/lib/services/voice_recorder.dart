@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
 
@@ -41,19 +42,31 @@ class VoiceRecording extends ChangeNotifier {
   int seconds = 0;
   String? path;
   Timer? _timer;
+  bool _disposed = false;
+  int _gen = 0;   // поколение запуска: stop/dispose во время запуска отменяют его
   /// Достигнут предел длины: вызывающий должен завершить запись.
   VoidCallback? onLimit;
   VoiceRecording(this.backend, this.newPath, {this.maxSeconds = 600});
 
   /// null — запись идёт; иначе — причина, почему не началась.
   Future<String?> start() async {
-    if (active) return null;
+    if (active || _disposed) return null;
+    final gen = ++_gen;
+    bool stale() => _disposed || gen != _gen;
     if (!await backend.hasPermission()) return 'Нет доступа к микрофону: разрешите его в настройках телефона';
+    if (stale()) return 'Запись отменена';
     final p = await newPath();
+    if (stale()) return 'Запись отменена';
     try {
       await backend.start(p);
     } catch (e) {
       return 'Не удалось начать запись: $e';
+    }
+    if (stale()) {
+      // чат закрыли (или запись отменили), пока запускался микрофон: остановить и стереть уже созданный файл
+      try { await backend.stop(); } catch (_) {}
+      await wipeLateFile(p);
+      return 'Запись отменена';
     }
     path = p;
     active = true;
@@ -69,6 +82,7 @@ class VoiceRecording extends ChangeNotifier {
 
   /// Остановить запись; возвращает (путь, секунды). Путь нужно затереть после отправки или отмены.
   Future<(String?, int)> stop() async {
+    _gen++;   // запуск, ещё не закончившийся, отменяется
     if (!active) return (null, 0);
     _timer?.cancel();
     final secs = seconds;
@@ -85,8 +99,24 @@ class VoiceRecording extends ChangeNotifier {
     return (out, secs);
   }
 
+  /// Стирание файла, запущенного слишком поздно; в тестах подменяется.
+  Future<void> Function(String path) wipeLateFile = _defaultWipe;
+  static Future<void> _defaultWipe(String p) async {
+    try {
+      final f = File(p);
+      if (await f.exists()) {
+        final n = await f.length();
+        final h = await f.open(mode: FileMode.write);
+        try { await h.writeFrom(List.filled(n < 1 << 20 ? n : 1 << 20, 0)); await h.flush(); } finally { await h.close(); }
+        await f.delete();
+      }
+    } catch (_) {}
+  }
+
   @override
   void dispose() {
+    _disposed = true;
+    _gen++;
     _timer?.cancel();
     backend.dispose();
     super.dispose();

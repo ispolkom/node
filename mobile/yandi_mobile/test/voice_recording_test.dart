@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:fake_async/fake_async.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/services/voice_recorder.dart';
@@ -24,7 +25,33 @@ class FakeVoice implements VoiceBackend {
   }
 }
 
+class SlowVoice extends FakeVoice {
+  final gate = Completer<void>();
+  @override
+  Future<void> start(String path) async {
+    await gate.future;   // плагин ещё запускает микрофон
+    await super.start(path);
+  }
+}
+
 void main() {
+  test('закрыли чат, пока запускался микрофон: запись не оживает, файл стирается (P7-3)', () async {
+    final b = SlowVoice();
+    final r = VoiceRecording(b, () async => '/tmp/late.m4a');
+    final wiped = <String>[];
+    r.wipeLateFile = (p) async => wiped.add(p);
+    final pending = r.start();
+    await Future<void>.delayed(Duration.zero);
+    expect(await r.stop(), (null, 0));   // закрытие экрана
+    r.dispose();
+    b.gate.complete();                    // плагин закончил запуск уже после закрытия
+    expect(await pending, 'Запись отменена');
+    expect(r.active, false);
+    expect(r.path, isNull);
+    expect(b.started, false);             // микрофон остановлен
+    expect(wiped, ['/tmp/late.m4a']);
+  });
+
   test('нет разрешения на микрофон — запись не начинается и сказано почему', () async {
     final b = FakeVoice()..permission = false;
     final r = VoiceRecording(b, () async => '/tmp/v.m4a');
