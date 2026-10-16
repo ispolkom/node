@@ -41,6 +41,9 @@ struct State {
     available: Option<Value>,
     #[serde(default)]
     errors: Vec<String>,
+    /// порог отката утрачен (файл состояния и его копия есть, но не читаются): кандидаты не принимаются, пока владелец не удалит оба файла
+    #[serde(skip)]
+    refuse: bool,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -60,18 +63,22 @@ fn state_path() -> std::path::PathBuf {
     dir().join("update_state.json")
 }
 
-/// Прочитать состояние: основной файл, при порче — копию. Второе значение: файл был, но прочитать не удалось ни его, ни копию.
+/// Прочитать состояние: основной файл и копию; порогом отката берётся БОЛЬШИЙ из читаемых номеров (оба пишутся одним значением, но
+/// между записями возможен обрыв). Второе значение: файл был, но не читается ни он, ни копия — порог неизвестен.
 fn load_state() -> (State, bool) {
     let main = state_path();
     let bak = main.with_extension("json.bak");
     let mut damaged = false;
+    let mut best: Option<State> = None;
     for p in [&main, &bak] {
         match std::fs::read(p) {
             Ok(b) => match serde_json::from_slice::<State>(&b) {
                 Ok(mut st) => {
                     // «доступное обновление» с диска — не проверенное предложение: заново оно берётся из подписанного манифеста
                     st.available = None;
-                    return (st, false);
+                    if best.as_ref().map_or(true, |cur| st.max_seq > cur.max_seq) {
+                        best = Some(st);
+                    }
                 }
                 Err(_) => damaged = true,
             },
@@ -79,7 +86,10 @@ fn load_state() -> (State, bool) {
             Err(_) => damaged = true,
         }
     }
-    (State::default(), damaged)
+    match best {
+        Some(st) => (st, false),
+        None => (State::default(), damaged),
+    }
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
@@ -87,20 +97,23 @@ fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let st = g.get_or_insert_with(|| {
         let (mut st, damaged) = load_state();
         if damaged {
-            st.errors = vec!["состояние проверки обновлений повреждено: защита от отката начата заново".into()];
-            eprintln!("[update] update_state.json повреждён, порог номера выпуска сброшен");
+            st.refuse = true;
+            st.errors = vec!["состояние проверки обновлений повреждено: порог номера выпуска неизвестен, новые выпуски не принимаются (удалите update_state.json и update_state.json.bak, чтобы начать заново)".into()];
+            eprintln!("[update] update_state.json повреждён: проверка обновлений остановлена до восстановления");
         }
         st
     });
     let r = f(st);
-    if let Ok(bytes) = serde_json::to_vec_pretty(&*st) {
-        let main = state_path();
-        // прежний исправный файл остаётся копией на случай порчи нового
-        if main.exists() {
-            let _ = std::fs::copy(&main, main.with_extension("json.bak"));
-        }
-        if let Err(e) = crate::util::private_file::write_private(&main, &bytes) {
-            eprintln!("[update] не удалось сохранить состояние проверки: {e}");
+    if !st.refuse {
+        if let Ok(bytes) = serde_json::to_vec_pretty(&*st) {
+            let main = state_path();
+            // обе копии получают ОДНО новое значение: сначала копия, потом основной файл (обрыв между ними не теряет порог — берётся больший)
+            if let Err(e) = crate::util::private_file::write_private(&main.with_extension("json.bak"), &bytes) {
+                eprintln!("[update] не удалось сохранить копию состояния проверки: {e}");
+            }
+            if let Err(e) = crate::util::private_file::write_private(&main, &bytes) {
+                eprintln!("[update] не удалось сохранить состояние проверки: {e}");
+            }
         }
     }
     r
@@ -151,6 +164,10 @@ pub async fn check_now() -> Value {
         return status_json();
     };
     let channels = if s.channels.is_empty() { default_channels() } else { s.channels };
+    // порог отката утрачен — без него «новее» не определить: каналы не опрашиваются, ошибка остаётся видна
+    if with_state(|st| st.refuse) {
+        return status_json();
+    }
     let min_seq = with_state(|st| st.max_seq);
     let t = now();
     let (found, errors) = check(&channels, &vk, min_seq, t).await;
@@ -214,6 +231,11 @@ mod tests {
         std::fs::write(&bak, br#"{"max_seq":7}"#).unwrap();
         let (st, damaged) = load_state();
         assert!(!damaged && st.max_seq == 7, "порог взят из копии");
+        // основной файл читается, но с меньшим номером (обрыв между записями): берётся больший из двух
+        std::fs::write(&main, br#"{"max_seq":3}"#).unwrap();
+        let (st2, _) = load_state();
+        assert_eq!(st2.max_seq, 7, "меньшее значение не снижает порог");
+        let _ = st;
         let _ = std::fs::remove_file(&main);
         let _ = std::fs::remove_file(&bak);
         let (_, damaged) = load_state();
