@@ -143,10 +143,29 @@ struct ExitStream {
     cancel: tokio::sync::watch::Sender<bool>,
 }
 
+/// Сколько штатно закрытому потоку дают дописать уже принятую очередь в цель, прежде чем запись прервут.
+const END_DRAIN_MAX: Duration = Duration::from_secs(60);
+
 impl ExitStream {
-    fn close(self) {
+    /// Аварийное закрытие (цепочка разрушена, очередь переполнена): запись и чтение цели прерываются сразу.
+    fn abort(self) {
         let _ = self.to_target.send(None);
         let _ = self.cancel.send(true);
+    }
+
+    /// Штатный END от клиента: уже принятая очередь дописывается в цель по порядку (конец очереди — `None`), чтение цели прекращается
+    /// после этого; зависшая запись прерывается не позже `END_DRAIN_MAX`.
+    fn close(self) {
+        let tx = self.to_target;
+        let _ = tx.send(None);
+        let cancel = self.cancel;
+        tokio::spawn(async move {
+            tokio::select! {
+                _ = tx.closed() => {} // писатель закончил и закрыл приёмник
+                _ = tokio::time::sleep(END_DRAIN_MAX) => {}
+            }
+            let _ = cancel.send(true);
+        });
     }
 }
 
@@ -323,7 +342,7 @@ impl Hops {
             Event::Closed { handle } => {
                 if let Some(c) = self.exit_circuits.lock().unwrap_or_else(|e| e.into_inner()).remove(&handle) {
                     for (_, s) in c.streams {
-                        s.close();
+                        s.abort();
                     }
                 }
             }
@@ -877,14 +896,35 @@ mod exit_stream_tests {
 
     /// Закрытие выходного потока сообщает задаче чтения цели прекратить чтение, а записи — завершиться.
     #[tokio::test]
-    async fn closing_an_exit_stream_stops_both_tasks() {
+    async fn aborting_an_exit_stream_stops_both_tasks() {
         let (tx, mut rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
         let s = ExitStream { to_target: tx, queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)), reorder: Reorder::default(), cancel: cancel_tx };
-        s.close();
+        s.abort();
         assert!(matches!(rx.recv().await, Some(None)), "писатель получает конец");
         cancel_rx.changed().await.unwrap();
         assert!(*cancel_rx.borrow(), "читатель получает отмену");
+    }
+
+    /// Штатный END после данных: медленная цель успевает получить всё принятое до конца, а чтение цели прекращается только после этого.
+    #[tokio::test]
+    async fn a_normal_end_lets_the_writer_drain_the_accepted_queue_in_order() {
+        let (client_side, mut server_side) = tokio::io::duplex(1024); // узкая труба: запись идёт кусками
+        let (tx, rx) = mpsc::unbounded_channel::<Option<Vec<u8>>>();
+        let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+        let queued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let writer = tokio::task::spawn(exit_writer(client_side, rx, cancel_rx.clone(), queued, Arc::new(std::sync::atomic::AtomicU64::new(0)), std::time::Instant::now()));
+        let body: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+        for part in body.chunks(30_000) {
+            tx.send(Some(part.to_vec())).unwrap();
+        }
+        let s = ExitStream { to_target: tx, queued: Arc::new(std::sync::atomic::AtomicUsize::new(0)), reorder: Reorder::default(), cancel: cancel_tx };
+        s.close(); // END сразу вслед за данными
+        let mut got = Vec::new();
+        tokio::io::AsyncReadExt::read_to_end(&mut server_side, &mut got).await.unwrap();
+        assert_eq!(got, body, "цель получила тело целиком и по порядку");
+        tokio::time::timeout(Duration::from_secs(2), writer).await.expect("писатель закончил").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), cancel_rx.changed()).await.expect("после дренирования читатель получает отмену").unwrap();
     }
 
     /// Цель перестала читать: зависшая запись прерывается закрытием потока, задача завершается.
