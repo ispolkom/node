@@ -214,7 +214,7 @@ class LocalProxy(
             cout.write(byteArrayOf(5, 5, 0, 1, 0, 0, 0, 0, 0, 0)); return
         }
         cout.write(byteArrayOf(5, 0, 0, 1, 0, 0, 0, 0, 0, 0)); cout.flush()
-        pump(c, up.first, up.second)
+        pump(c, cin, up.first, up.second)
     }
 
     // ── HTTP: CONNECT или обычный запрос с полным адресом ──────────────────────
@@ -228,7 +228,7 @@ class LocalProxy(
                 cout.write("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n\r\n".toByteArray()); return
             }
             cout.write("HTTP/1.1 200 Connection established\r\n\r\n".toByteArray()); cout.flush()
-            pump(c, up.first, up.second)
+            pump(c, cin, up.first, up.second)
             return
         }
         // обычный HTTP: http://host[:port]/path -> соединение до host:port и запрос с путём
@@ -246,7 +246,7 @@ class LocalProxy(
         for (l in lines.drop(1)) if (l.isNotEmpty() && !l.startsWith("Proxy-", true)) fixed.append(l).append("\r\n")
         fixed.append("\r\n")
         up.second.write(fixed.toString().toByteArray()); up.second.flush()
-        pump(c, up.first, up.second)
+        pump(c, cin, up.first, up.second)
     }
 
     // ── канал до компьютера ─────────────────────────────────────────────────────
@@ -273,13 +273,14 @@ class LocalProxy(
         return Pair(inp, out)
     }
 
-    private fun pump(c: Socket, upIn: InputStream, upOut: OutputStream) {
+    /** `cin` — тот же буферизованный вход клиента, из которого читались заголовки: в нём может лежать уже принятое тело запроса. */
+    private fun pump(c: Socket, cin: InputStream, upIn: InputStream, upOut: OutputStream) {
         c.soTimeout = 0
         val t = thread(isDaemon = true) {
             runCatching { copy(upIn, c.getOutputStream(), YandiVpnService.bytesDown) }
             runCatching { c.shutdownOutput() }
         }
-        runCatching { copy(c.getInputStream(), upOut, YandiVpnService.bytesUp) }
+        runCatching { copy(cin, upOut, YandiVpnService.bytesUp) }
         runCatching { upOut.flush() }
         t.join(300_000)
     }
