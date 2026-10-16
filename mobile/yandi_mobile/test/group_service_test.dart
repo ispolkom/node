@@ -627,13 +627,12 @@ void main() {
     expect((await bob.messages(node.gid)).where((e) => e.body['t'] == 'один раз').length, 1);
   });
 
-  test('визитка показывается по умолчанию; скрытие запоминается и не отменяется сменой профиля; картинка участника доходит', () async {
+  test('визитка показывается всегда и следует за профилем; картинка участника доходит', () async {
     await owner.sync();
     await bobJoins();
     await owner.sync();
     final bobAlias = bob.byId(node.gid)!.myAlias;
     final before = owner.displayName(node.gid, bobAlias);   // имя, названное при вступлении, или псевдоним
-    expect(await bob.cardShared(node.gid), isTrue);          // по умолчанию — показывать
     bob.setProfile('Доктор Хаус', [1, 2, 3]);
     await bob.sync();                                        // визитку выкладывает сам обход, без действий человека
     await owner.sync();
@@ -645,14 +644,6 @@ void main() {
     await owner.sync();
     expect(owner.displayName(node.gid, bobAlias), 'Хаус');
     expect(owner.memberAvatar(node.gid, bobAlias), isNull);  // картинки в профиле больше нет
-    await bob.setCardShared(node.gid, false);                // человек скрыл ник именно в этой группе
-    await owner.sync();
-    expect(owner.displayName(node.gid, bobAlias), before);
-    await bob.refreshCards('Другой ник', [9]);               // смена профиля скрытое не раскрывает
-    await bob.sync();
-    await owner.sync();
-    expect(await bob.cardShared(node.gid), isFalse);
-    expect(owner.displayName(node.gid, bobAlias), before);
   });
 
   test('контакт узнаётся в группе по подписи: свой ключ в контактах — имя из контактов, без ключа — как был', () async {

@@ -137,7 +137,7 @@ class SettingsScreen extends StatelessWidget {
             leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
             title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
             subtitle: Text(
-              state.myNick.isEmpty ? 'Не задан. Ник и картинку увидят контакты и участники ваших групп (в любой группе их можно скрыть). Не указывайте ФИО и личные фото; ник один на ПК и все ваши телефоны.' : state.myNick,
+              state.myNick.isEmpty ? 'Не задан. Ник и картинку увидят контакты и участники ваших групп. Не указывайте ФИО и личные фото; ник один на ПК и все ваши телефоны.' : state.myNick,
               style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onTap: () => _nickDialog(context),

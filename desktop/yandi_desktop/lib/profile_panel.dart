@@ -202,7 +202,7 @@ class _ProfilePanelState extends State<ProfilePanel> {
         const Padding(
           padding: EdgeInsets.symmetric(vertical: 6),
           child: UiText(
-            'Ник и аватар увидят ваши контакты и участники ваших групп. Не указывайте ФИО и личные фото. В любой группе их можно скрыть.',
+            'Ник и аватар увидят ваши контакты и участники ваших групп. Не указывайте ФИО и личные фото.',
             key: ValueKey('profile-warning'),
           ),
         ),

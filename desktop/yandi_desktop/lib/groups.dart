@@ -1372,47 +1372,6 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               });
             }),
           ],
-          () {
-            final mine = rows(info, 'members').where(
-              (m) => m['alias'] == group['my_alias'],
-            );
-            final shared =
-                mine.isNotEmpty && '${mine.first['nick'] ?? ''}'.isNotEmpty;
-            return Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
-              child: Wrap(
-                crossAxisAlignment: WrapCrossAlignment.center,
-                spacing: 14,
-                children: [
-                  UiText(
-                    shared
-                        ? 'Участники видят вас по нику и аватарке.'
-                        : 'Участники видят вас только по псевдониму ${group['my_alias']}.',
-                    style: const TextStyle(fontWeight: FontWeight.bold),
-                  ),
-                  InkWell(
-                    key: const ValueKey('card-share'),
-                    onTap: busy
-                        ? null
-                        : () => mutate(() async {
-                            await repo.act(selected!, 'profile', {
-                              'share': !shared,
-                            });
-                          }),
-                    child: UiText(
-                      shared
-                          ? 'Показывать только псевдоним'
-                          : 'Показывать мой ник и аватар',
-                      style: const TextStyle(
-                        color: Icq.header,
-                        decoration: TextDecoration.underline,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            );
-          }(),
           if (role != 'owner')
             button('Покинуть группу', () async {
               final id = selected!;

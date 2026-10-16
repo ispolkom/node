@@ -98,9 +98,6 @@ class GroupService {
     _known[gid] = found;
   }
 
-  /// Показываю ли я свой ник и картинку в этой группе: по умолчанию да (пока человек не скрыл их сам именно здесь).
-  Future<bool> cardShared(String gid) async => await store.read('grp_card_$gid') != '0';
-
   /// Мой профиль, из которого берётся визитка (ставит приложение при старте и при смене).
   String _profileNick = '';
   List<int>? _profileAvatar;
@@ -118,9 +115,8 @@ class GroupService {
     return '${nick.length}:${avatar?.length ?? 0}:$h';
   }
 
-  /// Выложить визитку в группе, если человек её не скрывал и она с прошлого раза изменилась.
+  /// Выложить визитку (ник и картинку из профиля) в группе, если она с прошлого раза изменилась. Ник виден всегда: скрыть его нельзя.
   Future<void> _ensureCard(String gid) async {
-    if (!await cardShared(gid)) return;
     final print = _cardPrint(_profileNick, _profileAvatar);
     if (await store.read('grp_card_fp_$gid') == print) return;
     final small = _profileAvatar;
@@ -128,15 +124,7 @@ class GroupService {
     await store.write('grp_card_fp_$gid', print);
   }
 
-  /// Раскрыть (или спрятать) свой ник и картинку в группе. Сам ник и картинка берутся из профиля — их передаёт приложение.
-  Future<void> setCardShared(String gid, bool on, {String nick = '', List<int>? avatar}) async {
-    await api.setCard(gid, on ? nick : '', on && avatar != null ? base64.encode(avatar) : '');
-    await store.write('grp_card_$gid', on ? '1' : '0');
-    await store.write('grp_card_fp_$gid', on ? _cardPrint(nick, avatar) : '');
-    await _rebuildMetaFor(gid);
-  }
-
-  /// Профиль поменялся — обновить визитки там, где человек их не скрыл.
+  /// Профиль поменялся — обновить визитки во всех группах.
   Future<void> refreshCards(String nick, List<int>? avatar) async {
     setProfile(nick, avatar);
     for (final g in groups) {
@@ -175,11 +163,6 @@ class GroupService {
     }
   }
 
-  Future<void> _rebuildMetaFor(String gid) async {
-    final g = byId(gid);
-    if (g != null) await _rebuildMeta(g);
-    onChanged?.call(gid);
-  }
   bool hasProblem(String gid) => _problems.contains(gid);
   /// Роль участника по псевдониму (null — не знаем или ушёл из группы).
   String? roleOf(String gid, String alias) => _roles[gid]?[alias];

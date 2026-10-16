@@ -451,16 +451,6 @@ void main() {
     expect(find.byKey(const ValueKey('autoclean-30')), findsNothing);
     await m1.stop(t);
   });
-  testWidgets('ник в группе по желанию: слово-переключатель отправляет share', (t) async {
-    final api = GroupApi();
-    await open(t, api, conversation: true);
-    await t.ensureVisible(find.byKey(const ValueKey('card-share')));
-    await t.tap(find.byKey(const ValueKey('card-share')));
-    await t.pumpAndSettle();
-    expect(api.calls.any((p) => p.endsWith('/profile')), true);
-    expect(api.bodies.any((b) => b['share'] == true), true);
-    await m1.stop(t);
-  });
   testWidgets('монетки: слово «Одобряю» в меню чужой записи отправляет голос', (t) async {
     final api = GroupApi();
     await open(t, api, conversation: true);
