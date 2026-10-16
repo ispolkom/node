@@ -381,19 +381,26 @@ impl ChatStorage {
     fn append_blob(path: &std::path::Path, blob: &[u8]) -> Result<()> {
         use std::io::Write;
         static CHECKED: std::sync::Mutex<Option<std::collections::HashSet<std::path::PathBuf>>> = std::sync::Mutex::new(None);
-        let first = CHECKED
+        let checked = CHECKED
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .get_or_insert_with(Default::default)
-            .insert(path.to_path_buf());
-        if first {
-            if let Ok(raw) = std::fs::read(path) {
-                if raw.starts_with(Self::MAGIC) {
-                    if let Some(keep) = Self::torn_tail_start(&raw) {
-                        std::fs::OpenOptions::new().write(true).open(path)?.set_len(keep as u64)?;
+            .contains(path);
+        if !checked {
+            // файл помечается проверенным только после успешного чтения и (при надобности) среза хвоста: ошибка ввода-вывода оставляет его
+            // непроверенным и запрещает дописывание, иначе новые записи легли бы за повреждённым хвостом
+            match std::fs::read(path) {
+                Ok(raw) => {
+                    if raw.starts_with(Self::MAGIC) {
+                        if let Some(keep) = Self::torn_tail_start(&raw) {
+                            std::fs::OpenOptions::new().write(true).open(path)?.set_len(keep as u64)?;
+                        }
                     }
                 }
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => return Err(e.into()),
             }
+            CHECKED.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(Default::default).insert(path.to_path_buf());
         }
         let mut file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
         let mut chunk = Vec::new();
@@ -1203,6 +1210,23 @@ mod closed_env_tests {
         ChatStorage::append_blob(&p, b"three").unwrap();
         let blobs = ChatStorage::read_blobs(&p).unwrap();
         assert_eq!(blobs, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+    }
+
+    #[test]
+    fn a_failed_tail_check_is_retried_and_does_not_let_new_records_land_behind_a_torn_tail() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("c2.chat");
+        std::fs::create_dir(&p).unwrap(); // чтение даёт ошибку ввода-вывода, а не «нет файла»
+        assert!(ChatStorage::append_blob(&p, b"zero").is_err());
+        std::fs::remove_dir(&p).unwrap();
+        let mut raw = Vec::from(&ChatStorage::MAGIC[..]);
+        raw.extend_from_slice(&3u32.to_be_bytes());
+        raw.extend_from_slice(b"one");
+        raw.extend_from_slice(&100u32.to_be_bytes());
+        raw.extend_from_slice(&[7u8; 10]);
+        std::fs::write(&p, &raw).unwrap();
+        ChatStorage::append_blob(&p, b"two").unwrap();
+        assert_eq!(ChatStorage::read_blobs(&p).unwrap(), vec![b"one".to_vec(), b"two".to_vec()], "хвост срезан при повторной проверке");
     }
 
     #[test]
