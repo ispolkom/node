@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -37,6 +38,21 @@ void main() {
     expect(b, [1, 2, 3]);
     expect(calls, 1);
     expect(VideoFrames.cached('/v/1.yfe'), isNotNull);
+  });
+
+  test('блокировка во время извлечения кадра: поздний кадр не попадает в кеш и не отдаётся', () async {
+    VideoFrames.clear();
+    final gate = Completer<Uint8List?>();
+    VideoFrames.grabber = (path, size, mime) => gate.future;
+    addTearDown(() {
+      VideoFrames.grabber = null;
+      VideoFrames.clear();
+    });
+    final pending = VideoFrames.of('/v/late.yfe', 100, 'video/mp4');
+    VideoFrames.clear(); // приложение заперто
+    gate.complete(Uint8List.fromList([9, 9, 9]));
+    expect(await pending, isNull);
+    expect(VideoFrames.cached('/v/late.yfe'), isNull);
   });
 
   testWidgets('видео в сообщении: кадр и белый треугольник «играть»', (t) async {

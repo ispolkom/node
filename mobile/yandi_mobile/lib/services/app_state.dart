@@ -25,6 +25,7 @@ import '../crypto/file_vault.dart';
 import 'vault_bytes_cache.dart';
 import 'vault_files.dart';
 import 'vault_service.dart';
+import 'video_frames.dart';
 import 'api_service.dart' as api_svc;
 import '../content_policy.dart';
 import 'ws_service.dart';
@@ -1613,6 +1614,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     avatars = null;
     _vaultFiles = null;
     VaultBytesCache.clear();
+    VideoFrames.clear();
     // картинки, уже отданные Flutter для показа (кеш изображений), тоже убираем
     PaintingBinding.instance.imageCache.clear();
     PaintingBinding.instance.imageCache.clearLiveImages();

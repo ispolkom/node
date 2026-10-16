@@ -14,11 +14,16 @@ class VideoFrames {
   /// Подмена в тестах: (путь, размер, mime) → JPEG-байты.
   static Future<Uint8List?> Function(String path, int size, String mime)? grabber;
 
+  /// Поколение кеша: clear() (блокировка, стирание) отменяет кадры, которые ещё извлекаются, — поздний ответ не попадает в кеш.
+  static int _gen = 0;
+
   static Uint8List? cached(String path) => _cache[path];
 
   static Future<Uint8List?> of(String path, int size, String mime) {
     if (_cache.containsKey(path)) return Future.value(_cache[path]);
+    final gen = _gen;
     return _pending[path] ??= _grab(path, size, mime).then((v) {
+      if (gen != _gen) return null; // кеш очищен (блокировка), пока кадр извлекался
       if (_cache.length >= _limit) _cache.remove(_cache.keys.first);
       _cache[path] = v;
       _pending.remove(path);
@@ -45,6 +50,7 @@ class VideoFrames {
   }
 
   static void clear() {
+    _gen++;
     _cache.clear();
     _pending.clear();
   }
