@@ -198,9 +198,10 @@ fn run() -> Result<i32, String> {
                     false,
                 )?;
                 match op.commit(&pending, &typed) {
-                    Ok(backup) => {
-                        println!("the recovery code was replaced. The previous recovery password (or code) NO LONGER WORKS.");
-                        println!("the node id, the key and the chats are unchanged. previous auth.json kept as {}", backup.display());
+                    Ok(()) => {
+                        println!("the recovery code was replaced. The previous recovery password (or code) no longer works with this auth.json.");
+                        println!("the node id, the key and the chats are unchanged.");
+                        println!("NOTE: copies of auth.json made BEFORE now (backups, disk images) still open with the previous secret; the root key itself is not rotated.");
                         return Ok(0);
                     }
                     Err(KeyRootError::Invalid(why)) => eprintln!("{why} ({attempt}/3)."),

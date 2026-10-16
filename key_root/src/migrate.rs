@@ -113,8 +113,10 @@ impl NewRecoveryCode<'_> {
         })
     }
 
-    /// Writes the new wrapper only if `typed` is the shown code. The previous `auth.json` is kept as a backup.
-    pub fn commit(&self, pending: &PendingRecovery, typed: &str) -> Result<PathBuf> {
+    /// Writes the new wrapper only if `typed` is the shown code. The previous `auth.json` is kept as a backup only while the write is
+    /// in doubt: once the new document is verified the backup is removed, because it still holds the OLD recovery wrapper of the same
+    /// root and would keep the replaced secret working for anyone who copies the directory.
+    pub fn commit(&self, pending: &PendingRecovery, typed: &str) -> Result<()> {
         let typed = crate::recovery_code::RecoveryCode::parse(typed)?;
         if !typed.same_as(&pending.code) {
             return Err(KeyRootError::Invalid(
@@ -138,6 +140,8 @@ impl NewRecoveryCode<'_> {
                 })
                 .unwrap_or(false)
         })?;
-        Ok(backup)
+        // an I/O error here is reported: the old wrapper would stay readable beside the new one
+        std::fs::remove_file(&backup).map_err(|_| KeyRootError::Io)?;
+        Ok(())
     }
 }

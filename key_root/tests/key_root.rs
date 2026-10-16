@@ -1056,8 +1056,13 @@ fn replacing_the_recovery_secret_by_a_code_needs_the_device_and_the_typed_confir
 
     // typed back correctly (any case, spaces instead of dashes): committed
     let typed = pending.code().display().to_lowercase().replace('-', " ");
-    let backup = op.commit(&pending, &typed).unwrap();
-    assert!(backup.to_string_lossy().contains("before-new-code") && backup.exists());
+    op.commit(&pending, &typed).unwrap();
+    let leftovers: Vec<_> = fs::read_dir(s.dir.file("."))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("before-new-code"))
+        .collect();
+    assert!(leftovers.is_empty(), "the old recovery wrapper must not stay beside the new one: {leftovers:?}");
     // the OLD password is dead; the code works; the device still works; same root, same identity, same login hash
     let doc = RootDocument::parse(&fs::read(s.dir.auth_file()).unwrap()).unwrap();
     assert_eq!(
