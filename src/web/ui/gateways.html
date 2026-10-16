@@ -297,11 +297,7 @@
             showAlert('Уведомление', message);
         };
         
-        window.confirm = function(message) {
-            console.log('❓ Overridden confirm:', message);
-            showConfirm('Подтверждение', message, () => {}, () => {});
-            return true;
-        };
+        // confirm НЕ подменяется: вызывающий код ждёт синхронный ответ (P7-22)
 
         console.log('✅ Alert/Confirm overridden');
     </script>

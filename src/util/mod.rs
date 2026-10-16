@@ -7,6 +7,7 @@
 pub mod data_dir;
 pub mod private_file;
 pub mod sealed;
+pub mod sealed_json;
 pub mod types;
 pub mod os_detector;
 pub mod mask;

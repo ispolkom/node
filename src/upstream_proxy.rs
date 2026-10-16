@@ -407,11 +407,19 @@ fn parse_file(bytes: &[u8]) -> Option<PoolFile> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     if v.get("proxies").is_some() {
         let f: PoolFile = serde_json::from_value(v).ok()?;
+        // включённая запись, не прошедшая проверку, — ошибка настроек, а не повод тихо выйти напрямую с настоящим адресом узла:
+        // отбрасываются только выключенные непригодные записи
+        if f.enabled && f.proxies.iter().any(|e| e.enabled && e.settings().check().is_err()) {
+            return None;
+        }
         let proxies = f.proxies.into_iter().filter(|e| e.settings().check().is_ok()).collect();
         return Some(PoolFile { proxies, ..f });
     }
     let s: Settings = serde_json::from_value(v).ok()?;
-    s.check().ok()?;
+    if s.check().is_err() {
+        // прежний формат (один прокси): непригодный включённый — ошибка (выход закрыт), выключенный — просто нет прокси
+        return if s.enabled { None } else { Some(PoolFile::default()) };
+    }
     Some(PoolFile { proxies: vec![Entry::new(s, None)], ..PoolFile::default() })
 }
 
@@ -1471,7 +1479,9 @@ mod tests {
         let off = br#"{"enabled": false, "kind": "socks5", "host": "h.example", "port": 1, "auth": {"type": "none"}}"#;
         assert!(!parse_file(off).unwrap().proxies[0].enabled);
         assert!(parse_file(b"not json").is_none());
-        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "an entry that fails the check is dropped");
+        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).is_none(), "an enabled entry that fails the check closes the exit instead of opening a direct one (P7-19)");
+        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":false,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "a disabled unusable entry is simply dropped");
+        assert!(parse_file(br#"{"enabled": false, "proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "the owner switched the whole pool off: direct exit is intended");
     }
 
     /// Закрытая среда: заперто — настройки не читаются; после переноса открытая копия затёрта, читается только с ключом.

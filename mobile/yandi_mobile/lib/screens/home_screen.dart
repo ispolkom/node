@@ -40,6 +40,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
   void initState() {
     super.initState();
     _searchFocus.addListener(() { if (mounted) setState(() {}); });
+    // ввод собственной клавиатурой меняет controller программно и onChanged не вызывает — запрос берётся из самого контроллера
+    _searchCtrl.addListener(() { if (mounted && _query != _searchCtrl.text) setState(() => _query = _searchCtrl.text); });
     _tabs = TabController(length: 4, vsync: this);
     _tabs.addListener(() {
       if (!mounted) return;

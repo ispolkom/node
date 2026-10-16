@@ -43,13 +43,20 @@ impl Consumer for ChatConsumer {
         })
     }
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
-        Box::pin(async move { self.0.unlock(key).await })
+        Box::pin(async move {
+            crate::chat_reactions::unlock(key); // реакции личных чатов — на том же ключе, что и сама переписка
+            self.0.unlock(key).await
+        })
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move { self.0.lock().await })
+        Box::pin(async move {
+            crate::chat_reactions::lock();
+            self.0.lock().await
+        })
     }
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            crate::chat_reactions::erase();
             let cm = self.0.clone();
             let _ = tokio::task::spawn_blocking(move || cm.erase_encrypted()).await;
         })
@@ -115,15 +122,20 @@ impl Consumer for SelfConsumer {
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
         Box::pin(async move {
             crate::mobile_self::set_master(key);
+            crate::mobile_self::unread_unlock(key);
             // открытая часть связки ключей ПК записывается рядом: пока среда заперта, телефоны всё равно могут писать ПК
             let _ = crate::mobile_self::bundle_json();
         })
     }
     fn lock(&self) -> BoxFuture<'_, ()> {
-        Box::pin(async move { crate::mobile_self::lock_keys() })
+        Box::pin(async move {
+            crate::mobile_self::lock_keys();
+            crate::mobile_self::unread_lock();
+        })
     }
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move {
+            crate::mobile_self::unread_erase();
             let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("mobile_self.enc"));
         })
     }

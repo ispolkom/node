@@ -264,7 +264,7 @@
         function showConfirm(title, message, onConfirm, onCancel) { showModal(title, message, onConfirm, onCancel, 'Да', 'Нет'); }
         function showAlert(title, message) { showModal(title, message, null, false, 'OK', null); }
         window.alert = function(message) { showAlert('Уведомление', message); };
-        window.confirm = function(message) { showConfirm('Подтверждение', message, function() {}, function() {}); return true; };
+        // confirm не подменяется: код ниже ждёт синхронный ответ, а асинхронное окно сразу разрешало действие (P7-22)
 
         // === Логика чата ===
         var currentContactId = null, currentContactShortId = null, currentContactName = null, myNodeId = null, autoRefreshInterval = null, pendingAttachment = null, lastMessageCount = 0, lastIncomingCount = 0;

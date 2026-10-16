@@ -3740,13 +3740,16 @@ impl P2PTransport {
 
                                                     
 
+                                                    // порядок замков везде один: сначала закрепления, потом таблица пиров (иначе обмен пирами, вытеснение
+                                                    // при полной таблице и запись закреплений блокируют друг друга навсегда)
+                                                    let pins_guard = transport.pinned_identities.read().await;
                                                     let mut peers_lock = peers.lock().await;
 
                                                     // Node Identity Binding Fix: unauthenticated
                                                     // peer-exchange hearsay carries no signing key at
                                                     // all — never let it introduce a pinned node_id.
                                                     // Only that node's OWN verified Hello may do that.
-                                                    let is_pinned = transport.pinned_identities.read().await.contains_key(&new_peer_id);
+                                                    let is_pinned = pins_guard.contains_key(&new_peer_id);
 
                                                     let hearsay = peers_lock.values().filter(|p| p.verified_signing_pubkey.is_none()).count();
                                                     if !peers_lock.contains_key(&new_peer_id) && !is_pinned && hearsay < MAX_HEARSAY_PEERS {

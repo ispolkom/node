@@ -6,7 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
 
 pub const MARKER: &str = "\u{1}yandi-rx:";
 /// Тот же набор, что в приложении (`MsgChannel.reactionSet`).
@@ -30,23 +29,34 @@ struct Data {
     rids: HashMap<String, String>,
 }
 
-static DATA: Mutex<Option<Data>> = Mutex::new(None);
-
-fn path() -> std::path::PathBuf {
-    crate::util::data_dir::data_dir().join("chat_reactions.json")
-}
+static STORE: crate::util::sealed_json::SealedJson<Data> =
+    crate::util::sealed_json::SealedJson::new("chat_reactions.json", "chat_reactions.enc", "chat_reactions");
 
 fn with<R>(f: impl FnOnce(&mut Data) -> R) -> R {
-    let mut g = DATA.lock().unwrap_or_else(|e| e.into_inner());
-    let d = g.get_or_insert_with(|| std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
-    let r = f(d);
-    if let Ok(s) = serde_json::to_vec(&*d) {
-        if let Some(p) = path().parent() {
-            let _ = std::fs::create_dir_all(p);
-        }
-        let _ = crate::util::private_file::write_private(&path(), &s);
-    }
-    r
+    STORE.with(f)
+}
+
+/// Закрытая среда: ключ области выдан / среда заперта / среда стёрта.
+pub fn unlock(key: [u8; 32]) {
+    STORE.unlock(key)
+}
+pub fn lock() {
+    STORE.lock()
+}
+pub fn erase() {
+    STORE.erase()
+}
+
+/// Переписка с собеседником удалена: его реакции и соответствия номеров больше не хранятся.
+pub fn forget_peer(peer_short: &str) {
+    with(|d| {
+        d.by_peer.remove(peer_short);
+    });
+}
+
+/// Вся переписка удалена.
+pub fn forget_all() {
+    with(|d| *d = Data::default());
 }
 
 pub fn envelope(msg_key: &str, emoji: &str) -> String {
@@ -168,5 +178,16 @@ mod tests {
         let own = local_for_phone("dev", "17ab-c");
         assert_eq!(own.len(), 64);
         assert_ne!(own, "17ab-c");
+    }
+
+    #[test]
+    fn reactions_do_not_outlive_the_history_they_belong_to() {
+        set_peer("aaaa1111aaaa1111", "m1", "👍");
+        set_peer("bbbb2222bbbb2222", "m2", "😂");
+        forget_peer("aaaa1111aaaa1111");
+        assert!(of_peer("aaaa1111aaaa1111").is_empty());
+        assert_eq!(of_peer("bbbb2222bbbb2222").len(), 1);
+        forget_all();
+        assert!(of_peer("bbbb2222bbbb2222").is_empty());
     }
 }

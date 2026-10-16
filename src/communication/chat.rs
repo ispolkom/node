@@ -796,12 +796,17 @@ impl ChatManager {
 
     /// Очистить историю чата
     pub fn clear_history(&self, peer_id: &HashId) -> Result<()> {
-        self.storage.clear_history(peer_id)
+        self.storage.clear_history(peer_id)?;
+        // реакции этой переписки не должны пережить саму историю
+        crate::chat_reactions::forget_peer(&hex::encode(&peer_id.0[..8]));
+        Ok(())
     }
 
     /// Очистить ВСЮ историю
     pub fn clear_all_history(&self) -> Result<()> {
-        self.storage.clear_all()
+        self.storage.clear_all()?;
+        crate::chat_reactions::forget_all();
+        Ok(())
     }
 
     /// Редактировать сообщение

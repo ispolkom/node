@@ -775,20 +775,28 @@ struct Unread {
     cmid: String,
 }
 
-static UNREAD: std::sync::Mutex<Option<std::collections::HashMap<String, Unread>>> = std::sync::Mutex::new(None);
+static UNREAD: crate::util::sealed_json::SealedJson<std::collections::HashMap<String, Unread>> =
+    crate::util::sealed_json::SealedJson::new("mobile_self_unread.json", "mobile_self_unread.enc", "mobile_self_unread");
 
 fn with_unread<R>(f: impl FnOnce(&mut std::collections::HashMap<String, Unread>) -> R) -> R {
-    let path = crate::util::data_dir::data_dir().join("mobile_self_unread.json");
-    let mut g = UNREAD.lock().unwrap_or_else(|e| e.into_inner());
-    let map = g.get_or_insert_with(|| std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
-    let r = f(map);
-    if map.len() > 20000 {
-        map.clear(); // старьё: «прочитано» по ним уже не нужно
-    }
-    if let Ok(s) = serde_json::to_vec(&*map) {
-        let _ = crate::util::private_file::write_private(&path, &s);
-    }
-    r
+    UNREAD.with(|map| {
+        let r = f(map);
+        if map.len() > 20000 {
+            map.clear(); // старьё: «прочитано» по ним уже не нужно
+        }
+        r
+    })
+}
+
+/// Закрытая среда: ключ области выдан / среда заперта / среда стёрта (индекс непрочитанного — закрытый уровень).
+pub fn unread_unlock(key: [u8; 32]) {
+    UNREAD.unlock(key)
+}
+pub fn unread_lock() {
+    UNREAD.lock()
+}
+pub fn unread_erase() {
+    UNREAD.erase()
 }
 
 pub fn remember_unread(local: &crate::util::HashId, device: &str, cmid: &str) {
@@ -1258,6 +1266,7 @@ mod tests {
         let id = received.receipt_id;
         assert!(matches!(classify(receipt(false, &[id.clone()])), Envelope::Receipt { read: false, ids } if ids == [id.clone()]));
         let local = incoming_id(&device, &id);
+        unread_unlock([9; 32]); // индекс непрочитанного теперь закрытый: в тесте выдаём ему ключ области
         remember_unread(&local, &device, &id);
         assert!(take_unread("another-device").is_empty());
         let unread = take_unread(&device);
