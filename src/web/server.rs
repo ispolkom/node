@@ -2747,8 +2747,9 @@ fn load_gateways(path: &str) -> Result<Vec<serde_json::Value>, String> {
         Ok(content) => {
             let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("gateways.json повреждён: {e}"))?;
             // структура проверяется: «gateways» не массив — повреждение, а не пустой список (иначе следующая запись затёрла бы документ)
+            // корень обязан быть объектом с полем gateways; иначе (массив, чужое имя поля) это не «пустой список», а чужой документ
             match data.get("gateways") {
-                None => Ok(Vec::new()),
+                None => Err("gateways.json повреждён: нет поля gateways".to_string()),
                 Some(v) => match v.as_array() {
                     Some(a) if a.iter().all(|x| x.is_object()) => Ok(a.clone()),
                     _ => Err("gateways.json повреждён: поле gateways должно быть списком объектов".to_string()),
@@ -6106,6 +6107,12 @@ mod gateways_file_tests {
         assert!(load_gateways(ps).is_err(), "gateways не массив");
         assert!(update_gateways(ps, |g| g.clear()).is_err());
         assert_eq!(std::fs::read(&p).unwrap(), br#"{"gateways":{"saved":[]}}"#.to_vec(), "файл не затёрт");
+        // корень-массив и объект без поля gateways — тоже чужой документ
+        for body in [&br#"[{"id":"1"}]"#[..], &br#"{"gatways":[]}"#[..], &br#"{}"#[..]] {
+            std::fs::write(&p, body).unwrap();
+            assert!(update_gateways(ps, |g| g.clear()).is_err(), "{}", String::from_utf8_lossy(body));
+            assert_eq!(std::fs::read(&p).unwrap(), body.to_vec(), "файл не затёрт");
+        }
         std::fs::write(&p, b"{broken").unwrap();
         assert!(update_gateways(ps, |g| g.clear()).is_err(), "повреждённый список не заменяется пустым");
         assert_eq!(std::fs::read(&p).unwrap(), b"{broken");
