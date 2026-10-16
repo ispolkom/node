@@ -661,6 +661,16 @@ void main() {
     await owner.sync();
     expect(owner.isKnownContact(node.gid, bobAlias), isTrue);
     expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    // имя из книжки главнее ника: Боб назвал себя «Кор», я сохранил его как «Мама» — у меня он «Мама», у остальных «Кор»
+    bob.setProfile('Кор', null);
+    await bob.sync();
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    owner.contactKeys = () async => const [];             // не мой контакт — виден его собственный ник
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Кор');
+    owner.contactKeys = () async => [(pub, 'Мама')];
+    await owner.sync();
     // чужая подпись под тем же именем не годится: ключ контакта другой
     owner.contactKeys = () async => [(List<int>.filled(32, 0xaa), 'Мама')];
     await owner.sync();

@@ -1255,10 +1255,9 @@ fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
     let members = with_store(|st| st.members(gid, dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
     let mut out: HashMap<String, String> =
         members.iter().filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string()))).collect();
-    // раскрытый ник — постоянное имя человека и следует за его профилем: он главнее имени, записанного у меня в контактах
-    // (оно проставляется при сопряжении само); имя контакта подставляется, только когда ника нет
+    // имя, которое я сам дал контакту (опознан по подписи), главнее его ника — только у меня; у остальных остаётся его ник
     for (alias, name) in recognised(gid, &members) {
-        out.entry(alias).or_insert(name);
+        out.insert(alias, name);
     }
     out
 }
