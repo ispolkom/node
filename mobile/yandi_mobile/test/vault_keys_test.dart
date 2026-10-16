@@ -306,4 +306,31 @@ void main() {
     be.blob = jsonEncode(current);
     (await VaultKeys.unlock(be, 'новый-пароль-7')).lock();
   });
+
+  test('миграция тега не удалась (диск полон): вход не ломается и метка не поднимается; со следующего раза миграция проходит (P8-3)', () async {
+    final be = FlakyBlobBackend();
+    final v = await _make(be);
+    final blobJson = jsonDecode(be.blob!) as Map<String, dynamic>;
+    blobJson['gt'] = await v.legacyTagForTest(blobJson['gen'] as int);   // файл «прежней версии» с прежним тегом
+    be.blob = jsonEncode(blobJson);
+    be.secure['vault_gt'] = '1';
+    v.lock();
+    be.failWrites = true;
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // запись нового файла не удалась, вход всё равно успешен
+    expect(be.secure['vault_gt'], '1', reason: 'метка версии 2 не поднята: файл всё ещё со старым тегом');
+    be.failWrites = false;
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // следующий вход: исправный файл принят и перезаверен
+    expect(be.secure['vault_gt'], '2');
+    expect((jsonDecode(be.blob!) as Map)['gt'], isNot(blobJson['gt']), reason: 'файл перезаверен по-новому');
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // и вход после миграции по-прежнему работает
+  });
+}
+
+class FlakyBlobBackend extends MemoryVaultBackend {
+  bool failWrites = false;
+  @override
+  Future<void> writeBlob(String text) async {
+    if (failWrites) throw StateError('диск полон');
+    await super.writeBlob(text);
+  }
 }

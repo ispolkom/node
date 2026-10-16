@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
@@ -138,6 +139,10 @@ class VaultKeys {
   }
 
   bool get unlocked => _dk != null;
+
+  /// Только для проверок: прежний тег поколения (до заверения обёрток), каким его писали старые версии.
+  @visibleForTesting
+  Future<String> legacyTagForTest(int gen) => _genTagV1(_dk!, gen);
 
   /// Подключ для конкретной цели (ключ базы, ключ файлов …): из DK одним HKDF, чтобы сам DK нигде не использовался напрямую.
   Future<Uint8List> subKey(String purpose) async {
@@ -371,15 +376,24 @@ class VaultKeys {
       final v2 = await _genTag(dk, fg, f);
       final legacy = tag != v2 && tag == await _genTagV1(dk, fg) && await b.secureRead(_kGt) != '2';
       if (tag != v2 && !legacy) throw VaultCorrupt('поколение файла ключей не заверено: файл изменён');
+      var migrated = !legacy;
       if (legacy) {
-        // прежний тег заверял только номер поколения: один раз перезаверяем по-новому (с обёртками); после этого возврат к прежнему виду запрещён
+        // прежний тег заверял только номер поколения: один раз перезаверяем по-новому (с обёртками)
         f['gt'] = v2;
         try {
           await b.writeBlob(jsonEncode(f));
-        } catch (_) {}
+          migrated = true;
+        } catch (_) {
+          // запись не удалась (диск полон): файл остаётся с прежним тегом, а метка НЕ поднимается до версии 2 — иначе следующий вход
+          // отверг бы исправный файл как «понижение формата». Миграция повторится при следующем входе.
+        }
       }
       if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
-      await b.secureWrite(_kGt, '2');
+      if (migrated) {
+        await b.secureWrite(_kGt, '2');
+      } else if (await b.secureRead(_kGt) == null) {
+        await b.secureWrite(_kGt, '1');
+      }
       return;
     }
     // файл без заверения допустим только как прежний формат; если заверенный файл уже был, удалённое `gt` — подмена

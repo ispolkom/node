@@ -35,6 +35,19 @@ class SlowVoice extends FakeVoice {
 }
 
 void main() {
+  test('двойное нажатие микрофона: второй запуск не стартует поверх первого и не останавливает его (P8-15)', () async {
+    final b = SlowVoice();
+    final r = VoiceRecording(b, () async => '/tmp/one.m4a');
+    final first = r.start();
+    await Future<void>.delayed(Duration.zero);
+    expect(await r.start(), contains('запускается'), reason: 'пока идёт первый запуск, второй отклоняется');
+    b.gate.complete();
+    expect(await first, isNull);
+    expect(r.active, true);
+    expect(b.started, true, reason: 'запись первого запуска идёт и никем не остановлена');
+    await r.stop();
+  });
+
   test('закрыли чат, пока запускался микрофон: запись не оживает, файл стирается (P7-3)', () async {
     final b = SlowVoice();
     final r = VoiceRecording(b, () async => '/tmp/late.m4a');

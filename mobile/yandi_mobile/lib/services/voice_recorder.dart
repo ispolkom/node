@@ -43,6 +43,7 @@ class VoiceRecording extends ChangeNotifier {
   String? path;
   Timer? _timer;
   bool _disposed = false;
+  bool _starting = false;   // запуск идёт: второй запуск не допускается, пока первый не завершится или не будет отменён
   int _gen = 0;   // поколение запуска: stop/dispose во время запуска отменяют его
   /// Достигнут предел длины: вызывающий должен завершить запись.
   VoidCallback? onLimit;
@@ -51,6 +52,16 @@ class VoiceRecording extends ChangeNotifier {
   /// null — запись идёт; иначе — причина, почему не началась.
   Future<String?> start() async {
     if (active || _disposed) return null;
+    if (_starting) return 'Микрофон ещё запускается';   // двойное нажатие не запускает второй запуск поверх первого
+    _starting = true;
+    try {
+      return await _startOnce();
+    } finally {
+      _starting = false;
+    }
+  }
+
+  Future<String?> _startOnce() async {
     final gen = ++_gen;
     bool stale() => _disposed || gen != _gen;
     if (!await backend.hasPermission()) return 'Нет доступа к микрофону: разрешите его в настройках телефона';
