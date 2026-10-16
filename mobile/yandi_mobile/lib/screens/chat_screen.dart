@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'file_viewer_screen.dart';
 import '../widgets/avatar_circle.dart';
 import '../models/group_invite.dart';
+import '../models/contact_card.dart';
 import '../widgets/secure_keyboard.dart';
 import 'groups_tab.dart' show joinInvited;
 import 'group_chat_screen.dart';
@@ -123,10 +124,12 @@ class _ChatScreenState extends State<ChatScreen> {
 
   /// Меню слов по нажатию на сообщение: Изменить, Ответить, Копировать, Удалить.
   Future<void> _messageMenu(ChatMessage m, Offset at) async {
-    final plain = FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null;
+    final card = ContactCardMsg.tryParse(m.text);
+    final plain = FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null && card == null;
     final isFile = FileOffer.tryParse(m.text) != null;
     final choice = await showMessageMenu(context, at, [
       cmdReply,                              // «Ответить» — самое верхнее
+      if (card != null && !m.outgoing && card.fullId.isNotEmpty) cmdSaveContact,
       if (m.outgoing && plain) cmdEdit,
       if (plain) cmdCopy,
       if (plain || isFile) cmdShare,         // «Переслать»
@@ -143,6 +146,8 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     switch (choice) {
+      case cmdSaveContact:
+        if (card != null && card.fullId.isNotEmpty) showSaveContactDialog(context, card.fullId, card.name);
       case cmdEdit:
         _startEdit(m);
       case cmdReply:
@@ -642,6 +647,8 @@ class _MessageBubble extends StatelessWidget {
               _FileCard(offer: offer, outgoing: isOut, failed: msg.status == MessageStatus.failed)
             else if (GroupInviteMsg.tryParse(msg.text) case final inv?)
               _InviteCard(invite: inv, outgoing: isOut)
+            else if (ContactCardMsg.tryParse(msg.text) case final card?)
+              _ContactCardView(card: card, outgoing: isOut)
             else
               Text(msg.text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             const SizedBox(height: 2),
@@ -920,6 +927,38 @@ class _Action extends StatelessWidget {
       ),
     ),
   );
+}
+
+/// Контакт, которым поделился собеседник: у получателя — «Сохранить» (окно с именем, правка только у себя).
+class _ContactCardView extends StatelessWidget {
+  final ContactCardMsg card;
+  final bool outgoing;
+  const _ContactCardView({required this.card, required this.outgoing});
+
+  @override
+  Widget build(BuildContext context) {
+    final state = context.watch<AppState>();
+    final known = card.fullId.isNotEmpty && state.isSaved(card.fullId);
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      Row(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.person_outline, color: AppTheme.accent),
+        const SizedBox(width: 8),
+        Flexible(child: Text(card.name.isEmpty ? 'Контакт' : card.name, style: const TextStyle(color: AppTheme.text, fontSize: 15, fontWeight: FontWeight.bold))),
+      ]),
+      const SizedBox(height: 4),
+      Text(
+        outgoing ? 'Контакт отправлен' : known ? 'Уже в ваших контактах' : card.fullId.isEmpty ? 'Контакт без полного адреса: сохранить нельзя' : 'Контакт от собеседника',
+        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+      ),
+      if (!outgoing && !known && card.fullId.isNotEmpty)
+        FilledButton(
+          key: const Key('save-shared-contact'),
+          style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
+          onPressed: () => showSaveContactDialog(context, card.fullId, card.name),
+          child: const Text('Сохранить'),
+        ),
+    ]);
+  }
 }
 
 /// Приглашение в группу в чате: у получателя — кнопка «Вступить», у отправителя — пометка.
