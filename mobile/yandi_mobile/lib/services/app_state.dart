@@ -1420,7 +1420,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   Future<void> sendMessage(String peerId, String text, {ChatMessage? replyTo}) async {
     if (isBlocked(peerId)) return;   // двусторонний блок: заблокированному не отправляем
-    final id = DateTime.now().millisecondsSinceEpoch.toString();
+    final id = ChatMessage.generateId();
     // Всегда конверт с id: получатель по нему отвечает «доставлено/прочитано». Раньше обёртка зависела от того, успел ли собеседник ответить
     // на пинг поддержки в этом сеансе: после запуска приложения это знание пусто, и всё отправленное в это окно уходило без номера — без галочек.
     // Шифровать мы можем только устройствам со связкой ключей E4, то есть новым сборкам, а они квитанции умеют.
@@ -1526,7 +1526,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final showText = res.$1;
     final remoteId = res.$2;
     final msg = ChatMessage(
-      id:        'inbox_${e.timestamp.millisecondsSinceEpoch}',
+      id:        ChatMessage.incomingId(e.fromPeerId, e.timestamp, showText),
       peerId:    e.fromPeerId,
       outgoing:  false,
       text:      showText,

@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'dart:math';
+import 'package:crypto/crypto.dart';
 
 enum MessageStatus { pending, delivered, read, failed }
 
@@ -30,11 +32,19 @@ class ChatMessage {
     this.replyText,
   });
 
+  /// Номер нового исходящего сообщения: время + 64 случайных бита (два сообщения в одну миллисекунду не совпадают).
   static String generateId() {
-    final rng = Random();
+    final rng = Random.secure();
     final ts  = DateTime.now().millisecondsSinceEpoch.toRadixString(16);
-    final rand = rng.nextInt(0xFFFFFF).toRadixString(16).padLeft(6, '0');
+    final rand = List.generate(8, (_) => rng.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
     return '$ts-$rand';
+  }
+
+  /// Номер входящего из E4-конверта: время, отправитель и отпечаток текста. Одно и то же письмо даёт один номер (повтор безопасен),
+  /// разные письма одного времени или от разных собеседников — разные.
+  static String incomingId(String fromPeerId, DateTime timestamp, String text) {
+    final digest = sha256.convert(utf8.encode('$fromPeerId|${timestamp.millisecondsSinceEpoch}|$text')).toString().substring(0, 20);
+    return 'inbox_${timestamp.millisecondsSinceEpoch}_$digest';
   }
 
   ChatMessage copyWith({MessageStatus? status, String? remoteId}) => ChatMessage(
