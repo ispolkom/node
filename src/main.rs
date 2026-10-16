@@ -37,6 +37,12 @@ async fn main() -> anyhow::Result<()> {
             let code = yandi::testnet::run_cli(argv[2..].to_vec()).await;
             std::process::exit(code);
         }
+        // `yandi backup inspect|verify|restore FILE` — работа с файлом резервной копии связей без запуска узла
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("backup") {
+            let code = yandi::backup_cli::run(argv[2..].to_vec());
+            std::process::exit(code);
+        }
         // `yandi bootstrap keygen|show|verify|add|from-card|remove|sign` — инструменты владельца списка входных узлов
         if argv.get(1).map(|a| a.as_str()) == Some("bootstrap") {
             let (code, text) = yandi::bootstrap::tool::run(argv[2..].to_vec());

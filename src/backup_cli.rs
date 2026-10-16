@@ -1,0 +1,216 @@
+//! `yandi backup ...` — работа с файлом резервной копии без запуска узла.
+//!
+//!   yandi backup inspect FILE                 что за копия (номер, время, узел); код не нужен
+//!   yandi backup verify  FILE                 открыть кодом и перечислить содержимое; ничего не записывается
+//!   yandi backup restore FILE [--force]       восстановить связи на этой машине (узел не должен работать)
+//!
+//!   параметры: --code-stdin (код/мастер-пароль строкой со стандартного ввода: для скриптов и проверок), --yes (без вопроса «продолжить»),
+//!   --port N (9000), --keys-dir/--data-dir/--home-dir D (другие каталоги, например для пробного восстановления),
+//!   --machine-id ID (для проверок)
+//!
+//! Код восстановления — тот, что показан при первой настройке узла (подходит и мастер-пароль, на который сделана обёртка).
+//! Он вводится без эха и нигде не сохраняется. После записи файлов для этой машины создаётся новый ключ устройства
+//! (`yandi-keys recover` внутри), поэтому узел стартует без повторного ввода кода.
+
+use crate::node_backup::{self, Layout, RestoreOptions};
+use std::io::BufRead;
+use std::path::PathBuf;
+
+struct Args {
+    cmd: String,
+    file: PathBuf,
+    force: bool,
+    yes: bool,
+    code_stdin: bool,
+    layout: Layout,
+    machine_id: Option<String>,
+}
+
+fn parse(argv: Vec<String>) -> Result<Args, String> {
+    let mut it = argv.into_iter();
+    let cmd = it.next().ok_or("нужна команда: inspect | verify | restore")?;
+    let mut file: Option<PathBuf> = None;
+    let (mut force, mut yes, mut code_stdin) = (false, false, false);
+    let mut port: u16 = 9000;
+    let (mut keys, mut data, mut home): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) = (None, None, None);
+    let mut machine_id = None;
+    while let Some(a) = it.next() {
+        let mut val = |name: &str| it.next().ok_or(format!("после {name} нужно значение"));
+        match a.as_str() {
+            "--force" => force = true,
+            "--yes" => yes = true,
+            "--code-stdin" => code_stdin = true,
+            "--port" => port = val("--port")?.parse().map_err(|_| "порт — число".to_string())?,
+            "--keys-dir" => keys = Some(val("--keys-dir")?.into()),
+            "--data-dir" => data = Some(val("--data-dir")?.into()),
+            "--home-dir" => home = Some(val("--home-dir")?.into()),
+            "--machine-id" => machine_id = Some(val("--machine-id")?),
+            s if s.starts_with("--") => return Err(format!("неизвестный параметр {s}")),
+            _ => file = Some(a.into()),
+        }
+    }
+    let live = Layout::live(port);
+    Ok(Args {
+        cmd,
+        file: file.ok_or("нужен путь к файлу .yandibak")?,
+        force,
+        yes,
+        code_stdin,
+        layout: Layout { keys: keys.unwrap_or(live.keys), data: data.unwrap_or(live.data), home: home.unwrap_or(live.home), port },
+        machine_id,
+    })
+}
+
+fn read_line() -> Result<String, String> {
+    let mut line = String::new();
+    std::io::stdin().lock().read_line(&mut line).map_err(|e| e.to_string())?;
+    Ok(line.trim_end_matches(['\r', '\n']).to_string())
+}
+
+/// Строка без эха (нужен терминал) или одна строка со стандартного ввода.
+fn ask_secret(prompt: &str, from_stdin: bool) -> Result<String, String> {
+    if from_stdin {
+        return read_line();
+    }
+    eprint!("{prompt}");
+    use std::io::Write;
+    let _ = std::io::stderr().flush();
+    unsafe {
+        if libc::isatty(0) != 1 {
+            return Err("стандартный ввод — не терминал; используйте --code-stdin".into());
+        }
+        let mut old: libc::termios = std::mem::zeroed();
+        libc::tcgetattr(0, &mut old);
+        let mut quiet = old;
+        quiet.c_lflag &= !libc::ECHO;
+        libc::tcsetattr(0, libc::TCSANOW, &quiet);
+        let line = read_line();
+        libc::tcsetattr(0, libc::TCSANOW, &old);
+        eprintln!();
+        line
+    }
+}
+
+fn describe(h: &node_backup::Header) -> String {
+    let (y, mo, d, hh, mi) = node_backup::civil_utc(h.created_ms / 1000);
+    format!("копия №{} от {y:04}-{mo:02}-{d:02} {hh:02}:{mi:02} UTC; узел {}", h.counter, h.node_id)
+}
+
+/// Работает ли узел с этим каталогом данных (сокет оболочки отвечает): восстановление поверх живого узла запрещено.
+fn node_is_running(l: &Layout) -> bool {
+    std::os::unix::net::UnixStream::connect(l.data.join("run").join("yandi-ui.sock")).is_ok()
+}
+
+pub fn run(argv: Vec<String>) -> i32 {
+    let a = match parse(argv) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 2;
+        }
+    };
+    let bytes = match std::fs::read(&a.file) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("yandi backup: {}: {e}", a.file.display());
+            return 2;
+        }
+    };
+    let header = match node_backup::read_header(&bytes) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 2;
+        }
+    };
+    println!("{}", describe(&header));
+    if a.cmd == "inspect" {
+        println!("в копии только связи; переписка, файлы, звонки и журналы групп не входят");
+        return 0;
+    }
+    if a.cmd != "verify" && a.cmd != "restore" {
+        eprintln!("yandi backup: неизвестная команда {}", a.cmd);
+        return 2;
+    }
+    let code = match ask_secret("Код восстановления (или мастер-пароль): ", a.code_stdin) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 2;
+        }
+    };
+    let opened = match node_backup::open_with_code(&bytes, &code) {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 1;
+        }
+    };
+    let entries = match opened.entries() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 1;
+        }
+    };
+    println!("копия открыта, файлов: {}; не входит: {}", entries.len(), opened.manifest.excluded.join(", "));
+    if a.cmd == "verify" {
+        for e in &entries {
+            println!("  {:?}/{} ({} байт)", e.area, e.path, e.data.len());
+        }
+        println!("проверка пройдена: файл цел, код подходит. Ничего не записано.");
+        return 0;
+    }
+    if node_is_running(&a.layout) {
+        eprintln!("yandi backup: узел с этим каталогом данных сейчас работает. Остановите его (sudo systemctl stop yandi-node) и повторите.");
+        return 1;
+    }
+    if !a.yes {
+        eprintln!("Будут записаны ключи и связи узла {} в {} и {}.", opened.header.node_id, a.layout.keys.display(), a.layout.data.display());
+        eprint!("Продолжить? (введите yes): ");
+        if read_line().map(|l| l.trim() != "yes").unwrap_or(true) {
+            eprintln!("отменено, ничего не записано");
+            return 1;
+        }
+    }
+    let report = match node_backup::restore(&opened, &a.layout, &RestoreOptions { force: a.force }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("yandi backup: {e}");
+            return 1;
+        }
+    };
+    println!("записано файлов: {}; групп восстановлено: {}", report.written.len(), report.groups);
+    for old in &report.kept_old {
+        println!("прежний файл сохранён: {}", old.display());
+    }
+    // ключ устройства для ЭТОЙ машины: корень открывается кодом, для него делается новая машинная обёртка
+    let machine: Box<dyn key_root::MachineContext> = match &a.machine_id {
+        Some(id) => Box::new(key_root::FixedMachine(id.clone())),
+        None => Box::new(key_root::SystemMachine),
+    };
+    let dir = match key_root::KeyDir::open(&a.layout.keys) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("yandi backup: каталог ключей: {e}");
+            return 1;
+        }
+    };
+    let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
+    let policy = key_root::KdfPolicy::production();
+    let secret = key_root::recovery_secret(&code);
+    let rec = key_root::Recovery { dir: &dir, port: a.layout.port, machine: machine.as_ref(), device: &device, password: &secret, policy: &policy };
+    match rec.run() {
+        Ok(r) => {
+            println!("личность узла {} восстановлена; для этой машины создан новый ключ устройства.", r.node_id);
+            println!();
+            println!("Дальше: запустите узел (sudo systemctl start yandi-node) и введите пароль закрытой среды, как раньше.");
+            println!("Телефоны и известные узлы подключатся сами. Группы возвращены без сообщений на узле (у участников они остались на телефонах).");
+            0
+        }
+        Err(e) => {
+            eprintln!("yandi backup: файлы записаны, но ключ устройства создать не удалось: {e}. Выполните `yandi-keys recover`.");
+            1
+        }
+    }
+}

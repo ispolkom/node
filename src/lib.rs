@@ -40,6 +40,8 @@ pub mod backup_signal;
 pub mod node_backup;
 #[cfg(unix)]
 pub mod backup_api;
+#[cfg(unix)]
+pub mod backup_cli;
 pub mod communication;
 pub mod core;
 pub mod crypto;

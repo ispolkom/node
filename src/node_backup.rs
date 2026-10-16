@@ -525,6 +525,10 @@ pub fn file_name(node_id: &str, counter: u64, now_ms: u64) -> String {
 }
 
 /// Дата и время по UTC из секунд эпохи (без внешних зависимостей).
+pub fn civil_utc(secs: u64) -> (u64, u64, u64, u64, u64) {
+    civil(secs)
+}
+
 fn civil(secs: u64) -> (u64, u64, u64, u64, u64) {
     let days = secs / 86_400;
     let rem = secs % 86_400;
