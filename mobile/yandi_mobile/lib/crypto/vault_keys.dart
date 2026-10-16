@@ -193,17 +193,18 @@ class VaultKeys {
     final wrapPw = await _wrap(dk, kekPw, 'pw');
     Uint8List? wrapPh;
     if (hasPhrase) wrapPh = await _wrap(dk, await _kekPhrase(phrase!, saltPh, phKdf), 'ph');
-    await b.writeBlob(jsonEncode({
+    final file = <String, dynamic>{
       'v': 1,
       'gen': 1,
-      'gt': await _genTag(dk, 1),
       'pw': {'kdf': pwKdf.toJson(), 'salt': base64.encode(saltPw), 'wrap': base64.encode(wrapPw)},
       'ph': hasPhrase
           ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!), if (!legacyPhraseEncoding) 'enc': 2}
           : null,
-    }));
+    };
+    file['gt'] = await _genTag(dk, 1, file);   // заверены номер поколения и обе секции обёрток
+    await b.writeBlob(jsonEncode(file));
     await b.secureWrite(_kGen, '1');
-    await b.secureWrite(_kGt, '1');   // файл создан сразу заверенным: снять `gt` и поднять `gen` до первого входа уже нельзя
+    await b.secureWrite(_kGt, '2');   // файл создан сразу заверенным: снять `gt` и поднять `gen` до первого входа уже нельзя
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -342,11 +343,11 @@ class VaultKeys {
     f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
     final gen = ((f['gen'] as int?) ?? 0) + 1;
     f['gen'] = gen;
-    f['gt'] = await _genTag(dk, gen);
+    f['gt'] = await _genTag(dk, gen, f);
     beforeCommit?.call();   // после всех вычислений, непосредственно перед записью нового замка
     await b.writeBlob(jsonEncode(f));      // сначала файл, потом метка: оборвёт между ними — файл новее метки, это допустимо
     await b.secureWrite(_kGen, '$gen');
-    await b.secureWrite(_kGt, '1');
+    await b.secureWrite(_kGt, '2');
   }
 
   /// Файл старее записанной метки поколения — его вернули из копии (с прежним паролем): отвергаем. Метки ещё нет (хранилище создано
@@ -367,9 +368,18 @@ class VaultKeys {
     final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
     final tag = f['gt'];
     if (tag is String) {
-      if (tag != await _genTag(dk, fg)) throw VaultCorrupt('поколение файла ключей не заверено: файл изменён');
+      final v2 = await _genTag(dk, fg, f);
+      final legacy = tag != v2 && tag == await _genTagV1(dk, fg) && await b.secureRead(_kGt) != '2';
+      if (tag != v2 && !legacy) throw VaultCorrupt('поколение файла ключей не заверено: файл изменён');
+      if (legacy) {
+        // прежний тег заверял только номер поколения: один раз перезаверяем по-новому (с обёртками); после этого возврат к прежнему виду запрещён
+        f['gt'] = v2;
+        try {
+          await b.writeBlob(jsonEncode(f));
+        } catch (_) {}
+      }
       if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
-      await b.secureWrite(_kGt, '1');
+      await b.secureWrite(_kGt, '2');
       return;
     }
     // файл без заверения допустим только как прежний формат; если заверенный файл уже был, удалённое `gt` — подмена
@@ -378,14 +388,32 @@ class VaultKeys {
     if (sg != null && fg > sg + 1) throw VaultCorrupt('поколение файла ключей выше записанной метки: файл изменён');
     if (sg == null) await b.secureWrite(_kGen, '$fg');
     try {
-      f['gt'] = await _genTag(dk, fg);
+      f['gt'] = await _genTag(dk, fg, f);
       await b.writeBlob(jsonEncode(f));   // заверяем прежний файл (то же поколение)
     } catch (_) {}
   }
 
-  static Future<String> _genTag(Uint8List dk, int gen) async {
+  /// Тег поколения v2: HMAC(DK) над номером поколения И обеими секциями обёрток (`pw`, `ph`: KDF, соль, обёртка). Старую (корректную)
+  /// секцию пароля под текущий `gt` подставить нельзя: тег перестаёт сходиться.
+  static Future<String> _genTag(Uint8List dk, int gen, Map<String, dynamic> f) async {
+    final mac = await Hmac.sha256().calculateMac(utf8.encode('yandi-vault:gen:v2:$gen:${_canon(f['pw'])}:${_canon(f['ph'])}'), secretKey: SecretKey(dk));
+    return base64.encode(mac.bytes);
+  }
+
+  /// Прежний тег (только номер поколения): принимается один раз, чтобы перезаверить файл по-новому.
+  static Future<String> _genTagV1(Uint8List dk, int gen) async {
     final mac = await Hmac.sha256().calculateMac(utf8.encode('yandi-vault:gen:v1:$gen'), secretKey: SecretKey(dk));
     return base64.encode(mac.bytes);
+  }
+
+  /// Каноническая запись JSON-значения (ключи по порядку): одинаковая у файла, только что собранного и прочитанного заново.
+  static String _canon(Object? v) {
+    if (v is Map) {
+      final keys = v.keys.map((k) => '$k').toList()..sort();
+      return '{${keys.map((k) => '${jsonEncode(k)}:${_canon(v[k])}').join(',')}}';
+    }
+    if (v is List) return '[${v.map(_canon).join(',')}]';
+    return jsonEncode(v);
   }
 
   /// Сколько неверных подряд. Метка заведена, а счётчика нет — его стёрли: засчитываем как несколько ошибок (с паузой).
