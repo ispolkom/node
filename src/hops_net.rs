@@ -435,10 +435,17 @@ impl Hops {
             // от цели к отправителю
             let mut seq = 0u32;
             let mut buf = vec![0u8; CHUNK];
-            loop {
+            'reader: loop {
                 // backpressure: while the shared send queue is full, stop reading from the destination
+                // (ожидание прерывается закрытием потока/цепочки: иначе при устойчивой перегрузке читатель держал бы сокет бесконечно)
                 while OUT_QUEUED.load(std::sync::atomic::Ordering::Relaxed) > OUT_QUEUE_HIGH {
-                    tokio::time::sleep(Duration::from_millis(5)).await;
+                    if *cancel_rx.borrow() {
+                        break 'reader;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep(Duration::from_millis(5)) => {}
+                        _ = cancel_rx.changed() => break 'reader,
+                    }
                 }
                 // чтение прекращается при закрытии цепочки/потока и при долгом простое (нет ни чтения, ни записи)
                 let read = tokio::select! {
