@@ -492,7 +492,7 @@ impl HttpProxyGateway {
                 name_lower.as_str(),
                 "connection" | "keep-alive" | "proxy-authenticate" |
                 "proxy-authorization" | "te" | "trailers" |
-                "transfer-encoding" | "upgrade"
+                "transfer-encoding" | "upgrade" | "content-length"
             ) {
                 continue;
             }
@@ -547,6 +547,11 @@ impl HttpProxyGateway {
         // Upgrade-Insecure-Requests
         if !header_names.iter().any(|k| k.to_lowercase() == "upgrade-insecure-requests") {
             http_req = http_req.header("Upgrade-Insecure-Requests", "1");
+        }
+
+        // тело запроса (POST): доставленные байты уходят цели как есть; Content-Length выставляет клиент по фактической длине
+        if request.method == "POST" && !request.body.is_empty() {
+            http_req = http_req.body(request.body.clone());
         }
 
         // Send request
