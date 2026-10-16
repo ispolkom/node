@@ -22,6 +22,9 @@ class ContactAvatar extends StatefulWidget {
 
   static final Map<String, (DateTime, Uint8List?)> _cache = {};
 
+  /// Картинку человека сменили (локально или он сам): забыть запомненный ответ, чтобы список запросил её заново.
+  static void invalidate(String id) => _cache.remove(id);
+
   @override
   State<ContactAvatar> createState() => _ContactAvatarState();
 }

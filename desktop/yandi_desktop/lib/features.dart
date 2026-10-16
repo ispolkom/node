@@ -1,3 +1,4 @@
+import 'dart:convert' show base64;
 import 'message_actions.dart';
 import 'contact_avatar.dart';
 import 'nick.dart';
@@ -514,6 +515,47 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     await mutate(() => repo.rename(contact, clean));
   }
 
+  /// Своя картинка этому человеку: видна только мне, ему ничего не отправляется (его собственная остаётся у остальных).
+  Future<void> pickContactAvatar(Map<String, dynamic> contact) async {
+    if (choosingFile || sending) return;
+    choosingFile = true;
+    final rev = revision;
+    try {
+      final path = await PlatformFiles.choose();
+      if (!active || rev != revision || path == null) return;
+      final size = await File(path).length();
+      if (size == 0 || size > 2 * 1024 * 1024) {
+        if (active) setState(() => error = 'Картинка до 2 МБ.');
+        return;
+      }
+      final bytes = await File(path).readAsBytes();
+      if (!FileRepository.raster(bytes)) {
+        bytes.fillRange(0, bytes.length, 0);
+        if (active) setState(() => error = 'Это не картинка (нужны PNG, JPEG или GIF).');
+        return;
+      }
+      final b64 = base64.encode(bytes);
+      bytes.fillRange(0, bytes.length, 0);
+      await mutate(() async {
+        await widget.api.request('/api/contacts/local', body: {'id': '${contact['short_id']}', 'avatar_b64': b64});
+        ContactAvatar.invalidate('${contact['avatar_id'] ?? contact['short_id']}');
+        await refresh();
+      });
+    } finally {
+      choosingFile = false;
+    }
+  }
+
+  /// Снять локальные имя и картинку: снова виден он сам (его ник и его картинка).
+  Future<void> resetLocal(Map<String, dynamic> contact) async {
+    if (!await confirm('Снять локальные имя и картинку?', 'Контакт снова будет показываться так, как он назвал себя сам.')) return;
+    await mutate(() async {
+      await widget.api.request('/api/contacts/local', body: {'id': '${contact['short_id']}', 'name': '', 'avatar_b64': ''});
+      ContactAvatar.invalidate('${contact['avatar_id'] ?? contact['short_id']}');
+      await refresh();
+    });
+  }
+
   Future<bool> confirm(String title, String explanation) async {
     final rev = revision;
     final answer = await showDialog<bool>(
@@ -889,6 +931,17 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                         onPressed: sending ? null : () => rename(c),
                         child: const UiText('Переименовать'),
                       ),
+                      TextButton(
+                        key: ValueKey('avatar-${c['short_id']}'),
+                        onPressed: sending ? null : () => pickContactAvatar(c),
+                        child: const UiText('Картинка'),
+                      ),
+                      if ('${c['local_name'] ?? ''}'.isNotEmpty || c['avatar_local'] == true)
+                        TextButton(
+                          key: ValueKey('reset-local-${c['short_id']}'),
+                          onPressed: sending ? null : () => resetLocal(c),
+                          child: const UiText('Как он сам'),
+                        ),
                       if (c['is_phone'] == true) ...[
                         for (final a in ['remove', 'hide', 'block'])
                           TextButton(

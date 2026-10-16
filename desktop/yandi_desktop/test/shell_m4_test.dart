@@ -159,6 +159,14 @@ void main() {
     expect(cleanPersonName('Корhttps://example.org/x'), 'Кор');   // ссылка из буфера в имя не попадает
     await m1.stop(t);
   });
+  testWidgets('контакт: «Картинка» есть у каждого, «Как он сам» не показывается, пока ничего локального не задано', (t) async {
+    final api = m2.FeatureApi();
+    await m2.open(t, api, 'Чат');
+    expect(find.byKey(ValueKey('avatar-${'a' * 16}')), findsOneWidget);
+    expect(find.byKey(ValueKey('avatar-${'b' * 16}')), findsOneWidget);
+    expect(find.byKey(ValueKey('reset-local-${'a' * 16}')), findsNothing);
+    await m1.stop(t);
+  });
   testWidgets('emoji panel inserts into the composer in chat', (t) async {
     final api = m2.FeatureApi();
     await m2.open(t, api, 'Чат');
