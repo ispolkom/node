@@ -50,11 +50,11 @@ def call(path, method='GET', body=None, cookie=None, raw=False):
     data = r.read()
     return r.status, (data if raw else json.loads(data or b'{}')), r.headers
 
-def sign_in(first):
+def sign_in(first, login=LOGIN):
     for _ in range(240):
         try:
             st, body, h = call('/api/auth/setup' if first else '/api/auth/login', 'POST',
-                {'login_password': LOGIN, 'login_password_repeat': LOGIN, 'master_password': MASTER, 'master_password_repeat': MASTER} if first else {'login_password': LOGIN})
+                {'login_password': LOGIN, 'login_password_repeat': LOGIN, 'master_password': MASTER, 'master_password_repeat': MASTER} if first else {'login_password': login})
             if st == 200:
                 for v in h.get_all('Set-Cookie') or []:
                     if v.startswith('yandi_session='): return v.split(';')[0]
@@ -106,8 +106,11 @@ r = subprocess.run([BIN, 'backup', 'restore', f'{ROOT}/node.yandibak', '--code-s
 print(r.stdout); print(r.stderr[-800:])
 assert r.returncode == 0, f'restore вернул {r.returncode}'
 pb = start(B)
-cookie_b = sign_in(False)
-assert cookie_b, 'B: вход по прежнему паролю'
+cookie_b = sign_in(False, VAULT_NEW)
+assert cookie_b, 'B: вход новым паролем (после восстановления пароль входа заменён)'
+st_old_login, _, _ = call('/api/auth/login', 'POST', {'login_password': LOGIN})
+print('вход прежним паролем входа:', st_old_login, '(ожидается 401)')
+assert st_old_login == 401, 'B: прежний пароль входа не должен действовать'
 assert ready(cookie_b), 'B: не готов'
 id_b = node_id(cookie_b)
 print('узел B:', id_b)
