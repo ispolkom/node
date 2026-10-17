@@ -523,6 +523,7 @@ class _ProxyFormState extends State<ProxyForm> {
                 onChanged: (v) => setState(() => kind = v!),
               ),
             ),
+            const SizedBox(height: 16),
             TextField(
               controller: line,
               minLines: 1,
@@ -532,17 +533,22 @@ class _ProxyFormState extends State<ProxyForm> {
               style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
               decoration: InputDecoration(
                 labelText: tr(context, 'ip:port:login:pass'),
+                contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                border: const OutlineInputBorder(),
                 hintText: '203.0.113.5:1080:login:pass',
               ),
             ),
             if (widget.editing) ...[
+              const SizedBox(height: 20),
               TextField(
                 controller: limit,
                 decoration: InputDecoration(
                   labelText: tr(context, 'Клиентов (0 — общий предел)'),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14),
+                  border: const OutlineInputBorder(),
                 ),
               ),
-              const SizedBox(height: 6),
+              const SizedBox(height: 14),
               PanelCheck(
                 value: enabled,
                 label: 'Включён',

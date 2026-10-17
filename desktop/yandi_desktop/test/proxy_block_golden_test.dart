@@ -62,6 +62,12 @@ void main() {
         find.byType(Scaffold),
         matchesGoldenFile('goldens/Прокси_${size.width.toInt()}.png'),
       );
+      await t.tap(find.widgetWithText(ElevatedButton, 'Изменить'));
+      await t.pumpAndSettle();
+      await expectLater(
+        find.byType(MaterialApp),
+        matchesGoldenFile('goldens/Прокси_правка_${size.width.toInt()}.png'),
+      );
       await stop(t);
     });
   }
