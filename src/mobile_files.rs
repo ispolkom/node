@@ -43,6 +43,9 @@ struct Meta {
     total_chunks: u32,
     created_ms: u64,
     done: bool,
+    /// абсолютный срок (мс) для файлов гостя: назначен при создании, не продлевается сменой роли и перезапуском (0 — нет)
+    #[serde(default)]
+    exp_ms: u64,
 }
 
 fn root() -> PathBuf {
@@ -99,9 +102,21 @@ static BEGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn expired(m: &Meta) -> bool {
-    // файлы гостя (отправителя или получателя) живут сутки, а не неделю (docs/GUEST.md)
+    // файлы гостя (отправителя или получателя) живут сутки от создания, а не неделю; срок записан при создании и от роли не зависит
+    if m.exp_ms > 0 && now_ms() >= m.exp_ms {
+        return true;
+    }
     let guest = crate::mobile_api::is_guest_peer(&m.from) || crate::mobile_api::is_guest_peer(&m.to);
-    now_ms().saturating_sub(m.created_ms) > if m.done && !guest { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+    now_ms().saturating_sub(m.created_ms) > if m.done && !guest && m.exp_ms == 0 { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+}
+
+/// Срок файла: сутки, если на любом конце гость (иначе 0 — обычные сроки).
+fn guest_exp(from: &str, to: &str) -> u64 {
+    if crate::mobile_api::is_guest_peer(from) || crate::mobile_api::is_guest_peer(to) {
+        now_ms() + 24 * 3600 * 1000
+    } else {
+        0
+    }
 }
 
 /// Гостя удалили: его файлы (отправленные и ожидающие его) удаляются сразу, а не по сроку «обычного» файла.
@@ -259,7 +274,8 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
         hex::encode(b)
     };
     let label: String = req.file_name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(64).collect();
-    let meta = Meta { id: id.clone(), from: me, to: req.to_peer_id, file_name: label, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false };
+    let exp_ms = guest_exp(&me, &req.to_peer_id);
+    let meta = Meta { id: id.clone(), from: me, to: req.to_peer_id, file_name: label, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false, exp_ms };
     if tokio::fs::create_dir_all(dir_of(&id)).await.is_err() || save_meta(&meta).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось создать передачу");
     }
@@ -425,7 +441,7 @@ pub(crate) async fn node_begin(from: &str, to: &str, file_size: u64, total_chunk
         rand::thread_rng().fill_bytes(&mut b);
         hex::encode(b)
     };
-    let meta = Meta { id: id.clone(), from: from.to_string(), to: to.to_string(), file_name: "file".into(), file_size, total_chunks, created_ms: now_ms(), done: false };
+    let meta = Meta { id: id.clone(), from: from.to_string(), to: to.to_string(), file_name: "file".into(), file_size, total_chunks, created_ms: now_ms(), done: false, exp_ms: guest_exp(from, to) };
     tokio::fs::create_dir_all(dir_of(&id)).await.map_err(|e| e.to_string())?;
     save_meta(&meta).await.map_err(|e| e.to_string())?;
     Ok(id)
@@ -457,7 +473,7 @@ mod tests {
     use super::*;
 
     fn meta(done: bool, age_ms: u64) -> Meta {
-        Meta { id: "ab".repeat(16), from: "a".into(), to: "b".into(), file_name: String::new(), file_size: 2500, total_chunks: 3, created_ms: now_ms() - age_ms, done }
+        Meta { id: "ab".repeat(16), from: "a".into(), to: "b".into(), file_name: String::new(), file_size: 2500, total_chunks: 3, created_ms: now_ms() - age_ms, done, exp_ms: 0 }
     }
 
     #[test]
@@ -487,12 +503,31 @@ mod guest_ttl_tests {
         let user = crate::mobile_api::test_add_device_with_role("user", "ttu");
         let other = crate::mobile_api::test_add_device_with_role("user", "tto");
         let (g, u, o) = (crate::mobile_api::device_peer_of(&guest).unwrap(), crate::mobile_api::device_peer_of(&user).unwrap(), crate::mobile_api::device_peer_of(&other).unwrap());
-        let meta = |from: &str, to: &str, age_h: u64| Meta { id: "a".repeat(32), from: from.into(), to: to.into(), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - age_h * 3600 * 1000, done: true };
+        let meta = |from: &str, to: &str, age_h: u64| Meta { id: "a".repeat(32), from: from.into(), to: to.into(), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - age_h * 3600 * 1000, done: true, exp_ms: 0 };
         assert!(expired(&meta(&g, &u, 25)), "файл от гостя старше суток просрочен");
         assert!(expired(&meta(&u, &g, 25)), "и файл гостю тоже");
         assert!(!expired(&meta(&g, &u, 23)));
         assert!(!expired(&meta(&u, &o, 48)), "обычные устройства: срок прежний, неделя");
         assert!(expired(&meta(&u, &o, 24 * 8)));
+    }
+
+    #[test]
+    fn a_guest_files_term_is_written_at_creation_and_does_not_depend_on_who_is_a_guest_later() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let g = crate::mobile_api::test_add_device_with_role("guest", "etg");
+        let u = crate::mobile_api::test_add_device_with_role("user", "etu");
+        let (gp, up) = (crate::mobile_api::device_peer_of(&g).unwrap(), crate::mobile_api::device_peer_of(&u).unwrap());
+        assert!(guest_exp(&gp, &up) > now_ms(), "файл гостя получает срок");
+        assert_eq!(guest_exp(&up, &"z".repeat(64)), 0, "обычный файл — без гостевого срока");
+        // срок прошёл, а гостя в памяти уже нет (перезапуск, принят в пользователи): файл всё равно просрочен
+        let m = Meta { id: "a".repeat(32), from: up.clone(), to: "z".repeat(64), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - 25 * 3600 * 1000, done: true, exp_ms: now_ms() - 1000 };
+        assert!(expired(&m));
+        // срок ещё не прошёл — файл жив, и неделя «обычного» срока его не продлевает сверх суток от создания
+        let live = Meta { exp_ms: now_ms() + 3600 * 1000, created_ms: now_ms() - 3600 * 1000, ..m.clone() };
+        assert!(!expired(&live));
+        let stale = Meta { exp_ms: now_ms() + 3600 * 1000, created_ms: now_ms() - 30 * 3600 * 1000, ..m };
+        assert!(expired(&stale));
     }
 }
 

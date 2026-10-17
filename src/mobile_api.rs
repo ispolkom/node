@@ -99,6 +99,9 @@ struct Mail {
     from: String,
     to: String,
     payload_b64: String,
+    /// абсолютный срок (мс), если письмо гостя или гостю: назначается при приёме и не продлевается ни сменой роли, ни перезапуском
+    #[serde(default)]
+    exp: u64,
 }
 static PAIRING: Mutex<Option<Pairing>> = Mutex::new(None);
 static DEVICES: Mutex<Option<Vec<Device>>> = Mutex::new(None);
@@ -173,9 +176,23 @@ pub(crate) fn is_guest_device(dev: &str) -> bool {
     with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.role == "guest"))
 }
 
+/// Видит ли устройство `me` присутствие устройства `peer`: гость не видит ничьего (P10-4), а присутствие гостей не видят пользователи узла.
+fn presence_allowed(me: &str, peer: &str) -> bool {
+    !is_guest_peer(me) && !(is_guest_peer(peer) && is_user_role(me))
+}
+
+/// Живые сигналы (звонки) идут только негостевым устройствам и только от них (P10-5).
+fn live_allowed(me: &str) -> bool {
+    !is_guest_peer(me)
+}
+
 /// Что гостю закрыто сверх закрытого пользователю: группы, прокси-выход, TURN (звонки), каталог пользователей. Файлы открыты, но под лимитами.
 fn guest_blocked(method: &axum::http::Method, path: &str) -> bool {
+    use axum::http::Method;
     (owner_only_path(method, path) && !path.starts_with("/mobile/files"))
+        // профиль и жалобы пишутся в постоянное хранилище: гостю закрыты, пока владелец не примет его (docs/GUEST.md, P10-2)
+        || (path == "/mobile/me/profile" && method != Method::GET)
+        || (path == "/mobile/complaints" && method == Method::POST)
         || path.starts_with("/mobile/groups")
         || path.starts_with("/mobile/proxy")
         || path == "/mobile/turn"
@@ -569,6 +586,10 @@ pub fn remove_device(id: &str) -> bool {
 
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
+    // файлы удалённого устройства (отправленные им и ждавшие его) не остаются на диске
+    if let Ok(h) = tokio::runtime::Handle::try_current() {
+        h.spawn(crate::mobile_files::drop_peer_files(peer.clone()));
+    }
     crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&peer, None);
     crate::backup_signal::notify_critical(); // устройство отозвано: старая копия вернула бы его
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
@@ -667,6 +688,7 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
         from: from.to_string(),
         to: to.to_string(),
         payload_b64: base64_of(payload),
+        exp: 0,
     };
     // отправитель (устройство или сам узел) проверяется под замком очереди: remove_device сначала убирает устройство, потом чистит его
     // письма, поэтому письмо забытого устройства либо не попадёт в очередь, либо будет вычищено вместе с остальными
@@ -683,19 +705,24 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
     true
 }
 
-/// Срок письма: сутки, если отправитель или получатель — гость (docs/GUEST.md), иначе обычный.
+/// Срок письма. У писем гостя или гостю срок абсолютный (`exp`, назначен при приёме): он не зависит от того, жив ли гость в памяти,
+/// и не продлевается принятием гостя в пользователи (docs/GUEST.md). Остальные — прежние 30 дней.
 fn expire_mail(l: &mut Vec<Mail>, now: u64) {
-    let guests: std::collections::HashSet<String> = with_devices(|d| d.iter().filter(|x| x.role == "guest").map(|x| x.peer_id()).collect());
-    l.retain(|x| {
-        let limit = if guests.contains(&x.from) || guests.contains(&x.to) { crate::guest::IDLE.as_millis() as u64 } else { MAIL_TTL_MS };
-        now.saturating_sub(x.ts) < limit
-    });
+    l.retain(|x| if x.exp > 0 { now < x.exp } else { now.saturating_sub(x.ts) < MAIL_TTL_MS });
+}
+
+/// Письму с гостем на любом конце — срок сутки от приёма.
+fn stamp_guest_mail(m: &mut Mail, now: u64) {
+    if m.exp == 0 && with_devices(|d| d.iter().any(|x| x.role == "guest" && (x.peer_id() == m.from || x.peer_id() == m.to))) {
+        m.exp = now + crate::guest::IDLE.as_millis() as u64;
+    }
 }
 
 /// Положить письмо в общую очередь. Просроченные письма убираются; переполнение решается отказом новому письму (с квотами на отправителя
 /// и на пару), а не вытеснением чужих неполученных писем.
-fn mail_accept(l: &mut Vec<Mail>, m: Mail, now: u64) -> bool {
+fn mail_accept(l: &mut Vec<Mail>, mut m: Mail, now: u64) -> bool {
     expire_mail(l, now);
+    stamp_guest_mail(&mut m, now);
     let from_n = l.iter().filter(|x| x.from == m.from).count();
     let pair_n = l.iter().filter(|x| x.from == m.from && x.to == m.to).count();
     let bytes: usize = l.iter().map(|x| x.payload_b64.len()).sum();
@@ -958,9 +985,6 @@ pub(crate) fn purge_idle_guests() -> usize {
         crate::guest::forget(&g.token_hash);
         crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&g.peer_id(), None);
         let peer = g.peer_id();
-        if let Ok(h) = tokio::runtime::Handle::try_current() {
-            h.spawn(crate::mobile_files::drop_peer_files(peer.clone()));
-        }
         after_forget(peer);
     }
     // письма гостя старше суток уходят и без того, что сам гость ещё жив
@@ -1313,7 +1337,7 @@ fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
     if let Ok(x) = device_x25519(device) {
         let node = hex::encode(st.my_id.0);
         let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 2) else { return };
-        let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob) };
+        let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob), exp: 0 };
         let _ = bus().send(Event::Live(Arc::new(m)));
     }
 }
@@ -1859,6 +1883,8 @@ async fn inbox(
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(200)
         .clamp(1, 1000);
+    // просроченное (письма гостей: абсолютный срок) не выдаётся, даже если чистильщик ещё не успел
+    let _ = with_mail_saved(|l| expire_mail(l, now_ms()));
     let acked = with_devices(|d| {
         d.iter()
             .find(|x| same(&x.token_hash, &dev))
@@ -2216,14 +2242,16 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                     }
                 }
                 Ok(Event::Live(m)) => {
-                    if m.to == me {
+                    // гость звонков и живых сигналов не получает (docs/GUEST.md, P10-5)
+                    if m.to == me && live_allowed(&me) {
                         if let (Some(from), Ok(p)) = (hex32(&m.from), base64::engine::general_purpose::STANDARD.decode(&m.payload_b64)) {
                             if sock.send(Message::Binary(frame(FT_LIVE_MSG, &from, m.ts, &p))).await.is_err() { break; }
                         }
                     }
                 }
                 Ok(Event::Presence(peer, up)) => {
-                    if peer != me {
+                    // присутствие других устройств гостю не раскрывается (P10-4), а присутствие гостей не видят пользователи узла
+                    if peer != me && presence_allowed(&me, &peer) {
                         if let Some(id) = hex32(&peer) {
                             let mut f = vec![FT_PEER_STATUS];
                             f.extend_from_slice(&id);
@@ -2252,6 +2280,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                 let Message::Binary(d) = msg else { if matches!(msg, Message::Close(_)) { break } else { continue } };
                 match d.first().copied() {
                     Some(FT_PING) => { if sock.send(Message::Binary(vec![FT_PONG])).await.is_err() { break; } }
+                    Some(FT_SEND_LIVE) if d.len() >= 37 && !live_allowed(&me) => continue, // гость не звонит и не шлёт живых сигналов
                     Some(FT_SEND_LIVE) if d.len() >= 37 => {
                         let mut id = [0u8; 32];
                         id.copy_from_slice(&d[1..33]);
@@ -2289,7 +2318,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                             if sock.send(Message::Binary(f)).await.is_err() { break; }
                             continue;
                         }
-                        let m = Mail { ts: next_ts(), from: me.clone(), to, payload_b64: base64::engine::general_purpose::STANDARD.encode(&d[37..37 + len]) };
+                        let m = Mail { ts: next_ts(), from: me.clone(), to, payload_b64: base64::engine::general_purpose::STANDARD.encode(&d[37..37 + len]), exp: 0 };
                         let _ = bus().send(Event::Live(Arc::new(m)));
                     }
                     Some(FT_SEND_MSG) if d.len() >= 37 => {
@@ -2572,6 +2601,10 @@ where
             .write_all(reply("407 Proxy Authentication Required").as_bytes())
             .await;
     };
+    // гостю выход в интернет через узел закрыт (docs/GUEST.md): проверка здесь, а не только в обычных ручках
+    if is_guest_device(&h) {
+        return tls.write_all(reply("403 Forbidden").as_bytes()).await;
+    }
     if TUNNELS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= MAX_TUNNELS {
         TUNNELS.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
         return tls
@@ -2703,7 +2736,7 @@ mod mail_quota_tests {
     use super::*;
 
     fn mail(from: &str, to: &str, ts: u64) -> Mail {
-        Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into() }
+        Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into(), exp: 0 }
     }
 
     #[test]
@@ -2712,7 +2745,7 @@ mod mail_quota_tests {
         let mut l: Vec<Mail> = Vec::new();
         let mut accepted = 0;
         for i in 0..2000 {
-            let m = Mail { ts: 1_000 + i as u64, from: format!("s{}", i % 50), to: format!("r{}", i % 70), payload_b64: big.clone() };
+            let m = Mail { ts: 1_000 + i as u64, from: format!("s{}", i % 50), to: format!("r{}", i % 70), payload_b64: big.clone(), exp: 0 };
             if mail_accept(&mut l, m, 2_000) {
                 accepted += 1;
             }
@@ -2947,7 +2980,7 @@ mod hardening_tests {
         let p = mail_path();
         let _ = std::fs::remove_file(&p);
         std::fs::create_dir_all(&p).unwrap(); // запись в файл невозможна
-        let m = Mail { ts: 1, from: "a".into(), to: "b".into(), payload_b64: "eA==".into() };
+        let m = Mail { ts: 1, from: "a".into(), to: "b".into(), payload_b64: "eA==".into(), exp: 0 };
         let (_, saved) = with_mail_saved(|l| mail_accept(l, m.clone(), now_ms()));
         assert!(!saved, "сбой записи виден вызывающему");
         std::fs::remove_dir_all(&p).unwrap();
@@ -3280,11 +3313,25 @@ mod guest_tests {
         let up = device_peer_of(&user).unwrap();
         let day = 24 * 3600 * 1000u64;
         let now = now_ms();
-        let mk = |from: &str, to: &str, age: u64| Mail { ts: now - age, from: from.into(), to: to.into(), payload_b64: "x".into() };
-        let mut l = vec![mk(&gp, &up, day + 1000), mk(&up, &gp, day + 1000), mk(&up, &"z".repeat(64), 2 * day), mk(&gp, &up, 1000)];
-        expire_mail(&mut l, now);
-        assert_eq!(l.len(), 2, "письма гостя старше суток ушли, свежее и чужое двухдневное остались");
-        assert!(l.iter().any(|m| m.from == up && m.to == "z".repeat(64)));
+        let mk = |from: &str, to: &str, age: u64| Mail { ts: now - age, from: from.into(), to: to.into(), payload_b64: "x".into(), exp: 0 };
+        // срок назначается при приёме: письмо гостя получает exp = приём + сутки
+        let mut l: Vec<Mail> = Vec::new();
+        assert!(mail_accept(&mut l, mk(&gp, &up, 0), now));
+        assert!(mail_accept(&mut l, mk(&up, &gp, 0), now));
+        assert!(mail_accept(&mut l, mk(&up, &"z".repeat(64), 0), now));
+        assert_eq!(l[0].exp, now + day);
+        assert_eq!(l[1].exp, now + day);
+        assert_eq!(l[2].exp, 0, "письмо обычных устройств без гостевого срока");
+        // сутки спустя гостевые ушли, обычное осталось
+        expire_mail(&mut l, now + day + 1);
+        assert_eq!(l.len(), 1);
+        assert_eq!(l[0].to, "z".repeat(64));
+        // гость исчез (перезапуск узла, принят в пользователи): срок письма от этого не продлевается
+        let mut l: Vec<Mail> = Vec::new();
+        mail_accept(&mut l, mk(&gp, &up, 0), now);
+        wipe(&["mg"]);
+        expire_mail(&mut l, now + day + 1);
+        assert!(l.is_empty(), "после исчезновения гостя письмо всё равно уходит по своему сроку");
         wipe(&["mg", "mu"]);
     }
 
@@ -3309,5 +3356,62 @@ mod guest_tests {
         assert!(!on_disk.contains("guest"));
         assert!(on_disk.contains(&owner), "устройство владельца в файле есть");
         wipe(&["kg_o", "kg_g"]);
+    }
+
+    #[tokio::test]
+    async fn a_guest_token_cannot_open_an_internet_tunnel_through_the_connect_entrance() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let guest = add("guest", "cg");
+        let h = token_hash("guest-tok");
+        with_devices(|d| {
+            if let Some(x) = d.iter_mut().find(|x| x.token_hash == guest) {
+                x.token_hash = h.clone();
+            }
+        });
+        let ask = |token: &'static str| async move {
+            let (mut client, server) = tokio::io::duplex(8192);
+            let task = tokio::spawn(serve_connect(server, Vec::new()));
+            client.write_all(format!("CONNECT example.org:443 HTTP/1.1\r\nProxy-Authorization: Bearer {token}\r\n\r\n").as_bytes()).await.unwrap();
+            let mut out = Vec::new();
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client.read_to_end(&mut out)).await;
+            let _ = task.await;
+            String::from_utf8_lossy(&out).to_string()
+        };
+        let r = ask("guest-tok").await;
+        assert!(r.starts_with("HTTP/1.1 403"), "гостю — отказ до обращения к сети: {r}");
+        assert!(ask("no-such-token").await.starts_with("HTTP/1.1 407"), "неизвестному — по-прежнему 407");
+        wipe(&["cg"]);
+    }
+
+    #[test]
+    fn a_guest_cannot_write_a_profile_or_a_complaint_but_can_read() {
+        use axum::http::Method;
+        assert!(guest_blocked(&Method::PUT, "/mobile/me/profile"));
+        assert!(!guest_blocked(&Method::GET, "/mobile/me/profile"));
+        assert!(guest_blocked(&Method::POST, "/mobile/complaints"));
+        assert!(!guest_blocked(&Method::GET, "/mobile/complaints"));
+    }
+
+    #[test]
+    fn presence_and_live_signals_are_closed_to_guests() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let guest = add("guest", "pg");
+        let user = add("user", "pu");
+        let owner = add("owner", "po");
+        let (g, u, o) = (device_peer_of(&guest).unwrap(), device_peer_of(&user).unwrap(), device_peer_of(&owner).unwrap());
+        assert!(!presence_allowed(&g, &o), "гость не видит присутствие владельца");
+        assert!(!presence_allowed(&g, &u));
+        assert!(presence_allowed(&o, &g), "владелец видит гостей");
+        assert!(presence_allowed(&o, &u));
+        assert!(!presence_allowed(&u, &g), "пользователи узла не видят присутствие гостей");
+        assert!(presence_allowed(&u, &o));
+        assert!(!live_allowed(&g));
+        assert!(live_allowed(&u) && live_allowed(&o));
+        wipe(&["pg", "pu", "po"]);
     }
 }
