@@ -237,10 +237,13 @@ class AppState extends ChangeNotifier implements FilesHost {
       final failed = await StorageService.failedOutgoing(
         sinceMs: now.subtract(Outbox.maxAge).millisecondsSinceEpoch,
         skipPrefixes: [FileOffer.marker, GroupInviteMsg.marker, ContactCardMsg.marker],
+        skipPeers: _blocked.keys.toList(),
       );
       _outbox.keepOnly({for (final m in failed) m.id});
       for (final m in _outbox.due(failed, now, skip: (m) => isBlocked(m.peerId))) {
         if (_ws != ws || !ws.connected) break;
+        // состояние могло измениться, пока шёл предыдущий await: собеседника заблокировали, сообщение удалили или оно уже подтверждено
+        if (isBlocked(m.peerId) || await StorageService.outgoingStatus(m.id) != MessageStatus.failed) continue;
         final payload = MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText);
         final ok = await ws.sendMessage(m.peerId, payload);
         if (!ok) {
@@ -248,9 +251,12 @@ class AppState extends ChangeNotifier implements FilesHost {
           continue;
         }
         _outbox.sent(m.id);
-        await StorageService.updateMessageStatus(m.id, MessageStatus.pending);
-        _replaceMessage(m.peerId, m.id, m.copyWith(status: MessageStatus.pending));
-        notifyListeners();
+        // квитанция, пришедшая за время отправки, не понижается: обновляем только если оно всё ещё failed
+        if (await StorageService.markPendingIfFailed(m.id)) {
+          final cur = _chats[m.peerId]?.where((x) => x.id == m.id).firstOrNull;
+          if (cur != null && cur.status == MessageStatus.failed) _replaceMessage(m.peerId, m.id, cur.copyWith(status: MessageStatus.pending));
+          notifyListeners();
+        }
       }
     } catch (_) {
       // база или сеть недоступны: попробуем на следующем проходе

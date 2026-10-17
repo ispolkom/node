@@ -33,5 +33,25 @@ Future<void> main()async{
   final d=Directory('$tmp/erase-enc')..createSync();docsOverride=d;final f=File('${d.path}/file.yfe')..writeAsBytesSync([89,70,69,49,2]);StorageService.wipeHook=(_)async=>false;
   final left=await StorageService.eraseAllLocalData();check(f.existsSync()&&left!=null,'unverified yfe silently unlinked');
  });await clean();
+ await test('p11_4_upgrade_from_v6_adds_remote_id_before_the_inbox_index',()async{
+  final d=Database('$tmp/yandi.db');await d.execute('CREATE TABLE messages (id TEXT PRIMARY KEY,peer_id TEXT NOT NULL,outgoing INTEGER NOT NULL,text TEXT NOT NULL,timestamp INTEGER NOT NULL,status TEXT NOT NULL DEFAULT "pending",reply_id TEXT,reply_text TEXT)');
+  await d.insert('messages',{'id':'m1','peer_id':'p','outgoing':0,'text':'a','timestamp':1,'status':'delivered'});await d.execute('PRAGMA user_version=6');
+  await StorageService.openEncrypted(List.filled(32,1));
+  final cols=(await StorageService.db.rawQuery('PRAGMA table_info(messages)')).map((r)=>r['name']).toSet();check(cols.contains('remote_id'),'remote_id not added');
+  check((await StorageService.db.rawQuery("SELECT name FROM sqlite_master WHERE name='ux_msg_in'")).isNotEmpty,'unique inbox index missing');
+  check((await StorageService.db.query('messages')).single['id']=='m1','message lost');
+ });await clean();
+ await test('p11_4_upgrade_from_v7_removes_old_duplicates_and_keeps_distinct_messages',()async{
+  final d=Database('$tmp/yandi.db');await d.execute('CREATE TABLE messages (id TEXT PRIMARY KEY,peer_id TEXT NOT NULL,outgoing INTEGER NOT NULL,text TEXT NOT NULL,timestamp INTEGER NOT NULL,status TEXT NOT NULL DEFAULT "pending",reply_id TEXT,reply_text TEXT,remote_id TEXT)');
+  for(final r in [['a','p',0,'x',1,'r1'],['b','p',0,'x',2,'r1'],['c','p',0,'y',3,null],['d','p',0,'z',4,null],['e','q',0,'x',5,'r1'],['f','p',1,'out',6,'r1'],['g','p',1,'out2',7,'r1']]){
+   await d.insert('messages',{'id':r[0],'peer_id':r[1],'outgoing':r[2],'text':r[3],'timestamp':r[4],'status':'delivered','remote_id':r[5]});}
+  await d.execute('PRAGMA user_version=7');
+  await StorageService.openEncrypted(List.filled(32,1));
+  final ids=((await StorageService.db.query('messages')).map((r)=>r['id'] as String).toList())..sort();
+  check('${ids}'=='[a, c, d, e, f, g]','duplicates not removed or distinct lost: $ids');
+  Future<int> ins(String id,String rid)async{await StorageService.db.execute("INSERT OR IGNORE INTO messages (id,peer_id,outgoing,text,timestamp,status,remote_id) VALUES ('$id','p',0,'t',9,'delivered','$rid')");return (await StorageService.db.query('messages')).where((r)=>r['id']==id).length;}
+  check(await ins('n1','r1')==0,'duplicate (peer,remote_id) accepted by the unique index');
+  check(await ins('n2','r2')==1,'new message rejected');
+ });await clean();
  print('RESULT $good PASS / $bad FAIL');if(bad>0)exitCode=1;
 }

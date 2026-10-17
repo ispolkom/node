@@ -228,7 +228,6 @@ class StorageService {
   }
 
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
-    if (oldVersion < 8) await _ensureInboxIndex(db);
     if (oldVersion < 7) {
       // номер сообщения у отправителя: без него после перезапуска не работают «прочитано» и правки входящих
       try { await db.execute('ALTER TABLE messages ADD COLUMN remote_id TEXT'); } catch (_) {}
@@ -259,6 +258,8 @@ class StorageService {
         await db.update('nodes', {'token': null}, where: 'id = ?', whereArgs: [id]);
       }
     }
+    // индекс v8 — ПОСЛЕ всех прежних шагов схемы: ему нужна колонка remote_id (её добавляет шаг v7), иначе обновление с v6 падает
+    if (oldVersion < 8) await _ensureInboxIndex(db);
   }
 
   static Future<void> _createTables(Database db, int version, {bool inboxIndex = true}) async {
@@ -570,13 +571,15 @@ class StorageService {
   }
 
   /// Неотправленные исходящие не старше `sinceMs` (для автоповтора): старые вперёд, не больше `limit`.
-  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 500, List<String> skipPrefixes = const []}) async {
-    // служебные конверты (файлы, приглашения, карточки) отсекаются в самом запросе: иначе сотня таких строк заслонила бы личные тексты
-    final skip = skipPrefixes.map((_) => ' AND text NOT LIKE ?').join();
+  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 500, List<String> skipPrefixes = const [], List<String> skipPeers = const []}) async {
+    // служебные конверты (файлы, приглашения, карточки) и заблокированные собеседники отсекаются в самом запросе: иначе сотни
+    // таких строк заслонили бы личные тексты остальных (предел SQLite на число параметров — отсекаем в запросе не больше 400 собеседников)
+    final peers = skipPeers.length > 400 ? skipPeers.take(400).toList() : skipPeers;
+    final skip = skipPrefixes.map((_) => ' AND text NOT LIKE ?').join() + (peers.isEmpty ? '' : ' AND peer_id NOT IN (${List.filled(peers.length, '?').join(',')})');
     final rows = await db.query(
       'messages',
       where: "outgoing = 1 AND status = 'failed' AND timestamp >= ?$skip",
-      whereArgs: [sinceMs, ...skipPrefixes.map((p) => '$p%')],
+      whereArgs: [sinceMs, ...skipPrefixes.map((p) => '$p%'), ...peers],
       orderBy: 'timestamp ASC',
       limit: limit,
     );
@@ -593,6 +596,18 @@ class StorageService {
               remoteId: r['remote_id'] as String?,
             ))
         .toList();
+  }
+
+  /// Статус исходящего сообщения (null — такого нет: например, пользователь удалил его).
+  static Future<MessageStatus?> outgoingStatus(String id) async {
+    final rows = await db.query('messages', columns: ['status'], where: 'id = ? AND outgoing = 1', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : _parseStatus(rows.first['status'] as String);
+  }
+
+  /// failed → pending только если оно всё ещё failed: подтверждение доставки/прочтения, пришедшее раньше, не понижается.
+  static Future<bool> markPendingIfFailed(String id) async {
+    final n = await db.update('messages', {'status': 'pending'}, where: "id = ? AND outgoing = 1 AND status = 'failed'", whereArgs: [id]);
+    return n > 0;
   }
 
   /// Записать входящее, если такого (собеседник + номер у отправителя, либо тот же локальный номер) ещё нет. true — записано, false —

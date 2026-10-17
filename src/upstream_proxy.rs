@@ -372,10 +372,21 @@ pub fn summary() -> Option<(usize, usize)> {
 
 /// Один проход: соединиться через каждый добавленный прокси (по очереди) с общеизвестным адресом и ничего не передавать.
 pub async fn probe_all() {
-    let list: Vec<(String, Settings)> = pool().file.proxies.iter().map(|e| (e.id.clone(), e.settings())).collect();
-    for (id, s) in list {
+    // пароли не держим между проверками: список номеров, а настройки каждой записи берутся свежими перед её соединением
+    let ids: Vec<String> = pool().file.proxies.iter().map(|e| e.id.clone()).collect();
+    for id in ids {
+        if mode_is_locked() {
+            return; // среда заперта посреди прохода: новых соединений с сохранёнными паролями не открываем
+        }
+        let Some(s) = pool().file.proxies.iter().find(|e| e.id == id).map(Entry::settings) else { continue };
         let r = connect(&s, "1.1.1.1", 443, Duration::from_secs(10)).await;
         let now = Instant::now();
+        // результат относится к той записи, что проверяли: среду могли запереть, а адрес или вход — поменять, пока шло соединение
+        let same = !mode_is_locked() && pool().file.proxies.iter().find(|e| e.id == id).map(Entry::settings).as_ref() == Some(&s);
+        drop(s);
+        if !same {
+            continue;
+        }
         match r {
             Ok(_) => {
                 let mut g = pool();
@@ -1018,15 +1029,9 @@ struct PatchReq {
     password: Option<String>,
 }
 
-async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Response {
-    if let Some(m) = r.max_clients {
-        if m > 1000 {
-            return bad_request("Число клиентов на прокси: от 1 до 1000 (0 — общий предел).");
-        }
-    }
-    let mut g = pool();
-    let backup = g.file.clone();
-    let Some(e) = g.file.proxies.iter_mut().find(|e| e.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response() };
+/// Запись с применённой правкой; при любой ошибке исходная запись остаётся нетронутой (правка идёт на копии).
+fn patched(old: &Entry, r: PatchReq) -> Result<Entry, String> {
+    let mut e = old.clone();
     if let Some(on) = r.enabled {
         e.enabled = on;
     }
@@ -1043,16 +1048,34 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
             user: r.user.unwrap_or_default(),
             password: r.password.unwrap_or_default(),
         };
-        let s = match from_form(f, Some(e.settings())) {
-            Ok(s) => s,
-            Err(m) => return bad_request(m),
-        };
-        let (host, port, auth, kind) = (s.host, s.port, s.auth, s.kind);
-        e.kind = kind;
-        e.host = host;
-        e.port = port;
-        e.auth = auth;
+        let s = from_form(f, Some(e.settings()))?;
+        e.kind = s.kind;
+        e.host = s.host;
+        e.port = s.port;
+        e.auth = s.auth;
     }
+    Ok(e)
+}
+
+async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Response {
+    if let Some(m) = r.max_clients {
+        if m > 1000 {
+            return bad_request("Число клиентов на прокси: от 1 до 1000 (0 — общий предел).");
+        }
+    }
+    let mut g = pool();
+    let backup = g.file.clone();
+    let Some(pos) = g.file.proxies.iter().position(|e| e.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response() };
+    // все поля проверяются на копии записи, рабочий пул меняется только целиком и только после успешной проверки
+    let new = match patched(&g.file.proxies[pos], r) {
+        Ok(n) => n,
+        Err(m) => return bad_request(m),
+    };
+    if new.host != g.file.proxies[pos].host || new.port != g.file.proxies[pos].port || new.auth != g.file.proxies[pos].auth || new.kind != g.file.proxies[pos].kind {
+        // у прокси другой адрес или вход: прежние итоги проверки к нему не относятся
+        g.health.remove(&id);
+    }
+    g.file.proxies[pos] = new;
     match persist_or_rollback(&mut g, backup) {
         Ok(()) => {
             request_probe();
@@ -1538,6 +1561,17 @@ mod tests {
         assert_eq!((same.host.as_str(), same.port, same.auth), ("h2.example", 1081, Auth::Password { user: "u".into(), password: "secret".into() }));
         let other = from_form(form("v", ""), Some(old)).unwrap();
         assert_eq!(other.auth, Auth::Password { user: "v".into(), password: String::new() }, "a new login does not inherit the old password");
+    }
+
+    #[test]
+    fn a_rejected_edit_changes_nothing_and_an_accepted_one_changes_everything() {
+        let old = Entry { id: "a".into(), enabled: false, kind: Kind::Socks5, host: "h.example".into(), port: 1080, auth: Auth::Password { user: "u".into(), password: "pw".into() }, max_clients: None };
+        let bad = patched(&old, PatchReq { enabled: Some(true), max_clients: Some(7), kind: None, host: Some("bad host".into()), port: Some(1080), auth: None, user: None, password: None });
+        assert!(bad.is_err(), "плохой адрес отвергается целиком");
+        assert!(!old.enabled && old.max_clients.is_none(), "исходная запись не тронута");
+        let ok = patched(&old, PatchReq { enabled: Some(true), max_clients: Some(7), kind: None, host: Some("h2.example".into()), port: Some(1081), auth: None, user: Some("u".into()), password: None }).unwrap();
+        assert!(ok.enabled && ok.max_clients == Some(7) && ok.host == "h2.example" && ok.port == 1081);
+        assert_eq!(ok.auth, Auth::Password { user: "u".into(), password: "pw".into() }, "пароль при том же логине сохранён");
     }
 
     #[test]
