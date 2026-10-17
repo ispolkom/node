@@ -1,5 +1,14 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Восстановить из копии': 'Restore from a backup',
+  'Восстановление из копии. Нужны файл копии (.yandibak) и сид-фраза. Пароль прежней установки не переносится: задайте новый пароль для этого компьютера.':
+      'Restore from a backup. You need the backup file (.yandibak) and the seed phrase. The old installation password is not carried over: set a new password for this computer.',
+  'Путь к файлу копии': 'Path to the backup file',
+  'Выберите файл копии': 'Choose the backup file',
+  'Файл копии не открылся.': 'The backup file could not be opened.',
+  'Восстановить': 'Restore',
+  'Назад': 'Back',
+  'Копия восстановлена. Нода запускается…': 'Backup restored. The node is starting…',
   'Первичная настройка узла': 'Node first-time setup',
   'Шаг 1 из 4': 'Step 1 of 4',
   'Шаг 2 из 4': 'Step 2 of 4',

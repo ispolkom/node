@@ -26,8 +26,13 @@ class WizardApi extends FakeApi {
       calls.add(path);
       return {'words': (n == 24 ? seed24 : seed12).split(' '), 'count': n};
     }
+    if (path == '/api/auth/restore/inspect') {
+      calls.add(path);
+      bodies.add(Map.of(body!));
+      return {'counter': 3, 'node_id': 'abc', 'text': 'Копия №3 от 2026-10-17 09:05 UTC; узел abc'};
+    }
     final r = await super.request(path, body: body, method: method);
-    if (path == '/api/auth/setup') setup = false;
+    if (path == '/api/auth/setup' || path == '/api/auth/restore') setup = false;
     return r;
   }
 }
@@ -151,6 +156,40 @@ void main() {
     await t.tap(find.text('Русский'));
     await t.pumpAndSettle();
     expect(find.text('Шаг 1 из 4'), findsOneWidget);
+    await stop(t);
+  });
+
+  testWidgets('restore from a backup: file, seed phrase, a NEW password; then the vault opens with it', (t) async {
+    final api = WizardApi();
+    await start(t, api);
+    await click(t, 'Восстановить из копии');
+    expect(find.textContaining('Пароль прежней установки не переносится'), findsOneWidget);
+    final fields = find.byType(TextField);
+    await t.enterText(fields.at(0), '/home/iam/копия.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    expect(find.textContaining('Копия №3'), findsOneWidget);
+    // неверные вводы не уходят на узел
+    await t.enterText(fields.at(1), 'one two three');
+    await t.enterText(fields.at(2), 'long password');
+    await t.enterText(fields.at(3), 'long password');
+    await click(t, 'Восстановить');
+    expect(find.text('Введите 12 или 24 слова сид-фразы'), findsOneWidget);
+    await t.enterText(fields.at(1), seed12);
+    await t.enterText(fields.at(3), 'other password');
+    await click(t, 'Восстановить');
+    expect(find.text('Пароли не совпадают'), findsOneWidget);
+    expect(api.calls.contains('/api/auth/restore'), false);
+    await t.enterText(fields.at(1), seed12);
+    await t.enterText(fields.at(2), 'long password');
+    await t.enterText(fields.at(3), 'long password');
+    await click(t, 'Восстановить');
+    await t.pump(const Duration(seconds: 2));
+    await t.pumpAndSettle();
+    expect(api.bodies.firstWhere((b) => b.containsKey('path') && b.containsKey('phrase')),
+        {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password'});
+    expect(api.bodies.last, {'password': 'long password'}, reason: 'закрытая среда открывается новым паролем');
+    expect(api.calls.indexOf('/api/auth/restore') < api.calls.indexOf('/api/vault/unlock'), true);
     await stop(t);
   });
 }

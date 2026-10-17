@@ -2,6 +2,7 @@ import 'dart:math';
 
 import 'package:flutter/material.dart';
 
+import 'platform_files.dart';
 import 'preferences.dart';
 import 'theme.dart';
 import 'transport/api.dart';
@@ -19,6 +20,9 @@ class SetupWizard extends StatefulWidget {
   /// Создаёт ключи и закрытую среду (пароль, фраза из слов через пробел).
   final Future<void> Function(String password, String phrase) finish;
 
+  /// Восстановление из файла копии: путь, сид-фраза, новый пароль этой установки.
+  final Future<void> Function(String path, String phrase, String password) restore;
+
   /// Только для тестов: детерминированная перестановка и выбор слов для проверки.
   final Random? random;
   const SetupWizard({
@@ -27,13 +31,14 @@ class SetupWizard extends StatefulWidget {
     required this.preferences,
     required this.busy,
     required this.finish,
+    required this.restore,
     this.random,
   });
   @override
   State<SetupWizard> createState() => _SetupWizardState();
 }
 
-enum _Step { show, order, type, password }
+enum _Step { show, order, type, password, restore }
 
 class _SetupWizardState extends State<SetupWizard> {
   static const _minimum = 6;
@@ -51,6 +56,12 @@ class _SetupWizardState extends State<SetupWizard> {
   List<int> asked = [];
   final typed = List.generate(3, (_) => TextEditingController());
   final password = TextEditingController(), repeat = TextEditingController();
+  // восстановление из копии
+  final path = TextEditingController(),
+      phrase = TextEditingController(),
+      newPassword = TextEditingController(),
+      newRepeat = TextEditingController();
+  String? backupInfo;
 
   @override
   void initState() {
@@ -100,7 +111,7 @@ class _SetupWizardState extends State<SetupWizard> {
   @override
   void dispose() {
     words.fillRange(0, words.length, '');
-    for (final c in [...typed, password, repeat]) {
+    for (final c in [...typed, password, repeat, path, phrase, newPassword, newRepeat]) {
       c.clear();
       c.dispose();
     }
@@ -182,6 +193,119 @@ class _SetupWizardState extends State<SetupWizard> {
     }
   }
 
+  Future<void> pick() async {
+    final chosen = await PlatformFiles.choose();
+    if (chosen == null || !mounted) return;
+    path.text = chosen;
+    await inspect();
+  }
+
+  Future<void> inspect() async {
+    setState(() {
+      backupInfo = null;
+      error = null;
+    });
+    try {
+      final r = await widget.api.request('/api/auth/restore/inspect', body: {'path': path.text.trim()});
+      if (mounted) setState(() => backupInfo = '${r['text']}');
+    } catch (e) {
+      if (mounted) setState(() => error = e is ApiFailure ? e.message : 'Файл копии не открылся.');
+    }
+  }
+
+  Future<void> runRestore() async {
+    if (sending || widget.busy) return;
+    final words = phrase.text.trim().split(RegExp(r'\s+'));
+    if (path.text.trim().isEmpty) {
+      setState(() => error = 'Выберите файл копии');
+      return;
+    }
+    if (words.length != 12 && words.length != 24) {
+      setState(() => error = 'Введите 12 или 24 слова сид-фразы');
+      return;
+    }
+    if (newPassword.text.runes.length < _minimum) {
+      setState(() => error = 'Пароль — не короче $_minimum символов');
+      return;
+    }
+    if (newPassword.text != newRepeat.text) {
+      setState(() => error = 'Пароли не совпадают');
+      return;
+    }
+    setState(() {
+      sending = true;
+      error = null;
+    });
+    final p = newPassword.text, f = phrase.text.trim(), file = path.text.trim();
+    phrase.clear();
+    newPassword.clear();
+    newRepeat.clear();
+    try {
+      await widget.restore(file, f, p);
+    } finally {
+      if (mounted) setState(() => sending = false);
+    }
+  }
+
+  List<Widget> _restore() => [
+    const UiText(
+      'Восстановление из копии. Нужны файл копии (.yandibak) и сид-фраза. Пароль прежней установки не переносится: задайте новый пароль для этого компьютера.',
+    ),
+    const SizedBox(height: 12),
+    Row(
+      children: [
+        Expanded(
+          child: TextField(
+            controller: path,
+            enableSuggestions: false,
+            autocorrect: false,
+            decoration: InputDecoration(
+              labelText: tr(context, 'Путь к файлу копии'),
+              border: const OutlineInputBorder(),
+            ),
+            onSubmitted: (_) => inspect(),
+          ),
+        ),
+        _button('Выбрать файл', pick, filled: false),
+      ],
+    ),
+    if (backupInfo != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(backupInfo!)),
+    for (final (controller, label) in [
+      (phrase, 'Сид-фраза (12 или 24 слова)'),
+      (newPassword, 'Новый пароль'),
+      (newRepeat, 'Повтор нового пароля'),
+    ])
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: TextField(
+          controller: controller,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          enabled: !sending && !widget.busy,
+          decoration: InputDecoration(
+            labelText: tr(context, label),
+            border: const OutlineInputBorder(),
+          ),
+          onSubmitted: (_) => runRestore(),
+        ),
+      ),
+    Wrap(
+      children: [
+        _button(sending ? 'Подождите…' : 'Восстановить', sending || widget.busy ? null : runRestore),
+        _button(
+          'Назад',
+          () => setState(() {
+            error = null;
+            step = _Step.show;
+          }),
+          filled: false,
+        ),
+      ],
+    ),
+  ];
+
   Widget _language() => Align(
     alignment: Alignment.centerRight,
     child: TextButton(
@@ -258,7 +382,19 @@ class _SetupWizardState extends State<SetupWizard> {
     ),
     const SizedBox(height: 12),
     if (loading) const UiText('Создаю сид-фразу…') else _numbered(words),
-    _button('Сохранил слова', loading || words.isEmpty ? null : toOrder),
+    Wrap(
+      children: [
+        _button('Сохранил слова', loading || words.isEmpty ? null : toOrder),
+        _button(
+          'Восстановить из копии',
+          () => setState(() {
+            error = null;
+            step = _Step.restore;
+          }),
+          filled: false,
+        ),
+      ],
+    ),
   ];
 
   List<Widget> _order() => [
@@ -383,6 +519,7 @@ class _SetupWizardState extends State<SetupWizard> {
       _Step.order => _order(),
       _Step.type => _type(),
       _Step.password => _password(),
+      _Step.restore => _restore(),
     };
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 12),

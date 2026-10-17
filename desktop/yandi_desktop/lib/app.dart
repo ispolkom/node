@@ -308,9 +308,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       body.clear();
       await pending;
       if (!mounted || own != epoch) return;
-      if (path == '/api/auth/setup') {
+      if (path == '/api/auth/setup' || path == '/api/auth/restore') {
         setState(() {
-          notice = 'Ключи созданы. Нода запускается…';
+          notice = path == '/api/auth/setup' ? 'Ключи созданы. Нода запускается…' : 'Копия восстановлена. Нода запускается…';
         });
         final until = DateTime.now().add(const Duration(seconds: 120));
         var ready = false;
@@ -511,6 +511,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     await act('/api/vault/setup', {'password': password, 'phrase': phrase});
   }
 
+  /// Восстановление на новой машине: файл копии + сид-фраза + новый пароль; затем закрытая среда открывается этим паролем.
+  Future<void> restoreFromBackup(String file, String phrase, String password) async {
+    await act('/api/auth/restore', {'path': file, 'phrase': phrase, 'password': password});
+    if (!mounted || error != null || auth == AuthStage.setup) return;
+    setState(() => entered = true);
+    await act('/api/vault/unlock', {'password': password});
+  }
+
   static void validateNew(String a, String b, {int minimum = 8}) {
     if (a.runes.length < minimum)
       throw FormatException('Новый пароль — не короче $minimum символов');
@@ -538,6 +546,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         preferences: preferences,
         busy: busy,
         finish: createWithSeed,
+        restore: restoreFromBackup,
       );
     if (!entered || auth == AuthStage.recovery)
       return Column(
