@@ -72,7 +72,6 @@ const MAX_MAIL_PER_PAIR: usize = 500;
 /// Общий потолок очереди писем по размеру: файл очереди переписывается целиком, поэтому он не должен разрастаться до сотен МБ.
 const MAX_MAIL_BYTES: usize = 24 * 1024 * 1024;
 /// Письмо дольше этого не ждёт (конверт E4 всё равно недействителен через 30 суток).
-const MAIL_TTL_MS: u64 = 30 * 24 * 3600 * 1000;
 const FT_PEER_STATUS: u8 = 0x12;
 
 #[derive(Clone)]
@@ -356,7 +355,7 @@ fn spawn_pc_inbox_drain() {
             }
             // по одному: письмо уходит из очереди только после обработки, сбой сохранения оставляет его на повтор
             while let Some(m) = with_pc_inbox(|l| l.first().cloned()) {
-                let done = if now_ms().saturating_sub(m.ts) > MAIL_TTL_MS {
+                let done = if now_ms().saturating_sub(m.ts) > crate::mail_policy::ttl_ms() {
                     true
                 } else if let Ok(blob) = base64::engine::general_purpose::STANDARD.decode(&m.blob_b64) {
                     phone_to_node(&st, &m.from, &blob)
@@ -729,7 +728,8 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
 /// Срок письма. У писем гостя или гостю срок абсолютный (`exp`, назначен при приёме): он не зависит от того, жив ли гость в памяти,
 /// и не продлевается принятием гостя в пользователи (docs/GUEST.md). Остальные — прежние 30 дней.
 fn expire_mail(l: &mut Vec<Mail>, now: u64) {
-    l.retain(|x| if x.exp > 0 { now < x.exp } else { now.saturating_sub(x.ts) < MAIL_TTL_MS });
+    let ttl = crate::mail_policy::ttl_ms();
+    l.retain(|x| if x.exp > 0 { now < x.exp } else { now.saturating_sub(x.ts) < ttl });
 }
 
 /// Письму с гостем на любом конце — срок сутки от приёма.
@@ -2834,7 +2834,7 @@ mod mail_quota_tests {
     fn expired_mail_makes_room() {
         let mut l: Vec<Mail> = (0..MAX_MAIL as u64).map(|i| mail(&format!("S{}", i % 20), "C", i)).collect();
         assert!(!mail_accept(&mut l, mail("N", "C", 10), 10), "очередь полна");
-        assert!(mail_accept(&mut l, mail("N", "C", MAIL_TTL_MS + 100), MAIL_TTL_MS + 100), "просроченное ушло");
+        assert!(mail_accept(&mut l, mail("N", "C", crate::mail_policy::ttl_ms() + 100), crate::mail_policy::ttl_ms() + 100), "просроченное ушло");
     }
 }
 

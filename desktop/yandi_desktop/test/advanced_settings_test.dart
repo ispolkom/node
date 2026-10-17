@@ -57,6 +57,15 @@ class SettingsApi extends m2.FeatureApi {
           },
         ],
       };
+    if (path == '/api/mail-policy') {
+      if (body != null) {
+        calls.add(path);
+        bodies.add(Map.of(body));
+        methods.add('POST');
+        return {'ok': true};
+      }
+      return {'days': 7, 'min': 1, 'max': 30, 'default': 7};
+    }
     if (path == '/api/guest-pairing') {
       if (body != null) {
         calls.add(path);
@@ -273,6 +282,23 @@ void main() {
     final back = ProxyLine.parse(text)!;
     expect((back.host, back.port, back.user, back.password), ('2001:db8::1', 1080, 'u', 'p:w'));
     expect(ProxyLine.parse(ProxyLine.format('h.example', 80))!.host, 'h.example');
+  });
+  testWidgets('mail retention: shows the term, refuses out-of-range, saves a valid one', (t) async {
+    final api = SettingsApi();
+    final errors = <Object>[];
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: SingleChildScrollView(child: MailPolicyPanel(api: api, busy: false, isActive: () => true, mutate: (a) async { try { await a(); } catch (e) { errors.add(e); } })))));
+    await t.pumpAndSettle();
+    expect(t.widget<TextField>(find.byType(TextField)).controller!.text, '7');
+    await t.enterText(find.byType(TextField), '99');
+    await m1.click(t, 'Сохранить срок');
+    expect(find.textContaining('от 1 до 30'), findsOneWidget);
+    expect(api.bodies.where((b) => b.containsKey('days')), isEmpty, reason: 'вне пределов на узел не уходит');
+    await t.enterText(find.byType(TextField), '3');
+    await m1.click(t, 'Сохранить срок');
+    expect(api.bodies.last, {'days': 3});
+    expect(find.text('Срок хранения почты сохранён.'), findsOneWidget);
+    expect(errors, isEmpty);
+    await m1.stop(t);
   });
   testWidgets('About screen', (t) async {
     await m2.open(t, SettingsApi(), 'О приложении');

@@ -718,6 +718,77 @@ class _GuestPairingPanelState extends State<GuestPairingPanel> {
   }
 }
 
+/// Срок хранения почты между устройствами на узле (шифртекст «от кого и кому»): чем короче, тем меньше следов у того, кто завладел узлом.
+class MailPolicyPanel extends StatefulWidget {
+  final Api api;
+  final bool busy;
+  final bool Function() isActive;
+  final Future<void> Function(Future<void> Function()) mutate;
+  const MailPolicyPanel({super.key, required this.api, required this.busy, required this.isActive, required this.mutate});
+  @override
+  State<MailPolicyPanel> createState() => _MailPolicyPanelState();
+}
+
+class _MailPolicyPanelState extends State<MailPolicyPanel> {
+  final days = TextEditingController();
+  Map<String, dynamic>? data;
+  String? error, saved;
+  bool get active => mounted && widget.isActive();
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    days.dispose();
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    try {
+      final d = await widget.api.request('/api/mail-policy');
+      if (active) setState(() { data = d; days.text = '${d['days']}'; error = null; });
+    } catch (e) {
+      if (active) setState(() => error = e is ApiFailure ? e.message : const ApiFailure('protocol').message);
+    }
+  }
+
+  Future<void> save() async {
+    final n = int.tryParse(days.text.trim());
+    final min = (data?['min'] ?? 1) as int, max = (data?['max'] ?? 30) as int;
+    if (n == null || n < min || n > max) {
+      setState(() { error = 'Срок хранения почты: от $min до $max суток.'; saved = null; });
+      return;
+    }
+    await widget.mutate(() async {
+      await widget.api.request('/api/mail-policy', body: {'days': n});
+      if (active) {
+        setState(() { error = null; saved = 'Срок хранения почты сохранён.'; });
+        await load();
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => PanelStack(
+    children: [
+      const UiText('Срок хранения почты', style: TextStyle(fontSize: 22)),
+      if (error != null) UiText(error!),
+      if (saved != null) UiText(saved!),
+      const UiText('Сообщения между устройствами лежат на узле (шифртекстом), пока получатель не заберёт, но не дольше этого срока. Короче срок — меньше следов, если узел попадёт в чужие руки; длиннее — дольше ждёт телефон, который давно не выходил на связь. Гостям срок всегда сутки.'),
+      TextField(
+        controller: days,
+        enabled: !widget.busy && data != null,
+        keyboardType: TextInputType.number,
+        decoration: InputDecoration(labelText: tr(context, 'Суток (1–30)'), border: const OutlineInputBorder(), contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14)),
+      ),
+      SolidButton('Сохранить срок', onPressed: widget.busy || data == null ? null : save),
+    ],
+  );
+}
+
 class AboutPanel extends StatelessWidget {
   const AboutPanel({super.key});
   @override

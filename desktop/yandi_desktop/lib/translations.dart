@@ -1,5 +1,11 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Срок хранения почты': 'Mail retention',
+  'Сообщения между устройствами лежат на узле (шифртекстом), пока получатель не заберёт, но не дольше этого срока. Короче срок — меньше следов, если узел попадёт в чужие руки; длиннее — дольше ждёт телефон, который давно не выходил на связь. Гостям срок всегда сутки.':
+      'Messages between devices stay on the node (as ciphertext) until the recipient collects them, but no longer than this term. A shorter term leaves fewer traces if the node falls into other hands; a longer one waits longer for a phone that has not been online for a while. For guests the term is always one day.',
+  'Суток (1–30)': 'Days (1–30)',
+  'Сохранить срок': 'Save term',
+  'Срок хранения почты сохранён.': 'Mail retention saved.',
   'Запросы сопряжения': 'Pairing requests',
   'Устройства, подключённые без QR, просят принять их на узел. Принятое устройство получает права пользователя узла; владельцем оно может стать только по QR.':
       'Devices connected without a QR ask to be accepted on the node. An accepted device gets node-user rights; it can become an owner only by QR.',
