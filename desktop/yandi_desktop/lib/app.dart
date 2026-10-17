@@ -32,6 +32,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   AuthStage? auth;
   VaultState? vault;
   bool connected = false, entered = false, busy = false, visible = true;
+
   /// Сообщение «Доступно обновление …» из /api/update/status (null — нет).
   String? updateNotice;
   bool polling = false, lockUnconfirmed = false;
@@ -91,7 +92,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     vault = null;
     nickAsked = false;
     MemberBadge.forget(); // визитки участников (картинки) в памяти не переживают запирание
-    unawaited(wipeOpenedCopies()); // открытые копии вложений («Сохранить и открыть») затираются при запирании и выходе
+    unawaited(
+      wipeOpenedCopies(),
+    ); // открытые копии вложений («Сохранить и открыть») затираются при запирании и выходе
   }
 
   void disconnect(ApiFailure failure) {
@@ -262,7 +265,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           if (!mounted || own != epoch) return;
           final a = u['available'];
           setState(() {
-            updateNotice = a is Map && a['version'] is String ? 'Доступно обновление YANDI ${a['version']}' : null;
+            updateNotice = a is Map && a['version'] is String
+                ? 'Доступно обновление YANDI ${a['version']}'
+                : null;
           });
         } catch (_) {}
       }
@@ -309,7 +314,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       if (!mounted || own != epoch) return;
       if (path == '/api/auth/setup' || path == '/api/auth/restore') {
         setState(() {
-          notice = path == '/api/auth/setup' ? 'Ключи созданы. Нода запускается…' : 'Копия восстановлена. Нода запускается…';
+          notice = path == '/api/auth/setup'
+              ? 'Ключи созданы. Нода запускается…'
+              : 'Копия восстановлена. Нода запускается…';
         });
         final until = DateTime.now().add(const Duration(seconds: 120));
         var ready = false;
@@ -369,11 +376,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   Widget button(String label, VoidCallback action) => Padding(
     padding: const EdgeInsets.symmetric(vertical: 6),
-    child: BevelButton(
-      label: label,
-      onPressed: busy ? null : action,
-      primary: true,
-      danger: label.startsWith('Остановить'),
+    child: Align(
+      alignment: Alignment.centerLeft,
+      child: BevelButton(
+        label: label,
+        onPressed: busy ? null : action,
+        primary: true,
+        danger: label.startsWith('Остановить'),
+      ),
     ),
   );
   Widget dashboard() => DashboardView(
@@ -397,7 +407,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     ),
   );
 
-  Widget vaultPanel() {
+  /// Кнопки тёмно-зелёные внутри (страница настроек, формы закрытой среды).
+  Widget solidScope(Widget child) => Builder(
+    builder: (context) => Theme(data: Icq.solidButtons(Theme.of(context)), child: child),
+  );
+
+  Widget vaultPanel() => solidScope(vaultPanelBody());
+
+  Widget vaultPanelBody() {
     final v = vault;
     if (v == null)
       return UiText(
@@ -434,7 +451,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               final phrase = values[2].trim();
               final n = phrase.split(RegExp(r'\s+')).length;
               if (n != 12 && n != 24)
-                throw const FormatException('Введите 12 или 24 слова сид-фразы');
+                throw const FormatException(
+                  'Введите 12 или 24 слова сид-фразы',
+                );
               final payload = <String, dynamic>{
                 'password': values[0],
                 'phrase': phrase,
@@ -518,8 +537,16 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   /// Восстановление на новой машине: файл копии + сид-фраза + новый пароль; затем закрытая среда открывается этим паролем.
-  Future<void> restoreFromBackup(String file, String phrase, String password) async {
-    await act('/api/auth/restore', {'path': file, 'phrase': phrase, 'password': password});
+  Future<void> restoreFromBackup(
+    String file,
+    String phrase,
+    String password,
+  ) async {
+    await act('/api/auth/restore', {
+      'path': file,
+      'phrase': phrase,
+      'password': password,
+    });
     if (!mounted || error != null || auth == AuthStage.setup) return;
     setState(() => entered = true);
     await act('/api/vault/unlock', {'password': password});
@@ -614,9 +641,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         else if (page == 'Статус узла')
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [NodeStatusView(status: status), const SizedBox(height: 12), dashboard()],
+            children: [
+              NodeStatusView(status: status),
+              const SizedBox(height: 12),
+              dashboard(),
+            ],
           )
-        else if (page == 'Настройки') ...[
+        else if (page == 'Настройки')
+          solidScope(Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           vaultPanel(),
           const Divider(),
           AnimatedBuilder(
@@ -686,7 +718,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               !vault!.hasError &&
               (!vault!.configured || vault!.unlocked))
             features(),
-        ] else if (!visible || vault == null)
+        ])) else if (!visible || vault == null)
           const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)
           vaultPanel()
@@ -706,120 +738,160 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       border: Border(bottom: BorderSide(color: Icq.light, width: 2)),
     ),
     padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-    child: HeaderLayout(
-      children: [
-        Image.asset('assets/logo.png', width: 38, height: 38),
-        const SizedBox(width: 16),
-        Expanded(
-          child: entered && connected
-              ? TabStrip(
-                  header: true,
-                  labels: const [
-                    'Главная',
-                    'Чат',
-                    'Поиск',
-                    'Жалобы',
-                    'Группы',
-                    'Шлюзы',
-                    'Статус узла',
-                    'Настройки',
-                    'О приложении',
-                  ],
-                  selected: page == 'Панель' ? 'Главная' : page,
-                  onSelected: busy
-                      ? null
-                      : (label) {
-                          setState(() {
-                            epoch++;
-                            preferences.reset();
-                            background.openPeer = null;
-                            widget.api.cancel();
-                            page = label == 'Главная' ? 'Панель' : label;
-                            formVersion++;
-                          });
-                          poll(force: true);
-                        },
-                )
-              : const UiText(
-                  'YANDI · локальная оболочка',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+    // содержимое шапки той же ширины и по тем же краям, что блоки в теле страницы
+    child: Align(
+      alignment: Alignment.topCenter,
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxWidth: !entered && connected ? 500 : 1400,
         ),
-        const SizedBox(width: 8),
-        Row(
-          mainAxisSize: MainAxisSize.min,
+        child: HeaderLayout(
           children: [
-            BevelButton(
-              label: 'EN / RU',
-              onPressed: () {
-                preferences.english = !preferences.english;
-                preferences.changed();
-              },
+            Image.asset('assets/logo.png', width: 38, height: 38),
+            const SizedBox(width: 16),
+            Expanded(
+              child: entered && connected
+                  ? TabStrip(
+                      header: true,
+                      labels: const [
+                        'Главная',
+                        'Чат',
+                        'Поиск',
+                        'Жалобы',
+                        'Группы',
+                        'Шлюзы',
+                        'Статус узла',
+                        'Настройки',
+                        'О приложении',
+                      ],
+                      selected: page == 'Панель' ? 'Главная' : page,
+                      onSelected: busy
+                          ? null
+                          : (label) {
+                              setState(() {
+                                epoch++;
+                                preferences.reset();
+                                background.openPeer = null;
+                                widget.api.cancel();
+                                page = label == 'Главная' ? 'Панель' : label;
+                                notice = null;
+                                formVersion++;
+                              });
+                              poll(force: true);
+                            },
+                    )
+                  : const UiText(
+                      'YANDI · локальная оболочка',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
             ),
-            IconButton(
-              tooltip: preferences.english ? 'System sound' : 'Системный звук',
-              icon: Icon(
-                preferences.sound
-                    ? Icons.volume_up_outlined
-                    : Icons.volume_off_outlined,
-                size: 18,
-              ),
-              onPressed: () {
-                preferences.sound = !preferences.sound;
-                preferences.changed();
-              },
+            const SizedBox(width: 8),
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextButton(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Icq.panel,
+                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    textStyle: const TextStyle(
+                      fontSize: 13,
+                      fontFamily: 'Tahoma',
+                      decoration: TextDecoration.none,
+                    ),
+                  ),
+                  onPressed: () {
+                    preferences.english = !preferences.english;
+                    preferences.changed();
+                  },
+                  child: const Text('EN / RU'),
+                ),
+                IconButton(
+                  color: Icq.panel,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 30,
+                    height: 30,
+                  ),
+                  tooltip: preferences.english
+                      ? 'System sound'
+                      : 'Системный звук',
+                  icon: Icon(
+                    preferences.sound
+                        ? Icons.volume_up_outlined
+                        : Icons.volume_off_outlined,
+                    size: 18,
+                  ),
+                  onPressed: () {
+                    preferences.sound = !preferences.sound;
+                    preferences.changed();
+                  },
+                ),
+                IconButton(
+                  color: Icq.panel,
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 30,
+                    height: 30,
+                  ),
+                  tooltip: preferences.english
+                      ? 'OS notifications'
+                      : 'Уведомления ОС',
+                  icon: Icon(
+                    preferences.notifications
+                        ? Icons.notifications_active_outlined
+                        : Icons.notifications_none,
+                    size: 18,
+                  ),
+                  onPressed: () {
+                    preferences.notifications = !preferences.notifications;
+                    preferences.changed();
+                  },
+                ),
+                if (entered)
+                  IconButton(
+                    color: Icq.panel,
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints.tightFor(
+                      width: 30,
+                      height: 30,
+                    ),
+                    tooltip: preferences.english
+                        ? 'Log out (locks the vault)'
+                        : 'Выйти (запирает закрытую среду)',
+                    icon: const Icon(Icons.logout, size: 18),
+                    onPressed: busy
+                        ? null
+                        : () async {
+                            // выход ВСЕГДА запирает среду: кеш состояния оболочки мог устареть (среду открыл другой клиент), а блокировка идемпотентна
+                            await act('/api/vault/lock', {});
+                            if (!mounted || lockUnconfirmed) return;
+                            setState(() {
+                              wipe();
+                              entered = false;
+                              notice = error = null;
+                            });
+                          },
+                  ),
+              ],
             ),
-            IconButton(
-              tooltip: preferences.english
-                  ? 'OS notifications'
-                  : 'Уведомления ОС',
-              icon: Icon(
-                preferences.notifications
-                    ? Icons.notifications_active_outlined
-                    : Icons.notifications_none,
-                size: 18,
-              ),
-              onPressed: () {
-                preferences.notifications = !preferences.notifications;
-                preferences.changed();
-              },
-            ),
-            if (entered)
-              IconButton(
-                tooltip: preferences.english
-                    ? 'Log out (locks the vault)'
-                    : 'Выйти (запирает закрытую среду)',
-                icon: const Icon(Icons.logout, size: 18),
-                onPressed: busy
-                    ? null
-                    : () async {
-                        // выход ВСЕГДА запирает среду: кеш состояния оболочки мог устареть (среду открыл другой клиент), а блокировка идемпотентна
-                        await act('/api/vault/lock', {});
-                        if (!mounted || lockUnconfirmed) return;
-                        setState(() {
-                          wipe();
-                          entered = false;
-                          notice = error = null;
-                        });
-                      },
-              ),
           ],
         ),
-      ],
+      ),
     ),
   );
 
-  bool Function() activeFor(int own) => () =>
-      visible &&
-      connected &&
-      entered &&
-      own == epoch &&
-      vault != null &&
-      !vault!.hasError &&
-      (!vault!.configured || vault!.unlocked);
+  bool Function() activeFor(int own) =>
+      () =>
+          visible &&
+          connected &&
+          entered &&
+          own == epoch &&
+          vault != null &&
+          !vault!.hasError &&
+          (!vault!.configured || vault!.unlocked);
 
   void lockedByCalls() {
     if (mounted) {
@@ -893,7 +965,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                           if (busy) const LinearProgressIndicator(),
                           if (error != null && connected)
                             NoticePanel(error!, error: true),
-                          if (notice != null) NoticePanel(notice!),
+                          if (notice != null)
+                            TransientNotice(
+                              key: ValueKey(notice),
+                              text: notice!,
+                              onDone: () {
+                                if (mounted) setState(() => notice = null);
+                              },
+                            ),
                           if (entered &&
                               connected &&
                               visible &&
@@ -1131,4 +1210,31 @@ class _TimeoutFormState extends State<TimeoutForm> {
       ),
     ],
   );
+}
+
+/// Сообщение об успехе («Действие выполнено», «Доступ восстановлен»): показывается несколько секунд и исчезает само.
+class TransientNotice extends StatefulWidget {
+  final String text;
+  final VoidCallback onDone;
+  const TransientNotice({super.key, required this.text, required this.onDone});
+  @override
+  State<TransientNotice> createState() => _TransientNoticeState();
+}
+
+class _TransientNoticeState extends State<TransientNotice> {
+  Timer? timer;
+  @override
+  void initState() {
+    super.initState();
+    timer = Timer(const Duration(seconds: 5), widget.onDone);
+  }
+
+  @override
+  void dispose() {
+    timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => NoticePanel(widget.text);
 }

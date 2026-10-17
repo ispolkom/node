@@ -31,6 +31,39 @@ abstract final class Icq {
     bottom: BorderSide(color: dark),
   );
 
+  /// Кнопки тёмно-зелёные, в цвете шапки (вместо подчёркнутых слов): для страницы настроек и форм закрытой среды.
+  static ThemeData solidButtons(ThemeData base) {
+    final style = ButtonStyle(
+      backgroundColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.disabled) ? border : header,
+      ),
+      foregroundColor: WidgetStateProperty.resolveWith(
+        (s) => s.contains(WidgetState.disabled) ? Colors.white70 : Colors.white,
+      ),
+      overlayColor: WidgetStatePropertyAll(Colors.white.withValues(alpha: 0.12)),
+      elevation: const WidgetStatePropertyAll(0),
+      shadowColor: const WidgetStatePropertyAll(Colors.transparent),
+      shape: const WidgetStatePropertyAll(RoundedRectangleBorder()),
+      side: const WidgetStatePropertyAll(BorderSide(color: light)),
+      minimumSize: const WidgetStatePropertyAll(Size(100, 40)),
+      padding: const WidgetStatePropertyAll(EdgeInsets.symmetric(horizontal: 14)),
+      textStyle: const WidgetStatePropertyAll(
+        TextStyle(
+          fontSize: 14,
+          fontFamily: 'Tahoma',
+          fontFamilyFallback: ['NotoColorEmoji'],
+          decoration: TextDecoration.none,
+        ),
+      ),
+    );
+    return base.copyWith(
+      filledButtonTheme: FilledButtonThemeData(style: style),
+      elevatedButtonTheme: ElevatedButtonThemeData(style: style),
+      textButtonTheme: TextButtonThemeData(style: style),
+      outlinedButtonTheme: OutlinedButtonThemeData(style: style),
+    );
+  }
+
   static ThemeData get theme {
     final base = ThemeData(
       useMaterial3: false,
@@ -189,7 +222,7 @@ class BevelButton extends TextButton {
     bool danger = false,
   }) : super(
          style: danger
-             ? TextButton.styleFrom(foregroundColor: Icq.danger)
+             ? TextButton.styleFrom(foregroundColor: Colors.white, backgroundColor: const Color(0xffb3261e))
              : (primary
                    ? TextButton.styleFrom(
                        textStyle: const TextStyle(
@@ -474,7 +507,7 @@ class HeaderLayout extends StatelessWidget {
         children: [
           children[0],
           children[1],
-          Expanded(child: tabs),
+          Flexible(child: tabs),
           children[3],
           children[4],
         ],
