@@ -342,6 +342,72 @@ pub fn lock() {
 pub fn unlock(key: [u8; 32]) {
     *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Sealed(key);
     *pool() = load_pool();
+    request_probe();
+}
+
+// ---- проверка живости: раз в сутки, по очереди, каждый добавленный прокси
+
+const PROBE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+fn last_probe() -> &'static Mutex<Option<Instant>> {
+    static L: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(None))
+}
+
+/// Проверить в ближайшую минуту (после открытия среды, добавления или правки), а не ждать суток.
+fn request_probe() {
+    *last_probe().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Сколько прокси добавлено и сколько из них сейчас отвечает. `None` — настройки недоступны (среда заперта).
+pub fn summary() -> Option<(usize, usize)> {
+    let now = Instant::now();
+    let g = pool();
+    if g.unavailable {
+        return None;
+    }
+    let working = g.file.proxies.iter().filter(|e| entry_view(&g, e, now)["state"] == "ok").count();
+    Some((g.file.proxies.len(), working))
+}
+
+/// Один проход: соединиться через каждый добавленный прокси (по очереди) с общеизвестным адресом и ничего не передавать.
+pub async fn probe_all() {
+    let list: Vec<(String, Settings)> = pool().file.proxies.iter().map(|e| (e.id.clone(), e.settings())).collect();
+    for (id, s) in list {
+        let r = connect(&s, "1.1.1.1", 443, Duration::from_secs(10)).await;
+        let now = Instant::now();
+        match r {
+            Ok(_) => {
+                let mut g = pool();
+                let h = g.health.entry(id).or_default();
+                h.fails = 0;
+                h.cooldown_until = None;
+                h.last_ok = Some(now);
+                h.last_error = None;
+            }
+            Err(e) => note_fail(pool_cell(), &id, &e.to_string(), now),
+        }
+    }
+}
+
+/// Фоновая проверка: раз в сутки (и сразу после открытия среды или изменения списка).
+pub async fn health_scheduler() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let due = {
+            let last = last_probe().lock().unwrap_or_else(|e| e.into_inner());
+            last.map_or(true, |t| t.elapsed() >= PROBE_EVERY)
+        };
+        if !due || mode_is_locked() || pool().file.proxies.is_empty() {
+            continue;
+        }
+        *last_probe().lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        probe_all().await;
+    }
+}
+
+fn mode_is_locked() -> bool {
+    matches!(mode(), Mode::Locked)
 }
 
 /// Перенос открытого файла в запечатанный; открытая копия затирается только после проверки записанного.
@@ -923,6 +989,7 @@ async fn add_proxies(Json(r): Json<AddReq>) -> Response {
         if let Err(e) = persist_or_rollback(&mut g, backup) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response();
         }
+        request_probe();
     }
     Json(json!({"ok": added > 0 || errors.is_empty(), "added": added, "errors": errors})).into_response()
 }
@@ -987,7 +1054,10 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
         e.auth = auth;
     }
     match persist_or_rollback(&mut g, backup) {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
+        Ok(()) => {
+            request_probe();
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
 }

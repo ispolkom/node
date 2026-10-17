@@ -1592,6 +1592,9 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
         "status": status,
         "nat_status": nat_status,
         "active_proxies": proxy_count,
+        // внешние прокси из настроек: добавлено и сколько отвечает по последней проверке (null — среда заперта)
+        "upstream_added": crate::upstream_proxy::summary().map(|s| s.0),
+        "upstream_working": crate::upstream_proxy::summary().map(|s| s.1),
         "mode": if state.transport.is_some() { &info.role } else { "Web UI only" },
     });
 

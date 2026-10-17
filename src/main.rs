@@ -305,6 +305,8 @@ async fn main() -> anyhow::Result<()> {
     }
     // срок хранения принятых и отправленных файлов: раз в сутки старое удаляется
     tokio::task::spawn(yandi::file_retention::scheduler());
+    // проверка внешних прокси раз в сутки, по очереди
+    tokio::task::spawn(yandi::upstream_proxy::health_scheduler());
     #[cfg(unix)]
     let closed_configured = closed_env.as_ref().is_some_and(|e| e.configured());
     #[cfg(not(unix))]

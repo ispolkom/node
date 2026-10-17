@@ -149,6 +149,13 @@ class NodeStatusView extends StatelessWidget {
     'node_id': 'ID узла',
   };
 
+  /// Внешние прокси из настроек: «работают из добавлено» по последней проверке (раз в сутки); пока среда заперта — прочерк.
+  static String upstream(Map<String, dynamic> st) {
+    final added = st['upstream_added'], working = st['upstream_working'];
+    if (added is! int || working is! int) return '—';
+    return '$working из $added';
+  }
+
   /// Значение для показа: логические — Да/Нет; «активные прокси» — только есть или нет, без самих прокси.
   static String show(String key, dynamic v) {
     if (key == 'active_proxies') {
@@ -180,7 +187,7 @@ class NodeStatusView extends StatelessWidget {
                   for (final item in rows.entries)
                     Padding(
                       padding: const EdgeInsets.only(bottom: 6),
-                      child: _StatusRow(item.value, show(item.key, status![item.key])),
+                      child: _StatusRow(item.value, item.key == 'active_proxies' ? upstream(status!) : show(item.key, status![item.key])),
                     ),
                 ],
               ),

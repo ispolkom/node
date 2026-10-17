@@ -48,6 +48,14 @@ void main() {
     expect(t.getRect(find.text('f' * 64)).right, lessThanOrEqualTo(row.right));
   });
 
+  testWidgets('активные прокси: работают из добавленных, заперто — прочерк', (t) async {
+    expect(NodeStatusView.upstream({'upstream_added': 3, 'upstream_working': 2}), '2 из 3');
+    expect(NodeStatusView.upstream({'upstream_added': 0, 'upstream_working': 0}), '0 из 0');
+    expect(NodeStatusView.upstream({'upstream_added': null, 'upstream_working': null}), '—');
+    expect(NodeStatusView.upstream({}), '—');
+    await t.pumpWidget(host(NodeStatusView(status: {...status, 'upstream_added': 2, 'upstream_working': 2})));
+    expect(find.text('2 из 2'), findsOneWidget);
+  });
   testWidgets('логические значения и «активные прокси» — только Да или Нет', (t) async {
     expect(NodeStatusView.show('is_local', false), 'Нет');
     expect(NodeStatusView.show('is_local', true), 'Да');
