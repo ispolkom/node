@@ -202,6 +202,42 @@ class BevelButton extends TextButton {
        );
 }
 
+/// Кнопка в цвете шапки приложения: основная — тёмно-зелёная, светлая — светлее, опасная — красная. Без подчёркнутых «слов-ссылок».
+enum SolidTone { primary, light, danger }
+
+class SolidButton extends StatelessWidget {
+  final String label;
+  final VoidCallback? onPressed;
+  final SolidTone tone;
+  const SolidButton(this.label, {super.key, required this.onPressed, this.tone = SolidTone.primary});
+  @override
+  Widget build(BuildContext context) => ElevatedButton(
+    onPressed: onPressed,
+    style: ElevatedButton.styleFrom(
+      backgroundColor: switch (tone) {
+        SolidTone.primary => Icq.header,
+        SolidTone.light => Icq.headerLight,
+        SolidTone.danger => const Color(0xffb3261e),
+      },
+      foregroundColor: Colors.white,
+      disabledBackgroundColor: Icq.border,
+      disabledForegroundColor: Colors.white70,
+      elevation: 0,
+      minimumSize: const Size(100, 40),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      shape: const RoundedRectangleBorder(),
+      side: const BorderSide(color: Icq.light),
+      textStyle: const TextStyle(
+        fontSize: 14,
+        fontFamily: 'Tahoma',
+        fontFamilyFallback: ['NotoColorEmoji'],
+        decoration: TextDecoration.none,
+      ),
+    ),
+    child: UiText(label, style: const TextStyle(color: Colors.white)),
+  );
+}
+
 class PageHeader extends StatelessWidget {
   final String title;
   final Widget? trailing;

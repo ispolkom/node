@@ -166,21 +166,13 @@ void main() {
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await stop(t);
   });
-  testWidgets('карточка «Ретрансляция» на Главной: состояние и слово-переключатель', (
-    t,
-  ) async {
+  testWidgets('ретрансляция включена по умолчанию, отдельного блока на Главной нет', (t) async {
     final api = NetworkApi()..relay = true;
     await start(t, api);
     await click(t, 'Войти');
-    expect(find.text('Ретрансляция'), findsOneWidget);
-    expect(find.textContaining('Служит ретранслятором'), findsOneWidget);
-    expect(find.textContaining('1 пар'), findsOneWidget);
-    await t.ensureVisible(find.byKey(const ValueKey('relay-toggle')));
-    await t.tap(find.byKey(const ValueKey('relay-toggle')));
-    await t.pumpAndSettle();
-    expect(api.relay, false);
-    expect(find.textContaining('не служит'), findsOneWidget);
-    // ручных ручек relay больше нет: вкладки «Relay» тоже
+    expect(find.text('Ретрансляция'), findsNothing);
+    expect(find.byKey(const ValueKey('relay-toggle')), findsNothing);
+    expect(api.calls.contains('/api/network/relay'), false);
     expect(find.text('Relay'), findsNothing);
     await stop(t);
   });

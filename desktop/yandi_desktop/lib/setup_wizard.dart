@@ -366,27 +366,10 @@ class _SetupWizardState extends State<SetupWizard> {
     ),
   );
 
-  /// Кнопки в цвете шапки приложения: основная — тёмно-зелёная, вторичная — светлее; без подчёркнутых «ссылок».
-  Widget _button(String label, VoidCallback? action, {bool filled = true}) =>
-      Padding(
-        padding: const EdgeInsets.only(right: 12, top: 8),
-        child: ElevatedButton(
-          onPressed: action,
-          style: ElevatedButton.styleFrom(
-            backgroundColor: filled ? Icq.header : Icq.headerLight,
-            foregroundColor: Colors.white,
-            disabledBackgroundColor: Icq.border,
-            disabledForegroundColor: Colors.white70,
-            elevation: 0,
-            minimumSize: const Size(100, 40),
-            padding: const EdgeInsets.symmetric(horizontal: 14),
-            shape: const RoundedRectangleBorder(),
-            side: const BorderSide(color: Icq.light),
-            textStyle: const TextStyle(fontSize: 14, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji']),
-          ),
-          child: UiText(label, style: const TextStyle(color: Colors.white)),
-        ),
-      );
+  Widget _button(String label, VoidCallback? action, {bool filled = true}) => Padding(
+    padding: const EdgeInsets.only(right: 12, top: 8),
+    child: SolidButton(label, onPressed: action, tone: filled ? SolidTone.primary : SolidTone.light),
+  );
 
   static const _cellWidth = 136.0, _cellHeight = 40.0;
 
@@ -404,7 +387,7 @@ class _SetupWizardState extends State<SetupWizard> {
   );
 
   /// Сетка из окон одного размера: по три слова в строке (12 слов — 4 строки, 24 слова — 8 строк).
-  Widget _numbered(List<String> list, {bool selectable = true}) => Column(
+  Widget _numbered(List<String> list) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
       for (var r = 0; r * 3 < list.length; r++)

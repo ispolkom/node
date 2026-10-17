@@ -1,6 +1,5 @@
 import 'theme.dart';
 import 'dashboard.dart';
-import 'relay_card.dart';
 import 'preferences.dart';
 import 'setup_wizard.dart';
 import 'nick.dart';
@@ -241,7 +240,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         }
       }
       await refreshVault(own);
-      if (!mounted || own != epoch || page != 'Панель') return;
+      if (!mounted || own != epoch || page != 'Панель' && page != 'Статус узла') return;
       if (force || current % 5 == 0) {
         final result = await widget.api.request('/api/status');
         if (!mounted || own != epoch) return;
@@ -383,12 +382,19 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     nodes: nodes,
     controls: Wrap(
       spacing: 12,
+      runSpacing: 8,
       children: [
-        button('Запустить узел', () => act('/api/node/start', {})),
-        button('Остановить узел', () => act('/api/node/stop', {})),
+        SolidButton(
+          'Запустить узел',
+          onPressed: busy ? null : () => act('/api/node/start', {}),
+        ),
+        SolidButton(
+          'Остановить узел',
+          tone: SolidTone.danger,
+          onPressed: busy ? null : () => act('/api/node/stop', {}),
+        ),
       ],
     ),
-    relay: RelayCard(api: widget.api, isActive: () => mounted && visible),
   );
 
   Widget vaultPanel() {
@@ -604,6 +610,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           vaultPanel()
         else if (page == 'Панель')
           dashboard()
+        else if (page == 'Статус узла')
+          NodeStatusView(status: status)
         else if (page == 'Настройки') ...[
           vaultPanel(),
           const Divider(),
@@ -709,6 +717,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     'Жалобы',
                     'Группы',
                     'Шлюзы',
+                    'Статус узла',
                     'Настройки',
                     'О приложении',
                   ],
