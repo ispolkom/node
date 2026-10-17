@@ -51,3 +51,6 @@ __pycache__/
 dist/
 release/.lock
 release/.SEQ.lock
+
+# файл привязки ссылок-приглашений к приложению (Android App Links) должен лежать в репозитории
+!deploy/site/**/assetlinks.json

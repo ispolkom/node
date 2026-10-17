@@ -145,6 +145,11 @@ fn is_user_role(peer: &str) -> bool {
     with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.restricted_role()))
 }
 
+/// Отправитель — пользователь узла или гость (не владелец).
+pub(crate) fn is_restricted_device(dev: &str) -> bool {
+    with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.restricted_role()))
+}
+
 /// Устройство с таким номером — гость или пользователь узла (не владелец).
 pub(crate) fn is_restricted_peer(peer: &str) -> bool {
     is_user_role(peer)
@@ -176,6 +181,16 @@ pub(crate) fn is_guest_device(dev: &str) -> bool {
     with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.role == "guest"))
 }
 
+/// Активность гостя по номеру устройства: обновляет «последний раз на связи», не чаще раза в минуту.
+fn touch_guest(peer: &str) {
+    let now = now_ms();
+    with_devices(|d| {
+        if let Some(x) = d.iter_mut().find(|x| x.role == "guest" && x.peer_id() == peer && now.saturating_sub(x.last_seen_ms) > 60_000) {
+            x.last_seen_ms = now;
+        }
+    });
+}
+
 /// Видит ли устройство `me` присутствие устройства `peer`: гость не видит ничьего (P10-4), а присутствие гостей не видят пользователи узла.
 fn presence_allowed(me: &str, peer: &str) -> bool {
     !is_guest_peer(me) && !(is_guest_peer(peer) && is_user_role(me))
@@ -189,7 +204,7 @@ fn live_allowed(me: &str) -> bool {
 /// Что гостю закрыто сверх закрытого пользователю: группы, прокси-выход, TURN (звонки), каталог пользователей. Файлы открыты, но под лимитами.
 fn guest_blocked(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
-    (owner_only_path(method, path) && !path.starts_with("/mobile/files"))
+    owner_only_path(method, path)
         // профиль и жалобы пишутся в постоянное хранилище: гостю закрыты, пока владелец не примет его (docs/GUEST.md, P10-2)
         || (path == "/mobile/me/profile" && method != Method::GET)
         || (path == "/mobile/complaints" && method == Method::POST)
@@ -205,7 +220,6 @@ fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     path == "/mobile/contacts"
         || path.starts_with("/mobile/chat/")
-        || path.starts_with("/mobile/files")
         || (path == "/mobile/profile" && method != Method::GET)
         || path == "/mobile/proxy/info"
 }
@@ -932,8 +946,20 @@ pub(crate) fn pair_requests_pending() -> Vec<serde_json::Value> {
 
 /// Решение владельца. Принять = роль «пользователь узла» (владельцем устройство становится только по QR). Отклонить = слот занят до конца суток.
 pub(crate) fn decide_pair_request(id: &str, accept: bool) -> Result<(), &'static str> {
-    let Some(r) = with_pair_requests(|l| l.iter().find(|r| r.id == id && r.state == "pending").cloned()) else {
+    // занять запрос одним действием под замком: конкурирующее решение увидит «обрабатывается» и получит отказ
+    let Some(r) = with_pair_requests(|l| {
+        let x = l.iter_mut().find(|r| r.id == id && r.state == "pending")?;
+        x.state = "deciding";
+        Some(x.clone())
+    }) else {
         return Err("запрос не найден или уже обработан");
+    };
+    let release = |state: &'static str| {
+        with_pair_requests(|l| {
+            if let Some(x) = l.iter_mut().find(|x| x.id == id) {
+                x.state = state;
+            }
+        })
     };
     if accept {
         let mut found = false;
@@ -944,6 +970,7 @@ pub(crate) fn decide_pair_request(id: &str, accept: bool) -> Result<(), &'static
             }
         });
         if !found {
+            release("pending");
             return Err("устройство уже не гость");
         }
         if !saved {
@@ -952,16 +979,13 @@ pub(crate) fn decide_pair_request(id: &str, accept: bool) -> Result<(), &'static
                     x.role = "guest".to_string();
                 }
             });
+            release("pending");
             return Err("не удалось сохранить; попробуйте ещё раз");
         }
         crate::guest::forget(&r.token_hash);
         crate::backup_signal::notify_critical(); // новое постоянное устройство в реестре
     }
-    with_pair_requests(|l| {
-        if let Some(x) = l.iter_mut().find(|x| x.id == id) {
-            x.state = if accept { "accepted" } else { "rejected" };
-        }
-    });
+    release(if accept { "accepted" } else { "rejected" });
     Ok(())
 }
 
@@ -971,8 +995,21 @@ struct GuestPairReq {
     device_name: String,
 }
 
+/// Убрать просроченные письма и записать файл очереди только если что-то убрано (нет лишней записи при каждом вызове).
+fn sweep_mail() {
+    let changed = with_mail(|l| {
+        let n = l.len();
+        expire_mail(l, now_ms());
+        l.len() != n
+    });
+    if changed {
+        let _ = with_mail_saved(|_| ());
+    }
+}
+
 /// Удалить гостей, молчавших дольше суток; вернуть, сколько удалено. Группы/почта/квоты забываются так же, как при отзыве.
-pub(crate) fn purge_idle_guests() -> usize {
+/// Дешёвая часть (без почты и диска): её можно вызывать с публичной ручки; полную уборку делает таймер.
+pub(crate) fn purge_idle_guests_cheap() -> usize {
     let limit = crate::guest::IDLE.as_millis() as u64;
     let now = now_ms();
     let mut gone: Vec<Device> = Vec::new();
@@ -987,9 +1024,16 @@ pub(crate) fn purge_idle_guests() -> usize {
         let peer = g.peer_id();
         after_forget(peer);
     }
-    // письма гостя старше суток уходят и без того, что сам гость ещё жив
-    let _ = with_mail_saved(|l| expire_mail(l, now_ms()));
     gone.len()
+}
+
+/// Полная уборка (таймер): гости, письма, очереди приглашений и запросов сопряжения.
+pub(crate) fn purge_idle_guests() -> usize {
+    let n = purge_idle_guests_cheap();
+    sweep_mail();
+    crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).sweep(now_ms());
+    with_pair_requests(|_| ());
+    n
 }
 
 /// Автоматическое сопряжение без QR: если оператор узла разрешил, устройство получает роль `guest` (docs/GUEST.md). Адрес устройства здесь не читается и не хранится.
@@ -997,10 +1041,11 @@ async fn pair_guest(Json(req): Json<GuestPairReq>) -> Response {
     if !crate::guest::enabled() {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "этот узел не принимает сопряжение без QR"}))).into_response();
     }
-    purge_idle_guests();
+    // сначала дешёвый отказ по частоте: ни уборки, ни диска, ни перебора списков для отвергнутых запросов
     if !crate::guest::take_issue_slot(Instant::now()) {
         return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "узел сейчас принимает слишком много новых устройств; повторите позже"}))).into_response();
     }
+    purge_idle_guests_cheap();
     use rand::RngCore;
     let mut raw = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut raw);
@@ -1884,7 +1929,7 @@ async fn inbox(
         .unwrap_or(200)
         .clamp(1, 1000);
     // просроченное (письма гостей: абсолютный срок) не выдаётся, даже если чистильщик ещё не успел
-    let _ = with_mail_saved(|l| expire_mail(l, now_ms()));
+    sweep_mail();
     let acked = with_devices(|d| {
         d.iter()
             .find(|x| same(&x.token_hash, &dev))
@@ -2277,6 +2322,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                 if device_by_peer(&me).is_none() {
                     break; // устройство забыли, пока кадр шёл: ничего из него не исполняем
                 }
+                touch_guest(&me); // кадр по живому сокету — активность гостя (не чаще раза в минуту)
                 let Message::Binary(d) = msg else { if matches!(msg, Message::Close(_)) { break } else { continue } };
                 match d.first().copied() {
                     Some(FT_PING) => { if sock.send(Message::Binary(vec![FT_PONG])).await.is_err() { break; } }
@@ -2961,13 +3007,13 @@ mod hardening_tests {
     #[test]
     fn user_role_is_kept_away_from_the_owners_correspondence() {
         use axum::http::Method;
-        for (m, p) in [(Method::GET, "/mobile/chat/abc"), (Method::POST, "/mobile/chat/abc"),                        (Method::GET, "/mobile/contacts"), (Method::POST, "/mobile/contacts"), (Method::PUT, "/mobile/profile"), (Method::GET, "/mobile/files")] {
+        for (m, p) in [(Method::GET, "/mobile/chat/abc"), (Method::POST, "/mobile/chat/abc"),                        (Method::GET, "/mobile/contacts"), (Method::POST, "/mobile/contacts"), (Method::PUT, "/mobile/profile")] {
             assert!(owner_only_path(&m, p), "{m} {p}");
         }
         for (m, p) in [(Method::GET, "/mobile/groups"), (Method::POST, "/mobile/complaints"), (Method::GET, "/mobile/me/profile"),
                        (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y"),
                        (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc"),
-                       (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack")] {
+                       (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack"), (Method::GET, "/mobile/files"), (Method::POST, "/mobile/files")] {
             assert!(!owner_only_path(&m, p), "{m} {p}");
         }
         // роль в старом devices.json отсутствует — это владелец
@@ -2989,6 +3035,7 @@ mod hardening_tests {
 
     #[tokio::test]
     async fn a_pairing_that_cannot_be_saved_is_refused_and_leaves_no_trace() {
+        let _lock = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let p = devices_path();
         let before = with_devices(|d| d.len());
         let code = issue_pairing_code();
@@ -3156,6 +3203,7 @@ mod guest_tests {
         wipe(&[]);
         crate::guest::set_enabled(true).unwrap();
         // владельческие устройства заполняют список до предела
+        let owners_before = with_devices(|d| d.iter().filter(|x| x.role == "owner").count());
         let owners: Vec<String> = (0..MAX_DEVICES).map(|i| add("owner", &format!("own{i:02}"))).collect();
         let tags: Vec<String> = (0..MAX_DEVICES).map(|i| format!("own{i:02}")).collect();
         for i in 0..crate::guest::MAX_GUESTS {
@@ -3168,7 +3216,7 @@ mod guest_tests {
         let r = pair_guest(Json(GuestPairReq { device_name: "лишний".into() })).await;
         assert_eq!(r.status(), StatusCode::SERVICE_UNAVAILABLE, "общий потолок гостей");
         let alive = with_devices(|d| d.iter().filter(|x| x.role == "owner").count());
-        assert_eq!(alive, owners.len(), "поток гостей не вытеснил ни одного устройства владельца");
+        assert_eq!(alive, owners_before + owners.len(), "поток гостей не вытеснил ни одного устройства владельца");
         crate::guest::set_enabled(false).unwrap();
         let t: Vec<&str> = tags.iter().map(|s| s.as_str()).collect();
         wipe(&t);
@@ -3214,17 +3262,21 @@ mod guest_tests {
         // 30 МБ + 1 байт — отказ; ровно 30 МБ (в 30 кусков по 1 МБ) — можно
         assert_eq!(start(&a, to(&b), crate::guest::MAX_FILE + 1, 31).await, StatusCode::TOO_MANY_REQUESTS);
         assert_eq!(start(&a, to(&b), crate::guest::MAX_FILE, 30).await, StatusCode::OK);
-        // владельцу и самому узлу гость файлы не шлёт
+        // владельцу и самому узлу гость файлы не шлёт; пользователь узла — тоже, но другому пользователю и гостю может
         assert_eq!(start(&a, to(&owner), 1000, 1).await, StatusCode::FORBIDDEN);
+        let user = add("user", "fu");
+        assert_eq!(start(&user, to(&owner), 1000, 1).await, StatusCode::FORBIDDEN, "пользователь узла не шлёт файлы владельцу");
+        assert_eq!(start(&user, to(&b), 1000, 1).await, StatusCode::OK, "пользователь узла шлёт гостю");
+        assert_eq!(start(&a, to(&user), 1000, 1).await, StatusCode::OK, "гость шлёт пользователю");
         // 20 файлов в сутки: уже один потрачен, ещё 19 проходят, двадцать первый нет (по 100 байт)
-        for _ in 0..19 {
+        for _ in 0..18 {
             assert_eq!(start(&a, to(&b), 100, 1).await, StatusCode::OK);
         }
         assert_eq!(start(&a, to(&b), 100, 1).await, StatusCode::TOO_MANY_REQUESTS);
         crate::guest::forget(&a);
         // владелец лимитом гостя не связан
         assert_eq!(start(&owner, to(&b), crate::guest::MAX_FILE + 1, 31).await, StatusCode::OK);
-        wipe(&["fa", "fb", "fo"]);
+        wipe(&["fa", "fb", "fo", "fu"]);
         let _ = std::fs::remove_dir_all(crate::util::data_dir::data_dir().join("mobile_files"));
     }
 
@@ -3413,5 +3465,79 @@ mod guest_tests {
         assert!(!live_allowed(&g));
         assert!(live_allowed(&u) && live_allowed(&o));
         wipe(&["pg", "pu", "po"]);
+    }
+
+    #[test]
+    fn two_owner_sessions_deciding_at_once_leave_one_decision() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        requests_reset();
+        let th = add("guest", "dq");
+        let (tx, rx) = (th.clone(), th.clone());
+        let _ = (tx, rx);
+        with_pair_requests(|l| l.push(PairRequest { id: "r1".into(), token_hash: th.clone(), name: "dq".into(), created_ms: now_ms(), state: "pending" }));
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let hs: Vec<_> = [true, false]
+            .into_iter()
+            .map(|accept| {
+                let b = barrier.clone();
+                std::thread::spawn(move || {
+                    b.wait();
+                    decide_pair_request("r1", accept).is_ok()
+                })
+            })
+            .collect();
+        let oks = hs.into_iter().map(|h| h.join().unwrap()).filter(|o| *o).count();
+        assert_eq!(oks, 1, "ровно одно решение выигрывает");
+        let role = with_devices(|d| d.iter().find(|x| x.token_hash == th).map(|x| x.role.clone())).unwrap();
+        let state = with_pair_requests(|l| l.iter().find(|r| r.id == "r1").map(|r| r.state)).unwrap();
+        assert!((role == "user" && state == "accepted") || (role == "guest" && state == "rejected"), "роль и решение согласованы: {role}/{state}");
+        requests_reset();
+        wipe(&["dq"]);
+    }
+
+    #[test]
+    fn a_ws_frame_keeps_a_guest_alive_but_a_silent_one_is_still_purged() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let a = add("guest", "wa");
+        let b = add("guest", "wb");
+        let day = 24 * 3600 * 1000u64;
+        with_devices(|d| {
+            for x in d.iter_mut() {
+                if x.token_hash == a || x.token_hash == b {
+                    x.created_ms = 1;
+                    x.last_seen_ms = now_ms() - day - 1000;
+                }
+            }
+        });
+        touch_guest(&device_peer_of(&a).unwrap()); // кадр на сокете гостя A
+        assert_eq!(purge_idle_guests_cheap(), 1);
+        assert!(with_devices(|d| d.iter().any(|x| x.token_hash == a)), "активный через сокет остаётся");
+        assert!(!with_devices(|d| d.iter().any(|x| x.token_hash == b)), "молчавший удалён");
+        wipe(&["wa", "wb"]);
+    }
+
+    #[tokio::test]
+    async fn a_refused_guest_request_does_not_touch_the_mail_file() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        crate::guest::set_enabled(true).unwrap();
+        let _ = with_mail_saved(|l| l.clear());
+        let before = std::fs::metadata(mail_path()).and_then(|m| m.modified()).ok();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        for _ in 0..crate::guest::MAX_ISSUE_PER_MIN {
+            crate::guest::take_issue_slot(Instant::now());
+        }
+        let r = pair_guest(Json(GuestPairReq { device_name: "x".into() })).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        let after = std::fs::metadata(mail_path()).and_then(|m| m.modified()).ok();
+        assert_eq!(before, after, "отвергнутый запрос не пишет файл почты");
+        crate::guest::set_enabled(false).unwrap();
+        crate::guest::take_issue_slot_reset_for_test();
+        wipe(&[]);
     }
 }

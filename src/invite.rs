@@ -143,9 +143,15 @@ fn eq(a: &[u8], b: &[u8]) -> bool {
 }
 
 impl Registry {
+    /// Периодическая очистка просроченного (вызывает таймер узла).
+    pub fn sweep(&mut self, now: u64) {
+        self.purge(now);
+    }
+
     fn purge(&mut self, now: u64) {
         self.invites.retain(|_, e| e.expires_at > now);
-        let live: Vec<String> = self.invites.keys().cloned().collect();
+        // O(приглашения + введения): множество живых номеров строится один раз, а не перебирается для каждого введения
+        let live: std::collections::HashSet<&String> = self.invites.keys().collect();
         for q in self.claims.values_mut() {
             q.retain(|c| live.contains(&c.invite_id));
         }
@@ -188,7 +194,7 @@ impl Registry {
     /// Б погашает приглашение. `redeemer_ed` — ключ подписи устройства Б на этом узле. Возвращает (claim_digest, consumed_at).
     #[allow(clippy::too_many_arguments)]
     pub fn redeem(&mut self, now: u64, redeemer_peer: &str, redeemer_ed: &[u8], invite: &[u8], invite_sig: &[u8], token: &[u8], claim: &[u8], claim_sig: &[u8]) -> Result<([u8; 32], u64), Refusal> {
-        self.purge(now);
+        // глобальная уборка здесь не нужна: срок проверяется у самой записи, а чистит таймер (sweep) — недопустимый запрос дёшев
         let doc: InviteDoc = serde_json::from_slice(invite).map_err(|_| Refusal::Malformed)?;
         let cdoc: ClaimDoc = serde_json::from_slice(claim).map_err(|_| Refusal::Malformed)?;
         if doc.v != 1 || cdoc.v != 1 || invite.len() > MAX_FIELD || claim.len() > MAX_FIELD {
@@ -264,7 +270,7 @@ impl Registry {
     pub fn revoke(&mut self, issuer_peer: &str, invite_id_hex: Option<&str>) {
         self.invites.retain(|k, e| !(e.issuer_peer == issuer_peer && invite_id_hex.map_or(true, |i| i == k)));
         if let Some(q) = self.claims.get_mut(issuer_peer) {
-            let live: Vec<String> = self.invites.keys().cloned().collect();
+            let live: std::collections::HashSet<&String> = self.invites.keys().collect();
             q.retain(|c| live.contains(&c.invite_id));
         }
     }
@@ -427,7 +433,9 @@ pub(crate) mod tests {
         cs[3] ^= 1;
         assert_eq!(r.redeem(NOW + 1, "b", &b.sk.verifying_key().to_bytes(), &m.invite, &m.sig, &m.token, &c.0, &cs), Err(Refusal::BadSignature));
         // срок
-        assert_eq!(red(&mut r, &b, &m, &c, NOW + 3_600_000), Err(Refusal::UnknownInvite), "истёкшее стирается и как неизвестное");
+        assert_eq!(red(&mut r, &b, &m, &c, NOW + 3_600_000), Err(Refusal::Expired), "срок проверяется у самой записи, не дожидаясь уборки");
+        r.sweep(NOW + 3_600_000);
+        assert_eq!(red(&mut r, &b, &m, &c, NOW + 3_600_001), Err(Refusal::UnknownInvite), "после уборки — как неизвестное");
         // приглашение, которого узел не регистрировал, по ссылке не появляется
         let m2 = make_invite(&a, NOW, 3_600_000);
         let c2 = make_claim(&b, &m2, 1);
