@@ -73,6 +73,20 @@ impl EnvelopeStore {
         )
     }
 
+    /// Восстановление из резервной копии на новой машине: envelope пришёл из копии, а счётчик попыток в копию не входит.
+    /// Заводит чистый счётчик для этого envelope; существующий счётчик не трогает.
+    pub fn restore_attempts(&self) -> Result<()> {
+        let _lock = self.lock()?;
+        let snapshot = self.load_locked()?.ok_or_else(|| anyhow!("закрытая среда не создана"))?;
+        if self.read(COUNTER)?.is_some() {
+            return Ok(());
+        }
+        self.write(
+            COUNTER,
+            &serde_json::to_vec(&Attempts { format: 1, id: snapshot.envelope.id, failures: 0, next_ms: 0, rec_failures: 0 })?,
+        )
+    }
+
     /// Криптостирание: убирает обёрнутый ключ данных и метки. Зашифрованные файлы потребителей остаются на диске, но без
     /// ключа не читаются. Вызывается под flock, после этого среда считается не созданной.
     fn wipe_locked(&self) {

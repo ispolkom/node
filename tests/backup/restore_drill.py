@@ -6,7 +6,9 @@ BIN = os.environ.get('YANDI_BIN', os.path.join(os.path.dirname(os.path.abspath(_
 K = 7
 b = 26000 + 100 * K
 P = dict(web=b, discovery=b+1, data=b+2, p2p_discovery=b+3, p2p_data=b+4, ws=b+6, http_proxy=b+7, mobile_gateway=b+8, mobile_p2p=b+9)
-LOGIN, MASTER = 'drill-login-pass-1', 'drill-master-pass-1'
+LOGIN = 'drill-login-pass-1'
+MASTER = 'legal winner thank year wave sausage worth useful legal winner thank yellow'  # сид-фраза (12 слов)
+VAULT_OLD, VAULT_NEW = 'drill-vault-pass-1', 'drill-vault-pass-2'
 ROOT = os.environ.get('YANDI_DRILL_DIR', '/tmp/yandi-backup-drill')
 opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
@@ -84,6 +86,9 @@ assert cookie, 'A: вход'
 assert ready(cookie), 'A: не готов'
 id_a = node_id(cookie)
 print('узел A:', id_a)
+st, body, _ = call('/api/vault/setup', 'POST', {'password': VAULT_OLD, 'phrase': MASTER}, cookie)
+print('закрытая среда создана:', st, body)
+assert st == 200, 'A: закрытая среда'
 st, body, _ = call('/api/contacts', 'POST', {'name': 'Тест-Контакт', 'short_id': 'ab' * 8}, cookie)
 print('контакт добавлен:', st)
 st, body, _ = call('/api/backup/status', cookie=cookie); print('статус копии:', st, {k: body[k] for k in ('counter', 'auto', 'ext')})
@@ -97,7 +102,7 @@ stop(pa)
 print('== B: пустая машина, восстановление')
 prepare(B)
 r = subprocess.run([BIN, 'backup', 'restore', f'{ROOT}/node.yandibak', '--code-stdin', '--yes', '--port', str(P['discovery'])],
-    input=MASTER + '\n', env=env_for(B), capture_output=True, text=True, timeout=300)
+    input=MASTER + '\n' + VAULT_NEW + '\n', env=env_for(B), capture_output=True, text=True, timeout=300)
 print(r.stdout); print(r.stderr[-800:])
 assert r.returncode == 0, f'restore вернул {r.returncode}'
 pb = start(B)
@@ -109,7 +114,12 @@ print('узел B:', id_b)
 st, contacts, _ = call('/api/contacts', cookie=cookie_b)
 names = [c.get('name') for c in contacts.get('contacts', [])]
 print('контакты B:', names)
+st, v, _ = call('/api/vault/status', cookie=cookie_b)
+print('закрытая среда на B:', st, v)
+st_old, _, _ = call('/api/vault/unlock', 'POST', {'password': VAULT_OLD}, cookie_b)
+st_new, _, _ = call('/api/vault/unlock', 'POST', {'password': VAULT_NEW}, cookie_b)
+print('старый пароль:', st_old, '| новый пароль:', st_new)
 stop(pb)
-ok = id_a == id_b and 'Тест-Контакт' in names
-print('РЕЗУЛЬТАТ:', 'ПРОЙДЕНО — тот же узел и контакты на новой машине' if ok else 'ПРОВАЛ')
+ok = id_a == id_b and 'Тест-Контакт' in names and st_old != 200 and st_new == 200
+print('РЕЗУЛЬТАТ:', 'ПРОЙДЕНО — тот же узел и контакты на новой машине; старый пароль не действует, новый открывает' if ok else 'ПРОВАЛ')
 sys.exit(0 if ok else 1)

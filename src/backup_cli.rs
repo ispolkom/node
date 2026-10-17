@@ -132,7 +132,7 @@ pub fn run(argv: Vec<String>) -> i32 {
         eprintln!("yandi backup: неизвестная команда {}", a.cmd);
         return 2;
     }
-    let code = match ask_secret("Код восстановления (или мастер-пароль): ", a.code_stdin) {
+    let code = match ask_secret("Сид-фраза (12 или 24 слова), код восстановления или мастер-пароль: ", a.code_stdin) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("yandi backup: {e}");
@@ -173,6 +173,31 @@ pub fn run(argv: Vec<String>) -> i32 {
             return 1;
         }
     }
+    // Копия с закрытой средой: пароль прежней установки не переносится, для этой машины задаётся новый (как в кошельках).
+    let has_vault = entries.iter().any(|e| e.path == "closed/envelope.json");
+    let new_password = if has_vault {
+        let first = match ask_secret("Новый пароль для этой машины (не короче 6 знаков): ", a.code_stdin) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("yandi backup: {e}");
+                return 2;
+            }
+        };
+        if first.chars().count() < 6 {
+            eprintln!("yandi backup: пароль не короче 6 знаков; ничего не записано");
+            return 2;
+        }
+        if !a.code_stdin {
+            let again = ask_secret("Повторите пароль: ", false).unwrap_or_default();
+            if again != first {
+                eprintln!("yandi backup: пароли не совпали; ничего не записано");
+                return 2;
+            }
+        }
+        Some(first)
+    } else {
+        None
+    };
     let report = match node_backup::restore(&opened, &a.layout, &RestoreOptions { force: a.force }) {
         Ok(r) => r,
         Err(e) => {
@@ -203,8 +228,17 @@ pub fn run(argv: Vec<String>) -> i32 {
     match rec.run() {
         Ok(r) => {
             println!("личность узла {} восстановлена; для этой машины создан новый ключ устройства.", r.node_id);
+            if let Some(pw) = &new_password {
+                match node_backup::finalize_vault(&a.layout, &code, pw) {
+                    Ok(_) => println!("закрытая среда открыта сид-фразой; пароль прежней установки больше не действует, действует новый."),
+                    Err(e) => {
+                        eprintln!("yandi backup: файлы и ключи записаны, но закрытая среда не настроена: {e}. Повторите команду с --force и той же сид-фразой.");
+                        return 1;
+                    }
+                }
+            }
             println!();
-            println!("Дальше: запустите узел (sudo systemctl start yandi-node) и введите пароль закрытой среды, как раньше.");
+            println!("Дальше: запустите узел (sudo systemctl start yandi-node) и войдите новым паролем.");
             println!("Телефоны и известные узлы подключатся сами. Группы возвращены без сообщений на узле (у участников они остались на телефонах).");
             0
         }

@@ -1357,3 +1357,63 @@ mod tests {
         assert!(!load_state(&l).critical_pending, "успех снимает долг");
     }
 }
+
+
+/// После восстановления на новой машине: если копия принесла закрытую среду, её пароль прежней установки не принимается.
+/// Среда открывается сид-фразой и заново оборачивается паролем, выбранным на этой машине (как в кошельках: пароль привязан к установке,
+/// сид — к личности). Счётчики попыток начинаются заново. Возвращает `false`, если закрытой среды в копии не было.
+#[cfg(unix)]
+pub fn finalize_vault(l: &Layout, phrase: &str, new_password: &str) -> Result<bool, String> {
+    use crate::node_vault::{store::EnvelopeStore, NodeVault};
+    let dir = l.data.join("closed");
+    if !dir.join("envelope.json").exists() {
+        return Ok(false);
+    }
+    let store = EnvelopeStore::open(&dir).map_err(|e| format!("закрытая среда: {e}"))?;
+    let snapshot = store.load().map_err(|e| format!("закрытая среда: {e}"))?.ok_or("закрытая среда в копии пуста")?;
+    store.restore_attempts().map_err(|e| format!("закрытая среда: {e}"))?;
+    let mut vault = NodeVault::default();
+    vault
+        .recover(&snapshot.envelope, phrase)
+        .map_err(|_| "сид-фраза не открывает закрытую среду из копии".to_string())?;
+    let next = vault.change_password(&snapshot.envelope, new_password).map_err(|e| format!("новый пароль: {e}"))?;
+    store.save(Some(&snapshot), &next, &vault).map_err(|e| format!("закрытая среда: {e}"))?;
+    Ok(true)
+}
+
+#[cfg(all(test, unix))]
+mod vault_tests {
+    use super::*;
+    use crate::node_vault::{store::EnvelopeStore, NodeVault, VaultEnvelope};
+
+    const SEED: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+    #[test]
+    fn restore_on_a_new_machine_drops_the_old_password_and_sets_a_new_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let l = Layout { keys: tmp.path().join("keys"), data: tmp.path().join("data"), home: tmp.path().join("home"), port: 9000 };
+        let dir = l.data.join("closed");
+        let (env, vault) = VaultEnvelope::create_unlocked("old password", Some(SEED)).unwrap();
+        let store = EnvelopeStore::open(&dir).unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        // как в копии: envelope и метка есть, счётчика попыток нет
+        std::fs::remove_file(dir.join("attempts.json")).unwrap();
+        drop(store);
+        assert!(finalize_vault(&l, "alpha bravo charlie delta", "new password").is_err(), "чужая фраза не открывает");
+        assert!(finalize_vault(&l, &SEED.to_uppercase(), "short").is_err(), "короткий пароль не принимается");
+        assert_eq!(finalize_vault(&l, &SEED.to_uppercase(), "new password"), Ok(true));
+        let store = EnvelopeStore::open(&dir).unwrap();
+        let snap = store.load().unwrap().unwrap();
+        let mut v = NodeVault::default();
+        assert!(v.unlock(&snap.envelope, "old password").is_err(), "старый пароль не действует");
+        v.unlock(&snap.envelope, "new password").unwrap();
+        assert!(dir.join("attempts.json").exists(), "счётчик попыток заведён заново");
+        // и сид-фраза по-прежнему открывает ту же среду
+        let mut r = NodeVault::default();
+        r.recover(&snap.envelope, SEED).unwrap();
+        // без закрытой среды в копии делать нечего
+        let empty = Layout { keys: tmp.path().join("k2"), data: tmp.path().join("d2"), home: tmp.path().join("h2"), port: 9000 };
+        assert_eq!(finalize_vault(&empty, SEED, "new password"), Ok(false));
+    }
+}
