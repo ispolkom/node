@@ -6,6 +6,7 @@ import '../crypto/vault_keys.dart';
 import '../services/app_state.dart';
 import '../services/vault_service.dart';
 import '../theme.dart';
+import '../widgets/password_hint.dart';
 import '../widgets/secure_keyboard.dart';
 
 /// Экраны закрытой среды: создание (секретные слова → повтор → пароль), вход по паролю, восстановление по словам.
@@ -291,6 +292,7 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
         return page(title: 'Пароль для входа', children: [
           info('Короткий пароль, не меньше ${VaultKeys.minPasswordLength} знаков. Он нужен при каждом запуске приложения. Без него никто не прочтёт ваши сообщения и файлы.'),
           field('Пароль', _pw),
+          PasswordHint(_pw),
           field('Повторите пароль', _pw2),
           errorText(_error),
           primary('Готово', _done),
@@ -524,6 +526,7 @@ class _VaultChangePasswordScreenState extends _SecretFormState<VaultChangePasswo
       info('Данные не перешифровываются: меняется только пароль, которым они открываются.'),
       field('Старый пароль', _old),
       field('Новый пароль', _new),
+      PasswordHint(_new),
       field('Повторите новый пароль', _new2),
       errorText(_error),
       primary(_busy ? 'Меняем…' : 'Сменить', _busy ? null : submit),

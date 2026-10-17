@@ -1,5 +1,8 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Слабый пароль: его подберут за часы, если файлы скопируют. Возьмите фразу из нескольких слов.': 'Weak password: it can be guessed within hours if the files are copied. Use a phrase of several words.',
+  'Средний пароль. Надёжнее фраза из нескольких слов или длиннее.': 'Fair password. A phrase of several words, or a longer one, is safer.',
+  'Хороший пароль.': 'Good password.',
   'Срок хранения почты': 'Mail retention',
   'Сообщения между устройствами лежат на узле (шифртекстом), пока получатель не заберёт, но не дольше этого срока. Короче срок — меньше следов, если узел попадёт в чужие руки; длиннее — дольше ждёт телефон, который давно не выходил на связь. Гостям срок всегда сутки.':
       'Messages between devices stay on the node (as ciphertext) until the recipient collects them, but no longer than this term. A shorter term leaves fewer traces if the node falls into other hands; a longer one waits longer for a phone that has not been online for a while. For guests the term is always one day.',

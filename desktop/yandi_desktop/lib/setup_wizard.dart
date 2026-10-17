@@ -5,6 +5,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 
 import 'platform_files.dart';
+import 'password_strength.dart';
 import 'preferences.dart';
 import 'theme.dart';
 import 'transport/api.dart';
@@ -336,6 +337,7 @@ class _SetupWizardState extends State<SetupWizard> {
           onSubmitted: (_) => runRestore(),
         ),
       ),
+    PasswordHint(newPassword),
     Wrap(
       children: [
         _button(sending ? 'Подождите…' : 'Восстановить', sending || widget.busy ? null : runRestore),
@@ -601,6 +603,7 @@ class _SetupWizardState extends State<SetupWizard> {
           onSubmitted: (_) => create(),
         ),
       ),
+    PasswordHint(password),
     _button(
       sending ? 'Подождите…' : 'Создать узел',
       sending || widget.busy ? null : create,
