@@ -202,13 +202,13 @@ impl HttpProxyClient {
 
         // Parse request line
         let request_line = Self::get_request_line(&request_data)?;
-        debug!("📨 Request: {}", request_line);
+        debug!("📨 Request: {}", crate::util::logsafe::a(&request_line));
 
         // Convert to real URL (now returns tuple: method, url)
         let (method, target_url) = UrlMapper::parse_request_line(&request_line)
             .context("Failed to parse target URL")?;
 
-        debug!("🎯 Method: {}, URL: {}", method, target_url);
+        debug!("🎯 Method: {}, URL: {}", method, crate::util::logsafe::a(&target_url));
 
         // Check if this is CONNECT (HTTPS tunneling)
         if method == "CONNECT" {
@@ -420,7 +420,7 @@ impl HttpProxyClient {
     ) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        info!("🔐 Starting CONNECT tunnel to {}", target_url);
+        info!("🔐 Starting CONNECT tunnel to {}", crate::util::logsafe::a(&target_url));
 
         // Generate request ID
         let request_id = {

@@ -1098,8 +1098,11 @@ impl Store {
             .filter_map(|(e, b)| b.get(&m.key).map(|x| json!({"epoch": e, "box": x, "owner_pub": g.epoch_owner.get(e)})))
             .collect();
         let owner_pub = g.owner().and_then(|o| o.member_pub.clone());
-        // first_epoch — самое старое поколение, конверты которого узел ещё хранит: более старые вытеснены навсегда (MAX_EPOCHS)
-        let first_epoch = g.key_boxes.keys().min().copied().unwrap_or(g.epoch);
+        // first_epoch — самое старое поколение, ключ которого этому участнику ещё могут выдать. Старше — навсегда недоступно: либо вытеснено
+        // (MAX_EPOCHS), либо вступил позже и его ключ ему никогда не выдавался. Считается по конвертам САМОГО участника (если они есть), а не по
+        // всем конвертам группы: иначе новичок вечно ждал бы ключ поколения, которого у него не будет, и все новые записи стояли бы за ним.
+        let own_first = g.key_boxes.iter().filter(|(_, b)| b.contains_key(&m.key)).map(|(e, _)| *e).min();
+        let first_epoch = own_first.or_else(|| g.key_boxes.keys().min().copied()).unwrap_or(g.epoch);
         Ok(json!({"epoch": g.epoch, "owner_pub": owner_pub, "boxes": boxes, "first_epoch": first_epoch}))
     }
 
@@ -2865,6 +2868,28 @@ mod tests {
                 "join"
             ]
         );
+    }
+
+    #[test]
+    fn a_member_who_joined_later_is_not_told_to_wait_for_a_key_that_was_never_issued_to_them() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let pubkey = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        s.set_pub(&gid, OWNER, &pubkey()).unwrap();
+        s.join(&gid, BOB, None, Some(&pubkey())).unwrap();
+        let bob = s.list_for(BOB)[0]["my_alias"].as_str().unwrap().to_string();
+        // поколение 1: ключ получил только Боб
+        s.put_keys(&gid, OWNER, 1, &[(bob.clone(), b64(b"box1"))].into()).unwrap();
+        s.append(&gid, OWNER, 1, &b64(b"old message")).unwrap();
+        // Ив вступает позже, владелец меняет поколение: поколение 2 получают Боб и Ив
+        s.join(&gid, EVE, None, Some(&pubkey())).unwrap();
+        let eve = s.list_for(EVE)[0]["my_alias"].as_str().unwrap().to_string();
+        s.put_keys(&gid, OWNER, 2, &[(bob.clone(), b64(b"b2")), (eve.clone(), b64(b"e2"))].into()).unwrap();
+        let bob_keys = s.my_keys(&gid, BOB).unwrap();
+        let eve_keys = s.my_keys(&gid, EVE).unwrap();
+        assert_eq!(bob_keys["first_epoch"], 1, "Бобу поколение 1 доступно: ждать его ключ можно");
+        assert_eq!(eve_keys["first_epoch"], 2, "Иву поколение 1 не выдавалось и не будет: запись помечается недоступной, а не блокирует ленту");
+        assert_eq!(eve_keys["boxes"].as_array().unwrap().len(), 1);
     }
 
     #[test]

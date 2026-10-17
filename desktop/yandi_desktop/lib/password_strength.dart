@@ -17,6 +17,17 @@ class PasswordStrength {
     if (p.isEmpty) return 0;
     final lower = p.toLowerCase();
     if (_common.contains(lower)) return 8;
+    // повтор одного и того же куска («passwordpassword», «abcabcabc») даёт стойкость куска плюс пару бит на число повторов
+    final unit = _repeatedUnit(p);
+    if (unit != null) return bits(unit) + 2;
+    // слова через пробел: повторяющиеся слова не независимы, а словарное слово даёт почти ничего
+    final tokens = lower.trim().split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    if (tokens.length >= 2) {
+      final distinct = tokens.toSet();
+      if (distinct.length < tokens.length) return bits(distinct.join(' ')) + 2;
+      final unusual = distinct.where((w) => !_common.contains(w)).toList();
+      if (unusual.length < distinct.length && unusual.length < 3) return unusual.length * 13.0 + 8;
+    }
     var pool = 0;
     if (RegExp(r'[a-z]').hasMatch(p)) pool += 26;
     if (RegExp(r'[A-Z]').hasMatch(p)) pool += 26;
@@ -38,6 +49,17 @@ class PasswordStrength {
     final words = p.trim().split(RegExp(r'\s+')).where((w) => w.length >= 3).length;
     if (words >= 3) b = math.min(b, words * 13.0 + 6);
     return b;
+  }
+
+  /// Если строка — повторение более короткого куска целое число раз, возвращает кусок.
+  static String? _repeatedUnit(String p) {
+    final n = p.length;
+    for (var u = 1; u <= n ~/ 2; u++) {
+      if (n % u != 0) continue;
+      final unit = p.substring(0, u);
+      if (unit * (n ~/ u) == p) return unit;
+    }
+    return null;
   }
 
   static PasswordLevel level(String p) {

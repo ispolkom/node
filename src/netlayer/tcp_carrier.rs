@@ -298,7 +298,7 @@ impl Carrier {
         let cfg = crate::netlayer::tls_cert::build_client_config_insecure().map_err(|e| io::Error::other(e.to_string()))?;
         let name = rustls::pki_types::ServerName::try_from("localhost").map_err(|e| io::Error::other(e.to_string()))?;
         let tls = tokio::time::timeout(Duration::from_secs(8), tokio_rustls::TlsConnector::from(cfg).connect(name, tcp)).await.map_err(|_| io::Error::other("tls timeout"))??;
-        println!("[carrier] установлено TCP-соединение с {to}");
+        println!("[carrier] установлено TCP-соединение с {}", crate::util::logsafe::a(&to));
         self.run_conn(tls, to.ip(), Some(to.port())).await;
         Ok(())
     }

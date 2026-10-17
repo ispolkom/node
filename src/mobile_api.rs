@@ -289,9 +289,25 @@ fn with_pc_inbox_saved<R>(f: impl FnOnce(&mut Vec<PcMail>) -> R) -> (R, bool) {
     (r, saved)
 }
 
+/// Убрать из очереди ПК письма старше срока хранения почты: время письма открытое, поэтому срок действует и пока закрытая среда заперта.
+/// Файл переписывается, только если что-то убрано.
+fn sweep_pc_inbox() {
+    let ttl = crate::mail_policy::ttl_ms();
+    let now = now_ms();
+    let changed = with_pc_inbox(|l| {
+        let n = l.len();
+        l.retain(|m| now.saturating_sub(m.ts) <= ttl);
+        l.len() != n
+    });
+    if changed {
+        let _ = with_pc_inbox_saved(|_| ());
+    }
+}
+
 /// Положить в ожидание. false — очередь переполнена (телефон увидит «не доставлено»).
 fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
     use base64::Engine;
+    sweep_pc_inbox(); // просроченные не занимают места новым
     let ((queued, pos), saved) = with_pc_inbox_saved(|l| {
         if l.len() >= PC_INBOX_MAX || l.iter().filter(|m| m.from == device).count() >= PC_INBOX_PER_DEVICE {
             return (false, 0);
@@ -1038,6 +1054,7 @@ pub(crate) fn purge_idle_guests_cheap() -> usize {
 pub(crate) fn purge_idle_guests() -> usize {
     let n = purge_idle_guests_cheap();
     sweep_mail();
+    sweep_pc_inbox();
     crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).sweep(now_ms());
     with_pair_requests(|_| ());
     n
@@ -3546,5 +3563,33 @@ mod guest_tests {
         crate::guest::set_enabled(false).unwrap();
         crate::guest::take_issue_slot_reset_for_test();
         wipe(&[]);
+    }
+
+    #[test]
+    fn expired_pc_mail_is_removed_even_while_the_environment_is_locked_and_frees_the_room() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        crate::mail_policy::reset_for_test();
+        with_pc_inbox(|l| l.clear());
+        let day = 24 * 3600 * 1000u64;
+        crate::mail_policy::set_days(1).unwrap();
+        let now = now_ms();
+        with_pc_inbox(|l| {
+            for i in 0..PC_INBOX_PER_DEVICE {
+                l.push(PcMail { ts: now - 2 * day - i as u64, from: "dev-old".into(), blob_b64: "x".into() });
+            }
+            l.push(PcMail { ts: now - 1000, from: "dev-new".into(), blob_b64: "y".into() });
+        });
+        // лимит устройства исчерпан старыми письмами; без чистки новое не приняли бы
+        assert!(queue_for_pc("dev-old", b"fresh"), "просроченные не занимают место новому письму");
+        let left = with_pc_inbox(|l| l.clone());
+        assert_eq!(left.len(), 2, "осталось своё свежее и письмо другого устройства");
+        assert!(left.iter().all(|m| now.saturating_sub(m.ts) < day));
+        // таймерная уборка тоже чистит
+        with_pc_inbox(|l| l.push(PcMail { ts: now - 3 * day, from: "dev-x".into(), blob_b64: "z".into() }));
+        sweep_pc_inbox();
+        assert_eq!(with_pc_inbox(|l| l.len()), 2);
+        with_pc_inbox(|l| l.clear());
+        crate::mail_policy::reset_for_test();
     }
 }

@@ -141,7 +141,9 @@ pub fn status_json() -> Value {
     let current = own_version();
     let available = st.available.clone().filter(|a| {
         let live = a["expires"].as_u64().is_none_or(|e| e == 0 || t <= e);
-        live && a["version"].as_str().is_some_and(|v| is_newer(v, &current))
+        // предложение ниже уже принятого порога (старый подписанный выпуск) не показывается
+        let seq_ok = a["seq"].as_u64().is_none_or(|q| q >= st.max_seq);
+        live && seq_ok && a["version"].as_str().is_some_and(|v| is_newer(v, &current))
     });
     json!({
         "enabled": s.enabled,
@@ -175,6 +177,8 @@ pub async fn check_now() -> Value {
         st.last_check = t;
         st.errors = errors;
         match found {
+            // результат, проверенный по устаревшему порогу (пока шла другая проверка, порог вырос), не подменяет более новое предложение
+            Some(f) if f.manifest.seq < st.max_seq => {}
             Some(f) => {
                 st.max_seq = st.max_seq.max(f.manifest.seq);
                 st.available = if is_newer(&f.manifest.version, &own_version()) {
@@ -215,6 +219,23 @@ pub fn spawn() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_offer_below_the_accepted_seq_is_never_shown() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        // «поздняя проверка»: предложение выпуска 9 осталось в состоянии, а порог уже 10 — оно не показывается
+        with_state(|st| {
+            st.max_seq = 10;
+            st.available = Some(json!({"version": "999.0.0", "seq": 9, "expires": 0}));
+        });
+        assert!(status_json()["available"].is_null(), "выпуск ниже принятого порога не предлагается");
+        with_state(|st| st.available = Some(json!({"version": "999.0.0", "seq": 10, "expires": 0})));
+        assert!(!status_json()["available"].is_null(), "выпуск на пороге предлагается");
+        with_state(|st| {
+            st.max_seq = 0;
+            st.available = None;
+        });
+    }
+
     use super::*;
 
     /// Порча файла состояния не молчит и не принимается за чистый первый запуск; копия возвращает порог.

@@ -43,6 +43,11 @@ pub trait Consumer: Send + Sync {
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
+    /// Что после стирания осталось на диске (пути или описания); пусто — всё удалено. Для экстренного стирания: «стёрто» говорится только
+    /// после проверки.
+    fn leftovers(&self) -> Vec<String> {
+        Vec::new()
+    }
     /// Служебная часть: нужна узлу, чтобы работать без хозяина у экрана (ключи «Компьютера», группы ПК, жалобы). Её ключ
     /// выводится из рабочего ключа устройства, она поднимается при старте и не запирается вместе с закрытой средой.
     fn is_service(&self) -> bool {
@@ -284,20 +289,54 @@ impl ClosedEnv {
         e
     }
 
-    /// Экстренное стирание по команде владельца (кнопка в оболочке): ключ данных и метки удаляются, зашифрованные файлы потребителей
-    /// стираются; среда считается не созданной. Личность узла (сид-фраза) и резервные копии связей не затрагиваются.
+    /// Экстренное стирание по команде владельца (кнопка в оболочке). Порядок: (1) сначала отозвать ВСЁ в памяти — сеанс и ключи
+    /// всех потребителей, включая служебные (группы ПК, ключи «Компьютера», жалобы), и поколение долгих операций; (2) удалить ключ данных
+    /// и метки с проверкой; (3) стереть файлы потребителей; (4) проверить, что ничего не осталось; (5) поднять служебные части заново
+    /// на ключе устройства с пустым состоянием. Любая ошибка диска возвращается владельцу, а ключи из памяти отозваны всё равно.
+    /// Личность узла (сид-фраза) и резервные копии связей не затрагиваются.
     pub async fn panic_erase(&self) -> Result<()> {
         let _op = self.op.lock().await;
-        self.store.panic_wipe()?;
-        self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
-        let _ = std::fs::remove_file(self.dir.join(MARKER));
-        self.lock().await;
+        self.lock_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            i.vault = None;
+            i.generation += 1;
+        }
         let consumers: Vec<Arc<dyn Consumer>> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        for c in consumers {
+        {
+            let _apply = self.apply.lock().await;
+            for c in &consumers {
+                c.lock().await; // и служебные тоже: ключи в памяти не должны пережить стирание
+            }
+        }
+        let mut problems: Vec<String> = Vec::new();
+        if let Err(e) = self.store.panic_wipe() {
+            problems.push(e.to_string());
+        }
+        for c in &consumers {
             c.erase().await;
         }
-        eprintln!("[closed] закрытая среда стёрта по команде владельца; зашифрованные файлы потребителей удалены");
-        Ok(())
+        for c in &consumers {
+            for left in c.leftovers() {
+                problems.push(format!("{}: осталось {left}", c.domain()));
+            }
+        }
+        let gone = matches!(self.store.load(), Ok(None));
+        if gone {
+            self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::remove_file(self.dir.join(MARKER));
+            // служебные части узла продолжают работать на ключе устройства, но с пустым состоянием
+            self.start_service().await;
+        } else if !problems.iter().any(|p| p.contains("ключ данных")) {
+            problems.push("запечатанный ключ данных не удалён".to_string());
+        }
+        if problems.is_empty() {
+            eprintln!("[closed] закрытая среда стёрта по команде владельца; зашифрованные файлы потребителей удалены");
+            Ok(())
+        } else {
+            eprintln!("[closed] ⚠️ экстренное стирание НЕ завершено: {}", problems.join("; "));
+            bail!("стирание не завершено: {}", problems.join("; "))
+        }
     }
 
     /// Забыли пароль: открыть словами и сразу задать новый.

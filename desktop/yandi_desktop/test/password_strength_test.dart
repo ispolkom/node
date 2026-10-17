@@ -9,6 +9,10 @@ void main() {
       expect(PasswordStrength.level(weak), PasswordLevel.weak, reason: weak);
     }
     expect(PasswordStrength.level(''), PasswordLevel.empty);
+    // повторы словарного пароля и одного слова не «хороший пароль» (P13-8)
+    for (final rep in ['password password password password', 'passwordpassword', 'qwerty qwerty qwerty', 'abcabcabcabc', 'cat cat cat cat cat cat']) {
+      expect(PasswordStrength.level(rep), PasswordLevel.weak, reason: rep);
+    }
     expect(PasswordStrength.level('correct horse battery staple'), PasswordLevel.good);
     expect(PasswordStrength.level('Tr0ub4dor&3xK!'), isNot(PasswordLevel.weak));
     expect(PasswordStrength.level('моя кошка любит рыбу по вечерам'), PasswordLevel.good);

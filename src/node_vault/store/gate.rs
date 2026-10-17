@@ -100,11 +100,33 @@ impl EnvelopeStore {
         let _ = self.dir.sync_all();
     }
 
-    /// Экстренное стирание по команде владельца: то же крипто-стирание, что после двадцати неверных сидов (под тем же flock), без счёта попыток.
+    /// Экстренное стирание по команде владельца: то же крипто-стирание, что после двадцати неверных сидов (под тем же flock), без счёта
+    /// попыток. В отличие от автоматического, результат ПРОВЕРЯЕТСЯ: ошибка удаления любого файла (кроме «уже нет») и ошибка fsync
+    /// каталога — это ошибка, а не успех; в конце envelope должен действительно не читаться.
     pub fn panic_wipe(&self) -> Result<()> {
         let _lock = self.lock()?;
-        self.wipe_locked();
-        Ok(())
+        let mut errors: Vec<String> = Vec::new();
+        for name in [super::ENVELOPE, super::PENDING, super::ANCHOR, COUNTER] {
+            let c = std::ffi::CString::new(name)?;
+            let rc = unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) };
+            if rc != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        if let Err(e) = self.dir.sync_all() {
+            errors.push(format!("запись каталога на диск: {e}"));
+        }
+        if self.load_locked()?.is_some() {
+            errors.push("запечатанный ключ данных всё ещё читается".to_string());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("не удалось стереть: {}", errors.join("; "))
+        }
     }
 
     /// Откат первичной настройки, оборвавшейся до публикации envelope: счётчик, заведённый `prepare_attempts`, убирается,

@@ -3274,7 +3274,7 @@ impl P2PTransport {
                                                         // SOCKS5 CONNECT request
                                                         if let Ok(socks5_req) = serde_json::from_slice::<crate::socks5::Socks5ProxyRequest>(&decrypted[1..]) {
                                                             println!("[transport] 📨 Socks5Request #{}: {}:{}",
-                                                                     socks5_req.request_id, socks5_req.target_host, socks5_req.target_port);
+                                                                     socks5_req.request_id, crate::util::logsafe::a(&socks5_req.target_host), crate::util::logsafe::a(&socks5_req.target_port));
 
                                                             if let Some(ref tx) = socks5_request_tx {
                                                                 let peer_id_for_tx = peer_id.clone();

@@ -301,7 +301,7 @@ impl TunExitHandler {
 
         println!(
             "   ✅ IPv6: {} -> {}",
-            ipv6_header.src_addr, ipv6_header.dst_addr
+            crate::util::logsafe::a(&ipv6_header.src_addr), crate::util::logsafe::a(&ipv6_header.dst_addr)
         );
 
         // Проверяем что это TCP
@@ -324,7 +324,7 @@ impl TunExitHandler {
 
         println!(
             "   ✅ TCP: {}:{} -> {}:{}",
-            ipv6_header.src_addr, tcp_header.src_port, ipv6_header.dst_addr, tcp_header.dst_port
+            crate::util::logsafe::a(&ipv6_header.src_addr), tcp_header.src_port, crate::util::logsafe::a(&ipv6_header.dst_addr), tcp_header.dst_port
         );
 
         // Определяем тип пакета и обрабатываем

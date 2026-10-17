@@ -129,7 +129,7 @@ impl ExitNodeHandler {
     /// Handle SOCKS5 CONNECT request (аналог HttpProxyGateway::handle_connect)
     pub async fn handle_request(&self, source_node: HashId, request: Socks5ProxyRequest) -> Result<()> {
         info!("📨 SOCKS5 CONNECT request #{} from {}", request.request_id, hex::encode(&source_node.0[..8]));
-        debug!("🎯 Target: {}:{}", request.target_host, request.target_port);
+        debug!("🎯 Target: {}:{}", crate::util::logsafe::a(&request.target_host), crate::util::logsafe::a(&request.target_port));
         // кто может выходить в интернет через этот узел — выбор владельца (по умолчанию только доверенные узлы)
         if !crate::exit_policy::may_exit(&source_node) {
             crate::exit_policy::refuse_log(&source_node, "SOCKS5");

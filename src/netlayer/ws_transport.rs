@@ -235,7 +235,7 @@ impl WsServer {
                     let tls_stream = match tokio::time::timeout(hs_timeout, acceptor_clone.accept(tcp)).await {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
-                            eprintln!("[ws] TLS handshake failed from {}: {}", peer, e);
+                            eprintln!("[ws] TLS handshake failed from {}: {}", crate::util::logsafe::a(&peer), e);
                             return;
                         }
                         Err(_) => return, // молчит: закрываем без шума в журнале (иначе журнал — цель атаки)
@@ -246,7 +246,7 @@ impl WsServer {
                     let ws_stream: WebSocketStream<_> = match tokio::time::timeout(hs_timeout, accept_async_with_config(tls_stream, Some(cfg))).await {
                         Ok(Ok(ws)) => ws,
                         Ok(Err(e)) => {
-                            eprintln!("[ws] WS upgrade failed from {}: {}", peer, e);
+                            eprintln!("[ws] WS upgrade failed from {}: {}", crate::util::logsafe::a(&peer), e);
                             return;
                         }
                         Err(_) => return,

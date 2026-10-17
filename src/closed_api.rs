@@ -92,6 +92,10 @@ impl Consumer for GroupsConsumer {
             let _ = tokio::task::spawn_blocking(crate::group_client::erase_encrypted).await;
         })
     }
+    fn leftovers(&self) -> Vec<String> {
+        let dir = crate::util::data_dir::data_dir().join("groups_pc");
+        std::fs::read_dir(&dir).map(|rd| rd.flatten().map(|e| e.path().display().to_string()).collect()).unwrap_or_default()
+    }
     fn is_service(&self) -> bool {
         true
     }
@@ -142,6 +146,10 @@ impl Consumer for SelfConsumer {
             let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("mobile_self.enc"));
         })
     }
+    fn leftovers(&self) -> Vec<String> {
+        let p = crate::util::data_dir::data_dir().join("mobile_self.enc");
+        if p.exists() { vec![p.display().to_string()] } else { Vec::new() }
+    }
     fn is_service(&self) -> bool {
         true
     }
@@ -174,6 +182,10 @@ impl Consumer for ComplaintsConsumer {
     }
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async move { crate::complaints::erase() })
+    }
+    fn leftovers(&self) -> Vec<String> {
+        let p = crate::util::data_dir::data_dir().join("complaints.enc");
+        if p.exists() { vec![p.display().to_string()] } else { Vec::new() }
     }
     fn is_service(&self) -> bool {
         true
@@ -222,6 +234,10 @@ impl Consumer for FilesConsumer {
             let _ = std::fs::remove_dir_all(crate::util::data_dir::data_dir().join("files"));
         })
     }
+    fn leftovers(&self) -> Vec<String> {
+        let p = crate::util::data_dir::data_dir().join("files");
+        if p.exists() { vec![p.display().to_string()] } else { Vec::new() }
+    }
 }
 
 /// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
@@ -248,6 +264,10 @@ impl Consumer for ProxyConsumer {
         Box::pin(async move {
             let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("upstream_proxy.enc"));
         })
+    }
+    fn leftovers(&self) -> Vec<String> {
+        let p = crate::util::data_dir::data_dir().join("upstream_proxy.enc");
+        if p.exists() { vec![p.display().to_string()] } else { Vec::new() }
     }
 }
 
@@ -484,42 +504,91 @@ mod tests {
         }
     }
 
+    struct Spy {
+        erased: Arc<Mutex<bool>>,
+        locked: Arc<Mutex<bool>>,
+        /// что «осталось» после стирания (для проверки, что неудача не выдаётся за успех)
+        left: Vec<String>,
+    }
+    impl Consumer for Spy {
+        fn domain(&self) -> &'static str {
+            "panic_spy"
+        }
+        fn migrate(&self, _old: Option<[u8; 32]>, _new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+            Box::pin(async { Ok(0) })
+        }
+        fn unlock(&self, _key: [u8; 32]) -> BoxFuture<'_, ()> {
+            Box::pin(async {})
+        }
+        fn lock(&self) -> BoxFuture<'_, ()> {
+            let f = self.locked.clone();
+            Box::pin(async move { *f.lock().unwrap() = true })
+        }
+        fn erase(&self) -> BoxFuture<'_, ()> {
+            let f = self.erased.clone();
+            Box::pin(async move { *f.lock().unwrap() = true })
+        }
+        fn leftovers(&self) -> Vec<String> {
+            self.left.clone()
+        }
+        fn is_service(&self) -> bool {
+            true // служебная часть: обычное запирание её не трогает, а стирание обязано
+        }
+    }
+
+    const PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
     /// Стирание работает на самой среде (общая глобальная ячейка здесь не нужна и в тестах заполняется только один раз).
     #[tokio::test]
-    async fn the_panic_erase_removes_the_environment_and_the_consumers_data_and_it_can_be_created_again() {
+    async fn the_panic_erase_revokes_every_consumer_including_services_erases_and_it_can_be_created_again() {
         let base = tempfile::tempdir().unwrap();
-        let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| None)).unwrap();
-        let erased = Arc::new(Mutex::new(false));
-        struct Spy(Arc<Mutex<bool>>);
-        impl Consumer for Spy {
-            fn domain(&self) -> &'static str {
-                "panic_spy"
-            }
-            fn migrate(&self, _old: Option<[u8; 32]>, _new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
-                Box::pin(async { Ok(0) })
-            }
-            fn unlock(&self, _key: [u8; 32]) -> BoxFuture<'_, ()> {
-                Box::pin(async {})
-            }
-            fn lock(&self) -> BoxFuture<'_, ()> {
-                Box::pin(async {})
-            }
-            fn erase(&self) -> BoxFuture<'_, ()> {
-                let f = self.0.clone();
-                Box::pin(async move { *f.lock().unwrap() = true })
-            }
-        }
-        env.register(Arc::new(Spy(erased.clone())));
-        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
-        env.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        // рабочий ключ устройства есть: служебные части живут отдельно от закрытой среды (как на настоящем узле)
+        let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| Some([7u8; 32]))).unwrap();
+        let (erased, locked) = (Arc::new(Mutex::new(false)), Arc::new(Mutex::new(false)));
+        env.register(Arc::new(Spy { erased: erased.clone(), locked: locked.clone(), left: vec![] }));
+        env.setup("owner password".into(), Some(PHRASE.into())).await.unwrap();
         assert!(env.configured() && env.unlocked());
+        *locked.lock().unwrap() = false;
         env.panic_erase().await.unwrap();
+        assert!(*locked.lock().unwrap(), "служебная часть тоже отозвана: ключи в памяти не переживают стирание");
         assert!(!env.configured() && !env.unlocked() && *erased.lock().unwrap(), "среда стёрта, потребители удалили свои данные");
         assert!(env.unlock("owner password".into()).await.is_err(), "прежний пароль больше ничего не открывает");
-        assert!(env.recover(phrase.into(), "another password".into()).await.is_err(), "и сид-фраза тоже: ключа данных больше нет");
+        assert!(env.recover(PHRASE.into(), "another password".into()).await.is_err(), "и сид-фраза тоже: ключа данных больше нет");
         // после стирания среду можно создать заново
-        env.setup("new owner password".into(), Some(phrase.into())).await.unwrap();
+        env.setup("new owner password".into(), Some(PHRASE.into())).await.unwrap();
         assert!(env.configured());
+    }
+
+    #[tokio::test]
+    async fn leftovers_after_the_erase_are_reported_not_hidden() {
+        let base = tempfile::tempdir().unwrap();
+        let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| None)).unwrap();
+        env.register(Arc::new(Spy { erased: Default::default(), locked: Default::default(), left: vec!["/data/groups_pc/state.enc".into()] }));
+        env.setup("owner password".into(), Some(PHRASE.into())).await.unwrap();
+        let err = env.panic_erase().await.unwrap_err().to_string();
+        assert!(err.contains("не завершено") && err.contains("state.enc"), "{err}");
+        assert!(!env.unlocked(), "ключи отозваны, даже когда остатки на диске есть");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_disk_failure_is_an_error_and_the_keys_are_revoked_anyway() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = tempfile::tempdir().unwrap();
+        let dir = base.path().join("closed");
+        let env = ClosedEnv::open(&dir, Box::new(|| None)).unwrap();
+        env.setup("owner password".into(), Some(PHRASE.into())).await.unwrap();
+        // каталог нельзя изменять: удалить файлы не получится
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let res = env.panic_erase().await;
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let err = res.unwrap_err().to_string();
+        assert!(err.contains("не завершено"), "{err}");
+        assert!(env.configured(), "ключ данных остался на диске — среда не считается стёртой");
+        assert!(!env.unlocked(), "но в памяти ключи отозваны");
+        // после починки диска повторное стирание доводит дело до конца
+        env.panic_erase().await.unwrap();
+        assert!(!env.configured());
     }
 }
 

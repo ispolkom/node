@@ -282,7 +282,7 @@ pub async fn knock_offline() {
         if !online.contains(&id) {
             for a in &p.addresses {
                 if let Err(e) = transport.send_hello_request(a).await {
-                    eprintln!("[peers] не достучался до {a}: {e}");
+                    eprintln!("[peers] не достучался до {}: {e}", crate::util::logsafe::a(&a));
                 }
             }
         }
@@ -290,7 +290,7 @@ pub async fn knock_offline() {
             if !p2p_known.contains(&id) {
                 for a in &p.p2p_addresses {
                     if let Err(e) = t.send_hello_request(a).await {
-                        eprintln!("[peers] канал переписки: не достучался до {a}: {e}");
+                        eprintln!("[peers] канал переписки: не достучался до {}: {e}", crate::util::logsafe::a(&a));
                     }
                 }
             }

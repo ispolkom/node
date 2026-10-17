@@ -12,7 +12,9 @@ class ProxyLine {
   final String host;
   final int port;
   final String user, password;
-  const ProxyLine(this.host, this.port, this.user, this.password);
+  /// Вид из схемы строки (`socks5` / `http_connect`); null — схемы не было, действует выбор в форме.
+  final String? kind;
+  const ProxyLine(this.host, this.port, this.user, this.password, [this.kind]);
 
   static (String, int)? _hostPort(String hp) {
     hp = hp.trim();
@@ -36,8 +38,24 @@ class ProxyLine {
 
   static ProxyLine? parse(String raw) {
     var line = raw.trim();
+    String? kind;
+    final scheme = RegExp(r'^([A-Za-z][A-Za-z0-9+.-]*)://').firstMatch(line);
+    if (scheme != null) {
+      // так же строго, как узел: https:// (TLS до прокси) не поддержан — молча понизить до обычного HTTP нельзя (логин и пароль ушли бы открытым текстом)
+      kind = switch (scheme.group(1)!.toLowerCase()) {
+        'socks5' || 'socks5h' || 'socks' => 'socks5',
+        'http' => 'http_connect',
+        _ => null,
+      };
+      if (kind == null) return null;
+    }
     line = line.replaceFirst(RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*://'), '').replaceFirst(RegExp(r'/+$'), '');
     if (line.isEmpty) return null;
+    final p = _parseBody(line);
+    return p == null ? null : ProxyLine(p.host, p.port, p.user, p.password, kind);
+  }
+
+  static ProxyLine? _parseBody(String line) {
     final at = line.lastIndexOf('@');
     if (at >= 0) {
       final cred = line.substring(0, at);
@@ -70,7 +88,10 @@ class ProxyLine {
   /// Строка для формы правки: адрес IPv6 — в скобках, иначе её нельзя будет разобрать обратно.
   static String format(String host, int port, {String user = '', String password = ''}) {
     final h = host.contains(':') ? '[$host]' : host;
-    return user.isEmpty ? '$h:$port' : '$h:$port:$user:$password';
+    if (user.isEmpty) return '$h:$port';
+    // «@» в логине или пароле: форма `логин:пароль@адрес` разбирается по последнему «@», а `адрес:порт:логин:пароль` — нет
+    if ('$user:$password'.contains('@')) return '$user:$password@$h:$port';
+    return '$h:$port:$user:$password';
   }
 
   /// Подходит ли строка для отправки: тот же разбор, что и при сохранении правки, поэтому форма не пропускает то, что потом отвергнет.
@@ -275,7 +296,7 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         await widget.api.request(
           idUrl(one),
           body: {
-            'kind': body['kind'],
+            'kind': l.kind ?? body['kind'],
             'host': l.host,
             'port': l.port,
             'auth': l.user.isEmpty ? 'none' : 'password',

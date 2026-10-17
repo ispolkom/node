@@ -211,7 +211,7 @@ impl HttpProxyGateway {
             self.send_response(source_node, refused).await?;
             return Ok(());
         }
-        debug!("🎯 Target: {} {}", request.method, request.url);
+        debug!("🎯 Target: {} {}", request.method, crate::util::logsafe::a(&request.url));
 
         // Special handling for CONNECT (HTTPS tunneling)
         if request.method == "CONNECT" {
@@ -556,7 +556,7 @@ impl HttpProxyGateway {
 
         // Send request
         let response = http_req.send().await
-            .context(format!("Failed to fetch {}", request.url))?;
+            .context("Failed to fetch the requested URL")?; // адрес в текст ошибки не кладём: он попал бы в журнал
 
         Ok(response)
     }

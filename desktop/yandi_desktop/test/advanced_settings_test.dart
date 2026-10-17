@@ -280,9 +280,15 @@ void main() {
     expect(p('http://example.com:3128/')!.port, 3128);
     expect(p('[2001:db8::1]:1080')!.host, '2001:db8::1');
     expect(p('[2001:db8::1]:1080:u:pw')!.user, 'u');
-    for (final bad in ['example.com', '1.2.3.4:0', '1.2.3.4:70000', ':1080', '[::1]', '[::1]:x', 'a:b@host', '1.2.3.4:1080:u']) {
+    for (final bad in ['https://u:p@proxy.example:443', 'ftp://h:1', 'example.com', '1.2.3.4:0', '1.2.3.4:70000', ':1080', '[::1]', '[::1]:x', 'a:b@host', '1.2.3.4:1080:u']) {
       expect(p(bad), isNull, reason: bad);
     }
+    expect(p('http://h.example:3128')!.kind, 'http_connect');
+    expect(p('socks5://h.example:1080')!.kind, 'socks5');
+    expect(p('h.example:1080')!.kind, isNull, reason: 'без схемы вид задаёт форма');
+    // «@» в пароле переживает форму правки
+    final at = ProxyLine.parse(ProxyLine.format('h.example', 1080, user: 'u', password: 'p@ss'))!;
+    expect((at.host, at.user, at.password), ('h.example', 'u', 'p@ss'));
     // форма правки: сериализация и разбор обратно дают то же самое, в том числе для IPv6
     final text = ProxyLine.format('2001:db8::1', 1080, user: 'u', password: 'p:w');
     final back = ProxyLine.parse(text)!;
