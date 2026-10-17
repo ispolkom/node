@@ -44,7 +44,7 @@ def call(path, method='GET', body=None, cookie=None, raw=False):
     req.add_header('Content-Type', 'application/json')
     if cookie: req.add_header('Cookie', cookie)
     try:
-        r = opener.open(req, timeout=30)
+        r = opener.open(req, timeout=180)
     except urllib.error.HTTPError as e:
         return e.code, e.read(), e.headers
     data = r.read()
@@ -121,5 +121,34 @@ st_new, _, _ = call('/api/vault/unlock', 'POST', {'password': VAULT_NEW}, cookie
 print('старый пароль:', st_old, '| новый пароль:', st_new)
 stop(pb)
 ok = id_a == id_b and 'Тест-Контакт' in names and st_old != 200 and st_new == 200
+
+print('== C: та же копия через первый запуск (окно восстановления)')
+C = f'{ROOT}/C'
+prepare(C)
+pc = start(C)
+for _ in range(240):  # сервер первичной настройки поднимается не сразу
+    try:
+        st, body, _ = call('/api/auth/restore/inspect', 'POST', {'path': f'{ROOT}/node.yandibak'})
+        if st != 404: break
+    except Exception: pass
+    time.sleep(0.5)
+print('осмотр копии:', st, body)
+assert st == 200 and body.get('node_id', '').startswith(id_a[:16]), 'C: осмотр'
+st, body, h = call('/api/auth/restore', 'POST', {'path': f'{ROOT}/node.yandibak', 'phrase': 'abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about', 'password': VAULT_NEW})
+print('чужая сид-фраза:', st, body)
+assert st == 400, 'C: чужая сид-фраза не должна открывать'
+st, body, h = call('/api/auth/restore', 'POST', {'path': f'{ROOT}/node.yandibak', 'phrase': MASTER, 'password': VAULT_NEW})
+print('восстановление:', st, body)
+assert st == 200, 'C: восстановление'
+cookie_c = None
+for v in h.get_all('Set-Cookie') or []:
+    if v.startswith('yandi_session='): cookie_c = v.split(';')[0]
+assert cookie_c and ready(cookie_c), 'C: не готов'
+id_c = node_id(cookie_c)
+st_old2, _, _ = call('/api/vault/unlock', 'POST', {'password': VAULT_OLD}, cookie_c)
+st_new2, _, _ = call('/api/vault/unlock', 'POST', {'password': VAULT_NEW}, cookie_c)
+print('узел C:', id_c, '| старый пароль:', st_old2, '| новый пароль:', st_new2)
+stop(pc)
+ok = ok and id_c == id_a and st_old2 != 200 and st_new2 == 200
 print('РЕЗУЛЬТАТ:', 'ПРОЙДЕНО — тот же узел и контакты на новой машине; старый пароль не действует, новый открывает' if ok else 'ПРОВАЛ')
 sys.exit(0 if ok else 1)

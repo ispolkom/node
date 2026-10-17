@@ -89,12 +89,143 @@ async fn new_seed(Json(b): Json<SeedBody>) -> Response {
     }
 }
 
+/// Восстановление на новой машине вместо первичной настройки: файл копии `.yandibak` + сид-фраза + НОВЫЙ пароль для этой установки.
+/// Пароль прежней установки не переносится. Показывается номер копии, её время и узел (заголовок открытый, фраза не нужна).
+#[cfg(unix)]
+fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
+    let p = std::path::Path::new(path);
+    if !p.is_absolute() {
+        return Err("Нужен полный путь к файлу копии".into());
+    }
+    let meta = std::fs::symlink_metadata(p).map_err(|_| "Файл копии не найден".to_string())?;
+    if !meta.is_file() {
+        return Err("Это не файл копии".into());
+    }
+    if meta.len() > 64 * 1024 * 1024 {
+        return Err("Файл слишком большой для копии связей".into());
+    }
+    std::fs::read(p).map_err(|_| "Файл копии не читается".to_string())
+}
+
+#[derive(Deserialize)]
+struct InspectBody {
+    path: String,
+}
+
+#[derive(Deserialize)]
+struct RestoreBody {
+    path: String,
+    phrase: String,
+    password: String,
+}
+
+static RESTORE_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+const RESTORE_FAILURE_LIMIT: u32 = 20;
+
+async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
+    #[cfg(unix)]
+    {
+        let r = tokio::task::spawn_blocking(move || {
+            let bytes = read_backup_file(&b.path)?;
+            let h = crate::node_backup::read_header(&bytes)?;
+            let (y, mo, d, hh, mi) = crate::node_backup::civil_utc(h.created_ms / 1000);
+            Ok::<_, String>(serde_json::json!({
+                "counter": h.counter, "node_id": h.node_id,
+                "text": format!("Копия №{} от {y:04}-{mo:02}-{d:02} {hh:02}:{mi:02} UTC; узел {}", h.counter, h.node_id),
+            }))
+        })
+        .await
+        .unwrap_or_else(|_| Err("Внутренняя ошибка".into()));
+        return match r {
+            Ok(v) => Json(v).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = b;
+        (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"error": "Только Linux и macOS"}))).into_response()
+    }
+}
+
+#[cfg(unix)]
+fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
+    use std::sync::atomic::Ordering;
+    if b.password.chars().count() < 6 {
+        return Err("Пароль — не короче 6 знаков".into());
+    }
+    // фраза не сид: опечатка, а не попытка (не считается и не запускает дорогой KDF)
+    if key_root::looks_like_seed(&b.phrase) {
+        key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
+    } else if b.phrase.trim().is_empty() {
+        return Err("Введите сид-фразу (12 или 24 слова)".into());
+    }
+    if RESTORE_FAILURES.load(Ordering::SeqCst) >= RESTORE_FAILURE_LIMIT {
+        return Err("Исчерпано число попыток восстановления; перезапустите узел".into());
+    }
+    let bytes = read_backup_file(&b.path)?;
+    let opened = match crate::node_backup::open_with_code(&bytes, &b.phrase) {
+        Ok(o) => o,
+        Err(e) => {
+            RESTORE_FAILURES.fetch_add(1, Ordering::SeqCst);
+            return Err(e);
+        }
+    };
+    RESTORE_FAILURES.store(0, Ordering::SeqCst);
+    let layout = crate::node_backup::Layout::live(crate::get_config().ports.discovery);
+    crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
+    let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| format!("Каталог ключей: {e}"))?;
+    let machine = key_root::SystemMachine;
+    let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
+    let policy = key_root::KdfPolicy::production();
+    let secret = key_root::recovery_secret(&b.phrase);
+    key_root::Recovery { dir: &dir, port: layout.port, machine: &machine, device: &device, password: &secret, policy: &policy }
+        .run()
+        .map_err(|e| format!("Файлы записаны, но ключ устройства создать не удалось: {e}"))?;
+    crate::node_backup::finalize_vault(&layout, &b.phrase, &b.password)?;
+    // тот же вход в состояние, что и после первичной настройки: корень открыт ключом этой машины
+    let (root, _) = key_root::unlock_root(&dir, &machine, &device).map_err(|e| format!("Корень не открылся: {e}"))?;
+    auth.is_setup.store(true, Ordering::Relaxed);
+    auth.needs_rebind.store(false, Ordering::Relaxed);
+    if let Ok(mut mk) = auth.master_key.lock() {
+        *mk = Some(*root);
+    }
+    Ok(())
+}
+
+async fn restore(State(sh): State<Shared>, Json(body): Json<RestoreBody>) -> Response {
+    #[cfg(unix)]
+    {
+        let sh2 = sh.clone();
+        let result = tokio::task::spawn_blocking(move || do_restore(&sh2.auth, &body)).await.unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
+        return match result {
+            Ok(()) => {
+                let token = sh.auth.create_session(false);
+                let mut headers = HeaderMap::new();
+                headers.insert(header::SET_COOKIE, make_session_cookie(&token, false).parse().unwrap());
+                if let Some(tx) = sh.done.lock().ok().and_then(|mut d| d.take()) {
+                    let _ = tx.send(());
+                }
+                (StatusCode::OK, headers, Json(serde_json::json!({"ok": true}))).into_response()
+            }
+            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (sh, body);
+        (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"error": "Только Linux и macOS"}))).into_response()
+    }
+}
+
 fn router(sh: Shared) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::to("/setup") }))
         .route("/setup", get(page))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/seed/new", post(new_seed))
+        .route("/api/auth/restore/inspect", post(restore_inspect))
+        .route("/api/auth/restore", post(restore))
         .route("/api/auth/state", get(|State(sh): State<Shared>| async move {
             crate::web::auth::ui_auth_state(&sh.auth)
         }))

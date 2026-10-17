@@ -257,7 +257,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     if !auth_state.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
         let port = config.ports.web_ui;
-        println!("🔐 Первый запуск: откройте оболочку YANDI и создайте пароль и четыре секретных слова");
+        println!("🔐 Первый запуск: откройте оболочку YANDI: сид-фраза и пароль (или восстановление из копии)");
         if let Err(e) = yandi::web::first_setup::run(auth_state.clone(), port).await {
             eprintln!("🔐 Первичная настройка не запустилась: {e}");
             std::process::exit(2);
