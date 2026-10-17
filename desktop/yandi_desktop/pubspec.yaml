@@ -17,7 +17,19 @@ flutter:
   assets:
     - assets/logo.png
     - assets/fonts/NotoColorEmoji-LICENSE.txt
+    - assets/fonts/LiberationSans-LICENSE.txt
   fonts:
+    # Основной шрифт панели: Liberation Sans (лицензия OFL 1.1), с курсивом и жирным. Tahoma на Linux нет, а подставляемый DejaVu даёт широкие промежутки и пробелы.
+    - family: YandiSans
+      fonts:
+        - asset: assets/fonts/LiberationSans-Regular.ttf
+        - asset: assets/fonts/LiberationSans-Italic.ttf
+          style: italic
+        - asset: assets/fonts/LiberationSans-Bold.ttf
+          weight: 700
+        - asset: assets/fonts/LiberationSans-BoldItalic.ttf
+          weight: 700
+          style: italic
     # Цветные эмодзи как на телефоне (Noto Color Emoji, лицензия OFL 1.1): системного шрифта на ПК может не быть.
     - family: NotoColorEmoji
       fonts:

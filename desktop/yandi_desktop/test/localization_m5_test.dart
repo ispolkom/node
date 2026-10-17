@@ -73,11 +73,12 @@ void main() {
     expect(find.text('Revoke device?'), findsOneWidget);
   });
   testWidgets('EN proxy fields, validation and message editor', (t) async {
-    await show(t, const ProxyForm());
-    expect(find.widgetWithText(TextField, 'Proxy password'), findsOneWidget);
-    await t.tap(find.text('Save'));
+    await show(t, ProxyForm(onPing: (_, __) async => const []));
+    expect(find.widgetWithText(TextField, 'ip:port:login:pass'), findsOneWidget);
+    expect(find.text('Ping'), findsOneWidget);
+    await t.tap(find.text('Add').last);
     await t.pumpAndSettle();
-    expect(find.textContaining('Enter a host'), findsOneWidget);
+    expect(find.textContaining('Format: ip:port:login:pass'), findsOneWidget);
     await show(
       t,
       const ContactNameDialog(initial: 'Сохранить', editingMessage: true),

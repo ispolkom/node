@@ -258,10 +258,10 @@ class _ProfilePanelState extends State<ProfilePanel> {
   Widget _btn(IconData icon, String label, VoidCallback? onTap) => OutlinedButton.icon(
     onPressed: onTap,
     icon: Icon(icon, size: 18),
-    label: UiText(label, style: const TextStyle(fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none)),
+    label: UiText(label, style: const TextStyle(fontFamily: 'YandiSans', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none)),
     style: OutlinedButton.styleFrom(
       side: const BorderSide(color: Icq.border),
-      textStyle: const TextStyle(fontSize: 13, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none),
+      textStyle: const TextStyle(fontSize: 13, fontFamily: 'YandiSans', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none),
     ),
   );
 }

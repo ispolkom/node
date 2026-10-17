@@ -1,5 +1,19 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Выбрать все': 'Select all',
+  'Прокси ещё не добавлены.': 'No proxies added yet.',
+  'Пинг': 'Ping',
+  'Включён': 'Enabled',
+  'Сохранить настройки прокси': 'Save proxy settings',
+  'Изменить внешний прокси': 'Edit upstream proxy',
+  'Удалить выбранные прокси?': 'Delete the selected proxies?',
+  'Показать логин и пароль': 'Show login and password',
+  'Скрыть логин и пароль': 'Hide login and password',
+  'ip:port:login:pass': 'ip:port:login:pass',
+  'Формат: ip:port:login:pass (логин и пароль можно не указывать), по одному прокси в строке.':
+      'Format: ip:port:login:pass (login and password are optional), one proxy per line.',
+  'Формат: ip:port:login:pass (логин и пароль можно не указывать).':
+      'Format: ip:port:login:pass (login and password are optional).',
   'Распечатать': 'Print',
   'Отправлено на печать. Система печати хранит задание временно: проверьте, что лист напечатан и очередь пуста.':
       'Sent to the printer. The print system keeps the job temporarily: make sure the sheet was printed and the queue is empty.',

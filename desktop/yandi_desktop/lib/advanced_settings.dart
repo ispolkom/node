@@ -6,6 +6,30 @@ import 'domain/shell_repository.dart';
 import 'preferences.dart';
 import 'groups.dart';
 
+/// Разбор одной строки `ip:port[:логин:пароль]`; пароль может содержать двоеточия. Строки со схемой или `@` разбирает узел.
+class ProxyLine {
+  final String host;
+  final int port;
+  final String user, password;
+  const ProxyLine(this.host, this.port, this.user, this.password);
+  static ProxyLine? parse(String line) {
+    final parts = line.trim().split(':');
+    if (parts.length != 2 && parts.length < 4) return null;
+    final port = int.tryParse(parts[1]);
+    if (parts[0].trim().isEmpty || port == null || port < 1 || port > 65535) {
+      return null;
+    }
+    if (parts.length == 2) return ProxyLine(parts[0].trim(), port, '', '');
+    final user = parts[2];
+    if (user.isEmpty) return null;
+    return ProxyLine(parts[0].trim(), port, user, parts.sublist(3).join(':'));
+  }
+
+  /// Подходит ли строка для отправки: свой вид или вид со схемой/@ (его проверит узел).
+  static bool plausible(String line) =>
+      line.contains('://') || line.contains('@') || parse(line) != null;
+}
+
 class AdvancedSettings extends StatefulWidget {
   final Api api;
   final bool busy;
@@ -27,6 +51,10 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
   Map<String, dynamic>? pool;
   String? error;
   bool loading = false;
+  bool poolEnabled = false, poolStrict = false;
+  final selected = <String>{};
+  final shown = <String>{};
+  final revealed = <String, ({String user, String password})>{};
   bool get active => mounted && widget.isActive();
   @override
   void initState() {
@@ -37,21 +65,31 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
   @override
   void dispose() {
     pool = null;
+    revealed.clear();
+    shown.clear();
     cap.clear();
     cap.dispose();
     super.dispose();
   }
 
+  List<Map<String, dynamic>> get proxies =>
+      pool == null ? const [] : ShellRepository.list(pool!, 'proxies');
+
   Future<void> refresh() async {
     if (!active || loading) return;
     loading = true;
     try {
-      final proxies = await widget.api.request('/api/upstream-proxies');
+      final data = await widget.api.request('/api/upstream-proxies');
       if (!active) return;
-      ShellRepository.list(proxies, 'proxies');
+      final ids = ShellRepository.list(data, 'proxies').map((p) => '${p['id']}').toSet();
       setState(() {
-        pool = proxies;
-        cap.text = '${proxies['max_clients']}';
+        pool = data;
+        poolEnabled = data['enabled'] == true;
+        poolStrict = data['strict'] == true;
+        cap.text = '${data['max_clients']}';
+        selected.retainAll(ids);
+        shown.retainAll(ids);
+        revealed.clear();
         error = null;
       });
     } catch (e) {
@@ -78,40 +116,163 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
         await action();
         if (active) await refresh();
       });
+
+  String idUrl(Map<String, dynamic> p, [String tail = '']) =>
+      '/api/upstream-proxies/${ShellRepository(widget.api).segment('${p['id']}')}$tail';
+
+  /// Проверка до сохранения: узел соединяется через каждую строку и ничего не запоминает.
+  Future<List<String>> ping(String text, String kind) async {
+    final r = await widget.api.request(
+      '/api/upstream-proxies/test',
+      body: {'text': text, 'kind': kind},
+    );
+    return [
+      for (final x in ShellRepository.list(r, 'results'))
+        x['ok'] == true
+            ? '${x['proxy']} — работает, ${x['ms']} мс'
+            : '${x['proxy']} — не отвечает: ${x['error'] ?? ''}',
+      for (final e in (r['errors'] is List ? r['errors'] as List : const []))
+        '$e',
+    ];
+  }
+
+  Future<({String user, String password})?> reveal(Map<String, dynamic> p) async {
+    final id = '${p['id']}';
+    final have = revealed[id];
+    if (have != null) return have;
+    try {
+      final r = await widget.api.request(idUrl(p, '/reveal'), body: const {});
+      if (!active) return null;
+      final v = (user: '${r['user'] ?? ''}', password: '${r['password'] ?? ''}');
+      revealed[id] = v;
+      return v;
+    } catch (e) {
+      if (active) {
+        setState(
+          () => error = e is ApiFailure
+              ? e.message
+              : const ApiFailure('protocol').message,
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<void> toggleEye(Map<String, dynamic> p) async {
+    final id = '${p['id']}';
+    if (shown.contains(id)) {
+      setState(() {
+        shown.remove(id);
+        revealed.remove(id);
+      });
+      return;
+    }
+    if (await reveal(p) != null && active) setState(() => shown.add(id));
+  }
+
   Future<void> createProxy() async {
     final body = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => const ProxyForm(),
+      builder: (_) => ProxyForm(onPing: ping),
     );
     if (!active || body == null) return;
     try {
       await sealedAction(() async {
-        await widget.api.request('/api/upstream-proxies', body: body);
+        final r = await widget.api.request('/api/upstream-proxies', body: body);
+        final errors = r['errors'];
+        if (errors is List && errors.isNotEmpty && active) {
+          setState(() => error = errors.join('\n'));
+        }
       });
     } finally {
       body.clear();
     }
   }
 
-  Future<void> editProxy(Map<String, dynamic> proxy) async {
-    final values = await showDialog<List<String>>(
+  Future<void> editSelected() async {
+    final p = proxies.where((p) => selected.contains('${p['id']}')).toList();
+    if (p.length != 1) return;
+    final one = p.single;
+    final secret = one['auth'] == 'password' ? await reveal(one) : (user: '', password: '');
+    if (!active || secret == null) return;
+    final line = [
+      '${one['host']}',
+      '${one['port']}',
+      if (one['auth'] == 'password') ...[secret.user, secret.password],
+    ].join(':');
+    final body = await showDialog<Map<String, dynamic>>(
       context: context,
-      builder: (_) => GroupForm(
-        title: 'Лимит прокси',
-        labels: const ['Клиентов (0 — общий предел)'],
-        initial: ['${proxy['max_clients'] ?? 0}'],
+      builder: (_) => ProxyForm(
+        onPing: ping,
+        editing: true,
+        initialLine: line,
+        initialKind: '${one['kind']}',
+        initialLimit: '${one['max_clients'] ?? 0}',
+        initialEnabled: one['enabled'] == true,
       ),
     );
-    if (!active || values == null) return;
-    final limit = int.tryParse(values.single);
+    if (!active || body == null) return;
+    final limit = int.tryParse('${body['max_clients']}');
     if (limit == null || limit < 0 || limit > 1000) {
       setState(() => error = 'Лимит: 0–1000.');
       return;
     }
+    final l = ProxyLine.parse('${body['text']}');
+    if (l == null) {
+      setState(() => error = 'Формат: ip:port:login:pass (логин и пароль можно не указывать).');
+      return;
+    }
+    try {
+      await sealedAction(() async {
+        await widget.api.request(
+          idUrl(one),
+          body: {
+            'kind': body['kind'],
+            'host': l.host,
+            'port': l.port,
+            'auth': l.user.isEmpty ? 'none' : 'password',
+            'user': l.user,
+            'password': l.password,
+            'enabled': body['enabled'],
+            'max_clients': limit,
+          },
+        );
+      });
+    } finally {
+      body.clear();
+      revealed.clear();
+      shown.clear();
+    }
+  }
+
+  Future<void> deleteSelected() async {
+    final ids = proxies.where((p) => selected.contains('${p['id']}')).toList();
+    if (ids.isEmpty) return;
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => GroupConfirm(
+        title: ids.length == 1 ? 'Удалить внешний прокси?' : 'Удалить выбранные прокси?',
+      ),
+    );
+    if (!active || ok != true) return;
+    await sealedAction(() async {
+      for (final p in ids) {
+        await widget.api.request(idUrl(p), method: 'DELETE');
+      }
+      selected.clear();
+    });
+  }
+
+  Future<void> savePoolSettings() async {
+    final n = int.tryParse(cap.text);
+    if (n == null || n < 1 || n > 1000) {
+      setState(() => error = 'Лимит: 1–1000.');
+      return;
+    }
     await sealedAction(() async {
       await widget.api.request(
-        '/api/upstream-proxies/${ShellRepository(widget.api).segment('${proxy['id']}')}',
-        body: {'max_clients': limit},
+        '/api/upstream-proxies/settings',
+        body: {'enabled': poolEnabled, 'strict': poolStrict, 'max_clients': n},
       );
     });
   }
@@ -120,177 +281,286 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
     onPressed: widget.busy || loading ? null : action,
     child: UiText(text),
   );
-  @override
-  Widget build(BuildContext context) => PanelStack(
-    children: [
-      if (loading) const LinearProgressIndicator(),
-      if (error != null) UiText(error!),
-      button('Обновить настройки', refresh),
-      const UiText(
-        'Внешние прокси для выхода в интернет',
-        style: TextStyle(fontSize: 22),
-      ),
-      const UiText(
-        'Изменения пула требуют открытой настроенной закрытой среды. Пароли хранит только демон в запечатанном файле.',
-      ),
-      const UiText(
-        'API правки адреса и пароля существующего прокси отсутствует. Доступны включение и лимит.',
-      ),
-      button('Добавить внешний прокси', createProxy),
-      if (pool != null) ...[
-        CheckboxListTile(
-          controlAffinity: ListTileControlAffinity.leading,
-          title: const UiText('Включить пул'),
-          value: pool!['enabled'] == true,
-          onChanged: widget.busy
-              ? null
-              : (v) => sealedAction(() async {
-                  await widget.api.request(
-                    '/api/upstream-proxies/settings',
-                    body: {'enabled': v!},
-                  );
-                }),
-        ),
-        CheckboxListTile(
-          controlAffinity: ListTileControlAffinity.leading,
-          title: const UiText('Строго соблюдать лимит клиентов'),
-          value: pool!['strict'] == true,
-          onChanged: widget.busy
-              ? null
-              : (v) => sealedAction(() async {
-                  await widget.api.request(
-                    '/api/upstream-proxies/settings',
-                    body: {'strict': v!},
-                  );
-                }),
-        ),
-        TextField(
-          controller: cap,
-          enabled: !widget.busy,
-          decoration: InputDecoration(
-            labelText: tr(context, 'Общий лимит клиентов'),
+
+  static const _data = TextStyle(fontSize: 14, fontStyle: FontStyle.italic);
+  static String _kind(dynamic k) => k == 'http_connect' ? 'HTTP' : 'SOCKS5';
+
+  Widget proxyRow(Map<String, dynamic> p) {
+    final id = '${p['id']}';
+    final hasAuth = p['auth'] == 'password';
+    final open = shown.contains(id);
+    final secret = revealed[id];
+    const mask = '••••••';
+    final user = open ? (secret?.user ?? '') : mask;
+    final pass = open ? (secret?.password ?? '') : mask;
+    final address = '${p['host']}:${p['port']}${hasAuth ? ':$user:$pass' : ''}';
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: Row(
+        children: [
+          PanelCheck(
+            value: selected.contains(id),
+            label: null,
+            onChanged: widget.busy
+                ? null
+                : (v) => setState(() => v ? selected.add(id) : selected.remove(id)),
           ),
-        ),
-        button('Сохранить лимит пула', () async {
-          final n = int.tryParse(cap.text);
-          if (n == null || n < 1 || n > 1000) {
-            setState(() => error = 'Лимит: 1–1000.');
-            return;
-          }
-          await sealedAction(() async {
-            await widget.api.request(
-              '/api/upstream-proxies/settings',
-              body: {'max_clients': n},
-            );
-          });
-        }),
-        for (final p in ShellRepository.list(pool!, 'proxies'))
-          Card(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                UiText('${p['kind']} · ${p['host']}:${p['port']}'),
-                UiText(
-                  '${stateLabel(context, p['state'])} · Клиентов: ${p['clients']} / ${p['cap']}',
-                ),
-                UiText(
-                  p['has_password'] == true
-                      ? 'Пароль сохранён демоном'
-                      : 'Без пароля',
-                ),
-                Wrap(
-                  children: [
-                    button(
-                      p['enabled'] == true
-                          ? 'Выключить прокси'
-                          : 'Включить прокси',
-                      () => sealedAction(() async {
-                        await widget.api.request(
-                          '/api/upstream-proxies/${ShellRepository(widget.api).segment('${p['id']}')}',
-                          body: {'enabled': p['enabled'] != true},
-                        );
-                      }),
+          const SizedBox(width: 6),
+          const SizedBox(
+            width: 58,
+            child: UiText('PROXY', style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Icq.dark)),
+          ),
+          Container(
+            width: 64,
+            padding: const EdgeInsets.symmetric(vertical: 4),
+            alignment: Alignment.center,
+            color: p['enabled'] == true ? Icq.header : Icq.dark,
+            child: Text(_kind(p['kind']), style: const TextStyle(fontSize: 12, color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 40,
+              padding: const EdgeInsets.only(left: 12),
+              decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Icq.border)),
+              child: Row(
+                children: [
+                  Flexible(
+                    flex: 2,
+                    child: Text(
+                      '${stateLabel(context, p['state'])} · ${p['clients']} / ${p['cap']}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: Icq.dark),
                     ),
-                    button('Изменить лимит прокси', () => editProxy(p)),
-                    button('Удалить внешний прокси', () async {
-                      final ok = await showDialog<bool>(
-                        context: context,
-                        builder: (_) => const GroupConfirm(
-                          title: 'Удалить внешний прокси?',
-                        ),
-                      );
-                      if (!active || ok != true) return;
-                      await sealedAction(() async {
-                        await widget.api.request(
-                          '/api/upstream-proxies/${ShellRepository(widget.api).segment('${p['id']}')}',
-                          method: 'DELETE',
-                        );
-                      });
-                    }),
-                  ],
-                ),
-              ],
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    flex: 5,
+                    child: Align(
+                      alignment: Alignment.centerRight,
+                      child: FittedBox(
+                        fit: BoxFit.scaleDown,
+                        alignment: Alignment.centerRight,
+                        child: Text(address, maxLines: 1, style: _data),
+                      ),
+                    ),
+                  ),
+                  if (hasAuth)
+                    IconButton(
+                      tooltip: tr(context, open ? 'Скрыть логин и пароль' : 'Показать логин и пароль'),
+                      onPressed: widget.busy ? null : () => toggleEye(p),
+                      icon: Icon(open ? Icons.visibility_off : Icons.visibility, size: 20, color: Icq.header),
+                    )
+                  else
+                    const SizedBox(width: 12),
+                ],
+              ),
             ),
           ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final list = proxies;
+    final busy = widget.busy || loading;
+    return PanelStack(
+      children: [
+        if (loading) const LinearProgressIndicator(),
+        if (error != null) UiText(error!),
+        button('Обновить настройки', refresh),
+        const UiText(
+          'Внешние прокси для выхода в интернет',
+          style: TextStyle(fontSize: 22),
+        ),
+        const UiText(
+          'Изменения пула требуют открытой настроенной закрытой среды. Пароли хранит только демон в запечатанном файле.',
+        ),
+        if (pool != null) ...[
+          const SizedBox(height: 4),
+          if (list.isEmpty)
+            const UiText('Прокси ещё не добавлены.')
+          else ...[
+            PanelCheck(
+              value: selected.length == list.length,
+              label: 'Выбрать все',
+              onChanged: widget.busy
+                  ? null
+                  : (v) => setState(() {
+                      selected.clear();
+                      if (v) selected.addAll(list.map((p) => '${p['id']}'));
+                    }),
+            ),
+            const SizedBox(height: 6),
+            for (final p in list) proxyRow(p),
+          ],
+          const SizedBox(height: 8),
+          PanelCheck(
+            value: poolEnabled,
+            label: 'Включить пул',
+            onChanged: widget.busy ? null : (v) => setState(() => poolEnabled = v),
+          ),
+          PanelCheck(
+            value: poolStrict,
+            label: 'Строго соблюдать лимит клиентов',
+            onChanged: widget.busy ? null : (v) => setState(() => poolStrict = v),
+          ),
+          TextField(
+            controller: cap,
+            enabled: !widget.busy,
+            decoration: InputDecoration(
+              labelText: tr(context, 'Общий лимит клиентов'),
+            ),
+          ),
+        ],
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: [
+            SolidButton('Добавить', onPressed: busy ? null : createProxy),
+            SolidButton('Изменить', onPressed: busy || selected.length != 1 ? null : editSelected),
+            SolidButton(
+              'Удалить',
+              tone: SolidTone.danger,
+              onPressed: busy || selected.isEmpty ? null : deleteSelected,
+            ),
+            SolidButton('Сохранить настройки прокси', onPressed: busy || pool == null ? null : savePoolSettings),
+          ],
+        ),
       ],
-    ],
-  );
+    );
+  }
 }
 
 class ProxyForm extends StatefulWidget {
-  const ProxyForm({super.key});
+  /// Проверка до сохранения: строки → отчёт по каждой.
+  final Future<List<String>> Function(String text, String kind)? onPing;
+  final bool editing;
+  final String initialLine, initialKind, initialLimit;
+  final bool initialEnabled;
+  const ProxyForm({
+    super.key,
+    this.onPing,
+    this.editing = false,
+    this.initialLine = '',
+    this.initialKind = 'socks5',
+    this.initialLimit = '0',
+    this.initialEnabled = true,
+  });
   @override
   State<ProxyForm> createState() => _ProxyFormState();
 }
 
 class _ProxyFormState extends State<ProxyForm> {
-  final fields = List.generate(4, (_) => TextEditingController());
-  String kind = 'socks5';
+  late final line = TextEditingController(text: widget.initialLine);
+  late final limit = TextEditingController(text: widget.initialLimit);
+  late String kind = widget.initialKind;
+  late bool enabled = widget.initialEnabled;
   String? error;
+  List<String> report = const [];
+  bool pinging = false;
   @override
   void dispose() {
-    for (final f in fields) {
-      f.clear();
-      f.dispose();
-    }
+    line.clear();
+    line.dispose();
+    limit.dispose();
     super.dispose();
+  }
+
+  /// Строки списка; при правке — ровно одна.
+  List<String>? lines() {
+    final all = line.text.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).toList();
+    if (all.isEmpty || (widget.editing && all.length != 1) || !all.every(ProxyLine.plausible)) {
+      setState(() => error = 'Формат: ip:port:login:pass (логин и пароль можно не указывать), по одному прокси в строке.');
+      return null;
+    }
+    return all;
+  }
+
+  Future<void> doPing() async {
+    final all = lines();
+    if (all == null || widget.onPing == null) return;
+    setState(() {
+      error = null;
+      pinging = true;
+      report = const [];
+    });
+    try {
+      final r = await widget.onPing!(all.join('\n'), kind);
+      if (mounted) setState(() => report = r);
+    } catch (e) {
+      if (mounted) {
+        setState(
+          () => error = e is ApiFailure ? e.message : const ApiFailure('protocol').message,
+        );
+      }
+    } finally {
+      if (mounted) setState(() => pinging = false);
+    }
   }
 
   @override
   Widget build(BuildContext context) => AlertDialog(
-    title: const UiText('Добавить внешний прокси'),
-    content: SingleChildScrollView(
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          DropdownButton<String>(
-            value: kind,
-            items: [
-              for (final k in ['socks5', 'http_connect'])
-                DropdownMenuItem(value: k, child: UiText(k)),
-            ],
-            onChanged: (v) => setState(() => kind = v!),
-          ),
-          for (var i = 0; i < fields.length; i++)
-            TextField(
-              controller: fields[i],
-              obscureText: i == 3,
-              autocorrect: false,
-              enableSuggestions: false,
-              decoration: InputDecoration(
-                labelText: tr(
-                  context,
-                  [
-                    'Хост прокси',
-                    'Порт прокси',
-                    'Логин прокси (необязательно)',
-                    'Пароль прокси',
-                  ][i],
-                ),
+    title: UiText(widget.editing ? 'Изменить внешний прокси' : 'Добавить внешний прокси'),
+    content: SizedBox(
+      width: 460,
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Align(
+              alignment: Alignment.centerLeft,
+              child: DropdownButton<String>(
+                value: kind,
+                items: const [
+                  DropdownMenuItem(value: 'socks5', child: Text('SOCKS5')),
+                  DropdownMenuItem(value: 'http_connect', child: Text('HTTP')),
+                ],
+                onChanged: (v) => setState(() => kind = v!),
               ),
             ),
-          if (error != null) UiText(error!),
-        ],
+            TextField(
+              controller: line,
+              minLines: 1,
+              maxLines: widget.editing ? 1 : 6,
+              autocorrect: false,
+              enableSuggestions: false,
+              style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
+              decoration: InputDecoration(
+                labelText: tr(context, 'ip:port:login:pass'),
+                hintText: '203.0.113.5:1080:login:pass',
+              ),
+            ),
+            if (widget.editing) ...[
+              TextField(
+                controller: limit,
+                decoration: InputDecoration(
+                  labelText: tr(context, 'Клиентов (0 — общий предел)'),
+                ),
+              ),
+              const SizedBox(height: 6),
+              PanelCheck(
+                value: enabled,
+                label: 'Включён',
+                onChanged: (v) => setState(() => enabled = v),
+              ),
+            ],
+            if (error != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: UiText(error!),
+              ),
+            for (final r in report)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: UiText(r, style: const TextStyle(fontSize: 13, fontStyle: FontStyle.italic)),
+              ),
+          ],
+        ),
       ),
     ),
     actions: [
@@ -298,34 +568,24 @@ class _ProxyFormState extends State<ProxyForm> {
         onPressed: () => Navigator.pop(context),
         child: const UiText('Отмена'),
       ),
-      FilledButton(
+      if (widget.onPing != null)
+        SolidButton('Пинг', tone: SolidTone.light, onPressed: pinging ? null : doPing),
+      SolidButton(
+        widget.editing ? 'Сохранить' : 'Добавить',
         onPressed: () {
-          final port = int.tryParse(fields[1].text);
-          if (port == null ||
-              port < 1 ||
-              port > 65535 ||
-              fields[0].text.trim().isEmpty ||
-              fields[2].text.isEmpty != fields[3].text.isEmpty) {
-            setState(
-              () => error =
-                  'Укажите хост, порт 1–65535 и оба поля авторизации либо оставьте их пустыми.',
-            );
-            return;
-          }
+          final all = lines();
+          if (all == null) return;
           final result = <String, dynamic>{
+            'text': all.join('\n'),
             'kind': kind,
-            'host': fields[0].text.trim(),
-            'port': port,
-            'auth': fields[2].text.isEmpty ? 'none' : 'password',
-            'user': fields[2].text,
-            'password': fields[3].text,
+            if (widget.editing) ...{
+              'max_clients': limit.text.trim(),
+              'enabled': enabled,
+            },
           };
-          for (final f in fields) {
-            f.clear();
-          }
+          line.clear();
           Navigator.pop(context, result);
         },
-        child: const UiText('Сохранить'),
       ),
     ],
   );

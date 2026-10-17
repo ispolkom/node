@@ -798,7 +798,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     padding: const EdgeInsets.symmetric(horizontal: 6),
                     textStyle: const TextStyle(
                       fontSize: 13,
-                      fontFamily: 'Tahoma',
+                      fontFamily: 'YandiSans',
                       decoration: TextDecoration.none,
                     ),
                   ),

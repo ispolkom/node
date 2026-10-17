@@ -9,13 +9,13 @@ import 'widget_test.dart' show click, stop;
 
 void main() {
   setUpAll(() async {
-    // The same system font used by fontconfig on the Linux preview host.
-    final loader = FontLoader('Tahoma');
+    // The bundled panel font.
+    final loader = FontLoader('YandiSans');
     loader.addFont(
       Future.value(
         ByteData.sublistView(
           File(
-            '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
+            'assets/fonts/LiberationSans-Regular.ttf',
           ).readAsBytesSync(),
         ),
       ),

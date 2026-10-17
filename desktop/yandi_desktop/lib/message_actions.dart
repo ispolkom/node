@@ -384,7 +384,7 @@ class InitialBadge extends StatelessWidget {
           color: Colors.white,
           fontSize: size * 0.55,
           fontWeight: FontWeight.bold,
-          fontFamily: 'Tahoma',
+          fontFamily: 'YandiSans',
         ),
       ),
     );

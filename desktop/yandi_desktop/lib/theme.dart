@@ -50,7 +50,7 @@ abstract final class Icq {
       textStyle: const WidgetStatePropertyAll(
         TextStyle(
           fontSize: 14,
-          fontFamily: 'Tahoma',
+          fontFamily: 'YandiSans',
           fontFamilyFallback: ['NotoColorEmoji'],
           decoration: TextDecoration.none,
         ),
@@ -67,7 +67,7 @@ abstract final class Icq {
   static ThemeData get theme {
     final base = ThemeData(
       useMaterial3: false,
-      fontFamily: 'Tahoma',
+      fontFamily: 'YandiSans',
       fontFamilyFallback: const [
         'MS Sans Serif',
         'Segoe UI',
@@ -114,7 +114,7 @@ abstract final class Icq {
       textStyle: WidgetStatePropertyAll(
         TextStyle(
           fontSize: 14,
-          fontFamily: 'Tahoma',
+          fontFamily: 'YandiSans',
           fontFamilyFallback: const ['NotoColorEmoji'],
           fontWeight: primary ? FontWeight.bold : FontWeight.normal,
           decoration: TextDecoration.underline,
@@ -127,7 +127,7 @@ abstract final class Icq {
     );
     return base.copyWith(
       textTheme: textTheme.apply(
-        fontFamily: 'Tahoma',
+        fontFamily: 'YandiSans',
         fontFamilyFallback: const ['NotoColorEmoji'],
       ),
       filledButtonTheme: FilledButtonThemeData(style: wordStyle(primary: true)),
@@ -262,7 +262,7 @@ class SolidButton extends StatelessWidget {
       side: const BorderSide(color: Icq.light),
       textStyle: const TextStyle(
         fontSize: 14,
-        fontFamily: 'Tahoma',
+        fontFamily: 'YandiSans',
         fontFamilyFallback: ['NotoColorEmoji'],
         decoration: TextDecoration.none,
       ),
@@ -409,7 +409,7 @@ class TabStrip extends StatelessWidget {
             ),
             textStyle: TextStyle(
               fontSize: header ? 13 : 14,
-              fontFamily: 'Tahoma',
+              fontFamily: 'YandiSans',
             ),
             minimumSize: const Size(0, 30),
           ),
@@ -514,4 +514,45 @@ class HeaderLayout extends StatelessWidget {
       );
     },
   );
+}
+
+/// Флажок в стиле панели: квадрат с рамкой, тёмно-зелёная заливка и белая галочка.
+class PanelCheck extends StatelessWidget {
+  final bool value;
+  final ValueChanged<bool>? onChanged;
+  final String? label;
+  const PanelCheck({super.key, required this.value, required this.onChanged, this.label});
+  @override
+  Widget build(BuildContext context) {
+    final box = Container(
+      width: 22,
+      height: 22,
+      decoration: BoxDecoration(
+        color: value ? Icq.header : Colors.white,
+        border: Border.all(color: value ? Icq.header : Icq.dark, width: 1.5),
+      ),
+      child: value ? const Icon(Icons.check, size: 17, color: Colors.white) : null,
+    );
+    return Semantics(
+      checked: value,
+      enabled: onChanged != null,
+      label: label,
+      child: InkWell(
+        onTap: onChanged == null ? null : () => onChanged!(!value),
+        child: Padding(
+          padding: const EdgeInsets.all(4),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              box,
+              if (label != null) ...[
+                const SizedBox(width: 8),
+                UiText(label!),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }

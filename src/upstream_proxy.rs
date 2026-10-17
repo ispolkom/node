@@ -935,6 +935,20 @@ struct PatchReq {
     /// 0 — вернуть общий предел
     #[serde(default)]
     max_clients: Option<u32>,
+    /// правка адреса, вида и входа: `host`+`port` идут вместе; пустой `password` при том же логине — оставить прежний
+    #[serde(default)]
+    kind: Option<Kind>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    /// "none" или "password"
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
 }
 
 async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Response {
@@ -951,6 +965,26 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
     }
     if let Some(m) = r.max_clients {
         e.max_clients = (m > 0).then_some(m);
+    }
+    if r.host.is_some() || r.port.is_some() || r.auth.is_some() || r.kind.is_some() {
+        let f = Form {
+            enabled: e.enabled,
+            kind: r.kind.unwrap_or(e.kind),
+            host: r.host.unwrap_or_else(|| e.host.clone()),
+            port: r.port.unwrap_or(e.port),
+            auth: r.auth.unwrap_or_else(|| if e.auth == Auth::None { "none".into() } else { "password".into() }),
+            user: r.user.unwrap_or_default(),
+            password: r.password.unwrap_or_default(),
+        };
+        let s = match from_form(f, Some(e.settings())) {
+            Ok(s) => s,
+            Err(m) => return bad_request(m),
+        };
+        let (host, port, auth, kind) = (s.host, s.port, s.auth, s.kind);
+        e.kind = kind;
+        e.host = host;
+        e.port = port;
+        e.auth = auth;
     }
     match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
@@ -980,6 +1014,44 @@ async fn test_one(Path(id): Path<String>) -> Response {
         Some(s) => test_settings(s).await.into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response(),
     }
+}
+
+/// Показать логин и пароль одного прокси (глаз в настройках). Только для владельца, пока закрытая среда открыта: в списке пароля нет.
+async fn reveal_one(Path(id): Path<String>) -> Response {
+    let found = pool().file.proxies.iter().find(|e| e.id == id).map(|e| e.auth.clone());
+    match found {
+        Some(Auth::Password { user, password }) => {
+            let mut r = Json(json!({"ok": true, "user": user, "password": password})).into_response();
+            r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+            r
+        }
+        Some(Auth::None) => Json(json!({"ok": true, "user": "", "password": ""})).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestReq {
+    text: String,
+    #[serde(default)]
+    kind: Option<Kind>,
+}
+
+/// Проверка до сохранения: каждая строка списка (не больше 10) — соединение через неё; ничего не записывается.
+async fn test_text(Json(r): Json<TestReq>) -> Response {
+    let (found, errors) = parse_lines(&r.text, r.kind.unwrap_or(Kind::Socks5));
+    if found.is_empty() {
+        return bad_request(errors.first().cloned().unwrap_or_else(|| "Введите адрес прокси.".into()));
+    }
+    let mut results = Vec::new();
+    for s in found.into_iter().take(10) {
+        let label = format!("{}:{}", s.host, s.port);
+        let Json(mut v) = test_settings(s).await;
+        v["proxy"] = json!(label);
+        results.push(v);
+    }
+    Json(json!({"ok": true, "results": results, "errors": errors})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -1024,6 +1096,8 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         // список прокси
         .route("/api/upstream-proxies", get(get_pool).post(add_proxies))
         .route("/api/upstream-proxies/settings", post(pool_settings))
+        .route("/api/upstream-proxies/test", post(test_text))
+        .route("/api/upstream-proxies/:id/reveal", post(reveal_one))
         .route("/api/upstream-proxies/:id", post(patch_proxy).delete(delete_proxy))
         .route("/api/upstream-proxies/:id/test", post(test_one))
 }
@@ -1364,6 +1438,36 @@ mod tests {
         }
         assert_eq!(seen.len(), 2, "shared traffic uses both proxies in turn");
         assert!(cell.lock().unwrap().assign.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_list_is_pinged_before_saving_and_nothing_is_stored() {
+        let (port, _rx) = fake_socks(Some(("u", "p")), 0).await;
+        let ok = test_text(Json(TestReq { text: format!("127.0.0.1:{port}:u:p"), kind: None })).await;
+        let body = axum::body::to_bytes(ok.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["results"][0]["ok"], true, "{v}");
+        assert!(v["results"][0]["ms"].is_u64());
+        // wrong password: the proxy answers, the check says so, and the password is not echoed back
+        let (port, _rx) = fake_socks(Some(("u", "p")), 0).await;
+        let bad = test_text(Json(TestReq { text: format!("127.0.0.1:{port}:u:WRONG"), kind: None })).await;
+        let body = axum::body::to_bytes(bad.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["results"][0]["ok"], false);
+        assert!(!String::from_utf8_lossy(&body).contains("WRONG"));
+        // a line that is not a proxy is refused with a sentence
+        let r = test_text(Json(TestReq { text: "not a proxy".into(), kind: None })).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn editing_keeps_the_old_password_only_for_the_same_login() {
+        let old = Settings { enabled: true, kind: Kind::Socks5, host: "h.example".into(), port: 1080, auth: Auth::Password { user: "u".into(), password: "secret".into() } };
+        let form = |user: &str, password: &str| Form { enabled: true, kind: Kind::Socks5, host: "h2.example".into(), port: 1081, auth: "password".into(), user: user.into(), password: password.into() };
+        let same = from_form(form("u", ""), Some(old.clone())).unwrap();
+        assert_eq!((same.host.as_str(), same.port, same.auth), ("h2.example", 1081, Auth::Password { user: "u".into(), password: "secret".into() }));
+        let other = from_form(form("v", ""), Some(old)).unwrap();
+        assert_eq!(other.auth, Auth::Password { user: "v".into(), password: String::new() }, "a new login does not inherit the old password");
     }
 
     #[test]

@@ -915,7 +915,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                       padding: const EdgeInsets.symmetric(horizontal: 8),
                       textStyle: const TextStyle(
                         fontSize: 12,
-                        fontFamily: 'Tahoma',
+                        fontFamily: 'YandiSans',
                       ),
                     ),
                   ),
@@ -1729,7 +1729,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                                 backgroundColor: Icq.header,
                                 foregroundColor: Colors.white,
                                 shape: const RoundedRectangleBorder(),
-                                textStyle: const TextStyle(fontSize: 14, fontFamily: 'Tahoma', decoration: TextDecoration.none),
+                                textStyle: const TextStyle(fontSize: 14, fontFamily: 'YandiSans', decoration: TextDecoration.none),
                               ),
                             ),
                           ),

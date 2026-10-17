@@ -209,7 +209,7 @@ class _StatusRow extends StatelessWidget {
             child: FittedBox(
               fit: BoxFit.scaleDown,
               alignment: Alignment.centerRight,
-              child: Text(value, maxLines: 1, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold)),
+              child: Text(value, maxLines: 1, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold, fontStyle: FontStyle.italic)),
             ),
           ),
         ),

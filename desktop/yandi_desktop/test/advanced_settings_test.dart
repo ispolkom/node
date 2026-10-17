@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/advanced_settings.dart';
+import 'package:yandi_desktop/theme.dart';
 import 'package:yandi_desktop/transport/api.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
@@ -49,9 +50,28 @@ class SettingsApi extends m2.FeatureApi {
             'enabled': true,
             'cap': 4,
             'clients': 0,
+            'auth': 'password',
+            'user': 'u',
+            'has_password': true,
+            'state': 'ok',
           },
         ],
       };
+    if (path.endsWith('/reveal')) {
+      calls.add(path);
+      return {'ok': true, 'user': 'u', 'password': 'SECRET'};
+    }
+    if (path == '/api/upstream-proxies/test') {
+      calls.add(path);
+      bodies.add(Map.of(body!));
+      return {
+        'ok': true,
+        'results': [
+          {'ok': true, 'ms': 42, 'proxy': 'example.com:1080'},
+        ],
+        'errors': [],
+      };
+    }
     if (path.startsWith('/api/upstream-proxies')) {
       calls.add(path);
       if (body != null) bodies.add(Map.of(body));
@@ -100,36 +120,102 @@ void main() {
     expect(errors, isEmpty);
     await m1.stop(t);
   });
+  Finder inDialog(String label) => find.descendant(
+    of: find.byType(AlertDialog),
+    matching: find.widgetWithText(ElevatedButton, label),
+  );
   testWidgets('proxy passwords never go to plain daemon storage', (t) async {
     final api = SettingsApi()
       ..configured = false
       ..unlocked = false;
     final errors = <Object>[];
     await panel(t, api, errors);
-    await m1.click(t, 'Добавить внешний прокси');
-    for (final e in {
-      'Хост прокси': 'example.com',
-      'Порт прокси': '1080',
-      'Логин прокси (необязательно)': 'u',
-      'Пароль прокси': 'SECRET',
-    }.entries) {
-      await t.enterText(find.widgetWithText(TextField, e.key), e.value);
-    }
-    await m1.click(t, 'Сохранить');
+    await m1.click(t, 'Добавить');
+    await t.enterText(
+      find.widgetWithText(TextField, 'ip:port:login:pass'),
+      'example.com:1080:u:SECRET',
+    );
+    await t.tap(inDialog('Добавить'));
+    await t.pumpAndSettle();
     expect(errors.single, isA<ApiFailure>());
     expect(api.calls.contains('/api/upstream-proxies'), false);
     expect(find.text('SECRET'), findsNothing);
-    api.configured = api.unlocked = true;
-    await m1.click(t, 'Изменить лимит прокси');
+    await m1.stop(t);
+  });
+  testWidgets('proxy list: login and password hidden until the eye, ping, add, edit, delete', (t) async {
+    final api = SettingsApi();
+    final errors = <Object>[];
+    await panel(t, api, errors);
+    // адрес виден, логин и пароль скрыты
+    expect(find.textContaining('example.com:1080:••••••:••••••'), findsOneWidget);
+    expect(find.textContaining('SECRET'), findsNothing);
+    await t.tap(find.byIcon(Icons.visibility));
+    await t.pumpAndSettle();
+    expect(find.textContaining('example.com:1080:u:SECRET'), findsOneWidget);
+    await t.tap(find.byIcon(Icons.visibility_off));
+    await t.pumpAndSettle();
+    expect(find.textContaining('SECRET'), findsNothing);
+    // «Изменить» и «Удалить» — только при выбранных
+    ElevatedButton btn(String l) =>
+        t.widget<ElevatedButton>(find.widgetWithText(ElevatedButton, l));
+    expect(btn('Изменить').onPressed, isNull);
+    expect(btn('Удалить').onPressed, isNull);
+    // добавление: пинг до сохранения
+    await m1.click(t, 'Добавить');
+    await t.enterText(
+      find.widgetWithText(TextField, 'ip:port:login:pass'),
+      'example.com:1080:u:SECRET',
+    );
+    await t.tap(inDialog('Пинг'));
+    await t.pumpAndSettle();
+    expect(api.bodies.last, {'text': 'example.com:1080:u:SECRET', 'kind': 'socks5'});
+    expect(find.textContaining('работает, 42 мс'), findsOneWidget);
+    expect(api.methods.contains('POST') && api.calls.contains('/api/upstream-proxies'), false);
+    await t.tap(inDialog('Добавить'));
+    await t.pumpAndSettle();
+    expect(api.bodies.last, {'text': 'example.com:1080:u:SECRET', 'kind': 'socks5'});
+    // кривая строка не уходит на узел
+    final before = api.bodies.length;
+    await m1.click(t, 'Добавить');
+    await t.enterText(find.widgetWithText(TextField, 'ip:port:login:pass'), 'example.com');
+    await t.tap(inDialog('Добавить'));
+    await t.pumpAndSettle();
+    expect(find.textContaining('Формат: ip:port:login:pass'), findsOneWidget);
+    expect(api.bodies.length, before);
+    await t.tap(find.text('Отмена'));
+    await t.pumpAndSettle();
+    // выбрать, изменить
+    await t.tap(find.byType(PanelCheck).at(1));
+    await t.pumpAndSettle();
+    expect(btn('Изменить').onPressed, isNotNull);
+    await m1.click(t, 'Изменить');
+    expect(
+      t.widget<TextField>(find.widgetWithText(TextField, 'ip:port:login:pass')).controller!.text,
+      'example.com:1080:u:SECRET',
+    );
     await t.enterText(
       find.widgetWithText(TextField, 'Клиентов (0 — общий предел)'),
       '3',
     );
-    await m1.click(t, 'Подтвердить');
-    expect(api.bodies.last, {'max_clients': 3});
-    await m1.click(t, 'Удалить внешний прокси');
+    await t.tap(inDialog('Сохранить'));
+    await t.pumpAndSettle();
+    expect(api.bodies.last['max_clients'], 3);
+    expect(api.bodies.last['host'], 'example.com');
+    expect(api.bodies.last['password'], 'SECRET');
+    // удалить с подтверждением
+    await m1.click(t, 'Удалить');
     await m1.click(t, 'Отмена');
     expect(api.methods.contains('DELETE'), false);
+    await m1.click(t, 'Удалить');
+    await t.tap(find.descendant(of: find.byType(AlertDialog), matching: find.text('Подтвердить')));
+    await t.pumpAndSettle();
+    expect(api.methods.contains('DELETE'), true);
+    // настройки пула сохраняются одной кнопкой
+    await t.tap(find.text('Включить пул'));
+    await t.pumpAndSettle();
+    await m1.click(t, 'Сохранить настройки прокси');
+    expect(api.bodies.last, {'enabled': true, 'strict': true, 'max_clients': 4});
+    expect(errors, isEmpty);
     await m1.stop(t);
   });
   testWidgets('About screen', (t) async {
