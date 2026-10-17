@@ -284,6 +284,22 @@ impl ClosedEnv {
         e
     }
 
+    /// Экстренное стирание по команде владельца (кнопка в оболочке): ключ данных и метки удаляются, зашифрованные файлы потребителей
+    /// стираются; среда считается не созданной. Личность узла (сид-фраза) и резервные копии связей не затрагиваются.
+    pub async fn panic_erase(&self) -> Result<()> {
+        let _op = self.op.lock().await;
+        self.store.panic_wipe()?;
+        self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = std::fs::remove_file(self.dir.join(MARKER));
+        self.lock().await;
+        let consumers: Vec<Arc<dyn Consumer>> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for c in consumers {
+            c.erase().await;
+        }
+        eprintln!("[closed] закрытая среда стёрта по команде владельца; зашифрованные файлы потребителей удалены");
+        Ok(())
+    }
+
     /// Забыли пароль: открыть словами и сразу задать новый.
     pub async fn recover(&self, phrase: String, new_password: String) -> Result<()> {
         let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);

@@ -57,6 +57,12 @@ class SettingsApi extends m2.FeatureApi {
           },
         ],
       };
+    if (path == '/api/vault/panic_erase') {
+      calls.add(path);
+      bodies.add(Map.of(body!));
+      methods.add('POST');
+      return {'ok': true};
+    }
     if (path == '/api/mail-policy') {
       if (body != null) {
         calls.add(path);
@@ -297,6 +303,26 @@ void main() {
     await m1.click(t, 'Сохранить срок');
     expect(api.bodies.last, {'days': 3});
     expect(find.text('Срок хранения почты сохранён.'), findsOneWidget);
+    expect(errors, isEmpty);
+    await m1.stop(t);
+  });
+  testWidgets('emergency erase: needs the confirmation word, the wrong word sends nothing', (t) async {
+    final api = SettingsApi();
+    final errors = <Object>[];
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: SingleChildScrollView(child: PanicPanel(api: api, busy: false, isActive: () => true, mutate: (a) async { try { await a(); } catch (e) { errors.add(e); } })))));
+    await t.pumpAndSettle();
+    await m1.click(t, 'Стереть закрытую среду');
+    await t.enterText(find.byType(TextField), 'нет');
+    await t.tap(inDialog('Стереть'));
+    await t.pumpAndSettle();
+    expect(find.text('Слово не совпало: ничего не стёрто.'), findsOneWidget);
+    expect(api.calls.contains('/api/vault/panic_erase'), false, reason: 'с неверным словом на узел ничего не уходит');
+    await m1.click(t, 'Стереть закрытую среду');
+    await t.enterText(find.byType(TextField), 'СТЕРЕТЬ');
+    await t.tap(inDialog('Стереть'));
+    await t.pumpAndSettle();
+    expect(api.bodies.last, {'confirm': 'СТЕРЕТЬ'});
+    expect(find.text('Закрытая среда стёрта.'), findsOneWidget);
     expect(errors, isEmpty);
     await m1.stop(t);
   });

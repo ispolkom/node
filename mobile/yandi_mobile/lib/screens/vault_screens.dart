@@ -610,3 +610,70 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
     ]);
   }
 }
+
+
+// ── Экстренное стирание ──────────────────────────────────────────────────────────────────────────────────────────────
+
+/// Быстрое стирание всех данных YANDI на телефоне без пароля (когда нет времени или пароля под рукой): подтверждается только словом.
+class VaultPanicScreen extends StatefulWidget {
+  const VaultPanicScreen({super.key});
+  static const word = 'СТЕРЕТЬ';
+  /// Подтверждено ли стирание введённым словом (регистр и пробелы по краям не важны).
+  static bool confirmed(String typed) => typed.trim().toUpperCase() == word;
+  @override
+  State<VaultPanicScreen> createState() => _VaultPanicScreenState();
+}
+
+class _VaultPanicScreenState extends State<VaultPanicScreen> {
+  final _word = TextEditingController();
+  bool _busy = false;
+  String? _error;
+
+  @override
+  void dispose() {
+    _word.dispose();
+    super.dispose();
+  }
+
+  Future<void> _erase() async {
+    if (_busy) return;
+    if (!VaultPanicScreen.confirmed(_word.text)) {
+      setState(() => _error = 'Для стирания введите слово ${VaultPanicScreen.word}');
+      return;
+    }
+    setState(() { _busy = true; _error = null; });
+    final nav = Navigator.of(context);
+    final messenger = ScaffoldMessenger.of(context);
+    final left = await context.read<AppState>().eraseEverything();
+    if (left != null) messenger.showSnackBar(SnackBar(content: Text('Стёрто не всё: $left')));
+    nav.pushNamedAndRemoveUntil('/vault-setup', (_) => false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: AppTheme.bg,
+      appBar: AppBar(backgroundColor: AppTheme.surface, iconTheme: const IconThemeData(color: AppTheme.text), title: const Text('Экстренное стирание', style: TextStyle(color: AppTheme.text))),
+      body: ListView(padding: const EdgeInsets.all(16), children: [
+        const Text('Сразу, без пароля, будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Вернуть их нельзя ни по паролю, ни по секретным словам. '
+            'Чтобы не нажать случайно, введите слово СТЕРЕТЬ.', style: TextStyle(color: AppTheme.textSecondary)),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _word,
+          autocorrect: false,
+          enableSuggestions: false,
+          style: const TextStyle(color: AppTheme.text),
+          decoration: const InputDecoration(hintText: 'СТЕРЕТЬ', border: OutlineInputBorder()),
+          onSubmitted: (_) => _erase(),
+        ),
+        if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
+        const SizedBox(height: 16),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
+          onPressed: _busy ? null : _erase,
+          child: Text(_busy ? 'Стираем…' : 'Стереть всё сейчас'),
+        ),
+      ]),
+    );
+  }
+}

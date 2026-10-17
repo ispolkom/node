@@ -100,6 +100,13 @@ impl EnvelopeStore {
         let _ = self.dir.sync_all();
     }
 
+    /// Экстренное стирание по команде владельца: то же крипто-стирание, что после двадцати неверных сидов (под тем же flock), без счёта попыток.
+    pub fn panic_wipe(&self) -> Result<()> {
+        let _lock = self.lock()?;
+        self.wipe_locked();
+        Ok(())
+    }
+
     /// Откат первичной настройки, оборвавшейся до публикации envelope: счётчик, заведённый `prepare_attempts`, убирается,
     /// чтобы настройку можно было повторить. Существующий vault не затрагивается.
     pub fn abort_setup(&self) -> Result<()> {

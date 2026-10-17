@@ -225,6 +225,13 @@ class SettingsScreen extends StatelessWidget {
             subtitle: const Text('Стереть все данные приложения с этого телефона (нужен пароль).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultEraseScreen())),
           ),
+          ListTile(
+            tileColor: AppTheme.surface,
+            leading: const Icon(Icons.warning_amber_outlined, color: Colors.redAccent),
+            title: const Text('Экстренное стирание', style: TextStyle(color: Colors.redAccent)),
+            subtitle: const Text('Стереть всё сразу, без пароля: нужно ввести слово-подтверждение.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultPanicScreen())),
+          ),
 
           // Аккаунт
           _Section(title: 'Устройство'),

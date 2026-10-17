@@ -1,5 +1,14 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Экстренное стирание': 'Emergency erase',
+  'Быстро и без пароля стирает закрытую среду этого компьютера. Нужно только подтвердить словом, чтобы не нажать случайно.': 'Quickly erases this computer\'s closed environment without a password. Only a confirmation word is needed, to avoid pressing it by accident.',
+  'Стереть закрытую среду?': 'Erase the closed environment?',
+  'Будут стёрты ключи и зашифрованные данные закрытой среды на этом компьютере: история, группы, ключи собеседника, пул прокси. Вернуть их нельзя ни по паролю, ни по сид-фразе. Личность узла и файл резервной копии останутся.': 'Keys and encrypted data of the closed environment on this computer will be erased: history, groups, the contact key, the proxy pool. They cannot be recovered with a password or a seed phrase. The node identity and the backup file remain.',
+  'Введите слово СТЕРЕТЬ': 'Type the word СТЕРЕТЬ',
+  'Стереть': 'Erase',
+  'Стереть закрытую среду': 'Erase the closed environment',
+  'Слово не совпало: ничего не стёрто.': 'The word did not match: nothing was erased.',
+  'Закрытая среда стёрта.': 'The closed environment was erased.',
   'Слабый пароль: его подберут за часы, если файлы скопируют. Возьмите фразу из нескольких слов.': 'Weak password: it can be guessed within hours if the files are copied. Use a phrase of several words.',
   'Средний пароль. Надёжнее фраза из нескольких слов или длиннее.': 'Fair password. A phrase of several words, or a longer one, is safer.',
   'Хороший пароль.': 'Good password.',

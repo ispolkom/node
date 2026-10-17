@@ -380,6 +380,29 @@ async fn recover(Json(b): Json<RecoverBody>) -> Response {
     }
 }
 
+#[derive(Deserialize)]
+struct PanicBody {
+    confirm: String,
+}
+
+/// Слово, которое нужно ввести для экстренного стирания (защита от случайного нажатия и от чужого запроса без ведома владельца).
+pub const PANIC_WORD: &str = "СТЕРЕТЬ";
+
+fn panic_word_ok(typed: &str) -> bool {
+    typed.trim() == PANIC_WORD
+}
+
+async fn panic_erase(Json(b): Json<PanicBody>) -> Response {
+    let e = match env() { Ok(e) => e, Err(r) => return r };
+    if !panic_word_ok(&b.confirm) {
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Для стирания введите слово {PANIC_WORD}")}))).into_response();
+    }
+    match e.panic_erase().await {
+        Ok(()) => ok(e),
+        Err(err) => fail(err),
+    }
+}
+
 async fn auto_lock(Json(b): Json<AutoLockBody>) -> Response {
     let e = match env() { Ok(e) => e, Err(r) => return r };
     match e.set_auto_lock(b.secs) {
@@ -398,6 +421,7 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         .route("/api/vault/change_password", post(change_password))
         .route("/api/vault/recover", post(recover))
         .route("/api/vault/auto_lock", post(auto_lock))
+        .route("/api/vault/panic_erase", post(panic_erase))
 }
 
 #[cfg(test)]
@@ -450,6 +474,52 @@ mod tests {
         assert!(!is_locked() && probe.0.lock().unwrap().is_some());
         assert_eq!(code(auto_lock(Json(AutoLockBody { secs: 600 })).await).await, 200);
         assert_eq!(env.status().auto_lock_secs, 600);
+    }
+
+    #[test]
+    fn the_panic_word_is_exact_apart_from_edge_spaces() {
+        assert!(panic_word_ok("СТЕРЕТЬ") && panic_word_ok("  СТЕРЕТЬ "));
+        for no in ["", "нет", "стереть", "СТЕРЕТЬ!", "ERASE"] {
+            assert!(!panic_word_ok(no), "{no}");
+        }
+    }
+
+    /// Стирание работает на самой среде (общая глобальная ячейка здесь не нужна и в тестах заполняется только один раз).
+    #[tokio::test]
+    async fn the_panic_erase_removes_the_environment_and_the_consumers_data_and_it_can_be_created_again() {
+        let base = tempfile::tempdir().unwrap();
+        let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| None)).unwrap();
+        let erased = Arc::new(Mutex::new(false));
+        struct Spy(Arc<Mutex<bool>>);
+        impl Consumer for Spy {
+            fn domain(&self) -> &'static str {
+                "panic_spy"
+            }
+            fn migrate(&self, _old: Option<[u8; 32]>, _new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+                Box::pin(async { Ok(0) })
+            }
+            fn unlock(&self, _key: [u8; 32]) -> BoxFuture<'_, ()> {
+                Box::pin(async {})
+            }
+            fn lock(&self) -> BoxFuture<'_, ()> {
+                Box::pin(async {})
+            }
+            fn erase(&self) -> BoxFuture<'_, ()> {
+                let f = self.0.clone();
+                Box::pin(async move { *f.lock().unwrap() = true })
+            }
+        }
+        env.register(Arc::new(Spy(erased.clone())));
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        env.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        assert!(env.configured() && env.unlocked());
+        env.panic_erase().await.unwrap();
+        assert!(!env.configured() && !env.unlocked() && *erased.lock().unwrap(), "среда стёрта, потребители удалили свои данные");
+        assert!(env.unlock("owner password".into()).await.is_err(), "прежний пароль больше ничего не открывает");
+        assert!(env.recover(phrase.into(), "another password".into()).await.is_err(), "и сид-фраза тоже: ключа данных больше нет");
+        // после стирания среду можно создать заново
+        env.setup("new owner password".into(), Some(phrase.into())).await.unwrap();
+        assert!(env.configured());
     }
 }
 

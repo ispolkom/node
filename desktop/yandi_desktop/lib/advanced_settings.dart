@@ -789,6 +789,85 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
   );
 }
 
+/// Экстренное стирание закрытой среды (история ПК, группы ПК, ключи собеседника, пул прокси): без пароля, но только со словом-подтверждением.
+class PanicPanel extends StatefulWidget {
+  static const word = 'СТЕРЕТЬ';
+  final Api api;
+  final bool busy;
+  final bool Function() isActive;
+  final Future<void> Function(Future<void> Function()) mutate;
+  const PanicPanel({super.key, required this.api, required this.busy, required this.isActive, required this.mutate});
+  @override
+  State<PanicPanel> createState() => _PanicPanelState();
+}
+
+class _PanicPanelState extends State<PanicPanel> {
+  String? done;
+  bool get active => mounted && widget.isActive();
+
+  Future<void> erase() async {
+    final typed = await showDialog<String>(context: context, builder: (_) => const _PanicWordDialog());
+    if (typed == null || !active) return;
+    if (typed.trim() != PanicPanel.word) {
+      setState(() => done = 'Слово не совпало: ничего не стёрто.');
+      return;
+    }
+    await widget.mutate(() async {
+      await widget.api.request('/api/vault/panic_erase', body: {'confirm': typed.trim()});
+      if (active) setState(() => done = 'Закрытая среда стёрта.');
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => PanelStack(
+    children: [
+      const UiText('Экстренное стирание', style: TextStyle(fontSize: 22)),
+      const UiText('Быстро и без пароля стирает закрытую среду этого компьютера. Нужно только подтвердить словом, чтобы не нажать случайно.'),
+      if (done != null) UiText(done!),
+      SolidButton('Стереть закрытую среду', tone: SolidTone.danger, onPressed: widget.busy ? null : erase),
+    ],
+  );
+}
+
+/// Окно подтверждения экстренного стирания: возвращает введённое слово (проверяет вызывающий) или null при отмене.
+class _PanicWordDialog extends StatefulWidget {
+  const _PanicWordDialog();
+  @override
+  State<_PanicWordDialog> createState() => _PanicWordDialogState();
+}
+
+class _PanicWordDialogState extends State<_PanicWordDialog> {
+  final word = TextEditingController();
+  @override
+  void dispose() {
+    word.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const UiText('Стереть закрытую среду?'),
+    content: Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const UiText('Будут стёрты ключи и зашифрованные данные закрытой среды на этом компьютере: история, группы, ключи собеседника, пул прокси. Вернуть их нельзя ни по паролю, ни по сид-фразе. Личность узла и файл резервной копии останутся.'),
+        const SizedBox(height: 12),
+        TextField(
+          controller: word,
+          autofocus: true,
+          decoration: InputDecoration(labelText: tr(context, 'Введите слово СТЕРЕТЬ'), border: const OutlineInputBorder()),
+          onSubmitted: (_) => Navigator.pop(context, word.text),
+        ),
+      ],
+    ),
+    actions: [
+      TextButton(onPressed: () => Navigator.pop(context), child: const UiText('Отмена')),
+      SolidButton('Стереть', tone: SolidTone.danger, onPressed: () => Navigator.pop(context, word.text)),
+    ],
+  );
+}
+
 class AboutPanel extends StatelessWidget {
   const AboutPanel({super.key});
   @override
