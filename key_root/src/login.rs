@@ -67,15 +67,30 @@ pub fn check_setup_inputs(
     master: &str,
     master_repeat: &str,
 ) -> Result<(), String> {
-    if login.chars().count() < 8 {
-        return Err("Пароль входа: минимум 8 символов".to_string());
+    check_setup_inputs_min(login, login_repeat, master, master_repeat, 8)
+}
+
+/// The same with a chosen shortest login password (a test installation may lower it; production passes 8).
+/// The master secret is either a seed phrase (12 or 24 words, checked as a seed: a typo is reported as a typo) or, for older tools, a
+/// free text of at least 12 characters.
+pub fn check_setup_inputs_min(
+    login: &str,
+    login_repeat: &str,
+    master: &str,
+    master_repeat: &str,
+    min_login: usize,
+) -> Result<(), String> {
+    if login.chars().count() < min_login {
+        return Err(format!("Пароль входа: минимум {min_login} символов"));
     }
     if login != login_repeat {
         return Err("Пароли входа не совпадают".to_string());
     }
-    if master.chars().count() < 12 {
+    if crate::seed::looks_like_seed(master) {
+        crate::seed::Seed::parse(master).map_err(|e| e.to_string())?;
+    } else if master.chars().count() < 12 {
         return Err(
-            "Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)".to_string(),
+            "Сид-фраза: нужно 12 или 24 слова из списка (или мастер-пароль: минимум 12 символов)".to_string(),
         );
     }
     if master != master_repeat {
@@ -100,6 +115,9 @@ pub fn create_keys(
     params: KdfParams,
     policy: &KdfPolicy,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
+    // a seed phrase is keyed by its bytes (language and spacing never matter); anything else is used as typed
+    let master_secret = recovery_secret(master_password);
+    let master_password: &str = &master_secret;
     let auth_path = dir.auth_file();
     ensure_no_existing_auth(&auth_path)?;
     if device.load().map(|k| k.is_some()).unwrap_or(true) {
@@ -169,8 +187,8 @@ pub fn reset_login(
     // Text shaped like a recovery code that fails the code's own check may be a typo in a code — or a password that merely looks like
     // one (a pass-phrase of words joined by hyphens has the same shape). It is therefore tried as typed FIRST; only if that does not
     // open the keys is it reported as a typo (rather than as "wrong").
-    let maybe_typo = crate::recovery_code::looks_like_code(code_input)
-        && RecoveryCode::parse(code_input).is_err();
+    let maybe_typo = (crate::recovery_code::looks_like_code(code_input) && RecoveryCode::parse(code_input).is_err())
+        || (crate::seed::looks_like_seed(code_input) && crate::seed::Seed::parse(code_input).is_err());
     let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей повреждён".to_string())?;
     let secret = recovery_secret(code_input);
     let root = match doc.unlock_with_password(&secret, policy) {

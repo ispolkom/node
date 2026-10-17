@@ -371,3 +371,31 @@ fn a_failed_first_setup_with_a_hardware_key_leaves_nothing_behind_and_can_be_rep
     create_keys(&d.dir, &machine(), &hw(), LOGIN, MASTER, FAST, &KdfPolicy::for_tests()).expect("повторная настройка");
     assert!(d.dir.file("device.seal").exists());
 }
+
+const SEED: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+#[test]
+fn a_seed_phrase_is_the_master_secret_by_its_bytes() {
+    let d = dir();
+    let root = create_keys(&d.dir, &machine(), &device(&d), LOGIN, SEED, FAST, &KdfPolicy::for_tests()).unwrap();
+    // the same phrase typed differently (case, spacing) resets the web password, and the root stays the same
+    reset_login(&d.dir, "  LEGAL winner thank\nyear wave sausage worth useful legal winner thank yellow ", "new login 22", &KdfPolicy::for_tests()).unwrap();
+    assert!(verify_login_in(&d.dir, "new login 22").unwrap());
+    let doc = RootDocument::parse(&std::fs::read(d.dir.auth_file()).unwrap()).unwrap();
+    assert_eq!(*doc.unlock_with_password(&recovery_secret(SEED), &KdfPolicy::for_tests()).unwrap(), *root);
+    // the text of the words is not what keys the wrapper
+    assert!(doc.unlock_with_password(SEED, &KdfPolicy::for_tests()).is_err());
+    // a typo in a seed phrase is told as a typo, not as "wrong"
+    let typo = reset_login(&d.dir, "winner legal thank year wave sausage worth useful legal winner thank yellow", "another login 3", &KdfPolicy::for_tests()).unwrap_err();
+    assert!(typo.contains("опечатка"), "{typo}");
+}
+
+#[test]
+fn setup_rules_check_a_seed_as_a_seed() {
+    assert!(check_setup_inputs("12345678", "12345678", SEED, SEED).is_ok());
+    assert!(check_setup_inputs_min("123456", "123456", SEED, SEED, 6).is_ok());
+    assert!(check_setup_inputs("12345678", "12345678", SEED, SEED).is_ok());
+    let bad = "winner legal thank year wave sausage worth useful legal winner thank yellow";
+    assert!(check_setup_inputs("12345678", "12345678", bad, bad).is_err());
+    assert!(check_setup_inputs("123456", "123456", SEED, SEED).is_err(), "в боевой версии пароль не короче 8");
+}

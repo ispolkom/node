@@ -535,7 +535,14 @@ pub(crate) fn check_setup_inputs(
     master: &str,
     master_repeat: &str,
 ) -> Result<(), String> {
-    key_root::login::check_setup_inputs(login, login_repeat, master, master_repeat)
+    // Тестовая установка: файл `test_weak_password` в каталоге данных (создаёт сам владелец) разрешает пароль входа от 6 знаков.
+    let min = if weak_password_allowed() { 6 } else { 8 };
+    key_root::login::check_setup_inputs_min(login, login_repeat, master, master_repeat, min)
+}
+
+#[cfg(unix)]
+fn weak_password_allowed() -> bool {
+    crate::util::data_dir::data_dir().join("test_weak_password").exists()
 }
 
 #[cfg(not(unix))]

@@ -68,11 +68,33 @@ async fn setup(State(sh): State<Shared>, Json(body): Json<SetupBody>) -> Respons
     }
 }
 
+#[derive(Deserialize)]
+struct SeedBody {
+    #[serde(default)]
+    words: usize,
+}
+
+/// A new seed phrase for the first-start wizard: 12 words by default, 24 on request. Nothing is stored: the phrase exists only in this
+/// answer and in the wizard's memory until the person has written it down and chosen a password.
+async fn new_seed(Json(b): Json<SeedBody>) -> Response {
+    let n = if b.words == 0 { 12 } else { b.words };
+    match key_root::Seed::generate(n) {
+        Some(seed) => (
+            StatusCode::OK,
+            [(header::CACHE_CONTROL, "no-store")],
+            Json(serde_json::json!({"words": seed.words(), "count": n})),
+        )
+            .into_response(),
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Нужно 12 или 24 слова"}))).into_response(),
+    }
+}
+
 fn router(sh: Shared) -> Router {
     Router::new()
         .route("/", get(|| async { Redirect::to("/setup") }))
         .route("/setup", get(page))
         .route("/api/auth/setup", post(setup))
+        .route("/api/auth/seed/new", post(new_seed))
         .route("/api/auth/state", get(|State(sh): State<Shared>| async move {
             crate::web::auth::ui_auth_state(&sh.auth)
         }))
@@ -210,6 +232,27 @@ mod tests {
         let result = tokio::time::timeout(std::time::Duration::from_secs(10), handle).await.expect("the setup server did not stop").unwrap();
         assert!(result.is_ok());
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn the_wizard_gets_a_new_seed_of_twelve_or_twenty_four_words_and_nothing_is_stored() {
+        let (port, handle) = start(Arc::new(|_, _| Ok(()))).await;
+        let url = format!("http://127.0.0.1:{port}/api/auth/seed/new");
+        for (ask, count) in [(serde_json::json!({}), 12usize), (serde_json::json!({"words": 12}), 12), (serde_json::json!({"words": 24}), 24)] {
+            let r = client().post(&url).json(&ask).send().await.unwrap();
+            assert_eq!(r.status(), 200);
+            assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
+            let v: serde_json::Value = r.json().await.unwrap();
+            let words: Vec<String> = v["words"].as_array().unwrap().iter().map(|w| w.as_str().unwrap().to_string()).collect();
+            assert_eq!(words.len(), count);
+            assert!(key_root::Seed::parse(&words.join(" ")).is_ok(), "каждая фраза проходит собственную проверку");
+        }
+        let a: serde_json::Value = client().post(&url).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+        let b: serde_json::Value = client().post(&url).json(&serde_json::json!({})).send().await.unwrap().json().await.unwrap();
+        assert_ne!(a["words"], b["words"], "каждый раз новая");
+        assert_eq!(client().post(&url).json(&serde_json::json!({"words": 15})).send().await.unwrap().status(), 400);
+        assert!(!handle.is_finished(), "сид сам по себе настройку не завершает");
+        handle.abort();
     }
 
     #[tokio::test]
