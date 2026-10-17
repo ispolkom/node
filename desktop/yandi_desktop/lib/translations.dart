@@ -1,5 +1,11 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Сопряжение без QR': 'Pairing without QR',
+  'Новые клиенты без QR получают гостевой доступ автоматически, если вы это разрешили. Гость: без групп, без выхода в интернет через узел, без звонков и каталогов.':
+      'New clients without a QR get guest access automatically if you allow it. A guest: no groups, no internet exit through the node, no calls and no directories.',
+  'Разрешить сопряжение без QR': 'Allow pairing without QR',
+  'Адрес гостя узел не записывает и не показывает, но технически видит его при прямом соединении. Гость, молчавший сутки, удаляется.':
+      'The node neither records nor shows a guest address, but technically sees it on a direct connection. A guest silent for a day is removed.',
   'Выбрать все': 'Select all',
   'Прокси ещё не добавлены.': 'No proxies added yet.',
   'Пинг': 'Ping',

@@ -216,6 +216,15 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой");
     }
+    // гость (сопряжён без QR): файлы только другим гостям и пользователям узла, не больше 30 МБ, 20 файлов и 300 МБ в сутки
+    if crate::mobile_api::is_guest_device(&dev) {
+        if !crate::mobile_api::is_restricted_peer(&req.to_peer_id) {
+            return err(StatusCode::FORBIDDEN, "гость может передавать файлы только другим гостям и пользователям этого узла");
+        }
+        if let Err(why) = crate::guest::reserve_file(&dev, req.file_size) {
+            return err(StatusCode::TOO_MANY_REQUESTS, why);
+        }
+    }
     // кусков не меньше, чем нужно для размера, и не вдвое больше
     let per = req.file_size.div_ceil(req.total_chunks as u64);
     if per > MAX_CHUNK_BYTES as u64 - CHUNK_OVERHEAD {

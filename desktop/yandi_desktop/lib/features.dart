@@ -1670,6 +1670,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 isActive: () => active,
                 mutate: (a) => mutate(a),
               ),
+              GuestPairingPanel(
+                api: widget.api,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
               DevicesPanel(
                 api: widget.api,
                 paired: true,

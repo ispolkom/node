@@ -478,6 +478,7 @@ impl WebServer {
             .route("/", get(index_handler))
             // кто может выходить в интернет через этот узел (выбор владельца)
             .merge(crate::exit_policy::router())
+            .merge(crate::guest::router())
             // закрытая среда узла: пароль владельца, блокировка, смена пароля
             .merge(vault_router())
             .merge(crate::upstream_proxy::router())

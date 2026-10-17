@@ -597,6 +597,79 @@ class _ProxyFormState extends State<ProxyForm> {
   );
 }
 
+/// Опция узла «разрешить сопряжение без QR»: гости (docs/GUEST.md). По умолчанию выключена.
+class GuestPairingPanel extends StatefulWidget {
+  final Api api;
+  final bool busy;
+  final bool Function() isActive;
+  final Future<void> Function(Future<void> Function()) mutate;
+  const GuestPairingPanel({
+    super.key,
+    required this.api,
+    required this.busy,
+    required this.isActive,
+    required this.mutate,
+  });
+  @override
+  State<GuestPairingPanel> createState() => _GuestPairingPanelState();
+}
+
+class _GuestPairingPanelState extends State<GuestPairingPanel> {
+  Map<String, dynamic>? data;
+  String? error;
+  bool get active => mounted && widget.isActive();
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final d = await widget.api.request('/api/guest-pairing');
+      if (active) setState(() { data = d; error = null; });
+    } catch (e) {
+      if (active) {
+        setState(() => error = e is ApiFailure ? e.message : const ApiFailure('protocol').message);
+      }
+    }
+  }
+
+  Future<void> set(bool on) => widget.mutate(() async {
+    await widget.api.request('/api/guest-pairing', body: {'enabled': on});
+    if (active) await load();
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final on = data?['enabled'] == true;
+    final mb = ((data?['limits']?['max_file_bytes'] ?? 31457280) as num) ~/ (1 << 20);
+    final perDay = data?['limits']?['max_files_per_day'] ?? 20;
+    final volume = ((data?['limits']?['max_bytes_per_day'] ?? 314572800) as num) ~/ (1 << 20);
+    return PanelStack(
+      children: [
+        const UiText('Сопряжение без QR', style: TextStyle(fontSize: 22)),
+        if (error != null) UiText(error!),
+        const UiText(
+          'Новые клиенты без QR получают гостевой доступ автоматически, если вы это разрешили. Гость: без групп, без выхода в интернет через узел, без звонков и каталогов.',
+        ),
+        PanelCheck(
+          value: on,
+          label: 'Разрешить сопряжение без QR',
+          onChanged: widget.busy || data == null ? null : set,
+        ),
+        if (data != null) ...[
+          UiText('Гостей сейчас: ${data!['guests']} из ${data!['max_guests']}'),
+          UiText('Файлы гостя: не больше $mb МБ, не больше $perDay файлов и $volume МБ в сутки; хранение до 24 часов.'),
+          const UiText(
+            'Адрес гостя узел не записывает и не показывает, но технически видит его при прямом соединении. Гость, молчавший сутки, удаляется.',
+          ),
+        ],
+      ],
+    );
+  }
+}
+
 class AboutPanel extends StatelessWidget {
   const AboutPanel({super.key});
   @override

@@ -547,7 +547,7 @@ class PanelCheck extends StatelessWidget {
               box,
               if (label != null) ...[
                 const SizedBox(width: 8),
-                UiText(label!),
+                Flexible(child: UiText(label!)),
               ],
             ],
           ),

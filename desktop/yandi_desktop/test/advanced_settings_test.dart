@@ -57,6 +57,20 @@ class SettingsApi extends m2.FeatureApi {
           },
         ],
       };
+    if (path == '/api/guest-pairing') {
+      if (body != null) {
+        calls.add(path);
+        bodies.add(Map.of(body));
+        methods.add('POST');
+        return {'ok': true};
+      }
+      return {
+        'enabled': false,
+        'guests': 3,
+        'max_guests': 64,
+        'limits': {'max_file_bytes': 31457280, 'max_files_per_day': 20, 'max_bytes_per_day': 314572800},
+      };
+    }
     if (path.endsWith('/reveal')) {
       calls.add(path);
       return {'ok': true, 'user': 'u', 'password': 'SECRET'};
@@ -215,6 +229,30 @@ void main() {
     await t.pumpAndSettle();
     await m1.click(t, 'Сохранить настройки прокси');
     expect(api.bodies.last, {'enabled': true, 'strict': true, 'max_clients': 4});
+    expect(errors, isEmpty);
+    await m1.stop(t);
+  });
+  testWidgets('pairing without QR: off by default, the owner turns it on', (t) async {
+    final api = SettingsApi();
+    final errors = <Object>[];
+    await t.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(
+            child: GuestPairingPanel(api: api, busy: false, isActive: () => true, mutate: (a) async {
+              try { await a(); } catch (e) { errors.add(e); }
+            }),
+          ),
+        ),
+      ),
+    );
+    await t.pumpAndSettle();
+    expect(find.text('Гостей сейчас: 3 из 64'), findsOneWidget);
+    expect(find.textContaining('не больше 30 МБ'), findsOneWidget);
+    expect(find.textContaining('20 файлов и 300 МБ'), findsOneWidget);
+    await t.tap(find.text('Разрешить сопряжение без QR'));
+    await t.pumpAndSettle();
+    expect(api.bodies.last, {'enabled': true});
     expect(errors, isEmpty);
     await m1.stop(t);
   });
