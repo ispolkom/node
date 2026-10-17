@@ -258,6 +258,15 @@ class AppState extends ChangeNotifier implements FilesHost {
           notifyListeners();
         }
       }
+      // «ушло в сокет, а квитанции нет»: пакет мог пропасть при обрыве; повторяем тем же номером (получатель с квитанциями отбросит повтор)
+      final pending = await StorageService.pendingOutgoing(sinceMs: now.subtract(Outbox.maxAge).millisecondsSinceEpoch);
+      _outbox.forgetPending({for (final m in pending) m.id});
+      for (final m in _outbox.duePending(pending, now, capable: (m) => _receiptCapable.contains(m.peerId) && !isBlocked(m.peerId))) {
+        if (_ws != ws || !ws.connected) break;
+        if (isBlocked(m.peerId) || await StorageService.outgoingStatus(m.id) != MessageStatus.pending) continue;
+        _outbox.pendingResent(m.id);
+        await ws.sendMessage(m.peerId, MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText));
+      }
     } catch (_) {
       // база или сеть недоступны: попробуем на следующем проходе
     } finally {

@@ -546,16 +546,31 @@ fn weak_password_allowed() -> bool {
 }
 
 // ── Долговечный счёт неверных паролей входа: пять — и дальше только сид-фраза (то же правило, что у закрытой среды) ──────────────────
+//
+// Попытка занимается ДО проверки пароля (как в замке закрытой среды), под одним замком: параллельные запросы не теряют неудачи, а
+// невозможность записать счёт отказывает до проверки секрета. Через этот путь идут все проверки пароля входа: вход, перепривязка,
+// повторный пароль для опасных действий.
 
 pub const MAX_LOGIN_FAILURES: u32 = 5;
+
+static LOGIN_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 fn login_failures_path() -> std::path::PathBuf {
     crate::util::data_dir::data_dir().join("login_failures")
 }
 
+/// Счёт с диска: нет файла — ноль; нечитаемый или испорченный файл — ошибка (не «ноль»: иначе порча файла снимала бы предел).
+fn login_failures_strict() -> Result<u32, String> {
+    match std::fs::read_to_string(login_failures_path()) {
+        Ok(s) => s.trim().parse().map_err(|_| "счёт попыток повреждён".to_string()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(format!("счёт попыток не читается: {e}")),
+    }
+}
+
 /// Сколько неверных паролей входа подряд (переживает перезапуск узла).
 pub fn login_failures() -> u32 {
-    std::fs::read_to_string(login_failures_path()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+    login_failures_strict().unwrap_or(0)
 }
 
 /// Вход паролем закрыт: пять неверных подряд, дальше — только вход по сид-фразе.
@@ -563,13 +578,82 @@ pub fn login_locked_out() -> bool {
     login_failures() >= MAX_LOGIN_FAILURES
 }
 
-pub fn record_login_failure_durable() {
-    let n = login_failures().saturating_add(1);
-    let _ = crate::util::private_file::write_private(&login_failures_path(), n.to_string().as_bytes());
+fn write_login_failures(n: u32) -> Result<(), String> {
+    crate::util::private_file::write_private(&login_failures_path(), n.to_string().as_bytes()).map_err(|e| format!("счёт попыток не записан: {e}"))
 }
 
 pub fn reset_login_failures() {
+    let _g = LOGIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::remove_file(login_failures_path());
+}
+
+/// Почему проверка пароля не состоялась.
+#[derive(Debug)]
+pub enum CountedLogin {
+    /// пять неверных подряд: пароль больше не принимается
+    Locked,
+    /// счёт попыток не прочитан или не записан: отказ до проверки секрета
+    Storage(String),
+    /// сбой самой проверки
+    Failed(String),
+}
+
+fn counted_with(password: &str, verify: impl Fn(&str) -> Result<bool, String>) -> Result<bool, CountedLogin> {
+    let _g = LOGIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
+    let n = login_failures_strict().map_err(CountedLogin::Storage)?;
+    if n >= MAX_LOGIN_FAILURES {
+        return Err(CountedLogin::Locked);
+    }
+    write_login_failures(n + 1).map_err(CountedLogin::Storage)?;
+    match verify(password) {
+        Ok(true) => {
+            let _ = std::fs::remove_file(login_failures_path());
+            Ok(true)
+        }
+        Ok(false) => Ok(false),
+        Err(e) => {
+            let _ = write_login_failures(n); // сбой проверки — не вина введённого пароля
+            Err(CountedLogin::Failed(e))
+        }
+    }
+}
+
+/// Проверить пароль входа со счётом попыток (единственный путь для всех входов по паролю).
+pub fn verify_login_counted(password: &str) -> Result<bool, CountedLogin> {
+    counted_with(password, verify_login)
+}
+
+/// Сид-фраза закрытой среды должна быть сид-фразой самого узла (той, что открывает корень личности): иначе у узла два независимых
+/// секрета, и восстановление по одному из них ломается (P12-2). Нет личности или файла ключей — проверять нечего (true).
+#[cfg(unix)]
+pub(crate) fn phrase_matches_identity(phrase: &str) -> Result<(), String> {
+    // в тестах обработчик не должен читать настоящие ключи этого компьютера; саму проверку проверяет phrase_matches_identity_in
+    #[cfg(test)]
+    {
+        let _ = phrase;
+        return Ok(());
+    }
+    #[cfg(not(test))]
+    phrase_matches_identity_real(phrase)
+}
+
+#[cfg(all(unix, not(test)))]
+fn phrase_matches_identity_real(phrase: &str) -> Result<(), String> {
+    let path = auth_file_path();
+    let Some(parent) = path.parent() else { return Ok(()) };
+    let Ok(dir) = key_root::KeyDir::open(parent.to_path_buf()) else { return Ok(()) };
+    phrase_matches_identity_in(&dir, phrase, &key_root::KdfPolicy::production())
+}
+
+#[cfg(unix)]
+pub(crate) fn phrase_matches_identity_in(dir: &key_root::KeyDir, phrase: &str, policy: &key_root::KdfPolicy) -> Result<(), String> {
+    let Ok(bytes) = std::fs::read(dir.auth_file()) else { return Ok(()) };
+    let Ok(doc) = key_root::RootDocument::parse(&bytes) else { return Ok(()) };
+    let secret = key_root::recovery_secret(phrase);
+    match doc.unlock_with_password(&secret, policy) {
+        Ok(_) => Ok(()),
+        Err(_) => Err("Сид-фраза закрытой среды должна совпадать с сид-фразой узла, записанной при создании".to_string()),
+    }
 }
 
 /// Действующий минимум длины нового пароля (8; 6 только при тестовом файле). Одна политика для настройки, восстановления и мастера.
@@ -774,7 +858,7 @@ pub(crate) fn recover_login_in(
     new_login_password: &str,
     policy: &key_root::KdfPolicy,
 ) -> Result<(), String> {
-    key_root::login::reset_login(dir, code_input, new_login_password, policy)?;
+    key_root::login::reset_login_min(dir, code_input, new_login_password, policy, min_new_password())?;
     if let Ok(mut sessions) = state.sessions.lock() {
         sessions.clear(); // a password reset ends every session that existed before it
     }
@@ -1109,6 +1193,18 @@ mod key_root_integration_tests {
             (base, dir)
         }
 
+        #[test]
+        fn the_closed_environment_seed_must_be_the_nodes_own_seed() {
+            let (base, dir) = fresh();
+            // личности ещё нет — проверять нечего
+            assert!(phrase_matches_identity_in(&dir, "anything at all", &KdfPolicy::for_tests()).is_ok());
+            setup(&dir, &FixedMachine("m1".into()), &AuthState::default()).unwrap();
+            assert!(phrase_matches_identity_in(&dir, MASTER, &KdfPolicy::for_tests()).is_ok(), "свой сид проходит");
+            let other = phrase_matches_identity_in(&dir, "a different phrase, also written down", &KdfPolicy::for_tests());
+            assert!(other.unwrap_err().contains("должна совпадать"), "чужая фраза отвергается до создания среды");
+            let _ = std::fs::remove_dir_all(base);
+        }
+
         fn setup(
             dir: &KeyDir,
             machine: &FixedMachine,
@@ -1342,20 +1438,58 @@ mod key_root_integration_tests {
 mod login_limit_tests {
     use super::*;
 
+    /// Тесты делят один файл счёта: идут по очереди.
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn five_wrong_passwords_close_the_password_login_and_the_counter_survives_a_restart() {
+        let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         reset_login_failures();
-        assert!(!login_locked_out());
+        let wrong = |_: &str| Ok(false);
         for i in 1..=MAX_LOGIN_FAILURES {
-            assert!(!login_locked_out(), "до {i}-й неудачи вход ещё открыт");
-            record_login_failure_durable();
+            assert!(matches!(counted_with("x", wrong), Ok(false)), "{i}-я неверная проходит как неверная");
         }
         assert!(login_locked_out(), "пятая неверная закрывает вход паролем");
-        // «перезапуск»: счёт лежит на диске, а не в памяти процесса
-        assert_eq!(login_failures(), MAX_LOGIN_FAILURES);
-        record_login_failure_durable();
-        assert!(login_locked_out());
+        assert_eq!(login_failures(), MAX_LOGIN_FAILURES, "счёт лежит на диске, а не в памяти процесса");
+        // дальше пароль не принимается совсем, даже верный, и проверка пароля не вызывается
+        assert!(matches!(counted_with("right", |_| panic!("проверка не должна запускаться")), Err(CountedLogin::Locked)));
         reset_login_failures();
         assert!(!login_locked_out(), "вход по сид-фразе снимает запрет");
+        // верный пароль обнуляет счёт
+        let _ = counted_with("x", wrong);
+        let _ = counted_with("x", wrong);
+        assert!(matches!(counted_with("ok", |_| Ok(true)), Ok(true)));
+        assert_eq!(login_failures(), 0);
+        // сбой самой проверки счёт не увеличивает
+        assert!(matches!(counted_with("x", |_| Err("сбой".into())), Err(CountedLogin::Failed(_))));
+        assert_eq!(login_failures(), 0);
+    }
+
+    #[test]
+    fn parallel_wrong_guesses_are_all_counted_and_never_exceed_the_limit() {
+        let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_login_failures();
+        let oks = std::sync::atomic::AtomicU32::new(0);
+        std::thread::scope(|s| {
+            for _ in 0..16 {
+                s.spawn(|| {
+                    if matches!(counted_with("x", |_| Ok(false)), Ok(false)) {
+                        oks.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+        assert_eq!(oks.load(std::sync::atomic::Ordering::SeqCst), MAX_LOGIN_FAILURES, "проверено ровно пять паролей, остальные отказаны до проверки");
+        assert!(login_locked_out());
+        reset_login_failures();
+    }
+
+    #[test]
+    fn a_damaged_counter_refuses_the_check_instead_of_counting_as_zero() {
+        let _s = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        reset_login_failures();
+        std::fs::write(login_failures_path(), b"not a number").unwrap();
+        assert!(matches!(counted_with("x", |_| panic!("проверка не должна запускаться")), Err(CountedLogin::Storage(_))));
+        reset_login_failures();
     }
 }

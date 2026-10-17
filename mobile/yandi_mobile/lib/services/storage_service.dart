@@ -598,6 +598,24 @@ class StorageService {
         .toList();
   }
 
+  /// Исходящие «ушло, квитанции нет» не старше `sinceMs` (для повтора потерянного пакета).
+  static Future<List<ChatMessage>> pendingOutgoing({required int sinceMs, int limit = 200}) async {
+    final rows = await db.query('messages', where: "outgoing = 1 AND status = 'pending' AND timestamp >= ?", whereArgs: [sinceMs], orderBy: 'timestamp ASC', limit: limit);
+    return rows
+        .map((r) => ChatMessage(
+              id: r['id'] as String,
+              peerId: r['peer_id'] as String,
+              outgoing: true,
+              text: r['text'] as String,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+              status: MessageStatus.pending,
+              replyId: r['reply_id'] as String?,
+              replyText: r['reply_text'] as String?,
+              remoteId: r['remote_id'] as String?,
+            ))
+        .toList();
+  }
+
   /// Статус исходящего сообщения (null — такого нет: например, пользователь удалил его).
   static Future<MessageStatus?> outgoingStatus(String id) async {
     final rows = await db.query('messages', columns: ['status'], where: 'id = ? AND outgoing = 1', whereArgs: [id], limit: 1);

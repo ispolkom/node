@@ -175,7 +175,8 @@ pub fn run(argv: Vec<String>) -> i32 {
     }
     // Копия с закрытой средой: пароль прежней установки не переносится, для этой машины задаётся новый (как в кошельках).
     let has_vault = entries.iter().any(|e| e.path == "closed/envelope.json");
-    let new_password = if has_vault {
+    // новый пароль нужен и без закрытой среды: он заменяет пароль входа (иначе перенесённый старый остался бы действовать)
+    let new_password = {
         let first = match ask_secret("Новый пароль для этой машины (не короче 8 знаков, на тестовом узле 6): ", a.code_stdin) {
             Ok(p) => p,
             Err(e) => {
@@ -201,8 +202,6 @@ pub fn run(argv: Vec<String>) -> i32 {
             }
         }
         Some(first)
-    } else {
-        None
     };
     let report = match node_backup::restore(&opened, &a.layout, &RestoreOptions { force: a.force }) {
         Ok(r) => r,
@@ -235,10 +234,20 @@ pub fn run(argv: Vec<String>) -> i32 {
         Ok(r) => {
             println!("личность узла {} восстановлена; для этой машины создан новый ключ устройства.", r.node_id);
             if let Some(pw) = &new_password {
-                match node_backup::finalize_vault(&a.layout, &code, pw).and_then(|_| key_root::login::reset_login_min(&dir, &code, pw, &policy, crate::web::auth::min_new_password())) {
-                    Ok(_) => println!("закрытая среда открыта сид-фразой; пароль прежней установки больше не действует, действует новый."),
+                if has_vault {
+                    match node_backup::finalize_vault(&a.layout, &code, pw) {
+                        Ok(_) => println!("закрытая среда открыта сид-фразой; пароль прежней установки больше не действует, действует новый."),
+                        Err(e) => {
+                            eprintln!("yandi backup: файлы и ключи записаны, но закрытая среда не настроена: {e}. Повторите команду с --force и той же сид-фразой.");
+                            return 1;
+                        }
+                    }
+                }
+                // новый пароль заменяет и пароль входа (перенесённый старый нигде не действует), с закрытой средой и без неё
+                match key_root::login::reset_login_min(&dir, &code, pw, &policy, crate::web::auth::min_new_password()) {
+                    Ok(_) => println!("пароль входа заменён новым; прежний больше не действует."),
                     Err(e) => {
-                        eprintln!("yandi backup: файлы и ключи записаны, но закрытая среда не настроена: {e}. Повторите команду с --force и той же сид-фразой.");
+                        eprintln!("yandi backup: файлы и ключи записаны, но пароль входа не заменён: {e}. Повторите команду с --force и той же сид-фразой.");
                         return 1;
                     }
                 }

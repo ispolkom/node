@@ -1233,7 +1233,7 @@ async fn require_step_up(state: &AppState, password: Option<&str>) -> Result<(),
         )
             .into_response());
     }
-    match crate::web::auth::verify_login(password) {
+    match crate::web::auth::verify_login_counted(password) {
         Ok(true) => {
             state.auth_state.record_login_success();
             Ok(())
@@ -1242,7 +1242,7 @@ async fn require_step_up(state: &AppState, password: Option<&str>) -> Result<(),
             state.auth_state.record_login_failure();
             Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response())
         }
-        Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response()),
+        Err(e) => Err(counted_login_error(e)),
     }
 }
 
@@ -1272,6 +1272,22 @@ struct LoginRequest {
     remember_me: bool,
 }
 
+/// Ответ на отказ счётчика проверки пароля: закрыт вход паролем (403), счёт не сохранён или сбой проверки (500).
+fn counted_login_error(e: crate::web::auth::CountedLogin) -> Response {
+    use crate::web::auth::CountedLogin::*;
+    match e {
+        Locked => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Слишком много неверных паролей: войдите по сид-фразе (восстановление доступа)"})),
+        ).into_response(),
+        Storage(m) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Вход временно невозможен: {m}")})),
+        ).into_response(),
+        Failed(m) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": m}))).into_response(),
+    }
+}
+
 async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> Response {
     // Brute-force throttle: reject before even hashing the password if
     // we're still cooling down from prior failures (see AuthState::
@@ -1283,16 +1299,9 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
-    // пять неверных паролей подряд — дальше пароль не принимается совсем (даже верный): только вход по сид-фразе
-    if crate::web::auth::login_locked_out() {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(serde_json::json!({"error": "Слишком много неверных паролей: войдите по сид-фразе (восстановление доступа)"})),
-        ).into_response();
-    }
-    match crate::web::auth::verify_login(&body.login_password) {
+    // все проверки пароля идут через один счёт: пять неверных подряд — дальше пароль не принимается совсем (даже верный)
+    match crate::web::auth::verify_login_counted(&body.login_password) {
         Ok(true) => {
-            crate::web::auth::reset_login_failures();
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(body.remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, body.remember_me);
@@ -1307,18 +1316,13 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
         }
         Ok(false) => {
             state.auth_state.record_login_failure();
-            crate::web::auth::record_login_failure_durable();
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Неверный пароль"})),
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => counted_login_error(e),
     }
 }
 
@@ -1397,8 +1401,8 @@ async fn api_auth_rebind(
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
-    // Verify login password first
-    match crate::web::auth::verify_login(&body.login_password) {
+    // Verify login password first (тот же счёт попыток, что и у входа)
+    match crate::web::auth::verify_login_counted(&body.login_password) {
         Ok(true) => {
             state.auth_state.record_login_success();
         }
@@ -1410,13 +1414,7 @@ async fn api_auth_rebind(
             )
                 .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
+        Err(e) => return counted_login_error(e),
     }
 
     match crate::web::auth::rebind_to_machine(&state.auth_state, &body.master_password) {

@@ -190,12 +190,14 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
         return Err("Введите сид-фразу (12 или 24 слова)".into());
     }
     key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
+    // файл читается и его открытый заголовок проверяется ДО занятия попытки: ошибка пути или повреждённый файл сид не проверяли
+    let bytes = read_backup_file(&b.path)?;
+    crate::node_backup::read_header(&bytes)?;
     // попытка занимается ДО дорогой проверки; успех другой копии бюджет не сбрасывает: сброс только после полного завершения
     if RESTORE_FAILURES.fetch_add(1, Ordering::SeqCst) >= RESTORE_FAILURE_LIMIT {
         RESTORE_FAILURES.fetch_sub(1, Ordering::SeqCst);
         return Err("Исчерпано число попыток восстановления; перезапустите узел".into());
     }
-    let bytes = read_backup_file(&b.path)?;
     let opened = crate::node_backup::open_with_code(&bytes, &b.phrase)?;
     let layout = crate::node_backup::Layout::live(crate::get_config().ports.discovery);
     crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
@@ -453,12 +455,20 @@ mod tests {
             assert!(do_restore(&auth, &b(&bad, "12345678")).is_err());
         }
         assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "ни одна опечатка не расходует попытку");
-        // верная по формату фраза занимает попытку до проверки файла, лимит держится
+        // ошибка пути или повреждённый файл — не попытка: сид не проверялся
         assert!(do_restore(&auth, &b(&seed, "12345678")).is_err());
-        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 1);
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "несуществующий файл не расходует попытку");
+        let dir = tempfile::tempdir().unwrap();
+        let junk = dir.path().join("junk.yandibak");
+        std::fs::write(&junk, b"not a backup").unwrap();
+        let bj = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into() };
+        assert!(do_restore(&auth, &bj).is_err());
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "повреждённый заголовок не расходует попытку");
+        // лимит держится: при исчерпанном бюджете отказ раньше проверки сида и счётчик не растёт
         RESTORE_FAILURES.store(RESTORE_FAILURE_LIMIT, Ordering::SeqCst);
-        assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().contains("Исчерпано"));
-        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), RESTORE_FAILURE_LIMIT, "отказ по лимиту счётчик не наращивает");
+        let bad_real = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into() };
+        let _ = do_restore(&auth, &bad_real);
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), RESTORE_FAILURE_LIMIT, "отказ не наращивает счётчик сверх лимита");
         // узел уже настроен — восстановление не выполняется
         RESTORE_FAILURES.store(0, Ordering::SeqCst);
         auth.is_setup.store(true, Ordering::Relaxed);

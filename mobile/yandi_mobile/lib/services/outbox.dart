@@ -16,12 +16,21 @@ class Outbox {
   /// Сколько сообщений за один проход (чтобы длинная очередь не забивала сокет).
   static const int perPass = 20;
 
+  /// Повторы «ушло, а квитанции нет»: спустя минуту, 5 минут и полчаса после отправки, не больше трёх раз на сообщение.
+  static const List<int> pendingDelaysSec = [60, 300, 1800];
+
   final Map<String, _Try> _tries = {};
+  final Map<String, int> _pendingTries = {};
 
   /// Можно ли повторять это сообщение.
   static bool retryable(ChatMessage m, DateTime now) {
     if (!m.outgoing || m.status != MessageStatus.failed) return false;
     if (now.difference(m.timestamp) >= maxAge) return false;
+    return retryableText(m);
+  }
+
+  /// Личный текст (не файл, не приглашение, не карточка).
+  static bool retryableText(ChatMessage m) {
     if (m.text.trim().isEmpty) return false;
     // по метке, а не по разбору: повреждённый служебный конверт тоже не должен уйти как обычный текст
     return !FileOffer.isOffer(m.text) && !m.text.startsWith(GroupInviteMsg.marker) && !m.text.startsWith(ContactCardMsg.marker);
@@ -42,6 +51,27 @@ class Outbox {
 
   /// Сообщение ушло.
   void sent(String id) => _tries.remove(id);
+
+  /// Ушло в сокет, но подтверждения нет: пакет мог пропасть при обрыве, пока сокет принимал его в буфер. Повтор тем же номером безопасен
+  /// ТОЛЬКО для собеседников, умеющих квитанции и отбрасывающих повтор по номеру (их знает вызывающий через [capable]).
+  List<ChatMessage> duePending(List<ChatMessage> pending, DateTime now, {required bool Function(ChatMessage) capable}) {
+    final out = <ChatMessage>[];
+    final sorted = pending.where((m) => m.outgoing && m.status == MessageStatus.pending && now.difference(m.timestamp) < maxAge && capable(m) && retryableText(m)).toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    for (final m in sorted) {
+      final n = _pendingTries[m.id] ?? 0;
+      if (n >= pendingDelaysSec.length) continue;
+      if (now.difference(m.timestamp) >= Duration(seconds: pendingDelaysSec[n])) out.add(m);
+      if (out.length >= perPass) break;
+    }
+    return out;
+  }
+
+  /// Повтор отправлен: следующий — позже (или никогда, если все три израсходованы).
+  void pendingResent(String id) => _pendingTries[id] = (_pendingTries[id] ?? 0) + 1;
+
+  /// Квитанция пришла или сообщение исчезло: счётчик не нужен.
+  void forgetPending(Set<String> stillPending) => _pendingTries.removeWhere((k, _) => !stillPending.contains(k));
 
   /// Повтор не удался: следующая попытка позже.
   void failedAgain(String id, DateTime now) {

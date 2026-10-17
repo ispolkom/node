@@ -256,6 +256,24 @@ void main() {
     expect(errors, isEmpty);
     await m1.stop(t);
   });
+  test('proxy line parser understands every form the node does, and round-trips IPv6', () {
+    ProxyLine? p(String s) => ProxyLine.parse(s);
+    expect(p('1.2.3.4:1080')!.host, '1.2.3.4');
+    expect(p('1.2.3.4:1080:u:pa:ss')!.password, 'pa:ss', reason: 'двоеточие внутри пароля');
+    expect(p('u:pw@1.2.3.4:1080')!.user, 'u');
+    expect(p('socks5://u:pw@[2001:db8::1]:1080')!.host, '2001:db8::1');
+    expect(p('http://example.com:3128/')!.port, 3128);
+    expect(p('[2001:db8::1]:1080')!.host, '2001:db8::1');
+    expect(p('[2001:db8::1]:1080:u:pw')!.user, 'u');
+    for (final bad in ['example.com', '1.2.3.4:0', '1.2.3.4:70000', ':1080', '[::1]', '[::1]:x', 'a:b@host', '1.2.3.4:1080:u']) {
+      expect(p(bad), isNull, reason: bad);
+    }
+    // форма правки: сериализация и разбор обратно дают то же самое, в том числе для IPv6
+    final text = ProxyLine.format('2001:db8::1', 1080, user: 'u', password: 'p:w');
+    final back = ProxyLine.parse(text)!;
+    expect((back.host, back.port, back.user, back.password), ('2001:db8::1', 1080, 'u', 'p:w'));
+    expect(ProxyLine.parse(ProxyLine.format('h.example', 80))!.host, 'h.example');
+  });
   testWidgets('About screen', (t) async {
     await m2.open(t, SettingsApi(), 'О приложении');
     expect(find.text('YANDI Desktop · 0.1.0'), findsOneWidget);

@@ -600,6 +600,10 @@ pub fn remove_device(id: &str) -> bool {
 
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
+    // отметка «последний раз на связи» удалённого устройства не остаётся в памяти
+    if let Some(m) = LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        m.remove(&peer);
+    }
     // файлы удалённого устройства (отправленные им и ждавшие его) не остаются на диске
     if let Ok(h) = tokio::runtime::Handle::try_current() {
         h.spawn(crate::mobile_files::drop_peer_files(peer.clone()));
@@ -661,11 +665,14 @@ fn live_count(peer: &str) -> usize {
 }
 
 fn set_live(peer: &str, up: bool) {
-    LAST_SEEN
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .get_or_insert_with(Default::default)
-        .insert(peer.to_string(), now_ms());
+    // отметку времени ведём только для существующего устройства: закрывающийся сокет уже удалённого гостя не должен заводить запись заново
+    if device_by_peer(peer).is_some() || is_node_peer(peer) {
+        LAST_SEEN
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_or_insert_with(Default::default)
+            .insert(peer.to_string(), now_ms());
+    }
     let mut g = LIVE.lock().unwrap_or_else(|e| e.into_inner());
     let m = g.get_or_insert_with(Default::default);
     let c = m.entry(peer.to_string()).or_insert(0);

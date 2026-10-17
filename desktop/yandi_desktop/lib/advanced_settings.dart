@@ -6,28 +6,75 @@ import 'domain/shell_repository.dart';
 import 'preferences.dart';
 import 'groups.dart';
 
-/// Разбор одной строки `ip:port[:логин:пароль]`; пароль может содержать двоеточия. Строки со схемой или `@` разбирает узел.
+/// Разбор одной строки прокси так же, как узел: `хост:порт[:логин:пароль]`, `логин:пароль@хост:порт`, IPv6 в скобках (`[::1]:1080`),
+/// допустимая схема `socks5://` или `http://` отбрасывается (вид задаёт список выбора). Пароль может содержать двоеточия.
 class ProxyLine {
   final String host;
   final int port;
   final String user, password;
   const ProxyLine(this.host, this.port, this.user, this.password);
-  static ProxyLine? parse(String line) {
-    final parts = line.trim().split(':');
-    if (parts.length != 2 && parts.length < 4) return null;
-    final port = int.tryParse(parts[1]);
-    if (parts[0].trim().isEmpty || port == null || port < 1 || port > 65535) {
-      return null;
+
+  static (String, int)? _hostPort(String hp) {
+    hp = hp.trim();
+    String host;
+    String portText;
+    if (hp.startsWith('[')) {
+      final end = hp.indexOf(']');
+      if (end < 0 || end + 1 >= hp.length || hp[end + 1] != ':') return null;
+      host = hp.substring(1, end);
+      portText = hp.substring(end + 2);
+    } else {
+      final at = hp.lastIndexOf(':');
+      if (at < 0) return null;
+      host = hp.substring(0, at);
+      portText = hp.substring(at + 1);
     }
-    if (parts.length == 2) return ProxyLine(parts[0].trim(), port, '', '');
-    final user = parts[2];
-    if (user.isEmpty) return null;
-    return ProxyLine(parts[0].trim(), port, user, parts.sublist(3).join(':'));
+    final port = int.tryParse(portText);
+    if (host.trim().isEmpty || port == null || port < 1 || port > 65535) return null;
+    return (host.trim(), port);
   }
 
-  /// Подходит ли строка для отправки: свой вид или вид со схемой/@ (его проверит узел).
-  static bool plausible(String line) =>
-      line.contains('://') || line.contains('@') || parse(line) != null;
+  static ProxyLine? parse(String raw) {
+    var line = raw.trim();
+    line = line.replaceFirst(RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*://'), '').replaceFirst(RegExp(r'/+$'), '');
+    if (line.isEmpty) return null;
+    final at = line.lastIndexOf('@');
+    if (at >= 0) {
+      final cred = line.substring(0, at);
+      final colon = cred.indexOf(':');
+      if (colon <= 0) return null;
+      final hp = _hostPort(line.substring(at + 1));
+      if (hp == null) return null;
+      return ProxyLine(hp.$1, hp.$2, cred.substring(0, colon), cred.substring(colon + 1));
+    }
+    if (line.startsWith('[')) {
+      final end = line.indexOf(']');
+      if (end < 0 || end + 1 >= line.length || line[end + 1] != ':') return null;
+      final tail = line.substring(end + 2).split(':');
+      final port = int.tryParse(tail[0]);
+      if (port == null || port < 1 || port > 65535) return null;
+      final host = line.substring(1, end);
+      if (tail.length == 1) return ProxyLine(host, port, '', '');
+      if (tail.length < 3 || tail[1].isEmpty) return null;
+      return ProxyLine(host, port, tail[1], tail.sublist(2).join(':'));
+    }
+    final parts = line.split(':');
+    if (parts.length != 2 && parts.length < 4) return null;
+    final port = int.tryParse(parts[1]);
+    if (parts[0].trim().isEmpty || port == null || port < 1 || port > 65535) return null;
+    if (parts.length == 2) return ProxyLine(parts[0].trim(), port, '', '');
+    if (parts[2].isEmpty) return null;
+    return ProxyLine(parts[0].trim(), port, parts[2], parts.sublist(3).join(':'));
+  }
+
+  /// Строка для формы правки: адрес IPv6 — в скобках, иначе её нельзя будет разобрать обратно.
+  static String format(String host, int port, {String user = '', String password = ''}) {
+    final h = host.contains(':') ? '[$host]' : host;
+    return user.isEmpty ? '$h:$port' : '$h:$port:$user:$password';
+  }
+
+  /// Подходит ли строка для отправки: тот же разбор, что и при сохранении правки, поэтому форма не пропускает то, что потом отвергнет.
+  static bool plausible(String line) => parse(line) != null;
 }
 
 class AdvancedSettings extends StatefulWidget {
@@ -195,11 +242,12 @@ class _AdvancedSettingsState extends State<AdvancedSettings> {
     final one = p.single;
     final secret = one['auth'] == 'password' ? await reveal(one) : (user: '', password: '');
     if (!active || secret == null) return;
-    final line = [
+    final line = ProxyLine.format(
       '${one['host']}',
-      '${one['port']}',
-      if (one['auth'] == 'password') ...[secret.user, secret.password],
-    ].join(':');
+      (one['port'] as num).toInt(),
+      user: one['auth'] == 'password' ? secret.user : '',
+      password: one['auth'] == 'password' ? secret.password : '',
+    );
     final body = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (_) => ProxyForm(

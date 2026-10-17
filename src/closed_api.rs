@@ -336,6 +336,14 @@ async fn status() -> Response {
 
 async fn setup(Json(b): Json<SetupBody>) -> Response {
     let e = match env() { Ok(e) => e, Err(r) => return r };
+    // сид закрытой среды обязан быть сидом узла: два независимых секрета ломают восстановление (проверка до создания; среды ещё нет, считать нечего)
+    #[cfg(unix)]
+    if let Some(p) = b.phrase.clone().filter(|p| !p.trim().is_empty()) {
+        let check = tokio::task::spawn_blocking(move || crate::web::auth::phrase_matches_identity(&p)).await.unwrap_or_else(|_| Err("Внутренняя ошибка".into()));
+        if let Err(m) = check {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": m}))).into_response();
+        }
+    }
     match e.setup(b.password, b.phrase.filter(|p| !p.trim().is_empty())).await {
         Ok(()) => ok(e),
         Err(err) => fail(err),

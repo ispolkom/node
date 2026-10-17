@@ -622,6 +622,8 @@ fn note_fail(cell: &Mutex<Pool>, id: &str, err: &str, now: Instant) {
     let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
     let h = g.health.entry(id.to_string()).or_default();
     h.fails = h.fails.saturating_add(1);
+    // известный отказ не превращается в «работает» по таймеру: пауза означает «можно пробовать», а не «исправен»; «работает» вернёт только удача
+    h.last_ok = None;
     let wait = COOLDOWN_BASE.saturating_mul(1u32 << (h.fails - 1).min(5)).min(COOLDOWN_MAX);
     h.cooldown_until = Some(now + wait);
     h.last_error = Some(err.to_string());
@@ -828,6 +830,17 @@ fn parse_line(line: &str, default_kind: Kind) -> Result<Settings, String> {
         let (user, password) = cred.split_once(':').ok_or("логин и пароль через двоеточие")?;
         let (h, p) = host_port(hp)?;
         (h, p, Auth::Password { user: user.to_string(), password: password.to_string() })
+    } else if let Some(r) = rest.strip_prefix('[') {
+        // IPv6 в скобках без «@»: [адрес]:порт или [адрес]:порт:логин:пароль
+        let (h, tail) = r.split_once(']').ok_or("нет закрывающей скобки адреса")?;
+        let tail = tail.strip_prefix(':').ok_or("после адреса в скобках нужен :порт")?;
+        let parts: Vec<&str> = tail.splitn(3, ':').collect();
+        let port: u16 = parts[0].parse().map_err(|_| "порт — число от 1 до 65535".to_string())?;
+        match parts.len() {
+            1 => (h.to_string(), port, Auth::None),
+            3 => (h.to_string(), port, Auth::Password { user: parts[1].to_string(), password: parts[2].to_string() }),
+            _ => return Err("ожидается [адрес]:порт или [адрес]:порт:логин:пароль".into()),
+        }
     } else {
         let parts: Vec<&str> = rest.splitn(4, ':').collect();
         match parts.len() {
@@ -1572,6 +1585,16 @@ mod tests {
         let ok = patched(&old, PatchReq { enabled: Some(true), max_clients: Some(7), kind: None, host: Some("h2.example".into()), port: Some(1081), auth: None, user: Some("u".into()), password: None }).unwrap();
         assert!(ok.enabled && ok.max_clients == Some(7) && ok.host == "h2.example" && ok.port == 1081);
         assert_eq!(ok.auth, Auth::Password { user: "u".into(), password: "pw".into() }, "пароль при том же логине сохранён");
+    }
+
+    #[test]
+    fn ipv6_in_brackets_is_understood_with_and_without_credentials() {
+        let (ok, err) = parse_lines("[2001:db8::1]:1080\n[2001:db8::2]:1081:u:p:w\nsocks5://u:p@[2001:db8::3]:1082\n[2001:db8::4]", Kind::Socks5);
+        assert_eq!(ok.len(), 3, "{err:?}");
+        assert_eq!((ok[0].host.as_str(), ok[0].port, ok[0].auth.clone()), ("2001:db8::1", 1080, Auth::None));
+        assert_eq!(ok[1].auth, Auth::Password { user: "u".into(), password: "p:w".into() }, "двоеточие внутри пароля сохраняется");
+        assert_eq!((ok[2].host.as_str(), ok[2].port), ("2001:db8::3", 1082));
+        assert_eq!(err.len(), 1, "адрес без порта отвергнут");
     }
 
     #[test]

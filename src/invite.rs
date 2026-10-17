@@ -24,6 +24,8 @@ pub const MAX_CLAIMS_PER_ISSUER: usize = 20;
 pub const MAX_TTL_MS: u64 = 24 * 3600 * 1000;
 /// Допустимый разбег часов телефона и узла.
 pub const SKEW_MS: u64 = 5 * 60 * 1000;
+/// Сколько после погашения введение ждёт приглашающего (не короче этого, даже если срок самой ссылки уже вышел).
+pub const DELIVERY_MS: u64 = 24 * 3600 * 1000;
 const INVITE_DOMAIN: &[u8] = b"yandi-invite-v1\0";
 const CLAIM_DOMAIN: &[u8] = b"yandi-claim-v1\0";
 const MAX_FIELD: usize = 4096;
@@ -149,11 +151,13 @@ impl Registry {
     }
 
     fn purge(&mut self, now: u64) {
-        self.invites.retain(|_, e| e.expires_at > now);
+        // приглашение живёт до срока ссылки, а ПОГАШЕННОЕ — ещё и пока введение ждёт приглашающего (сутки от погашения):
+        // успешное погашение перед самым сроком не должно сразу терять введение
+        self.invites.retain(|_, e| e.expires_at > now || e.consumed.map_or(false, |(_, at)| now < at + DELIVERY_MS));
         // O(приглашения + введения): множество живых номеров строится один раз, а не перебирается для каждого введения
         let live: std::collections::HashSet<&String> = self.invites.keys().collect();
         for q in self.claims.values_mut() {
-            q.retain(|c| live.contains(&c.invite_id));
+            q.retain(|c| live.contains(&c.invite_id) && now < c.consumed_at + DELIVERY_MS);
         }
         self.claims.retain(|_, q| !q.is_empty());
     }
@@ -513,11 +517,18 @@ pub(crate) mod tests {
         r.revoke("a", None);
         assert!(r.claims_for(NOW + 1, "a").is_empty());
         assert!(r.claims_for(NOW + 2, "a").is_empty());
-        // срок: введение пропадает вместе с приглашением
+        // срок ссылки вышел, а введение уже принято: оно ждёт приглашающего ещё сутки от погашения, потом пропадает
         let m2 = make_invite(&a, NOW, 60_000);
         reg(&mut r, &a, &m2).unwrap();
         let c2 = make_claim(&b, &m2, 2);
-        red(&mut r, &b, &m2, &c2, NOW + 1).unwrap();
-        assert!(r.claims_for(NOW + 60_001, "a").is_empty());
+        red(&mut r, &b, &m2, &c2, NOW + 59_000).unwrap();
+        assert_eq!(r.claims_for(NOW + 60_001, "a").len(), 1, "погашено за секунду до срока — введение не потеряно");
+        assert_eq!(r.claims_for(NOW + 59_000 + DELIVERY_MS - 1, "a").len(), 1);
+        assert!(r.claims_for(NOW + 59_000 + DELIVERY_MS, "a").is_empty(), "через сутки от погашения введение стёрто");
+        // а непогашенное приглашение исчезает ровно в срок
+        let m3 = make_invite(&a, NOW, 60_000);
+        reg(&mut r, &a, &m3).unwrap();
+        r.sweep(NOW + 60_001);
+        assert_eq!(r.active_of("a"), 0);
     }
 }

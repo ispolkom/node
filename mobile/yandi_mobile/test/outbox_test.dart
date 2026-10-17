@@ -88,5 +88,31 @@ void main() {
     final pass = o.due(list, t0.add(const Duration(minutes: 10)), skip: (m) => m.peerId == 'blocked');
     expect(pass.map((m) => m.id), ['ok'], reason: 'очередь друга идёт, хотя 30 сообщений заблокированному старше');
   });
+
+  test('ушло без квитанции: повтор через минуту, 5 минут и полчаса, три раза и всё, только для умеющих квитанции', () {
+    final o = Outbox();
+    final sentAt = DateTime(2026, 10, 18, 12);
+    final m = ChatMessage(id: 'p', peerId: 'friend', outgoing: true, text: 'привет', timestamp: sentAt, status: MessageStatus.pending);
+    bool yes(ChatMessage _) => true;
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 59)), capable: yes), isEmpty, reason: 'ещё рано');
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 60)), capable: yes), [m]);
+    o.pendingResent('p');
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 299)), capable: yes), isEmpty);
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 300)), capable: yes), [m]);
+    o.pendingResent('p');
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 1800)), capable: yes), [m]);
+    o.pendingResent('p');
+    expect(o.duePending([m], sentAt.add(const Duration(hours: 3)), capable: yes), isEmpty, reason: 'три повтора израсходованы: ящик узла не засоряем');
+    // собеседник без квитанций (старый клиент без дедупликации) — не повторяем: он показал бы дубли
+    expect(Outbox().duePending([m], sentAt.add(const Duration(minutes: 2)), capable: (_) => false), isEmpty);
+    // доставленное и служебное не повторяются; старше суток — тоже
+    final done = ChatMessage(id: 'd', peerId: 'friend', outgoing: true, text: 'x', timestamp: sentAt, status: MessageStatus.delivered);
+    final file = ChatMessage(id: 'f', peerId: 'friend', outgoing: true, text: FileOffer.marker + '{}', timestamp: sentAt, status: MessageStatus.pending);
+    expect(Outbox().duePending([done, file], sentAt.add(const Duration(minutes: 2)), capable: yes), isEmpty);
+    expect(Outbox().duePending([m], sentAt.add(const Duration(hours: 25)), capable: yes), isEmpty);
+    // квитанция пришла — счётчик забыт
+    o.forgetPending({});
+    expect(o.duePending([m], sentAt.add(const Duration(seconds: 61)), capable: yes), [m], reason: 'счётчик очищен вместе с исчезнувшим сообщением');
+  });
 }
 
