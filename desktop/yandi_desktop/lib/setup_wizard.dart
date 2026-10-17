@@ -47,7 +47,8 @@ class SetupWizard extends StatefulWidget {
 enum _Step { show, order, type, password, restore }
 
 class _SetupWizardState extends State<SetupWizard> {
-  static const _minimum = 6;
+  /// Минимум длины пароля задаёт узел (8; 6 только на тестовом узле): мастер берёт его из ответа `/api/auth/seed/new`, до ответа — 8.
+  int _minimum = 8;
   late final Random _random = widget.random ?? Random.secure();
   _Step step = _Step.show;
   int count = 12;
@@ -88,7 +89,9 @@ class _SetupWizardState extends State<SetupWizard> {
       final list = (r['words'] as List).map((w) => '$w').toList();
       if (list.length != count) throw const ApiFailure('protocol');
       if (!mounted) return;
+      final min = r['min_password'];
       setState(() {
+        if (min is int && min >= 6 && min <= 64) _minimum = min;
         _wipe();
         words = list;
         step = _Step.show;

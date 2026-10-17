@@ -545,6 +545,41 @@ fn weak_password_allowed() -> bool {
     crate::util::data_dir::data_dir().join("test_weak_password").exists()
 }
 
+/// Действующий минимум длины нового пароля (8; 6 только при тестовом файле). Одна политика для настройки, восстановления и мастера.
+#[cfg(unix)]
+pub(crate) fn min_new_password() -> usize {
+    if weak_password_allowed() { 6 } else { 8 }
+}
+
+#[cfg(not(unix))]
+pub(crate) fn min_new_password() -> usize {
+    8
+}
+
+#[cfg(not(unix))]
+pub(crate) fn check_new_password(pw: &str) -> Result<(), String> {
+    if pw.chars().count() < 8 {
+        return Err("Пароль — не короче 8 знаков".into());
+    }
+    if pw.len() > 1024 {
+        return Err("Пароль — не длиннее 1024 байт".into());
+    }
+    Ok(())
+}
+
+/// Полная проверка нового пароля ДО любых записей: минимум по политике узла и предел 1024 байта (его накладывает замок закрытой среды).
+#[cfg(unix)]
+pub(crate) fn check_new_password(pw: &str) -> Result<(), String> {
+    let min = min_new_password();
+    if pw.chars().count() < min {
+        return Err(format!("Пароль — не короче {min} знаков"));
+    }
+    if pw.len() > 1024 {
+        return Err("Пароль — не длиннее 1024 байт".into());
+    }
+    Ok(())
+}
+
 #[cfg(not(unix))]
 pub(crate) fn check_setup_inputs(
     login: &str,

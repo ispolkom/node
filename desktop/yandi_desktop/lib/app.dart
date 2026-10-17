@@ -32,6 +32,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   AuthStage? auth;
   VaultState? vault;
   bool connected = false, entered = false, busy = false, visible = true;
+  /// Мастер первой настройки: при уходе из окна скрывается (слова не остаются на экране), через [_wizardWipeAfter] пересоздаётся без введённого.
+  int wizardGeneration = 0;
+  Timer? wizardWipeTimer;
+  static const Duration _wizardWipeAfter = Duration(minutes: 3);
 
   /// Сообщение «Доступно обновление …» из /api/update/status (null — нет).
   String? updateNotice;
@@ -117,6 +121,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     }
     blurIgnored = false;
     visible = state == AppLifecycleState.resumed;
+    wizardWipeTimer?.cancel();
+    if (!visible && auth == AuthStage.setup) {
+      wizardWipeTimer = Timer(_wizardWipeAfter, () {
+        wizardGeneration++;
+        if (mounted) setState(() {});
+      });
+    }
     timer?.cancel();
     wipe();
     if (mounted) setState(() {});
@@ -129,6 +140,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   @override
   void dispose() {
     timer?.cancel();
+    wizardWipeTimer?.cancel();
     preferences.reset();
     background.dispose();
     preferences.removeListener(preferenceChanged);
@@ -573,13 +585,18 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         ],
       );
     if (auth == AuthStage.setup)
-      return SetupWizard(
-        key: const ValueKey('setup-wizard'),
-        api: widget.api,
-        preferences: preferences,
-        busy: busy,
-        finish: createWithSeed,
-        restore: restoreFromBackup,
+      // в неактивном окне слова и введённое не рисуются (состояние хранится недолго, потом мастер создаётся заново)
+      return Visibility(
+        visible: visible,
+        maintainState: true,
+        child: SetupWizard(
+          key: ValueKey('setup-wizard-$wizardGeneration'),
+          api: widget.api,
+          preferences: preferences,
+          busy: busy,
+          finish: createWithSeed,
+          restore: restoreFromBackup,
+        ),
       );
     if (!entered || auth == AuthStage.recovery)
       return Column(

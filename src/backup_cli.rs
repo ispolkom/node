@@ -176,15 +176,21 @@ pub fn run(argv: Vec<String>) -> i32 {
     // Копия с закрытой средой: пароль прежней установки не переносится, для этой машины задаётся новый (как в кошельках).
     let has_vault = entries.iter().any(|e| e.path == "closed/envelope.json");
     let new_password = if has_vault {
-        let first = match ask_secret("Новый пароль для этой машины (не короче 6 знаков): ", a.code_stdin) {
+        let first = match ask_secret("Новый пароль для этой машины (не короче 8 знаков, на тестовом узле 6): ", a.code_stdin) {
             Ok(p) => p,
             Err(e) => {
                 eprintln!("yandi backup: {e}");
                 return 2;
             }
         };
-        if first.chars().count() < 6 {
-            eprintln!("yandi backup: пароль не короче 6 знаков; ничего не записано");
+        #[cfg(unix)]
+        if let Err(e) = crate::web::auth::check_new_password(&first) {
+            eprintln!("yandi backup: {e}; ничего не записано");
+            return 2;
+        }
+        #[cfg(not(unix))]
+        if first.chars().count() < 6 || first.len() > 1024 {
+            eprintln!("yandi backup: пароль не короче 6 знаков и не длиннее 1024 байт; ничего не записано");
             return 2;
         }
         if !a.code_stdin {
@@ -229,7 +235,7 @@ pub fn run(argv: Vec<String>) -> i32 {
         Ok(r) => {
             println!("личность узла {} восстановлена; для этой машины создан новый ключ устройства.", r.node_id);
             if let Some(pw) = &new_password {
-                match node_backup::finalize_vault(&a.layout, &code, pw) {
+                match node_backup::finalize_vault(&a.layout, &code, pw).and_then(|_| key_root::login::reset_login_min(&dir, &code, pw, &policy, crate::web::auth::min_new_password())) {
                     Ok(_) => println!("закрытая среда открыта сид-фразой; пароль прежней установки больше не действует, действует новый."),
                     Err(e) => {
                         eprintln!("yandi backup: файлы и ключи записаны, но закрытая среда не настроена: {e}. Повторите команду с --force и той же сид-фразой.");

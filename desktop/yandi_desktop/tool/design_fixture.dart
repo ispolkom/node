@@ -19,6 +19,7 @@ class DesignApi implements Api {
     if (path == '/api/auth/seed/new')
       return {
         'count': 12,
+        'min_password': 6,
         'words': 'legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' '),
       };
     if (path == '/api/auth/state')

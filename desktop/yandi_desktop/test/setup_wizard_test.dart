@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import '../tool/design_fixture.dart';
+import 'package:yandi_desktop/app.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/preferences.dart';
 import 'package:yandi_desktop/setup_wizard.dart';
@@ -11,6 +13,7 @@ final seed24 = '${List.filled(23, 'abandon').join(' ')} art';
 /// Узел для мастера: отдаёт сид по запросу, ключи создаёт один раз.
 class WizardApi extends FakeApi {
   final asked = <int>[];
+  int? minPassword = 6;
   WizardApi() {
     setup = true;
     configured = false;
@@ -26,7 +29,7 @@ class WizardApi extends FakeApi {
       final n = (body?['words'] ?? 12) as int;
       asked.add(n);
       calls.add(path);
-      return {'words': (n == 24 ? seed24 : seed12).split(' '), 'count': n};
+      return {'words': (n == 24 ? seed24 : seed12).split(' '), 'count': n, if (minPassword != null) 'min_password': minPassword};
     }
     if (path == '/api/auth/restore/inspect') {
       calls.add(path);
@@ -118,11 +121,25 @@ void main() {
     await t.enterText(find.byType(TextField).at(0), '123');
     await t.enterText(find.byType(TextField).at(1), '123');
     await click(t, 'Создать узел');
-    expect(find.text('Пароль — не короче 6 символов'), findsOneWidget);
+    expect(find.text('Пароль — не короче 6 символов'), findsOneWidget, reason: 'минимум — тот, что назвал узел (тестовый: 6)');
     expect(api.calls.contains('/api/auth/setup'), false);
     for (final f in t.widgetList<TextField>(find.byType(TextField))) {
       expect(f.obscureText && f.autocorrect == false && !f.enableSuggestions, true);
     }
+    await stop(t);
+  });
+
+  testWidgets('the password minimum comes from the node: 8 by default, so a 6-7 character password never reaches it', (t) async {
+    final api = WizardApi()..minPassword = null; // узел не назвал минимум — действует строгий по умолчанию
+    await start(t, api);
+    await toTypeStep(t);
+    await typeAsked(t, seed12.split(' '));
+    await click(t, 'ОК');
+    await t.enterText(find.byType(TextField).at(0), '1234567');
+    await t.enterText(find.byType(TextField).at(1), '1234567');
+    await click(t, 'Создать узел');
+    expect(find.text('Пароль — не короче 8 символов'), findsOneWidget);
+    expect(api.calls.contains('/api/auth/setup'), false);
     await stop(t);
   });
 
@@ -229,4 +246,42 @@ void main() {
     expect(find.textContaining('Печать недоступна'), findsOneWidget);
     await stop(t);
   });
+
+  testWidgets('leaving the window hides the seed words, and a long absence recreates the wizard without them', (t) async {
+    final api = CountingDesignApi('setup');
+    t.view.physicalSize = const Size(1280, 800);
+    t.view.devicePixelRatio = 1;
+    addTearDown(t.view.resetPhysicalSize);
+    addTearDown(t.view.resetDevicePixelRatio);
+    await t.pumpWidget(DesktopApp(api: api));
+    await t.pumpAndSettle();
+    expect(find.textContaining('yellow'), findsWidgets, reason: 'слова показаны, пока окно активно');
+    expect(api.seedCalls, 1);
+    // ушли в другое окно: слова не рисуются, состояние мастера цело
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump();
+    expect(find.textContaining('yellow'), findsNothing, reason: 'в неактивном окне сид не на экране');
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pumpAndSettle();
+    expect(find.textContaining('yellow'), findsWidgets);
+    expect(api.seedCalls, 1, reason: 'недолгий уход мастер не сбрасывает');
+    // долгое отсутствие: мастер создаётся заново (прежние слова и ввод не сохраняются)
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump(const Duration(minutes: 3, seconds: 1));
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pumpAndSettle();
+    expect(api.seedCalls, 2, reason: 'новый мастер запросил новые слова');
+    await stop(t);
+  });
 }
+
+class CountingDesignApi extends DesignApi {
+  int seedCalls = 0;
+  CountingDesignApi(super.scene);
+  @override
+  Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) {
+    if (path == '/api/auth/seed/new') seedCalls++;
+    return super.request(path, body: body, method: method);
+  }
+}
+

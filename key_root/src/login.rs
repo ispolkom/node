@@ -179,8 +179,19 @@ pub fn reset_login(
     new_login_password: &str,
     policy: &KdfPolicy,
 ) -> Result<(), String> {
-    if new_login_password.chars().count() < 8 {
-        return Err("Новый пароль входа должен быть не короче 8 символов".to_string());
+    reset_login_min(dir, code_input, new_login_password, policy, 8)
+}
+
+/// То же с заданным минимумом длины пароля (узел с тестовым послаблением допускает 6; восстановление применяет действующую политику узла).
+pub fn reset_login_min(
+    dir: &KeyDir,
+    code_input: &str,
+    new_login_password: &str,
+    policy: &KdfPolicy,
+    min_len: usize,
+) -> Result<(), String> {
+    if new_login_password.chars().count() < min_len {
+        return Err(format!("Новый пароль входа должен быть не короче {min_len} символов"));
     }
     let bytes = crate::keydir::read_private_file(&dir.auth_file())
         .map_err(|_| "Файл ключей недоступен".to_string())?;

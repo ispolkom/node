@@ -53,7 +53,21 @@ async fn page() -> Html<&'static str> {
 
 async fn setup(State(sh): State<Shared>, Json(body): Json<SetupBody>) -> Response {
     let sh2 = sh.clone();
-    let result = tokio::task::spawn_blocking(move || (sh2.make_keys)(&sh2.auth, &body)).await.unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
+    let result = tokio::task::spawn_blocking(move || {
+        // длинный пароль отвергается до любых записей (замок закрытой среды принимает не больше 1024 байт)
+        if body.login_password.len() > 1024 || body.master_password.len() > 1024 {
+            return Err("Пароль — не длиннее 1024 байт".to_string());
+        }
+        #[cfg(unix)]
+        let _op = FIRST_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        #[cfg(unix)]
+        if sh2.auth.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("Узел уже настроен".to_string());
+        }
+        (sh2.make_keys)(&sh2.auth, &body)
+    })
+    .await
+    .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
     match result {
         Ok(()) => {
             let token = sh.auth.create_session(false);
@@ -74,6 +88,19 @@ struct SeedBody {
     words: usize,
 }
 
+#[cfg(unix)]
+fn min_password_for_wizard() -> usize {
+    crate::web::auth::min_new_password()
+}
+#[cfg(not(unix))]
+fn min_password_for_wizard() -> usize {
+    8
+}
+
+/// Одна первая настройка за раз (настройка или восстановление): параллельные запросы не перемешивают файлы и не обходят счётчик.
+#[cfg(unix)]
+static FIRST_RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// A new seed phrase for the first-start wizard: 12 words by default, 24 on request. Nothing is stored: the phrase exists only in this
 /// answer and in the wizard's memory until the person has written it down and chosen a password.
 async fn new_seed(Json(b): Json<SeedBody>) -> Response {
@@ -82,7 +109,7 @@ async fn new_seed(Json(b): Json<SeedBody>) -> Response {
         Some(seed) => (
             StatusCode::OK,
             [(header::CACHE_CONTROL, "no-store")],
-            Json(serde_json::json!({"words": seed.words(), "count": n})),
+            Json(serde_json::json!({"words": seed.words(), "count": n, "min_password": min_password_for_wizard()})),
         )
             .into_response(),
         None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Нужно 12 или 24 слова"}))).into_response(),
@@ -151,27 +178,25 @@ async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
 #[cfg(unix)]
 fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
     use std::sync::atomic::Ordering;
-    if b.password.chars().count() < 6 {
-        return Err("Пароль — не короче 6 знаков".into());
+    // одна первая настройка за раз: второй параллельный запрос ждёт и, когда узел уже настроен, получает отказ — файлы не перемешиваются
+    let _op = FIRST_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    if auth.is_setup.load(Ordering::Relaxed) {
+        return Err("Узел уже настроен".into());
     }
-    // фраза не сид: опечатка, а не попытка (не считается и не запускает дорогой KDF)
-    if key_root::looks_like_seed(&b.phrase) {
-        key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
-    } else if b.phrase.trim().is_empty() {
+    // всё, что можно проверить без записи, — ДО записи: длинный пароль не оставит полуустановленного переноса
+    crate::web::auth::check_new_password(&b.password)?;
+    // сид разбирается всегда: опечатка, неверное число слов или слово не из списка — это не попытка (без счёта и без дорогого KDF)
+    if b.phrase.trim().is_empty() {
         return Err("Введите сид-фразу (12 или 24 слова)".into());
     }
-    if RESTORE_FAILURES.load(Ordering::SeqCst) >= RESTORE_FAILURE_LIMIT {
+    key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
+    // попытка занимается ДО дорогой проверки; успех другой копии бюджет не сбрасывает: сброс только после полного завершения
+    if RESTORE_FAILURES.fetch_add(1, Ordering::SeqCst) >= RESTORE_FAILURE_LIMIT {
+        RESTORE_FAILURES.fetch_sub(1, Ordering::SeqCst);
         return Err("Исчерпано число попыток восстановления; перезапустите узел".into());
     }
     let bytes = read_backup_file(&b.path)?;
-    let opened = match crate::node_backup::open_with_code(&bytes, &b.phrase) {
-        Ok(o) => o,
-        Err(e) => {
-            RESTORE_FAILURES.fetch_add(1, Ordering::SeqCst);
-            return Err(e);
-        }
-    };
-    RESTORE_FAILURES.store(0, Ordering::SeqCst);
+    let opened = crate::node_backup::open_with_code(&bytes, &b.phrase)?;
     let layout = crate::node_backup::Layout::live(crate::get_config().ports.discovery);
     crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
     let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| format!("Каталог ключей: {e}"))?;
@@ -183,8 +208,11 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
         .run()
         .map_err(|e| format!("Файлы записаны, но ключ устройства создать не удалось: {e}"))?;
     crate::node_backup::finalize_vault(&layout, &b.phrase, &b.password)?;
+    // новый пароль заменяет и пароль ВХОДА (login_hash), а не только замок закрытой среды: старый пароль после переноса не действует нигде
+    key_root::login::reset_login_min(&dir, &b.phrase, &b.password, &policy, crate::web::auth::min_new_password())?;
     // тот же вход в состояние, что и после первичной настройки: корень открыт ключом этой машины
     let (root, _) = key_root::unlock_root(&dir, &machine, &device).map_err(|e| format!("Корень не открылся: {e}"))?;
+    RESTORE_FAILURES.store(0, Ordering::SeqCst);
     auth.is_setup.store(true, Ordering::Relaxed);
     auth.needs_rebind.store(false, Ordering::Relaxed);
     if let Ok(mut mk) = auth.master_key.lock() {
@@ -405,4 +433,37 @@ mod tests {
         }
         handle.abort();
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_checks_the_password_and_the_seed_before_any_count_or_any_write() {
+        use std::sync::atomic::Ordering;
+        let auth = AuthState::default();
+        RESTORE_FAILURES.store(0, Ordering::SeqCst);
+        let seed = key_root::Seed::generate(12).unwrap().words().join(" ");
+        let b = |phrase: &str, password: &str| RestoreBody { path: "/nonexistent/copy.yandibak".into(), phrase: phrase.into(), password: password.into() };
+        // слишком длинный пароль — до любой записи и до счёта
+        assert!(do_restore(&auth, &b(&seed, &"x".repeat(1025))).unwrap_err().contains("1024"));
+        // короткий — тоже
+        assert!(do_restore(&auth, &b(&seed, "123")).unwrap_err().contains("не короче"));
+        // опечатка в слове, неверное число слов, пустая фраза: не попытка (не считается), в том числе «не похожая на сид»
+        let mut words: Vec<String> = seed.split(' ').map(String::from).collect();
+        words[11] = "yelow".into();
+        for bad in [words.join(" "), seed.split(' ').take(11).collect::<Vec<_>>().join(" "), "".into(), "просто пароль".into()] {
+            assert!(do_restore(&auth, &b(&bad, "12345678")).is_err());
+        }
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "ни одна опечатка не расходует попытку");
+        // верная по формату фраза занимает попытку до проверки файла, лимит держится
+        assert!(do_restore(&auth, &b(&seed, "12345678")).is_err());
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 1);
+        RESTORE_FAILURES.store(RESTORE_FAILURE_LIMIT, Ordering::SeqCst);
+        assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().contains("Исчерпано"));
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), RESTORE_FAILURE_LIMIT, "отказ по лимиту счётчик не наращивает");
+        // узел уже настроен — восстановление не выполняется
+        RESTORE_FAILURES.store(0, Ordering::SeqCst);
+        auth.is_setup.store(true, Ordering::Relaxed);
+        assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().contains("уже настроен"));
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0);
+    }
 }
+
