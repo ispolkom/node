@@ -688,6 +688,125 @@ struct PairReq {
 }
 
 
+
+// ---- запросы сопряжения: гость просит владельца принять его как пользователя узла (docs/GUEST.md)
+
+const PAIR_REQUEST_TTL_MS: u64 = 24 * 3600 * 1000;
+const MAX_PAIR_REQUESTS: usize = 50;
+
+#[derive(Clone)]
+struct PairRequest {
+    id: String,
+    token_hash: String,
+    name: String,
+    created_ms: u64,
+    /// pending | accepted | rejected
+    state: &'static str,
+}
+
+/// Только в оперативной памяти: ни IP, ни текста, только метка устройства и решение; перезапуск узла очередь стирает.
+static PAIR_REQUESTS: Mutex<Vec<PairRequest>> = Mutex::new(Vec::new());
+
+fn with_pair_requests<R>(f: impl FnOnce(&mut Vec<PairRequest>) -> R) -> R {
+    let mut g = PAIR_REQUESTS.lock().unwrap_or_else(|e| e.into_inner());
+    // срок и осиротевшие: запрос живёт сутки от подачи, пока жив сам гость
+    let now = now_ms();
+    let alive: std::collections::HashSet<String> = with_devices(|d| d.iter().map(|x| x.token_hash.clone()).collect());
+    g.retain(|r| now.saturating_sub(r.created_ms) < PAIR_REQUEST_TTL_MS && alive.contains(&r.token_hash));
+    f(&mut g)
+}
+
+/// Короткая метка устройства для сверки владельцем: первые 12 знаков номера, по четыре.
+fn short_mark(peer: &str) -> String {
+    peer.chars().take(12).collect::<Vec<_>>().chunks(4).map(|c| c.iter().collect::<String>()).collect::<Vec<_>>().join(" ")
+}
+
+/// Гость просит сопряжения. Один запрос на устройство в сутки (отклонённый тоже занимает слот).
+async fn pair_request_post(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let Some((name, role)) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| (x.name.clone(), x.role.clone()))) else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
+    if role != "guest" {
+        return (StatusCode::CONFLICT, Json(json!({"error": "устройство уже сопряжено", "state": "accepted"}))).into_response();
+    }
+    let out = with_pair_requests(|l| {
+        if let Some(r) = l.iter().find(|r| r.token_hash == dev) {
+            return Ok((r.id.clone(), r.state));
+        }
+        if l.iter().filter(|r| r.state == "pending").count() >= MAX_PAIR_REQUESTS {
+            return Err(());
+        }
+        use rand::RngCore;
+        let mut b = [0u8; 8];
+        rand::thread_rng().fill_bytes(&mut b);
+        let id = hex::encode(b);
+        l.push(PairRequest { id: id.clone(), token_hash: dev.clone(), name, created_ms: now_ms(), state: "pending" });
+        Ok((id, "pending"))
+    });
+    match out {
+        Ok((id, state)) => Json(json!({"id": id, "state": state})).into_response(),
+        Err(()) => (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "у владельца сейчас слишком много запросов; повторите позже"}))).into_response(),
+    }
+}
+
+/// Что с моим запросом: pending / accepted / rejected / none.
+async fn pair_request_get(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let role = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.role.clone()));
+    let state = if matches!(role.as_deref(), Some("user") | Some("owner")) {
+        "accepted"
+    } else {
+        with_pair_requests(|l| l.iter().find(|r| r.token_hash == dev).map(|r| r.state)).unwrap_or("none")
+    };
+    Json(json!({"state": state})).into_response()
+}
+
+/// Для оболочки ПК: ждущие запросы (без адресов).
+pub(crate) fn pair_requests_pending() -> Vec<serde_json::Value> {
+    let mut v: Vec<PairRequest> = with_pair_requests(|l| l.iter().filter(|r| r.state == "pending").cloned().collect());
+    v.sort_by_key(|r| r.created_ms);
+    v.into_iter()
+        .map(|r| {
+            let mark = with_devices(|d| d.iter().find(|x| x.token_hash == r.token_hash).map(|x| short_mark(&x.peer_id()))).unwrap_or_default();
+            json!({"id": r.id, "name": r.name, "mark": mark, "created_ms": r.created_ms, "expires_ms": r.created_ms + PAIR_REQUEST_TTL_MS})
+        })
+        .collect()
+}
+
+/// Решение владельца. Принять = роль «пользователь узла» (владельцем устройство становится только по QR). Отклонить = слот занят до конца суток.
+pub(crate) fn decide_pair_request(id: &str, accept: bool) -> Result<(), &'static str> {
+    let Some(r) = with_pair_requests(|l| l.iter().find(|r| r.id == id && r.state == "pending").cloned()) else {
+        return Err("запрос не найден или уже обработан");
+    };
+    if accept {
+        let mut found = false;
+        let ((), saved) = devices_apply(|d| {
+            if let Some(x) = d.iter_mut().find(|x| x.token_hash == r.token_hash && x.role == "guest") {
+                x.role = "user".to_string();
+                found = true;
+            }
+        });
+        if !found {
+            return Err("устройство уже не гость");
+        }
+        if !saved {
+            devices_apply(|d| {
+                if let Some(x) = d.iter_mut().find(|x| x.token_hash == r.token_hash) {
+                    x.role = "guest".to_string();
+                }
+            });
+            return Err("не удалось сохранить; попробуйте ещё раз");
+        }
+        crate::guest::forget(&r.token_hash);
+        crate::backup_signal::notify_critical(); // новое постоянное устройство в реестре
+    }
+    with_pair_requests(|l| {
+        if let Some(x) = l.iter_mut().find(|x| x.id == id) {
+            x.state = if accept { "accepted" } else { "rejected" };
+        }
+    });
+    Ok(())
+}
+
 #[derive(Deserialize)]
 struct GuestPairReq {
     #[serde(default)]
@@ -2086,6 +2205,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/profile/avatar", get(profile_avatar))
         .route("/mobile/contacts", get(contacts).post(contact_put))
         .route("/mobile/chat/:peer", get(history).post(send))
+        .route("/mobile/pair/request", post(pair_request_post).get(pair_request_get))
         .route("/mobile/inbox", get(inbox))
         .route("/mobile/inbox/ack", post(inbox_ack))
         .route("/mobile/proxy/info", get(proxy_info))
@@ -2928,5 +3048,79 @@ mod guest_tests {
         assert_eq!(start(&owner, to(&b), crate::guest::MAX_FILE + 1, 31).await, StatusCode::OK);
         wipe(&["fa", "fb", "fo"]);
         let _ = std::fs::remove_dir_all(crate::util::data_dir::data_dir().join("mobile_files"));
+    }
+
+    async fn body_of(r: Response) -> serde_json::Value {
+        let b = axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap();
+        serde_json::from_slice(&b).unwrap()
+    }
+
+    fn requests_reset() {
+        PAIR_REQUESTS.lock().unwrap_or_else(|e| e.into_inner()).clear();
+    }
+
+    #[tokio::test]
+    async fn a_guest_asks_to_be_paired_the_owner_decides_and_the_queue_keeps_no_address() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        requests_reset();
+        let a = add("guest", "qa");
+        let b = add("guest", "qb");
+        let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
+        // подал дважды — запрос один
+        let first = body_of(pair_request_post(ext(&a)).await).await;
+        let again = body_of(pair_request_post(ext(&a)).await).await;
+        assert_eq!(first["id"], again["id"]);
+        assert_eq!(first["state"], "pending");
+        body_of(pair_request_post(ext(&b)).await).await;
+        // владелец видит двоих, без адресов и без лишних полей
+        let list = pair_requests_pending();
+        assert_eq!(list.len(), 2);
+        for r in &list {
+            let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
+            assert!(keys.iter().all(|k| ["id", "name", "mark", "created_ms", "expires_ms"].contains(&k.as_str())), "{keys:?}");
+        }
+        // принять первого: роль user (не owner), на диск попадает как постоянное устройство
+        let id_a = first["id"].as_str().unwrap();
+        decide_pair_request(id_a, true).unwrap();
+        assert_eq!(with_devices(|d| d.iter().find(|x| x.token_hash == a).map(|x| x.role.clone())).unwrap(), "user");
+        assert_eq!(body_of(pair_request_get(ext(&a)).await).await["state"], "accepted");
+        assert!(decide_pair_request(id_a, true).is_err(), "дважды принять нельзя");
+        // отклонить второго: остаётся гостем, повторный запрос слот не освобождает
+        let id_b = pair_requests_pending()[0]["id"].as_str().unwrap().to_string();
+        decide_pair_request(&id_b, false).unwrap();
+        assert_eq!(with_devices(|d| d.iter().find(|x| x.token_hash == b).map(|x| x.role.clone())).unwrap(), "guest");
+        assert_eq!(body_of(pair_request_get(ext(&b)).await).await["state"], "rejected");
+        let retry = body_of(pair_request_post(ext(&b)).await).await;
+        assert_eq!(retry["state"], "rejected", "отклонённый не может завалить владельца новыми запросами");
+        assert!(pair_requests_pending().is_empty());
+        // уже сопряжённый просить не может
+        assert_eq!(pair_request_post(ext(&a)).await.status(), StatusCode::CONFLICT);
+        requests_reset();
+        wipe(&["qa", "qb"]);
+    }
+
+    #[tokio::test]
+    async fn the_request_queue_is_capped_and_forgets_a_vanished_guest() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        requests_reset();
+        let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
+        let ths: Vec<String> = (0..=MAX_PAIR_REQUESTS).map(|i| add("guest", &format!("c{i:02}"))).collect();
+        for t in ths.iter().take(MAX_PAIR_REQUESTS) {
+            assert_eq!(pair_request_post(ext(t)).await.status(), StatusCode::OK);
+        }
+        assert_eq!(pair_request_post(ext(&ths[MAX_PAIR_REQUESTS])).await.status(), StatusCode::TOO_MANY_REQUESTS, "общий предел очереди");
+        // гость исчез — его запрос тоже
+        with_devices(|d| d.retain(|x| x.token_hash != ths[0]));
+        assert_eq!(pair_requests_pending().len(), MAX_PAIR_REQUESTS - 1);
+        // истёк срок — запрос стёрт
+        with_pair_requests(|l| l[0].created_ms = 1);
+        assert_eq!(pair_requests_pending().len(), MAX_PAIR_REQUESTS - 2);
+        requests_reset();
+        wipe(&[]);
+        with_devices(|d| d.retain(|x| !x.name.starts_with('c') || x.name.len() != 3));
     }
 }

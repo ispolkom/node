@@ -132,7 +132,27 @@ async fn post_settings(Json(b): Json<Body>) -> Response {
 
 /// Настройка для оболочки ПК и веб-страницы (под проверкой входа владельца).
 pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
-    Router::new().route("/api/guest-pairing", get(get_settings).post(post_settings))
+    Router::new()
+        .route("/api/guest-pairing", get(get_settings).post(post_settings))
+        .route("/api/pair-requests", get(list_requests))
+        .route("/api/pair-requests/:id", axum::routing::post(decide_request))
+}
+
+async fn list_requests() -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "requests": crate::mobile_api::pair_requests_pending() }))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Decision {
+    accept: bool,
+}
+
+async fn decide_request(axum::extract::Path(id): axum::extract::Path<String>, Json(d): Json<Decision>) -> Response {
+    match crate::mobile_api::decide_pair_request(&id, d.accept) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(e) => (StatusCode::NOT_FOUND, Json(serde_json::json!({"ok": false, "error": e}))).into_response(),
+    }
 }
 
 #[cfg(test)]

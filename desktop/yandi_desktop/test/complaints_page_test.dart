@@ -11,6 +11,13 @@ class _Api implements Api {
   Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) async {
     calls.add(path);
     bodies.add(body);
+    if (path == '/api/pair-requests') {
+      return {
+        'requests': [
+          {'id': 'p1', 'name': 'Гость (ab12)', 'mark': 'aaaa bbbb cccc', 'created_ms': 1700000000000, 'expires_ms': 1700086400000},
+        ],
+      };
+    }
     if (path == '/api/complaints') {
       return {
         'complaints': [
@@ -60,5 +67,35 @@ void main() {
     expect(measure?['kind'], 'warn');
     await t.pumpWidget(const SizedBox());
     await t.binding.setSurfaceSize(null);
+  });
+
+  testWidgets('запросы сопряжения: отдельный блок, без адресов, принять и отклонить уходят на узел', (t) async {
+    final api = _Api();
+    await t.binding.setSurfaceSize(const Size(1400, 900));
+    await t.pumpWidget(
+      PreferencesScope(
+        preferences: AppPreferences(),
+        child: MaterialApp(
+          home: Scaffold(
+            body: SingleChildScrollView(child: ComplaintsFeature(api: api, isActive: () => true, onFailure: (_) {})),
+          ),
+        ),
+      ),
+    );
+    await t.pump();
+    await t.pump();
+    expect(find.text('Запросы сопряжения'), findsOneWidget);
+    expect(find.textContaining('Гость (ab12) · метка aaaa bbbb cccc'), findsOneWidget);
+    expect(find.textContaining('.'), findsWidgets);
+    await t.tap(find.widgetWithText(ElevatedButton, 'Принять'));
+    await t.pump();
+    final i = api.calls.lastIndexOf('/api/pair-requests/p1');
+    expect(i >= 0, true);
+    expect(api.bodies[i], {'accept': true});
+    await t.tap(find.widgetWithText(ElevatedButton, 'Отклонить'));
+    await t.pump();
+    expect(api.bodies[api.calls.lastIndexOf('/api/pair-requests/p1')], {'accept': false});
+    await t.pumpWidget(const SizedBox());
+    await t.pumpAndSettle();
   });
 }

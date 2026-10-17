@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'preferences.dart';
 import 'transport/api.dart';
 import 'groups.dart';
+import 'theme.dart';
 
 /// Страница «Жалобы»: слева обращения (кто пожаловался и на кого), справа текст, переписка и меры владельца узла.
 /// Ответы уходят от имени узла («Администрация узла»), не от владельца лично.
@@ -17,6 +18,7 @@ class ComplaintsFeature extends StatefulWidget {
 
 class _ComplaintsFeatureState extends State<ComplaintsFeature> {
   List<Map<String, dynamic>> items = [];
+  List<Map<String, dynamic>> pairRequests = [];
   Map<String, dynamic>? current;
   String? selected, error, notice;
   bool loading = true, busy = false;
@@ -64,8 +66,14 @@ class _ComplaintsFeatureState extends State<ComplaintsFeature> {
       if (id != null) {
         cur = await widget.api.request('/api/complaints/$id');
       }
+      // запросы сопряжения: отдельный блок, его сбой не мешает жалобам
+      List<Map<String, dynamic>> pairs = pairRequests;
+      try {
+        pairs = listOf((await widget.api.request('/api/pair-requests'))['requests']);
+      } catch (_) {}
       if (!active) return;
       setState(() {
+        pairRequests = pairs;
         items = listOf(r['complaints']);
         current = cur;
         loading = false;
@@ -250,10 +258,47 @@ class _ComplaintsFeatureState extends State<ComplaintsFeature> {
     );
   }
 
+  /// Гость без QR просит принять его на узел. Принять = «пользователь узла» (владельцем устройство становится только по QR).
+  Widget pairBlock() => Padding(
+    padding: const EdgeInsets.only(bottom: 16),
+    child: Panel(
+      title: 'Запросы сопряжения',
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const UiText('Устройства, подключённые без QR, просят принять их на узел. Принятое устройство получает права пользователя узла; владельцем оно может стать только по QR.'),
+          const SizedBox(height: 8),
+          if (pairRequests.isEmpty) const UiText('Запросов нет.'),
+          for (final r in pairRequests)
+            Container(
+              margin: const EdgeInsets.only(bottom: 6),
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              decoration: BoxDecoration(color: Colors.white, border: Border.all(color: Icq.border)),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${r['name']} · метка ${r['mark']} · ${when(r['created_ms'])}',
+                      style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  SolidButton('Принять', onPressed: busy ? null : () => act(() => widget.api.request('/api/pair-requests/${r['id']}', body: {'accept': true}).then((_) {}), ok: 'Устройство принято как пользователь узла.')),
+                  const SizedBox(width: 8),
+                  SolidButton('Отклонить', tone: SolidTone.danger, onPressed: busy ? null : () => act(() => widget.api.request('/api/pair-requests/${r['id']}', body: {'accept': false}).then((_) {}), ok: 'Запрос отклонён.')),
+                ],
+              ),
+            ),
+        ],
+      ),
+    ),
+  );
+
   @override
   Widget build(BuildContext context) => Column(
     crossAxisAlignment: CrossAxisAlignment.start,
     children: [
+      pairBlock(),
       if (loading) const LinearProgressIndicator(),
       if (error != null) UiText(error!),
       if (notice != null) UiText(notice!),

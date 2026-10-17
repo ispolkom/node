@@ -1,5 +1,11 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Запросы сопряжения': 'Pairing requests',
+  'Устройства, подключённые без QR, просят принять их на узел. Принятое устройство получает права пользователя узла; владельцем оно может стать только по QR.':
+      'Devices connected without a QR ask to be accepted on the node. An accepted device gets node-user rights; it can become an owner only by QR.',
+  'Запросов нет.': 'No requests.',
+  'Устройство принято как пользователь узла.': 'The device was accepted as a node user.',
+  'Запрос отклонён.': 'The request was declined.',
   'Сопряжение без QR': 'Pairing without QR',
   'Новые клиенты без QR получают гостевой доступ автоматически, если вы это разрешили. Гость: без групп, без выхода в интернет через узел, без звонков и каталогов.':
       'New clients without a QR get guest access automatically if you allow it. A guest: no groups, no internet exit through the node, no calls and no directories.',
