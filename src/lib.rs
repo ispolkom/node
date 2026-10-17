@@ -62,6 +62,7 @@ pub use key_root::hw_print;
 pub mod ip_history;
 pub mod mdns;
 pub mod guest;
+pub mod invite;
 pub mod mobile_api;
 pub mod mobile_files;
 pub mod group_client;

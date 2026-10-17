@@ -99,7 +99,18 @@ static BEGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn expired(m: &Meta) -> bool {
-    now_ms().saturating_sub(m.created_ms) > if m.done { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+    // файлы гостя (отправителя или получателя) живут сутки, а не неделю (docs/GUEST.md)
+    let guest = crate::mobile_api::is_guest_peer(&m.from) || crate::mobile_api::is_guest_peer(&m.to);
+    now_ms().saturating_sub(m.created_ms) > if m.done && !guest { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+}
+
+/// Гостя удалили: его файлы (отправленные и ожидающие его) удаляются сразу, а не по сроку «обычного» файла.
+pub async fn drop_peer_files(peer: String) {
+    for m in all_meta().await {
+        if m.from == peer || m.to == peer {
+            let _ = tokio::fs::remove_dir_all(dir_of(&m.id)).await;
+        }
+    }
 }
 
 /// Передача, если она есть и не просрочена (просроченная сразу убирается: срок соблюдается при каждом обращении, а не только при уборке).
@@ -463,3 +474,25 @@ mod tests {
         assert_eq!(reserved(&meta(false, 0)), 2500 + 3 * 28);
     }
 }
+
+#[cfg(test)]
+mod guest_ttl_tests {
+    use super::*;
+
+    #[test]
+    fn a_guests_ready_file_expires_in_a_day_but_an_ordinary_one_lives_longer() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let guest = crate::mobile_api::test_add_device_with_role("guest", "ttg");
+        let user = crate::mobile_api::test_add_device_with_role("user", "ttu");
+        let other = crate::mobile_api::test_add_device_with_role("user", "tto");
+        let (g, u, o) = (crate::mobile_api::device_peer_of(&guest).unwrap(), crate::mobile_api::device_peer_of(&user).unwrap(), crate::mobile_api::device_peer_of(&other).unwrap());
+        let meta = |from: &str, to: &str, age_h: u64| Meta { id: "a".repeat(32), from: from.into(), to: to.into(), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - age_h * 3600 * 1000, done: true };
+        assert!(expired(&meta(&g, &u, 25)), "файл от гостя старше суток просрочен");
+        assert!(expired(&meta(&u, &g, 25)), "и файл гостю тоже");
+        assert!(!expired(&meta(&g, &u, 23)));
+        assert!(!expired(&meta(&u, &o, 48)), "обычные устройства: срок прежний, неделя");
+        assert!(expired(&meta(&u, &o, 24 * 8)));
+    }
+}
+

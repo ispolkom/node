@@ -152,6 +152,22 @@ pub(crate) fn guest_count() -> usize {
     with_devices(|d| d.iter().filter(|x| x.role == "guest").count())
 }
 
+/// Для проверок в других модулях: устройство с ролью, возвращает хэш токена.
+#[cfg(test)]
+pub(crate) fn test_add_device_with_role(role: &str, tag: &str) -> String {
+    let th = format!("{:0<64}", tag);
+    with_devices(|d| {
+        d.retain(|x| x.token_hash != th);
+        d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into() });
+    });
+    th
+}
+
+/// Устройство с таким номером — гость.
+pub(crate) fn is_guest_peer(peer: &str) -> bool {
+    with_devices(|d| d.iter().any(|x| x.role == "guest" && x.peer_id() == peer))
+}
+
 /// Гость (сопряжён без QR, docs/GUEST.md): у него всё то же, что у пользователя узла, минус группы, интернет, звонки, каталоги и файлы свыше лимитов.
 pub(crate) fn is_guest_device(dev: &str) -> bool {
     with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.role == "guest"))
@@ -553,6 +569,7 @@ pub fn remove_device(id: &str) -> bool {
 
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
+    crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&peer, None);
     crate::backup_signal::notify_critical(); // устройство отозвано: старая копия вернула бы его
     with_mail(|l| l.retain(|m| m.to != peer && m.from != peer));
     crate::device_profile::forget(&peer);
@@ -666,10 +683,19 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
     true
 }
 
+/// Срок письма: сутки, если отправитель или получатель — гость (docs/GUEST.md), иначе обычный.
+fn expire_mail(l: &mut Vec<Mail>, now: u64) {
+    let guests: std::collections::HashSet<String> = with_devices(|d| d.iter().filter(|x| x.role == "guest").map(|x| x.peer_id()).collect());
+    l.retain(|x| {
+        let limit = if guests.contains(&x.from) || guests.contains(&x.to) { crate::guest::IDLE.as_millis() as u64 } else { MAIL_TTL_MS };
+        now.saturating_sub(x.ts) < limit
+    });
+}
+
 /// Положить письмо в общую очередь. Просроченные письма убираются; переполнение решается отказом новому письму (с квотами на отправителя
 /// и на пару), а не вытеснением чужих неполученных писем.
 fn mail_accept(l: &mut Vec<Mail>, m: Mail, now: u64) -> bool {
-    l.retain(|x| now.saturating_sub(x.ts) < MAIL_TTL_MS);
+    expire_mail(l, now);
     let from_n = l.iter().filter(|x| x.from == m.from).count();
     let pair_n = l.iter().filter(|x| x.from == m.from && x.to == m.to).count();
     let bytes: usize = l.iter().map(|x| x.payload_b64.len()).sum();
@@ -688,6 +714,111 @@ struct PairReq {
 }
 
 
+
+// ---- приглашения в контакты (ссылка-приглашение, docs/GUEST.md, src/invite.rs)
+
+fn device_ed_bytes(dev: &str) -> Option<Vec<u8>> {
+    use base64::Engine;
+    let k = with_devices(|d| d.iter().find(|x| same(&x.token_hash, dev)).and_then(|x| x.ed25519_pub.clone()))?;
+    base64::engine::general_purpose::STANDARD.decode(k).ok().filter(|v| v.len() == 32)
+}
+
+fn b64u() -> base64::engine::GeneralPurpose {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD
+}
+
+fn invite_refusal(r: crate::invite::Refusal) -> Response {
+    use crate::invite::Refusal::*;
+    let code = match r {
+        InviteUsed => StatusCode::CONFLICT,
+        UnknownInvite => StatusCode::NOT_FOUND,
+        TooMany | NoRoom => StatusCode::TOO_MANY_REQUESTS,
+        BadSignature | BadToken | NotYours | Forbidden | WrongNode => StatusCode::FORBIDDEN,
+        Expired => StatusCode::GONE,
+        Malformed => StatusCode::BAD_REQUEST,
+    };
+    (code, Json(json!({"error": r.text(), "code": format!("{r:?}")}))).into_response()
+}
+
+#[derive(Deserialize)]
+struct InviteRegisterReq {
+    invite: String,
+    signature: String,
+}
+
+/// А регистрирует приглашение на узле: после подтверждения ссылку можно отправлять.
+async fn invite_register(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<InviteRegisterReq>) -> Response {
+    use base64::Engine;
+    let (Some(peer), Some(ed), Some(node)) = (device_peer_of(&dev), device_ed_bytes(&dev), STATE.get().map(|s| s.my_id.0)) else {
+        return (StatusCode::CONFLICT, Json(json!({"error": "сначала устройство должно передать узлу свои ключи"}))).into_response();
+    };
+    let (Ok(inv), Ok(sig)) = (b64u().decode(&req.invite), b64u().decode(&req.signature)) else { return invite_refusal(crate::invite::Refusal::Malformed) };
+    let out = crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).register(now_ms(), &peer, &ed, &node, &inv, &sig);
+    match out {
+        Ok(id) => Json(json!({"id": id})).into_response(),
+        Err(r) => invite_refusal(r),
+    }
+}
+
+#[derive(Deserialize)]
+struct InviteRevokeReq {
+    #[serde(default)]
+    id: Option<String>,
+}
+
+async fn invite_revoke(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<InviteRevokeReq>) -> Response {
+    let Some(peer) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&peer, req.id.as_deref());
+    Json(json!({"ok": true})).into_response()
+}
+
+#[derive(Deserialize)]
+struct InviteRedeemReq {
+    invite: String,
+    invite_signature: String,
+    token: String,
+    claim: String,
+    claim_signature: String,
+}
+
+/// Б гасит приглашение: узел А атомарно отмечает «использовано» и откладывает введение для А.
+async fn invite_redeem(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<InviteRedeemReq>) -> Response {
+    use base64::Engine;
+    let (Some(peer), Some(ed)) = (device_peer_of(&dev), device_ed_bytes(&dev)) else {
+        return (StatusCode::CONFLICT, Json(json!({"error": "сначала устройство должно передать узлу свои ключи"}))).into_response();
+    };
+    let (Ok(inv), Ok(isig), Ok(tok), Ok(claim), Ok(csig)) = (
+        b64u().decode(&req.invite),
+        b64u().decode(&req.invite_signature),
+        b64u().decode(&req.token),
+        b64u().decode(&req.claim),
+        b64u().decode(&req.claim_signature),
+    ) else {
+        return invite_refusal(crate::invite::Refusal::Malformed);
+    };
+    let out = crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).redeem(now_ms(), &peer, &ed, &inv, &isig, &tok, &claim, &csig);
+    match out {
+        Ok((digest, at)) => Json(json!({"claim_digest": b64u().encode(digest), "consumed_at": at})).into_response(),
+        Err(r) => invite_refusal(r),
+    }
+}
+
+async fn invite_claims(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let Some(peer) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    let list = crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).claims_for(now_ms(), &peer);
+    Json(json!({"claims": list})).into_response()
+}
+
+#[derive(Deserialize)]
+struct InviteAckReq {
+    ids: Vec<String>,
+}
+
+async fn invite_claims_ack(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<InviteAckReq>) -> Response {
+    let Some(peer) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).ack(&peer, &req.ids);
+    Json(json!({"ok": true})).into_response()
+}
 
 // ---- запросы сопряжения: гость просит владельца принять его как пользователя узла (docs/GUEST.md)
 
@@ -825,8 +956,15 @@ pub(crate) fn purge_idle_guests() -> usize {
     });
     for g in &gone {
         crate::guest::forget(&g.token_hash);
-        after_forget(g.peer_id());
+        crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&g.peer_id(), None);
+        let peer = g.peer_id();
+        if let Ok(h) = tokio::runtime::Handle::try_current() {
+            h.spawn(crate::mobile_files::drop_peer_files(peer.clone()));
+        }
+        after_forget(peer);
     }
+    // письма гостя старше суток уходят и без того, что сам гость ещё жив
+    let _ = with_mail_saved(|l| expire_mail(l, now_ms()));
     gone.len()
 }
 
@@ -1913,7 +2051,9 @@ fn store_device_bundle(devices: &mut Vec<Device>, token_hash: &str, req: KeysReq
     } else {
         return StatusCode::UNAUTHORIZED;
     }
-    let Ok(bytes) = serde_json::to_vec(&updated) else { return StatusCode::INTERNAL_SERVER_ERROR };
+    // гости на диск не пишутся (docs/GUEST.md) — и здесь тоже
+    let persisted: Vec<&Device> = updated.iter().filter(|x| x.role != "guest").collect();
+    let Ok(bytes) = serde_json::to_vec(&persisted) else { return StatusCode::INTERNAL_SERVER_ERROR };
     if crate::util::private_file::write_private(path, &bytes).is_err() {
         return StatusCode::INTERNAL_SERVER_ERROR;
     }
@@ -2206,6 +2346,11 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/contacts", get(contacts).post(contact_put))
         .route("/mobile/chat/:peer", get(history).post(send))
         .route("/mobile/pair/request", post(pair_request_post).get(pair_request_get))
+        .route("/mobile/invite", post(invite_register))
+        .route("/mobile/invite/revoke", post(invite_revoke))
+        .route("/mobile/invite/redeem", post(invite_redeem))
+        .route("/mobile/invite/claims", get(invite_claims))
+        .route("/mobile/invite/claims/ack", post(invite_claims_ack))
         .route("/mobile/inbox", get(inbox))
         .route("/mobile/inbox/ack", post(inbox_ack))
         .route("/mobile/proxy/info", get(proxy_info))
@@ -3122,5 +3267,47 @@ mod guest_tests {
         requests_reset();
         wipe(&[]);
         with_devices(|d| d.retain(|x| !x.name.starts_with('c') || x.name.len() != 3));
+    }
+
+    #[test]
+    fn a_guests_mail_lives_a_day_and_other_mail_keeps_its_longer_term() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let guest = add("guest", "mg");
+        let user = add("user", "mu");
+        let gp = device_peer_of(&guest).unwrap();
+        let up = device_peer_of(&user).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        let mk = |from: &str, to: &str, age: u64| Mail { ts: now - age, from: from.into(), to: to.into(), payload_b64: "x".into() };
+        let mut l = vec![mk(&gp, &up, day + 1000), mk(&up, &gp, day + 1000), mk(&up, &"z".repeat(64), 2 * day), mk(&gp, &up, 1000)];
+        expire_mail(&mut l, now);
+        assert_eq!(l.len(), 2, "письма гостя старше суток ушли, свежее и чужое двухдневное остались");
+        assert!(l.iter().any(|m| m.from == up && m.to == "z".repeat(64)));
+        wipe(&["mg", "mu"]);
+    }
+
+    #[test]
+    fn uploading_keys_does_not_write_a_guest_to_disk() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let owner = add("owner", "kg_o");
+        let guest = add("guest", "kg_g");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("devices.json");
+        let sk = ed25519_dalek::SigningKey::from_bytes(&[5u8; 32]);
+        let ed = sk.verifying_key().to_bytes();
+        let b = base64::engine::general_purpose::STANDARD;
+        use base64::Engine;
+        let req = || KeysReq { x25519_pub: b.encode([3u8; 32]), ed25519_pub: b.encode(ed), signature: b.encode([0u8; 64]) };
+        let mut devices: Vec<Device> = with_devices(|d| d.clone());
+        assert_eq!(store_device_bundle(&mut devices, &guest, req(), &ed, &path), StatusCode::OK);
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(!on_disk.contains(&guest), "гость не попал в файл");
+        assert!(!on_disk.contains("guest"));
+        assert!(on_disk.contains(&owner), "устройство владельца в файле есть");
+        wipe(&["kg_o", "kg_g"]);
     }
 }
