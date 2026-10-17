@@ -115,52 +115,6 @@ void main() {
     expect(find.text('Доступ к ноде'), findsOneWidget);
     await stop(t);
   });
-  testWidgets(
-    'setup hidden fields, Unicode validation and single flight Enter',
-    (t) async {
-      final api = FakeApi()..setup = true;
-      await start(t, api);
-      final fields = find.byType(TextField);
-      expect(fields, findsNWidgets(3));
-      for (final field in t.widgetList<TextField>(fields)) {
-        expect(
-          field.obscureText &&
-              field.autocorrect == false &&
-              !field.enableSuggestions,
-          true,
-        );
-        expect(field.autofillHints, isEmpty);
-      }
-      final inputs = [
-        'пароль12',
-        'пароль12',
-        'первое второе третье четвёртое',
-      ];
-      for (var i = 0; i < 3; i++) {
-        await t.enterText(fields.at(i), inputs[i]);
-      }
-      api.pending = Completer<Map<String, dynamic>>();
-      await t.ensureVisible(fields.last);
-      await t.testTextInput.receiveAction(TextInputAction.done);
-      await t.pump();
-      await t.testTextInput.receiveAction(TextInputAction.done);
-      await t.pump();
-      expect(api.calls.where((c) => c == '/api/auth/setup').length, 1);
-      expect(
-        t
-            .widgetList<TextField>(fields)
-            .every((f) => f.controller!.text.isEmpty),
-        true,
-      );
-      api.setup = false;
-      api.pending!.complete({'ok': true});
-      await t.pump();
-      await t.pump(const Duration(seconds: 1));
-      await t.pumpAndSettle();
-      expect(find.text('Доступ к ноде'), findsOneWidget);
-      await stop(t);
-    },
-  );
   testWidgets('recovery state explains CLI binding recovery', (t) async {
     await start(t, FakeApi()..recovery = true);
     expect(find.text('Требуется восстановление'), findsOneWidget);
@@ -191,7 +145,7 @@ void main() {
     expect(api.calls.length, greaterThan(count));
     await stop(t);
   });
-  testWidgets('vault setup requires four secret words', (t) async {
+  testWidgets('vault setup requires a 12 or 24 word seed phrase', (t) async {
     final api = m2.FeatureApi()..configured = false..unlocked = false;
     await start(t, api);
     await vaultPage(t);
@@ -204,9 +158,16 @@ void main() {
     await t.enterText(find.byType(TextField).at(1), 'owner password');
     await t.enterText(find.byType(TextField).at(2), 'alpha1 bravo2 charlie3 delta4');
     await click(t, 'Создать закрытую среду');
+    expect(find.text('Введите 12 или 24 слова сид-фразы'), findsOneWidget);
+    expect(api.calls.contains('/api/vault/setup'), false);
+    const seed = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
+    await t.enterText(find.byType(TextField).at(0), 'owner password');
+    await t.enterText(find.byType(TextField).at(1), 'owner password');
+    await t.enterText(find.byType(TextField).at(2), seed);
+    await click(t, 'Создать закрытую среду');
     expect(api.bodies.last, {
       'password': 'owner password',
-      'phrase': 'alpha1 bravo2 charlie3 delta4',
+      'phrase': seed,
     });
     expect(
       find.text('Открыта. Узел может читать историю и группы ПК.'),
@@ -329,16 +290,6 @@ void main() {
     await t.tap(find.byTooltip('Выйти (запирает закрытую среду)'));
     await t.pumpAndSettle();
     expect(api.calls.contains('/api/vault/lock'), true, reason: 'выход всегда запирает среду');
-    await stop(t);
-  });
-  testWidgets('password mismatch does not send setup command', (t) async {
-    final api = FakeApi()..setup = true;
-    await start(t, api);
-    await t.enterText(find.byType(TextField).at(0), 'long password');
-    await t.enterText(find.byType(TextField).at(1), 'other password');
-    await click(t, 'Создать и запустить ноду');
-    expect(find.text('Пароли не совпадают'), findsOneWidget);
-    expect(api.calls.contains('/api/auth/setup'), false);
     await stop(t);
   });
   testWidgets('auth recovery sends existing API contract', (t) async {

@@ -2,6 +2,7 @@ import 'theme.dart';
 import 'dashboard.dart';
 import 'relay_card.dart';
 import 'preferences.dart';
+import 'setup_wizard.dart';
 import 'nick.dart';
 import 'member_badge.dart';
 import 'voice.dart' show wipeOpenedCopies;
@@ -407,7 +408,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             'Перенос части старых данных не завершён и повторится при входе.',
           ),
         const UiText(
-          'Пять неверных паролей подряд оставляют вход только по секретным словам; пять неверных наборов слов стирают закрытую среду без возможности восстановления.',
+          'Пять неверных паролей подряд оставляют вход только по сид-фразе; двадцать неверных сид-фраз стирают закрытую среду на этом компьютере (личность восстанавливается по сид-фразе и файлу копии).',
         ),
         if (!v.configured)
           SecretForm(
@@ -416,7 +417,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             labels: const [
               'Пароль владельца',
               'Повтор пароля',
-              'Четыре секретных слова',
+              'Сид-фраза (12 или 24 слова)',
             ],
             busy: busy,
             submit: (values) async {
@@ -425,8 +426,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               if (values[0].runes.length < 6)
                 throw const FormatException('Пароль — не короче 6 символов');
               final phrase = values[2].trim();
-              if (phrase.split(RegExp(r'\s+')).length != 4)
-                throw const FormatException('Введите четыре секретных слова');
+              final n = phrase.split(RegExp(r'\s+')).length;
+              if (n != 12 && n != 24)
+                throw const FormatException('Введите 12 или 24 слова сид-фразы');
               final payload = <String, dynamic>{
                 'password': values[0],
                 'phrase': phrase,
@@ -447,7 +449,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             key: ValueKey('recover-$formVersion'),
             title: 'Восстановить словами',
             labels: const [
-              'Четыре секретных слова',
+              'Сид-фраза (12 или 24 слова)',
               'Новый пароль',
               'Повтор нового пароля',
             ],
@@ -496,6 +498,19 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     );
   }
 
+  /// Конец мастера: ключи из сид-фразы (пароль входа = пароль владельца), затем закрытая среда с теми же паролем и фразой.
+  Future<void> createWithSeed(String password, String phrase) async {
+    await act('/api/auth/setup', {
+      'login_password': password,
+      'login_password_repeat': password,
+      'master_password': phrase,
+      'master_password_repeat': phrase,
+    });
+    if (!mounted || error != null || auth == AuthStage.setup) return;
+    setState(() => entered = true);
+    await act('/api/vault/setup', {'password': password, 'phrase': phrase});
+  }
+
   static void validateNew(String a, String b, {int minimum = 8}) {
     if (a.runes.length < minimum)
       throw FormatException('Новый пароль — не короче $minimum символов');
@@ -517,32 +532,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         ],
       );
     if (auth == AuthStage.setup)
-      return SecretForm(
-        key: ValueKey('setup-$formVersion'),
-        title: 'Создать и запустить ноду',
-        description:
-            'Первичная настройка: один пароль и четыре секретных слова. Запишите слова на бумаге: пять неверных паролей оставляют вход только по словам, а пять неверных наборов слов стирают закрытую среду.',
-        labels: const ['Пароль', 'Повтор пароля', 'Четыре секретных слова'],
+      return SetupWizard(
+        key: const ValueKey('setup-wizard'),
+        api: widget.api,
+        preferences: preferences,
         busy: busy,
-        submit: (v) {
-          validateNew(v[0], v[1]);
-          final words = v[2].trim().split(RegExp(r'\s+'));
-          if (words.length != 4)
-            throw const FormatException('Введите четыре секретных слова');
-          final phrase = words.join(' ');
-          if (phrase.runes.length < 12)
-            throw const FormatException(
-              'Слова слишком короткие: нужно не меньше 12 знаков вместе',
-            );
-          if (v[0] == phrase)
-            throw const FormatException('Пароль и слова должны отличаться');
-          return act('/api/auth/setup', {
-            'login_password': v[0],
-            'login_password_repeat': v[1],
-            'master_password': phrase,
-            'master_password_repeat': phrase,
-          });
-        },
+        finish: createWithSeed,
       );
     if (!entered || auth == AuthStage.recovery)
       return Column(
@@ -568,7 +563,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             key: ValueKey('auth-recover-$formVersion'),
             title: 'Восстановить доступ',
             labels: const [
-              'Мастер-пароль или код восстановления',
+              'Сид-фраза, мастер-пароль или код восстановления',
               'Новый пароль входа',
               'Повтор нового пароля',
             ],

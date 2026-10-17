@@ -1,5 +1,39 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Первичная настройка узла': 'Node first-time setup',
+  'Шаг 1 из 4': 'Step 1 of 4',
+  'Шаг 2 из 4': 'Step 2 of 4',
+  'Шаг 3 из 4': 'Step 3 of 4',
+  'Шаг 4 из 4': 'Step 4 of 4',
+  'Запишите слова на бумаге в том же порядке, в каком они показаны на экране. Без них нельзя восстановить пароль и перенести узел на новый компьютер: контакты и связи будут потеряны. Никому не показывайте эти слова и не фотографируйте экран.':
+      'Write the words on paper in the same order as shown on the screen. Without them you cannot recover the password or move the node to a new computer: contacts and connections will be lost. Never show these words to anyone and do not photograph the screen.',
+  'Выберите степень сложности сид-фразы': 'Choose the seed phrase strength',
+  '12 слов (обычная)': '12 words (standard)',
+  '24 слова (повышенная)': '24 words (extended)',
+  'Создаю сид-фразу…': 'Generating the seed phrase…',
+  'Сохранил слова': 'I saved the words',
+  'Проверка записи. Нажимайте на слова в том порядке, в каком они были показаны.':
+      'Check your record. Click the words in the order they were shown.',
+  'Сбросить': 'Reset',
+  'ОК': 'OK',
+  'Показать слова снова': 'Show the words again',
+  'Порядок не совпал. Вернитесь и сверьте слова с записью.':
+      'The order does not match. Go back and compare the words with your record.',
+  'Введите слова по номерам из своей записи. Сейчас слова на экране скрыты.':
+      'Enter the words by number from your record. The words are hidden on screen now.',
+  'Слово №{0}': 'Word #{0}',
+  'Эти слова не совпали с записью. Проверьте запись.': 'These words do not match your record. Check it.',
+  'Пароль даёт вход в вашу переписку без сид-фразы. Если забудете пароль, восстановите его по записанной сид-фразе. Пять неверных паролей подряд закроют вход по паролю; двадцать неверных сид-фраз сотрут узел на этом компьютере.':
+      'The password opens your conversations without the seed phrase. If you forget it, recover it with the seed phrase you wrote down. Five wrong passwords in a row close password sign-in; twenty wrong seed phrases erase the node on this computer.',
+  'Пароль': 'Password',
+  'Создать узел': 'Create node',
+  'Повторить': 'Retry',
+  'Не удалось получить сид-фразу.': 'Could not get the seed phrase.',
+  'Сид-фраза (12 или 24 слова)': 'Seed phrase (12 or 24 words)',
+  'Введите 12 или 24 слова сид-фразы': 'Enter the 12 or 24 seed phrase words',
+  'Сид-фраза, мастер-пароль или код восстановления': 'Seed phrase, master password or recovery code',
+  'Пять неверных паролей подряд оставляют вход только по сид-фразе; двадцать неверных сид-фраз стирают закрытую среду на этом компьютере (личность восстанавливается по сид-фразе и файлу копии).':
+      'Five wrong passwords in a row leave sign-in only by seed phrase; twenty wrong seed phrases erase the closed environment on this computer (the identity is restored from the seed phrase and the backup file).',
   'Время ожидания звонка истекло.': 'Call timed out.',
   'Ошибка сигнального или медиа-слоя.': 'Signaling or media error.',
   '📞 Звонок завершён': '📞 Call ended',

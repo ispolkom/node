@@ -16,6 +16,11 @@ class DesignApi implements Api {
     String? method,
   }) async {
     if (scene == 'offline') throw const ApiFailure('disconnected');
+    if (path == '/api/auth/seed/new')
+      return {
+        'count': 12,
+        'words': 'legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' '),
+      };
     if (path == '/api/auth/state')
       return {'setup_required': scene == 'setup', 'recovery_required': false};
     if (path == '/api/vault/status')
