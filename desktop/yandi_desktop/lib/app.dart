@@ -240,7 +240,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         }
       }
       await refreshVault(own);
-      if (!mounted || own != epoch || page != 'Панель' && page != 'Статус узла') return;
+      if (!mounted || own != epoch || page != 'Статус узла') return;
       if (force || current % 5 == 0) {
         final result = await widget.api.request('/api/status');
         if (!mounted || own != epoch) return;
@@ -609,9 +609,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           // первый запуск: среда создаётся сразу; после блокировки на любой странице — только вход
           vaultPanel()
         else if (page == 'Панель')
-          dashboard()
+          // «Главная» зарезервирована под ленту контактов: пока пустая страница
+          const SizedBox.shrink()
         else if (page == 'Статус узла')
-          NodeStatusView(status: status)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [NodeStatusView(status: status), const SizedBox(height: 12), dashboard()],
+          )
         else if (page == 'Настройки') ...[
           vaultPanel(),
           const Divider(),

@@ -126,8 +126,9 @@ void main() {
     final api = FakeApi();
     await start(t, api);
     await click(t, 'Войти');
-    expect(find.text('Запустить узел'), findsOneWidget);
+    expect(find.text('Запустить узел'), findsNothing, reason: 'Главная пока пустая');
     await click(t, 'Статус узла');
+    expect(find.text('Запустить узел'), findsOneWidget);
     expect(find.text('abc'), findsOneWidget);
     await t.pump(const Duration(seconds: 10));
     await t.pumpAndSettle();

@@ -170,6 +170,7 @@ void main() {
     final api = NetworkApi()..relay = true;
     await start(t, api);
     await click(t, 'Войти');
+    await click(t, 'Статус узла');
     expect(find.text('Ретрансляция'), findsNothing);
     expect(find.byKey(const ValueKey('relay-toggle')), findsNothing);
     expect(api.calls.contains('/api/network/relay'), false);
