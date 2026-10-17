@@ -18,7 +18,7 @@ class ChatBgService {
     } on PlatformException catch (e) {
       // Логируем, но не падаем — основной WS в приложении работает и так
       // ignore: avoid_print
-      print('ChatBgService start error: $e');
+      print('ChatBgService start error: ${e.runtimeType}');
     }
   }
 

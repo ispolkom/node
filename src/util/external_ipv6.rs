@@ -210,7 +210,7 @@ const STUN_SERVERS: &[&str] = &[
 /// Perform STUN query to peer node for NAT traversal
 /// This is used for P2P traffic between nodes, NOT for initial discovery!
 pub fn stun_query_peer(peer_addr: &str) -> Result<Option<String>> {
-    println!("🔄 STUN query to peer: {}...", peer_addr);
+    println!("🔄 STUN query to peer: {}...", crate::util::logsafe::a(&peer_addr));
 
     match query_stun_server(peer_addr) {
         Ok(Some(ip)) => {

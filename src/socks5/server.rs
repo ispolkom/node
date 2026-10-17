@@ -70,12 +70,12 @@ impl Socks5Server {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    println!("[socks5] New connection from {}", addr);
+                    println!("[socks5] New connection from {}", crate::util::logsafe::a(&addr));
                     let config = self.config.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_client(stream, addr, config).await {
-                            eprintln!("[socks5] Error handling {}: {:?}", addr, e);
+                            eprintln!("[socks5] Error handling {}: {:?}", crate::util::logsafe::a(&addr), e);
                         }
                     });
                 }
@@ -104,7 +104,7 @@ impl Socks5Server {
         let request = tokio::time::timeout(hs, Self::read_request(&mut stream)).await
             .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
-        println!("[socks5] Request from {}: {:?}", client_addr, request.command);
+        println!("[socks5] Request from {}: {:?}", crate::util::logsafe::a(&client_addr), request.command);
 
         // Phase 4: Execute command
         match request.command {
@@ -276,7 +276,7 @@ impl Socks5Server {
         let response = Socks5Response::success(bind_addr);
         stream.write_all(&response.to_bytes()).await?;
 
-        println!("[socks5] Connected to {}", target_addr);
+        println!("[socks5] Connected to {}", crate::util::logsafe::a(&target_addr));
 
         // Relay data
         let (mut client_read, mut client_write) = stream.split();
@@ -435,12 +435,12 @@ impl Socks5ProxyServer {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    debug!("📥 New SOCKS5 connection from {}", addr);
+                    debug!("📥 New SOCKS5 connection from {}", crate::util::logsafe::a(&addr));
 
                     let client = self.clone_for_handler();
                     tokio::spawn(async move {
                         if let Err(e) = client.handle_client_p2p(stream, addr).await {
-                            error!("❌ Error handling SOCKS5 client {}: {}", addr, e);
+                            error!("❌ Error handling SOCKS5 client {}: {}", crate::util::logsafe::a(&addr), e);
                         }
                     });
                 }
@@ -552,7 +552,7 @@ impl Socks5ProxyServer {
         let request = tokio::time::timeout(hs, Socks5Server::read_request(&mut client_stream)).await
             .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
-        debug!("📨 SOCKS5 request from {}: {:?}", client_addr, request.command);
+        debug!("📨 SOCKS5 request from {}: {:?}", crate::util::logsafe::a(&client_addr), request.command);
 
         // Phase 4: Execute command via P2P
         match request.command {
@@ -668,7 +668,7 @@ impl Socks5ProxyServer {
             current
         };
 
-        debug!("🔌 CONNECT request #{} to {:?}", request_id, target_addr);
+        debug!("🔌 CONNECT request #{}", request_id);
 
         // 3. Парсим target address
         let (target_host, target_port) = match target_addr {

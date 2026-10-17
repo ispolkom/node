@@ -96,7 +96,7 @@ class YandiVpnService {
         }
       },
       onError: (error) {
-        print('[VPN] Packet listener error: $error');
+        print('[VPN] Packet listener error: ${error.runtimeType}');
       },
     );
   }

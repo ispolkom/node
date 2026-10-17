@@ -101,13 +101,13 @@ impl HttpProxyClient {
     /// Start the proxy server
     pub async fn start(&self) -> Result<()> {
         let addr = &self.config.client_listen_addr;
-        info!("🌐 HTTP Proxy Client listening on {}", addr);
+        info!("🌐 HTTP Proxy Client listening on {}", crate::util::logsafe::a(&addr));
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .context(format!("Failed to bind to {}", addr))?;
 
-        info!("✅ HTTP Proxy ready! Configure browser: HTTP proxy = {}", addr);
+        info!("✅ HTTP Proxy ready! Configure browser: HTTP proxy = {}", crate::util::logsafe::a(&addr));
         info!("📡 Gateway node: {}", hex::encode(&self.gateway_node.0[..8]));
 
         // Subscribe to P2P packets for responses
@@ -132,15 +132,15 @@ impl HttpProxyClient {
         loop {
             match listener.accept().await {
                 Ok((mut stream, client_addr)) => {
-                    debug!("📥 New connection from {}", client_addr);
+                    debug!("📥 New connection from {}", crate::util::logsafe::a(&client_addr));
 
                     // Проверяем аутентификацию если настроен токен
                     if let Some(token) = &self.config.auth_token {
                         if !Self::authenticate_socket(&mut stream, token).await {
-                            warn!("❌ Auth failed from {}", client_addr);
+                            warn!("❌ Auth failed from {}", crate::util::logsafe::a(&client_addr));
                             continue;
                         }
-                        debug!("✅ Auth successful from {}", client_addr);
+                        debug!("✅ Auth successful from {}", crate::util::logsafe::a(&client_addr));
                     }
 
                     let client = self.clone_for_handler();

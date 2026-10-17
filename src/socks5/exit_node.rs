@@ -151,7 +151,7 @@ impl ExitNodeHandler {
         // Connect to target: только адрес в интернете, соединение — ровно с проверенным адресом
         let target_addr = if request.target_host.contains(':') { format!("[{}]:{}", request.target_host, request.target_port) } else { format!("{}:{}", request.target_host, request.target_port) };
 
-        info!("🔌 Connecting to {} ...", target_addr);
+        info!("🔌 Connecting to {} ...", crate::util::logsafe::a(&target_addr));
 
         let target_stream = match crate::exit_policy::connect_public(&target_addr, Duration::from_secs(10)).await {
             Ok(stream) => {
@@ -162,7 +162,7 @@ impl ExitNodeHandler {
                     debug!("✅ TCP_NODELAY enabled for target");
                 }
 
-                info!("✅ Connected to {}", target_addr);
+                info!("✅ Connected to {}", crate::util::logsafe::a(&target_addr));
                 stream
             }
             Err(e) => {
@@ -172,7 +172,7 @@ impl ExitNodeHandler {
                     std::io::ErrorKind::TimedOut => 0x06,
                     _ => 0x05,
                 };
-                error!("❌ Failed to connect to {}: {}", target_addr, e);
+                error!("❌ Failed to connect to {}: {}", crate::util::logsafe::a(&target_addr), e);
                 self.send_response(source_node, Socks5ProxyResponse::error(request.request_id, code)).await?;
                 return Err(anyhow!("Failed to connect: {}", e));
             }

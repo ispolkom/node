@@ -271,17 +271,17 @@ impl HttpProxyGateway {
         }
         let slot = ConnectSlot { set: self.connecting.clone(), key };
 
-        info!("🔌 Connecting to {} ...", addr_str);
+        info!("🔌 Connecting to {} ...", crate::util::logsafe::a(&addr_str));
 
         // Только адрес в интернете (не этот компьютер, не домашняя сеть), соединение — ровно с проверенным адресом
         let target_stream = match crate::exit_policy::connect_public(&addr_str, Duration::from_secs(10)).await {
             Ok(stream) => {
-                info!("✅ Connected to {}", addr_str);
+                info!("✅ Connected to {}", crate::util::logsafe::a(&addr_str));
                 stream
             }
             Err(e) => {
                 let status = if e.kind() == std::io::ErrorKind::PermissionDenied { 403 } else if e.kind() == std::io::ErrorKind::TimedOut { 504 } else { 502 };
-                error!("❌ CONNECT {} refused/failed: {}", addr_str, e);
+                error!("❌ CONNECT {} refused/failed: {}", crate::util::logsafe::a(&addr_str), e);
                 let proxy_response = ProxyResponse { request_id: request.request_id, status, headers: vec![], body: Vec::new() };
                 self.send_response(source_node, proxy_response).await?;
                 return Err(anyhow::anyhow!("Failed to connect: {}", e));

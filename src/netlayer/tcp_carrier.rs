@@ -321,7 +321,7 @@ impl Carrier {
         let cfg = crate::netlayer::tls_cert::build_server_config(&identity).map_err(|e| io::Error::other(e.to_string()))?;
         let tls = tokio::time::timeout(Duration::from_secs(10), tokio_rustls::TlsAcceptor::from(cfg).accept(tcp)).await.map_err(|_| io::Error::other("tls timeout"))??;
         drop(_hs);
-        println!("[carrier] принято TCP-соединение от {}", peer.ip());
+        println!("[carrier] принято TCP-соединение от {}", crate::util::logsafe::a(&peer.ip()));
         self.run_conn(tls, peer.ip(), None).await;
         Ok(())
     }
@@ -353,7 +353,7 @@ impl Carrier {
             g.conns.retain(|c| c.id != conn.id);
         }
         writer.abort();
-        println!("[carrier] TCP-соединение с {remote_ip} закрыто");
+        println!("[carrier] TCP-соединение с {} закрыто", crate::util::logsafe::a(&remote_ip));
     }
 
     async fn read_loop<R: tokio::io::AsyncRead + Unpin>(&self, rd: &mut R, conn: &Arc<Conn>) -> io::Result<()> {

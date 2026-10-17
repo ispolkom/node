@@ -177,7 +177,7 @@ class YandiChatService : Service() {
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
-                    if (running) Log.w(TAG, "WS ошибка: $e")
+                    if (running) Log.w(TAG, "WS ошибка: ${e.javaClass.simpleName}")
                 } finally {
                     // сокет закрывается на любом выходе (ошибка рукопожатия, кривой кадр, таймаут), иначе дескрипторы копятся до GC
                     runCatching { client?.close() }

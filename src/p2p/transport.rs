@@ -525,7 +525,7 @@ impl P2PTransport {
         self.data_send_socket.send_to(&bytes0, &peer_addr)
             .await
             .map_err(|e| format!("Failed to send Path0 packet to {}: {}", peer_addr, e))?;
-        println!("[P2P] 📤 Path0 → {} ({}B, ts: {})", peer_addr, bytes0.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        println!("[P2P] 📤 Path0 → {} ({}B, ts: {})", crate::util::logsafe::a(&peer_addr), bytes0.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
 
         self.stats_sent_packets.fetch_add(1, Ordering::Relaxed);
         self.stats_sent_bytes.fetch_add(bytes0.len() as u64, Ordering::Relaxed);
@@ -542,7 +542,7 @@ impl P2PTransport {
 
         self.stats_sent_packets.fetch_add(1, Ordering::Relaxed);
         self.stats_sent_bytes.fetch_add(bytes1.len() as u64, Ordering::Relaxed);
-        println!("[P2P] 📤 Path1 → {} ({}B, ts: {})", peer_addr, bytes1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        println!("[P2P] 📤 Path1 → {} ({}B, ts: {})", crate::util::logsafe::a(&peer_addr), bytes1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
         self.stats_sent_path1.fetch_add(1, Ordering::Relaxed);
 
         println!("[P2P] 🔄 DUAL-PATH: Path0 + Path1 → {} ({} bytes)",
@@ -885,7 +885,7 @@ impl P2PTransport {
                         }
 
                     } else {
-                        eprintln!("[P2P] ⚠️  Failed to parse packet from {}", from_addr);
+                        eprintln!("[P2P] ⚠️  Failed to parse packet from {}", crate::util::logsafe::a(&from_addr));
                     }
                 }
                 Err(e) => {
@@ -927,15 +927,15 @@ impl P2PTransport {
                     }
                     match P2PHelloPacket::from_bytes(data) {
                         Ok(hello) => {
-                            println!("[P2P] 📨 Received P2P Hello from {}: {:?}", from, hello.hello_type);
+                            println!("[P2P] 📨 Received P2P Hello from {}: {:?}", crate::util::logsafe::a(&from), hello.hello_type);
                             // SEC-03: reject Hello packets with invalid signatures
                             if let Err(e) = hello.verify_signature() {
-                                eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", from, e);
+                                eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", crate::util::logsafe::a(&from), e);
                                 continue;
                             }
                             // подпись не доказывает свежесть: записанный Hello нельзя проигрывать после окна, которое помнит кэш nonce
                             if !hello.is_fresh() {
-                                eprintln!("[P2P] ⚠️ Hello from {} rejected — stale timestamp", from);
+                                eprintln!("[P2P] ⚠️ Hello from {} rejected — stale timestamp", crate::util::logsafe::a(&from));
                                 continue;
                             }
 
@@ -982,7 +982,7 @@ impl P2PTransport {
                             {
                                 let mut seen = self.seen_hello_nonces.lock().await;
                                 if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
-                                    eprintln!("[P2P] ⛔ REJECTED: REPLAY — Hello for {} reuses a nonce already accepted within the freshness window (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                    eprintln!("[P2P] ⛔ REJECTED: REPLAY — Hello for {} reuses a nonce already accepted within the freshness window (from {})", hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&from));
                                     continue;
                                 }
                             }
@@ -999,7 +999,7 @@ impl P2PTransport {
                                 if let Some(existing) = peers.get(&hello.node_id) {
                                     if let Some(known_key) = existing.ed25519_public {
                                         if known_key != hello.ed25519_public {
-                                            eprintln!("[P2P] ⛔ REJECTED: IDENTITY_CONFLICT — {} previously verified with a different signing key (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                            eprintln!("[P2P] ⛔ REJECTED: IDENTITY_CONFLICT — {} previously verified with a different signing key (from {})", hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&from));
                                             continue;
                                         }
                                     }
@@ -1016,7 +1016,7 @@ impl P2PTransport {
                                             eprintln!(
                                                 "[P2P] ❌ BOOTSTRAP FINGERPRINT MISMATCH from {} — \
                                                  expected {}, got {}. Rejecting.",
-                                                from,
+                                                crate::util::logsafe::a(&from),
                                                 hex::encode(&expected[..8]),
                                                 hex::encode(&hello.ed25519_public[..8])
                                             );
@@ -1109,7 +1109,7 @@ impl P2PTransport {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[P2P] ⚠️ Invalid P2P Hello packet from {}: {}", from, e);
+                            eprintln!("[P2P] ⚠️ Invalid P2P Hello packet from {}: {}", crate::util::logsafe::a(&from), e);
                         }
                     }
                 }
@@ -1147,7 +1147,7 @@ impl P2PTransport {
             // Это CommPacket (control 0x50-0x5F, data 0x60-0x6F)
             if let Some(comm_packet) = crate::communication::CommPacket::from_bytes(data) {
                 let packet_type_name = format!("{:?}", comm_packet.packet_type);
-                println!("[P2P] 📦 Received CommPacket ({}) from {}", packet_type_name, from);
+                println!("[P2P] 📦 Received CommPacket ({}) from {}", packet_type_name, crate::util::logsafe::a(&from));
 
                 // Отправляем в chat handler
                 if let Some(ref tx) = self.chat_packet_tx {
@@ -1166,7 +1166,7 @@ impl P2PTransport {
                     if let Some(id) = peer_id {
                         let _ = tx.try_send((id, comm_packet));
                     } else {
-                        eprintln!("[P2P] ⚠️  Received CommPacket from unknown peer: {}", from);
+                        eprintln!("[P2P] ⚠️  Received CommPacket from unknown peer: {}", crate::util::logsafe::a(&from));
                     }
                 }
 
@@ -1176,7 +1176,7 @@ impl P2PTransport {
 
         // 🔗 P2P Tunnel packets (0x80-0x8F) - для p2p_tunnel manager
         if packet_type_byte >= 0x80 && packet_type_byte <= 0x8F {
-            println!("[P2P] 🔗 Received Tunnel packet (0x{:02X}) from {}", packet_type_byte, from);
+            println!("[P2P] 🔗 Received Tunnel packet (0x{:02X}) from {}", packet_type_byte, crate::util::logsafe::a(&from));
 
             // Ищем peer по from addr
             let peer_id = {
@@ -1193,7 +1193,7 @@ impl P2PTransport {
                     return Ok(());
                 }
             } else {
-                eprintln!("[P2P] ⚠️  Received Tunnel packet from unknown peer: {}", from);
+                eprintln!("[P2P] ⚠️  Received Tunnel packet from unknown peer: {}", crate::util::logsafe::a(&from));
             }
 
             return Ok(());
@@ -1254,7 +1254,7 @@ impl P2PTransport {
             _ => "Unknown",
         };
 
-        println!("[P2P] 📦 Received P2PPacket {} from {}", packet_type_name, from);
+        println!("[P2P] 📦 Received P2PPacket {} from {}", packet_type_name, crate::util::logsafe::a(&from));
 
         // Сохраняем sender до move
         let sender = p2p_packet.sender;
@@ -1429,7 +1429,7 @@ impl P2PTransport {
         let bytes = hello.to_bytes().map_err(|e| e.to_string())?;
         self.discovery_socket.send_to(&bytes, addr).await
             .map_err(|e| format!("Failed to send: {}", e))?;
-        println!("[P2P] ✅ HELLO_REQ sent to {} (PFS ephemeral key)", addr);
+        println!("[P2P] ✅ HELLO_REQ sent to {} (PFS ephemeral key)", crate::util::logsafe::a(&addr));
         Ok(())
     }
 }

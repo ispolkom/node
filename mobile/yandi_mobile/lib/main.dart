@@ -33,12 +33,12 @@ Future<void> _initInBackground() async {
   try {
     await NotificationService.init().timeout(const Duration(seconds: 20));
   } catch (e) {
-    debugPrint('notifications init: $e');
+    debugPrint('notifications init: ${e.runtimeType}');
   }
   try {
     await initBackgroundWorker().timeout(const Duration(seconds: 20));
   } catch (e) {
-    debugPrint('background worker init: $e');
+    debugPrint('background worker init: ${e.runtimeType}');
   }
 }
 

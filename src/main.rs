@@ -556,11 +556,11 @@ async fn main() -> anyhow::Result<()> {
             println!("[P2P] ⏭️  Нет других входных узлов для знакомства (в списке только свой адрес)");
         }
         for addr in p2p_nodes {
-            println!("[P2P] 🔗 Connecting to {}:9001...", addr);
+            println!("[P2P] 🔗 Connecting to {}:9001...", yandi::util::logsafe::a(&addr));
             if let Err(e) = p2p_transport.send_hello_request(&addr).await {
-                println!("[P2P] ⚠️  Failed to connect to {}: {}", addr, e);
+                println!("[P2P] ⚠️  Failed to connect to {}: {}", yandi::util::logsafe::a(&addr), e);
             } else {
-                println!("[P2P] ✅ Hello sent to {}", addr);
+                println!("[P2P] ✅ Hello sent to {}", yandi::util::logsafe::a(&addr));
             }
         }
     }

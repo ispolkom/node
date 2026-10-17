@@ -196,7 +196,7 @@ impl P2PTransport {
                 continue;
             }
             let Some(addr) = crate::network_offers::p2p_discovery_addr(h) else { continue };
-            println!("[punch] 🏠 {} is reached through its home node {}: greeting {}", hex::encode(&target.0[..8]), &h[..16], addr);
+            println!("[punch] 🏠 {} is reached through its home node {}: greeting {}", hex::encode(&target.0[..8]), &h[..16], crate::util::logsafe::a(&addr));
             let _ = self.send_hello_request(&addr.to_string()).await;
             greeted = true;
         }
@@ -362,7 +362,7 @@ impl P2PTransport {
                 let _ = self.discovery_socket.send_to(&probe(&token, &me), from).await;
             }
             if send_hello {
-                println!("[punch] ✅ the way is open to {} ({}): starting the hello", hex::encode(&sender.0[..8]), from);
+                println!("[punch] ✅ the way is open to {} ({}): starting the hello", hex::encode(&sender.0[..8]), crate::util::logsafe::a(&from));
                 let _ = self.send_hello_request(&from.to_string()).await;
             }
         } else {
@@ -429,7 +429,7 @@ impl P2PTransport {
                     c.retain(|_, (_, _, t)| t.elapsed() < CHALLENGE_LIFE);
                 }
             }
-            println!("[path] packets of {} now come from {}: challenging that address", hex::encode(&peer.0[..8]), from);
+            println!("[path] packets of {} now come from {}: challenging that address", hex::encode(&peer.0[..8]), crate::util::logsafe::a(&from));
             self.send_sealed_to(peer, P2PPacketType::PathChallenge, token.to_vec(), from).await;
         }
     }
@@ -474,7 +474,7 @@ impl P2PTransport {
         }
         let mut peers = self.peers.lock().await;
         if let Some(p) = peers.get_mut(&peer) {
-            println!("[path] {} confirmed at {}", hex::encode(&peer.0[..8]), from);
+            println!("[path] {} confirmed at {}", hex::encode(&peer.0[..8]), crate::util::logsafe::a(&from));
             p.p2p_data_addr = Some(from.to_string());
             p.last_seen = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
         }

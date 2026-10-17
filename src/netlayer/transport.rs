@@ -1039,7 +1039,7 @@ impl P2PTransport {
                         // адрес интерфейса (127.0.0.1, VPN, LAN) в «все интерфейсы» не превращается: вход просто не запускается
                         Err(e) if ws_fallback_allowed(addr) => {
                             eprintln!("[ws-server] ⚠️  bind {} failed: {} — fallback на {}",
-                                      addr, e, fallback);
+                                      crate::util::logsafe::a(&addr), e, fallback);
                             match WsServer::bind(fallback, &tls).await {
                                 Ok(s) => s,
                                 Err(e2) => {
@@ -1050,7 +1050,7 @@ impl P2PTransport {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[ws-server] bind {} failed: {} — disabled", addr, e);
+                            eprintln!("[ws-server] bind {} failed: {} — disabled", crate::util::logsafe::a(&addr), e);
                             return;
                         }
                     },
@@ -1075,7 +1075,7 @@ impl P2PTransport {
                         ).await {
                             Ok(Some(b)) => b,
                             _ => {
-                                eprintln!("[ws-server] {} no first packet in 5s, dropping", conn.peer_addr);
+                                eprintln!("[ws-server] {} no first packet in 5s, dropping", crate::util::logsafe::a(&conn.peer_addr));
                                 return;
                             }
                         };
@@ -1089,7 +1089,7 @@ impl P2PTransport {
                             let (embedded_node_id, session_id, addr, client_nonce, mac) = match decode_resume(&first_bytes) {
                                 Ok(t) => t,
                                 Err(e) => {
-                                    eprintln!("[ws-server] {} bad RESUME: {}", conn.peer_addr, e);
+                                    eprintln!("[ws-server] {} bad RESUME: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                     return;
                                 }
                             };
@@ -1129,7 +1129,7 @@ impl P2PTransport {
                             }
                             if !matches!(status, ResumeStatus::Ok) || sk.is_none() {
                                 eprintln!("[ws-server] RESUME from {} ({}) status={:?}, key={}",
-                                          conn.peer_addr,
+                                          crate::util::logsafe::a(&conn.peer_addr),
                                           hex::encode(&embedded_node_id.0[..8]),
                                           status, sk.is_some());
                                 // Шлём plaintext ACK (mobile может его прочесть без сессии)
@@ -1158,7 +1158,7 @@ impl P2PTransport {
                                 enc.restore_session(embedded_node_id, working)
                             };
                             println!("[ws-server] 🔁 RESUME {} v{} (session {:#x}, new addr {})",
-                                     hex::encode(&embedded_node_id.0[..8]), v, session_id, addr);
+                                     hex::encode(&embedded_node_id.0[..8]), v, session_id, crate::util::logsafe::a(&addr));
                             let mut peer = PeerInfo::new(embedded_node_id, &conn.peer_addr);
                             peer.touch();
                             transport_for_pump.peers.lock().await.insert(embedded_node_id, peer);
@@ -1173,23 +1173,23 @@ impl P2PTransport {
                             let hello = match HelloPacket::from_bytes(&first_bytes) {
                                 Ok(h) => h,
                                 Err(e) => {
-                                    eprintln!("[ws-server] {} bad Hello: {}", conn.peer_addr, e);
+                                    eprintln!("[ws-server] {} bad Hello: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                     return;
                                 }
                             };
                             println!("[ws-server] 👋 Hello from {} ({})",
-                                     hex::encode(&hello.node_id.0[..8]), conn.peer_addr);
+                                     hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&conn.peer_addr));
 
                             // Same barriers as the UDP discovery path: signature + self-certifying
                             // identity + freshness, nonce replay, pinned/verified key conflict.
                             if let Err(e) = P2PTransport::verify_peer_handshake_static(&hello) {
-                                eprintln!("[ws-server] {} Hello REJECTED: {}", conn.peer_addr, e);
+                                eprintln!("[ws-server] {} Hello REJECTED: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                 return;
                             }
                             {
                                 let mut seen = transport_for_pump.seen_hello_nonces.lock().await;
                                 if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: replayed nonce", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: replayed nonce", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
                             }
@@ -1201,19 +1201,19 @@ impl P2PTransport {
                                 conn.peer_addr.parse::<std::net::SocketAddr>().map(|a| a.ip()).unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
                                 hello.node_id,
                             ).await {
-                                eprintln!("[ws-server] {} Hello REJECTED: admission ({})", conn.peer_addr, reason.name());
+                                eprintln!("[ws-server] {} Hello REJECTED: admission ({})", crate::util::logsafe::a(&conn.peer_addr), reason.name());
                                 return;
                             }
                             {
                                 let pins = transport_for_pump.pinned_identities.read().await;
                                 if Self::identity_conflict(&pins, hello.node_id, &hello.public_key) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: pinned identity conflict", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: pinned identity conflict", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
                             }
                             if let Some(existing) = transport_for_pump.peers.lock().await.get(&hello.node_id) {
                                 if matches!(existing.verified_signing_pubkey, Some(k) if k != hello.public_key) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: verified key conflict", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: verified key conflict", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
                             }
@@ -1236,7 +1236,7 @@ impl P2PTransport {
                                 match enc.complete_hello_responder(hello.node_id, &hello.x25519_public) {
                                     Ok(k) => k,
                                     Err(e) => {
-                                        eprintln!("[ws-server] {} session not established: {}", conn.peer_addr, e);
+                                        eprintln!("[ws-server] {} session not established: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                         transport_for_pump.ws_outgoing.lock().await.remove(&hello.node_id);
                                         return;
                                     }
@@ -1310,7 +1310,7 @@ impl P2PTransport {
                         }
                         // Соединение закрылось — убираем из ws_outgoing только СВОЙ маршрут (новое соединение того же узла осталось)
                         transport_for_pump.drop_ws_route(&peer_id, &conn.outgoing).await;
-                        println!("[ws-server] 🛑 connection {} closed", conn.peer_addr);
+                        println!("[ws-server] 🛑 connection {} closed", crate::util::logsafe::a(&conn.peer_addr));
                     });
                 }
             });
@@ -2263,7 +2263,7 @@ impl P2PTransport {
                     if let Ok(data) = encrypted {
                         let addr = peer.data_addr.as_ref().unwrap_or(&peer.addr);
                         eprintln!("[stream-manager] 🔒 Encrypted to {} bytes, sending to {}",
-                                 data.len(), addr);
+                                 data.len(), crate::util::logsafe::a(&addr));
                         if let Err(e) = socket_manager.data().await.send_to(&data, addr).await {
                             eprintln!("[stream-manager] ❌ Send failed: {}", e);
                         } else {
@@ -2393,7 +2393,7 @@ impl P2PTransport {
                     // Try to parse as Hello packet
                     match HelloPacket::from_bytes(&data) {
                         Ok(hello_packet) => {
-                            println!("[transport] 📨 Received Hello packet from {}", from);
+                            println!("[transport] 📨 Received Hello packet from {}", crate::util::logsafe::a(&from));
 
                             // 🔒 Two-Phase Peer Verification (Stage 1.3)
                             match P2PTransport::verify_peer_handshake_static(&hello_packet) {
@@ -2468,7 +2468,7 @@ impl P2PTransport {
                                 if !Self::check_replay(&mut seen, hello_packet.node_id, hello_packet.nonce) {
                                     println!(
                                         "[transport] ⛔ REJECTED: REPLAY — Hello for node_id {} reuses a nonce already accepted within the freshness window (from {})",
-                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                        hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                     );
                                     continue;
                                 }
@@ -2486,7 +2486,7 @@ impl P2PTransport {
                             {
                                 let pins = bootstrap_pins.read().await;
                                 if !Self::bootstrap_key_ok(&pins, &from.ip().to_string(), &hello_packet.public_key) {
-                                    println!("[transport] ⛔ REJECTED: BOOTSTRAP_KEY_MISMATCH — {} is a pinned bootstrap address, the Hello carries another signing key", from);
+                                    println!("[transport] ⛔ REJECTED: BOOTSTRAP_KEY_MISMATCH — {} is a pinned bootstrap address, the Hello carries another signing key", crate::util::logsafe::a(&from));
                                     continue;
                                 }
                             }
@@ -2495,7 +2495,7 @@ impl P2PTransport {
                                 if Self::identity_conflict(&pins, hello_packet.node_id, &hello_packet.public_key) {
                                     println!(
                                         "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} is pinned to a different signing key than this Hello claims (from {})",
-                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                        hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                     );
                                     continue;
                                 }
@@ -2505,7 +2505,7 @@ impl P2PTransport {
                                     if known_key != hello_packet.public_key {
                                         println!(
                                             "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} previously verified with a different signing key (from {})",
-                                            hex::encode(&hello_packet.node_id.0[..8]), from
+                                            hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                         );
                                         continue;
                                     }
@@ -2694,10 +2694,10 @@ impl P2PTransport {
                             if e.contains("Invalid magic") {
                                 // Это не наш пакет - возможно сканирование портов или случайный трафик
                                 // Silently игнорируем чтобы не засорять логи
-                                eprintln!("[transport] 🚫 Discarding non-YANDI packet from {} (invalid magic)", from);
+                                eprintln!("[transport] 🚫 Discarding non-YANDI packet from {} (invalid magic)", crate::util::logsafe::a(&from));
                             } else {
                                 // Другие ошибки логируем полностью
-                                println!("[transport] ⚠️  Invalid Hello packet from {}: {}", from, e);
+                                println!("[transport] ⚠️  Invalid Hello packet from {}: {}", crate::util::logsafe::a(&from), e);
                             }
                         }
                     }
@@ -2941,7 +2941,7 @@ impl P2PTransport {
                                                             if let Ok(resp_data) = enc_lock.encrypt(&p, &frame_bytes) {
                                                                 let addr = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 eprintln!("[transport] 🔒 Encrypted response: {} bytes, sending to {}",
-                                                                         resp_data.len(), addr);
+                                                                         resp_data.len(), crate::util::logsafe::a(&addr));
                                                                 match socket.send_to(&resp_data, addr).await {
                                                                     Ok(n) => {
                                                                         eprintln!("[transport] ✅ Sent {} bytes of response", n);
@@ -3118,7 +3118,7 @@ impl P2PTransport {
                                                             if let Ok(encrypted_ack) = enc_lock.encrypt(&p, &ack_bytes) {
                                                                 let addr_to_use = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 let _ = socket.send_to(&encrypted_ack, addr_to_use).await;
-                                                                println!("[transport] 📤 Отправлен ProxyGatewayStarted ACK на {}", addr_to_use);
+                                                                println!("[transport] 📤 Отправлен ProxyGatewayStarted ACK на {}", crate::util::logsafe::a(&addr_to_use));
                                                             }
                                                         }
                                                     }
@@ -3185,7 +3185,7 @@ impl P2PTransport {
                                                             if let Ok(encrypted_ack) = enc_lock.encrypt(&p, &ack_bytes) {
                                                                 let addr_to_use = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 let _ = socket.send_to(&encrypted_ack, addr_to_use).await;
-                                                                println!("[transport] 📤 Отправлен Socks5GatewayStarted ACK на {}", addr_to_use);
+                                                                println!("[transport] 📤 Отправлен Socks5GatewayStarted ACK на {}", crate::util::logsafe::a(&addr_to_use));
                                                             }
                                                         }
                                                     }
@@ -3756,7 +3756,7 @@ impl P2PTransport {
 
                                                         println!("[transport] ➕ Adding new peer from list: {} @ {}",
 
-                                                                 hex::encode(&new_peer_id.0[..8]), new_addr);
+                                                                 hex::encode(&new_peer_id.0[..8]), crate::util::logsafe::a(&new_addr));
 
                                                         let new_peer = PeerInfo::new(new_peer_id, &new_addr);
 
@@ -4388,7 +4388,7 @@ impl P2PTransport {
                                                         for i in 0..5 {
                                                             let _ = socket_send.send_to(&probe_enc, &addr_clone).await;
                                                             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                                                            tracing::debug!("[punch] probe #{} → {}", i + 1, addr_clone);
+                                                            tracing::debug!("[punch] probe #{} → {}", i + 1, crate::util::logsafe::a(&addr_clone));
                                                         }
                                                         PUNCH_TASKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                                     });
@@ -4489,7 +4489,7 @@ impl P2PTransport {
 
     /// Send Hello Request to peer
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
-        println!("[transport] 📤 Sending HELLO_REQ to {}", addr);
+        println!("[transport] 📤 Sending HELLO_REQ to {}", crate::util::logsafe::a(&addr));
         // куда стучаться по TCP, если UDP до этого узла не дойдёт
         if let (Some(c), Ok(sa)) = (tcp_carrier::global(), addr.parse::<std::net::SocketAddr>()) {
             c.hint(sa);
@@ -4573,7 +4573,7 @@ impl P2PTransport {
             .await
             .map_err(|e| format!("Failed to send Hello packet: {}", e))?;
 
-        println!("[transport] ✅ HELLO_REQ sent to {} ({} bytes)", addr, data.len());
+        println!("[transport] ✅ HELLO_REQ sent to {} ({} bytes)", crate::util::logsafe::a(&addr), data.len());
 
         Ok(())
     }
@@ -4581,7 +4581,7 @@ impl P2PTransport {
     /// Ответить на приглашение: своим одноразовым ключом, сеанс поднимается сразу.
     /// Ошибка «встречное знакомство» — остаётся ключ рукопожатия узла с меньшим номером, подтверждение не отправляется.
     pub async fn send_hello_ack(&self, addr: &str, request_nonce: u64, peer_id: HashId, peer_ephemeral: [u8; 32]) -> Result<(), String> {
-        println!("[transport] 📤 Sending HELLO_ACK to {}", addr);
+        println!("[transport] 📤 Sending HELLO_ACK to {}", crate::util::logsafe::a(&addr));
         let ports = self.port_manager.current_state();
 
         // Get CID from node ID
@@ -4658,7 +4658,7 @@ impl P2PTransport {
             .await
             .map_err(|e| format!("Failed to send Hello packet: {}", e))?;
 
-        println!("[transport] ✅ HELLO_ACK sent to {} ({} bytes)", addr, data.len());
+        println!("[transport] ✅ HELLO_ACK sent to {} ({} bytes)", crate::util::logsafe::a(&addr), data.len());
 
         Ok(())
     }
@@ -4889,7 +4889,7 @@ impl P2PTransport {
 
         let mut conn = connect_to_anchor(anchor_url, anchor_fingerprint_hex).await
             .map_err(|e| format!("WS connect: {}", e))?;
-        println!("[ws-client] 🌐 connected to {}", conn.peer_addr);
+        println!("[ws-client] 🌐 connected to {}", crate::util::logsafe::a(&conn.peer_addr));
 
         // 🔐 Hardening Step 2: попытка resume по сохранённому SessionToken (с session-key).
         // Если получится — пропускаем Hello/ECDH; иначе fallback на обычный Hello flow.
@@ -5816,7 +5816,7 @@ impl P2PTransport {
                     eprintln!("[resume] persist failed: {}", e);
                 }
                 println!("[resume] ✅ session {:#x} from {} ({}): verified, TTL refreshed",
-                         session_id, hex::encode(&sender.0[..8]), addr);
+                         session_id, hex::encode(&sender.0[..8]), crate::util::logsafe::a(&addr));
             }
             (ResumeStatus::BadMac, _) => {
                 eprintln!("[resume] ❌ session {:#x} from {}: BadMac",
@@ -6133,7 +6133,7 @@ impl P2PTransport {
 
             // Skip own address (localhost)
             if addr.contains("127.0.0.1") || addr.contains("localhost") {
-                println!("[bootstrap] ⏭️  Skipping localhost: {}", addr);
+                println!("[bootstrap] ⏭️  Skipping localhost: {}", crate::util::logsafe::a(&addr));
                 skipped += 1;
                 continue;
             }
@@ -6141,21 +6141,21 @@ impl P2PTransport {
             // Skip own external IP
             if let Some(ref ext_ip) = external_ip {
                 if peer_ip == ext_ip {
-                    println!("[bootstrap] ⏭️  Skipping own external IP: {}", addr);
+                    println!("[bootstrap] ⏭️  Skipping own external IP: {}", crate::util::logsafe::a(&addr));
                     skipped += 1;
                     continue;
                 }
             }
 
-            println!("[bootstrap] 📡 Connecting to {}...", addr);
+            println!("[bootstrap] 📡 Connecting to {}...", crate::util::logsafe::a(&addr));
 
             match self.send_hello_request(&addr).await {
                 Ok(_) => {
-                    println!("[bootstrap] ✅ Hello sent to {}", addr);
+                    println!("[bootstrap] ✅ Hello sent to {}", crate::util::logsafe::a(&addr));
                     connected += 1;
                 }
                 Err(e) => {
-                    println!("[bootstrap] ❌ Failed to connect to {}: {}", addr, e);
+                    println!("[bootstrap] ❌ Failed to connect to {}: {}", crate::util::logsafe::a(&addr), e);
                     failed += 1;
                 }
             }
@@ -6326,7 +6326,7 @@ impl P2PTransport {
                 if let Err(e) = self.socket_manager.data().await.send_to(&data, addr).await {
                     return Err(format!("Failed to send SYN: {}", e));
                 }
-                println!("[transport] 📤 Sent SYN for stream {} to {}", stream_id, addr);
+                println!("[transport] 📤 Sent SYN for stream {} to {}", stream_id, crate::util::logsafe::a(&addr));
             }
         }
 
