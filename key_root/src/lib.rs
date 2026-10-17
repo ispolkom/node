@@ -19,6 +19,7 @@ pub mod machine;
 pub mod migrate;
 pub mod recovery_code;
 pub mod root;
+pub mod seed;
 pub mod unlock;
 pub mod wrap;
 
@@ -34,6 +35,7 @@ pub use migrate::{
 };
 pub use recovery_code::{recovery_secret, RecoveryCode};
 pub use root::RootDocument;
+pub use seed::{looks_like_seed, Seed, SeedError};
 pub use unlock::{status, unlock_root, KeyStoreStatus, RootSource};
 pub use wrap::{derive_domain, KdfParams, KdfPolicy, DOMAIN_CORE, DOMAIN_IDENTITY};
 pub use zeroize::Zeroizing;
