@@ -200,15 +200,15 @@
                         <div id="vaultSetup" style="display:none">
                             <input type="password" id="vsPass" placeholder="Пароль (не короче 6 знаков)" autocomplete="new-password">
                             <input type="password" id="vsPass2" placeholder="Пароль ещё раз" autocomplete="new-password">
-                            <p class="form-help">Четыре секретных слова (необязательно, каждое от 5 знаков, разные) позволят восстановить доступ, если пароль забыт. Без слов забытый пароль не восстановить.</p>
-                            <input type="text" id="vsPhrase" placeholder="Четыре слова через пробел (можно пропустить)" autocomplete="off">
+                            <p class="form-help">Сид-фраза (12 или 24 английских слова, как в окне первой настройки) нужна, чтобы восстановить доступ, если пароль забыт. Пять неверных паролей закрывают вход по паролю; двадцать неверных сид-фраз стирают закрытую среду на этом компьютере.</p>
+                            <input type="text" id="vsPhrase" placeholder="Сид-фраза: 12 или 24 слова через пробел" autocomplete="off">
                             <button class="btn" id="vsGo">Создать закрытую среду</button>
                         </div>
                         <div id="vaultUnlock" style="display:none">
                             <input type="password" id="vuPass" placeholder="Пароль владельца" autocomplete="current-password">
                             <button class="btn" id="vuGo">Разблокировать</button>
                             <details><summary>Забыли пароль?</summary>
-                                <input type="text" id="vrPhrase" placeholder="Четыре слова" autocomplete="off">
+                                <input type="text" id="vrPhrase" placeholder="Сид-фраза: 12 или 24 слова" autocomplete="off">
                                 <input type="password" id="vrPass" placeholder="Новый пароль" autocomplete="new-password">
                                 <button class="btn" id="vrGo">Восстановить словами</button>
                             </details>
@@ -786,7 +786,7 @@
         $('vsGo').onclick = function () {
             if ($('vsPass').value !== $('vsPass2').value) return msg('Пароли не совпали', true);
             var phrase = $('vsPhrase').value.trim();
-            if (!phrase && !confirm('Без секретных слов забытый пароль не восстановить. Продолжить без слов?')) return;
+            if (!phrase) return msg('Введите сид-фразу (12 или 24 слова)', true);
             act('/api/vault/setup', { password: $('vsPass').value, phrase: phrase || null }, 'Закрытая среда создана, данные перенесены.');
             $('vsPass').value = ''; $('vsPass2').value = '';
         };
