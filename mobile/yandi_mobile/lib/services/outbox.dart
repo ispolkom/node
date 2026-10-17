@@ -27,9 +27,10 @@ class Outbox {
     return !FileOffer.isOffer(m.text) && !m.text.startsWith(GroupInviteMsg.marker) && !m.text.startsWith(ContactCardMsg.marker);
   }
 
-  /// Какие из неотправленных пора повторить сейчас: по порядку отправки, не больше [perPass].
-  List<ChatMessage> due(List<ChatMessage> failed, DateTime now) {
-    final mine = failed.where((m) => retryable(m, now)).toList()..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+  /// Какие из неотправленных пора повторить сейчас: по порядку отправки, не больше [perPass]. [skip] (например, заблокированный
+  /// собеседник) отсекается ДО лимита прохода, иначе такие сообщения занимали бы весь проход.
+  List<ChatMessage> due(List<ChatMessage> failed, DateTime now, {bool Function(ChatMessage)? skip}) {
+    final mine = failed.where((m) => retryable(m, now) && !(skip?.call(m) ?? false)).toList()..sort((a, b) => a.timestamp.compareTo(b.timestamp));
     final out = <ChatMessage>[];
     for (final m in mine) {
       final t = _tries[m.id];

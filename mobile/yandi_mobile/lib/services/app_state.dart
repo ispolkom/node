@@ -12,6 +12,8 @@ import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
 import '../models/trusted_node.dart';
 import '../models/contact.dart';
+import '../models/group_invite.dart';
+import '../models/contact_card.dart';
 import '../models/message.dart';
 import '../models/file_offer.dart';
 import '../models/file_state.dart';
@@ -232,11 +234,13 @@ class AppState extends ChangeNotifier implements FilesHost {
     _retrying = true;
     try {
       final now = DateTime.now();
-      final failed = await StorageService.failedOutgoing(sinceMs: now.subtract(Outbox.maxAge).millisecondsSinceEpoch);
+      final failed = await StorageService.failedOutgoing(
+        sinceMs: now.subtract(Outbox.maxAge).millisecondsSinceEpoch,
+        skipPrefixes: [FileOffer.marker, GroupInviteMsg.marker, ContactCardMsg.marker],
+      );
       _outbox.keepOnly({for (final m in failed) m.id});
-      for (final m in _outbox.due(failed, now)) {
+      for (final m in _outbox.due(failed, now, skip: (m) => isBlocked(m.peerId))) {
         if (_ws != ws || !ws.connected) break;
-        if (isBlocked(m.peerId)) continue;
         final payload = MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText);
         final ok = await ws.sendMessage(m.peerId, payload);
         if (!ok) {
@@ -419,14 +423,6 @@ class AppState extends ChangeNotifier implements FilesHost {
         if (res == null) { if (await commitReplay()) ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
         final showText = res.$1;
         final remoteId = res.$2;
-        // то же сообщение уже пришло (повтор отправителя): подтверждаем и не показываем второй раз
-        if (remoteId != null && await StorageService.incomingExists(fromPeerId, remoteId)) {
-          if (await commitReplay()) {
-            _sendDeliveredReceipt(fromPeerId, remoteId);
-            ackIds.add(id);
-          }
-          continue;
-        }
         final msg = ChatMessage(
           id:        'inbox_$id',
           peerId:    fromPeerId,
@@ -438,8 +434,15 @@ class AppState extends ChangeNotifier implements FilesHost {
           replyId:   res.$3,
           replyText: res.$4,
         );
-        // ConflictAlgorithm.ignore в saveMessage гарантирует идемпотентность
-        await StorageService.saveMessage(msg);
+        // запись и проверка «не было ли уже» — одна операция базы; повтор отправителя подтверждаем, но второй раз не показываем
+        final fresh = await StorageService.insertIncomingIfNew(msg);
+        if (!fresh) {
+          if (await commitReplay()) {
+            if (remoteId != null) _sendDeliveredReceipt(fromPeerId, remoteId);
+            ackIds.add(id);
+          }
+          continue;
+        }
         if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
         if (activeChatPeerId != fromPeerId) _bumpUnread(fromPeerId);
         if (!await commitReplay()) continue;   // сохранено, но номер не занят: подтверждение — в следующий проход
@@ -1615,12 +1618,6 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (res == null) { await e.commit?.call(); notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
     final showText = res.$1;
     final remoteId = res.$2;
-    // повторная отправка того же сообщения (после обрыва) — не показываем второй раз, но подтверждаем, чтобы отправитель перестал повторять
-    if (remoteId != null && await StorageService.incomingExists(e.fromPeerId, remoteId)) {
-      await e.commit?.call();
-      _sendDeliveredReceipt(e.fromPeerId, remoteId);
-      return;
-    }
     final msg = ChatMessage(
       id:        ChatMessage.incomingId(e.fromPeerId, e.timestamp, showText),
       peerId:    e.fromPeerId,
@@ -1632,8 +1629,15 @@ class AppState extends ChangeNotifier implements FilesHost {
       replyId:   res.$3,
       replyText: res.$4,
     );
+    // запись и проверка «не было ли уже» — одна операция базы; в память и в уведомления попадает только тот, кто записал
+    final fresh = await StorageService.insertIncomingIfNew(msg);
+    if (!fresh) {
+      // повторная отправка того же сообщения (после обрыва) — второй раз не показываем, но подтверждаем, чтобы отправитель перестал повторять
+      await e.commit?.call();
+      if (remoteId != null) _sendDeliveredReceipt(e.fromPeerId, remoteId);
+      return;
+    }
     _chats.putIfAbsent(e.fromPeerId, () => []).add(msg);
-    await StorageService.saveMessage(msg);
     await e.commit?.call();   // номер письма занимается только после записи в БД
     if (remoteId != null) { _rids[msg.id] = remoteId; _saveRx(); }
     if (activeChatPeerId != e.fromPeerId) _bumpUnread(e.fromPeerId);

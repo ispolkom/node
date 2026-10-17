@@ -78,4 +78,15 @@ void main() {
     // а обычный текст, даже похожий на служебный, повторяется
     expect(Outbox.retryable(msg('a', text: 'yandi-file: привет'), t0), true);
   });
+
+  test('заблокированный собеседник не занимает проход: пропускается до лимита', () {
+    final o = Outbox();
+    final list = [
+      for (var i = 0; i < 30; i++) ChatMessage(id: 'x$i', peerId: 'blocked', outgoing: true, text: 'a$i', timestamp: DateTime(2026, 10, 18, 12).add(Duration(seconds: i)), status: MessageStatus.failed),
+      ChatMessage(id: 'ok', peerId: 'friend', outgoing: true, text: 'привет', timestamp: DateTime(2026, 10, 18, 12, 5), status: MessageStatus.failed),
+    ];
+    final pass = o.due(list, t0.add(const Duration(minutes: 10)), skip: (m) => m.peerId == 'blocked');
+    expect(pass.map((m) => m.id), ['ok'], reason: 'очередь друга идёт, хотя 30 сообщений заблокированному старше');
+  });
 }
+

@@ -110,7 +110,7 @@ class StorageService {
     final hasEnc = await File(encPath).exists();
     final hasPlain = await _isPlainSqlite(plainPath);
     if (hasPlain && !hasEnc) await _migratePlain(plainPath, encPath, pass);
-    _db = await openDatabase(encPath, version: 7, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+    _db = await openDatabase(encPath, version: 8, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
     if (hasPlain && hasEnc) {
       // Зашифрованная база уже есть и открылась (оборванный прежний перенос или вернувшаяся копия): открытая — устаревшая, поверх
       // действующей её не переносим (новые записи пропали бы), а затираем.
@@ -154,7 +154,7 @@ class StorageService {
     Database? dst;
     try {
       final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
-      dst = await openDatabase(tmp, version: 7, onCreate: _createTables, password: pass);
+      dst = await openDatabase(tmp, version: 8, onCreate: (d, v) => _createTables(d, v, inboxIndex: false), password: pass);
       final tables = (await src.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'"))
           .map((row) => row['name']).toSet();
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
@@ -171,7 +171,9 @@ class StorageService {
         if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
       }
       // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
-      if (srcVersion > 0 && srcVersion < 7) await _onUpgrade(dst, srcVersion, 7);
+      if (srcVersion > 0 && srcVersion < 8) await _onUpgrade(dst, srcVersion, 8);
+      // уникальность входящих по (собеседник, номер у отправителя) — после копирования: в старой базе могли быть дубли, их убираем здесь
+      await _ensureInboxIndex(dst);
     } finally {
       try { await src.close(); } finally { await dst?.close(); }
     }
@@ -217,7 +219,16 @@ class StorageService {
     await db.execute('CREATE INDEX IF NOT EXISTS idx_group_kind ON group_entries(gid, kind, seq)');
   }
 
+  /// Один и тот же входящий (собеседник + номер у отправителя) хранится один раз: повтор отправки после обрыва не даёт второй строки,
+  /// даже если два пути доставки (сокет и почта) обрабатывают его одновременно. Прежние дубли убираются перед созданием индекса.
+  static Future<void> _ensureInboxIndex(Database db) async {
+    await db.execute('DELETE FROM messages WHERE outgoing = 0 AND remote_id IS NOT NULL AND rowid NOT IN '
+        '(SELECT MIN(rowid) FROM messages WHERE outgoing = 0 AND remote_id IS NOT NULL GROUP BY peer_id, remote_id)');
+    await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS ux_msg_in ON messages(peer_id, remote_id) WHERE outgoing = 0 AND remote_id IS NOT NULL');
+  }
+
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 8) await _ensureInboxIndex(db);
     if (oldVersion < 7) {
       // номер сообщения у отправителя: без него после перезапуска не работают «прочитано» и правки входящих
       try { await db.execute('ALTER TABLE messages ADD COLUMN remote_id TEXT'); } catch (_) {}
@@ -250,7 +261,7 @@ class StorageService {
     }
   }
 
-  static Future<void> _createTables(Database db, int version) async {
+  static Future<void> _createTables(Database db, int version, {bool inboxIndex = true}) async {
     await _createGroupTables(db);
     await db.execute('''
       CREATE TABLE nodes (
@@ -295,6 +306,7 @@ class StorageService {
     await db.execute(
       'CREATE INDEX idx_msg_peer ON messages(peer_id, timestamp)',
     );
+    if (inboxIndex) await _ensureInboxIndex(db);
 
     await db.execute('''
       CREATE TABLE manual_contacts (
@@ -558,11 +570,13 @@ class StorageService {
   }
 
   /// Неотправленные исходящие не старше `sinceMs` (для автоповтора): старые вперёд, не больше `limit`.
-  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 100}) async {
+  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 500, List<String> skipPrefixes = const []}) async {
+    // служебные конверты (файлы, приглашения, карточки) отсекаются в самом запросе: иначе сотня таких строк заслонила бы личные тексты
+    final skip = skipPrefixes.map((_) => ' AND text NOT LIKE ?').join();
     final rows = await db.query(
       'messages',
-      where: "outgoing = 1 AND status = 'failed' AND timestamp >= ?",
-      whereArgs: [sinceMs],
+      where: "outgoing = 1 AND status = 'failed' AND timestamp >= ?$skip",
+      whereArgs: [sinceMs, ...skipPrefixes.map((p) => '$p%')],
       orderBy: 'timestamp ASC',
       limit: limit,
     );
@@ -579,6 +593,18 @@ class StorageService {
               remoteId: r['remote_id'] as String?,
             ))
         .toList();
+  }
+
+  /// Записать входящее, если такого (собеседник + номер у отправителя, либо тот же локальный номер) ещё нет. true — записано, false —
+  /// повтор. Проверка и запись — одна операция базы: два пути доставки не могут оба «не найти» и оба записать.
+  static Future<bool> insertIncomingIfNew(ChatMessage msg) async {
+    return await db.transaction((txn) async {
+      await txn.rawInsert(
+        'INSERT OR IGNORE INTO messages (id, peer_id, outgoing, text, timestamp, status, reply_id, reply_text, remote_id) VALUES (?,?,?,?,?,?,?,?,?)',
+        [msg.id, msg.peerId, msg.outgoing ? 1 : 0, msg.text, msg.timestamp.millisecondsSinceEpoch, msg.status.name, msg.replyId, msg.replyText, msg.remoteId],
+      );
+      return (Sqflite.firstIntValue(await txn.rawQuery('SELECT changes()')) ?? 0) > 0;
+    });
   }
 
   /// Уже есть входящее от этого собеседника с таким номером у отправителя (повторная отправка того же сообщения).
