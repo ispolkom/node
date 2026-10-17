@@ -1283,8 +1283,16 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
+    // пять неверных паролей подряд — дальше пароль не принимается совсем (даже верный): только вход по сид-фразе
+    if crate::web::auth::login_locked_out() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Слишком много неверных паролей: войдите по сид-фразе (восстановление доступа)"})),
+        ).into_response();
+    }
     match crate::web::auth::verify_login(&body.login_password) {
         Ok(true) => {
+            crate::web::auth::reset_login_failures();
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(body.remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, body.remember_me);
@@ -1299,6 +1307,7 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
         }
         Ok(false) => {
             state.auth_state.record_login_failure();
+            crate::web::auth::record_login_failure_durable();
             (
                 StatusCode::UNAUTHORIZED,
                 Json(serde_json::json!({"error": "Неверный пароль"})),
@@ -1455,6 +1464,16 @@ async fn api_auth_recover(
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
+    // новый пароль проверяется целиком до любых действий; сид-фраза проходит счёт закрытой среды (двадцать неверных стирают её), и только
+    // потом заменяется пароль входа — отдельного проверочного пути для сида без лимита нет
+    #[cfg(unix)]
+    if let Err(e) = crate::web::auth::check_new_password(&body.new_login_password) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    if let Some(Err((code, text))) = crate::closed_api::recover_vault_if_configured(body.recovery_code.clone(), body.new_login_password.clone()).await {
+        state.auth_state.record_login_failure();
+        return (code, Json(serde_json::json!({"error": text}))).into_response();
+    }
     let auth_state = state.auth_state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::web::auth::recover_login(&auth_state, &body.recovery_code, &body.new_login_password)
@@ -1464,6 +1483,7 @@ async fn api_auth_recover(
     .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
     match result {
         Ok(remember_me) => {
+            crate::web::auth::reset_login_failures(); // вход по сид-фразе снимает запрет входа паролем
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, remember_me);

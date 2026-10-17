@@ -545,6 +545,33 @@ fn weak_password_allowed() -> bool {
     crate::util::data_dir::data_dir().join("test_weak_password").exists()
 }
 
+// ── Долговечный счёт неверных паролей входа: пять — и дальше только сид-фраза (то же правило, что у закрытой среды) ──────────────────
+
+pub const MAX_LOGIN_FAILURES: u32 = 5;
+
+fn login_failures_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("login_failures")
+}
+
+/// Сколько неверных паролей входа подряд (переживает перезапуск узла).
+pub fn login_failures() -> u32 {
+    std::fs::read_to_string(login_failures_path()).ok().and_then(|s| s.trim().parse().ok()).unwrap_or(0)
+}
+
+/// Вход паролем закрыт: пять неверных подряд, дальше — только вход по сид-фразе.
+pub fn login_locked_out() -> bool {
+    login_failures() >= MAX_LOGIN_FAILURES
+}
+
+pub fn record_login_failure_durable() {
+    let n = login_failures().saturating_add(1);
+    let _ = crate::util::private_file::write_private(&login_failures_path(), n.to_string().as_bytes());
+}
+
+pub fn reset_login_failures() {
+    let _ = std::fs::remove_file(login_failures_path());
+}
+
 /// Действующий минимум длины нового пароля (8; 6 только при тестовом файле). Одна политика для настройки, восстановления и мастера.
 #[cfg(unix)]
 pub(crate) fn min_new_password() -> usize {
@@ -1308,5 +1335,27 @@ mod key_root_integration_tests {
             let _ = std::fs::remove_dir_all(base);
             let _ = std::fs::remove_dir_all(other);
         }
+    }
+}
+
+#[cfg(test)]
+mod login_limit_tests {
+    use super::*;
+
+    #[test]
+    fn five_wrong_passwords_close_the_password_login_and_the_counter_survives_a_restart() {
+        reset_login_failures();
+        assert!(!login_locked_out());
+        for i in 1..=MAX_LOGIN_FAILURES {
+            assert!(!login_locked_out(), "до {i}-й неудачи вход ещё открыт");
+            record_login_failure_durable();
+        }
+        assert!(login_locked_out(), "пятая неверная закрывает вход паролем");
+        // «перезапуск»: счёт лежит на диске, а не в памяти процесса
+        assert_eq!(login_failures(), MAX_LOGIN_FAILURES);
+        record_login_failure_durable();
+        assert!(login_locked_out());
+        reset_login_failures();
+        assert!(!login_locked_out(), "вход по сид-фразе снимает запрет");
     }
 }

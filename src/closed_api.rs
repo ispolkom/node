@@ -286,6 +286,30 @@ fn env() -> Result<&'static Arc<ClosedEnv>, Response> {
     })
 }
 
+/// Вход по сид-фразе (`/api/auth/recover`): если закрытая среда создана, фраза СНАЧАЛА проходит её счёт — двадцать неверных стирают
+/// среду, опечатка не считается (P11-12: иначе это был бы второй проверочный путь для того же секрета без лимита). Новый пароль
+/// ставится сразу и на закрытую среду. `None` — среда не создана или недоступна: прежний порядок. Ошибка — готовый код и текст.
+pub(crate) async fn recover_vault_if_configured(phrase: String, new_password: String) -> Option<Result<(), (StatusCode, String)>> {
+    let e = global()?;
+    if !e.configured() {
+        return None;
+    }
+    Some(match e.recover(phrase, new_password).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let text = err.to_string();
+            let code = if text.contains("пауза") || text.contains("заблокирован до KDF") {
+                StatusCode::TOO_MANY_REQUESTS
+            } else if text.contains("неверный секрет") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            Err((code, text))
+        }
+    })
+}
+
 /// Код ответа по тексту ошибки слоя входа: паузы — 429, неверный секрет — 401, прочее — 400.
 fn fail(e: anyhow::Error) -> Response {
     let text = e.to_string();
