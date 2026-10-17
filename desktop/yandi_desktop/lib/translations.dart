@@ -1,5 +1,9 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Распечатать': 'Print',
+  'Отправлено на печать. Система печати хранит задание временно: проверьте, что лист напечатан и очередь пуста.':
+      'Sent to the printer. The print system keeps the job temporarily: make sure the sheet was printed and the queue is empty.',
+  'Печать недоступна: принтер или команда lp не найдены.': 'Printing is unavailable: no printer or lp command found.',
   'Восстановить из копии': 'Restore from a backup',
   'Восстановление из копии. Нужны файл копии (.yandibak) и сид-фраза. Пароль прежней установки не переносится: задайте новый пароль для этого компьютера.':
       'Restore from a backup. You need the backup file (.yandibak) and the seed phrase. The old installation password is not carried over: set a new password for this computer.',

@@ -1,3 +1,5 @@
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/material.dart';
@@ -23,6 +25,9 @@ class SetupWizard extends StatefulWidget {
   /// Восстановление из файла копии: путь, сид-фраза, новый пароль этой установки.
   final Future<void> Function(String path, String phrase, String password) restore;
 
+  /// Печать листа с сид-фразой прямо из памяти (по умолчанию команда `lp`, файл не создаётся); в тестах подменяется.
+  final Future<bool> Function(String text)? printer;
+
   /// Только для тестов: детерминированная перестановка и выбор слов для проверки.
   final Random? random;
   const SetupWizard({
@@ -32,6 +37,7 @@ class SetupWizard extends StatefulWidget {
     required this.busy,
     required this.finish,
     required this.restore,
+    this.printer,
     this.random,
   });
   @override
@@ -193,6 +199,42 @@ class _SetupWizardState extends State<SetupWizard> {
     }
   }
 
+  /// Лист для печати: слова по номерам и памятка. Передаётся принтеру через стандартный ввод, на диск оболочка ничего не пишет.
+  String _sheet() {
+    final b = StringBuffer('YANDI\n\n');
+    for (var i = 0; i < words.length; i++) {
+      b.writeln('${(i + 1).toString().padLeft(2)}. ${words[i]}');
+    }
+    b.writeln();
+    b.writeln('Seed phrase of the node. Keep it on paper, away from the computer.');
+    b.writeln('Anyone who has these words can restore the node. Do not photograph it.');
+    return b.toString();
+  }
+
+  static Future<bool> _lp(String text) async {
+    try {
+      final p = await Process.start('lp', ['-t', 'YANDI', '-o', 'job-sheets=none']);
+      p.stdin.add(utf8.encode(text));
+      await p.stdin.close();
+      await p.stdout.drain<void>();
+      await p.stderr.drain<void>();
+      return await p.exitCode == 0;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  String? printNote;
+
+  Future<void> printSheet() async {
+    setState(() => printNote = null);
+    final ok = await (widget.printer ?? _lp)(_sheet());
+    if (!mounted) return;
+    setState(() => printNote = ok
+        ? 'Отправлено на печать. Система печати хранит задание временно: проверьте, что лист напечатан и очередь пуста.'
+        : 'Печать недоступна: принтер или команда lp не найдены.');
+  }
+
   Future<void> pick() async {
     final chosen = await PlatformFiles.choose();
     if (chosen == null || !mounted) return;
@@ -308,46 +350,92 @@ class _SetupWizardState extends State<SetupWizard> {
 
   Widget _language() => Align(
     alignment: Alignment.centerRight,
-    child: TextButton(
+    child: OutlinedButton(
       onPressed: () {
         widget.preferences.english = !widget.preferences.english;
         widget.preferences.update();
       },
+      style: OutlinedButton.styleFrom(
+        foregroundColor: Icq.header,
+        side: const BorderSide(color: Icq.header),
+        shape: const RoundedRectangleBorder(),
+        minimumSize: const Size(80, 32),
+        textStyle: const TextStyle(fontSize: 13, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji']),
+      ),
       child: Text(widget.preferences.english ? 'Русский' : 'English'),
     ),
   );
 
+  /// Кнопки в цвете шапки приложения: основная — тёмно-зелёная, вторичная — светлее; без подчёркнутых «ссылок».
   Widget _button(String label, VoidCallback? action, {bool filled = true}) =>
       Padding(
         padding: const EdgeInsets.only(right: 12, top: 8),
-        child: filled
-            ? FilledButton(onPressed: action, child: UiText(label))
-            : OutlinedButton(onPressed: action, child: UiText(label)),
+        child: ElevatedButton(
+          onPressed: action,
+          style: ElevatedButton.styleFrom(
+            backgroundColor: filled ? Icq.header : Icq.headerLight,
+            foregroundColor: Colors.white,
+            disabledBackgroundColor: Icq.border,
+            disabledForegroundColor: Colors.white70,
+            elevation: 0,
+            minimumSize: const Size(100, 40),
+            padding: const EdgeInsets.symmetric(horizontal: 14),
+            shape: const RoundedRectangleBorder(),
+            side: const BorderSide(color: Icq.light),
+            textStyle: const TextStyle(fontSize: 14, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji']),
+          ),
+          child: UiText(label, style: const TextStyle(color: Colors.white)),
+        ),
       );
 
-  Widget _numbered(List<String> list) => Wrap(
-    spacing: 8,
-    runSpacing: 8,
+  static const _cellWidth = 136.0, _cellHeight = 40.0;
+
+  /// Слово в окне одного размера: длина слова размер окна не меняет, слишком длинное уменьшается.
+  Widget _cell(Widget child, {bool filled = true}) => Container(
+    width: double.infinity,
+    height: _cellHeight,
+    alignment: Alignment.center,
+    padding: const EdgeInsets.symmetric(horizontal: 8),
+    decoration: BoxDecoration(
+      color: filled ? Icq.light : Icq.background,
+      border: Icq.frame,
+    ),
+    child: FittedBox(fit: BoxFit.scaleDown, child: child),
+  );
+
+  /// Сетка из окон одного размера: по три слова в строке (12 слов — 4 строки, 24 слова — 8 строк).
+  Widget _numbered(List<String> list, {bool selectable = true}) => Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
     children: [
-      for (var i = 0; i < list.length; i++)
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(border: Icq.frame),
-          child: SelectableText.rich(
-            TextSpan(
-              children: [
-                TextSpan(
-                  text: '${i + 1}. ',
-                  style: const TextStyle(color: Icq.dark),
+      for (var r = 0; r * 3 < list.length; r++)
+        Padding(
+          padding: const EdgeInsets.only(bottom: 8),
+          child: Row(
+            children: [
+              for (var i = r * 3; i < r * 3 + 3; i++)
+                Expanded(
+                  child: Padding(
+                    padding: EdgeInsets.only(right: i % 3 == 2 ? 0 : 8),
+                    child: i >= list.length ? const SizedBox(height: _cellHeight) : _cell(
+                    Text.rich(
+                      TextSpan(
+                        children: [
+                          TextSpan(
+                            text: '${i + 1}. ',
+                            style: const TextStyle(color: Icq.dark),
+                          ),
+                          TextSpan(
+                            text: list[i],
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                          ),
+                        ],
+                      ),
+                      maxLines: 1,
+                    ),
+                    ),
+                  ),
                 ),
-                TextSpan(
-                  text: list[i],
-                  style: const TextStyle(fontWeight: FontWeight.bold),
-                ),
-              ],
-            ),
-            // запрет копирования слов в буфер обмена: только запись от руки
-            contextMenuBuilder: (context, state) => const SizedBox.shrink(),
+            ],
           ),
         ),
     ],
@@ -360,10 +448,16 @@ class _SetupWizardState extends State<SetupWizard> {
       'Запишите слова на бумаге в том же порядке, в каком они показаны на экране. Без них нельзя восстановить пароль и перенести узел на новый компьютер: контакты и связи будут потеряны. Никому не показывайте эти слова и не фотографируйте экран.',
     ),
     const SizedBox(height: 12),
+    Align(
+      alignment: Alignment.centerLeft,
+      child: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: UiText('Выберите степень сложности сид-фразы', style: const TextStyle(fontWeight: FontWeight.bold)),
+      ),
+    ),
+    const SizedBox(height: 4),
     Row(
       children: [
-        const Flexible(child: UiText('Выберите степень сложности сид-фразы')),
-        const SizedBox(width: 12),
         DropdownButton<int>(
           value: count,
           items: const [
@@ -382,9 +476,11 @@ class _SetupWizardState extends State<SetupWizard> {
     ),
     const SizedBox(height: 12),
     if (loading) const UiText('Создаю сид-фразу…') else _numbered(words),
+    if (printNote != null) Padding(padding: const EdgeInsets.only(top: 4), child: UiText(printNote!)),
     Wrap(
       children: [
         _button('Сохранил слова', loading || words.isEmpty ? null : toOrder),
+        _button('Распечатать', loading || words.isEmpty ? null : printSheet, filled: false),
         _button(
           'Восстановить из копии',
           () => setState(() {
@@ -412,12 +508,25 @@ class _SetupWizardState extends State<SetupWizard> {
       children: [
         for (final index in shuffled)
           if (!picked.contains(index))
-            ActionChip(
-              label: Text(words[index]),
-              onPressed: () => setState(() {
-                picked = [...picked, index];
-                error = null;
-              }),
+            SizedBox(
+              width: _cellWidth,
+              height: _cellHeight,
+              child: ElevatedButton(
+                onPressed: () => setState(() {
+                  picked = [...picked, index];
+                  error = null;
+                }),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Icq.panel,
+                  foregroundColor: Icq.text,
+                  elevation: 0,
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  shape: const RoundedRectangleBorder(),
+                  side: const BorderSide(color: Icq.dark),
+                  textStyle: const TextStyle(fontSize: 16, fontFamily: 'Tahoma', fontFamilyFallback: ['NotoColorEmoji'], decoration: TextDecoration.none),
+                ),
+                child: FittedBox(fit: BoxFit.scaleDown, child: Text(words[index], style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16))),
+              ),
             ),
       ],
     ),

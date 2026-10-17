@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_desktop/preferences.dart';
+import 'package:yandi_desktop/setup_wizard.dart';
 
 import 'widget_test.dart' show FakeApi, start, click, stop;
 
@@ -41,7 +43,7 @@ Future<void> toTypeStep(WidgetTester t, {List<String>? phrase}) async {
   final words = (phrase ?? seed12.split(' '));
   await click(t, 'Сохранил слова');
   for (final w in words) {
-    final chip = find.widgetWithText(ActionChip, w);
+    final chip = find.widgetWithText(ElevatedButton, w);
     await t.ensureVisible(chip.first);
     await t.tap(chip.first);
     await t.pump();
@@ -190,6 +192,41 @@ void main() {
         {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password'});
     expect(api.bodies.last, {'password': 'long password'}, reason: 'закрытая среда открывается новым паролем');
     expect(api.calls.indexOf('/api/auth/restore') < api.calls.indexOf('/api/vault/unlock'), true);
+    await stop(t);
+  });
+
+  testWidgets('the seed sheet goes to the printer from memory, numbered, and a failure is told', (t) async {
+    final api = WizardApi();
+    final sent = <String>[];
+    var ok = true;
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: SingleChildScrollView(
+          child: PreferencesScope(
+            preferences: AppPreferences(),
+            child: SetupWizard(
+              api: api,
+              preferences: AppPreferences(),
+              busy: false,
+              finish: (_, __) async {},
+              restore: (_, __, ___) async {},
+              printer: (text) async {
+                sent.add(text);
+                return ok;
+              },
+            ),
+          ),
+        ),
+      ),
+    ));
+    await t.pumpAndSettle();
+    await click(t, 'Распечатать');
+    expect(sent.single, contains(' 1. legal'));
+    expect(sent.single, contains('12. yellow'));
+    expect(find.textContaining('Отправлено на печать'), findsOneWidget);
+    ok = false;
+    await click(t, 'Распечатать');
+    expect(find.textContaining('Печать недоступна'), findsOneWidget);
     await stop(t);
   });
 }
