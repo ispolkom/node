@@ -20,6 +20,7 @@ import '../models/avatar_msg.dart';
 import 'avatar_service.dart';
 import 'avatar_processor.dart';
 import '../crypto/identity.dart';
+import 'outbox.dart';
 import 'storage_service.dart';
 import '../crypto/file_vault.dart';
 import 'vault_bytes_cache.dart';
@@ -181,6 +182,8 @@ class AppState extends ChangeNotifier implements FilesHost {
         // сокет открылся (первый раз или после обрыва): статусы за время обрыва не приходили, берём заново, и забираем накопленную почту
         unawaited(refreshContacts());
         unawaited(_syncInbox());
+        _outbox.connectionBack(DateTime.now());
+        unawaited(retryUnsent());   // связь вернулась: неотправленное уходит сразу
         announceReceiptSupport();
         unawaited(syncGroups());
       },
@@ -198,6 +201,10 @@ class AppState extends ChangeNotifier implements FilesHost {
 
     chatBg.start(node);
 
+    // неотправленные сообщения повторяются сами (паузы и срок — в Outbox)
+    _retryTimer?.cancel();
+    _retryTimer = async_lib.Timer.periodic(const Duration(seconds: 5), (_) => unawaited(retryUnsent()));
+
     // статусы «в сети» ещё и подтягиваем раз в 20 секунд: события о смене могут потеряться при обрыве связи
     _presenceTimer?.cancel();
     _presenceTimer = async_lib.Timer.periodic(const Duration(seconds: 20), (_) {
@@ -209,6 +216,44 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   async_lib.Timer? _presenceTimer;
+
+  // ── Автоповтор неотправленных сообщений ──────────────────────────────────
+  final Outbox _outbox = Outbox();
+  async_lib.Timer? _retryTimer;
+  bool _retrying = false;
+
+  /// Сколько неотправленных сообщений сейчас ждёт повтора (для показателя стабильности связи).
+  int get unsentWaiting => _outbox.waiting;
+
+  /// Один проход: неотправленные личные сообщения уходят снова тем же номером (получатель отбрасывает повтор по номеру).
+  Future<void> retryUnsent() async {
+    final ws = _ws;
+    if (_retrying || ws == null || !ws.connected) return;
+    _retrying = true;
+    try {
+      final now = DateTime.now();
+      final failed = await StorageService.failedOutgoing(sinceMs: now.subtract(Outbox.maxAge).millisecondsSinceEpoch);
+      _outbox.keepOnly({for (final m in failed) m.id});
+      for (final m in _outbox.due(failed, now)) {
+        if (_ws != ws || !ws.connected) break;
+        if (isBlocked(m.peerId)) continue;
+        final payload = MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText);
+        final ok = await ws.sendMessage(m.peerId, payload);
+        if (!ok) {
+          _outbox.failedAgain(m.id, DateTime.now());
+          continue;
+        }
+        _outbox.sent(m.id);
+        await StorageService.updateMessageStatus(m.id, MessageStatus.pending);
+        _replaceMessage(m.peerId, m.id, m.copyWith(status: MessageStatus.pending));
+        notifyListeners();
+      }
+    } catch (_) {
+      // база или сеть недоступны: попробуем на следующем проходе
+    } finally {
+      _retrying = false;
+    }
+  }
 
   /// Группы узла (ключи, журнал, правила). Пересоздаётся вместе с подключением к узлу.
   GroupService? groups;
@@ -374,6 +419,14 @@ class AppState extends ChangeNotifier implements FilesHost {
         if (res == null) { if (await commitReplay()) ackIds.add(id); continue; } // служебное — подтверждаем и пропускаем
         final showText = res.$1;
         final remoteId = res.$2;
+        // то же сообщение уже пришло (повтор отправителя): подтверждаем и не показываем второй раз
+        if (remoteId != null && await StorageService.incomingExists(fromPeerId, remoteId)) {
+          if (await commitReplay()) {
+            _sendDeliveredReceipt(fromPeerId, remoteId);
+            ackIds.add(id);
+          }
+          continue;
+        }
         final msg = ChatMessage(
           id:        'inbox_$id',
           peerId:    fromPeerId,
@@ -1562,6 +1615,12 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (res == null) { await e.commit?.call(); notifyListeners(); return; } // служебное (квитанция/пинг) — не показываем
     final showText = res.$1;
     final remoteId = res.$2;
+    // повторная отправка того же сообщения (после обрыва) — не показываем второй раз, но подтверждаем, чтобы отправитель перестал повторять
+    if (remoteId != null && await StorageService.incomingExists(e.fromPeerId, remoteId)) {
+      await e.commit?.call();
+      _sendDeliveredReceipt(e.fromPeerId, remoteId);
+      return;
+    }
     final msg = ChatMessage(
       id:        ChatMessage.incomingId(e.fromPeerId, e.timestamp, showText),
       peerId:    e.fromPeerId,
@@ -1639,6 +1698,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> lockDown() async {
     _lockEpoch++;
     _presenceTimer?.cancel();
+    _retryTimer?.cancel();
     _ws?.dispose();
     _ws = null;
     _api?.dispose();

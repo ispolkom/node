@@ -25,6 +25,7 @@ import '../widgets/vault_image.dart';
 import '../widgets/message_menu.dart';
 import '../models/receipt.dart';
 import 'package:flutter/services.dart';
+import '../services/outbox.dart';
 import '../theme.dart';
 import '../content_policy.dart';
 import '../widgets/link_guard.dart';
@@ -693,7 +694,7 @@ class _MessageBubble extends StatelessWidget {
                     color: AppTheme.textSecondary, fontSize: 10)),
                 if (isOut) ...[
                   const SizedBox(width: 4),
-                  Icon(_statusIcon(msg.status), size: 13, color: _statusColor(msg.status)),
+                  Icon(_statusIcon(msg.status, waiting: Outbox.retryable(msg, DateTime.now())), size: 13, color: _statusColor(msg.status, waiting: Outbox.retryable(msg, DateTime.now()))),
                 ],
               ],
             ),
@@ -703,16 +704,17 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  IconData _statusIcon(MessageStatus s) => switch (s) {
+  /// [waiting] — не ушло, но приложение повторит само (часы, а не ошибка).
+  IconData _statusIcon(MessageStatus s, {bool waiting = false}) => switch (s) {
     MessageStatus.pending   => Icons.check,        // 1 серая — отправлено
     MessageStatus.delivered => Icons.done_all,     // 2 серые — доставлено
     MessageStatus.read      => Icons.done_all,     // 2 оранжевые — прочитано
-    MessageStatus.failed    => Icons.error_outline,
+    MessageStatus.failed    => waiting ? Icons.schedule : Icons.error_outline,
   };
 
-  Color _statusColor(MessageStatus s) => switch (s) {
+  Color _statusColor(MessageStatus s, {bool waiting = false}) => switch (s) {
     MessageStatus.read   => AppTheme.incoming,        // #ff4001: цвет рамки собеседника — «он это увидел»
-    MessageStatus.failed => Colors.redAccent,
+    MessageStatus.failed => waiting ? AppTheme.textSecondary : Colors.redAccent,
     _                    => AppTheme.textSecondary,   // серый: отправлено / доставлено
   };
 }

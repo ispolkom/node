@@ -557,6 +557,36 @@ class StorageService {
     );
   }
 
+  /// Неотправленные исходящие не старше `sinceMs` (для автоповтора): старые вперёд, не больше `limit`.
+  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 100}) async {
+    final rows = await db.query(
+      'messages',
+      where: "outgoing = 1 AND status = 'failed' AND timestamp >= ?",
+      whereArgs: [sinceMs],
+      orderBy: 'timestamp ASC',
+      limit: limit,
+    );
+    return rows
+        .map((r) => ChatMessage(
+              id: r['id'] as String,
+              peerId: r['peer_id'] as String,
+              outgoing: true,
+              text: r['text'] as String,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+              status: MessageStatus.failed,
+              replyId: r['reply_id'] as String?,
+              replyText: r['reply_text'] as String?,
+              remoteId: r['remote_id'] as String?,
+            ))
+        .toList();
+  }
+
+  /// Уже есть входящее от этого собеседника с таким номером у отправителя (повторная отправка того же сообщения).
+  static Future<bool> incomingExists(String peerId, String remoteId) async {
+    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ?', whereArgs: [peerId, remoteId], limit: 1);
+    return rows.isNotEmpty;
+  }
+
   static Future<void> updateMessageStatus(String id, MessageStatus status) async {
     await db.update(
       'messages',
