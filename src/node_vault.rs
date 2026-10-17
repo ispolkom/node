@@ -122,25 +122,13 @@ fn password_ok(password: &str) -> Result<()> {
     Ok(())
 }
 
-fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
     if phrase.len() > MAX_SECRET {
         bail!("слишком длинная фраза");
     }
-    let words: Vec<_> = phrase.split_whitespace().collect();
-    if words.len() != 4 || words.iter().any(|w| w.chars().count() < 5) {
-        bail!("нужны четыре слова не короче пяти знаков");
-    }
-    let mut seen = std::collections::HashSet::new();
-    if !words.iter().all(|w| seen.insert(w.to_lowercase())) {
-        bail!("слова не должны повторяться");
-    }
-    // Длины сохраняют границы слов; пробелы между словами нормализуются.
-    let mut encoded = Zeroizing::new(Vec::new());
-    for word in words {
-        encoded.extend_from_slice(&(word.len() as u32).to_be_bytes());
-        encoded.extend_from_slice(word.as_bytes());
-    }
-    Ok(encoded)
+    // Сид-фраза (12 или 24 слова): ключ делается из байтов сида, а не из текста; регистр и пробелы не важны.
+    let seed = key_root::Seed::parse(phrase).map_err(|e| anyhow!("{e}"))?;
+    Ok(Zeroizing::new(seed.secret().as_bytes().to_vec()))
 }
 
 fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
@@ -478,13 +466,13 @@ mod tests {
     fn password_change_preserves_data_and_optional_recovery() {
         let envelope = VaultEnvelope::create(
             "old password",
-            Some("словоодин словодва словотри словочетыре"),
+            Some("legal winner thank year wave sausage worth useful legal winner thank yellow"),
         )
         .unwrap();
         let mut vault = NodeVault::default();
         assert!(vault.change_password(&envelope, "new password").is_err());
         vault
-            .recover(&envelope, "словоодин\nсловодва  словотри словочетыре")
+            .recover(&envelope, "Legal winner\nthank  year wave sausage worth useful legal winner thank yellow")
             .unwrap();
         let data = vault.seal("groups/state", b"group keys").unwrap();
         let next = vault.change_password(&envelope, "new password").unwrap();
@@ -500,7 +488,7 @@ mod tests {
         vault.unlock(&next, "new password").unwrap();
         assert_eq!(&**vault.open("groups/state", &data).unwrap(), b"group keys");
         vault
-            .recover(&next, "словоодин словодва словотри словочетыре")
+            .recover(&next, "legal winner thank year wave sausage worth useful legal winner thank yellow")
             .unwrap();
         assert_eq!(&**vault.open("groups/state", &data).unwrap(), b"group keys");
         // Ошибка смены не портит прежний envelope, он сохраняется до успешной публикации нового.
@@ -553,8 +541,19 @@ mod tests {
     }
 
     #[test]
-    fn recovery_words_must_differ() {
-        assert!(VaultEnvelope::create("owner password", Some("alpha1 alpha1 gamma3 delta4")).is_err());
-        assert!(VaultEnvelope::create("owner password", Some("Alpha1 alpha1 gamma3 delta4")).is_err());
+    fn recovery_phrase_must_be_a_valid_seed() {
+        // 12 слов с неверной контрольной суммой, чужое слово, неверное число слов, прежний формат из четырёх слов
+        for bad in [
+            "winner legal thank year wave sausage worth useful legal winner thank yellow",
+            "legal winner thank year wave sausage worth useful legal winner thank yelow",
+            "legal winner thank year wave sausage worth useful legal winner thank",
+            "alpha1 bravo2 charlie3 delta4",
+        ] {
+            assert!(VaultEnvelope::create("owner password", Some(bad)).is_err(), "{bad}");
+        }
+        // 24 слова тоже годятся, регистр и пробелы не важны
+        let long = format!("{}art", "abandon ".repeat(23));
+        assert!(VaultEnvelope::create("owner password", Some(&long)).is_ok());
+        assert!(VaultEnvelope::create("owner password", Some(&long.to_uppercase())).is_ok());
     }
 }

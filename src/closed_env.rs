@@ -39,7 +39,7 @@ pub trait Consumer: Send + Sync {
     fn migrate(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>>;
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()>;
     fn lock(&self) -> BoxFuture<'_, ()>;
-    /// Среда стёрта (пять неверных сид-фраз): удалить зашифрованные файлы этой части — ключа к ним больше нет ни у кого.
+    /// Среда стёрта (двадцать неверных сид-фраз): удалить зашифрованные файлы этой части — ключа к ним больше нет ни у кого.
     fn erase(&self) -> BoxFuture<'_, ()> {
         Box::pin(async {})
     }
@@ -212,7 +212,7 @@ impl ClosedEnv {
         i.generation == generation && i.vault.is_some()
     }
 
-    /// Первичная настройка: пароль и четыре слова (обязательны: пять неверных паролей оставляют только сид).
+    /// Первичная настройка: пароль и сид-фраза (12 или 24 слова) (обязательны: пять неверных паролей оставляют только сид).
     /// Создаёт среду, переносит данные, открывает сеанс.
     pub async fn setup(&self, password: String, phrase: Option<String>) -> Result<()> {
         // поколение блокировок фиксируется ДО очереди и вычисления ключа, как в unlock: запирание во время настройки отменяет вход
@@ -222,7 +222,7 @@ impl ClosedEnv {
             bail!("закрытая среда уже создана");
         }
         if phrase.as_deref().map_or(true, |p| p.trim().is_empty()) {
-            bail!("нужны четыре секретных слова");
+            bail!("нужна сид-фраза (12 или 24 слова)");
         }
         // счётчик без среды остаётся только от оборванной прежней настройки (стирание убирает и его): снимаем, иначе повторная
         // настройка навсегда упрётся в «нельзя сбрасывать счётчики существующей среды». Существующую среду abort_setup не трогает.
@@ -267,7 +267,7 @@ impl ClosedEnv {
         self.install(vault, Some(epoch)).await
     }
 
-    /// После неудачного входа: если среда стёрта (пять неверных сид-фраз), она считается не созданной,
+    /// После неудачного входа: если среда стёрта (двадцать неверных сид-фраз), она считается не созданной,
     /// ключи у потребителей отзываются, и мастер настройки откроется заново.
     async fn after_failed_entry(&self, e: anyhow::Error) -> anyhow::Error {
         let erased = matches!(self.store.load(), Ok(None));
@@ -279,7 +279,7 @@ impl ClosedEnv {
             for c in consumers {
                 c.erase().await;
             }
-            eprintln!("[closed] ⚠️  закрытая среда стёрта: пять неверных сид-фраз; зашифрованные файлы потребителей удалены");
+            eprintln!("[closed] ⚠️  закрытая среда стёрта: двадцать неверных сид-фраз; зашифрованные файлы потребителей удалены");
         }
         e
     }
@@ -508,7 +508,7 @@ mod tests {
     async fn a_lock_during_the_key_derivation_cancels_the_pending_unlock() {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), None);
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         e.lock().await;
         assert!(!e.unlocked());
         let e2 = e.clone();
@@ -527,7 +527,7 @@ mod tests {
     async fn install_with_a_stale_epoch_does_not_reopen_a_locked_environment() {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), None);
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         e.lock().await;
         let vault = e.store.clone().unlock_async("owner password".into(), false).await.unwrap();
         let stale = e.lock_epoch.load(Ordering::SeqCst);
@@ -543,7 +543,7 @@ mod tests {
         let (e, chat, _groups) = env(base.path(), None);
         let e2 = e.clone();
         let pending = tokio::task::spawn(async move {
-            e2.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await
+            e2.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await
         });
         tokio::time::sleep(Duration::from_millis(100)).await; // настройка уже зафиксировала поколение и считает ключ
         e.lock().await;
@@ -560,10 +560,10 @@ mod tests {
         // метку записать нельзя (на её месте каталог): настройка обрывается уже после создания счётчика
         let marker = base.path().join("closed").join(MARKER);
         std::fs::create_dir_all(&marker).unwrap();
-        let _ = e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await;
+        let _ = e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await;
         assert!(!e.configured(), "обрыв: среды нет");
         std::fs::remove_dir_all(&marker).unwrap();
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.expect("повторная настройка проходит");
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.expect("повторная настройка проходит");
         assert!(e.configured() && e.unlocked());
     }
 
@@ -574,7 +574,7 @@ mod tests {
         assert!(!e.configured() && !e.unlocked());
         assert!(e.unlock("whatever1".into()).await.is_err(), "не создано");
 
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         assert!(e.configured() && e.unlocked());
         let (kc, kg) = (chat.key().unwrap(), groups.key().unwrap());
         assert_ne!(kc, kg, "области разделены");
@@ -607,7 +607,7 @@ mod tests {
 
         // забыли пароль: слова + новый пароль
         e.lock().await;
-        e.recover("alpha1 bravo2 charlie3 delta4".into(), "recovered pass".into()).await.unwrap();
+        e.recover("legal winner thank year wave sausage worth useful legal winner thank yellow".into(), "recovered pass".into()).await.unwrap();
         assert_eq!(groups.key().unwrap(), kg);
         e.lock().await;
         e.unlock("recovered pass".into()).await.unwrap();
@@ -624,7 +624,7 @@ mod tests {
         let svc = groups.key().expect("служебная часть работает без владельца");
         assert!(chat.key().is_none(), "личная часть ждёт пароль");
         // владелец вошёл: личная открыта, служебная перенесена под свой ключ и осталась на нём
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         assert!(chat.key().is_some());
         assert_eq!(groups.key().unwrap(), svc, "служебный ключ не меняется от входа владельца");
         assert_eq!(groups.adopted.lock().unwrap().len(), 1, "данные под ключом среды переносятся под служебный ключ");
@@ -635,13 +635,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn five_wrong_phrases_erase_the_environment_and_it_can_be_created_again() {
+    async fn twenty_wrong_phrases_erase_the_environment_and_it_can_be_created_again() {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), None);
-        let phrase = "alpha1 bravo2 charlie3 delta4";
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
         e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
         e.lock().await;
-        for _ in 0..5 {
+        for _ in 0..crate::node_vault::store::gate::MAX_PHRASE_FAILURES {
             // пауза растёт после четвёртой попытки; для теста подменяем её
             let c = base.path().join("closed").join("attempts.json");
             if let Ok(b) = std::fs::read(&c) {
@@ -652,7 +652,7 @@ mod tests {
                     }
                 }
             }
-            assert!(e.recover("wrong1 wrong2 wrong3 wrong4".into(), "new password".into()).await.is_err());
+            assert!(e.recover("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(), "new password".into()).await.is_err());
         }
         assert!(!e.configured(), "после стирания среда не создана");
         assert!(chat.key().is_none());
@@ -666,7 +666,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), Some([1; 32]));
         chat.fail_migration.store(true, Ordering::SeqCst);
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         assert!(e.status().migration_pending, "метка осталась");
         e.lock().await;
         chat.fail_migration.store(false, Ordering::SeqCst);

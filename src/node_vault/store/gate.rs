@@ -26,7 +26,7 @@ struct Attempts {
 }
 
 pub const MAX_PASSWORD_FAILURES: u32 = 5;
-pub const MAX_PHRASE_FAILURES: u32 = 5;
+pub const MAX_PHRASE_FAILURES: u32 = 20;
 
 impl Attempts {
     fn total(&self) -> u32 {
@@ -117,6 +117,11 @@ impl EnvelopeStore {
         {
             bail!("повреждён счётчик попыток; вход заблокирован до KDF");
         }
+        // Фраза, не прошедшая собственную проверку (число слов, слово не из списка, контрольная сумма), — опечатка, а не попытка:
+        // она не расходует счётчик и не запускает KDF.
+        if recovery {
+            crate::node_vault::phrase_secret(secret)?;
+        }
         let now = now_ms()?;
         if now < attempts.next_ms {
             bail!("пауза перед следующей попыткой входа");
@@ -152,7 +157,7 @@ impl EnvelopeStore {
         } else {
             if recovery && attempts.rec_failures >= MAX_PHRASE_FAILURES {
                 self.wipe_locked();
-                bail!("пять неверных сид-фраз: закрытая среда стёрта");
+                bail!("двадцать неверных сид-фраз: закрытая среда стёрта");
             }
             if attempts.total() > 3 {
                 attempts.next_ms = now_ms()?.saturating_add(delay_ms(attempts.total()));
@@ -430,7 +435,7 @@ mod tests {
     async fn five_wrong_passwords_close_the_password_door_and_the_phrase_still_opens() {
         let d = temp();
         let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
-        let phrase = "alpha bravo charlie delta";
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
         let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
             .await
             .unwrap();
@@ -462,10 +467,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn five_wrong_phrases_erase_the_closed_environment() {
+    async fn a_phrase_with_a_typo_is_not_a_guess() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let d = temp();
         let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
-        let phrase = "alpha bravo charlie delta";
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        let before = kdf_calls();
+        for typo in ["", "legal winner", "legal winner thank year wave sausage worth useful legal winner thank yelow", "winner legal thank year wave sausage worth useful legal winner thank yellow"] {
+            assert!(store.clone().unlock_async(typo.into(), true).await.is_err());
+        }
+        let a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        assert_eq!((a.failures, a.rec_failures), (0, 0), "опечатки не считаются попытками");
+        assert_eq!(kdf_calls(), before, "и не запускают KDF");
+    }).await
+    }
+
+    #[tokio::test]
+    async fn twenty_wrong_phrases_erase_the_closed_environment() {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
         let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
             .await
             .unwrap();
@@ -477,7 +504,7 @@ mod tests {
             let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
             a.next_ms = if a.total() > 3 { 1 } else { 0 };
             store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
-            let err = match store.clone().unlock_async("one two three four".into(), true).await {
+            let err = match store.clone().unlock_async("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(), true).await {
                 Err(e) => e.to_string(),
                 Ok(_) => panic!("чужая фраза не должна открывать"),
             };
