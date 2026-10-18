@@ -97,7 +97,8 @@ mod tests {
         };
         let mut bad = Vec::new();
         for f in files {
-            let name = f.to_string_lossy().to_string();
+            // на Windows путь с «\\»: сравнивать нужно по единому виду
+            let name = f.to_string_lossy().replace('\\', "/");
             // команды оператора в терминале (cli.rs) выводят адреса осознанно
             if name.ends_with("netlayer/cli.rs") || name.ends_with("util/logsafe.rs") {
                 continue;
