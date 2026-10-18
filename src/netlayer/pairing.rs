@@ -1249,7 +1249,11 @@ mod tests {
         let path = dir.path().join("paired_clients.json");
         assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::Absent);
         fs::write(&path, old_clients_json()).unwrap();
+        // на не-Unix сброс каталога на диск не поддержан: запись выполнена, но долговечность честно «не подтверждена» (P19-2)
+        #[cfg(unix)]
         assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::Rewritten);
+        #[cfg(not(unix))]
+        assert!(matches!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::RewrittenDurabilityUnknown(_)));
         no_old_secrets(&fs::read_to_string(&path).unwrap());
         assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::AlreadyClean);
         fs::write(&path, b"{oops").unwrap();
@@ -1283,7 +1287,10 @@ mod tests {
     fn p17_4_a_normal_write_is_reported_durable() {
         let dir = tempdir().unwrap();
         let p = dir.path().join("x.json");
+        #[cfg(unix)]
         assert_eq!(crate::util::private_file::write_private_checked(&p, b"{}").unwrap(), crate::util::private_file::Committed::Durable);
+        #[cfg(not(unix))]
+        assert!(matches!(crate::util::private_file::write_private_checked(&p, b"{}").unwrap(), crate::util::private_file::Committed::DurabilityUnknown(_)), "на этой платформе сброс каталога не подтверждается");
     }
 
 
@@ -1294,9 +1301,13 @@ mod tests {
             ("transport.rs", include_str!("transport.rs")),
             ("server.rs", include_str!("../web/server.rs")),
             ("node_backup.rs", include_str!("../node_backup.rs")),
-            ("pairing.rs (до тестов)", include_str!("pairing.rs").split("#[cfg(test)]\nmod tests {").next().unwrap()),
+            ("pairing.rs (до тестов)", include_str!("pairing.rs")),
         ];
         for (name, text) in sources {
+            // исходники в Windows могут быть с переводами строк CRLF; «до тестов» — часть файла перед модулем тестов
+            let normalized = text.replace("\r\n", "\n");
+            let text = if name.starts_with("pairing.rs") { normalized.split("#[cfg(test)]\nmod tests {").next().unwrap().to_string() } else { normalized };
+            let text = text.as_str();
             for banned in ["PKT_RESUME", "PKT_SESSION_ISSUE", "compute_resume_mac", "derive_resume_key", "new_with_session_key", "resume_secret()", "session_key()", "SessionToken", "handle_resume_packet", "handle_session_issue", "encode_resume", "decode_resume"] {
                 assert!(!text.contains(banned), "{name}: осталось {banned}");
             }
