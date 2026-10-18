@@ -316,12 +316,19 @@ pub(crate) fn locked<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
     with_lock(path, f)
 }
 
+/// Прочитать файл связи без перехода по ссылкам и с лимитом размера (для восстановления); любая ошибка — `None`.
+pub(crate) fn read_bytes_nofollow(path: &Path) -> Option<Vec<u8>> {
+    read_text(path).ok().flatten().map(String::into_bytes)
+}
+
 /// Результат очистки одного файла связи на месте.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Cleaned {
     Absent,
     AlreadyClean,
     Rewritten,
+    /// Переписан, но сбросить запись каталога на диск не удалось: после отключения питания мог вернуться прежний файл (P18-4).
+    RewrittenDurabilityUnknown(String),
     /// Файл не разбирается по строгой схеме: содержимое не проверено, файл не тронут.
     Unparseable,
 }
@@ -335,8 +342,10 @@ pub fn sanitize_file_in_place(kind: StoreKind, path: &Path, locked_file: bool) -
         if clean == text {
             return Ok(Cleaned::AlreadyClean);
         }
-        write_text(path, &clean)?;
-        Ok(Cleaned::Rewritten)
+        Ok(match write_text(path, &clean)? {
+            crate::util::private_file::Committed::Durable => Cleaned::Rewritten,
+            crate::util::private_file::Committed::DurabilityUnknown(why) => Cleaned::RewrittenDurabilityUnknown(why),
+        })
     };
     if locked_file {
         with_lock(path, body)?
@@ -354,19 +363,17 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
     }
-    write_text(path, &s)
+    write_text(path, &s).map(|_| ())
 }
 
 /// Запись текста файла связи: приватно и атомарно. Если переименование выполнено, а сбросить каталог на диск не удалось, запись считается
 /// выполненной, но владельцу об этом прямо сообщается в журнал (долговечность не подтверждена).
-fn write_text(path: &Path, text: &str) -> Result<()> {
-    match crate::util::private_file::write_private_checked(path, text.as_bytes()).with_context(|| format!("write {:?}", path))? {
-        crate::util::private_file::Committed::Durable => {}
-        crate::util::private_file::Committed::DurabilityUnknown(why) => {
-            eprintln!("[pairing] {}: запись выполнена, но долговечность не подтверждена (каталог не сброшен на диск: {why})", path.display());
-        }
+fn write_text(path: &Path, text: &str) -> Result<crate::util::private_file::Committed> {
+    let c = crate::util::private_file::write_private_checked(path, text.as_bytes()).with_context(|| format!("write {:?}", path))?;
+    if let crate::util::private_file::Committed::DurabilityUnknown(why) = &c {
+        eprintln!("[pairing] {}: запись выполнена, но долговечность не подтверждена (каталог не сброшен на диск: {why})", path.display());
     }
-    Ok(())
+    Ok(c)
 }
 
 // ----------------- Stores -----------------

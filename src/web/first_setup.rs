@@ -202,10 +202,29 @@ async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
 }
 
 #[cfg(unix)]
-/// Предупреждения последнего восстановления (что не удалось очистить): уходят в ответ `/api/auth/restore`.
-static RESTORE_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Неудача восстановления. Если файлы копии уже записаны, предупреждения (что не очищено, что пропущено) идут в ответ вместе с ошибкой,
+/// а не остаются только в журнале (P18-5).
+#[derive(Debug)]
+struct RestoreFail {
+    error: String,
+    warnings: Vec<String>,
+    files_written: bool,
+}
 
-fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
+impl From<&str> for RestoreFail {
+    fn from(error: &str) -> Self {
+        Self::from(error.to_string())
+    }
+}
+
+impl From<String> for RestoreFail {
+    fn from(error: String) -> Self {
+        Self { error, warnings: Vec::new(), files_written: false }
+    }
+}
+
+/// Успех: предупреждения восстановления (что не удалось очистить или пропущено).
+fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<Vec<String>, RestoreFail> {
     use std::sync::atomic::Ordering;
     // одна первая настройка за раз: второй параллельный запрос ждёт и, когда узел уже настроен, получает отказ — файлы не перемешиваются
     let _op = FIRST_RUN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -233,47 +252,52 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
     for u in &report.unclean {
         eprintln!("[restore] не очищено от секретов старого формата: {u}");
     }
-    *RESTORE_WARNINGS.lock().unwrap_or_else(|e| e.into_inner()) = report.unclean.clone();
-    let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| format!("Каталог ключей: {e}"))?;
+    let warnings = report.unclean.clone();
+    // с этого места файлы копии уже на диске: любая ошибка несёт предупреждения с собой
+    let after = |error: String| RestoreFail { error, warnings: warnings.clone(), files_written: true };
+    let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| after(format!("Каталог ключей: {e}")))?;
     let machine = key_root::SystemMachine;
     let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
     let policy = key_root::KdfPolicy::production();
     let secret = key_root::recovery_secret(&b.phrase);
     key_root::Recovery { dir: &dir, port: layout.port, machine: &machine, device: &device, password: &secret, policy: &policy }
         .run()
-        .map_err(|e| format!("Файлы записаны, но ключ устройства создать не удалось: {e}"))?;
-    crate::node_backup::finalize_vault(&layout, &b.phrase, &b.password)?;
+        .map_err(|e| after(format!("Файлы записаны, но ключ устройства создать не удалось: {e}")))?;
+    crate::node_backup::finalize_vault(&layout, &b.phrase, &b.password).map_err(&after)?;
     // новый пароль заменяет и пароль ВХОДА (login_hash), а не только замок закрытой среды: старый пароль после переноса не действует нигде
-    key_root::login::reset_login_min(&dir, &b.phrase, &b.password, &policy, crate::web::auth::min_new_password())?;
+    key_root::login::reset_login_min(&dir, &b.phrase, &b.password, &policy, crate::web::auth::min_new_password()).map_err(|e| after(e.to_string()))?;
     // тот же вход в состояние, что и после первичной настройки: корень открыт ключом этой машины
-    let (root, _) = key_root::unlock_root(&dir, &machine, &device).map_err(|e| format!("Корень не открылся: {e}"))?;
+    let (root, _) = key_root::unlock_root(&dir, &machine, &device).map_err(|e| after(format!("Корень не открылся: {e}")))?;
     RESTORE_FAILURES.store(0, Ordering::SeqCst);
     auth.is_setup.store(true, Ordering::Relaxed);
     auth.needs_rebind.store(false, Ordering::Relaxed);
     if let Ok(mut mk) = auth.master_key.lock() {
         *mk = Some(*root);
     }
-    Ok(())
+    Ok(warnings)
 }
 
 async fn restore(State(sh): State<Shared>, Json(body): Json<RestoreBody>) -> Response {
     #[cfg(unix)]
     {
         let sh2 = sh.clone();
-        let result = tokio::task::spawn_blocking(move || do_restore(&sh2.auth, &body)).await.unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
+        let result = tokio::task::spawn_blocking(move || do_restore(&sh2.auth, &body)).await.unwrap_or_else(|_| Err(RestoreFail::from("Внутренняя ошибка")));
         return match result {
-            Ok(()) => {
+            Ok(warnings) => {
                 let token = sh.auth.create_session(false);
                 let mut headers = HeaderMap::new();
                 headers.insert(header::SET_COOKIE, make_session_cookie(&token, false).parse().unwrap());
                 if let Some(tx) = sh.done.lock().ok().and_then(|mut d| d.take()) {
                     let _ = tx.send(());
                 }
-                // что не удалось очистить от секретов старого формата — владельцу в ответе (с точными путями)
-                let warnings = std::mem::take(&mut *RESTORE_WARNINGS.lock().unwrap_or_else(|e| e.into_inner()));
+                // что не удалось очистить или пропущено — владельцу в ответе (с точными путями)
                 (StatusCode::OK, headers, Json(serde_json::json!({"ok": true, "warnings": warnings}))).into_response()
             }
-            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+            Err(f) => {
+                // файлы уже записаны: предупреждения идут и отдельным полем, и в тексте, который показывает оболочка
+                let text = if f.warnings.is_empty() { f.error.clone() } else { format!("{} Не очищено или пропущено: {}", f.error, f.warnings.join("; ")) };
+                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": text, "warnings": f.warnings, "files_written": f.files_written}))).into_response()
+            }
         };
     }
     #[cfg(not(unix))]
@@ -480,9 +504,9 @@ mod tests {
         let seed = key_root::Seed::generate(12).unwrap().words().join(" ");
         let b = |phrase: &str, password: &str| RestoreBody { path: "/nonexistent/copy.yandibak".into(), phrase: phrase.into(), password: password.into() };
         // слишком длинный пароль — до любой записи и до счёта
-        assert!(do_restore(&auth, &b(&seed, &"x".repeat(1025))).unwrap_err().contains("1024"));
+        assert!(do_restore(&auth, &b(&seed, &"x".repeat(1025))).unwrap_err().error.contains("1024"));
         // короткий — тоже
-        assert!(do_restore(&auth, &b(&seed, "123")).unwrap_err().contains("не короче"));
+        assert!(do_restore(&auth, &b(&seed, "123")).unwrap_err().error.contains("не короче"));
         // опечатка в слове, неверное число слов, пустая фраза: не попытка (не считается), в том числе «не похожая на сид»
         let mut words: Vec<String> = seed.split(' ').map(String::from).collect();
         words[11] = "yelow".into();
@@ -507,7 +531,7 @@ mod tests {
         // узел уже настроен — восстановление не выполняется
         RESTORE_FAILURES.store(0, Ordering::SeqCst);
         auth.is_setup.store(true, Ordering::Relaxed);
-        assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().contains("уже настроен"));
+        assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().error.contains("уже настроен"));
         assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0);
     }
 }
