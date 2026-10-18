@@ -65,6 +65,8 @@ class YandiChatService : Service() {
     private val screenOn      = AtomicBoolean(true)
     private val lastPongMs    = AtomicLong(System.currentTimeMillis())
     private val networkReady  = AtomicBoolean(true)
+    /** Поколение соединения: потоки прежней настройки видят, что номер сменился, и выходят, не трогая новую. */
+    private val generation    = java.util.concurrent.atomic.AtomicInteger(0)
 
     @Volatile private var ws: RawWsClient? = null
     private var workerThread: Thread?      = null
@@ -118,10 +120,22 @@ class YandiChatService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                host        = intent.getStringExtra("host")        ?: return START_NOT_STICKY
-                port        = intent.getIntExtra("port", 8766)
-                token       = intent.getStringExtra("token")       ?: return START_NOT_STICKY
-                fingerprint = intent.getStringExtra("fingerprint") ?: ""
+                val newHost  = intent.getStringExtra("host")  ?: return START_NOT_STICKY
+                val newPort  = intent.getIntExtra("port", 8766)
+                val newToken = intent.getStringExtra("token") ?: return START_NOT_STICKY
+                val newPrint = intent.getStringExtra("fingerprint") ?: ""
+                // смена узла (или токена) у работающей службы: соединение прежнего узла закрывается ДО нового запуска,
+                // иначе оно жило бы со старым токеном и продолжало получать уведомления удалённого узла
+                val changed = running && (newHost != host || newPort != port || newToken != token || newPrint != fingerprint)
+                if (changed) {
+                    generation.incrementAndGet()
+                    running = false
+                    ws?.close()
+                    ws = null
+                    pingThread?.interrupt()
+                    workerThread?.interrupt()
+                }
+                host = newHost; port = newPort; token = newToken; fingerprint = newPrint
                 start()
             }
             ACTION_STOP -> stop()
@@ -142,6 +156,7 @@ class YandiChatService : Service() {
     private fun start() {
         if (running) return
         running = true
+        generation.incrementAndGet()
         createChannels()
         startForeground(NOTIF_ID_STATUS, buildStatusNotif("Подключение…"))
         startPingThread()
@@ -150,6 +165,7 @@ class YandiChatService : Service() {
 
     private fun stop() {
         running = false
+        generation.incrementAndGet()
         ws?.close()
         ws = null
         pingThread?.interrupt()
@@ -161,9 +177,10 @@ class YandiChatService : Service() {
     // ── Worker: reconnect-loop ─────────────────────────────────────────────────
 
     private fun startWorkerThread() {
+        val gen = generation.get()
         workerThread = thread(name = "yandi-ws", isDaemon = true) {
             var delay = 5_000L
-            while (running) {
+            while (running && gen == generation.get()) {
                 var client: RawWsClient? = null
                 try {
                     updateStatusNotif("Подключено к ноде")
@@ -172,6 +189,7 @@ class YandiChatService : Service() {
                     ws = c
                     lastPongMs.set(System.currentTimeMillis())
                     c.connect("/mobile/ws", token)
+                    if (gen != generation.get()) { c.close(); break }   // за время соединения узел сменили: это уже чужое поколение
                     delay = 5_000L
                     readLoop(c)
                 } catch (e: InterruptedException) {
@@ -182,8 +200,8 @@ class YandiChatService : Service() {
                     // сокет закрывается на любом выходе (ошибка рукопожатия, кривой кадр, таймаут), иначе дескрипторы копятся до GC
                     runCatching { client?.close() }
                 }
-                ws = null
-                if (!running) break
+                if (gen == generation.get()) ws = null
+                if (!running || gen != generation.get()) break
                 updateStatusNotif("Переподключение через ${delay / 1000}с…")
                 try { Thread.sleep(delay) } catch (_: InterruptedException) { break }
                 delay = (delay * 2).coerceAtMost(60_000L)
@@ -194,8 +212,9 @@ class YandiChatService : Service() {
     // ── Ping thread: адаптивный интервал ──────────────────────────────────────
 
     private fun startPingThread() {
+        val gen = generation.get()
         pingThread = thread(name = "yandi-ping", isDaemon = true) {
-            while (running) {
+            while (running && gen == generation.get()) {
                 val interval = if (screenOn.get()) PING_INTERVAL_SCREEN_ON
                                else                PING_INTERVAL_SCREEN_OFF
                 try {

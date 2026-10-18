@@ -79,12 +79,16 @@ async fn setup(State(sh): State<Shared>, Json(body): Json<SetupBody>) -> Respons
                 return Err("Пароль администратора должен отличаться от пароля входа".to_string());
             }
         }
-        (sh2.make_keys)(&sh2.auth, &body)?;
+        // отдельный админ-пароль записывается ДО ключей: не записался — настройка не начинается, а не «успех» с общим паролем;
+        // не удались сами ключи — записанный админ-пароль убирается
         if !body.admin_password.is_empty() {
-            // ключи уже созданы: сбой записи не отменяет настройку, админ-пароль можно назначить в «Настройках узла»
-            if let Err(e) = crate::web::admin::set_password(&body.admin_password) {
-                eprintln!("[auth] админ-пароль не записан: {e}");
+            crate::web::admin::set_password(&body.admin_password)?;
+        }
+        if let Err(e) = (sh2.make_keys)(&sh2.auth, &body) {
+            if !body.admin_password.is_empty() {
+                let _ = crate::web::admin::clear_password();
             }
+            return Err(e);
         }
         Ok(())
     })

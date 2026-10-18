@@ -1,4 +1,5 @@
 import 'message_actions.dart';
+import 'admin_panel.dart';
 import 'member_badge.dart';
 import 'theme.dart';
 import 'content_policy.dart';
@@ -1573,8 +1574,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
               subtitle: button('Удалить группу ${g['name']}', () async {
                 final id = '${g['id']}';
                 repo.path(id, 'info');
+                if (!await ensureAdminSession(context, widget.api)) return;
                 final value = await form('Удалить группу целиком', [
-                  'Пароль входа узла',
+                  'Пароль администратора',
                 ], secret: true);
                 if (value == null) return;
                 await mutate(() async {
@@ -1613,14 +1615,19 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                   : tab,
               onSelected: busy
                   ? null
-                  : (label) => choose(
-                      null,
-                      nextTab: label == 'Мои группы'
-                          ? 'Свои группы'
-                          : label == 'Список групп'
-                          ? 'Каталог'
-                          : label,
-                    ),
+                  : (label) async {
+                      // группы всего узла — управление узлом: нужен сеанс администратора
+                      if (label == 'Управление узла' && !await ensureAdminSession(context, widget.api)) return;
+                      if (!mounted) return;
+                      await choose(
+                        null,
+                        nextTab: label == 'Мои группы'
+                            ? 'Свои группы'
+                            : label == 'Список групп'
+                            ? 'Каталог'
+                            : label,
+                      );
+                    },
             ),
           ],
         ),

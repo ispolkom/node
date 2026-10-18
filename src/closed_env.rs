@@ -143,12 +143,18 @@ impl ClosedEnv {
 
     /// При старте узла: служебные части получают свой ключ из рабочего ключа устройства и работают без владельца у экрана.
     pub async fn start_service(&self) {
+        self.start_service_skipping(&[]).await
+    }
+
+    /// То же, но части из `skip` остаются запертыми (в них после стирания осталось зашифрованное содержимое: повторный вывод того же ключа
+    /// вернул бы им старые данные, P14-8).
+    async fn start_service_skipping(&self, skip: &[String]) {
         let Some(master) = (self.legacy_master)() else {
             eprintln!("[closed] ⚠️  рабочий ключ устройства недоступен: служебные части ждут входа владельца");
             return;
         };
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        for c in consumers.iter().filter(|c| c.is_service()) {
+        for c in consumers.iter().filter(|c| c.is_service() && !skip.iter().any(|d| d == c.domain())) {
             c.unlock(service_key_for(&master, c.domain())).await;
         }
     }
@@ -316,17 +322,22 @@ impl ClosedEnv {
         for c in &consumers {
             c.erase().await;
         }
+        let mut dirty: Vec<String> = Vec::new();
         for c in &consumers {
             for left in c.leftovers() {
                 problems.push(format!("{}: осталось {left}", c.domain()));
+                if !dirty.iter().any(|d| d == c.domain()) {
+                    dirty.push(c.domain().to_string());
+                }
             }
         }
         let gone = matches!(self.store.load(), Ok(None));
         if gone {
             self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
             let _ = std::fs::remove_file(self.dir.join(MARKER));
-            // служебные части узла продолжают работать на ключе устройства, но с пустым состоянием
-            self.start_service().await;
+            // служебные части узла продолжают работать на ключе устройства, но с пустым состоянием; те, где осталось зашифрованное
+            // содержимое, не поднимаются: иначе они прочитали бы старые данные тем же ключом
+            self.start_service_skipping(&dirty).await;
         } else if !problems.iter().any(|p| p.contains("ключ данных")) {
             problems.push("запечатанный ключ данных не удалён".to_string());
         }
@@ -382,6 +393,7 @@ impl ClosedEnv {
 
     /// Отозвать ключи сразу (синхронно для вызывающего), затем стереть состояние у потребителей.
     pub async fn lock(&self) {
+        crate::web::admin::end(); // блокировка личной среды закрывает и сеанс администратора
         self.lock_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         {
             let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());

@@ -462,8 +462,20 @@ void main() {
     expect(api.bodies.any((b) => b['v'] == 1 && b.containsKey('seq')), true);
     await m1.stop(t);
   });
-  testWidgets('ownership countdown and node delete StepUp', (t) async {
+  testWidgets('группы всего узла открываются только после пароля администратора', (t) async {
     final api = GroupApi();
+    await open(t, api);
+    await m1.click(t, 'Управление узла');
+    expect(find.byType(AlertDialog), findsOneWidget, reason: 'без сеанса администратора вкладка просит пароль');
+    expect(api.calls.contains('/api/mobile/groups'), false, reason: 'список групп узла не запрошен без сеанса');
+    await t.tap(find.text('Отмена'));
+    await t.pumpAndSettle();
+    expect(find.text('Метаданные всех групп узла. Содержание доступно только участникам.'), findsNothing);
+    await m1.stop(t);
+  });
+
+  testWidgets('ownership countdown and node delete StepUp', (t) async {
+    final api = GroupApi()..adminActive = true; // группы всего узла — только в сеансе администратора
     await open(t, api, conversation: true);
     await m1.click(t, 'Передать владение');
     expect(find.text('Подождите 3 с'), findsOneWidget);
@@ -474,15 +486,15 @@ void main() {
     await m1.click(t, 'Управление узла');
     expect(find.text('Сообщение группе'), findsNothing);
     await m1.click(t, 'Удалить группу Семья');
-    await t.enterText(field('Пароль входа узла'), 'test-password');
+    await t.enterText(field('Пароль администратора'), 'test-password');
     await m1.click(t, 'Отмена');
     expect(api.calls.any((p) => p.endsWith('/delete')), false);
     await m1.click(t, 'Удалить группу Семья');
     expect(
-      t.widget<TextField>(field('Пароль входа узла')).controller!.text,
+      t.widget<TextField>(field('Пароль администратора')).controller!.text,
       '',
     );
-    await t.enterText(field('Пароль входа узла'), 'test-password');
+    await t.enterText(field('Пароль администратора'), 'test-password');
     await m1.click(t, 'Удалить навсегда');
     expect(api.bodies.any((b) => b['password'] == 'test-password'), true);
     await m1.stop(t);

@@ -90,6 +90,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   void wipe() {
+    // сеанс администратора не переживает блокировку, выход и смену пользователя: токен забывается, админ-страницы закрываются
+    AdminToken.value = null;
+    adminMode = false;
+    notices = [];
+    unreadNotices = 0;
     preferences.reset();
     background.reset();
     epoch++;
@@ -250,6 +255,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         if (adminMode && !active) {
           // сеанс администратора закончился: возвращаемся в личный аккаунт
           adminMode = false;
+          AdminToken.value = null;
           page = 'Панель';
           notice = 'Сеанс администратора закончился. Войдите в админ-панель снова.';
           formVersion++;
@@ -270,8 +276,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       ok = await showDialog<bool>(context: ctx, builder: (_) => AdminPasswordDialog(api: widget.api)) ?? false;
     }
     if (!ok || !mounted) return;
-    // извещения просмотрены: следующее станет «новым», только если число вырастет
-    unawaited(widget.api.request('/api/notices/ack', body: {'kinds': [for (final n in notices) '${n['kind']}']}).then((_) {}, onError: (_) {}));
+    ackNotices('Статус узла');
     setState(() {
       epoch++;
       preferences.reset();
@@ -285,11 +290,24 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     poll(force: true);
   }
 
+  /// Отметить прочитанным то, что показывает открытая страница (а не всё сразу при входе): новое событие того же типа останется новым.
+  void ackNotices(String page) {
+    const byPage = {
+      'Жалобы': ['complaints', 'pair_requests'],
+      'Статус узла': ['update'],
+      'Настройки узла': ['proxies'],
+    };
+    final kinds = byPage[page];
+    if (kinds == null) return;
+    unawaited(widget.api.request('/api/notices/ack', body: {'kinds': kinds}).then((_) {}, onError: (_) {}));
+  }
+
   /// Выйти из админ-панели: сеанс на узле закрывается.
   Future<void> leaveAdmin() async {
     try {
       await widget.api.request('/api/admin/session', method: 'DELETE');
     } catch (_) {}
+    AdminToken.value = null;
     if (!mounted) return;
     setState(() {
       epoch++;
@@ -722,10 +740,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         if (updateNotice != null) UiText(updateNotice!),
         if (background.unread.isNotEmpty)
           UiText('Новых чатов: ${background.unread.length}'),
-        if (lockUnconfirmed) ...[
+        if (lockUnconfirmed && !adminMode) ...[
           const UiText('Состояние блокировки не подтверждено'),
           button('Повторить блокировку', () => act('/api/vault/lock', {})),
-        ] else if (vault != null &&
+        ] else if (!adminMode &&
+            vault != null &&
             !vault!.hasError &&
             (!vault!.configured || !vault!.unlocked))
           // первый запуск: среда создаётся сразу; после блокировки на любой странице — только вход
@@ -813,7 +832,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               !vault!.hasError &&
               (!vault!.configured || vault!.unlocked))
             features(),
-        ])) else if (!visible || vault == null)
+        ])) else if (adminMode && visible)
+          // управление узлом не требует личной среды: жалобы, шлюзы и настройки узла открываются одним админ-сеансом (P14-9)
+          (page == 'Настройки узла' ? solidScope(features()) : features())
+        else if (!visible || vault == null)
           const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)
           vaultPanel()
@@ -873,6 +895,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                                 leaveAdmin();
                                 return;
                               }
+                              if (adminMode) ackNotices(label);
                               setState(() {
                                 epoch++;
                                 preferences.reset();

@@ -3,6 +3,15 @@ import 'preferences.dart';
 import 'theme.dart';
 import 'transport/api.dart';
 
+/// Есть ли у этого окна действующий сеанс администратора; если нет — спросить админ-пароль. Для управленческих действий вне админ-панели.
+Future<bool> ensureAdminSession(BuildContext context, Api api) async {
+  try {
+    if ((await api.request('/api/admin/session'))['active'] == true) return true;
+  } catch (_) {}
+  if (!context.mounted) return false;
+  return await showDialog<bool>(context: context, builder: (_) => AdminPasswordDialog(api: api)) ?? false;
+}
+
 /// Вход в админ-панель: пароль администратора на 15 минут (сеанс держит узел; docs/ROLES.md). Возвращает true при успехе.
 class AdminPasswordDialog extends StatefulWidget {
   final Api api;
@@ -27,7 +36,8 @@ class _AdminPasswordDialogState extends State<AdminPasswordDialog> {
     if (busy || password.text.isEmpty) return;
     setState(() { busy = true; error = null; });
     try {
-      await widget.api.request('/api/admin/session', body: {'password': password.text});
+      final r = await widget.api.request('/api/admin/session', body: {'password': password.text});
+      AdminToken.value = r['token'] is String ? r['token'] as String : null;
       password.clear();
       if (mounted) Navigator.pop(context, true);
     } on ApiFailure catch (e) {

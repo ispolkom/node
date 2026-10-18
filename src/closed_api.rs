@@ -575,6 +575,29 @@ mod tests {
         assert!(!env.unlocked(), "ключи отозваны, даже когда остатки на диске есть");
     }
 
+    /// P14-8: часть, где осталось зашифрованное содержимое, не получает ключ заново — иначе она прочла бы старые данные.
+    #[tokio::test]
+    async fn a_service_with_leftovers_is_not_started_again_but_a_clean_one_is() {
+        let base = tempfile::tempdir().unwrap();
+        let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| Some([7u8; 32]))).unwrap();
+        let (dirty_locked, clean_locked) = (Arc::new(Mutex::new(false)), Arc::new(Mutex::new(false)));
+        struct Part(Arc<Mutex<bool>>, &'static str, Vec<String>);
+        impl Consumer for Part {
+            fn domain(&self) -> &'static str { self.1 }
+            fn leftovers(&self) -> Vec<String> { self.2.clone() }
+            fn migrate(&self, _o: Option<[u8; 32]>, _n: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> { Box::pin(async { Ok(0) }) }
+            fn unlock(&self, _k: [u8; 32]) -> BoxFuture<'_, ()> { let f = self.0.clone(); Box::pin(async move { *f.lock().unwrap() = false }) }
+            fn lock(&self) -> BoxFuture<'_, ()> { let f = self.0.clone(); Box::pin(async move { *f.lock().unwrap() = true }) }
+            fn is_service(&self) -> bool { true }
+        }
+        env.register(Arc::new(Part(dirty_locked.clone(), "panic_dirty", vec!["/data/complaints.enc".into()])));
+        env.register(Arc::new(Part(clean_locked.clone(), "panic_clean", vec![])));
+        env.setup("owner password".into(), Some(PHRASE.into())).await.unwrap();
+        assert!(env.panic_erase().await.is_err());
+        assert!(*dirty_locked.lock().unwrap(), "часть с остатками осталась запертой");
+        assert!(!*clean_locked.lock().unwrap(), "чистая служебная часть поднята заново");
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn a_disk_failure_is_an_error_and_the_keys_are_revoked_anyway() {

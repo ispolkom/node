@@ -145,7 +145,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     setState(() { _entries = list; _requests = reqs; });
     // какие файлы уже лежат у меня: для них в сообщении показывается плеер/превью, а не «скачать»
     for (final e in list) {
-      if (e.body['f'] is String && !_paths.containsKey(e.body['f'])) {
+      if (e.body['f'] is String && !_paths.containsKey(_cacheId(e.body))) {
         _localPath(e.body).then((p) { if (p != null && mounted) setState(() {}); });
       }
     }
@@ -185,10 +185,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         try { await svc.api.fileDelete(widget.gid, d['f'] as String); } catch (_) {}   // запись не ушла — файл на узле не нужен
         rethrow;
       }
-      // свой файл остаётся у меня зашифрованным под номером файла; открытая копия из выбора файла затирается
+      // свой файл остаётся у меня зашифрованным под именем, привязанным к группе и описанию файла; открытая копия из выбора файла затирается
       try {
         final vf = await context.read<AppState>().vaultFiles();
-        _paths[d['f'] as String] = (await vf.importAs(path, d['f'] as String, name: name)).path;
+        _paths[_cacheId(d)] = (await vf.importAs(path, _cacheId(d), name: name)).path;
         await context.read<AppState>().dropPickerCopy(path);
       } catch (_) {}
       await svc.sync(only: widget.gid);
@@ -204,20 +204,25 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
+  /// Имя копии в хранилище привязано к группе, номеру файла И его описанию (хэш, размер): участник, который выпустил новое сообщение с чужим
+  /// описанием под уже знакомым номером, не получает прежний файл — копия под другим описанием не находится и скачивается с проверкой хэша.
+  String _cacheId(Map<String, dynamic> d) => FileVault.safeId('grp:${widget.gid}:${d['f']}:${d['h']}:${d['z']}');
+
   Future<String?> _localPath(Map<String, dynamic> d) async {
-    final fid = d['f'] as String;
-    final mem = _paths[fid];
+    final key = _cacheId(d);
+    final mem = _paths[key];
     if (mem != null && File(mem).existsSync()) return mem;
-    final p = (await context.read<AppState>().vaultFiles()).pathFor(FileVault.safeId(fid));
-    if (File(p).existsSync()) { _paths[fid] = p; return p; }
+    final p = (await context.read<AppState>().vaultFiles()).pathFor(key);
+    if (File(p).existsSync()) { _paths[key] = p; return p; }
     return null;
   }
 
   /// Скачивает файл группы в закрытую среду; путь к нему или null, если не вышло (причина — во всплывающей строке).
   Future<String?> _fetchFile(Map<String, dynamic> d) async {
     final fid = d['f'] as String;
+    final key = _cacheId(d);
     final vf = await context.read<AppState>().vaultFiles();
-    final out = File(vf.pathFor(FileVault.safeId(fid)));
+    final out = File(vf.pathFor(key));
     final part = File('${out.path}.part');   // пока качается, файла в хранилище нет
     setState(() => _progress[fid] = 0);
     try {
@@ -232,7 +237,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (mounted) setState(() => _progress.remove(fid));
     }
     await part.rename(out.path);
-    _paths[fid] = out.path;
+    _paths[key] = out.path;
     return out.path;
   }
 
@@ -635,7 +640,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                           : _entryCommands(g, e, d.globalPosition),
                       selected: _selected.contains(e.seq),
                       flash: _flash == e.seq,
-                      localPath: e.body['f'] is String ? _paths[e.body['f']] : null,
+                      localPath: e.body['f'] is String ? _paths[_cacheId(e.body)] : null,
                       entry: e,
                       mine: mine,
                       author: svc.displayName(g.id, e.from),

@@ -1253,10 +1253,22 @@ async fn require_step_up(state: &AppState, password: Option<&str>) -> Result<(),
     }
 }
 
+/// То же для действий администратора: проверяется админ-пароль с его собственным бюджетом попыток.
+async fn require_admin_step_up(password: &str) -> Result<(), Response> {
+    let password = password.to_string();
+    match tokio::task::spawn_blocking(move || crate::web::auth::verify_admin_counted(&password)).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response()),
+        Ok(Err(e)) => Err(counted_login_error(e)),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Внутренняя ошибка"}))).into_response()),
+    }
+}
+
 /// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
 /// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
 async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
-    if let Err(resp) = require_step_up(&state, Some(&body.password)).await {
+    // удаление чужой группы — управление узлом: нужен сеанс администратора (его проверил admin_guard) и ЕЩЁ РАЗ админ-пароль
+    if let Err(resp) = require_admin_step_up(&body.password).await {
         return resp;
     }
     crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
@@ -1379,6 +1391,7 @@ async fn api_auth_logout(State(state): State<AppState>, headers: HeaderMap) -> R
     if let Some(token) = crate::web::auth::extract_session_token(cookie_str) {
         state.auth_state.invalidate_session(&token);
     }
+    crate::web::admin::end(); // выход закрывает и сеанс администратора
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "Set-Cookie",
@@ -1490,8 +1503,15 @@ async fn api_auth_recover(
     match result {
         Ok(remember_me) => {
             crate::web::auth::reset_login_failures(); // вход по сид-фразе снимает запрет входа паролем
-            crate::web::admin::clear_password(); // сид-фраза владельца возвращает общий пароль: забытый админ-пароль не запирает узел
             crate::web::admin::end();
+            // сид-фраза владельца возвращает общий пароль: забытый админ-пароль не запирает узел; не удалось — не говорим «успех»
+            if let Err(e) = crate::web::admin::clear_password() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Пароль входа изменён, но админ-пароль не сброшен: {e}. Повторите восстановление или удалите файл admin_auth.json.")})),
+                )
+                    .into_response();
+            }
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, remember_me);
@@ -3490,7 +3510,7 @@ async fn api_chat_delete(
 
 /// Пути с расшифрованным содержимым владельца: при запертой среде отвечают 423 (служебная доставка идёт внутри узла и не страдает).
 fn is_owner_content_path(path: &str) -> bool {
-    ["/api/groups", "/api/complaints", "/api/files/content"]
+    ["/api/groups", "/api/files/content"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
@@ -3505,7 +3525,8 @@ fn is_locked_media_path(path: &str) -> bool {
 
 /// Админские маршруты без сеанса администратора: 403 `admin_required` (интерфейс просит админ-пароль).
 async fn admin_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
-    if !crate::web::admin::allowed(req.uri().path()) {
+    let token = req.headers().get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    if !crate::web::admin::allowed(req.method(), req.uri().path(), token) {
         return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin_required", "message": "нужен пароль администратора"}))).into_response();
     }
     next.run(req).await
@@ -3520,14 +3541,11 @@ struct AdminSessionBody {
 async fn api_admin_session_post(State(state): State<AppState>, Json(b): Json<AdminSessionBody>) -> Response {
     match crate::web::auth::verify_admin_counted(&b.password) {
         Ok(true) => {
-            state.auth_state.record_login_success();
-            crate::web::admin::start();
-            Json(serde_json::json!({"ok": true, "ttl_secs": crate::web::admin::TTL.as_secs()})).into_response()
+            // токен знает только вошедший клиент; он нужен на каждом админском запросе
+            let token = crate::web::admin::start();
+            Json(serde_json::json!({"ok": true, "token": token, "ttl_secs": crate::web::admin::TTL.as_secs()})).into_response()
         }
-        Ok(false) => {
-            state.auth_state.record_login_failure();
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response()
-        }
+        Ok(false) => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response(),
         Err(e) => counted_login_error(e),
     }
 }
@@ -3562,18 +3580,24 @@ async fn api_admin_password_post(Json(b): Json<AdminPasswordBody>) -> Response {
     }
 }
 
-async fn api_admin_session_get() -> Json<serde_json::Value> {
-    let left = crate::web::admin::remaining();
+async fn api_admin_session_get(headers: HeaderMap) -> Json<serde_json::Value> {
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    let left = crate::web::admin::remaining_for(token);
     Json(serde_json::json!({"active": left.is_some(), "separate": crate::web::admin::has_separate(), "remaining_secs": left.map(|d| d.as_secs()).unwrap_or(0), "ttl_secs": crate::web::admin::TTL.as_secs()}))
 }
 
-async fn api_admin_session_delete() -> Json<serde_json::Value> {
-    crate::web::admin::end();
+async fn api_admin_session_delete(headers: HeaderMap) -> Json<serde_json::Value> {
+    // закрыть сеанс может только его владелец: чужой клиент не выгонит администратора
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    if crate::web::admin::remaining_for(token).is_some() {
+        crate::web::admin::end();
+    }
     Json(serde_json::json!({"ok": true}))
 }
 
-async fn api_notices_get() -> Json<serde_json::Value> {
-    Json(crate::web::admin::view())
+async fn api_notices_get(headers: HeaderMap) -> Json<serde_json::Value> {
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    Json(crate::web::admin::view(token))
 }
 
 #[derive(Deserialize)]
@@ -6132,7 +6156,7 @@ mod locked_guard_tests {
     fn owner_content_paths_are_matched_exactly() {
         assert!(p("/api/groups"));
         assert!(p("/api/groups/abc/messages"));
-        assert!(p("/api/complaints/7/reply"));
+        assert!(!p("/api/complaints/7/reply"), "жалобы — служебные данные узла под админ-сеансом, а не личное содержимое под паролем среды");
         assert!(p("/api/files/content/id/name.txt"));
         assert!(!p("/api/groupsx"));
         assert!(!p("/api/mobile/groups"));
@@ -6210,7 +6234,8 @@ mod ui_socket_parity_tests {
             let (head, payload) = text.split_once("\r\n\r\n").unwrap();
             assert!(head.starts_with(&format!("HTTP/1.1 {expected_status}")), "{path}: {head}");
             assert_eq!(serde_json::from_str::<serde_json::Value>(payload).unwrap(), expected, "{path}");
-            if path.ends_with("/delete") { assert_eq!(expected_status, 429, "peer credentials must not bypass StepUp backoff"); }
+            // удаление группы — действие администратора: без его сеанса отказ одинаков и по TCP, и по сокету (права сокета сеанс не заменяют)
+            if path.ends_with("/delete") { assert_eq!(expected_status, 403, "peer credentials must not replace the admin session"); assert_eq!(expected["error"], "admin_required"); }
         }
         unix.abort(); tcp.abort();
         let _ = unix.await; let _ = tcp.await;
@@ -6353,29 +6378,42 @@ mod admin_guard_tests {
     use super::*;
     use tower::ServiceExt;
 
-    async fn status_of(app: &Router, path: &str) -> StatusCode {
-        app.clone().oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+    async fn status_of(app: &Router, path: &str, token: Option<&str>) -> StatusCode {
+        let mut r = axum::http::Request::get(path);
+        if let Some(t) = token {
+            r = r.header(crate::web::admin::HEADER, t);
+        }
+        app.clone().oneshot(r.body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
     }
 
     #[tokio::test]
-    async fn admin_routes_answer_403_without_a_session_and_work_with_one() {
+    async fn admin_routes_answer_403_without_the_sessions_token_and_work_with_it() {
         let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         crate::web::admin::reset_for_test();
         let app: Router = Router::new()
             .route("/api/complaints", get(|| async { "ok" }))
             .route("/api/guest-pairing", get(|| async { "ok" }))
+            .route("/api/devices/pairing", get(|| async { "ok" }))
+            .route("/api/settings", get(|| async { "ok" }).put(|| async { "ok" }))
             .route("/api/status", get(|| async { "ok" }))
             .route("/api/chats", get(|| async { "ok" }))
             .layer(axum::middleware::from_fn(admin_guard));
-        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::FORBIDDEN);
-        assert_eq!(status_of(&app, "/api/guest-pairing").await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/complaints", None).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/guest-pairing", None).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/devices/pairing", None).await, StatusCode::FORBIDDEN);
+        // чтение настроек личное, запись — управление узлом
+        assert_eq!(status_of(&app, "/api/settings", None).await, StatusCode::OK);
+        let put = app.clone().oneshot(axum::http::Request::put("/api/settings").body(axum::body::Body::empty()).unwrap()).await.unwrap().status();
+        assert_eq!(put, StatusCode::FORBIDDEN);
         // личные маршруты без сеанса работают как раньше
-        assert_eq!(status_of(&app, "/api/status").await, StatusCode::OK);
-        assert_eq!(status_of(&app, "/api/chats").await, StatusCode::OK);
-        crate::web::admin::start();
-        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/status", None).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/chats", None).await, StatusCode::OK);
+        let token = crate::web::admin::start();
+        assert_eq!(status_of(&app, "/api/complaints", Some(&token)).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/complaints", None).await, StatusCode::FORBIDDEN, "другой клиент без токена не пользуется чужим сеансом");
+        assert_eq!(status_of(&app, "/api/complaints", Some("чужой")).await, StatusCode::FORBIDDEN);
         crate::web::admin::end();
-        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::FORBIDDEN, "после выхода снова закрыто");
+        assert_eq!(status_of(&app, "/api/complaints", Some(&token)).await, StatusCode::FORBIDDEN, "после выхода снова закрыто");
         crate::web::admin::reset_for_test();
     }
 }

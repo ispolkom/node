@@ -72,6 +72,11 @@ String resolveSocket(List<String> args, Map<String, String> env) {
   return '$home/.local/share/yandi/run/yandi-ui.sock';
 }
 
+/// Токен сеанса администратора (его выдаёт узел после админ-пароля). Живёт только в памяти окна: другой клиент того же пользователя его не знает.
+class AdminToken {
+  static String? value;
+}
+
 abstract class Api {
   Future<Map<String, dynamic>> request(
     String path, {
@@ -222,6 +227,8 @@ class UnixApi implements Api, BinaryApi, GroupFileApi {
         );
         req.followRedirects = false;
         req.headers.set(HttpHeaders.acceptHeader, 'application/json');
+        final adminToken = AdminToken.value;
+        if (adminToken != null) req.headers.set('x-yandi-admin', adminToken);
         final payload = encoded;
         if (payload != null) {
           req.headers.contentType = boundary == null

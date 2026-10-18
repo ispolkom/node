@@ -561,7 +561,16 @@ fn login_failures_path() -> std::path::PathBuf {
 
 /// Счёт с диска: нет файла — ноль; нечитаемый или испорченный файл — ошибка (не «ноль»: иначе порча файла снимала бы предел).
 fn login_failures_strict() -> Result<u32, String> {
-    match std::fs::read_to_string(login_failures_path()) {
+    failures_strict(&login_failures_path())
+}
+
+/// Отдельный бюджет неверных попыток админ-пароля (P14-4): правильный пароль входа не обнуляет его, и наоборот.
+fn admin_failures_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("admin_failures")
+}
+
+fn failures_strict(path: &std::path::Path) -> Result<u32, String> {
+    match std::fs::read_to_string(path) {
         Ok(s) => s.trim().parse().map_err(|_| "счёт попыток повреждён".to_string()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
         Err(e) => Err(format!("счёт попыток не читается: {e}")),
@@ -578,13 +587,14 @@ pub fn login_locked_out() -> bool {
     login_failures() >= MAX_LOGIN_FAILURES
 }
 
-fn write_login_failures(n: u32) -> Result<(), String> {
-    crate::util::private_file::write_private(&login_failures_path(), n.to_string().as_bytes()).map_err(|e| format!("счёт попыток не записан: {e}"))
+fn write_failures(path: &std::path::Path, n: u32) -> Result<(), String> {
+    crate::util::private_file::write_private(path, n.to_string().as_bytes()).map_err(|e| format!("счёт попыток не записан: {e}"))
 }
 
 pub fn reset_login_failures() {
     let _g = LOGIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let _ = std::fs::remove_file(login_failures_path());
+    let _ = std::fs::remove_file(admin_failures_path());
 }
 
 /// Почему проверка пароля не состоялась.
@@ -599,20 +609,24 @@ pub enum CountedLogin {
 }
 
 fn counted_with(password: &str, verify: impl Fn(&str) -> Result<bool, String>) -> Result<bool, CountedLogin> {
+    counted_in(&login_failures_path(), password, verify)
+}
+
+fn counted_in(path: &std::path::Path, password: &str, verify: impl Fn(&str) -> Result<bool, String>) -> Result<bool, CountedLogin> {
     let _g = LOGIN_GUARD.lock().unwrap_or_else(|e| e.into_inner());
-    let n = login_failures_strict().map_err(CountedLogin::Storage)?;
+    let n = failures_strict(path).map_err(CountedLogin::Storage)?;
     if n >= MAX_LOGIN_FAILURES {
         return Err(CountedLogin::Locked);
     }
-    write_login_failures(n + 1).map_err(CountedLogin::Storage)?;
+    write_failures(path, n + 1).map_err(CountedLogin::Storage)?;
     match verify(password) {
         Ok(true) => {
-            let _ = std::fs::remove_file(login_failures_path());
+            let _ = std::fs::remove_file(path);
             Ok(true)
         }
         Ok(false) => Ok(false),
         Err(e) => {
-            let _ = write_login_failures(n); // сбой проверки — не вина введённого пароля
+            let _ = write_failures(path, n); // сбой проверки — не вина введённого пароля
             Err(CountedLogin::Failed(e))
         }
     }
@@ -623,9 +637,14 @@ pub fn verify_login_counted(password: &str) -> Result<bool, CountedLogin> {
     counted_with(password, verify_login)
 }
 
-/// Проверить админ-пароль с тем же счётом попыток (общий с входом: пять неверных закрывают вход паролем).
+/// Проверить админ-пароль. Отдельный админ-пароль имеет СВОЙ бюджет пяти попыток (верный пароль входа его не обнуляет, P14-4);
+/// пока админ-пароль совпадает с паролем входа, это тот же секрет и тот же бюджет.
 pub fn verify_admin_counted(password: &str) -> Result<bool, CountedLogin> {
-    counted_with(password, crate::web::admin::verify_admin)
+    if crate::web::admin::has_separate() {
+        counted_in(&admin_failures_path(), password, crate::web::admin::verify_admin)
+    } else {
+        counted_with(password, crate::web::admin::verify_admin)
+    }
 }
 
 /// Сид-фраза закрытой среды должна быть сид-фразой самого узла (той, что открывает корень личности): иначе у узла два независимых
@@ -1496,5 +1515,21 @@ mod login_limit_tests {
         std::fs::write(login_failures_path(), b"not a number").unwrap();
         assert!(matches!(counted_with("x", |_| panic!("проверка не должна запускаться")), Err(CountedLogin::Storage(_))));
         reset_login_failures();
+    }
+
+    /// P14-4: у пароля входа и отдельного админ-пароля свои бюджеты; верный пароль одного не обнуляет неверные попытки другого.
+    #[test]
+    fn the_budgets_of_two_secrets_are_independent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (login, admin) = (dir.path().join("login_failures"), dir.path().join("admin_failures"));
+        for _ in 0..4 {
+            assert!(matches!(counted_in(&admin, "x", |_| Ok(false)), Ok(false)));
+        }
+        // верный вход паролем не трогает счёт админ-пароля
+        assert!(matches!(counted_in(&login, "right", |_| Ok(true)), Ok(true)));
+        assert_eq!(failures_strict(&admin), Ok(4));
+        assert!(matches!(counted_in(&admin, "x", |_| Ok(false)), Ok(false)));
+        assert!(matches!(counted_in(&admin, "right", |_| panic!("проверка не должна запускаться")), Err(CountedLogin::Locked)), "пять неверных закрыли админ-пароль");
+        assert!(matches!(counted_in(&login, "right", |_| Ok(true)), Ok(true)), "а вход паролем остался открыт");
     }
 }
