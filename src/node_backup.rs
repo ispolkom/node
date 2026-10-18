@@ -619,12 +619,9 @@ fn sweep_pairing_files_with(l: &Layout, anchors_override: Option<&str>) -> Vec<S
                 _ => {}
             }
             match crate::netlayer::pairing::sanitize_file_in_place(kind, &p, false) {
-                Ok(Cleaned::Unparseable) => {
-                    // разобрать нельзя — значит и проверить на секреты нельзя; это остаток восстановления (имя по шаблону), его удаляем
-                    if let Err(er) = std::fs::remove_file(&p) {
-                        problems.push(format!("{}: остаток не удалён ({er})", p.display()));
-                    }
-                }
+                // разобрать нельзя — проверить на секреты нельзя; а имя по шаблону не доказывает, что файл создан восстановлением (P18-2),
+                // поэтому не удаляем: сообщаем путь, решение за владельцем
+                Ok(Cleaned::Unparseable) => problems.push(format!("{}: похож на остаток восстановления, но не разбирается; не тронут — проверьте и удалите вручную", p.display())),
                 Ok(_) => {}
                 Err(er) => problems.push(format!("{}: остаток не очищен ({er})", p.display())),
             }
@@ -1396,12 +1393,16 @@ mod tests {
         std::fs::write(t.home.join(".paired_clients.json.restore-1-0"), b"{garbage that may hold a secret").unwrap();
         std::fs::write(t.home.join("my_paired_clients.json"), b"MINE").unwrap();
         let report = restore(&opened, &t, &RestoreOptions { force: true }).unwrap();
-        assert!(report.unclean.is_empty(), "{:?}", report.unclean);
+        assert!(report.unclean.iter().any(|p| p.contains(".paired_clients.json.restore-1-0")), "неразбираемый остаток назван в отчёте: {:?}", report.unclean);
+        assert_eq!(report.unclean.len(), 1, "{:?}", report.unclean);
         for entry in std::fs::read_dir(&t.home).unwrap().flatten() {
+            if entry.file_name() == ".paired_clients.json.restore-1-0" {
+                continue; // неразбираемый файл не тронут и не проверяется: он в отчёте
+            }
             let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
             assert!(!text.contains(SECRET2) && !text.contains("resume_secret_hex"), "{:?}: остаток секрета", entry.path());
         }
-        assert!(!t.home.join(".paired_clients.json.restore-1-0").exists(), "неразбираемый остаток удалён");
+        assert!(t.home.join(".paired_clients.json.restore-1-0").exists(), "неразбираемый остаток не удаляется по одному имени (P18-2)");
         assert_eq!(std::fs::read(t.home.join("my_paired_clients.json")).unwrap(), b"MINE", "посторонний файл не тронут");
         let active = std::fs::read_to_string(t.home.join("paired_clients.json")).unwrap();
         assert!(active.contains("\"version\": 2"), "активный файл переписан в формат v2: {active}");
@@ -1456,11 +1457,12 @@ mod tests {
         std::fs::write(l.home.join("paired_clients.json.before-restore-123-0"), old_v1()).unwrap();
         std::fs::write(l.home.join(".paired_anchors.json.restore-5-1"), b"garbage").unwrap();
         let problems = sweep_pairing_files_with(&l, None);
-        assert!(problems.is_empty(), "{problems:?}");
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains(".paired_anchors.json.restore-5-1"), "неразбираемый остаток назван в отчёте: {problems:?}");
         for (n, c) in &theirs {
             assert_eq!(std::fs::read(l.home.join(n)).unwrap(), *c, "{n} тронут");
         }
-        assert!(!l.home.join(".paired_anchors.json.restore-5-1").exists());
+        assert_eq!(std::fs::read(l.home.join(".paired_anchors.json.restore-5-1")).unwrap(), b"garbage", "по одному имени не удаляется (P18-2)");
         let cleaned = std::fs::read_to_string(l.home.join("paired_clients.json.before-restore-123-0")).unwrap();
         assert!(!cleaned.contains(SECRET2) && cleaned.contains("\"version\": 2"));
         // нестандартное имя файла якорей: соседи с общим началом имени не затрагиваются
