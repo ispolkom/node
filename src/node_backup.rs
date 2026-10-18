@@ -771,6 +771,20 @@ fn inject_rollback_write_failure() -> bool {
 /// Физическое имя цели для сравнения. Путь делается абсолютным; `.` и `..` разбираются по компонентам (после существующего каталога — по его реальному
 /// пути, внутри ещё не существующей части — лексически); затем самый глубокий существующий родитель приводится к реальному пути (ссылки раскрываются),
 /// остаток дописывается. Два разных написания одного и того же файла, в том числе через несуществующий каталог и `..`, дают один ключ (P21-1).
+/// Не различает ли файловая система в этом каталоге регистр имён: создаётся пробный файл со строчным именем и проверяется заглавное написание.
+/// Любая ошибка — «различает» (так никогда не склеиваются законные разные имена на системе с учётом регистра).
+fn dir_is_case_insensitive(dir: &Path) -> bool {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    let name = format!(".yandi-case-probe-{}-{nanos:x}", std::process::id());
+    let lower = dir.join(&name);
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lower).is_err() {
+        return false;
+    }
+    let same = std::fs::symlink_metadata(dir.join(name.to_uppercase())).is_ok();
+    let _ = std::fs::remove_file(&lower);
+    same
+}
+
 type Staged = (PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>);
 
 /// Уборка подготовленных файлов и сброс на диск всех затронутых каталогов (созданные, где лежали подготовленные файлы, где менялись имена).
@@ -789,6 +803,8 @@ fn abort_cleanup(staged: &[Staged], created: &[PathBuf], staged_dirs: &[PathBuf]
     let mut dirs: Vec<PathBuf> = staged_dirs.to_vec();
     dirs.extend_from_slice(touched);
     notes.extend(sync_report(created, &dirs));
+    // неподтверждённая запись каталога (как и оставшийся файл) — возможное остаточное состояние: флаг консервативный (P22-3)
+    let left = left || !notes.is_empty();
     (notes, left)
 }
 
@@ -814,9 +830,16 @@ fn physical_key(p: &Path) -> PathBuf {
     let mut probe = cur.clone();
     loop {
         if let Ok(real) = std::fs::canonicalize(&probe) {
+            // ещё не существующий хвост: на файловой системе без учёта регистра «PAIRED_CLIENTS.JSON» и «paired_clients.json» — один файл (P22-9);
+            // на системе с учётом регистра имена разные и в нижний регистр не приводятся
+            let fold = !rest.is_empty() && dir_is_case_insensitive(&real);
             let mut out = real;
             for part in rest.iter().rev() {
-                out.push(part);
+                if fold {
+                    out.push(part.to_string_lossy().to_lowercase());
+                } else {
+                    out.push(part);
+                }
             }
             return out;
         }
@@ -976,21 +999,23 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
             }
             let mut move_aside = !inject_swap_failure(i) && pairing_kind.is_none() && path.exists();
             if let Some(kind) = pairing_kind {
-                let raw = crate::netlayer::pairing::read_bytes_nofollow(path);
-                let prior = raw.as_ref().and_then(|b| crate::netlayer::pairing::sanitized_store_text(*kind, b)).map(|t| t.into_bytes());
-                if raw.is_some() && prior.is_none() && !pairing_rollback.contains_key(path) {
-                    // существующий файл связи, который не разбирается: очистить его для отката нельзя, а удалять при откате нельзя — он отодвигается
-                    // рядом (как обычный файл) и возвращается переименованием; о нём скажет и обход остатков (P21-2)
-                    move_aside = !inject_swap_failure(i);
-                } else {
-                    let changed = match (&raw, &prior) {
-                        (Some(r), Some(p)) => {
-                            let (a, b) = (serde_json::from_slice::<Value>(r).ok(), serde_json::from_slice::<Value>(p).ok());
-                            a != b
+                use crate::netlayer::pairing::PriorFile;
+                match crate::netlayer::pairing::prior_file(path) {
+                    PriorFile::Absent => {
+                        pairing_rollback.entry(path.clone()).or_insert((None, false)); // прежнего файла нет: при откате созданный убирается
+                    }
+                    PriorFile::Text(raw) => match crate::netlayer::pairing::sanitized_store_text(*kind, &raw).map(|t| t.into_bytes()) {
+                        Some(prior) => {
+                            // сравнение разобранного JSON, а не текста: разный вид записи при том же содержимом изменением не считается
+                            let changed = serde_json::from_slice::<Value>(&raw).ok() != serde_json::from_slice::<Value>(&prior).ok();
+                            pairing_rollback.entry(path.clone()).or_insert((Some(prior), changed)); // исходное состояние запоминается один раз
                         }
-                        _ => false,
-                    };
-                    pairing_rollback.entry(path.clone()).or_insert((prior, changed)); // исходное состояние запоминается один раз
+                        // существующий файл связи не разбирается: очистить его для отката нельзя, удалять при откате нельзя — он отодвигается рядом
+                        // (как обычный файл) и возвращается переименованием; о нём скажет и обход остатков (P21-2)
+                        None => move_aside = !inject_swap_failure(i),
+                    },
+                    // есть, но не прочитан (не UTF-8, больше лимита, нет прав, ссылка, ошибка чтения): неизвестное не считается отсутствием (P22-1)
+                    PriorFile::Unreadable(_) => move_aside = !inject_swap_failure(i),
                 }
             }
             if move_aside {
@@ -2050,6 +2075,46 @@ mod tests {
         FAIL_SWAP_AT.with(|c| c.set(None));
         assert!(!err.files_changed, "{err:?}");
         assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), junk, "исходные байты возвращены");
+    }
+
+    /// P22-1: прежний файл связи, который нельзя прочитать как текст (не UTF-8, больше лимита), не теряется откатом: возвращается теми же байтами.
+    #[cfg(unix)]
+    #[test]
+    fn p22_1_an_unreadable_prior_pairing_file_comes_back_byte_for_byte() {
+        let (opened, last, _) = pairing_copy();
+        let mut cases: Vec<Vec<u8>> = vec![vec![0xff, 0xfe, 0x00, b'{']];
+        cases.push(vec![b'a'; 5 * 1024 * 1024]); // больше лимита хранилища
+        for junk in cases {
+            let (_d2, t) = target_layout();
+            std::fs::write(t.home.join("paired_clients.json"), &junk).unwrap();
+            FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+            let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+            FAIL_SWAP_AT.with(|c| c.set(None));
+            assert!(!err.files_changed, "{err:?}");
+            assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), junk, "исходные байты потеряны");
+        }
+    }
+
+    /// P22-3: неподтверждённая запись каталога при уборке делает результат «изменено», а не «прежнее».
+    #[test]
+    fn p22_3_an_unconfirmed_cleanup_sync_marks_the_result_as_changed() {
+        let (notes, left) = abort_cleanup(&[], &[], &[PathBuf::from("/nonexistent-yandi/dir")], &[]);
+        assert!(!notes.is_empty());
+        assert!(left, "уборка не подтверждена — флаг консервативный");
+    }
+
+    /// P22-9: на системе с учётом регистра разные имена не склеиваются (проверка склейки на системе без учёта регистра — только на такой системе).
+    #[test]
+    fn p22_9_case_sensitive_filesystems_keep_different_missing_names_apart() {
+        let d = tempfile::tempdir().unwrap();
+        let a = physical_key(&d.path().join("Paired_Clients.json"));
+        let b = physical_key(&d.path().join("paired_clients.json"));
+        if dir_is_case_insensitive(d.path()) {
+            assert_eq!(a, b, "без учёта регистра это один файл");
+        } else {
+            assert_ne!(a, b, "с учётом регистра это два разных файла");
+        }
+        assert!(std::fs::read_dir(d.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".yandi-case-probe")), "пробный файл убран");
     }
 
     /// P21-3: подготовленный файл, который не удаётся убрать, называется в отчёте и делает результат «изменено».

@@ -372,9 +372,23 @@ pub(crate) fn locked<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
     with_lock(path, f)
 }
 
-/// Прочитать файл связи без перехода по ссылкам и с лимитом размера (для восстановления); любая ошибка — `None`.
-pub(crate) fn read_bytes_nofollow(path: &Path) -> Option<Vec<u8>> {
-    read_text(path).ok().flatten().map(String::into_bytes)
+/// Состояние существующего файла связи перед заменой при восстановлении. Неизвестное состояние НЕ считается отсутствием файла (P22-1).
+pub(crate) enum PriorFile {
+    /// Файла нет.
+    Absent,
+    /// Прочитан как текст в пределах лимита.
+    Text(Vec<u8>),
+    /// Есть, но не прочитан: не UTF-8, больше лимита, нет прав, ссылка/не обычный файл, ошибка ввода-вывода (причина).
+    Unreadable(String),
+}
+
+/// Прочитать прежний файл связи без перехода по ссылкам и с лимитом размера (для восстановления).
+pub(crate) fn prior_file(path: &Path) -> PriorFile {
+    match read_text(path) {
+        Ok(None) => PriorFile::Absent,
+        Ok(Some(t)) => PriorFile::Text(t.into_bytes()),
+        Err(e) => PriorFile::Unreadable(e),
+    }
 }
 
 /// Результат очистки одного файла связи на месте.
