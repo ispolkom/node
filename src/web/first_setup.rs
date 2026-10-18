@@ -202,6 +202,9 @@ async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
 }
 
 #[cfg(unix)]
+/// Предупреждения последнего восстановления (что не удалось очистить): уходят в ответ `/api/auth/restore`.
+static RESTORE_WARNINGS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
 fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
     use std::sync::atomic::Ordering;
     // одна первая настройка за раз: второй параллельный запрос ждёт и, когда узел уже настроен, получает отказ — файлы не перемешиваются
@@ -230,6 +233,7 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
     for u in &report.unclean {
         eprintln!("[restore] не очищено от секретов старого формата: {u}");
     }
+    *RESTORE_WARNINGS.lock().unwrap_or_else(|e| e.into_inner()) = report.unclean.clone();
     let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| format!("Каталог ключей: {e}"))?;
     let machine = key_root::SystemMachine;
     let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));
@@ -265,7 +269,9 @@ async fn restore(State(sh): State<Shared>, Json(body): Json<RestoreBody>) -> Res
                 if let Some(tx) = sh.done.lock().ok().and_then(|mut d| d.take()) {
                     let _ = tx.send(());
                 }
-                (StatusCode::OK, headers, Json(serde_json::json!({"ok": true}))).into_response()
+                // что не удалось очистить от секретов старого формата — владельцу в ответе (с точными путями)
+                let warnings = std::mem::take(&mut *RESTORE_WARNINGS.lock().unwrap_or_else(|e| e.into_inner()));
+                (StatusCode::OK, headers, Json(serde_json::json!({"ok": true, "warnings": warnings}))).into_response()
             }
             Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
         };

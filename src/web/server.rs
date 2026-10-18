@@ -6105,14 +6105,10 @@ async fn pair_issue_handler(
             }
             Ok(st.issue(pk.clone(), ttl))
         })
-        .map(|g| (g, crate::netlayer::pairing::PairedClientStore::load_or_default(&crate::netlayer::pairing::default_paired_clients_path())))
     })
     .await;
     let tok = match issued {
-        Ok(Ok((g, snapshot))) => {
-            *transport.paired_clients.lock().await = snapshot;
-            g
-        }
+        Ok(Ok(g)) => g,
         Ok(Err(e)) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

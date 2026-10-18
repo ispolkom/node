@@ -33,7 +33,20 @@ fn sweep_stale_temps(path: &Path, name: &str) {
     }
 }
 
+/// Чем закончилась запись: файл на месте и целиком (переименование выполнено), а долговечность записи каталога подтверждена или нет.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Committed {
+    Durable,
+    /// Переименование выполнено, но сбросить запись каталога на диск не удалось: после отключения питания прежний файл мог бы вернуться.
+    DurabilityUnknown(String),
+}
+
 pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    write_private_checked(path, data).map(|_| ())
+}
+
+/// То же, что `write_private`, но ошибка сброса каталога не теряется: вызывающий узнаёт, что запись выполнена, а её долговечность не подтверждена.
+pub fn write_private_checked(path: &Path, data: &[u8]) -> std::io::Result<Committed> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)?;
@@ -56,10 +69,25 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    // само переименование живёт в каталоге: без его fsync после отключения питания может вернуться старое имя, а вызывающий
-    // (перенос ключей) уже затёр исходник
-    sync_dir(path);
-    Ok(())
+    // само переименование живёт в каталоге: без его fsync после отключения питания может вернуться прежний файл
+    match sync_dir_checked(path) {
+        Ok(()) => Ok(Committed::Durable),
+        Err(e) => Ok(Committed::DurabilityUnknown(e.to_string())),
+    }
+}
+
+/// Сбросить на диск запись каталога, где лежит `path`; ошибка возвращается.
+pub fn sync_dir_checked(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(())
+    }
 }
 
 /// Сбросить на диск запись каталога, где лежит `path` (где ОС это умеет; ошибка не фатальна — файл уже записан и сохранён).

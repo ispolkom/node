@@ -536,66 +536,97 @@ fn private_dirs(dir: &Path) -> std::io::Result<()> {
 }
 
 /// Записать файлы копии в каталоги узла. Узел при этом не должен работать. Журналы групп и переписка не восстанавливаются.
-/// Привести к безопасному виду активные файлы связи и убрать/очистить остатки рядом с ними. Возвращает всё, что сделать не удалось
-/// (путь и причина). Файл блокировки и временные файлы записи (`.…tmp…`) не трогаются.
+/// Это остаток, который создаёт само восстановление: `<имя>.before-restore-<штамп>-<номер>` или `.<имя>.restore-<штамп>-<номер>` с числовыми
+/// компонентами. Любые другие файлы рядом (заметки, ручные копии, файлы с похожим именем) не считаются остатками и не трогаются.
+fn is_restore_leftover(own_name: &str, name: &str) -> bool {
+    fn nums(rest: &str) -> bool {
+        let mut it = rest.split('-');
+        let (Some(a), Some(b), None) = (it.next(), it.next(), it.next()) else { return false };
+        !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+    }
+    if let Some(rest) = name.strip_prefix(&format!("{own_name}.before-restore-")) {
+        return nums(rest);
+    }
+    if let Some(rest) = name.strip_prefix(&format!(".{own_name}.restore-")) {
+        return nums(rest);
+    }
+    false
+}
+
+/// Привести к безопасному виду активные файлы связи и убрать/очистить остатки восстановления рядом с ними. Возвращает всё, что сделать
+/// не удалось или пропущено (путь и причина). Остатки определяются только точным шаблоном имён, который создаёт восстановление; файл
+/// блокировки и временные файлы записи (`.…tmp…`) не трогаются. Чтение идёт без перехода по ссылкам.
 pub fn sweep_pairing_files(l: &Layout) -> Vec<String> {
     sweep_pairing_files_with(l, crate::netlayer::packet::anchor_store_override().as_deref())
 }
 
 fn sweep_pairing_files_with(l: &Layout, anchors_override: Option<&str>) -> Vec<String> {
-    use crate::netlayer::pairing::StoreKind;
+    use crate::netlayer::pairing::{Cleaned, StoreKind};
     let mut problems = Vec::new();
     for (rel, kind) in [("paired_clients.json", StoreKind::Clients), ("paired_anchors.json", StoreKind::Anchors)] {
-        let Ok(path) = target_path_with(l, Area::Home, rel, anchors_override) else { continue };
-        // 1. активный файл: если он в старом формате — переписать очищенным видом; если не разбирается — сообщить
-        match std::fs::read(&path) {
-            Ok(bytes) => match crate::netlayer::pairing::sanitized_store_text(kind, &bytes) {
-                Some(clean) if clean.as_bytes() != bytes.as_slice() => {
-                    if let Err(e) = crate::util::private_file::write_private(&path, clean.as_bytes()) {
-                        problems.push(format!("{}: не удалось переписать без секретов старого формата ({e})", path.display()));
-                    }
-                }
-                Some(_) => {}
-                None => problems.push(format!("{}: файл не разбирается по строгой схеме, возможные секреты не проверены; удалите или проверьте его вручную", path.display())),
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => problems.push(format!("{}: не читается ({e})", path.display())),
+        let path = match target_path_with(l, Area::Home, rel, anchors_override) {
+            Ok(p) => p,
+            Err(e) => {
+                problems.push(format!("{rel}: путь не определён ({e})"));
+                continue;
+            }
+        };
+        // 1. активный файл — под своей блокировкой: старый формат переписывается очищенным видом, неразбираемый — в отчёт
+        match crate::netlayer::pairing::sanitize_file_in_place(kind, &path, true) {
+            Ok(Cleaned::Absent | Cleaned::AlreadyClean | Cleaned::Rewritten) => {}
+            Ok(Cleaned::Unparseable) => problems.push(format!("{}: файл не разбирается по строгой схеме, возможные секреты не проверены; удалите или проверьте его вручную", path.display())),
+            Err(e) => problems.push(format!("{}: не удалось очистить ({e})", path.display())),
         }
-        // 2. остатки рядом: переписать очищенным видом или удалить
-        let Some(dir) = path.parent() else { continue };
+        // 2. остатки восстановления рядом: очистить или удалить; каждая ошибка попадает в отчёт
+        let dir = match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            Some(d) => d.to_path_buf(),
+            None => PathBuf::from("."),
+        };
         let Some(own_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
-        let Ok(rd) = std::fs::read_dir(dir) else { continue };
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            // только остатки именно этого файла: `<имя>.<что-то>` или `.<имя>.<что-то>`; посторонние файлы с похожим именем не трогаются
-            let related = name.starts_with(&format!("{own_name}.")) || name.starts_with(&format!(".{own_name}."));
-            if !related || name.ends_with(".lock") || name.contains(".tmp") {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                problems.push(format!("{}: каталог не читается, остатки не проверены ({e})", dir.display()));
+                continue;
+            }
+        };
+        for entry in rd {
+            let e = match entry {
+                Ok(e) => e,
+                Err(er) => {
+                    problems.push(format!("{}: запись каталога не прочитана ({er})", dir.display()));
+                    continue;
+                }
+            };
+            let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+            if !is_restore_leftover(&own_name, &name) {
                 continue;
             }
             let p = e.path();
             match std::fs::symlink_metadata(&p) {
                 Ok(m) if m.file_type().is_symlink() => {
-                    problems.push(format!("{}: символическая ссылка рядом с файлом связи, не тронута", p.display()));
+                    problems.push(format!("{}: символическая ссылка вместо остатка, не тронута", p.display()));
                     continue;
                 }
-                Ok(m) if !m.is_file() => continue,
+                Ok(m) if !m.is_file() => {
+                    problems.push(format!("{}: остаток не обычный файл, не тронут", p.display()));
+                    continue;
+                }
                 Err(er) => {
                     problems.push(format!("{}: {er}", p.display()));
                     continue;
                 }
                 _ => {}
             }
-            match std::fs::read(&p).ok().and_then(|b| crate::netlayer::pairing::sanitized_store_text(kind, &b)) {
-                Some(clean) => {
-                    if let Err(er) = crate::util::private_file::write_private(&p, clean.as_bytes()) {
-                        problems.push(format!("{}: остаток не очищен ({er})", p.display()));
-                    }
-                }
-                None => {
+            match crate::netlayer::pairing::sanitize_file_in_place(kind, &p, false) {
+                Ok(Cleaned::Unparseable) => {
+                    // разобрать нельзя — значит и проверить на секреты нельзя; это остаток восстановления (имя по шаблону), его удаляем
                     if let Err(er) = std::fs::remove_file(&p) {
                         problems.push(format!("{}: остаток не удалён ({er})", p.display()));
                     }
                 }
+                Ok(_) => {}
+                Err(er) => problems.push(format!("{}: остаток не очищен ({er})", p.display())),
             }
         }
     }
@@ -603,11 +634,15 @@ fn sweep_pairing_files_with(l: &Layout, anchors_override: Option<&str>) -> Vec<S
 }
 
 pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
+    restore_with(opened, l, opt, crate::netlayer::packet::anchor_store_override().as_deref())
+}
+
+fn restore_with(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>) -> Result<RestoreReport, String> {
     let entries = opened.entries()?;
     // пути проверяются ДО любой записи: ни ссылок внутри каталогов узла, ни (без явного разрешения) уже существующих файлов
     let mut targets = Vec::new();
     for e in &entries {
-        targets.push(target_path(l, e.area, &e.path)?);
+        targets.push(target_path_with(l, e.area, &e.path, anchors_override)?);
     }
     if !opt.force {
         let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
@@ -634,9 +669,9 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
     }
     // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
-    let mut staged: Vec<(PathBuf, PathBuf, String)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта)
-    let cleanup = |staged: &[(PathBuf, PathBuf, String)]| {
-        for (_, tmp, _) in staged {
+    let mut staged: Vec<(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта, вид файла связи — по ЛОГИЧЕСКОМУ имени записи, а не по имени на диске)
+    let cleanup = |staged: &[(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)]| {
+        for (_, tmp, _, _) in staged {
             let _ = std::fs::remove_file(tmp);
         }
     };
@@ -676,7 +711,7 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
             cleanup(&staged);
             return Err(format!("{}: {er}", e.path));
         }
-        staged.push((path, tmp, format!("{:?}/{}", e.area, e.path)));
+        staged.push((path, tmp, format!("{:?}/{}", e.area, e.path), pairing_store_kind(&e.path)));
     }
     // Фаза 2: замена. Прежние файлы переименовываются под уникальными именами, новые встают на их место. Исключение — файлы связи
     // (`paired_*.json`): их прежнее содержимое может нести секреты старого формата, поэтому сырой копии «до восстановления» не
@@ -686,8 +721,8 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
     let mut done: Vec<(PathBuf, Option<PathBuf>)> = Vec::new(); // (рабочий путь, куда ушёл прежний)
     let mut pairing_rollback: std::collections::HashMap<PathBuf, Option<Vec<u8>>> = std::collections::HashMap::new(); // прежний очищенный вид (None — прежнего нет или он не разбирается)
     let mut failure: Option<String> = None;
-    for (i, (path, tmp, label)) in staged.iter().enumerate() {
-        let pairing_kind = path.file_name().and_then(|n| n.to_str()).and_then(pairing_store_kind);
+    for (i, (path, tmp, label, pairing_kind)) in staged.iter().enumerate() {
+        let pairing_kind = *pairing_kind;
         let old = if let Some(kind) = pairing_kind {
             let prior = std::fs::read(path).ok().and_then(|b| crate::netlayer::pairing::sanitized_store_text(kind, &b)).map(|t| t.into_bytes());
             pairing_rollback.insert(path.clone(), prior);
@@ -702,7 +737,16 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         } else {
             None
         };
-        if let Err(er) = std::fs::rename(tmp, path) {
+        // замена файла связи идёт под его блокировкой: параллельная выдача права или очистка не вклинится между чтением прежнего и заменой
+        let renamed = if pairing_kind.is_some() {
+            match crate::netlayer::pairing::locked(path, || std::fs::rename(tmp, path)) {
+                Ok(r) => r,
+                Err(e) => Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string())),
+            }
+        } else {
+            std::fs::rename(tmp, path)
+        };
+        if let Err(er) = renamed {
             if let Some(o) = &old {
                 let _ = std::fs::rename(o, path);
             }
@@ -751,7 +795,7 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
     }
     // Очистка не зависит от содержимого копии: активные файлы связи и любые остатки рядом с ними (`*.before-restore-*`, промежуточные
     // `.restore-*`, в том числе от прежних сбоев) проверяются всегда; всё, что не удалось очистить или удалить, попадает в отчёт.
-    let unclean = sweep_pairing_files(l);
+    let unclean = sweep_pairing_files_with(l, anchors_override);
     if groups > 0 {
         // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
         // не обязательная часть: ключи и связи уже на месте, и сбой этой записи (диск) не должен превращать удачное восстановление в ошибку
@@ -1386,6 +1430,116 @@ mod tests {
         assert_eq!(target_path_with(&l, Area::Home, "paired_anchors.json", None).unwrap(), l.home.join("paired_anchors.json"));
         // клиентские права переопределением не затрагиваются
         assert_eq!(target_path_with(&l, Area::Home, "paired_clients.json", Some(custom.to_str().unwrap())).unwrap(), l.home.join("paired_clients.json"));
+    }
+
+    // ---- замечания проверки Sol (круг 37): P17-6…8 ----
+
+    #[test]
+    fn p17_7_the_sweep_touches_only_the_exact_leftovers_the_restore_creates() {
+        let (_d, l) = layout();
+        std::fs::create_dir_all(&l.home).unwrap();
+        // чужие файлы с похожими именами должны остаться байт в байт
+        let theirs: Vec<(String, &[u8])> = vec![
+            ("paired_clients.json.notes".into(), b"my note"),
+            ("paired_clients.json.json".into(), b"{}"),
+            (".paired_clients.json.config".into(), b"cfg"),
+            ("paired_clients.json.before-restore-abc-1".into(), b"not numeric"),
+            ("paired_clients.json.before-restore-1".into(), b"one number"),
+            ("paired_clients.json.before-restore-1-2-3".into(), b"three numbers"),
+            ("paired_clients.json.резерв".into(), "юникод".as_bytes()),
+            ("paired_anchors.json.manual-backup".into(), b"manual"),
+        ];
+        for (n, c) in &theirs {
+            std::fs::write(l.home.join(n), c).unwrap();
+        }
+        // настоящие остатки восстановления
+        std::fs::write(l.home.join("paired_clients.json.before-restore-123-0"), old_v1()).unwrap();
+        std::fs::write(l.home.join(".paired_anchors.json.restore-5-1"), b"garbage").unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert!(problems.is_empty(), "{problems:?}");
+        for (n, c) in &theirs {
+            assert_eq!(std::fs::read(l.home.join(n)).unwrap(), *c, "{n} тронут");
+        }
+        assert!(!l.home.join(".paired_anchors.json.restore-5-1").exists());
+        let cleaned = std::fs::read_to_string(l.home.join("paired_clients.json.before-restore-123-0")).unwrap();
+        assert!(!cleaned.contains(SECRET2) && cleaned.contains("\"version\": 2"));
+        // нестандартное имя файла якорей: соседи с общим началом имени не затрагиваются
+        let custom = _d.path().join("elsewhere");
+        std::fs::create_dir_all(&custom).unwrap();
+        for n in ["profile.json", "profile.photo", ".profile.config"] {
+            std::fs::write(custom.join(n), b"MINE").unwrap();
+        }
+        let ov = custom.join("profile.json");
+        let problems = sweep_pairing_files_with(&l, Some(ov.to_str().unwrap()));
+        // профиль не файл связи: он разбирается как «не по схеме» и сообщается, но НЕ удаляется
+        assert!(problems.iter().any(|p| p.contains("profile.json")), "{problems:?}");
+        for n in ["profile.json", "profile.photo", ".profile.config"] {
+            assert_eq!(std::fs::read(custom.join(n)).unwrap(), b"MINE", "{n}");
+        }
+    }
+
+    #[test]
+    fn p17_6_a_nonstandard_anchor_store_name_never_gets_a_raw_before_restore_copy() {
+        let (_d, src) = layout();
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        sample(&src);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_anchors.json");
+        // копия старой сборки: файл якорей в старом формате с секретом
+        let payload = serde_json::to_string(&crate::netlayer::pairing::PairingPayload {
+            anchor_id: crate::util::HashId([1u8; 32]),
+            anchor_x25519_hex: "a".repeat(64),
+            fingerprint_hex: "b".repeat(64),
+            anchor_url: "wss://a.example/".into(),
+        })
+        .unwrap();
+        let old_anchors = format!(r#"{{"anchors":[{{"payload":{payload},"session":{{"session_id":7,"resume_secret_hex":"{SECRET2}","expires_at":4102444800}},"preference":1}}]}}"#);
+        entries.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: old_anchors.clone().into_bytes() });
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        let private = d2.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&t.home).unwrap();
+        let custom = private.join("anchors-custom.json");
+        std::fs::write(&custom, old_anchors.as_bytes()).unwrap(); // уже лежит старый файл по нестандартному пути
+        let report = restore_with(&opened, &t, &RestoreOptions { force: true }, Some(custom.to_str().unwrap())).unwrap();
+        assert!(report.unclean.is_empty(), "{:?}", report.unclean);
+        assert!(report.kept_old.iter().all(|k| !k.to_string_lossy().contains("anchors-custom")), "сырой before-restore для файла связи: {:?}", report.kept_old);
+        for entry in std::fs::read_dir(&private).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!text.contains(SECRET2), "{:?}: остаток секрета", entry.path());
+        }
+        assert!(std::fs::read_to_string(&custom).unwrap().contains("\"version\": 2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p17_8_every_failure_of_the_sweep_is_reported_and_symlinks_are_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, l) = layout();
+        std::fs::create_dir_all(&l.home).unwrap();
+        // ссылка на чужой файл под видом остатка: не следуем, сообщаем
+        let target = _d.path().join("victim.txt");
+        std::fs::write(&target, b"IMPORTANT").unwrap();
+        std::os::unix::fs::symlink(&target, l.home.join("paired_clients.json.before-restore-1-1")).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert!(problems.iter().any(|p| p.contains("символическая ссылка")), "{problems:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"IMPORTANT");
+        // активный файл — ссылка: не читается и не переписывается, это в отчёте
+        std::fs::remove_file(l.home.join("paired_clients.json.before-restore-1-1")).unwrap();
+        std::os::unix::fs::symlink(&target, l.home.join("paired_clients.json")).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert!(problems.iter().any(|p| p.contains("paired_clients.json")), "{problems:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"IMPORTANT");
+        std::fs::remove_file(l.home.join("paired_clients.json")).unwrap();
+        // каталог не читается: остатки не проверены — это не молчание
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(problems.iter().any(|p| p.contains("не читается") || p.contains("не очищить") || p.contains("каталог")), "{problems:?}");
     }
 
     #[test]

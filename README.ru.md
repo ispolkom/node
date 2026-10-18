@@ -2,9 +2,9 @@
 
 > English: [README.md](README.md)
 
-**Одноранговая сеть для свободной связи: общение людей, файлы и звонки с шифрованием каждого звена (сквозное — между телефонами в приложении; между узлами пока нет), выход в интернет через узлы в других странах, цепочки через несколько узлов.** Один бинарный файл `yandi` — узел сети со встроенным веб-интерфейсом. Без центрального сервера и без аккаунтов.
+**Одноранговая сеть для свободной связи: общение людей, файлы и звонки с шифрованием каждого звена (сквозное — между телефонами в приложении; между узлами асинхронный сквозной слой в проектировании), выход в интернет через узлы в других странах, цепочки через несколько узлов.** Один бинарный файл `yandi` — узел сети со встроенным веб-интерфейсом. Без центрального сервера и без аккаунтов.
 
-*English, in short:* a peer-to-peer network node written in Rust — chat, files and calls encrypted on every link (end-to-end between phones in the app; node-to-node conversations are not yet end-to-end), proxying and exit to the internet through nodes in other jurisdictions (one hop, fast; or three hops with layered encryption, anonymous), own UDP-first transport with a TLS/443 entry that looks like an ordinary website to anyone who does not know the secret. Nodes find each other through a signed bootstrap list ([`bootstrap/`](bootstrap/)). Most documentation is in Russian; the code and tests are readable without it.
+*English, in short:* a peer-to-peer network node written in Rust — chat, files and calls encrypted on every link (end-to-end between phones in the app; the asynchronous end-to-end layer between nodes is in design), proxying and exit to the internet through nodes in other jurisdictions (one hop, fast; or three hops with layered encryption, anonymous), own UDP-first transport with a TLS/443 entry that looks like an ordinary website to anyone who does not know the secret. Nodes find each other through a signed bootstrap list ([`bootstrap/`](bootstrap/)). Most documentation is in Russian; the code and tests are readable without it.
 
 > **Статус: рабочий прототип, не готовый продукт.** Основное проверено на настоящих процессах, но у проекта нет независимого аудита, и сеть пока состоит из считанных узлов. Не полагайтесь на него там, где от этого зависит безопасность людей. Подробный честный список ограничений — в разделе «Чего пока нет».
 
@@ -88,7 +88,7 @@ cargo test --offline          # только тесты
 ## Чего пока нет (честно)
 
 - **Нет независимого аудита безопасности.** Криптография собрана из проверенных библиотек, формат пакета сеанса закреплён «золотыми» векторами, но проект ни разу не проверяла сторонняя команда.
-- **Нет сквозного шифрования между устройствами людей через посредников** (шифруется каждое звено, а не «человек — человек» целиком): при ретрансляции чужой узел может прочитать переписку. Это условие I2 в `INVARIANTS.md`, оно помечено «ждёт».
+- **Нет асинхронного сквозного слоя между узлами.** Между двумя узлами сеанс шифруется между конечными точками (по чтению кода ретранслятор пересылает датаграммы и ключей сеанса не имеет; в сети из нескольких узлов и на устройствах это не испытывалось), но нет слоя «запечатанного конверта» для офлайн-доставки, прямой секретности для хранимого содержимого, распространения ключей шифрования узлов по сети и проверки ключа человеком. Исправленный разбор и план — в [`docs/E2E_ARCHITECTURE.md`](docs/E2E_ARCHITECTURE.md). Инвариант I2 остаётся «ждёт».
 - **Цепочки не защищают от наблюдателя, видящего всю сеть:** нет подмешивания пустого трафика и закрепления входного узла (вход выбирается случайно).
 - **UDP в часы пик режется провайдерами**; путь по TCP (запасной) в плане, а TLS-вход для телефона уже есть.
 - **Транспорт между узлами шлёт каждый пакет дважды** (оригинал и копию) — осознанное решение для надёжности; это вдвое снижает потолок скорости.

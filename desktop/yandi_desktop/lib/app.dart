@@ -46,6 +46,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   String page = 'Панель';
   /// Режим администратора (docs/ROLES.md): отдельное меню; сеанс держит узел 15 минут по паролю.
   bool adminMode = false;
+  /// Предупреждение после восстановления из копии (что не очищено); остаётся на экране, пока его не закроют.
+  String? restoreWarning;
   List<Map<String, dynamic>> notices = [];
   int unreadNotices = 0;
   Map<String, dynamic>? status, speed;
@@ -416,7 +418,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     try {
       final pending = widget.api.request(path, body: body);
       body.clear();
-      await pending;
+      final response = await pending;
+      if (path == '/api/auth/restore' && response['warnings'] is List && (response['warnings'] as List).isNotEmpty) {
+        // что не удалось очистить от секретов старого формата — владельцу, с точными путями
+        restoreWarning = 'Копия восстановлена, но не всё очищено от секретов старого формата: ${(response['warnings'] as List).join('; ')}';
+      }
       if (!mounted || own != epoch) return;
       if (path == '/api/auth/setup' || path == '/api/auth/restore') {
         setState(() {
@@ -737,6 +743,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (restoreWarning != null) NoticePanel(restoreWarning!, error: true),
         if (updateNotice != null) UiText(updateNotice!),
         if (background.unread.isNotEmpty)
           UiText('Новых чатов: ${background.unread.length}'),

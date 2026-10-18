@@ -554,10 +554,6 @@ pub struct P2PTransport {
     pub ws_outgoing: Arc<tokio::sync::Mutex<HashMap<HashId, mpsc::Sender<Vec<u8>>>>>,
 
 
-    /// PairedClientStore — записи о праве спаренных клиентов (без секретов, формат v2). Загружается при старте из
-    /// `~/.yandi/paired_clients.json`: при этом старый файл с секретами переписывается (миграция). Изменения идут транзакциями
-    /// `PairedClientStore::update` прямо над файлом; эта копия — снимок на момент последней загрузки или выдачи.
-    pub paired_clients: Arc<tokio::sync::Mutex<crate::netlayer::pairing::PairedClientStore>>,
 
     /// 🔁 Step 6: PairedAnchorStore — mobile хранит список своих anchor'ов в порядке
     /// предпочтения. Загружается при старте из `~/.yandi/paired_anchors.json`.
@@ -918,6 +914,15 @@ impl P2PTransport {
         println!("[transport] Capabilities: 0b{:016b}", capabilities);
 
         // Create transport object first
+        // Записи о праве клиентов в памяти не держатся (источник истины — файл, изменения идут транзакциями `update`); при старте файл
+        // только читается: старый формат с секретами переписывается, повреждённый блокирует выдачу и это попадает в журнал.
+        {
+            let path = crate::netlayer::pairing::default_paired_clients_path();
+            let st = crate::netlayer::pairing::PairedClientStore::load_or_default(&path);
+            if let Some(why) = &st.blocked {
+                eprintln!("[pairing] {}: выдача прав заблокирована: {why}", path.display());
+            }
+        }
         let transport = Self {
             identity,
             local_id: node_id.clone(),
@@ -950,11 +955,6 @@ impl P2PTransport {
             local_nat_mapping: Arc::new(tokio::sync::RwLock::new(MappingBehavior::Unknown)),
             mapping_probes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_outgoing: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            paired_clients: {
-                let path = crate::netlayer::pairing::default_paired_clients_path();
-                let store = crate::netlayer::pairing::PairedClientStore::load_or_default(&path);
-                Arc::new(tokio::sync::Mutex::new(store))
-            },
             paired_anchors: {
                 let path = crate::netlayer::pairing::default_paired_anchors_path();
                 let store = crate::netlayer::pairing::PairedAnchorStore::load_or_default(&path);

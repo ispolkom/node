@@ -8,7 +8,7 @@
 import re, sys
 
 SRC = sys.argv[1] if len(sys.argv) > 1 else "."
-ROUNDS = {10: ("30", "ANALYSIS10.md"), 11: ("31", "ANALYSIS11.md"), 12: ("32", "ANALYSIS12.md"), 13: ("33", "ANALYSIS13.md"), 14: ("34", "ANALYSIS14.md"), 15: ("35 (проект RESUME)", "ANALYSIS15.md"), 16: ("36 (реализация 2а)", "ANALYSIS16.md")}
+ROUNDS = {10: ("30", "ANALYSIS10.md"), 11: ("31", "ANALYSIS11.md"), 12: ("32", "ANALYSIS12.md"), 13: ("33", "ANALYSIS13.md"), 14: ("34", "ANALYSIS14.md"), 15: ("35 (проект RESUME)", "ANALYSIS15.md"), 16: ("36 (реализация 2а)", "ANALYSIS16.md"), 17: ("37 (повторная проверка 2а и аудит E2E)", "ANALYSIS17.md")}
 
 # id → (коммит исправления, примечание). Соответствие внутри круга 31 восстановлено по тексту сообщений коммитов.
 FIX = {}
@@ -38,20 +38,24 @@ DESIGN = {
 }
 for _i in range(1, 11):
     DESIGN[f"P16-{_i}"] = "Исправлено в коде; проверено автотестами; **ждёт повторной независимой проверки Sol**"
+for _i in range(1, 11):
+    DESIGN[f"P17-{_i}"] = "Исправлено в коде; проверено автотестами; **ждёт повторной независимой проверки Sol**"
+for _i in range(1, 10):
+    DESIGN[f"E17-{_i}"] = "**Открыто** — архитектурное замечание к проекту E2E; документ `docs/E2E_ARCHITECTURE.md` будет переписан, внедрение E1 заблокировано"
 rng(12, 1, 8, "3290c25"); rng(13, 1, 8, "0e3e731"); rng(14, 1, 11, "5312040")
 OPEN = {"P11-3": "Не исправлено (отложено решением: обновление прежних замков с четырьмя словами; в проекте на ранней стадии прежних установок нет). Остаётся открытой записью."}
 
 def status_impl(pid):
-    return pid in ("P15-1", "P15-2", "P15-8", "P15-9", "P15-10") or pid.startswith("P16-")
+    return pid in ("P15-1", "P15-2", "P15-8", "P15-9", "P15-10") or pid.startswith("P16-") or pid.startswith("P17-")
 
 
 def parse(round_no, fname):
     text = open(f"{SRC}/{fname}", encoding="utf-8").read()
     out = []
-    for m in re.finditer(r"^## (P\d+-\d+) — (.+?)\n(.*?)(?=^## P\d+-\d+ — |^### |\Z)", text, re.S | re.M):
+    for m in re.finditer(r"^#{2,3} ((?:P|E)\d+-\d+) — (.+?)\n(.*?)(?=^#{2,3} (?:P|E)\d+-\d+ — |^#{2,3} (?!(?:P|E)\d+-\d+)|\Z)", text, re.S | re.M):
         pid, title, body = m.groups()
         sev = re.search(r"Серьёзность:\s*([^.\n]+)", body)
-        files = re.search(r"Файл[ы]?:\s*([^\n]+)", body)
+        files = re.search(r"Файл[ы]?:\s*([^\n]+)", body) or re.search(r"(`[^`\n]+`[^\n]*)", body)
         out.append((pid, title.strip(), sev.group(1).strip() if sev else "нет данных", re.sub(r"\*\*\s*$", "", files.group(1)).strip()[:140].replace("|", "/") if files else "нет данных"))
     return out
 

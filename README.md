@@ -1,6 +1,6 @@
 # YANDI Node
 
-**A peer-to-peer network for free communication: chat, files and calls encrypted on every link (end-to-end encryption between phones in the app; node-to-node conversations are not yet end-to-end, see "What is not there yet"), access to the internet through nodes in other jurisdictions, circuits through several nodes.** One binary, `yandi`, is a network node with a built-in web interface. No central server, no accounts.
+**A peer-to-peer network for free communication: chat, files and calls encrypted on every link (end-to-end encryption between phones in the app; between nodes, the asynchronous end-to-end layer is still in design, see "What is not there yet"), access to the internet through nodes in other jurisdictions, circuits through several nodes.** One binary, `yandi`, is a network node with a built-in web interface. No central server, no accounts.
 
 > Русская версия: [README.ru.md](README.ru.md)
 
@@ -86,7 +86,7 @@ Private data lives in a **closed environment** unlocked by the user's password; 
 ## What is not there yet (honestly)
 
 - **No independent security audit.**
-- **No end-to-end encryption between people through intermediaries**: every link is encrypted, not "person to person" as a whole, so a relay could read a relayed conversation. This is invariant I2, marked "pending".
+- **No asynchronous end-to-end layer between nodes.** Between two nodes the session is encrypted between the endpoints (by code reading, a relay forwards datagrams and holds no session keys; this has not been tested across several nodes or on devices), but there is no sealed-envelope layer for offline delivery, no forward secrecy for stored content, no network-wide distribution of nodes' encryption keys and no human key verification yet. The corrected analysis and the plan are in [`docs/E2E_ARCHITECTURE.md`](docs/E2E_ARCHITECTURE.md). Invariant I2 stays "pending".
 - **Circuits do not protect against an observer who sees the whole network**: no cover traffic and no entry-node pinning (the entry is chosen at random).
 - **UDP is throttled by some providers at peak hours**; a TCP fallback path is planned, the TLS entry for phones already exists.
 - **The node sends every packet twice** between nodes (original and copy) — a deliberate reliability choice that halves the speed ceiling.

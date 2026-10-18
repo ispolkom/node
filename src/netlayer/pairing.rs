@@ -19,6 +19,7 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -63,8 +64,13 @@ impl PairingPayload {
         if !is_hex(&self.fingerprint_hex, 64) {
             bail!("fingerprint_hex: нужно 64 hex-знака в нижнем регистре");
         }
-        if !self.anchor_url.starts_with("wss://") || self.anchor_url.len() > 512 || self.anchor_url.chars().any(|c| c.is_control() || c.is_whitespace()) {
-            bail!("anchor_url: нужен wss://-адрес без пробелов и управляющих знаков, не длиннее 512");
+        // адрес разбирается штатным разборщиком: схема wss, узел обязателен, без имени пользователя, пароля, запроса и фрагмента
+        if self.anchor_url.len() > 512 {
+            bail!("anchor_url: длиннее 512 знаков");
+        }
+        let u = url::Url::parse(&self.anchor_url).map_err(|e| anyhow::anyhow!("anchor_url: {e}"))?;
+        if u.scheme() != "wss" || u.host_str().map_or(true, str::is_empty) || !u.username().is_empty() || u.password().is_some() || u.query().is_some() || u.fragment().is_some() || u.path() != "/" {
+            bail!("anchor_url: нужен wss://узел[:порт]/ без имени пользователя, пароля, пути, запроса и фрагмента");
         }
         Ok(())
     }
@@ -109,6 +115,31 @@ impl ClientGrant {
     }
 }
 
+/// Карта JSON без повторяющихся ключей (обычная схлопывает дубликаты молча, оставляя последний).
+fn unique_map<'de, D, V>(d: D) -> std::result::Result<HashMap<String, V>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    V: Deserialize<'de>,
+{
+    struct Vis<V>(std::marker::PhantomData<V>);
+    impl<'de, V: Deserialize<'de>> serde::de::Visitor<'de> for Vis<V> {
+        type Value = HashMap<String, V>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("объект JSON с неповторяющимися ключами")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, mut a: A) -> std::result::Result<Self::Value, A::Error> {
+            let mut m = HashMap::new();
+            while let Some((k, v)) = a.next_entry::<String, V>()? {
+                if m.insert(k, v).is_some() {
+                    return Err(serde::de::Error::custom("повторяющийся ключ"));
+                }
+            }
+            Ok(m)
+        }
+    }
+    d.deserialize_map(Vis(std::marker::PhantomData))
+}
+
 // ----------------- Старый формат (v1): строгое описание -----------------
 // v1 допускается ровно в этом виде; любое отклонение — `Corrupt`, а не «пустое состояние». Секретные поля читаются, чтобы убедиться,
 // что это действительно старый файл, и нигде не сохраняются.
@@ -126,11 +157,35 @@ struct OldGrant {
     node_id_hex: Option<String>,
 }
 
+impl OldGrant {
+    /// Допустимая историческая форма старых полей: секреты были 32 байтами в hex; иначе это не файл прежней сборки.
+    fn validate(&self) -> Result<()> {
+        let hex64 = |s: &str| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit());
+        if !hex64(&self.resume_secret_hex) || self.session_key_hex.as_deref().is_some_and(|k| !hex64(k)) || self.node_id_hex.as_deref().is_some_and(|k| !hex64(k)) {
+            bail!("поля старой записи не той формы");
+        }
+        Ok(())
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 #[allow(dead_code)]
 struct OldClients {
+    #[serde(deserialize_with = "unique_map")]
     clients: HashMap<String, OldGrant>,
+}
+
+impl OldClients {
+    fn validate(&self) -> Result<()> {
+        for (k, g) in &self.clients {
+            if !is_hex(k, 64) {
+                bail!("ключ клиента не 64 hex-знака");
+            }
+            g.validate()?;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -181,14 +236,40 @@ pub enum StoreRead<T> {
 }
 
 fn read_text(path: &Path) -> std::result::Result<Option<String>, String> {
-    match fs::symlink_metadata(path) {
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{e}")),
-        Ok(m) if m.file_type().is_symlink() || !m.is_file() => return Err("не обычный файл".into()),
-        Ok(m) if m.len() > MAX_STORE_BYTES => return Err("файл слишком велик".into()),
-        Ok(_) => {}
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        // открытие без перехода по ссылке и проверка уже открытого дескриптора: между проверкой и чтением путь подменить нельзя
+        let f = match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{e}")),
+        };
+        let m = f.metadata().map_err(|e| e.to_string())?;
+        if !m.is_file() {
+            return Err("не обычный файл".into());
+        }
+        if m.len() > MAX_STORE_BYTES {
+            return Err("файл слишком велик".into());
+        }
+        let mut s = String::new();
+        f.take(MAX_STORE_BYTES + 1).read_to_string(&mut s).map_err(|e| e.to_string())?;
+        if s.len() as u64 > MAX_STORE_BYTES {
+            return Err("файл слишком велик".into());
+        }
+        Ok(Some(s))
     }
-    fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+    #[cfg(not(unix))]
+    {
+        match fs::symlink_metadata(path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(format!("{e}")),
+            Ok(m) if m.file_type().is_symlink() || !m.is_file() => return Err("не обычный файл".into()),
+            Ok(m) if m.len() > MAX_STORE_BYTES => return Err("файл слишком велик".into()),
+            Ok(_) => {}
+        }
+        fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+    }
 }
 
 /// Одна транзакция над файлом хранилища: блокировка на стабильном соседнем файле `<имя>.lock` (flock) держится на всё чтение,
@@ -229,6 +310,40 @@ fn with_lock<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
     }
 }
 
+/// Выполнить `f` под блокировкой файла хранилища (для других модулей: восстановление, очистка). Вложенный вызов для того же файла запрещён.
+pub(crate) fn locked<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
+    with_lock(path, f)
+}
+
+/// Результат очистки одного файла связи на месте.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Cleaned {
+    Absent,
+    AlreadyClean,
+    Rewritten,
+    /// Файл не разбирается по строгой схеме: содержимое не проверено, файл не тронут.
+    Unparseable,
+}
+
+/// Очистить файл связи на месте: прочитать без перехода по ссылке, пересобрать проверенную модель, записать. `locked_file` — под блокировкой
+/// файла (активные файлы хранилища); для остатков восстановления блокировка не нужна (их никто не обновляет) и файл `.lock` рядом не создаётся.
+pub fn sanitize_file_in_place(kind: StoreKind, path: &Path, locked_file: bool) -> Result<Cleaned> {
+    let body = || -> Result<Cleaned> {
+        let Some(text) = read_text(path).map_err(|e| anyhow::anyhow!("{}: {e}", path.display()))? else { return Ok(Cleaned::Absent) };
+        let Some(clean) = sanitized_store_text(kind, text.as_bytes()) else { return Ok(Cleaned::Unparseable) };
+        if clean == text {
+            return Ok(Cleaned::AlreadyClean);
+        }
+        write_text(path, &clean)?;
+        Ok(Cleaned::Rewritten)
+    };
+    if locked_file {
+        with_lock(path, body)?
+    } else {
+        body()
+    }
+}
+
 /// Запись без блокировки (вызывается только под ней): лимит размера, приватный файл, атомарная замена.
 fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let s = serde_json::to_string_pretty(value).context("serialize store")?;
@@ -238,7 +353,18 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
     }
-    crate::util::private_file::write_private(path, s.as_bytes()).with_context(|| format!("write {:?}", path))?;
+    write_text(path, &s)
+}
+
+/// Запись текста файла связи: приватно и атомарно. Если переименование выполнено, а сбросить каталог на диск не удалось, запись считается
+/// выполненной, но владельцу об этом прямо сообщается в журнал (долговечность не подтверждена).
+fn write_text(path: &Path, text: &str) -> Result<()> {
+    match crate::util::private_file::write_private_checked(path, text.as_bytes()).with_context(|| format!("write {:?}", path))? {
+        crate::util::private_file::Committed::Durable => {}
+        crate::util::private_file::Committed::DurabilityUnknown(why) => {
+            eprintln!("[pairing] {}: запись выполнена, но долговечность не подтверждена (каталог не сброшен на диск: {why})", path.display());
+        }
+    }
     Ok(())
 }
 
@@ -249,6 +375,7 @@ fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[serde(deny_unknown_fields)]
 pub struct PairedClientStore {
     pub version: u32,
+    #[serde(deserialize_with = "unique_map")]
     pub clients: HashMap<String, ClientGrant>,
     /// Файл не удалось прочитать как известный формат (или очистить): хранилище пустое в памяти и **записывать его нельзя**.
     #[serde(skip)]
@@ -298,8 +425,10 @@ impl PairedClientStore {
             Ok(Some(v)) => StoreRead::Unsupported(v),
             // старый формат: права клиентов не переносятся
             Ok(None) => match serde_json::from_str::<OldClients>(&text) {
-                Ok(o) if o.clients.keys().all(|k| is_hex(k, 64)) => StoreRead::Migrated(Self::default()),
-                Ok(_) => StoreRead::Corrupt("схема v1: ключ клиента не 64 hex-знака".into()),
+                Ok(o) => match o.validate() {
+                    Ok(()) => StoreRead::Migrated(Self::default()),
+                    Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
+                },
                 Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
             },
         }
@@ -359,7 +488,7 @@ impl PairedClientStore {
         })?
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         if let Some(why) = &self.blocked {
             bail!("хранилище не записывается: {why}");
         }
@@ -429,8 +558,12 @@ impl PairedAnchorStore {
         if self.anchors.len() > MAX_ANCHORS {
             bail!("слишком много якорей ({} > {MAX_ANCHORS})", self.anchors.len());
         }
+        let mut seen = std::collections::HashSet::new();
         for a in &self.anchors {
             a.payload.validate()?;
+            if !seen.insert(a.payload.anchor_id) {
+                bail!("якорь указан дважды");
+            }
         }
         Ok(())
     }
@@ -452,6 +585,7 @@ impl PairedAnchorStore {
             },
             Ok(Some(v)) => StoreRead::Unsupported(v),
             Ok(None) => match serde_json::from_str::<OldAnchors>(&text) {
+                Ok(o) if o.anchors.iter().any(|e| e.session.as_ref().is_some_and(|g| g.validate().is_err())) => StoreRead::Corrupt("схема v1: поля старой записи не той формы".into()),
                 Ok(o) => {
                     let s = Self {
                         version: STORE_VERSION,
@@ -517,7 +651,7 @@ impl PairedAnchorStore {
         })?
     }
 
-    pub fn save(&self, path: &Path) -> Result<()> {
+    pub(crate) fn save(&self, path: &Path) -> Result<()> {
         if let Some(why) = &self.blocked {
             bail!("хранилище не записывается: {why}");
         }
@@ -833,6 +967,9 @@ mod tests {
         let mut p = payload();
         p.anchor_url = "http://anchor/".into();
         assert!(p.validate().is_err(), "не wss");
+        // граница гарантии: имя узла правильной формы может быть любой строкой из допустимых знаков — хранилище такое не распознаёт как секрет
+        p.anchor_url = format!("wss://{}.example/", &OLD_RESUME_SECRET[..40]);
+        assert!(p.validate().is_ok(), "секрет «правильной формы» внутри допустимого поля отличить нельзя; это сказано в документах");
         p.anchor_url = "wss://a b/".into();
         assert!(p.validate().is_err(), "пробел в адресе");
         assert!(PairingPayload::from_qr_string(&format!(r#"{{"anchor_id":"{}","anchor_x25519_hex":"{}","fingerprint_hex":"{}","anchor_url":"wss://a/","extra":1}}"#, hex::encode([1u8; 32]), "a".repeat(64), "b".repeat(64))).is_err(), "лишнее поле в QR");
@@ -956,6 +1093,91 @@ mod tests {
         assert!(PairedClientStore::update(&path, |_| Ok(())).is_err());
         assert_eq!(fs::read(&path).unwrap(), b"{oops");
     }
+
+
+    // ---- замечания проверки Sol (круг 37): P17-1…5 ----
+
+    #[test]
+    fn p17_3_duplicate_keys_and_malformed_old_fields_are_rejected() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paired_clients.json");
+        let pk = "ab".repeat(32);
+        let g = format!(r#"{{"session_id_hex":"{}","expires_at":9}}"#, "0".repeat(32));
+        fs::write(&path, format!(r#"{{"version":2,"clients":{{"{pk}":{g},"{pk}":{g}}}}}"#)).unwrap();
+        assert!(matches!(PairedClientStore::read(&path), StoreRead::Corrupt(_)), "повторяющийся ключ клиента");
+        // старая запись: секретные поля неверной формы — не файл прежней сборки
+        for bad in [
+            format!(r#"{{"clients":{{"{pk}":{{"session_id":1,"resume_secret_hex":"zz","expires_at":9}}}}}}"#),
+            format!(r#"{{"clients":{{"{pk}":{{"session_id":1,"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":9,"session_key_hex":"short"}}}}}}"#),
+            format!(r#"{{"clients":{{"{pk}":{{"session_id":1,"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":9}},"{pk}":{{"session_id":2,"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":9}}}}}}"#),
+        ] {
+            fs::write(&path, &bad).unwrap();
+            assert!(matches!(PairedClientStore::read(&path), StoreRead::Corrupt(_)), "{bad}");
+        }
+        // якорь дважды
+        let a = serde_json::to_string(&payload()).unwrap();
+        let apath = dir.path().join("paired_anchors.json");
+        fs::write(&apath, format!(r#"{{"version":2,"anchors":[{{"payload":{a},"preference":1}},{{"payload":{a},"preference":2}}]}}"#)).unwrap();
+        assert!(matches!(PairedAnchorStore::read(&apath), StoreRead::Corrupt(_)), "один якорь дважды");
+    }
+
+    #[test]
+    fn p17_1_the_url_is_parsed_by_a_real_parser() {
+        for bad in ["wss://user:pw@host/", "wss://host/?token=1", "wss://host/#frag", "wss://host/some/path", "wss://host/ключ пробел", "ws://host/", "wss://ho st/", "https://host/", &format!("wss://{}/", "a".repeat(600))] {
+            let mut p = payload();
+            p.anchor_url = bad.to_string();
+            assert!(p.validate().is_err(), "{bad}");
+        }
+        for ok in ["wss://anchor.example:443/", "wss://[2001:db8::1]:8766/", "wss://1.2.3.4/", "wss://anchor.example"] {
+            let mut p = payload();
+            p.anchor_url = ok.to_string();
+            assert!(p.validate().is_ok(), "{ok}");
+        }
+    }
+
+    #[test]
+    fn p17_2_cleaning_in_place_runs_under_the_store_lock_and_never_follows_links() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paired_clients.json");
+        assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::Absent);
+        fs::write(&path, old_clients_json()).unwrap();
+        assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::Rewritten);
+        no_old_secrets(&fs::read_to_string(&path).unwrap());
+        assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::AlreadyClean);
+        fs::write(&path, b"{oops").unwrap();
+        assert_eq!(sanitize_file_in_place(StoreKind::Clients, &path, true).unwrap(), Cleaned::Unparseable);
+        assert_eq!(fs::read(&path).unwrap(), b"{oops", "неразбираемый файл не тронут");
+        // очистка и выдача права одновременно: ни одно право не теряется
+        let path = std::sync::Arc::new(dir.path().join("paired_clients.json"));
+        fs::write(&*path, old_clients_json()).unwrap();
+        let p2 = path.clone();
+        let cleaner = std::thread::spawn(move || {
+            for _ in 0..20 {
+                let _ = sanitize_file_in_place(StoreKind::Clients, &p2, true);
+            }
+        });
+        for i in 0..20u8 {
+            let key = format!("{:02x}{}", i, "0".repeat(62));
+            PairedClientStore::update(&path, |st| {
+                st.issue(key.clone(), 3600);
+                Ok(())
+            })
+            .unwrap();
+        }
+        cleaner.join().unwrap();
+        match PairedClientStore::read(&path) {
+            StoreRead::Current(st) => assert_eq!(st.clients.len(), 20),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn p17_4_a_normal_write_is_reported_durable() {
+        let dir = tempdir().unwrap();
+        let p = dir.path().join("x.json");
+        assert_eq!(crate::util::private_file::write_private_checked(&p, b"{}").unwrap(), crate::util::private_file::Committed::Durable);
+    }
+
 
     /// Страж по исходникам: механизма возобновления и хранения рабочего ключа в коде больше нет.
     #[test]
