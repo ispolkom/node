@@ -1,112 +1,120 @@
 # YANDI Node
 
-> English: [README.en.md](README.en.md)
+**A peer-to-peer network for free communication: end-to-end encrypted chat, files and calls between people, access to the internet through nodes in other jurisdictions, circuits through several nodes.** One binary, `yandi`, is a network node with a built-in web interface. No central server, no accounts.
 
-**Одноранговая сеть для свободной связи: шифрованное общение людей, файлы и звонки, выход в интернет через узлы в других странах, цепочки через несколько узлов.** Один бинарный файл `yandi` — узел сети со встроенным веб-интерфейсом. Без центрального сервера и без аккаунтов.
+> Русская версия: [README.ru.md](README.ru.md)
 
-*English, in short:* a peer-to-peer network node written in Rust — end-to-end encrypted chat, files and calls between people, proxying and exit to the internet through nodes in other jurisdictions (one hop, fast; or three hops with layered encryption, anonymous), own UDP-first transport with a TLS/443 entry that looks like an ordinary website to anyone who does not know the secret. Nodes find each other through a signed bootstrap list ([`bootstrap/`](bootstrap/)). Most documentation is in Russian; the code and tests are readable without it.
+> **Status: a working prototype, not a finished product.** The main features are verified on real processes, but the project has had no independent security audit and the network is still tiny. Do not rely on it where people's safety depends on it. See "What is not there yet" below.
 
-> **Статус: рабочий прототип, не готовый продукт.** Основное проверено на настоящих процессах, но у проекта нет независимого аудита, и сеть пока состоит из считанных узлов. Не полагайтесь на него там, где от этого зависит безопасность людей. Подробный честный список ограничений — в разделе «Чего пока нет».
+## Features
 
-## Что умеет
-
-| Возможность | Состояние |
+| Feature | State |
 |---|---|
-| Переписка, файлы, сигналы звонков между узлами со сквозным шифрованием по звену (X25519 + AES-256-GCM, одноразовые ключи на каждое рукопожатие, защита от повторов) | работает, проверено на 3 узлах |
-| Выход в интернет через другой узел (SOCKS5 на вашем компьютере) | работает |
-| **Автоматический выбор выхода** из каталога узлов по стране и качеству, чередование выходов, отдых сбойных | работает |
-| **Проверка страны выхода по факту**: узел спрашивает выход через него самого и отбрасывает обманувшего | работает |
-| **Режим «Анонимно»**: цепочка вход → средний → выход с шифрованием слоями (ячейки одного размера, подписанные рукопожатия) | работает, проверено на 4 узлах |
-| **Режим «Быстро»**: один выход, почти как обычное соединение | работает |
-| **Правила по сайтам**: нужные сайты через выход, остальные напрямую | работает |
-| **Узлы только с достижимым адресом**: карточки проверяются обратным подключением с подписью | работает |
-| **Клиенты за NAT через ретрансляторы**: подписанная запись о доступности | работает |
-| **Личный шлюз**: свои устройства выходят в интернет через свой компьютер по секрету владельца | работает |
-| **Вход для телефона по TLS (порт 443)** с сайтом-маскировкой для непрошеных гостей | работает (на стороне узла) |
-| Взаимность: узел, который мог бы помогать сети, но отказывается, теряет доступ к чужой помощи — с честным предупреждением | работает (для выхода) |
-| Доверенные узлы по визитке, доверие по истории поведения | работает |
-| Подписанный bootstrap: новые узлы находят вход в сеть | реализовано и проверено тестами; **список пока без входных узлов** — владелец добавляет свой (см. [`bootstrap/`](bootstrap/)) |
+| Chat, files and call signalling between nodes, encrypted per link (X25519 + AES-256-GCM, fresh keys for every handshake, replay protection) | works, verified on 3 nodes |
+| Exit to the internet through another node (SOCKS5 on your computer) | works |
+| **Automatic exit choice** from the node directory by country and quality, rotation, resting of failing exits | works |
+| **Exit country checked by measurement**: the node asks the exit itself where it is and drops one that lies | works |
+| **"Anonymous" mode**: entry → middle → exit circuit with layered encryption (equal-size cells, signed handshakes) | works, verified on 4 nodes |
+| **"Fast" mode**: a single exit, close to a normal connection | works |
+| **Route rules**: listed sites through the exit, everything else directly | works |
+| **Only reachable nodes count**: cards are proved by a signed connect-back | works |
+| **Clients behind NAT through relays**: signed availability records | works |
+| **Personal gateway**: your own devices reach the internet through your own computer, using a secret only you hold | works |
+| **TLS entry for a phone (port 443)** with a decoy website for anyone who does not know the secret | works (node side) |
+| Reciprocity: a node that could help but refuses loses access to others' help, with an honest warning | works (for exits) |
+| Trusted nodes by business card | works |
+| Signed bootstrap list so new nodes find the network | implemented and tested; **the list ships without entry nodes** — the owner adds their own (see [`bootstrap/`](bootstrap/)) |
 
-## Как устроена сеть (коротко)
+## How the network is organised
 
-- **Узел** — программа `yandi` на машине с достижимым (белым) адресом. Узел публикует **карточку** (страна, мощность, чем помогает), подписанную своим ключом; соседи проверяют её и обмениваются карточками, как пирами в торрентах.
-- **Клиент** — узел или устройство, до которого нельзя достучаться снаружи (за NAT, телефон). Он держит связь с двумя **ретрансляторами** и объявляет подписанную запись «меня можно найти через них».
-- **Выход** — узел, через который трафик выходит в интернет со своего адреса. Кто может выходить, решает владелец: никто / только доверенные (по умолчанию) / все.
-- **Цепочка** — путь через несколько узлов с шифрованием слоями: вход знает вас, но не цель; выход знает цель, но не вас; средний — ни то ни другое.
-- Подробно: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (устройство и карта кода), [`docs/NETWORK.md`](docs/NETWORK.md) (роли, режимы, как узлы находят друг друга).
+- **Node** — the `yandi` program on a machine with a reachable (public) address. A node publishes a **card** (country, power, what it offers) signed with its key; neighbours verify it and exchange cards like peers in a torrent swarm.
+- **Client** — a node or device that cannot be reached from outside (behind NAT, a phone). It keeps links to two **relays** and announces a signed record "reach me through them".
+- **Exit** — a node through which traffic leaves to the internet from its own address. The owner decides who may use it: nobody / trusted nodes only (default) / everyone.
+- **Circuit** — a path through several nodes with layered encryption: the entry knows you but not the target; the exit knows the target but not you; the middle knows neither.
+- Details: [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md), [`docs/NETWORK.md`](docs/NETWORK.md) (in Russian).
 
-## Быстрый старт
+## Quick start
 
-Нужен Rust (stable). Для Linux рекомендуется поднять буферы UDP (см. [`DEPLOYMENT.md`](DEPLOYMENT.md)).
+Requires Rust (stable). On Linux, raise the UDP buffers (see [`DEPLOYMENT.md`](DEPLOYMENT.md)).
 
 ```bash
 cargo build --release
-./target/release/yandi            # запустить узел; управление — оболочка YANDI через локальный сокет владельца (TCP-порта нет)
+./target/release/yandi            # start a node; control is the YANDI shell over the local owner socket (no TCP port)
 ```
 
-При первом запуске узел открывает на `127.0.0.1` маленькую страницу: в браузере создайте пароль входа и мастер-пароль, после чего узел создаёт личность (ключи; хранятся зашифрованными мастер-паролем) в папке данных. Дальше всё настраивается на веб-странице («Настройки»): режим работы, кто может выходить через вас, свой выход в интернет через сеть (быстро / анонимно + страна).
+On first start the node opens a small page on `127.0.0.1`: create a login password and a master password in the browser; the node then creates its identity (keys, stored encrypted with the master password). Everything else is configured on the web page ("Settings").
 
-**Тренировочная сеть на одной машине** (несколько копий узла со своими папками и портами):
+**A training network on one machine** (several node copies with their own folders and ports):
 
 ```bash
-./target/release/yandi testnet up 3      # поднять 3 копии
+./target/release/yandi testnet up 3
 ./target/release/yandi testnet status
 ./target/release/yandi testnet down
 ```
 
-**Свой выход через сеть из командной строки:**
+**Your own exit through the network, from the command line:**
 
 ```text
-socks5 auto [NL]     быстро: выход выбирается сам, страна по желанию
-socks5 hops [NL]     анонимно: цепочка через три узла
+socks5 auto [NL]     fast: the exit is chosen automatically, country optional
+socks5 hops [NL]     anonymous: a circuit through three nodes
 ```
 
-(или на странице настроек, или `POST /api/socks5/start/{auto|hops|rules}[-NL]`). Прокси слушает только `127.0.0.1`, пароль у каждого узла свой.
+(or on the settings page, or `POST /api/socks5/start/{auto|hops|rules}[-NL]`). The proxy listens on `127.0.0.1` only; every node has its own password.
 
-## Проверка
+## Testing
 
 ```bash
-scripts/check.sh              # сборка и быстрые тесты
-scripts/check.sh полностью    # плюс сетевые тесты на настоящих процессах
-cargo test --offline          # только тесты
+scripts/check.sh              # build and quick tests
+scripts/check.sh полностью    # plus network tests on real processes ("полностью" = "fully")
+cargo test --offline          # tests only
 ```
 
-Сетевые тесты (`tests/testnet_*_test.rs`, помечены `#[ignore]`) поднимают настоящие процессы узлов на одной машине. Тесты выхода, цепочек, личного шлюза и правил требуют, чтобы у машины был **публичный адрес** (эхо-сервер для проверки ставится на него), поэтому в CI на обычных раннерах они не запускаются. Запуск по одному: `cargo test --offline --test testnet_hops_test -- --ignored --test-threads=1` (тесты используют одни и те же порты — параллельно не запускать).
+Network tests (`tests/testnet_*_test.rs`, marked `#[ignore]`) start real node processes on one machine. The exit, circuit, personal-gateway and rules tests need the machine to have a **public address** (the echo server is placed on it), so they do not run on ordinary CI runners. Run them one at a time: `cargo test --offline --test testnet_hops_test -- --ignored --test-threads=1` (they share ports).
 
-Документ [`docs/INVARIANTS.md`](docs/INVARIANTS.md) — короткий список обещаний проекта; каждое охраняется тестом, а тест `tests/invariants.rs` следит, чтобы документ не разошёлся с тестами.
+[`docs/INVARIANTS.md`](docs/INVARIANTS.md) is a short list of the project's promises; each is guarded by a test, and `tests/invariants.rs` keeps the document in sync with the tests.
 
-## Чего пока нет (честно)
+## People, roles and privacy
 
-- **Нет независимого аудита безопасности.** Криптография собрана из проверенных библиотек, формат пакета сеанса закреплён «золотыми» векторами, но проект ни разу не проверяла сторонняя команда.
-- **Нет сквозного шифрования между устройствами людей через посредников** (шифруется каждое звено, а не «человек — человек» целиком): при ретрансляции чужой узел может прочитать переписку. Это условие I2 в `INVARIANTS.md`, оно помечено «ждёт».
-- **Цепочки не защищают от наблюдателя, видящего всю сеть:** нет подмешивания пустого трафика и закрепления входного узла (вход выбирается случайно).
-- **UDP в часы пик режется провайдерами**; путь по TCP (запасной) в плане, а TLS-вход для телефона уже есть.
-- **Транспорт между узлами шлёт каждый пакет дважды** (оригинал и копию) — осознанное решение для надёжности; это вдвое снижает потолок скорости.
-- **Мобильное приложение** (`mobile/yandi_mobile`, Flutter) отстаёт от узла: пароль прокси и защищённое соединение по отпечатку сертификата ещё не подключены.
-- Анонимным сеть называть нельзя, пока не закрыты пункты выше.
+Every node has three kinds of participants (details: [`docs/ROLES.md`](docs/ROLES.md), in Russian):
 
-Полный список и план — в [`docs/ROADMAP.md`](docs/ROADMAP.md) и [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md) (карта шифрования с найденными дефектами).
+- **Administrator** — the node's owner. Manages the node (complaints, pairing codes and requests, gateways, node settings, deleting groups, warning or removing users) from the **Admin panel** in the desktop shell. The panel opens with a separate administrator password for 15 minutes; the server enforces it on every management route. The administrator does not read anyone's conversations and does not write "as admin".
+- **User** — a person whose phone was accepted by the administrator (or the owner's own personal account on the PC). Has private chats, creates groups, uses the node as an internet exit.
+- **Guest** — a phone connected without a QR code, with limits (no groups, no internet exit, no calls, short-lived mail and files; see [`docs/GUEST.md`](docs/GUEST.md)).
 
-## Структура репозитория
+Private data lives in a **closed environment** unlocked by the user's password; one seed phrase restores both the node and that environment. An emergency erase button destroys the environment's key and files. What the node logs, keeps and for how long is described in [`docs/PRIVACY.md`](docs/PRIVACY.md) (in Russian): addresses are hidden in logs, mail on the node expires (7 days by default).
+
+## What is not there yet (honestly)
+
+- **No independent security audit.**
+- **No end-to-end encryption between people through intermediaries**: every link is encrypted, not "person to person" as a whole, so a relay could read a relayed conversation. This is invariant I2, marked "pending".
+- **Circuits do not protect against an observer who sees the whole network**: no cover traffic and no entry-node pinning (the entry is chosen at random).
+- **UDP is throttled by some providers at peak hours**; a TCP fallback path is planned, the TLS entry for phones already exists.
+- **The node sends every packet twice** between nodes (original and copy) — a deliberate reliability choice that halves the speed ceiling.
+- **The phone app** (`mobile/yandi_mobile`, Flutter) is young: it works against your own node (pairing by QR, TLS pinned to the node's certificate fingerprint), but it has had far less testing than the node, and groups, calls and invitations are still being refined.
+- The network must not be called anonymous until the points above are closed.
+
+Full list and plan: [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md).
+
+## Repository layout
 
 ```text
-src/                исходный код узла (карта — docs/ARCHITECTURE.md)
-tests/              модульные, сторожевые и сетевые тесты (testnet_*_test.rs — на настоящих процессах)
-docs/               архитектура, сеть, инварианты, формат на проводе, карта шифрования, план
-bootstrap/          подписанный список входных узлов и утилита подписи — как новые узлы находят сеть
-mobile/             мобильное приложение (Flutter), отстаёт от узла
-key_root/           утилита корневого ключа узла
-scripts/check.sh    все проверки одной командой
-.github/workflows/  сборка на Linux/Windows/macOS, сетевые тесты, проверка зависимостей
-DEPLOYMENT.md       развёртывание на сервере: порты, sysctl, systemd
-SECURITY.md         как сообщить об уязвимости
-CONTRIBUTING.md     как участвовать
+src/                node source code (map: docs/ARCHITECTURE.md)
+tests/              unit, guard and network tests (testnet_*_test.rs run on real processes)
+docs/               architecture, network, invariants, wire format, crypto map, roadmap
+bootstrap/          signed list of entry nodes and the signing tool
+mobile/             phone app (Flutter)
+key_root/           node root-key utility
+scripts/check.sh    all checks in one command
+.github/workflows/  builds on Linux/Windows/macOS, network tests, dependency checks
+DEPLOYMENT.md       server deployment: ports, sysctl, systemd
+SECURITY.md         how to report a vulnerability
+CONTRIBUTING.md     how to contribute
 ```
 
-## Лицензия
+## License
 
-MIT (см. [`LICENSE`](LICENSE)).
+MIT (see [`LICENSE`](LICENSE)).
 
-## Безопасность
+## Security
 
-Нашли уязвимость — не публикуйте её в открытых задачах, прочитайте [`SECURITY.md`](SECURITY.md).
+Found a vulnerability? Do not file a public issue — read [`SECURITY.md`](SECURITY.md).
