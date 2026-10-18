@@ -1,3 +1,4 @@
+import 'admin_panel.dart';
 import 'theme.dart';
 import 'dashboard.dart';
 import 'preferences.dart';
@@ -43,6 +44,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   int epoch = 0, tick = 0, formVersion = 0, operation = 0;
   String? error, notice;
   String page = 'Панель';
+  /// Режим администратора (docs/ROLES.md): отдельное меню; сеанс держит узел 15 минут по паролю.
+  bool adminMode = false;
+  List<Map<String, dynamic>> notices = [];
+  int unreadNotices = 0;
   Map<String, dynamic>? status, speed;
   List<dynamic> nodes = [];
   Timer? timer;
@@ -229,6 +234,76 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     await poll(force: true);
   }
 
+  /// Извещения администратора и состояние сеанса админ-панели (ошибки не мешают: у старых узлов ручки нет).
+  Future<void> refreshNotices(int own) async {
+    try {
+      final r = await widget.api.request('/api/notices');
+      if (!mounted || own != epoch) return;
+      final items = [
+        for (final x in (r['items'] is List ? r['items'] as List : const []))
+          if (x is Map) x.cast<String, dynamic>(),
+      ];
+      final active = r['admin_active'] == true;
+      setState(() {
+        notices = items;
+        unreadNotices = (r['unread'] is num) ? (r['unread'] as num).toInt() : 0;
+        if (adminMode && !active) {
+          // сеанс администратора закончился: возвращаемся в личный аккаунт
+          adminMode = false;
+          page = 'Панель';
+          notice = 'Сеанс администратора закончился. Войдите в админ-панель снова.';
+          formVersion++;
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// Открыть админ-панель: если сеанса нет, спросить пароль администратора.
+  Future<void> openAdmin() async {
+    var ok = false;
+    try {
+      ok = (await widget.api.request('/api/admin/session'))['active'] == true;
+    } catch (_) {}
+    if (!ok) {
+      final ctx = navigator.currentContext;
+      if (ctx == null) return;
+      ok = await showDialog<bool>(context: ctx, builder: (_) => AdminPasswordDialog(api: widget.api)) ?? false;
+    }
+    if (!ok || !mounted) return;
+    // извещения просмотрены: следующее станет «новым», только если число вырастет
+    unawaited(widget.api.request('/api/notices/ack', body: {'kinds': [for (final n in notices) '${n['kind']}']}).then((_) {}, onError: (_) {}));
+    setState(() {
+      epoch++;
+      preferences.reset();
+      background.openPeer = null;
+      widget.api.cancel();
+      adminMode = true;
+      page = 'Статус узла';
+      notice = null;
+      formVersion++;
+    });
+    poll(force: true);
+  }
+
+  /// Выйти из админ-панели: сеанс на узле закрывается.
+  Future<void> leaveAdmin() async {
+    try {
+      await widget.api.request('/api/admin/session', method: 'DELETE');
+    } catch (_) {}
+    if (!mounted) return;
+    setState(() {
+      epoch++;
+      preferences.reset();
+      background.openPeer = null;
+      widget.api.cancel();
+      adminMode = false;
+      page = 'Панель';
+      notice = null;
+      formVersion++;
+    });
+    poll(force: true);
+  }
+
   Future<void> poll({bool force = false}) async {
     if (!visible ||
         !connected ||
@@ -255,6 +330,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         }
       }
       await refreshVault(own);
+      if (force || current % 3 == 0) await refreshNotices(own);
       if (!mounted || own != epoch || page != 'Статус узла') return;
       if (force || current % 5 == 0) {
         final result = await widget.api.request('/api/status');
@@ -653,8 +729,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           // первый запуск: среда создаётся сразу; после блокировки на любой странице — только вход
           vaultPanel()
         else if (page == 'Панель')
-          // «Главная» зарезервирована под ленту контактов: пока пустая страница
-          const SizedBox.shrink()
+          // «Главная» зарезервирована под ленту контактов; пока — только извещения администратора (если есть)
+          NoticesCard(items: notices, onOpen: openAdmin)
         else if (page == 'Статус узла')
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -739,6 +815,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           const UiText('Проверка закрытой среды…')
         else if (vault!.hasError || vault!.configured && !vault!.unlocked)
           vaultPanel()
+        else if (page == 'Настройки узла')
+          solidScope(features())
         else
           features(),
       ],
@@ -770,21 +848,29 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               child: entered && connected
                   ? TabStrip(
                       header: true,
-                      labels: const [
-                        'Главная',
-                        'Чат',
-                        'Поиск',
-                        'Жалобы',
-                        'Группы',
-                        'Шлюзы',
-                        'Статус узла',
-                        'Настройки',
-                        'О приложении',
-                      ],
+                      labels: adminMode
+                          ? const ['Личный аккаунт', 'Статус узла', 'Шлюзы', 'Жалобы', 'Настройки узла']
+                          : [
+                              'Главная',
+                              'Чат',
+                              'Поиск',
+                              'Группы',
+                              'Настройки',
+                              'О приложении',
+                              unreadNotices > 0 ? 'Админ-панель ($unreadNotices)' : 'Админ-панель',
+                            ],
                       selected: page == 'Панель' ? 'Главная' : page,
                       onSelected: busy
                           ? null
                           : (label) {
+                              if (label.startsWith('Админ-панель')) {
+                                openAdmin();
+                                return;
+                              }
+                              if (label == 'Личный аккаунт') {
+                                leaveAdmin();
+                                return;
+                              }
                               setState(() {
                                 epoch++;
                                 preferences.reset();

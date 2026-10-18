@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/app.dart';
 import 'package:yandi_desktop/theme.dart';
 import '../tool/design_fixture.dart';
-import 'widget_test.dart' show click, stop;
+import 'widget_test.dart' show click, stop, admin;
 
 void main() {
   setUpAll(() async {
@@ -61,6 +61,8 @@ void main() {
           await click(t, 'Войти');
           if (scene == 'unlock')
             await click(t, 'Настройки');
+          else if (scene == 'Статус узла' || scene == 'Шлюзы')
+            await admin(t, scene);
           else if (scene != 'Главная')
             await click(t, scene);
           if (scene == 'Чат') await click(t, 'Открыть чат');

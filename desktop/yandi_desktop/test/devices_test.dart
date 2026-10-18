@@ -47,7 +47,7 @@ class DeviceApi extends m2.FeatureApi {
 void main() {
   testWidgets('pairing TTL, confirmation and full ID revoke', (t) async {
     final api = DeviceApi();
-    await m2.open(t, api, 'Настройки');
+    await m2.openAdmin(t, api, 'Настройки узла');
     await m1.click(t, 'Создать код сопряжения');
     expect(find.text('daemon-secret'), findsOneWidget);
     await t.pump(const Duration(seconds: 4));
@@ -62,7 +62,7 @@ void main() {
   });
   testWidgets('pairing QR stays a 280x280 square', (t) async {
     final api = DeviceApi();
-    await m2.open(t, api, 'Настройки');
+    await m2.openAdmin(t, api, 'Настройки узла');
     await t.ensureVisible(find.text('Создать код сопряжения'));
     await m1.click(t, 'Создать код сопряжения');
     final size = t.getSize(find.byKey(const ValueKey('pairing-qr')));
@@ -71,7 +71,7 @@ void main() {
   });
   testWidgets('late pairing is discarded on navigation', (t) async {
     final api = DeviceApi()..pairing = Completer();
-    await m2.open(t, api, 'Настройки');
+    await m2.openAdmin(t, api, 'Настройки узла');
     await t.ensureVisible(find.text('Создать код сопряжения'));
     await t.tap(find.text('Создать код сопряжения'));
     await t.pump();

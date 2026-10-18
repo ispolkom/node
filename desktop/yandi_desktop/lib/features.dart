@@ -165,7 +165,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
     final rev = revision;
     final currentPeer = selected == null ? null : peer(selected!);
     try {
-      if (widget.page == 'Настройки') {
+      if (widget.page == 'Настройки' || widget.page == 'Настройки узла') {
         final profile = await repo.profile();
         if (!active || rev != revision) return;
         final nextName = '${profile['display_name'] ?? ''}';
@@ -1663,7 +1663,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (error != null) NoticePanel(error!, error: true),
             if (notice != null) NoticePanel(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
-            if (widget.page == 'Настройки') ...[
+            if (widget.page == 'Настройки узла') ...[
               AdvancedSettings(
                 api: widget.api,
                 busy: sending,
@@ -1695,6 +1695,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 isActive: () => active,
                 mutate: (a) => mutate(a),
               ),
+            ] else if (widget.page == 'Настройки') ...[
               PanelStack(
                 children: [
                   const UiText('Профиль', style: TextStyle(fontSize: 22)),

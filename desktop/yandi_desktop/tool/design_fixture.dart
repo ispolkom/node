@@ -5,6 +5,7 @@ import 'package:yandi_desktop/transport/api.dart';
 class DesignApi implements Api {
   final String scene;
   DesignApi([this.scene = 'Главная']);
+  bool adminActive = false;
   static final peer = 'a' * 64, group = 'b' * 32;
   static const short = 'aaaaaaaaaaaaaaaa';
   @override
@@ -16,6 +17,12 @@ class DesignApi implements Api {
     String? method,
   }) async {
     if (scene == 'offline') throw const ApiFailure('disconnected');
+    if (path == '/api/admin/session') {
+      if (method == 'DELETE') adminActive = false;
+      if (body != null) adminActive = true;
+      return {'ok': true, 'active': adminActive};
+    }
+    if (path == '/api/notices') return {'items': const [], 'unread': 0, 'admin_active': adminActive};
     if (path == '/api/auth/seed/new')
       return {
         'count': 12,

@@ -2,7 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/transport/api.dart';
-import 'widget_test.dart' show FakeApi, start, click, stop;
+import 'widget_test.dart' show FakeApi, start, click, stop, admin;
 
 class NetworkApi extends FakeApi {
   final gateways = <Map<String, dynamic>>[];
@@ -103,7 +103,7 @@ void main() {
     final api = NetworkApi();
     await start(t, api);
     await click(t, 'Войти');
-    await click(t, 'Шлюзы');
+    await admin(t, 'Шлюзы');
     await t.enterText(find.byType(TextField).first, '<b>шлюз</b>');
     await t.enterText(find.byType(TextField).last, '0123456789abcdef');
     await click(t, 'Добавить шлюз');
@@ -150,7 +150,7 @@ void main() {
     });
     await start(t, api);
     await click(t, 'Войти');
-    await click(t, 'Шлюзы');
+    await admin(t, 'Шлюзы');
     await click(t, 'Старт SOCKS5');
     expect(find.textContaining('ephemeral-fixture-password'), findsOneWidget);
     final startButton = t.widget<OutlinedButton>(
@@ -161,8 +161,8 @@ void main() {
     expect(api.socks, false);
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await click(t, 'Старт SOCKS5');
-    await click(t, 'Главная');
-    await click(t, 'Шлюзы');
+    await click(t, 'Личный аккаунт');
+    await admin(t, 'Шлюзы');
     expect(find.textContaining('ephemeral-fixture-password'), findsNothing);
     await stop(t);
   });
@@ -170,7 +170,7 @@ void main() {
     final api = NetworkApi()..relay = true;
     await start(t, api);
     await click(t, 'Войти');
-    await click(t, 'Статус узла');
+    await admin(t, 'Статус узла');
     expect(find.text('Ретрансляция'), findsNothing);
     expect(find.byKey(const ValueKey('relay-toggle')), findsNothing);
     expect(api.calls.contains('/api/network/relay'), false);
@@ -183,7 +183,7 @@ void main() {
     final api = NetworkApi()..saveFails = true;
     await start(t, api);
     await click(t, 'Войти');
-    await click(t, 'Шлюзы');
+    await admin(t, 'Шлюзы');
     await t.enterText(find.byType(TextField).first, 'name');
     await t.enterText(find.byType(TextField).last, '0123456789abcdef');
     await click(t, 'Добавить шлюз');
@@ -200,7 +200,7 @@ void main() {
     addTearDown(() => t.binding.setSurfaceSize(null));
     await start(t, NetworkApi());
     await click(t, 'Войти');
-    await click(t, 'Шлюзы');
+    await admin(t, 'Шлюзы');
     expect(t.takeException(), isNull);
     await stop(t);
   });

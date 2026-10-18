@@ -20,6 +20,9 @@ class FakeApi implements Api {
     'migration_pending': false,
     'error': null,
   };
+  /// Сеанс администратора, как его держит узел, и извещения для личного аккаунта.
+  bool adminActive = false;
+  List<Map<String, dynamic>> notices = [];
   @override
   Future<Map<String, dynamic>> request(
     String path, {
@@ -32,6 +35,13 @@ class FakeApi implements Api {
     if (down) throw const ApiFailure('disconnected');
     if (path == '/api/auth/state')
       return {'setup_required': setup, 'recovery_required': recovery};
+    if (path == '/api/admin/session') {
+      if (method == 'DELETE') adminActive = false;
+      if (body != null) adminActive = true;
+      return {'ok': true, 'active': adminActive};
+    }
+    if (path == '/api/notices') return {'items': notices, 'unread': notices.length, 'admin_active': adminActive};
+    if (path == '/api/notices/ack') return {'ok': true};
     if (path == '/api/status') return {'short_id': 'abc', 'status': 'online'};
     if (path == '/api/nodes') return {'nodes': []};
     if (path == '/api/speed') return {'rx_speed': 12};
@@ -68,6 +78,17 @@ Finder action(String label) {
   final tip = find.byTooltip(label);
   return tip.evaluate().isNotEmpty ? tip.first : find.text(label).first;
 }
+/// Страница админ-панели: сначала «Админ-панель» и пароль администратора, затем сама страница.
+Future<void> admin(WidgetTester tester, String page) async {
+  await click(tester, 'Админ-панель');
+  if (find.byType(AlertDialog).evaluate().isNotEmpty) {
+    await tester.enterText(find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)), 'admin-pass');
+    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.widgetWithText(ElevatedButton, 'Войти')));
+    await tester.pumpAndSettle();
+  }
+  if (page != 'Статус узла') await click(tester, page);
+}
+
 Future<void> click(WidgetTester tester, String label) async {
   await tester.pump(); // введённый текст меняет микрофон на самолётик
   final button = action(label);
@@ -127,7 +148,7 @@ void main() {
     await start(t, api);
     await click(t, 'Войти');
     expect(find.text('Запустить узел'), findsNothing, reason: 'Главная пока пустая');
-    await click(t, 'Статус узла');
+    await admin(t, 'Статус узла');
     expect(find.text('Запустить узел'), findsOneWidget);
     expect(find.text('abc'), findsOneWidget);
     await t.pump(const Duration(seconds: 10));

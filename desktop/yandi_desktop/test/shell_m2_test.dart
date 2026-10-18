@@ -101,6 +101,13 @@ Future<void> open(WidgetTester t, FeatureApi api, String page) async {
   await m1.click(t, page);
 }
 
+/// Страницы управления узлом открываются через админ-панель.
+Future<void> openAdmin(WidgetTester t, FeatureApi api, String page) async {
+  await m1.start(t, api);
+  await m1.click(t, 'Войти');
+  await m1.admin(t, page);
+}
+
 Finder field(String label) => find.widgetWithText(TextField, label);
 void main() {
   test(
