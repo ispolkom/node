@@ -107,7 +107,7 @@ for r, (audit, fname) in ROUNDS.items():
     for pid, title, sev, files in items:
         total += 1
         if pid in DESIGN:
-            status, commit = DESIGN[pid], (("9689280" if not (pid.startswith("P16-") or pid.startswith("P17-")) else ("f98f1fd" if pid.startswith("P16-") else "7fe7021")) if status_impl(pid) else "—")
+            status, commit = DESIGN[pid], (("9689280" if not (pid.startswith("P16-") or pid.startswith("P17-")) else ("f98f1fd" if pid.startswith("P16-") else "7fe7021")) if status_impl(pid) else ("3bf2b01" if pid == "P18-6" else "—"))
         elif pid in OPEN:
             status, commit = "**Открыто.** " + OPEN[pid], "—"
         elif pid in FIX:
