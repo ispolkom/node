@@ -116,4 +116,20 @@ void main() {
     expect(api.calls.any((p) => p.startsWith('/api/chat') || p.startsWith('/api/groups')), false, reason: 'содержимое чатов при запертой среде не запрашивалось');
     await stop(t);
   });
+
+  testWidgets('пропущенные звонки считаются на колоколе и сбрасываются при открытии чата', (t) async {
+    final api = FakeApi()..configured = true..unlocked = false;
+    api.alertCalls = 2;
+    await start(t, api);
+    await click(t, 'Войти');
+    await t.pump(const Duration(seconds: 4));
+    await t.pumpAndSettle();
+    final badge = find.byKey(const ValueKey('alert-badge'));
+    expect(find.descendant(of: badge, matching: find.text('2')), findsOneWidget, reason: 'два пропущенных звонка');
+    api.alertCalls = 0; // узел сбросит счётчик после подтверждения
+    await click(t, 'Чат');
+    expect(api.calls.contains('/api/alerts/ack'), true, reason: 'открытие чата подтверждает просмотр');
+    expect(find.byKey(const ValueKey('alert-badge')), findsNothing);
+    await stop(t);
+  });
 }

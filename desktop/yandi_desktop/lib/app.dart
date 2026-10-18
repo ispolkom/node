@@ -52,6 +52,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   String? restoreWarning;
   List<Map<String, dynamic>> notices = [];
   int unreadNotices = 0;
+  int alertCalls = 0;
   Map<String, dynamic>? status, speed;
   List<dynamic> nodes = [];
   Timer? timer;
@@ -256,19 +257,20 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       final r = await widget.api.request('/api/alerts');
       if (!mounted || own != epoch) return;
       int n(Object? v) => v is num ? v.toInt().clamp(0, 99999) : 0;
-      final m = n(r['messages']), x = n(r['notices']);
-      if (m != alertMessages || x != alertNotices) setState(() { alertMessages = m; alertNotices = x; });
+      final m = n(r['messages']), x = n(r['notices']), c = n(r['missed_calls']);
+      if (m != alertMessages || x != alertNotices || c != alertCalls) setState(() { alertMessages = m; alertNotices = x; alertCalls = c; });
     } catch (_) {}
   }
 
   /// Число на колокольчике: ожидающие сообщения + непрочитанные чаты текущего сеанса + новые извещения админ-панели.
-  int get alertTotal => alertMessages + background.unread.length + alertNotices;
+  int get alertTotal => alertMessages + background.unread.length + alertNotices + alertCalls;
 
   /// Подсказка к колокольчику: что именно посчитано (без имён и текста).
   String get alertHint {
     final parts = <String>[
       if (alertMessages > 0) '${preferences.english ? 'Messages waiting' : 'Сообщений ждёт'}: $alertMessages',
       if (background.unread.isNotEmpty) '${preferences.english ? 'Unread chats' : 'Непрочитанных чатов'}: ${background.unread.length}',
+      if (alertCalls > 0) '${preferences.english ? 'Missed calls' : 'Пропущенных звонков'}: $alertCalls',
       if (alertNotices > 0) '${preferences.english ? 'Admin notices' : 'Извещений админ-панели'}: $alertNotices',
     ];
     final base = preferences.english ? 'OS notifications' : 'Уведомления ОС';
@@ -337,6 +339,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     final kinds = byPage[page];
     if (kinds == null) return;
     unawaited(widget.api.request('/api/notices/ack', body: {'kinds': kinds}).then((_) {}, onError: (_) {}));
+  }
+
+  /// Владелец открыл чат: пропущенные звонки просмотрены, счётчик на узле и на колоколе обнуляется.
+  void ackCalls() {
+    if (alertCalls == 0) return;
+    setState(() => alertCalls = 0);
+    unawaited(widget.api.request('/api/alerts/ack', method: 'POST', body: const {}).then((_) {}, onError: (_) {}));
   }
 
   /// Выйти из админ-панели: сеанс на узле закрывается.
@@ -941,6 +950,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                                 return;
                               }
                               if (adminMode) ackNotices(label);
+                              if (label == 'Чат') ackCalls();
                               setState(() {
                                 epoch++;
                                 preferences.reset();

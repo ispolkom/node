@@ -2384,8 +2384,11 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                                 Some(t) if matches!(crate::mobile_self::classify(t.clone()), crate::mobile_self::Envelope::CapPing) => {
                                     node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
                                 }
-                                _ => {
+                                other => {
                                     // страница не открыта (или не сигнал) — «не на связи», чтобы телефон не висел в вызове
+                                    if let Some(t) = &other {
+                                        crate::mobile_self::note_missed_call(t);
+                                    }
                                     let mut f = vec![FT_PEER_OFFLINE];
                                     f.extend_from_slice(&id);
                                     if sock.send(Message::Binary(f)).await.is_err() { break; }

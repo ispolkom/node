@@ -508,6 +508,7 @@ impl WebServer {
             .route("/api/admin/session", get(api_admin_session_get).post(api_admin_session_post).delete(api_admin_session_delete))
             .route("/api/admin/password", post(api_admin_password_post))
             .route("/api/alerts", get(api_alerts))
+            .route("/api/alerts/ack", post(api_alerts_ack))
             .route("/api/notices", get(api_notices_get))
             .route("/api/notices/ack", post(api_notices_ack))
             .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
@@ -3606,8 +3607,15 @@ async fn api_alerts() -> Json<serde_json::Value> {
     Json(serde_json::json!({
         "messages": crate::mobile_api::pc_inbox_pending(),
         "notices": crate::web::admin::view(None)["unread"].as_u64().unwrap_or(0),
+        "missed_calls": crate::mobile_self::missed_calls(),
         "locked": locked,
     }))
+}
+
+/// Владелец открыл чат: пропущенные звонки просмотрены (счётчик сбрасывается).
+async fn api_alerts_ack() -> Json<serde_json::Value> {
+    crate::mobile_self::clear_missed_calls();
+    Json(serde_json::json!({"ok": true}))
 }
 
 async fn api_notices_get(headers: HeaderMap) -> Json<serde_json::Value> {

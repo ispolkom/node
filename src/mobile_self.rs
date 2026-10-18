@@ -978,6 +978,35 @@ pub fn call_page_alive() -> bool {
     CALLS.lock().unwrap_or_else(|e| e.into_inner()).last_poll.map(|t| t.elapsed() < std::time::Duration::from_secs(6)).unwrap_or(false)
 }
 
+/// Номера звонков, на которые страница не ответила (её не было открыто). Хранятся только в памяти и только номера: ни имён, ни времени.
+static MISSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Запомнить пропущенный звонок: сигнал «invite» свежий и корректный, а страница не открыта. Повтор того же звонка не считается.
+pub fn note_missed_call(text: &str) {
+    let Some(rest) = text.strip_prefix(CALL_MARKER) else { return };
+    let Ok(m) = serde_json::from_str::<serde_json::Value>(rest) else { return };
+    let (Some("invite"), Some(cid), Some(ts)) = (m["t"].as_str(), m["cid"].as_str(), m["ts"].as_i64()) else { return };
+    if m["v"] != 1 || cid.len() < 8 || cid.len() > 64 {
+        return;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    if (now - ts).abs() >= 90_000 {
+        return;
+    }
+    let mut l = MISSED.lock().unwrap_or_else(|e| e.into_inner());
+    if !l.iter().any(|c| c == cid) && l.len() < 99 {
+        l.push(cid.to_string());
+    }
+}
+
+pub fn missed_calls() -> usize {
+    MISSED.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+pub fn clear_missed_calls() {
+    MISSED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 pub fn push_call(from_device: &str, text: &str) {
     let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
     q.seq += 1;
@@ -1002,6 +1031,21 @@ pub fn poll_calls(after: u64) -> (Vec<(u64, String, String)>, u64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missed_calls_count_only_fresh_invites_once() {
+        clear_missed_calls();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let invite = |t: &str, cid: &str, ts: u128| format!("{CALL_MARKER}{{\"v\":1,\"t\":\"{t}\",\"cid\":\"{cid}\",\"video\":false,\"ts\":{ts}}}");
+        note_missed_call(&invite("invite", "abcdefgh1", now));
+        note_missed_call(&invite("invite", "abcdefgh1", now)); // повтор того же звонка
+        note_missed_call(&invite("hangup", "abcdefgh2", now)); // не вызов
+        note_missed_call(&invite("invite", "abcdefgh3", now - 600_000)); // устарел
+        note_missed_call("обычный текст");
+        assert_eq!(missed_calls(), 1);
+        clear_missed_calls();
+        assert_eq!(missed_calls(), 0);
+    }
 
     #[test]
     fn bug_r15_mobile_key_holder_revokes_without_lazy_plain_reopen() {
