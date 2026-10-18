@@ -709,7 +709,7 @@ fn restore_with(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
     restore_core(opened, l, opt, anchors_override).map_err(|f| f.message)
 }
 
-/// Пробы отказов для тестов (в рабочей сборке отсутствуют): номер замены, которая «откажет», и отказ записи при откате.
+// Пробы отказов для тестов (в рабочей сборке отсутствуют): номер замены, которая «откажет», и отказ записи при откате.
 #[cfg(test)]
 thread_local! {
     static FAIL_SWAP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };

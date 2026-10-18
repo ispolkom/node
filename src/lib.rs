@@ -31,6 +31,8 @@
 //! - **util** - Common types and utilities
 
 pub mod bootstrap;
+/// Рукопожатие v3: исследовательская модель (кодек, ключи, автомат), к узлу не подключена — docs/HANDSHAKE_HARDENING.md.
+pub mod hs3;
 #[cfg(unix)]
 pub mod closed_api;
 #[cfg(unix)]
