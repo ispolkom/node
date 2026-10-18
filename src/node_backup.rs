@@ -780,6 +780,21 @@ enum CaseKind {
     Unknown,
 }
 
+#[cfg(test)]
+thread_local! {
+    static FAIL_PROBE_REMOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn inject_probe_remove_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_PROBE_REMOVE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
 /// Кэш проб по каталогам и накопленные предупреждения (оставшийся пробный файл, имена, уникальность которых проверить нельзя).
 #[derive(Default)]
 struct CaseProbe {
@@ -800,7 +815,8 @@ impl CaseProbe {
             Err(_) => CaseKind::Unknown,
             Ok(_) => {
                 let same = std::fs::symlink_metadata(dir.join(name.to_uppercase())).is_ok();
-                if let Err(e) = std::fs::remove_file(&lower) {
+                let removed = if inject_probe_remove_failure() { Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "проба отказа удаления")) } else { std::fs::remove_file(&lower) };
+                if let Err(e) = removed {
                     self.warnings.push(format!("{}: пробный файл проверки регистра не удалён ({e}); удалите его вручную", lower.display()));
                 }
                 if same { CaseKind::Insensitive } else { CaseKind::Sensitive }
@@ -901,15 +917,28 @@ fn check_target_collisions(entries: &[Entry], targets: &[PathBuf], probe: &mut C
 
 /// Обёртка: любой отказ без своих предупреждений (проверки до записи, недопустимые пути, права каталогов) тоже говорит, что остатки не проверялись (P21-4).
 fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>) -> Result<RestoreReport, RestoreFailure> {
-    restore_inner(opened, l, opt, anchors_override).map_err(|mut f| {
-        if !f.warnings.iter().any(|w| w.contains("не выполнялась")) {
-            f.warnings.push("проверка остатков прежних восстановлений не выполнялась: операция прервана до замены файлов".into());
+    // пробы регистра создают файлы в каталогах узла; их отчёт принадлежит этой обёртке и попадает в результат на ЛЮБОМ выходе (P24-5)
+    let mut probe = CaseProbe::default();
+    let result = restore_inner(opened, l, opt, anchors_override, &mut probe);
+    match result {
+        Ok(mut r) => {
+            r.unclean.extend(std::mem::take(&mut probe.warnings));
+            Ok(r)
         }
-        f
-    })
+        Err(mut f) => {
+            if !probe.warnings.is_empty() {
+                f.files_changed = true; // на диске остался пробный файл
+                f.warnings.extend(std::mem::take(&mut probe.warnings));
+            }
+            if !f.warnings.iter().any(|w| w.contains("не выполнялась")) {
+                f.warnings.push("проверка остатков прежних восстановлений не выполнялась: операция прервана до замены файлов".into());
+            }
+            Err(f)
+        }
+    }
 }
 
-fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>) -> Result<RestoreReport, RestoreFailure> {
+fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>, case_probe: &mut CaseProbe) -> Result<RestoreReport, RestoreFailure> {
     let entries = opened.entries()?;
     // пути проверяются ДО любой записи: ни ссылок внутри каталогов узла, ни (без явного разрешения) уже существующих файлов
     let mut targets = Vec::new();
@@ -918,8 +947,7 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     }
     // две записи копии (или запись и путь --anchor-store) не должны вести в один и тот же физический файл: иначе замена и откат
     // перезаписывали бы друг друга (P20-2), а блокировки алиасов висели бы друг на друге (P20-1); проверка — до любой записи
-    let mut case_probe = CaseProbe::default();
-    check_target_collisions(&entries, &targets, &mut case_probe)?;
+    check_target_collisions(&entries, &targets, case_probe)?;
     if !opt.force {
         let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
         if !existing.is_empty() {
@@ -945,7 +973,7 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     }
     // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
-    let mut skipped: Vec<String> = std::mem::take(&mut case_probe.warnings); // пробные файлы регистра, которые не удалось убрать
+    let mut skipped: Vec<String> = Vec::new();
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut staged: Vec<(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта, вид файла связи — по ЛОГИЧЕСКОМУ имени записи, а не по имени на диске)
     // каталоги, где лежат (или лежали) подготовленные файлы: их имена тоже сбрасываются на диск после уборки (P21-3)
@@ -998,7 +1026,7 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     {
         let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
         for (path, _, label, _) in &staged {
-            if let Some(first) = seen.insert(physical_key(path, &mut case_probe), label.clone()) {
+            if let Some(first) = seen.insert(physical_key(path, case_probe), label.clone()) {
                 let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
                 return Err(early_fail(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено до замены файлов", path.display()), &skipped, notes, left));
             }
@@ -2155,24 +2183,58 @@ mod tests {
         assert!(std::fs::read_dir(d.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".yandi-case-probe")), "пробный файл убран");
     }
 
-    /// P23-8/9: нельзя создать пробный файл — состояние «неизвестно»: имена не из ASCII не считаются проверенными, ASCII-имена складываются осторожно.
+    /// P23-8/9, P24-6: нельзя создать пробный файл — состояние «неизвестно»: имена не из ASCII не считаются проверенными, ASCII-имена складываются
+    /// осторожно. Применимость прав проверяется В ТОМ ЖЕ режиме 0500, права возвращает защитник при любом выходе.
     #[cfg(unix)]
     #[test]
     fn p23_8_an_unknown_case_state_is_not_treated_as_sensitive() {
         use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
         let d = tempfile::tempdir().unwrap();
+        let _g = Restore(d.path().to_path_buf());
         std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap(); // пробный файл создать нельзя
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(d.path().join(".applicable")).is_ok() {
+            return; // права не действуют (суперпользователь): проверка неприменима
+        }
         let mut cp = CaseProbe::default();
         let a = physical_key(&d.path().join("Резерв.json"), &mut cp);
         let b = physical_key(&d.path().join("резерв.json"), &mut cp);
-        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        if std::fs::OpenOptions::new().write(true).create_new(true).open(d.path().join(".x")).is_ok() {
-            // права не действуют (запуск от суперпользователя): проверка неприменима
-            return;
-        }
         assert_eq!(cp.kind(d.path()), CaseKind::Unknown);
         assert_eq!(a, b, "при неизвестном состоянии имена складываются осторожно");
         assert!(!cp.unverifiable.is_empty(), "имя не из ASCII названо непроверяемым");
+        // и восстановление с таким именем отклоняется до записи
+        let entries = vec![Entry { area: Area::Home, path: "x.json".into(), data: vec![] }];
+        let targets = vec![d.path().join("Резерв.json")];
+        let mut cp2 = CaseProbe::default();
+        let err = check_target_collisions(&entries, &targets, &mut cp2).unwrap_err();
+        assert!(err.message.contains("проверить нельзя"), "{}", err.message);
+    }
+
+    /// P24-5: неудалённый пробный файл назван в отчёте на раннем отказе, и результат помечен «изменено».
+    #[cfg(unix)]
+    #[test]
+    fn p24_5_a_probe_file_that_could_not_be_removed_is_reported_on_an_early_refusal() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(&src).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&t.keys).unwrap();
+        std::fs::write(t.keys.join("auth.json"), b"existing").unwrap();
+        FAIL_PROBE_REMOVE.with(|c| c.set(true));
+        let err = restore_core(&opened, &t, &RestoreOptions { force: false }, None).unwrap_err();
+        FAIL_PROBE_REMOVE.with(|c| c.set(false));
+        assert!(err.message.contains("уже есть файлы узла"), "{}", err.message);
+        assert!(err.warnings.iter().any(|w| w.contains("пробный файл")), "{:?}", err.warnings);
+        assert!(err.files_changed, "на диске остался пробный файл");
     }
 
     /// P21-3: подготовленный файл, который не удаётся убрать, называется в отчёте и делает результат «изменено».

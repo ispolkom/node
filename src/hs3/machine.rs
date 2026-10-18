@@ -33,6 +33,11 @@ pub const MAX_SLOTS: usize = 256;
 pub const RESERVED_SLOTS: usize = 64; // только для пиров с действующим поколением или собственным обменом
 pub const MAX_SLOTS_PER_IDENTITY: usize = 8;
 pub const MAX_PENDING_PER_IDENTITY: usize = 4;
+/// Зафиксированных поколений на пару (действующее и до трёх прежних) и пар всего: память поколений ограничена числом, а не только слотами.
+pub const MAX_GENS_PER_PEER: usize = 4;
+pub const MAX_PEERS: usize = 4096;
+/// Желаний собственного запуска, не поместившихся в пул, которые автомат повторяет по таймеру.
+pub const MAX_INTENTS: usize = 64;
 const RETX_AT_MS: [u64; 3] = [1_000, 3_000, 7_000]; // повторы с отступами 1, 2, 4 секунды от начала
 const NEW_TRY_AT_MS: [u64; 2] = [4_000, 8_000]; // свежий запрос (новые Ea и nonce), если ответа нет
 
@@ -180,6 +185,21 @@ pub struct Machine {
     context: u8,
     rng: StdRng,
     peers: HashMap<PeerId, Peer>,
+    /// Ограниченная очередь запусков, отказанных из-за пула или лимита личности: повторяются по таймеру.
+    intents: Vec<(PeerId, PathId)>,
+    max_peers: usize,
+}
+
+/// Назначить срок снятия прежним поколениям один раз: более поздние коммиты и подтверждения его не продлевают (P24-4).
+fn retire_older(gens: &mut [Generation], now: u64) {
+    for g in gens.iter_mut() {
+        let at = now.saturating_add(OLD_RX_GRACE_MS);
+        g.retire_after = Some(g.retire_after.map_or(at, |r| r.min(at)));
+    }
+}
+
+fn retire_older_than(gens: &mut [Generation], ix: usize, now: u64) {
+    retire_older(&mut gens[..ix], now);
 }
 
 fn h16(key: &[u8; 32], label: &[u8], t: &[u8; 32]) -> [u8; 16] {
@@ -195,7 +215,7 @@ fn h16(key: &[u8; 32], label: &[u8], t: &[u8; 32]) -> [u8; 16] {
 impl Machine {
     pub fn new(seed: u64, signing: SigningKey, context: u8) -> Self {
         let id = crate::util::types::derive_node_id(&signing.verifying_key().to_bytes());
-        Self { id, sk: signing, context, rng: StdRng::seed_from_u64(seed), peers: HashMap::new() }
+        Self { id, sk: signing, context, rng: StdRng::seed_from_u64(seed), peers: HashMap::new(), intents: Vec::new(), max_peers: MAX_PEERS }
     }
 
     pub fn id(&self) -> PeerId {
@@ -219,6 +239,26 @@ impl Machine {
 
     pub fn slots_used(&self) -> usize {
         self.peers.values().map(Peer::slots).sum()
+    }
+
+    /// Только для тестов: предел числа пар.
+    #[cfg(test)]
+    pub fn set_max_peers(&mut self, n: usize) {
+        self.max_peers = n;
+    }
+
+    pub fn gens_count(&self, peer: &PeerId) -> usize {
+        self.peers.get(peer).map_or(0, |p| p.gens.len())
+    }
+
+    pub fn intents_len(&self) -> usize {
+        self.intents.len()
+    }
+
+    /// Закрыть пару (сеанс завершён владельцем: бездействие, выход): все состояния и поколения снимаются. Политика бездействия принадлежит транспорту.
+    pub fn close(&mut self, peer: &PeerId) {
+        self.peers.remove(peer);
+        self.intents.retain(|(p, _)| p != peer);
     }
 
     pub fn peer_entries(&self) -> usize {
@@ -263,7 +303,11 @@ impl Machine {
                 if now.saturating_sub(o.started) >= HANDSHAKE_DEADLINE_MS {
                     let o = p.outgoing.take().unwrap();
                     if let OutPhase::WaitFinR { t, keys, ack_path, key, .. } = o.phase {
-                        p.late.push(Late { key, t, keys, expires: now.saturating_add(LATE_WINDOW_MS), ack_path });
+                        // срок считается от абсолютного дедлайна обмена, а не от момента ленивой уборки (P24-7)
+                        let expires = o.started.saturating_add(HANDSHAKE_DEADLINE_MS).saturating_add(LATE_WINDOW_MS);
+                        if now < expires {
+                            p.late.push(Late { key, t, keys, expires, ack_path });
+                        }
                     }
                     if p.want {
                         p.restart_at = Some(now.saturating_add(p.backoff_ms));
@@ -288,23 +332,33 @@ impl Machine {
         self.peers.retain(|_, p| !p.is_empty());
     }
 
-    /// Запустить обмен с пиром. Повторный запуск при идущем обмене объединяется с ним.
+    /// Запустить обмен с пиром. Повторный запуск при идущем обмене объединяется с ним. Если пул полон или достигнут предел личности, запись о
+    /// пире не создаётся, а желание хранится в ограниченной очереди и повторяется по таймеру (P24-3).
     pub fn start(&mut self, now: u64, peer: PeerId, path: PathId) -> Vec<Out> {
         if peer == self.id {
             return vec![];
         }
         self.expire(now);
         let slots = self.slots_used();
+        let existing = self.peers.get(&peer);
+        if existing.is_some_and(|p| p.outgoing.is_some()) {
+            let p = self.peers.get_mut(&peer).unwrap();
+            p.want = true;
+            p.last_path = path;
+            return vec![];
+        }
+        let blocked = slots >= MAX_SLOTS || existing.is_some_and(|p| p.slots() >= MAX_SLOTS_PER_IDENTITY) || (existing.is_none() && self.peers.len() >= self.max_peers);
+        if blocked {
+            if !self.intents.iter().any(|(p, _)| *p == peer) && self.intents.len() < MAX_INTENTS {
+                self.intents.push((peer, path));
+            }
+            return vec![];
+        }
+        self.intents.retain(|(p, _)| *p != peer);
         {
             let p = self.peers.entry(peer).or_insert_with(Peer::new);
             p.want = true;
             p.last_path = path;
-            if p.outgoing.is_some() {
-                return vec![];
-            }
-            if slots >= MAX_SLOTS {
-                return vec![]; // пул полон: собственный обмен не вытесняет идущие (повторится по таймеру)
-            }
         }
         let t = self.build_request(now, &peer);
         let p = self.peers.get_mut(&peer).unwrap();
@@ -361,6 +415,9 @@ impl Machine {
             if p.slots() >= MAX_SLOTS_PER_IDENTITY || pending >= MAX_PENDING_PER_IDENTITY {
                 return vec![];
             }
+        }
+        if !self.peers.contains_key(&peer) && self.peers.len() >= self.max_peers {
+            return vec![]; // таблица пар полна: новые пары не заводятся
         }
         let known = self.peers.get(&peer).is_some_and(|p| !p.gens.is_empty() || p.outgoing.is_some());
         let limit = if known { MAX_SLOTS } else { MAX_SLOTS - RESERVED_SLOTS };
@@ -432,21 +489,33 @@ impl Machine {
         }
         let tx_open = role == Role::Initiator;
         if tx_open {
-            for g in p.gens.iter_mut() {
-                g.retire_after = Some(now.saturating_add(OLD_RX_GRACE_MS));
-            }
+            retire_older(&mut p.gens, now);
         }
         p.gens.push(Generation { t, role, keys, tx_open, since_ms: now, key, replaced_at: None, retire_after: None });
+        // число поколений ограничено: сверх предела снимаются самые старые, кроме самого нового с открытой отправкой (прежний TX не теряется, P23-6)
+        while p.gens.len() > MAX_GENS_PER_PEER {
+            let keep = p.gens.iter().rposition(|g| g.tx_open);
+            match (0..p.gens.len()).find(|i| Some(*i) != keep && *i + 1 != p.gens.len()) {
+                Some(i) => {
+                    p.gens.remove(i);
+                }
+                None => break,
+            }
+        }
         // состояния старше и равные зафиксированному обмену больше не нужны; более новые попытки сохраняются
         p.late.retain(|l| l.key > key);
         p.incoming.retain(|i| i.key >= key);
         if p.outgoing.as_ref().is_some_and(|o| o.newest_key() <= key) {
             p.outgoing = None;
         }
-        if p.outgoing.is_none() {
+        // обязательство довести более новую попытку сохраняется, пока она идёт или хранится в позднем окне; иначе цель достигнута (P24-1)
+        if p.outgoing.is_none() && p.late.is_empty() {
             p.want = false;
             p.restart_at = None;
             p.backoff_ms = 1_000;
+        } else if p.outgoing.is_none() && p.restart_at.is_none() {
+            p.want = true;
+            p.restart_at = Some(now.saturating_add(p.backoff_ms));
         }
         true
     }
@@ -527,9 +596,7 @@ impl Machine {
                     // первый аутентифицированный пакет инициатора под этим поколением: отправка переходит на него; ответ — свой KeyConfirm
                     if !p.gens[ix].tx_open {
                         p.gens[ix].tx_open = true;
-                        for g in p.gens.iter_mut().take(ix) {
-                            g.retire_after = Some(now.saturating_add(OLD_RX_GRACE_MS));
-                        }
+                        retire_older_than(&mut p.gens, ix, now);
                     }
                     let my = p.gens[ix].my_tag();
                     out.push(Out::Send { path, bytes: key_confirm_frame(context, &t, &my) });
@@ -550,6 +617,10 @@ impl Machine {
         self.expire(now);
         let mut out = Vec::new();
         let context = self.context;
+        let intents: Vec<(PeerId, PathId)> = std::mem::take(&mut self.intents);
+        for (peer, path) in intents {
+            out.extend(self.start(now, peer, path));
+        }
         let peers: Vec<PeerId> = self.peers.keys().copied().collect();
         for peer in peers {
             let mut new_try = false;
