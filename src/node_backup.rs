@@ -771,18 +771,44 @@ fn inject_rollback_write_failure() -> bool {
 /// Физическое имя цели для сравнения. Путь делается абсолютным; `.` и `..` разбираются по компонентам (после существующего каталога — по его реальному
 /// пути, внутри ещё не существующей части — лексически); затем самый глубокий существующий родитель приводится к реальному пути (ссылки раскрываются),
 /// остаток дописывается. Два разных написания одного и того же файла, в том числе через несуществующий каталог и `..`, дают один ключ (P21-1).
-/// Не различает ли файловая система в этом каталоге регистр имён: создаётся пробный файл со строчным именем и проверяется заглавное написание.
-/// Любая ошибка — «различает» (так никогда не склеиваются законные разные имена на системе с учётом регистра).
-fn dir_is_case_insensitive(dir: &Path) -> bool {
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-    let name = format!(".yandi-case-probe-{}-{nanos:x}", std::process::id());
-    let lower = dir.join(&name);
-    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lower).is_err() {
-        return false;
+/// Как файловая система каталога сравнивает имена: проба создаёт строчный файл и ищет заглавное написание.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CaseKind {
+    Sensitive,
+    Insensitive,
+    /// Проба не удалась (нет прав, ошибка): состояние неизвестно и не считается «различает» (P23-8).
+    Unknown,
+}
+
+/// Кэш проб по каталогам и накопленные предупреждения (оставшийся пробный файл, имена, уникальность которых проверить нельзя).
+#[derive(Default)]
+struct CaseProbe {
+    cache: std::collections::HashMap<PathBuf, CaseKind>,
+    warnings: Vec<String>,
+    unverifiable: Vec<String>,
+}
+
+impl CaseProbe {
+    fn kind(&mut self, dir: &Path) -> CaseKind {
+        if let Some(k) = self.cache.get(dir) {
+            return *k;
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let name = format!(".yandi-case-probe-{}-{nanos:x}", std::process::id());
+        let lower = dir.join(&name);
+        let kind = match std::fs::OpenOptions::new().write(true).create_new(true).open(&lower) {
+            Err(_) => CaseKind::Unknown,
+            Ok(_) => {
+                let same = std::fs::symlink_metadata(dir.join(name.to_uppercase())).is_ok();
+                if let Err(e) = std::fs::remove_file(&lower) {
+                    self.warnings.push(format!("{}: пробный файл проверки регистра не удалён ({e}); удалите его вручную", lower.display()));
+                }
+                if same { CaseKind::Insensitive } else { CaseKind::Sensitive }
+            }
+        };
+        self.cache.insert(dir.to_path_buf(), kind);
+        kind
     }
-    let same = std::fs::symlink_metadata(dir.join(name.to_uppercase())).is_ok();
-    let _ = std::fs::remove_file(&lower);
-    same
 }
 
 type Staged = (PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>);
@@ -808,7 +834,7 @@ fn abort_cleanup(staged: &[Staged], created: &[PathBuf], staged_dirs: &[PathBuf]
     (notes, left)
 }
 
-fn physical_key(p: &Path) -> PathBuf {
+fn physical_key(p: &Path, cprobe: &mut CaseProbe) -> PathBuf {
     use std::path::Component;
     let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().map(|c| c.join(p)).unwrap_or_else(|_| p.to_path_buf()) };
     let mut cur = PathBuf::new();
@@ -831,8 +857,13 @@ fn physical_key(p: &Path) -> PathBuf {
     loop {
         if let Ok(real) = std::fs::canonicalize(&probe) {
             // ещё не существующий хвост: на файловой системе без учёта регистра «PAIRED_CLIENTS.JSON» и «paired_clients.json» — один файл (P22-9);
-            // на системе с учётом регистра имена разные и в нижний регистр не приводятся
-            let fold = !rest.is_empty() && dir_is_case_insensitive(&real);
+            // на системе с учётом регистра имена разные и в нижний регистр не приводятся; при неизвестном состоянии — осторожно как без учёта
+            // регистра, а имена не из ASCII (каноническая эквивалентность Unicode здесь не проверяется) названы непроверяемыми (P23-8)
+            let kind = if rest.is_empty() { CaseKind::Sensitive } else { cprobe.kind(&real) };
+            let fold = kind != CaseKind::Sensitive;
+            if kind != CaseKind::Sensitive && rest.iter().any(|c| !c.to_string_lossy().is_ascii()) {
+                cprobe.unverifiable.push(p.display().to_string());
+            }
             let mut out = real;
             for part in rest.iter().rev() {
                 if fold {
@@ -854,13 +885,16 @@ fn physical_key(p: &Path) -> PathBuf {
 }
 
 /// Проверка, что никакие две цели не ведут в один физический файл; выполняется до записи и ещё раз после создания каталогов.
-fn check_target_collisions(entries: &[Entry], targets: &[PathBuf]) -> Result<(), RestoreFailure> {
+fn check_target_collisions(entries: &[Entry], targets: &[PathBuf], probe: &mut CaseProbe) -> Result<(), RestoreFailure> {
     let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
     for (e, t) in entries.iter().zip(targets) {
         let label = format!("{:?}/{}", e.area, e.path);
-        if let Some(first) = seen.insert(physical_key(t), label.clone()) {
+        if let Some(first) = seen.insert(physical_key(t, probe), label.clone()) {
             return Err(RestoreFailure::from(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено, ничего не изменено", t.display())));
         }
+    }
+    if let Some(name) = probe.unverifiable.first() {
+        return Err(RestoreFailure::from(format!("{name}: уникальность имени не из ASCII на этой файловой системе проверить нельзя (регистр и нормализация Unicode не определены); восстановление отклонено, ничего не изменено")));
     }
     Ok(())
 }
@@ -884,7 +918,8 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     }
     // две записи копии (или запись и путь --anchor-store) не должны вести в один и тот же физический файл: иначе замена и откат
     // перезаписывали бы друг друга (P20-2), а блокировки алиасов висели бы друг на друге (P20-1); проверка — до любой записи
-    check_target_collisions(&entries, &targets)?;
+    let mut case_probe = CaseProbe::default();
+    check_target_collisions(&entries, &targets, &mut case_probe)?;
     if !opt.force {
         let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
         if !existing.is_empty() {
@@ -910,7 +945,7 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     }
     // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
-    let mut skipped: Vec<String> = Vec::new();
+    let mut skipped: Vec<String> = std::mem::take(&mut case_probe.warnings); // пробные файлы регистра, которые не удалось убрать
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut staged: Vec<(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта, вид файла связи — по ЛОГИЧЕСКОМУ имени записи, а не по имени на диске)
     // каталоги, где лежат (или лежали) подготовленные файлы: их имена тоже сбрасываются на диск после уборки (P21-3)
@@ -963,7 +998,7 @@ fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_over
     {
         let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
         for (path, _, label, _) in &staged {
-            if let Some(first) = seen.insert(physical_key(path), label.clone()) {
+            if let Some(first) = seen.insert(physical_key(path, &mut case_probe), label.clone()) {
                 let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
                 return Err(early_fail(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено до замены файлов", path.display()), &skipped, notes, left));
             }
@@ -2012,11 +2047,12 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let direct = d.path().join("paired_clients.json");
         let via_missing = d.path().join("new").join("..").join("paired_clients.json");
-        assert_eq!(physical_key(&direct), physical_key(&via_missing));
+        let mut cp = CaseProbe::default();
+        assert_eq!(physical_key(&direct, &mut cp), physical_key(&via_missing, &mut cp));
         let cwd = std::env::current_dir().unwrap();
         let rel = pathdiff(&direct, &cwd);
-        assert_eq!(physical_key(&direct), physical_key(&rel), "относительное и абсолютное написание");
-        assert_ne!(physical_key(&direct), physical_key(&d.path().join("new").join("paired_clients.json")), "разные файлы не склеиваются");
+        assert_eq!(physical_key(&direct, &mut cp), physical_key(&rel, &mut cp), "относительное и абсолютное написание");
+        assert_ne!(physical_key(&direct, &mut cp), physical_key(&d.path().join("new").join("paired_clients.json"), &mut cp), "разные файлы не склеиваются");
     }
 
     fn pathdiff(target: &Path, base: &Path) -> PathBuf {
@@ -2107,14 +2143,36 @@ mod tests {
     #[test]
     fn p22_9_case_sensitive_filesystems_keep_different_missing_names_apart() {
         let d = tempfile::tempdir().unwrap();
-        let a = physical_key(&d.path().join("Paired_Clients.json"));
-        let b = physical_key(&d.path().join("paired_clients.json"));
-        if dir_is_case_insensitive(d.path()) {
-            assert_eq!(a, b, "без учёта регистра это один файл");
-        } else {
-            assert_ne!(a, b, "с учётом регистра это два разных файла");
+        let mut cp = CaseProbe::default();
+        let a = physical_key(&d.path().join("Paired_Clients.json"), &mut cp);
+        let b = physical_key(&d.path().join("paired_clients.json"), &mut cp);
+        match cp.kind(d.path()) {
+            CaseKind::Insensitive => assert_eq!(a, b, "без учёта регистра это один файл"),
+            CaseKind::Sensitive => assert_ne!(a, b, "с учётом регистра это два разных файла"),
+            CaseKind::Unknown => panic!("проба регистра не удалась во временном каталоге"),
         }
+        assert!(cp.warnings.is_empty() && cp.unverifiable.is_empty(), "{:?} {:?}", cp.warnings, cp.unverifiable);
         assert!(std::fs::read_dir(d.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".yandi-case-probe")), "пробный файл убран");
+    }
+
+    /// P23-8/9: нельзя создать пробный файл — состояние «неизвестно»: имена не из ASCII не считаются проверенными, ASCII-имена складываются осторожно.
+    #[cfg(unix)]
+    #[test]
+    fn p23_8_an_unknown_case_state_is_not_treated_as_sensitive() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap(); // пробный файл создать нельзя
+        let mut cp = CaseProbe::default();
+        let a = physical_key(&d.path().join("Резерв.json"), &mut cp);
+        let b = physical_key(&d.path().join("резерв.json"), &mut cp);
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(d.path().join(".x")).is_ok() {
+            // права не действуют (запуск от суперпользователя): проверка неприменима
+            return;
+        }
+        assert_eq!(cp.kind(d.path()), CaseKind::Unknown);
+        assert_eq!(a, b, "при неизвестном состоянии имена складываются осторожно");
+        assert!(!cp.unverifiable.is_empty(), "имя не из ASCII названо непроверяемым");
     }
 
     /// P21-3: подготовленный файл, который не удаётся убрать, называется в отчёте и делает результат «изменено».
