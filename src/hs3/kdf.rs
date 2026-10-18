@@ -33,6 +33,7 @@ fn expand32(prk: &[u8; 32], info: &[u8]) -> [u8; 32] {
 }
 
 /// Ключи поколения. Все значения стираются при освобождении.
+#[derive(Clone)]
 pub struct Keys {
     pub i2r: Zeroizing<[u8; 32]>,
     pub r2i: Zeroizing<[u8; 32]>,

@@ -4,6 +4,9 @@
 //! независимыми векторами до того, как что-либо будет встроено в рабочую сеть. Рабочие пути (`netlayer`, `p2p`) этот модуль не вызывают.
 pub mod codec;
 pub mod kdf;
+pub mod machine;
+#[cfg(test)]
+mod sim_tests;
 
 #[cfg(test)]
 mod tests {
