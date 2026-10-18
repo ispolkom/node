@@ -505,6 +505,9 @@ impl WebServer {
             .route("/media/*path", get(media_handler))
             // API endpoints (protected)
             .route("/api/status", get(api_status))
+            .route("/api/admin/session", get(api_admin_session_get).post(api_admin_session_post).delete(api_admin_session_delete))
+            .route("/api/notices", get(api_notices_get))
+            .route("/api/notices/ack", post(api_notices_ack))
             .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
             .route("/api/update/check", post(|| async { Json(crate::updates::check_now().await) }))
             .route("/api/speed", get(api_speed))
@@ -687,6 +690,8 @@ impl WebServer {
             .route("/pair/issue", post(pair_issue_handler))
             // пока закрытая среда заперта, расшифрованное содержимое владельца (группы, жалобы, файлы переписки) не отдаётся
             .route_layer(axum::middleware::from_fn(locked_guard))
+            // админские маршруты (жалобы, сопряжение, настройки узла) — только в сеансе администратора (после auth: он слой снаружи)
+            .route_layer(axum::middleware::from_fn(admin_guard))
             // Apply auth middleware to all routes above
             .route_layer(axum::middleware::from_fn_with_state(
                 state_for_auth,
@@ -3495,6 +3500,59 @@ fn is_locked_media_path(path: &str) -> bool {
         || matches!(path, "/api/mobile/call/events" | "/api/mobile/call/turn" | "/api/mobile/call/log")
 }
 
+/// Админские маршруты без сеанса администратора: 403 `admin_required` (интерфейс просит админ-пароль).
+async fn admin_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if !crate::web::admin::allowed(req.uri().path()) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin_required", "message": "нужен пароль администратора"}))).into_response();
+    }
+    next.run(req).await
+}
+
+#[derive(Deserialize)]
+struct AdminSessionBody {
+    password: String,
+}
+
+/// Открыть админ-панель: пароль проверяется тем же счётчиком попыток, что и вход (пять неверных закрывают вход паролем).
+async fn api_admin_session_post(State(state): State<AppState>, Json(b): Json<AdminSessionBody>) -> Response {
+    match crate::web::auth::verify_login_counted(&b.password) {
+        Ok(true) => {
+            state.auth_state.record_login_success();
+            crate::web::admin::start();
+            Json(serde_json::json!({"ok": true, "ttl_secs": crate::web::admin::TTL.as_secs()})).into_response()
+        }
+        Ok(false) => {
+            state.auth_state.record_login_failure();
+            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response()
+        }
+        Err(e) => counted_login_error(e),
+    }
+}
+
+async fn api_admin_session_get() -> Json<serde_json::Value> {
+    let left = crate::web::admin::remaining();
+    Json(serde_json::json!({"active": left.is_some(), "remaining_secs": left.map(|d| d.as_secs()).unwrap_or(0), "ttl_secs": crate::web::admin::TTL.as_secs()}))
+}
+
+async fn api_admin_session_delete() -> Json<serde_json::Value> {
+    crate::web::admin::end();
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn api_notices_get() -> Json<serde_json::Value> {
+    Json(crate::web::admin::view())
+}
+
+#[derive(Deserialize)]
+struct NoticesAck {
+    kinds: Vec<String>,
+}
+
+async fn api_notices_ack(Json(b): Json<NoticesAck>) -> Json<serde_json::Value> {
+    crate::web::admin::ack(&b.kinds);
+    Json(serde_json::json!({"ok": true}))
+}
+
 async fn locked_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
     #[cfg(unix)]
     if (is_owner_content_path(req.uri().path()) || is_locked_media_path(req.uri().path())) && crate::closed_api::is_locked() {
@@ -6257,3 +6315,34 @@ mod step_up_tests {
 
 }
 
+#[cfg(test)]
+mod admin_guard_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    async fn status_of(app: &Router, path: &str) -> StatusCode {
+        app.clone().oneshot(axum::http::Request::get(path).body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn admin_routes_answer_403_without_a_session_and_work_with_one() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::web::admin::reset_for_test();
+        let app: Router = Router::new()
+            .route("/api/complaints", get(|| async { "ok" }))
+            .route("/api/guest-pairing", get(|| async { "ok" }))
+            .route("/api/status", get(|| async { "ok" }))
+            .route("/api/chats", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(admin_guard));
+        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/guest-pairing").await, StatusCode::FORBIDDEN);
+        // личные маршруты без сеанса работают как раньше
+        assert_eq!(status_of(&app, "/api/status").await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/chats").await, StatusCode::OK);
+        crate::web::admin::start();
+        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::OK);
+        crate::web::admin::end();
+        assert_eq!(status_of(&app, "/api/complaints").await, StatusCode::FORBIDDEN, "после выхода снова закрыто");
+        crate::web::admin::reset_for_test();
+    }
+}

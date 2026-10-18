@@ -5,6 +5,7 @@
 //! Локальный веб-сервер для управления нодой
 
 pub mod server;
+pub mod admin;
 pub mod api;
 pub mod auth;
 pub mod peers;
