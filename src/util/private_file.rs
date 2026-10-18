@@ -85,8 +85,9 @@ pub fn sync_dir_checked(path: &Path) -> std::io::Result<()> {
     }
     #[cfg(not(unix))]
     {
+        // сбросить запись каталога здесь нечем: честно «не подтверждено», а не «долговечно» (P19-2)
         let _ = path;
-        Ok(())
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "сброс каталога на диск на этой платформе не поддержан"))
     }
 }
 

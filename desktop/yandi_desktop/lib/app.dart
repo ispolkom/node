@@ -516,11 +516,16 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     } catch (e) {
       if (!mounted || own != epoch) return;
       final failure = e is ApiFailure ? e : const ApiFailure('protocol');
+      if (path == '/api/auth/restore' && failure.warnings.isNotEmpty) {
+        // отказ после записи части файлов: пути неочищенного и пропущенного — владельцу (P19-3)
+        restoreWarning = '${failure.filesWritten ? 'Часть файлов копии записана. ' : ''}Не очищено, пропущено или не подтверждено: ${failure.warnings.join('; ')}';
+      }
       setState(() {
         if (failure.kind == 'disconnected' || failure.kind == 'timeout') {
           disconnect(failure);
         } else {
-          error = failure.message;
+          // отказ восстановления после записи файлов: мастер всё ещё на экране, поэтому предупреждение идёт и в текст ошибки
+          error = path == '/api/auth/restore' && failure.warnings.isNotEmpty ? '${failure.message} $restoreWarning' : failure.message;
         }
         if (isLock) lockUnconfirmed = true;
       });

@@ -248,7 +248,8 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<Vec<String>, RestoreF
     }
     let opened = crate::node_backup::open_with_code(&bytes, &b.phrase)?;
     let layout = crate::node_backup::Layout::live(crate::get_config().ports.discovery);
-    let report = crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
+    let report = crate::node_backup::restore_detailed(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })
+        .map_err(|f| RestoreFail { error: f.message, warnings: f.warnings, files_written: f.files_changed })?;
     for u in &report.unclean {
         eprintln!("[restore] не очищено от секретов старого формата: {u}");
     }
@@ -277,6 +278,12 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<Vec<String>, RestoreF
     Ok(warnings)
 }
 
+/// Тело ответа об ошибке восстановления: текст, предупреждения отдельным полем и признак изменённых файлов. Оболочка читает именно эти поля.
+fn restore_failure_json(f: &RestoreFail) -> serde_json::Value {
+    let text = if f.warnings.is_empty() { f.error.clone() } else { format!("{} Не очищено, пропущено или не подтверждено: {}", f.error, f.warnings.join("; ")) };
+    serde_json::json!({"error": text, "warnings": f.warnings, "files_written": f.files_written})
+}
+
 async fn restore(State(sh): State<Shared>, Json(body): Json<RestoreBody>) -> Response {
     #[cfg(unix)]
     {
@@ -293,11 +300,7 @@ async fn restore(State(sh): State<Shared>, Json(body): Json<RestoreBody>) -> Res
                 // что не удалось очистить или пропущено — владельцу в ответе (с точными путями)
                 (StatusCode::OK, headers, Json(serde_json::json!({"ok": true, "warnings": warnings}))).into_response()
             }
-            Err(f) => {
-                // файлы уже записаны: предупреждения идут и отдельным полем, и в тексте, который показывает оболочка
-                let text = if f.warnings.is_empty() { f.error.clone() } else { format!("{} Не очищено или пропущено: {}", f.error, f.warnings.join("; ")) };
-                (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": text, "warnings": f.warnings, "files_written": f.files_written}))).into_response()
-            }
+            Err(f) => (StatusCode::BAD_REQUEST, Json(restore_failure_json(&f))).into_response(),
         };
     }
     #[cfg(not(unix))]
@@ -496,6 +499,18 @@ mod tests {
     }
 
     #[cfg(unix)]
+    #[test]
+    fn a_failed_restore_after_files_were_written_carries_its_warnings_to_the_shell() {
+        let f = RestoreFail { error: "Откат не завершён.".into(), warnings: vec!["/x/.paired_clients.json.restore-1-0: не разбирается".into()], files_written: true };
+        let j = restore_failure_json(&f);
+        assert_eq!(j["files_written"], true);
+        assert_eq!(j["warnings"][0], "/x/.paired_clients.json.restore-1-0: не разбирается");
+        assert!(j["error"].as_str().unwrap().contains(".paired_clients.json.restore-1-0"), "текст ошибки тоже называет путь");
+        let plain = restore_failure_json(&RestoreFail::from("Узел уже настроен"));
+        assert_eq!(plain["error"], "Узел уже настроен");
+        assert_eq!(plain["files_written"], false);
+    }
+
     #[test]
     fn restore_checks_the_password_and_the_seed_before_any_count_or_any_write() {
         use std::sync::atomic::Ordering;

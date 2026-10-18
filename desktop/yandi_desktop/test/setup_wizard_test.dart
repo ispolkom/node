@@ -4,6 +4,7 @@ import 'package:yandi_desktop/app.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/preferences.dart';
 import 'package:yandi_desktop/setup_wizard.dart';
+import 'package:yandi_desktop/transport/api.dart';
 
 import 'widget_test.dart' show FakeApi, start, click, stop;
 
@@ -13,6 +14,7 @@ final seed24 = '${List.filled(23, 'abandon').join(' ')} art';
 /// Узел для мастера: отдаёт сид по запросу, ключи создаёт один раз.
 class WizardApi extends FakeApi {
   final asked = <int>[];
+  ApiFailure? restoreFails;
   int? minPassword = 6;
   WizardApi() {
     setup = true;
@@ -35,6 +37,10 @@ class WizardApi extends FakeApi {
       calls.add(path);
       bodies.add(Map.of(body!));
       return {'counter': 3, 'node_id': 'abc', 'text': 'Копия №3 от 2026-10-17 09:05 UTC; узел abc'};
+    }
+    if (path == '/api/auth/restore' && restoreFails != null) {
+      calls.add(path);
+      throw restoreFails!;
     }
     final r = await super.request(path, body: body, method: method);
     if (path == '/api/auth/setup' || path == '/api/auth/restore') setup = false;
@@ -237,6 +243,25 @@ void main() {
         {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password'});
     expect(api.bodies.last, {'password': 'long password'}, reason: 'закрытая среда открывается новым паролем');
     expect(api.calls.indexOf('/api/auth/restore') < api.calls.indexOf('/api/vault/unlock'), true);
+    await stop(t);
+  });
+
+  testWidgets('a failed restore after files were written still shows the paths of what was not cleaned (P19-3)', (t) async {
+    final api = WizardApi()..restoreFails = const ApiFailure('http', 400, ['/home/iam/.yandi/.paired_clients.json.restore-1-0: не разбирается'], true);
+    await start(t, api);
+    await click(t, 'Восстановить из копии');
+    final fields = find.byType(TextField);
+    await t.enterText(fields.at(0), '/home/iam/копия.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    await t.enterText(fields.at(1), seed12);
+    await t.enterText(fields.at(2), 'long password');
+    await t.enterText(fields.at(3), 'long password');
+    await click(t, 'Восстановить');
+    await t.pump(const Duration(seconds: 2));
+    await t.pumpAndSettle();
+    expect(find.textContaining('.paired_clients.json.restore-1-0'), findsOneWidget, reason: 'путь остатка показан владельцу');
+    expect(find.textContaining('Часть файлов копии записана'), findsOneWidget);
     await stop(t);
   });
 

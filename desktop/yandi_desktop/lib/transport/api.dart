@@ -7,7 +7,11 @@ import 'dart:typed_data';
 class ApiFailure implements Exception {
   final String kind;
   final int? status;
-  const ApiFailure(this.kind, [this.status]);
+  /// Только для восстановления из копии: что не очищено, пропущено или не подтверждено (пути и фиксированные сообщения узла); ограниченно по числу и длине.
+  final List<String> warnings;
+  /// Только для восстановления из копии: остались ли на диске изменённые файлы.
+  final bool filesWritten;
+  const ApiFailure(this.kind, [this.status, this.warnings = const [], this.filesWritten = false]);
   String get message => switch (kind) {
     'sealed_required' =>
       'Создайте и откройте закрытую среду перед изменением пула прокси.',
@@ -339,8 +343,20 @@ class UnixApi implements Api, BinaryApi, GroupFileApi {
             value = <String, dynamic>{'devices': value};
           if (value is! Map<String, dynamic>)
             throw const ApiFailure('protocol');
-          if (response.statusCode < 200 || response.statusCode >= 300)
+          if (response.statusCode < 200 || response.statusCode >= 300) {
+            // единственное исключение из правила «тело ответа в ошибку не попадает»: ограниченный контракт восстановления из копии,
+            // иначе владелец не узнал бы путь неочищенного остатка (P19-3); тип, число и длина проверяются
+            if (path == '/api/auth/restore') {
+              final w = value['warnings'];
+              final list = <String>[
+                if (w is List)
+                  for (final x in w.take(20))
+                    if (x is String) x.length > 500 ? x.substring(0, 500) : x,
+              ];
+              throw ApiFailure('http', response.statusCode, list, value['files_written'] == true);
+            }
             throw ApiFailure('http', response.statusCode);
+          }
           if (value['ok'] == false ||
               value['status'] == 'error' ||
               value['error'] != null &&
