@@ -117,3 +117,91 @@ class NoticesCard extends StatelessWidget {
           ),
         );
 }
+
+/// Отдельный пароль администратора: открывает только админ-панель, не переписку. Без него админ-панель открывается паролем пользователя.
+class AdminPasswordPanel extends StatefulWidget {
+  final Api api;
+  const AdminPasswordPanel({super.key, required this.api});
+  @override
+  State<AdminPasswordPanel> createState() => _AdminPasswordPanelState();
+}
+
+class _AdminPasswordPanelState extends State<AdminPasswordPanel> {
+  final current = TextEditingController(), next = TextEditingController(), repeat = TextEditingController();
+  bool? separate;
+  bool busy = false;
+  String? error, done;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  @override
+  void dispose() {
+    for (final c in [current, next, repeat]) {
+      c.clear();
+      c.dispose();
+    }
+    super.dispose();
+  }
+
+  Future<void> load() async {
+    try {
+      final r = await widget.api.request('/api/admin/session');
+      if (mounted) setState(() => separate = r['separate'] == true);
+    } catch (_) {}
+  }
+
+  Future<void> save() async {
+    if (busy) return;
+    if (next.text != repeat.text) {
+      setState(() { error = 'Пароли не совпадают'; done = null; });
+      return;
+    }
+    setState(() { busy = true; error = null; done = null; });
+    try {
+      await widget.api.request('/api/admin/password', body: {'current': current.text, 'new': next.text, 'repeat': repeat.text});
+      for (final c in [current, next, repeat]) {
+        c.clear();
+      }
+      if (mounted) setState(() { busy = false; separate = true; done = 'Пароль администратора сохранён.'; });
+    } on ApiFailure catch (e) {
+      if (mounted) setState(() { busy = false; error = e.status == 429 ? 'Слишком много попыток. Подождите перед повтором.' : e.message; });
+    } catch (_) {
+      if (mounted) setState(() { busy = false; error = 'Не удалось сохранить пароль.'; });
+    }
+  }
+
+  Widget field(TextEditingController c, String label) => Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: TextField(
+      controller: c,
+      obscureText: true,
+      enableSuggestions: false,
+      autocorrect: false,
+      enabled: !busy,
+      decoration: InputDecoration(labelText: tr(context, label), border: const OutlineInputBorder()),
+    ),
+  );
+
+  @override
+  Widget build(BuildContext context) => Panel(
+    title: 'Пароль администратора',
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        UiText(separate == true
+            ? 'Отдельный пароль администратора назначен: он открывает только админ-панель. Забыли его — войдите по сид-фразе, пароль вернётся к паролю пользователя.'
+            : 'Сейчас админ-панель открывается паролем пользователя. Назначьте отдельный пароль: он открывает только админ-панель, не переписку.'),
+        field(current, 'Текущий пароль администратора'),
+        field(next, 'Новый пароль администратора'),
+        field(repeat, 'Повтор нового пароля'),
+        if (error != null) NoticePanel(error!, error: true),
+        if (done != null) NoticePanel(done!),
+        SolidButton(busy ? 'Подождите…' : 'Сохранить пароль администратора', onPressed: busy ? null : save),
+      ],
+    ),
+  );
+}

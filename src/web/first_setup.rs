@@ -32,6 +32,11 @@ struct SetupBody {
     master_password: String,
     #[serde(default)]
     master_password_repeat: String,
+    /// Отдельный пароль администратора (необязателен: пусто — совпадает с паролем входа).
+    #[serde(default)]
+    admin_password: String,
+    #[serde(default)]
+    admin_password_repeat: String,
 }
 
 async fn host_guard(State(sh): State<Shared>, headers: HeaderMap, req: axum::extract::Request, next: Next) -> Response {
@@ -64,7 +69,24 @@ async fn setup(State(sh): State<Shared>, Json(body): Json<SetupBody>) -> Respons
         if sh2.auth.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
             return Err("Узел уже настроен".to_string());
         }
-        (sh2.make_keys)(&sh2.auth, &body)
+        // отдельный админ-пароль проверяется целиком до создания ключей
+        if !body.admin_password.is_empty() {
+            if body.admin_password != body.admin_password_repeat {
+                return Err("Пароли администратора не совпадают".to_string());
+            }
+            crate::web::auth::check_new_password(&body.admin_password)?;
+            if body.admin_password == body.login_password {
+                return Err("Пароль администратора должен отличаться от пароля входа".to_string());
+            }
+        }
+        (sh2.make_keys)(&sh2.auth, &body)?;
+        if !body.admin_password.is_empty() {
+            // ключи уже созданы: сбой записи не отменяет настройку, админ-пароль можно назначить в «Настройках узла»
+            if let Err(e) = crate::web::admin::set_password(&body.admin_password) {
+                eprintln!("[auth] админ-пароль не записан: {e}");
+            }
+        }
+        Ok(())
     })
     .await
     .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));

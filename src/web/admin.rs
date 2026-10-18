@@ -33,9 +33,63 @@ pub fn end() {
     *UNTIL.lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
+// ---- админ-пароль (этап 2)
+//
+// Отдельный пароль администратора хранится рядом с auth.json (`admin_auth.json`, Argon2id, права 0600). Файла нет — админ-пароль совпадает с
+// паролем входа (так было до этапа 2). Файл есть, но не читается или повреждён, — отказ, а не откат на пароль входа: иначе порча файла
+// молча подменяла бы более строгий пароль более слабым. Рабочие данные узла этим паролем не шифруются: он только открывает админ-панель.
+
+fn password_file() -> std::path::PathBuf {
+    crate::web::auth::auth_file_path().with_file_name("admin_auth.json")
+}
+
+/// Есть ли у администратора отдельный пароль.
+pub fn has_separate() -> bool {
+    std::fs::symlink_metadata(password_file()).is_ok()
+}
+
+fn verify_in(file: &std::path::Path, password: &str, login: impl Fn(&str) -> Result<bool, String>) -> Result<bool, String> {
+    match std::fs::symlink_metadata(file) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => login(password),
+        Err(_) => Err("Файл админ-пароля недоступен".to_string()),
+        Ok(_) => {
+            let json = std::fs::read_to_string(file).map_err(|_| "Файл админ-пароля недоступен".to_string())?;
+            let v: serde_json::Value = serde_json::from_str(&json).map_err(|_| "Файл админ-пароля повреждён".to_string())?;
+            let hash = v.get("hash").and_then(|h| h.as_str()).ok_or("Файл админ-пароля повреждён")?;
+            Ok(crate::web::auth::verify_login_password(password, hash))
+        }
+    }
+}
+
+/// Проверить админ-пароль (без счёта попыток; счёт — в `auth::verify_admin_counted`).
+pub fn verify_admin(password: &str) -> Result<bool, String> {
+    verify_in(&password_file(), password, crate::web::auth::verify_login)
+}
+
+fn set_in(file: &std::path::Path, new: &str, login: impl Fn(&str) -> Result<bool, String>) -> Result<(), String> {
+    crate::web::auth::check_new_password(new)?;
+    if login(new).unwrap_or(false) {
+        return Err("Пароль администратора должен отличаться от пароля входа".to_string());
+    }
+    let hash = crate::web::auth::hash_login_password(new)?;
+    let json = serde_json::json!({"version": 1, "hash": hash}).to_string();
+    crate::util::private_file::write_private(file, json.as_bytes()).map_err(|_| "Не удалось записать админ-пароль".to_string())
+}
+
+/// Назначить отдельный админ-пароль (проверка длины, отличие от пароля входа, атомарная запись).
+pub fn set_password(new: &str) -> Result<(), String> {
+    set_in(&password_file(), new, crate::web::auth::verify_login)
+}
+
+/// Вернуть общий пароль (админ-пароль = пароль входа): после восстановления по сид-фразе.
+pub fn clear_password() {
+    let _ = std::fs::remove_file(password_file());
+}
+
 /// Маршруты, которым нужен сеанс администратора: управление узлом, а не личный аккаунт.
 pub fn is_admin_path(path: &str) -> bool {
-    const PREFIXES: [&str; 11] = [
+    const PREFIXES: [&str; 12] = [
+        "/api/admin/password",
         "/api/complaints",
         "/api/pair-requests",
         "/api/guest-pairing",
@@ -126,11 +180,55 @@ pub(crate) fn reset_for_test() {
 mod tests {
     use super::*;
 
+    fn tmp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("yandi-admin-{}-{name}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d.join("admin_auth.json")
+    }
+
+    #[test]
+    fn without_a_file_the_admin_password_is_the_login_password() {
+        let f = tmp("none");
+        let login = |p: &str| Ok(p == "login-pass-1");
+        assert_eq!(verify_in(&f, "login-pass-1", login), Ok(true));
+        assert_eq!(verify_in(&f, "other", login), Ok(false));
+    }
+
+    #[test]
+    fn a_separate_password_replaces_the_login_one_for_the_panel() {
+        let f = tmp("sep");
+        let login = |p: &str| Ok(p == "login-pass-1");
+        set_in(&f, "admin-pass-2", login).unwrap();
+        assert_eq!(verify_in(&f, "admin-pass-2", login), Ok(true));
+        assert_eq!(verify_in(&f, "login-pass-1", login), Ok(false), "пароль входа админ-панель больше не открывает");
+    }
+
+    #[test]
+    fn the_admin_password_must_differ_from_login_and_be_long_enough() {
+        let f = tmp("rules");
+        let login = |p: &str| Ok(p == "login-pass-1");
+        assert!(set_in(&f, "login-pass-1", login).is_err());
+        assert!(set_in(&f, "abc", login).is_err());
+        assert!(!f.exists(), "отказ ничего не записывает");
+    }
+
+    #[test]
+    fn a_broken_file_refuses_instead_of_falling_back_to_the_login_password() {
+        let f = tmp("broken");
+        std::fs::write(&f, b"{not json").unwrap();
+        let login = |_: &str| Ok(true);
+        assert!(verify_in(&f, "login-pass-1", login).is_err());
+        std::fs::write(&f, br#"{"version":1}"#).unwrap();
+        assert!(verify_in(&f, "login-pass-1", login).is_err());
+    }
+
     #[test]
     fn admin_paths_need_a_session_and_personal_ones_do_not() {
         for p in [
             "/api/complaints",
             "/api/complaints/c1/measure",
+            "/api/admin/password",
             "/api/pair-requests/p1",
             "/api/guest-pairing",
             "/api/mail-policy",

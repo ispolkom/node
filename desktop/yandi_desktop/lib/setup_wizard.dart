@@ -21,7 +21,8 @@ class SetupWizard extends StatefulWidget {
   final bool busy;
 
   /// Создаёт ключи и закрытую среду (пароль, фраза из слов через пробел).
-  final Future<void> Function(String password, String phrase) finish;
+  /// `admin` — отдельный пароль администратора (пусто: совпадает с паролем входа).
+  final Future<void> Function(String password, String phrase, String admin) finish;
 
   /// Восстановление из файла копии: путь, сид-фраза, новый пароль этой установки.
   final Future<void> Function(String path, String phrase, String password) restore;
@@ -64,6 +65,7 @@ class _SetupWizardState extends State<SetupWizard> {
   List<int> asked = [];
   final typed = List.generate(3, (_) => TextEditingController());
   final password = TextEditingController(), repeat = TextEditingController();
+  final adminPassword = TextEditingController(), adminRepeat = TextEditingController();
   // восстановление из копии
   final path = TextEditingController(),
       phrase = TextEditingController(),
@@ -121,7 +123,7 @@ class _SetupWizardState extends State<SetupWizard> {
   @override
   void dispose() {
     words.fillRange(0, words.length, '');
-    for (final c in [...typed, password, repeat, path, phrase, newPassword, newRepeat]) {
+    for (final c in [...typed, password, repeat, adminPassword, adminRepeat, path, phrase, newPassword, newRepeat]) {
       c.clear();
       c.dispose();
     }
@@ -189,6 +191,21 @@ class _SetupWizardState extends State<SetupWizard> {
       setState(() => error = 'Пароли не совпадают');
       return;
     }
+    final a = adminPassword.text;
+    if (a.isNotEmpty) {
+      if (a.runes.length < _minimum) {
+        setState(() => error = 'Пароль администратора — не короче $_minimum символов');
+        return;
+      }
+      if (a != adminRepeat.text) {
+        setState(() => error = 'Пароли администратора не совпадают');
+        return;
+      }
+      if (a == p) {
+        setState(() => error = 'Пароль администратора должен отличаться от пароля пользователя');
+        return;
+      }
+    }
     setState(() {
       sending = true;
       error = null;
@@ -196,8 +213,10 @@ class _SetupWizardState extends State<SetupWizard> {
     final phrase = words.join(' ');
     password.clear();
     repeat.clear();
+    adminPassword.clear();
+    adminRepeat.clear();
     try {
-      await widget.finish(p, phrase);
+      await widget.finish(p, phrase, a);
     } finally {
       if (mounted) setState(() => sending = false);
     }
@@ -604,6 +623,29 @@ class _SetupWizardState extends State<SetupWizard> {
         ),
       ),
     PasswordHint(password),
+    const SizedBox(height: 12),
+    const UiText(
+      'Пароль администратора (необязательно) открывает только админ-панель: жалобы, шлюзы, настройки узла. Он не открывает переписку. Если оставить пустым, админ-панель открывается паролем пользователя; назначить отдельный можно позже в «Настройках узла».',
+    ),
+    for (final (controller, label) in [
+      (adminPassword, 'Пароль администратора'),
+      (adminRepeat, 'Повтор пароля администратора'),
+    ])
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: TextField(
+          controller: controller,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          enabled: !sending && !widget.busy,
+          decoration: InputDecoration(
+            labelText: tr(context, label),
+            border: const OutlineInputBorder(),
+          ),
+        ),
+      ),
     _button(
       sending ? 'Подождите…' : 'Создать узел',
       sending || widget.busy ? null : create,

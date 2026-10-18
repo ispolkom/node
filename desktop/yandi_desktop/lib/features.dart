@@ -5,6 +5,7 @@ import 'nick.dart';
 import 'theme.dart';
 import 'search_page.dart';
 import 'complaints_page.dart';
+import 'admin_panel.dart';
 import 'content_policy.dart';
 import 'preferences.dart';
 import 'dart:io';
@@ -1664,6 +1665,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             if (notice != null) NoticePanel(notice!),
             if (refreshError) const UiText('Данные не обновлены.'),
             if (widget.page == 'Настройки узла') ...[
+              AdminPasswordPanel(api: widget.api),
               AdvancedSettings(
                 api: widget.api,
                 busy: sending,

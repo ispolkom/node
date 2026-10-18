@@ -612,10 +612,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   /// Конец мастера: ключи из сид-фразы (пароль входа = пароль владельца), затем закрытая среда с теми же паролем и фразой.
-  Future<void> createWithSeed(String password, String phrase) async {
+  Future<void> createWithSeed(String password, String phrase, [String admin = '']) async {
     await act('/api/auth/setup', {
       'login_password': password,
       'login_password_repeat': password,
+      if (admin.isNotEmpty) 'admin_password': admin,
+      if (admin.isNotEmpty) 'admin_password_repeat': admin,
       'master_password': phrase,
       'master_password_repeat': phrase,
     });

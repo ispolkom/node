@@ -215,12 +215,12 @@ fn guest_blocked(method: &axum::http::Method, path: &str) -> bool {
 }
 
 /// Что недоступно роли `user`: личная переписка и контакты ПК, отправка от имени узла, профиль владельца.
+/// Выход в интернет через узел (`/mobile/proxy/info`) пользователю доступен (docs/ROLES.md); гостю он закрыт в `guest_blocked`.
 fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
     use axum::http::Method;
     path == "/mobile/contacts"
         || path.starts_with("/mobile/chat/")
         || (path == "/mobile/profile" && method != Method::GET)
-        || path == "/mobile/proxy/info"
 }
 
 impl Device {
@@ -3036,7 +3036,7 @@ mod hardening_tests {
         }
         for (m, p) in [(Method::GET, "/mobile/groups"), (Method::POST, "/mobile/complaints"), (Method::GET, "/mobile/me/profile"),
                        (Method::GET, "/mobile/profile"), (Method::GET, "/mobile/ws"), (Method::GET, "/mobile/groups/x/files/y"),
-                       (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc"),
+                       (Method::POST, "/mobile/pubkeys"), (Method::GET, "/mobile/pubkey/abc"), (Method::GET, "/mobile/proxy/info"),
                        (Method::GET, "/mobile/inbox"), (Method::POST, "/mobile/inbox/ack"), (Method::GET, "/mobile/files"), (Method::POST, "/mobile/files")] {
             assert!(!owner_only_path(&m, p), "{m} {p}");
         }

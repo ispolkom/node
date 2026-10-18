@@ -623,6 +623,11 @@ pub fn verify_login_counted(password: &str) -> Result<bool, CountedLogin> {
     counted_with(password, verify_login)
 }
 
+/// Проверить админ-пароль с тем же счётом попыток (общий с входом: пять неверных закрывают вход паролем).
+pub fn verify_admin_counted(password: &str) -> Result<bool, CountedLogin> {
+    counted_with(password, crate::web::admin::verify_admin)
+}
+
 /// Сид-фраза закрытой среды должна быть сид-фразой самого узла (той, что открывает корень личности): иначе у узла два независимых
 /// секрета, и восстановление по одному из них ломается (P12-2). Нет личности или файла ключей — проверять нечего (true).
 #[cfg(unix)]

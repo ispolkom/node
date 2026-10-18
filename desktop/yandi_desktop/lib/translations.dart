@@ -1,6 +1,18 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
   'Пароль администратора': 'Administrator password',
+  'Пароль администратора должен отличаться от пароля пользователя': 'The administrator password must differ from the user password',
+  'Пароли администратора не совпадают': 'The administrator passwords do not match',
+  'Пароль администратора — не короче': 'Administrator password — at least',
+  'Повтор пароля администратора': 'Repeat administrator password',
+  'Пароль администратора (необязательно) открывает только админ-панель: жалобы, шлюзы, настройки узла. Он не открывает переписку. Если оставить пустым, админ-панель открывается паролем пользователя; назначить отдельный можно позже в «Настройках узла».': 'The optional administrator password opens only the admin panel: complaints, gateways, node settings. It does not open conversations. If left empty, the admin panel opens with the user password; you can set a separate one later in Node settings.',
+  'Отдельный пароль администратора назначен: он открывает только админ-панель. Забыли его — войдите по сид-фразе, пароль вернётся к паролю пользователя.': 'A separate administrator password is set: it opens only the admin panel. If you forget it, sign in with the seed phrase and it returns to the user password.',
+  'Сейчас админ-панель открывается паролем пользователя. Назначьте отдельный пароль: он открывает только админ-панель, не переписку.': 'The admin panel currently opens with the user password. Set a separate password: it opens only the admin panel, not conversations.',
+  'Текущий пароль администратора': 'Current administrator password',
+  'Новый пароль администратора': 'New administrator password',
+  'Сохранить пароль администратора': 'Save administrator password',
+  'Пароль администратора сохранён.': 'Administrator password saved.',
+  'Не удалось сохранить пароль.': 'Could not save the password.',
   'Админ-панель управляет узлом: жалобы, сопряжение, настройки. Переписку она не открывает. Доступ на 15 минут.': 'The admin panel manages the node: complaints, pairing, settings. It does not open conversations. Access lasts 15 minutes.',
   'Неверный пароль администратора': 'Wrong administrator password',
   'Слишком много неверных паролей: войдите по сид-фразе (восстановление доступа)': 'Too many wrong passwords: sign in with the seed phrase (access recovery)',

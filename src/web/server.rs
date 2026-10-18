@@ -506,6 +506,7 @@ impl WebServer {
             // API endpoints (protected)
             .route("/api/status", get(api_status))
             .route("/api/admin/session", get(api_admin_session_get).post(api_admin_session_post).delete(api_admin_session_delete))
+            .route("/api/admin/password", post(api_admin_password_post))
             .route("/api/notices", get(api_notices_get))
             .route("/api/notices/ack", post(api_notices_ack))
             .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
@@ -1489,6 +1490,8 @@ async fn api_auth_recover(
     match result {
         Ok(remember_me) => {
             crate::web::auth::reset_login_failures(); // вход по сид-фразе снимает запрет входа паролем
+            crate::web::admin::clear_password(); // сид-фраза владельца возвращает общий пароль: забытый админ-пароль не запирает узел
+            crate::web::admin::end();
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, remember_me);
@@ -3515,7 +3518,7 @@ struct AdminSessionBody {
 
 /// Открыть админ-панель: пароль проверяется тем же счётчиком попыток, что и вход (пять неверных закрывают вход паролем).
 async fn api_admin_session_post(State(state): State<AppState>, Json(b): Json<AdminSessionBody>) -> Response {
-    match crate::web::auth::verify_login_counted(&b.password) {
+    match crate::web::auth::verify_admin_counted(&b.password) {
         Ok(true) => {
             state.auth_state.record_login_success();
             crate::web::admin::start();
@@ -3529,9 +3532,39 @@ async fn api_admin_session_post(State(state): State<AppState>, Json(b): Json<Adm
     }
 }
 
+#[derive(Deserialize)]
+struct AdminPasswordBody {
+    current: String,
+    new: String,
+    #[serde(default)]
+    repeat: String,
+}
+
+/// Назначить или сменить отдельный админ-пароль. Нужен действующий сеанс (маршрут админский) и текущий админ-пароль ещё раз.
+async fn api_admin_password_post(Json(b): Json<AdminPasswordBody>) -> Response {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    if b.new != b.repeat {
+        return bad("Пароли не совпадают");
+    }
+    if let Err(e) = crate::web::auth::check_new_password(&b.new) {
+        return bad(&e);
+    }
+    match crate::web::auth::verify_admin_counted(&b.current) {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный текущий пароль администратора"}))).into_response(),
+        Err(e) => return counted_login_error(e),
+    }
+    let new = b.new.clone();
+    match tokio::task::spawn_blocking(move || crate::web::admin::set_password(&new)).await {
+        Ok(Ok(())) => Json(serde_json::json!({"ok": true, "separate": true})).into_response(),
+        Ok(Err(e)) => bad(&e),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Внутренняя ошибка"}))).into_response(),
+    }
+}
+
 async fn api_admin_session_get() -> Json<serde_json::Value> {
     let left = crate::web::admin::remaining();
-    Json(serde_json::json!({"active": left.is_some(), "remaining_secs": left.map(|d| d.as_secs()).unwrap_or(0), "ttl_secs": crate::web::admin::TTL.as_secs()}))
+    Json(serde_json::json!({"active": left.is_some(), "separate": crate::web::admin::has_separate(), "remaining_secs": left.map(|d| d.as_secs()).unwrap_or(0), "ttl_secs": crate::web::admin::TTL.as_secs()}))
 }
 
 async fn api_admin_session_delete() -> Json<serde_json::Value> {

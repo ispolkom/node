@@ -164,6 +164,34 @@ void main() {
     await stop(t);
   });
 
+  testWidgets('отдельный пароль администратора уходит на узел; одинаковый с паролем пользователя отвергается', (t) async {
+    final api = WizardApi();
+    await start(t, api);
+    await toTypeStep(t);
+    await typeAsked(t, seed12.split(' '));
+    await click(t, 'ОК');
+    await t.enterText(find.byType(TextField).at(0), 'long password');
+    await t.enterText(find.byType(TextField).at(1), 'long password');
+    await t.enterText(find.byType(TextField).at(2), 'long password');
+    await t.enterText(find.byType(TextField).at(3), 'long password');
+    await click(t, 'Создать узел');
+    expect(find.text('Пароль администратора должен отличаться от пароля пользователя'), findsOneWidget);
+    expect(api.calls.contains('/api/auth/setup'), false);
+    await t.enterText(find.byType(TextField).at(2), 'admin password');
+    await t.enterText(find.byType(TextField).at(3), 'admin passwordX');
+    await click(t, 'Создать узел');
+    expect(find.text('Пароли администратора не совпадают'), findsOneWidget);
+    await t.enterText(find.byType(TextField).at(3), 'admin password');
+    await click(t, 'Создать узел');
+    await t.pump(const Duration(seconds: 2));
+    await t.pumpAndSettle();
+    final setup = api.bodies.firstWhere((b) => b.containsKey('login_password'));
+    expect(setup['admin_password'], 'admin password');
+    expect(setup['admin_password_repeat'], 'admin password');
+    expect(setup['login_password'], 'long password');
+    await stop(t);
+  });
+
   testWidgets('the language button switches the instructions, the words stay English', (t) async {
     final api = WizardApi();
     await start(t, api);
@@ -225,7 +253,7 @@ void main() {
               api: api,
               preferences: AppPreferences(),
               busy: false,
-              finish: (_, __) async {},
+              finish: (_, __, ___) async {},
               restore: (_, __, ___) async {},
               printer: (text) async {
                 sent.add(text);
