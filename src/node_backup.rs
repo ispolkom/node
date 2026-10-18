@@ -1090,6 +1090,12 @@ pub fn node_id_from_files(l: &Layout, root: &[u8; 32]) -> Result<String, String>
 mod tests {
     use super::*;
 
+    /// Тесты не должны зависеть от глобального переопределения пути файла якорей (его выставляет другой тест и оно живёт на весь процесс):
+    /// восстановление в тестах всегда идёт с путём по умолчанию внутри временного каталога.
+    fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
+        super::restore_with(opened, l, opt, None)
+    }
+
     fn layout() -> (tempfile::TempDir, Layout) {
         let d = tempfile::tempdir().unwrap();
         let l = Layout { keys: d.path().join("keys"), data: d.path().join("data"), home: d.path().join("home"), port: 9000 };
