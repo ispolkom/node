@@ -2,9 +2,9 @@
 
 > English: [README.md](README.md)
 
-**Одноранговая сеть для свободной связи: шифрованное общение людей, файлы и звонки, выход в интернет через узлы в других странах, цепочки через несколько узлов.** Один бинарный файл `yandi` — узел сети со встроенным веб-интерфейсом. Без центрального сервера и без аккаунтов.
+**Одноранговая сеть для свободной связи: общение людей, файлы и звонки с шифрованием каждого звена (сквозное — между телефонами в приложении; между узлами пока нет), выход в интернет через узлы в других странах, цепочки через несколько узлов.** Один бинарный файл `yandi` — узел сети со встроенным веб-интерфейсом. Без центрального сервера и без аккаунтов.
 
-*English, in short:* a peer-to-peer network node written in Rust — end-to-end encrypted chat, files and calls between people, proxying and exit to the internet through nodes in other jurisdictions (one hop, fast; or three hops with layered encryption, anonymous), own UDP-first transport with a TLS/443 entry that looks like an ordinary website to anyone who does not know the secret. Nodes find each other through a signed bootstrap list ([`bootstrap/`](bootstrap/)). Most documentation is in Russian; the code and tests are readable without it.
+*English, in short:* a peer-to-peer network node written in Rust — chat, files and calls encrypted on every link (end-to-end between phones in the app; node-to-node conversations are not yet end-to-end), proxying and exit to the internet through nodes in other jurisdictions (one hop, fast; or three hops with layered encryption, anonymous), own UDP-first transport with a TLS/443 entry that looks like an ordinary website to anyone who does not know the secret. Nodes find each other through a signed bootstrap list ([`bootstrap/`](bootstrap/)). Most documentation is in Russian; the code and tests are readable without it.
 
 > **Статус: рабочий прототип, не готовый продукт.** Основное проверено на настоящих процессах, но у проекта нет независимого аудита, и сеть пока состоит из считанных узлов. Не полагайтесь на него там, где от этого зависит безопасность людей. Подробный честный список ограничений — в разделе «Чего пока нет».
 

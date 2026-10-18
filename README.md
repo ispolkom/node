@@ -1,6 +1,6 @@
 # YANDI Node
 
-**A peer-to-peer network for free communication: end-to-end encrypted chat, files and calls between people, access to the internet through nodes in other jurisdictions, circuits through several nodes.** One binary, `yandi`, is a network node with a built-in web interface. No central server, no accounts.
+**A peer-to-peer network for free communication: chat, files and calls encrypted on every link (end-to-end encryption between phones in the app; node-to-node conversations are not yet end-to-end, see "What is not there yet"), access to the internet through nodes in other jurisdictions, circuits through several nodes.** One binary, `yandi`, is a network node with a built-in web interface. No central server, no accounts.
 
 > Русская версия: [README.ru.md](README.ru.md)
 
