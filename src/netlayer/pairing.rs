@@ -273,6 +273,16 @@ fn read_text(path: &Path) -> std::result::Result<Option<String>, String> {
     }
 }
 
+/// Только для тестов: удерживает ли кто-нибудь сейчас замок файла хранилища (неблокирующая проба).
+#[cfg(all(test, unix))]
+pub(crate) fn lock_is_held(path: &Path) -> bool {
+    use std::os::unix::io::AsRawFd;
+    let Ok((lock, _)) = open_lock_file(path) else { return false };
+    let got = unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0;
+    got.then(|| unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_UN) });
+    !got
+}
+
 /// Единственный замок на не-Unix: один и тот же для одиночных транзакций и для `locked_many`, чтобы они исключали друг друга.
 #[cfg(not(unix))]
 static FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());

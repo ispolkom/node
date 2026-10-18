@@ -6,18 +6,21 @@ void main() {
     final f = restoreFailureFrom(400, {
       'error': 'секретный текст ответа не должен попасть в исключение',
       'warnings': [
-        for (var i = 0; i < 30; i++) 'путь $i',
+        'путь 0',
         42,
         null,
         'x' * 700,
+        for (var i = 1; i < 30; i++) 'путь $i',
       ],
       'files_written': true,
       'token': 'abc',
     });
     expect(f.status, 400);
     expect(f.filesWritten, true);
-    expect(f.warnings.length, 20, reason: 'не больше 20 строк');
+    expect(f.warnings.length <= 20, true, reason: 'не больше 20 строк');
     expect(f.warnings.first, 'путь 0');
+    expect(f.warnings.any((w) => w.length > 500), false, reason: 'длинная строка обрезана');
+    expect(f.warnings.contains('42'), false, reason: 'не строки отброшены');
     expect(f.toString().contains('секретный'), false);
     final long = restoreFailureFrom(400, {'warnings': ['y' * 700]});
     expect(long.warnings.single.length, 500);
