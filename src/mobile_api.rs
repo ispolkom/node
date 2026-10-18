@@ -3449,7 +3449,7 @@ mod guest_tests {
         });
         let ask = |token: &'static str| async move {
             let (mut client, server) = tokio::io::duplex(8192);
-            let task = tokio::spawn(serve_connect(server, Vec::new()));
+            let task = tokio::task::spawn(serve_connect(server, Vec::new()));
             client.write_all(format!("CONNECT example.org:443 HTTP/1.1\r\nProxy-Authorization: Bearer {token}\r\n\r\n").as_bytes()).await.unwrap();
             let mut out = Vec::new();
             let _ = tokio::time::timeout(std::time::Duration::from_secs(5), client.read_to_end(&mut out)).await;
