@@ -214,6 +214,9 @@ pub fn run(argv: Vec<String>) -> i32 {
     for old in &report.kept_old {
         println!("прежний файл сохранён: {}", old.display());
     }
+    for u in &report.unclean {
+        eprintln!("ВНИМАНИЕ, не очищено от секретов старого формата: {u}");
+    }
     // ключ устройства для ЭТОЙ машины: корень открывается кодом, для него делается новая машинная обёртка
     let machine: Box<dyn key_root::MachineContext> = match &a.machine_id {
         Some(id) => Box::new(key_root::FixedMachine(id.clone())),

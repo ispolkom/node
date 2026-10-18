@@ -226,7 +226,10 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<(), String> {
     }
     let opened = crate::node_backup::open_with_code(&bytes, &b.phrase)?;
     let layout = crate::node_backup::Layout::live(crate::get_config().ports.discovery);
-    crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
+    let report = crate::node_backup::restore(&opened, &layout, &crate::node_backup::RestoreOptions { force: false })?;
+    for u in &report.unclean {
+        eprintln!("[restore] не очищено от секретов старого формата: {u}");
+    }
     let dir = key_root::KeyDir::open(&layout.keys).map_err(|e| format!("Каталог ключей: {e}"))?;
     let machine = key_root::SystemMachine;
     let device = key_root::HardwareDeviceKey::new(dir.file("device.seal"), dir.file("device.key"));

@@ -6091,27 +6091,43 @@ async fn pair_issue_handler(
         .ttl_secs
         .unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
 
-    // Право клиента — запись без секретов (docs/RESUME_REDESIGN.md): кому и до какого срока.
-    let tok = crate::netlayer::pairing::ClientGrant::new(ttl);
-
-    // Сохраняем в paired_clients store (key = client_pubkey_hex).
-    let mut store = transport.paired_clients.lock().await;
-    store
-        .clients
-        .insert(req.client_pubkey_hex.clone(), tok.clone());
+    // Право клиента — запись без секретов (docs/RESUME_REDESIGN.md): кому и до какого срока. Срок ограничен годом.
+    let ttl = ttl.min(365 * 24 * 3600);
     let path = crate::netlayer::pairing::default_paired_clients_path();
-    if let Err(e) = store.save(&path) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PairIssueResponse {
-                status: "error".into(),
-                session_id: None,
-                expires_at: None,
-                message: Some(format!("persist failed: {}", e)),
-            }),
-        )
-            .into_response();
-    }
+    let pk = req.client_pubkey_hex.clone();
+    // транзакция над файлом: блокировка → строгое чтение → изменение копии → запись; заблокированное или переполненное хранилище не
+    // меняется, память обновляется только после успешной записи
+    let issued = tokio::task::spawn_blocking(move || {
+        crate::netlayer::pairing::PairedClientStore::update(&path, |st| {
+            st.gc_expired();
+            if !st.clients.contains_key(&pk) && st.clients.len() >= crate::netlayer::pairing::MAX_CLIENTS {
+                anyhow::bail!("слишком много выданных прав");
+            }
+            Ok(st.issue(pk.clone(), ttl))
+        })
+        .map(|g| (g, crate::netlayer::pairing::PairedClientStore::load_or_default(&crate::netlayer::pairing::default_paired_clients_path())))
+    })
+    .await;
+    let tok = match issued {
+        Ok(Ok((g, snapshot))) => {
+            *transport.paired_clients.lock().await = snapshot;
+            g
+        }
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PairIssueResponse { status: "error".into(), session_id: None, expires_at: None, message: Some(format!("persist failed: {}", e)) }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PairIssueResponse { status: "error".into(), session_id: None, expires_at: None, message: Some("internal error".into()) }),
+            )
+                .into_response();
+        }
+    };
 
     info!(
         "[pair/issue] issued grant {} for pubkey {}",

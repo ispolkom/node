@@ -202,9 +202,11 @@ async fn main() -> anyhow::Result<()> {
         match yandi::netlayer::pairing::PairingPayload::from_qr_string(&qr) {
             Ok(payload) => {
                 let path = yandi::netlayer::pairing::default_paired_anchors_path();
-                let mut store = yandi::netlayer::pairing::PairedAnchorStore::load_or_default(&path);
-                store.add_or_update(payload.clone(), 0);
-                match store.save(&path) {
+                // транзакция над файлом (блокировка, строгое чтение, запись): параллельный запуск не теряет чужую запись
+                match yandi::netlayer::pairing::PairedAnchorStore::update(&path, |st| {
+                    st.add_or_update(payload.clone(), 0);
+                    Ok(())
+                }) {
                     Ok(_) => {
                         println!("✅ Pairing imported:");
                         println!("   anchor_id:       {}", hex::encode(&payload.anchor_id.0[..8]));
@@ -300,6 +302,10 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
         let auth_for_backup = auth_state.clone();
+    // остатки секретов старого формата рядом с файлами связи (прежние сбои восстановления) очищаются при каждом старте
+    for u in yandi::node_backup::sweep_pairing_files(&yandi::node_backup::Layout::live(discovery_port)) {
+        eprintln!("[pairing] не очищено от секретов старого формата: {u}");
+    }
         yandi::backup_api::install(yandi::node_backup::Layout::live(discovery_port), std::sync::Arc::new(move || auth_for_backup.get_master_key()));
         tokio::task::spawn(yandi::backup_api::scheduler());
     }

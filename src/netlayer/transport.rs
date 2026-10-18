@@ -554,9 +554,9 @@ pub struct P2PTransport {
     pub ws_outgoing: Arc<tokio::sync::Mutex<HashMap<HashId, mpsc::Sender<Vec<u8>>>>>,
 
 
-    /// 🔐 Step 4: PairedClientStore — anchor хранит session-токены спаренных клиентов.
-    /// Загружается при старте из `~/.yandi/paired_clients.json`. На mobile-стороне пуст.
-    /// Используется при обработке 0xC0 RESUME: lookup session_id → verify HMAC → refresh TTL.
+    /// PairedClientStore — записи о праве спаренных клиентов (без секретов, формат v2). Загружается при старте из
+    /// `~/.yandi/paired_clients.json`: при этом старый файл с секретами переписывается (миграция). Изменения идут транзакциями
+    /// `PairedClientStore::update` прямо над файлом; эта копия — снимок на момент последней загрузки или выдачи.
     pub paired_clients: Arc<tokio::sync::Mutex<crate::netlayer::pairing::PairedClientStore>>,
 
     /// 🔁 Step 6: PairedAnchorStore — mobile хранит список своих anchor'ов в порядке
