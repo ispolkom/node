@@ -239,8 +239,9 @@ fn read_text(path: &Path) -> std::result::Result<Option<String>, String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        // открытие без перехода по ссылке и проверка уже открытого дескриптора: между проверкой и чтением путь подменить нельзя
-        let f = match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW).open(path) {
+        // открытие без перехода по ссылке и проверка уже открытого дескриптора: между проверкой и чтением путь подменить нельзя;
+        // O_NONBLOCK — чтобы FIFO на месте файла не повесил открытие до проверки типа (обычному файлу флаг не мешает)
+        let f = match fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(path) {
             Ok(f) => f,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(e) => return Err(format!("{e}")),
@@ -290,7 +291,7 @@ fn with_lock<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
             .write(true)
             .truncate(false)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
             .open(&lock_path)
             .with_context(|| format!("блокировка {:?}", lock_path))?;
         // flock принадлежит открытому описанию файла: каждый вызов открывает файл заново, поэтому потоки одного процесса тоже исключают друг друга
@@ -906,6 +907,21 @@ mod tests {
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(matches!(PairedClientStore::read(&link), StoreRead::Io(_)));
         assert_eq!(fs::read_to_string(&real).unwrap(), old_clients_json(), "цель ссылки не тронута");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p18_6_a_fifo_in_place_of_the_file_is_refused_without_blocking() {
+        use std::os::unix::ffi::OsStrExt;
+        let dir = tempdir().unwrap();
+        let fifo = dir.path().join("paired_clients.json");
+        let c = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(matches!(PairedClientStore::read(&fifo), StoreRead::Io(_)));
+        });
+        assert_eq!(rx.recv_timeout(std::time::Duration::from_secs(5)), Ok(true), "чтение FIFO не должно зависать");
     }
 
     #[test]
