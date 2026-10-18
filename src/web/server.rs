@@ -1469,6 +1469,7 @@ async fn api_auth_recover(
     if let Err(e) = crate::web::auth::check_new_password(&body.new_login_password) {
         return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response();
     }
+    #[cfg(unix)]
     if let Some(Err((code, text))) = crate::closed_api::recover_vault_if_configured(body.recovery_code.clone(), body.new_login_password.clone()).await {
         state.auth_state.record_login_failure();
         return (code, Json(serde_json::json!({"error": text}))).into_response();

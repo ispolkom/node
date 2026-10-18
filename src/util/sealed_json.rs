@@ -335,6 +335,7 @@ mod tests {
         S.lock();
     }
 
+    #[cfg(unix)]
     #[test]
     fn an_unreadable_plain_file_is_not_replaced_and_reading_a_missing_store_creates_nothing() {
         use std::os::unix::fs::PermissionsExt;
