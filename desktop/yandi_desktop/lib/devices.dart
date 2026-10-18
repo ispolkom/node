@@ -98,7 +98,7 @@ class _DevicesPanelState extends State<DevicesPanel> {
     }
   }
 
-  /// [role]: `owner` — телефон владельца, `user` — посторонний пользователь узла (группы и жалобы, без личной переписки ПК).
+  /// [role]: `owner` — телефон владельца. Три роли сети: админ, пользователь, гость; пользователем человек становится, когда админ принимает его запрос гостя.
   Future<void> pairing([String role = 'owner']) async {
     clear();
     // Start TTL before request so network latency cannot prolong the secret.
@@ -197,11 +197,6 @@ class _DevicesPanelState extends State<DevicesPanel> {
         TextButton(
           onPressed: widget.busy ? null : pairing,
           child: const UiText('Создать код сопряжения'),
-        ),
-      if (widget.paired)
-        TextButton(
-          onPressed: widget.busy ? null : () => pairing('user'),
-          child: const UiText('Код для пользователя узла (без личной переписки)'),
         ),
       if (text != null && expires != null) ...[
         if (qr != null)
