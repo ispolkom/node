@@ -408,15 +408,11 @@ impl PairedClientStore {
         Ok(())
     }
 
-    fn read_unlocked(path: &Path) -> StoreRead<Self> {
-        let text = match read_text(path) {
-            Ok(None) => return StoreRead::Missing,
-            Ok(Some(t)) => t,
-            Err(e) => return StoreRead::Io(e),
-        };
-        match probe_version(&text) {
+    /// Разбор текста без ввода-вывода: одна проверка для чтения, очистки и копий (P18-3).
+    fn parse(text: &str) -> StoreRead<Self> {
+        match probe_version(text) {
             Err(e) => StoreRead::Corrupt(e),
-            Ok(Some(STORE_VERSION)) => match serde_json::from_str::<Self>(&text) {
+            Ok(Some(STORE_VERSION)) => match serde_json::from_str::<Self>(text) {
                 Ok(s) => match s.check() {
                     Ok(()) => StoreRead::Current(s),
                     Err(e) => StoreRead::Corrupt(format!("схема v2: {e}")),
@@ -425,13 +421,21 @@ impl PairedClientStore {
             },
             Ok(Some(v)) => StoreRead::Unsupported(v),
             // старый формат: права клиентов не переносятся
-            Ok(None) => match serde_json::from_str::<OldClients>(&text) {
+            Ok(None) => match serde_json::from_str::<OldClients>(text) {
                 Ok(o) => match o.validate() {
                     Ok(()) => StoreRead::Migrated(Self::default()),
                     Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
                 },
                 Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
             },
+        }
+    }
+
+    fn read_unlocked(path: &Path) -> StoreRead<Self> {
+        match read_text(path) {
+            Ok(None) => StoreRead::Missing,
+            Ok(Some(t)) => Self::parse(&t),
+            Err(e) => StoreRead::Io(e),
         }
     }
 
@@ -569,15 +573,11 @@ impl PairedAnchorStore {
         Ok(())
     }
 
-    fn read_unlocked(path: &Path) -> StoreRead<Self> {
-        let text = match read_text(path) {
-            Ok(None) => return StoreRead::Missing,
-            Ok(Some(t)) => t,
-            Err(e) => return StoreRead::Io(e),
-        };
-        match probe_version(&text) {
+    /// Разбор текста без ввода-вывода: одна проверка для чтения, очистки и копий (P18-3).
+    fn parse(text: &str) -> StoreRead<Self> {
+        match probe_version(text) {
             Err(e) => StoreRead::Corrupt(e),
-            Ok(Some(STORE_VERSION)) => match serde_json::from_str::<Self>(&text) {
+            Ok(Some(STORE_VERSION)) => match serde_json::from_str::<Self>(text) {
                 Ok(s) => match s.check() {
                     Ok(()) => StoreRead::Current(s),
                     Err(e) => StoreRead::Corrupt(format!("схема v2: {e}")),
@@ -585,7 +585,7 @@ impl PairedAnchorStore {
                 Err(e) => StoreRead::Corrupt(format!("схема v2: {e}")),
             },
             Ok(Some(v)) => StoreRead::Unsupported(v),
-            Ok(None) => match serde_json::from_str::<OldAnchors>(&text) {
+            Ok(None) => match serde_json::from_str::<OldAnchors>(text) {
                 Ok(o) if o.anchors.iter().any(|e| e.session.as_ref().is_some_and(|g| g.validate().is_err())) => StoreRead::Corrupt("схема v1: поля старой записи не той формы".into()),
                 Ok(o) => {
                     let s = Self {
@@ -600,6 +600,14 @@ impl PairedAnchorStore {
                 }
                 Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
             },
+        }
+    }
+
+    fn read_unlocked(path: &Path) -> StoreRead<Self> {
+        match read_text(path) {
+            Ok(None) => StoreRead::Missing,
+            Ok(Some(t)) => Self::parse(&t),
+            Err(e) => StoreRead::Io(e),
         }
     }
 
@@ -700,16 +708,8 @@ pub fn sanitized_store_text(kind: StoreKind, bytes: &[u8]) -> Option<String> {
 
 impl PairedClientStore {
     fn read_text_model(text: &str) -> Option<Self> {
-        match probe_version(text).ok()? {
-            Some(STORE_VERSION) => {
-                let s = serde_json::from_str::<Self>(text).ok()?;
-                s.check().ok()?;
-                Some(s)
-            }
-            None => {
-                let o = serde_json::from_str::<OldClients>(text).ok()?;
-                o.clients.keys().all(|k| is_hex(k, 64)).then(Self::default)
-            }
+        match Self::parse(text) {
+            StoreRead::Current(s) | StoreRead::Migrated(s) => Some(s),
             _ => None,
         }
     }
@@ -717,22 +717,8 @@ impl PairedClientStore {
 
 impl PairedAnchorStore {
     fn read_text_model(text: &str) -> Option<Self> {
-        match probe_version(text).ok()? {
-            Some(STORE_VERSION) => {
-                let s = serde_json::from_str::<Self>(text).ok()?;
-                s.check().ok()?;
-                Some(s)
-            }
-            None => {
-                let o = serde_json::from_str::<OldAnchors>(text).ok()?;
-                let s = Self {
-                    version: STORE_VERSION,
-                    anchors: o.anchors.into_iter().map(|e| PairedAnchorEntry { payload: e.payload, preference: e.preference }).collect(),
-                    blocked: None,
-                };
-                s.check().ok()?;
-                Some(s)
-            }
+        match Self::parse(text) {
+            StoreRead::Current(s) | StoreRead::Migrated(s) => Some(s),
             _ => None,
         }
     }
@@ -1135,6 +1121,35 @@ mod tests {
         let apath = dir.path().join("paired_anchors.json");
         fs::write(&apath, format!(r#"{{"version":2,"anchors":[{{"payload":{a},"preference":1}},{{"payload":{a},"preference":2}}]}}"#)).unwrap();
         assert!(matches!(PairedAnchorStore::read(&apath), StoreRead::Corrupt(_)), "один якорь дважды");
+    }
+
+    #[test]
+    fn p18_3_every_reader_classifies_the_same_malformed_bytes_the_same_way() {
+        let pk = "ab".repeat(32);
+        let a = serde_json::to_string(&payload()).unwrap();
+        let bad_clients = [
+            format!(r#"{{"clients":{{"{pk}":{{"session_id":1,"resume_secret_hex":"not-hex","expires_at":9}}}}}}"#),
+            format!(r#"{{"clients":{{"{pk}":{{"session_id":1,"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":9,"session_key_hex":"short"}}}}}}"#),
+        ];
+        let bad_anchors = [
+            format!(r#"{{"anchors":[{{"payload":{a},"session":{{"session_id":1,"resume_secret_hex":"zz","expires_at":9}},"preference":1}}]}}"#),
+            format!(r#"{{"anchors":[{{"payload":{a},"session":{{"session_id":1,"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":9,"session_key_hex":"short"}},"preference":1}}]}}"#),
+        ];
+        let dir = tempdir().unwrap();
+        for (kind, name, list) in [(StoreKind::Clients, "paired_clients.json", &bad_clients), (StoreKind::Anchors, "paired_anchors.json", &bad_anchors)] {
+            for bad in list.iter() {
+                let path = dir.path().join(name);
+                fs::write(&path, bad).unwrap();
+                let read_corrupt = match kind {
+                    StoreKind::Clients => matches!(PairedClientStore::read(&path), StoreRead::Corrupt(_)),
+                    StoreKind::Anchors => matches!(PairedAnchorStore::read(&path), StoreRead::Corrupt(_)),
+                };
+                assert!(read_corrupt, "чтение: {bad}");
+                assert!(sanitized_store_text(kind, bad.as_bytes()).is_none(), "копия/восстановление: {bad}");
+                assert!(matches!(sanitize_file_in_place(kind, &path, true), Ok(Cleaned::Unparseable)), "очистка на месте: {bad}");
+                assert_eq!(fs::read_to_string(&path).unwrap(), *bad, "испорченный файл очисткой не переписывается молча");
+            }
+        }
     }
 
     #[test]
