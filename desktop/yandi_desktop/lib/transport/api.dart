@@ -41,6 +41,18 @@ class ApiFailure implements Exception {
   String toString() => message;
 }
 
+/// Отказ восстановления из копии: из тела ответа берутся только предупреждения (не больше 20 строк по 500 знаков) и признак «файлы записаны»;
+/// остальное тело в исключение не попадает (P19-3, P20-6).
+ApiFailure restoreFailureFrom(int status, Map<String, dynamic> value) {
+  final w = value['warnings'];
+  final list = <String>[
+    if (w is List)
+      for (final x in w.take(20))
+        if (x is String) x.length > 500 ? x.substring(0, 500) : x,
+  ];
+  return ApiFailure('http', status, list, value['files_written'] == true);
+}
+
 String fileErrorKind(dynamic message) => switch (message) {
   'File is larger than the allowed size' => 'file_limit',
   'Too many unfinished uploads' => 'file_busy',
@@ -346,15 +358,7 @@ class UnixApi implements Api, BinaryApi, GroupFileApi {
           if (response.statusCode < 200 || response.statusCode >= 300) {
             // единственное исключение из правила «тело ответа в ошибку не попадает»: ограниченный контракт восстановления из копии,
             // иначе владелец не узнал бы путь неочищенного остатка (P19-3); тип, число и длина проверяются
-            if (path == '/api/auth/restore') {
-              final w = value['warnings'];
-              final list = <String>[
-                if (w is List)
-                  for (final x in w.take(20))
-                    if (x is String) x.length > 500 ? x.substring(0, 500) : x,
-              ];
-              throw ApiFailure('http', response.statusCode, list, value['files_written'] == true);
-            }
+            if (path == '/api/auth/restore') throw restoreFailureFrom(response.statusCode, value);
             throw ApiFailure('http', response.statusCode);
           }
           if (value['ok'] == false ||

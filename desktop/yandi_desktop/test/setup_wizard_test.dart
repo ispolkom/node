@@ -265,6 +265,24 @@ void main() {
     await stop(t);
   });
 
+  testWidgets('a failed restore with files written but no warnings still says that files are on disk (P20-4)', (t) async {
+    final api = WizardApi()..restoreFails = const ApiFailure('http', 400, [], true);
+    await start(t, api);
+    await click(t, 'Восстановить из копии');
+    final fields = find.byType(TextField);
+    await t.enterText(fields.at(0), '/home/iam/копия.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    await t.enterText(fields.at(1), seed12);
+    await t.enterText(fields.at(2), 'long password');
+    await t.enterText(fields.at(3), 'long password');
+    await click(t, 'Восстановить');
+    await t.pump(const Duration(seconds: 2));
+    await t.pumpAndSettle();
+    expect(find.textContaining('Часть файлов копии записана'), findsOneWidget);
+    await stop(t);
+  });
+
   testWidgets('the seed sheet goes to the printer from memory, numbered, and a failure is told', (t) async {
     final api = WizardApi();
     final sent = <String>[];

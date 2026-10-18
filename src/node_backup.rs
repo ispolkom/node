@@ -537,17 +537,61 @@ pub struct RestoreOptions {
     pub force: bool,
 }
 
-/// Создать каталог (и недостающие родители) с правами 0700.
-fn private_dirs(dir: &Path) -> std::io::Result<()> {
+/// Создать каталог (и недостающие родители) с правами 0700; созданные каталоги (от самого глубокого) дописываются в `created`: их имена
+/// тоже живут в родителях и нуждаются в сбросе на диск (P20-5).
+fn private_dirs(dir: &Path, created: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut cur = dir.to_path_buf();
+    while !cur.as_os_str().is_empty() && std::fs::symlink_metadata(&cur).is_err() {
+        missing.push(cur.clone());
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
+    }
     #[cfg(unix)]
-    {
+    let r = {
         use std::os::unix::fs::DirBuilderExt;
         std::fs::DirBuilder::new().recursive(true).mode(0o700).create(dir)
-    }
+    };
     #[cfg(not(unix))]
-    {
-        std::fs::create_dir_all(dir)
+    let r = std::fs::create_dir_all(dir);
+    if r.is_ok() {
+        created.extend(missing);
     }
+    r
+}
+
+/// Сбросить на диск созданные каталоги и их имена в родителях (снизу вверх), а также каталоги, где лежали изменённые файлы. Всё, что не
+/// подтвердилось, возвращается строками для отчёта.
+fn sync_report(created: &[PathBuf], touched: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut dirs: Vec<PathBuf> = touched.to_vec();
+    dirs.sort();
+    dirs.dedup();
+    for d in &dirs {
+        if let Err(er) = crate::util::private_file::sync_dir_checked(&d.join("x")) {
+            out.push(format!("{}: запись каталога не подтверждена на диске ({er}); после отключения питания могли вернуться прежние или новые файлы", d.display()));
+        }
+    }
+    for d in created {
+        // сам каталог и его имя в родителе
+        for target in [d.join("x"), d.clone()] {
+            if let Err(er) = crate::util::private_file::sync_dir_checked(&target) {
+                out.push(format!("{}: созданный каталог не подтверждён на диске ({er})", d.display()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Отказ до замены файлов: накопленные предупреждения не теряются, и прямо сказано, что проверка остатков не выполнялась (P20-4).
+fn early_fail(message: String, skipped: &[String], sync_notes: Vec<String>) -> RestoreFailure {
+    let mut warnings = skipped.to_vec();
+    warnings.extend(sync_notes);
+    warnings.push("проверка остатков прежних восстановлений не выполнялась: операция прервана до замены файлов".into());
+    RestoreFailure { message, warnings, files_changed: false }
 }
 
 /// Записать файлы копии в каталоги узла. Узел при этом не должен работать. Журналы групп и переписка не восстанавливаются.
@@ -666,6 +710,38 @@ fn restore_with(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
 thread_local! {
     static FAIL_SWAP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
     static FAIL_ROLLBACK_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ROLLBACK_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_TMP_RENAME_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static AFTER_SWAP_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+fn inject_tmp_rename_failure(_i: usize) -> bool {
+    #[cfg(test)]
+    {
+        FAIL_TMP_RENAME_AT.with(|c| c.get() == Some(_i))
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+/// Проба: код, который тест выполняет между неудачной заменой и началом отката (пока замки ещё у восстановления).
+fn run_after_swap_hook() {
+    #[cfg(test)]
+    {
+        if let Some(h) = AFTER_SWAP_HOOK.with(|c| c.borrow_mut().take()) {
+            h();
+        }
+    }
+}
+fn inject_rollback_rename_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_ROLLBACK_RENAME.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
 }
 fn inject_swap_failure(_i: usize) -> bool {
     #[cfg(test)]
@@ -755,6 +831,7 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
     // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
     let mut groups = 0usize;
     let mut skipped: Vec<String> = Vec::new();
+    let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut staged: Vec<(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта, вид файла связи — по ЛОГИЧЕСКОМУ имени записи, а не по имени на диске)
     let cleanup = |staged: &[(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)]| {
         for (_, tmp, _, _) in staged {
@@ -783,7 +860,8 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
                 }
                 Err(er) => {
                     cleanup(&staged);
-                    return Err(RestoreFailure::from(er));
+                    let notes = sync_report(&created_dirs, &[]);
+                    return Err(early_fail(er, &skipped, notes));
                 }
             }
         } else {
@@ -791,15 +869,17 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
         };
         if let Some(dir) = path.parent() {
             // каталоги — приватные (0700): узел не стартует с каталогом данных, доступным другим пользователям
-            if let Err(er) = private_dirs(dir) {
+            if let Err(er) = private_dirs(dir, &mut created_dirs) {
                 cleanup(&staged);
-                return Err(RestoreFailure::from(format!("{}: {er}", e.path)));
+                let notes = sync_report(&created_dirs, &[]);
+                return Err(early_fail(format!("{}: {er}", e.path), &skipped, notes));
             }
         }
         let tmp = path.with_file_name(format!(".{}.restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
         if let Err(er) = crate::util::private_file::write_private(&tmp, &data) {
             cleanup(&staged);
-            return Err(RestoreFailure::from(format!("{}: {er}", e.path)));
+            let notes = sync_report(&created_dirs, &[]);
+            return Err(early_fail(format!("{}: {er}", e.path), &skipped, notes));
         }
         staged.push((path, tmp, format!("{:?}/{}", e.area, e.path), pairing_store_kind(&e.path)));
     }
@@ -811,33 +891,48 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
         kept: Vec<PathBuf>,
         written: Vec<String>,
         done: Vec<(PathBuf, Option<PathBuf>)>, // (рабочий путь, куда ушёл прежний)
+        touched: Vec<PathBuf>,                 // каталоги, где менялись имена (переименования, удаления, откат): их нужно сбросить на диск
         failure: Option<String>,
         stuck: Vec<String>,
+        notes: Vec<String>,
         durability: Vec<String>,
     }
     let mut lock_paths: Vec<PathBuf> = staged.iter().filter(|(_, _, _, k)| k.is_some()).map(|(p, _, _, _)| p.clone()).collect();
     lock_paths.sort();
     lock_paths.dedup();
     let mut swap_body = || -> Swap {
-        let mut sw = Swap { kept: Vec::new(), written: Vec::new(), done: Vec::new(), failure: None, stuck: Vec::new(), durability: Vec::new() };
-        let mut pairing_rollback: std::collections::HashMap<PathBuf, Option<Vec<u8>>> = std::collections::HashMap::new(); // прежний очищенный вид (None — прежнего нет или он не разбирается)
+        let mut sw = Swap { kept: Vec::new(), written: Vec::new(), done: Vec::new(), touched: Vec::new(), failure: None, stuck: Vec::new(), notes: Vec::new(), durability: Vec::new() };
+        // прежний очищенный вид (None — прежнего нет или он не разбирается) и признак «очистка изменила прежнее содержимое»
+        let mut pairing_rollback: std::collections::HashMap<PathBuf, (Option<Vec<u8>>, bool)> = std::collections::HashMap::new();
         for (i, (path, tmp, label, pairing_kind)) in staged.iter().enumerate() {
             let mut old: Option<PathBuf> = None;
+            if let Some(dir) = path.parent() {
+                sw.touched.push(dir.to_path_buf()); // имя в этом каталоге будет меняться (замена, при отказе — откат)
+            }
             if let Some(kind) = pairing_kind {
-                let prior = crate::netlayer::pairing::read_bytes_nofollow(path).and_then(|b| crate::netlayer::pairing::sanitized_store_text(*kind, &b)).map(|t| t.into_bytes());
-                pairing_rollback.entry(path.clone()).or_insert(prior); // исходное состояние запоминается один раз
+                let raw = crate::netlayer::pairing::read_bytes_nofollow(path);
+                let prior = raw.as_ref().and_then(|b| crate::netlayer::pairing::sanitized_store_text(*kind, b)).map(|t| t.into_bytes());
+                let changed = match (&raw, &prior) {
+                    (Some(r), Some(p)) => r != p,
+                    _ => false,
+                };
+                pairing_rollback.entry(path.clone()).or_insert((prior, changed)); // исходное состояние запоминается один раз
             } else if path.exists() && !inject_swap_failure(i) {
                 let o = path.with_file_name(format!("{}.before-restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
                 if let Err(er) = std::fs::rename(path, &o) {
                     sw.failure = Some(format!("{label}: {er}"));
                     break;
                 }
-                old = Some(o);
+                old = Some(o); // имя изменено: с этого момента откат обязан вернуть прежний файл на место
             }
-            let renamed = if inject_swap_failure(i) { Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа замены")) } else { std::fs::rename(tmp, path) };
+            let renamed = if inject_swap_failure(i) || inject_tmp_rename_failure(i) { Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа замены")) } else { std::fs::rename(tmp, path) };
             if let Err(er) = renamed {
                 if let Some(o) = &old {
-                    let _ = std::fs::rename(o, path);
+                    // прежний файл уже отодвинут: его возвращение проверяется, а не отбрасывается (P20-3)
+                    let back = if inject_rollback_rename_failure() { Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа возврата имени")) } else { std::fs::rename(o, path) };
+                    if back.is_err() {
+                        sw.stuck.push(format!("{} (прежний файл остался под именем {})", path.display(), o.display()));
+                    }
                 }
                 sw.failure = Some(format!("{label}: {er}"));
                 break;
@@ -849,18 +944,19 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
             sw.written.push(label.clone());
         }
         if sw.failure.is_some() {
+            run_after_swap_hook();
             // откат: уже заменённые файлы возвращаются (прежний — поверх нового одним rename), не дошедшие подготовленные удаляются;
             // что вернуть не удалось — перечисляется, а не замалчивается
-            for (path, old) in sw.done.iter().rev() {
+            for (path, old) in sw.done.clone().iter().rev() {
                 match old {
                     Some(o) => {
-                        if std::fs::rename(o, path).is_err() {
+                        if inject_rollback_rename_failure() || std::fs::rename(o, path).is_err() {
                             sw.stuck.push(format!("{} (прежний файл: {})", path.display(), o.display()));
                         }
                     }
                     None => match pairing_rollback.get(path) {
                         // файл связи: возвращается очищенный вид прежнего содержимого (сырых копий нет); замок уже у нас
-                        Some(Some(prior)) => {
+                        Some((Some(prior), changed)) => {
                             let r = if inject_rollback_write_failure() {
                                 Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа записи при откате"))
                             } else {
@@ -870,6 +966,9 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
                                 Ok(crate::util::private_file::Committed::Durable) => {}
                                 Ok(crate::util::private_file::Committed::DurabilityUnknown(why)) => sw.durability.push(format!("{}: откат записан, но запись каталога не подтверждена на диске ({why})", path.display())),
                                 Err(e2) => sw.stuck.push(format!("{} (прежний очищенный файл связи не возвращён: {e2})", path.display())),
+                            }
+                            if *changed {
+                                sw.notes.push(format!("{}: откат вернул очищенный вид файла связи (секреты старого формата удалены, права клиентов прежнего формата не возвращаются)", path.display()));
                             }
                         }
                         _ => {
@@ -888,34 +987,35 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
         Err(er) => {
             // замок взять не удалось: ни одна замена не начата
             cleanup(&staged);
-            return Err(RestoreFailure { message: format!("не удалось взять блокировку файла связи: {er}"), warnings: skipped, files_changed: false });
+            let notes = sync_report(&created_dirs, &[]);
+            return Err(early_fail(format!("не удалось взять блокировку файла связи: {er}"), &skipped, notes));
         }
     };
-    let Swap { kept, written, done, failure, stuck, mut durability } = sw;
-    // переименования и откат живут в каталогах: без их сброса на диск после отключения питания мог бы вернуться прежний файл (P18-4, P19-2)
-    let mut dirs: Vec<PathBuf> = done.iter().filter_map(|(p, _)| p.parent().map(|d| d.to_path_buf())).collect();
-    dirs.sort();
-    dirs.dedup();
-    for d in &dirs {
-        if let Err(er) = crate::util::private_file::sync_dir_checked(&d.join("x")) {
-            durability.push(format!("{}: запись каталога не подтверждена на диске ({er}); после отключения питания могли вернуться прежние или новые файлы", d.display()));
-        }
-    }
+    let Swap { kept, written, done: _, touched, failure, stuck, notes, mut durability } = sw;
     if let Some(er) = failure {
+        // подготовленные файлы убираются ДО итогового сброса каталогов, чтобы и это удаление было подтверждено (P20-5)
         cleanup(&staged);
+        durability.extend(sync_report(&created_dirs, &touched));
         let mut warnings = skipped;
         warnings.extend(stuck.iter().cloned());
-        warnings.extend(durability);
+        warnings.extend(notes);
+        warnings.extend(durability.iter().cloned());
+        warnings.push("проверка остатков прежних восстановлений не выполнялась: операция откатывалась".into());
+        let residue = !stuck.is_empty() || !durability.is_empty();
         return Err(RestoreFailure {
-            message: if stuck.is_empty() {
-                format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними. Можно повторить команду")
-            } else {
+            message: if !stuck.is_empty() {
                 format!("восстановление не завершено ({er}), откат прошёл не полностью: {}. Прежние файлы лежат рядом (*.before-restore-*); повторите команду с --force", stuck.join("; "))
+            } else if !durability.is_empty() {
+                format!("восстановление не завершено и откатено ({er}), но запись откатов на диск не подтверждена; возможны остаточные изменения после сбоя питания")
+            } else {
+                format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними. Можно повторить команду")
             },
             warnings,
-            files_changed: !stuck.is_empty(),
+            // «изменены» читается консервативно: true при любой неподтверждённой части; false только когда откат выполнен и подтверждён
+            files_changed: residue,
         });
     }
+    durability.extend(sync_report(&created_dirs, &touched));
     // Очистка не зависит от содержимого копии: активные файлы связи и любые остатки рядом с ними (`*.before-restore-*`, промежуточные
     // `.restore-*`, в том числе от прежних сбоев) проверяются всегда; всё, что не удалось очистить или удалить, попадает в отчёт.
     let mut unclean = skipped;
@@ -1711,6 +1811,129 @@ mod tests {
         let msg = r.unwrap_err();
         assert!(msg.contains("один и тот же файл"), "{msg}");
         assert!(!alias.exists(), "ничего не записано");
+    }
+
+    /// P20-3: прежний обычный файл отодвинут, замена отказала, и возврат имени тоже отказал — это неудача отката, а не «файлы прежние».
+    #[cfg(unix)]
+    #[test]
+    fn p20_3_a_failed_return_of_a_moved_file_is_reported_as_residue() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "contacts.json");
+        entries.push(Entry { area: Area::Data, path: "contacts.json".into(), data: b"[]".to_vec() });
+        let idx = entries.len() - 1;
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        std::fs::create_dir_all(&t.data).unwrap();
+        std::fs::write(t.data.join("contacts.json"), b"OLD").unwrap();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(Some(idx)));
+        FAIL_ROLLBACK_RENAME.with(|c| c.set(true));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(None));
+        FAIL_ROLLBACK_RENAME.with(|c| c.set(false));
+        assert!(err.files_changed, "{err:?}");
+        assert!(err.message.contains("откат прошёл не полностью"), "{}", err.message);
+        assert!(!t.data.join("contacts.json").exists(), "файл остался отодвинутым");
+        assert!(err.warnings.iter().any(|w| w.contains("прежний файл остался под именем")), "{:?}", err.warnings);
+        // тот же отказ замены, но возврат имени удался: ничего не изменено, и файл на месте с прежними байтами
+        std::fs::remove_file(std::fs::read_dir(&t.data).unwrap().flatten().find(|e| e.file_name().to_string_lossy().contains("before-restore")).unwrap().path()).unwrap();
+        std::fs::write(t.data.join("contacts.json"), b"OLD").unwrap();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(Some(idx)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert_eq!(std::fs::read(t.data.join("contacts.json")).unwrap(), b"OLD");
+    }
+
+    /// P20-4: накопленное «пропущено» не теряется, если отказ случился при подготовке; прямо сказано, что остатки не проверялись.
+    #[cfg(unix)]
+    #[test]
+    fn p20_4_skipped_files_survive_an_early_failure() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_anchors.json");
+        entries.insert(0, Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() }); // пропускается первым
+        for e in entries.iter_mut() {
+            if e.path == "groups/index.json" {
+                e.data = b"not json".to_vec(); // подготовка отказывает позже пропуска
+            }
+        }
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        assert!(!err.files_changed);
+        assert!(err.warnings.iter().any(|w| w.contains("paired_anchors.json") && w.contains("не восстановлен")), "{:?}", err.warnings);
+        assert!(err.warnings.iter().any(|w| w.contains("не выполнялась")), "{:?}", err.warnings);
+    }
+
+    /// P20-5: созданные каталоги учитываются, а не подтверждённая запись каталога попадает в отчёт.
+    #[test]
+    fn p20_5_created_directories_are_tracked_and_unconfirmed_syncs_are_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let mut created = Vec::new();
+        private_dirs(&d.path().join("a/b/c"), &mut created).unwrap();
+        assert_eq!(created.len(), 3, "{created:?}");
+        assert!(created[0].ends_with("a/b/c") && created[2].ends_with("a"), "от самого глубокого: {created:?}");
+        assert!(sync_report(&created, &[d.path().to_path_buf()]).is_empty(), "обычная запись подтверждается");
+        let notes = sync_report(&[PathBuf::from("/nonexistent-yandi/a/b")], &[PathBuf::from("/nonexistent-yandi/c")]);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+    }
+
+    /// P20-6: между неудачной заменой и откатом замок файла связи держит восстановление: конкурирующий писатель ждёт и фиксируется ПОСЛЕ отката,
+    /// его запись не теряется, а прежнее право A возвращено точными байтами (различимы A и подготовленное B).
+    #[cfg(unix)]
+    #[test]
+    fn p20_6_a_concurrent_writer_waits_for_the_rollback_and_nothing_is_lost() {
+        use crate::netlayer::pairing::{PairedClientStore, StoreRead};
+        let (opened, last, _) = pairing_copy(); // подготовленное состояние — пустой список клиентов
+        let (_d2, t) = target_layout();
+        let clients = t.home.join("paired_clients.json");
+        let a = "ab".repeat(32);
+        let b = "cd".repeat(32);
+        let prior = format!(r#"{{"version":2,"clients":{{"{a}":{{"session_id_hex":"{}","expires_at":4102444800}}}}}}"#, "2".repeat(32));
+        std::fs::write(&clients, &prior).unwrap();
+        let finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let waited = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (c2, f2, b2) = (clients.clone(), finished.clone(), b.clone());
+        let (w2, wr2) = (waited.clone(), writer.clone());
+        let f3 = finished.clone();
+        AFTER_SWAP_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                let h = std::thread::spawn(move || {
+                    PairedClientStore::update(&c2, |s| {
+                        s.issue(b2.clone(), 600);
+                        Ok(())
+                    })
+                    .unwrap();
+                    f2.store(true, std::sync::atomic::Ordering::SeqCst);
+                });
+                std::thread::sleep(std::time::Duration::from_millis(400));
+                w2.store(!f3.load(std::sync::atomic::Ordering::SeqCst), std::sync::atomic::Ordering::SeqCst); // писатель всё ещё ждёт замок
+                *wr2.lock().unwrap() = Some(h);
+            }));
+        });
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert!(waited.load(std::sync::atomic::Ordering::SeqCst), "писатель не должен был закончить до конца отката: замок не держался");
+        writer.lock().unwrap().take().unwrap().join().unwrap();
+        match PairedClientStore::read(&clients) {
+            StoreRead::Current(s) => {
+                assert!(s.get(&a).is_some(), "прежнее право A после отката потеряно");
+                assert!(s.get(&b).is_some(), "запись конкурирующего писателя потеряна");
+            }
+            other => panic!("{other:?}"),
+        }
     }
 
     /// P19-2 и P19-4: откат не удался — это в предупреждениях и в признаке изменённых файлов; пропущенные файлы связи не теряются.

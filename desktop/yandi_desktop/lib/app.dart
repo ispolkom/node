@@ -516,16 +516,16 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     } catch (e) {
       if (!mounted || own != epoch) return;
       final failure = e is ApiFailure ? e : const ApiFailure('protocol');
-      if (path == '/api/auth/restore' && failure.warnings.isNotEmpty) {
-        // отказ после записи части файлов: пути неочищенного и пропущенного — владельцу (P19-3)
-        restoreWarning = '${failure.filesWritten ? 'Часть файлов копии записана. ' : ''}Не очищено, пропущено или не подтверждено: ${failure.warnings.join('; ')}';
+      if (path == '/api/auth/restore' && (failure.warnings.isNotEmpty || failure.filesWritten)) {
+        // отказ после записи части файлов: владелец узнаёт, что файлы уже на диске (повтор может отказать из-за них), и пути из предупреждений (P19-3, P20-4)
+        restoreWarning = '${failure.filesWritten ? 'Часть файлов копии записана; повтор восстановления может отказать из-за них. ' : ''}${failure.warnings.isEmpty ? '' : 'Не очищено, пропущено или не подтверждено: ${failure.warnings.join('; ')}'}';
       }
       setState(() {
         if (failure.kind == 'disconnected' || failure.kind == 'timeout') {
           disconnect(failure);
         } else {
           // отказ восстановления после записи файлов: мастер всё ещё на экране, поэтому предупреждение идёт и в текст ошибки
-          error = path == '/api/auth/restore' && failure.warnings.isNotEmpty ? '${failure.message} $restoreWarning' : failure.message;
+          error = path == '/api/auth/restore' && restoreWarning != null && (failure.warnings.isNotEmpty || failure.filesWritten) ? '${failure.message} $restoreWarning' : failure.message;
         }
         if (isLock) lockUnconfirmed = true;
       });
