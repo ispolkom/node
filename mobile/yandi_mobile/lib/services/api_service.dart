@@ -51,6 +51,20 @@ class ApiService {
     return info;
   }
 
+  /// Есть ли версия приложения новее [version] (проверку подписи сделал узел; на сайт телефон не ходит). null — узел не ответил или не знает ручки.
+  Future<Map<String, dynamic>?> getAppUpdate(String version) async {
+    try {
+      final res = await _client
+          .get(_url('/mobile/update?v=${Uri.encodeQueryComponent(version)}'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final a = (jsonDecode(res.body) as Map<String, dynamic>)['available'];
+      return a is Map<String, dynamic> ? a : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Единый профиль с узла: {nick, avatar_hash, updated_ms}; null — узел не ответил (старый узел без профиля тоже).
   Future<Map<String, dynamic>?> getProfile() async {
     try {

@@ -209,6 +209,7 @@ pub fn spawn() {
         tokio::time::sleep(std::time::Duration::from_secs(first)).await;
         loop {
             let v = check_now().await;
+            crate::android_update::refresh().await; // телефонам: есть ли новый APK (манифест Android на том же сайте)
             if let Some(a) = v.get("available").filter(|a| !a.is_null()) {
                 println!("[update] доступна версия {} (№{}), канал {}", a["version"].as_str().unwrap_or("?"), a["seq"], a["channel"].as_str().unwrap_or("?"));
             }

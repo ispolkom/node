@@ -444,15 +444,46 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AddContactScreen())),
               child: const Icon(Icons.person_add),
             ),
-      body: TabBarView(
-        controller: _tabs,
-        children: [
-          _contactsBody(context, state),
-          _searchBody(context, state),
-          const GroupsTab(),
-          FilesTab(key: _filesKey),
-        ],
-      ),
+      body: Column(children: [
+        if (state.appUpdate != null) _updateBanner(context, state),
+        Expanded(
+          child: TabBarView(
+            controller: _tabs,
+            children: [
+              _contactsBody(context, state),
+              _searchBody(context, state),
+              const GroupsTab(),
+              FilesTab(key: _filesKey),
+            ],
+          ),
+        ),
+      ]),
+    );
+  }
+
+  /// Сообщение о новой версии: узел проверил подпись выпуска; приложение ничего не качает само — ссылка на страницу загрузки копируется.
+  Widget _updateBanner(BuildContext context, AppState state) {
+    final u = state.appUpdate!;
+    final page = '${u['page'] ?? ''}';
+    return Container(
+      key: const ValueKey('app-update-banner'),
+      width: double.infinity,
+      color: AppTheme.surface,
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      child: Row(children: [
+        Expanded(child: Text('Доступна новая версия ${u['version']}. Скачайте её на странице загрузки.',
+            style: const TextStyle(color: AppTheme.text, fontSize: 13))),
+        TextButton(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: page));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+            }
+          },
+          child: const Text('Скопировать ссылку'),
+        ),
+        TextButton(onPressed: state.dismissAppUpdate, child: const Text('Позже')),
+      ]),
     );
   }
 

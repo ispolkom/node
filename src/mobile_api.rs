@@ -1626,6 +1626,11 @@ async fn resolve_hex(st: &MobileState, id: &str) -> Option<HashId> {
     st.p2p.find_peer_by_short_id(id).await
 }
 
+/// Есть ли версия приложения новее той, что у телефона (`?v=1.0.0-b3`): узел сам проверил подписанный манифест, телефон на сайт не ходит.
+async fn app_update(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Json<serde_json::Value> {
+    Json(crate::android_update::answer(q.get("v").map(String::as_str).unwrap_or("")))
+}
+
 async fn info(
     State(st): State<Arc<MobileState>>,
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
@@ -2435,6 +2440,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
 fn router(st: Arc<MobileState>) -> Router {
     let guarded = Router::new()
         .route("/mobile/info", get(info))
+        .route("/mobile/update", get(app_update))
         .route("/mobile/profile", get(profile_get).put(profile_put))
         .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
         .route("/mobile/me", axum::routing::delete(device_forget_self))

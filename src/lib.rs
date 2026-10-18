@@ -88,6 +88,7 @@ pub mod reciprocity;
 pub mod release;
 pub mod update_check;
 pub mod updates;
+pub mod android_update;
 #[cfg(target_os = "linux")]
 pub mod updater;
 pub mod relay_net;

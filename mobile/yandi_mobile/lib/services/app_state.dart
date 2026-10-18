@@ -1,3 +1,4 @@
+import '../app_version.dart';
 import 'group_service.dart';
 import 'group_api_http.dart';
 import 'group_store_sqlite.dart';
@@ -214,10 +215,35 @@ class AppState extends ChangeNotifier implements FilesHost {
       unawaited(syncProfile());
     });
 
+    unawaited(checkAppUpdate());
+    _updateTimer?.cancel();
+    _updateTimer = async_lib.Timer.periodic(const Duration(hours: 6), (_) => unawaited(checkAppUpdate()));
+
     unawaited(_loadInitialData());
   }
 
   async_lib.Timer? _presenceTimer;
+
+  // ── Новая версия приложения ───────────────────────────────────────────────
+  /// {version, notes, size, page} — есть версия новее этой; null — нет или человек отложил это сообщение.
+  Map<String, dynamic>? appUpdate;
+  String? _updateDismissed;
+  async_lib.Timer? _updateTimer;
+
+  Future<void> checkAppUpdate() async {
+    final a = await _api?.getAppUpdate(kAppVersion);
+    final next = (a != null && a['version'] != _updateDismissed) ? a : null;
+    if (next?['version'] != appUpdate?['version']) {
+      appUpdate = next;
+      notifyListeners();
+    }
+  }
+
+  void dismissAppUpdate() {
+    _updateDismissed = appUpdate?['version'] as String?;
+    appUpdate = null;
+    notifyListeners();
+  }
 
   // ── Автоповтор неотправленных сообщений ──────────────────────────────────
   final Outbox _outbox = Outbox();
@@ -1717,6 +1743,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> lockDown() async {
     _lockEpoch++;
     _presenceTimer?.cancel();
+    _updateTimer?.cancel();
+    appUpdate = null;
     _retryTimer?.cancel();
     _ws?.dispose();
     _ws = null;
