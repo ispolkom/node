@@ -135,6 +135,15 @@ fn checked_path(base: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(cur)
 }
 
+/// Файлы связи формата сопряжения: в копию и из копии они проходят очистку от секретов старого формата (docs/RESUME_REDESIGN.md).
+fn pairing_store_kind(rel: &str) -> Option<crate::netlayer::pairing::StoreKind> {
+    match rel {
+        "paired_clients.json" => Some(crate::netlayer::pairing::StoreKind::Clients),
+        "paired_anchors.json" => Some(crate::netlayer::pairing::StoreKind::Anchors),
+        _ => None,
+    }
+}
+
 /// Собрать файлы для копии. Отсутствующие пропускаются (узел мог не пользоваться возможностью); слишком большие и не-обычные файлы —
 /// ошибка, а не тихий пропуск: копия не должна молча получиться неполной.
 pub fn collect(l: &Layout) -> Result<Vec<Entry>, String> {
@@ -153,7 +162,17 @@ pub fn collect(l: &Layout) -> Result<Vec<Entry>, String> {
         if meta.len() > MAX_FILE {
             return Err(format!("{rel}: слишком большой для копии ({} байт)", meta.len()));
         }
-        let data = std::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
+        let mut data = std::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
+        if let Some(kind) = pairing_store_kind(&rel) {
+            // секретов старого формата в копии быть не должно; неразобранный файл связи в копию не кладётся (сопряжение делается заново)
+            match crate::netlayer::pairing::sanitized_store_text(kind, &data) {
+                Some(clean) => data = clean.into_bytes(),
+                None => {
+                    eprintln!("[backup] {rel}: формат не распознан, в копию не включён (после восстановления сопряжение нужно повторить)");
+                    return Ok(());
+                }
+            }
+        }
         total += data.len();
         if total > MAX_TOTAL {
             return Err("копия получилась слишком большой".into());
@@ -536,7 +555,16 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         }
     };
     for (i, (e, path)) in entries.iter().zip(targets).enumerate() {
-        let data = if e.path == "groups/index.json" {
+        let sanitized_pairing = match pairing_store_kind(&e.path) {
+            Some(kind) => match crate::netlayer::pairing::sanitized_store_text(kind, &e.data) {
+                Some(clean) => Some(clean.into_bytes()),
+                None => continue, // старая или чужая копия с неразобранным файлом связи: он не восстанавливается (нужно новое сопряжение)
+            },
+            None => None,
+        };
+        let data = if let Some(clean) = sanitized_pairing {
+            clean
+        } else if e.path == "groups/index.json" {
             match rebase_groups(&e.data) {
                 Ok(d) => {
                     groups = serde_json::from_slice::<Value>(&d).ok().and_then(|v| v.as_array().map(|a| a.len())).unwrap_or(0);
@@ -618,6 +646,21 @@ pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<Rest
         } else {
             format!("восстановление не завершено ({er}), откат прошёл не полностью: {}. Прежние файлы лежат рядом (*.before-restore-*); повторите команду с --force", stuck.join("; "))
         });
+    }
+    // прежние файлы связи остаются рядом под именем «.before-restore-…»: секретов старого формата в них быть не должно
+    for k in &kept {
+        let is_pairing = k.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("paired_clients.json.before-restore") || n.starts_with("paired_anchors.json.before-restore"));
+        if is_pairing {
+            let kind = if k.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("paired_clients")) { crate::netlayer::pairing::StoreKind::Clients } else { crate::netlayer::pairing::StoreKind::Anchors };
+            match std::fs::read(k).ok().and_then(|b| crate::netlayer::pairing::sanitized_store_text(kind, &b)) {
+                Some(clean) => {
+                    let _ = crate::util::private_file::write_private(k, clean.as_bytes());
+                }
+                None => {
+                    let _ = std::fs::remove_file(k);
+                }
+            }
+        }
     }
     if groups > 0 {
         // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
@@ -1158,6 +1201,45 @@ mod tests {
         let (root, auth) = real_root_and_auth(&code);
         let bytes = seal(&collect(l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
         (open_with_root(&bytes, &root).unwrap(), root)
+    }
+
+    /// P15-9: старые секреты возобновления не попадают в копию, не восстанавливаются и не остаются в файле «до восстановления».
+    #[test]
+    fn old_resume_secrets_never_enter_a_backup_or_survive_a_restore() {
+        const SECRET: &str = "11aa22bb33cc44dd55ee66ff77008899aabbccddeeff00112233445566778899";
+        let old = format!(r#"{{"clients":{{"{pk}":{{"session_id":5,"resume_secret_hex":"{SECRET}","expires_at":4102444800,"session_key_hex":"{SECRET}"}}}}}}"#, pk = "ab".repeat(32));
+        let (_d, l) = layout();
+        sample(&l);
+        put(&l, Area::Home, "paired_clients.json", old.as_bytes());
+        put(&l, Area::Home, "paired_anchors.json", b"{not json at all, but might hold a secret");
+        let got = collect(&l).unwrap();
+        for e in &got {
+            assert!(!String::from_utf8_lossy(&e.data).contains(SECRET), "{}: секрет в копии", e.path);
+            assert!(!String::from_utf8_lossy(&e.data).contains("resume_secret_hex"), "{}", e.path);
+        }
+        assert!(got.iter().any(|e| e.path == "paired_clients.json"), "очищенный файл связи в копии есть");
+        assert!(!got.iter().any(|e| e.path == "paired_anchors.json"), "неразобранный файл в копию не кладётся");
+        // восстановление поверх машины, где лежит старый файл: он не остаётся рядом со старым секретом
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut forged = got.clone();
+        forged.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() });
+        forged.retain(|e| e.path != "paired_clients.json");
+        forged.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: old.clone().into_bytes() }); // копия старой сборки с секретом
+        let bytes = seal(&forged, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let target = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&target.home).unwrap();
+        std::fs::write(target.home.join("paired_clients.json"), old.as_bytes()).unwrap();
+        restore(&opened, &target, &RestoreOptions { force: true }).unwrap();
+        let restored = std::fs::read_to_string(target.home.join("paired_clients.json")).unwrap();
+        assert!(!restored.contains(SECRET) && !restored.contains("resume_secret_hex"), "восстановленный файл очищен");
+        assert!(!target.home.join("paired_anchors.json").exists(), "неразобранный файл связи не восстановлен");
+        for entry in std::fs::read_dir(&target.home).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!text.contains(SECRET), "{:?}: остаток секрета", entry.path());
+        }
     }
 
     #[test]

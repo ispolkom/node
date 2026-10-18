@@ -1065,10 +1065,9 @@ impl P2PTransport {
                 while let Some(mut conn) = server.accept_rx.recv().await {
                     let transport_for_pump = transport_arc_ws.clone();
                     tokio::spawn(async move {
-                        // Hardening Step 2: первое сообщение — Hello ИЛИ plaintext 0xC0 RESUME.
-                        // Hello → классический flow, ECDH → session.
-                        // RESUME → fast-path: lookup session_id в paired_clients, restore session-key,
-                        //          send 0xC1 ACK encrypted. Пропускаем Hello/ECDH.
+                        // Первое сообщение соединения — подписанный Hello (эфемерный ECDH → новые ключи сеанса). Возобновления по
+                        // сохранённым секретам больше нет (docs/RESUME_REDESIGN.md): любой другой первый пакет, в том числе
+                        // прежний 0xC0, разбирается как Hello и отвергается.
                         let first_bytes = match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             conn.incoming.recv(),
@@ -1080,95 +1079,7 @@ impl P2PTransport {
                             }
                         };
 
-                        let peer_id: HashId = if first_bytes.first().copied() == Some(crate::netlayer::pairing::PKT_RESUME) {
-                            // ----- plaintext-RESUME fast path -----
-                            use crate::netlayer::pairing::{
-                                compute_resume_ack_mac, decode_resume, derive_resume_key, encode_resume_ack,
-                                encode_resume_ack_grant, verify_resume_mac, ResumeStatus, DEFAULT_SESSION_TTL_SECS,
-                            };
-                            let (embedded_node_id, session_id, addr, client_nonce, mac) = match decode_resume(&first_bytes) {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    eprintln!("[ws-server] {} bad RESUME: {}", crate::util::logsafe::a(&conn.peer_addr), e);
-                                    return;
-                                }
-                            };
-                            // Lookup session_id в paired_clients store
-                            let mut status = ResumeStatus::Unknown;
-                            let mut hit_pk: Option<String> = None;
-                            let mut sk: Option<[u8; 32]> = None;
-                            let mut resume_secret: Option<[u8; 32]> = None;
-                            {
-                                let store = transport_for_pump.paired_clients.lock().await;
-                                for (pk, tok) in store.clients.iter() {
-                                    if tok.session_id == session_id {
-                                        if tok.is_expired() {
-                                            status = ResumeStatus::Expired;
-                                            hit_pk = Some(pk.clone());
-                                            break;
-                                        }
-                                        let secret = match tok.resume_secret() {
-                                            Ok(s) => s,
-                                            Err(_) => continue,
-                                        };
-                                        if verify_resume_mac(&secret, session_id, &addr, &client_nonce, &mac)
-                                            && Self::resume_node_matches(pk, &embedded_node_id)
-                                            && tok.node_id_hex.as_deref().map_or(true, |h| h == hex::encode(embedded_node_id.0))
-                                        {
-                                            status = ResumeStatus::Ok;
-                                            hit_pk = Some(pk.clone());
-                                            sk = tok.session_key();
-                                            resume_secret = Some(secret);
-                                        } else {
-                                            status = ResumeStatus::BadMac;
-                                            hit_pk = Some(pk.clone());
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            if !matches!(status, ResumeStatus::Ok) || sk.is_none() {
-                                eprintln!("[ws-server] RESUME from {} ({}) status={:?}, key={}",
-                                          crate::util::logsafe::a(&conn.peer_addr),
-                                          hex::encode(&embedded_node_id.0[..8]),
-                                          status, sk.is_some());
-                                // Шлём plaintext ACK (mobile может его прочесть без сессии)
-                                let ack = encode_resume_ack(status, None);
-                                let _ = conn.outgoing.send(ack).await;
-                                return;
-                            }
-                            // Refresh TTL & persist
-                            if let Some(pk) = hit_pk {
-                                let path = crate::netlayer::pairing::default_paired_clients_path();
-                                let mut store = transport_for_pump.paired_clients.lock().await;
-                                store.refresh(&pk, DEFAULT_SESSION_TTL_SECS);
-                                if let Some(t) = store.clients.get_mut(&pk) {
-                                    t.node_id_hex.get_or_insert_with(|| hex::encode(embedded_node_id.0));
-                                }
-                                if let Err(e) = store.save(&path) {
-                                    eprintln!("[ws-server] persist paired_clients: {}", e);
-                                }
-                            }
-                            // Рабочий ключ этого возобновления: из сохранённого ключа и свежих значений обеих сторон
-                            let server_nonce: [u8; crate::netlayer::pairing::RESUME_NONCE_LEN] = rand::random();
-                            let working = derive_resume_key(&sk.unwrap(), &client_nonce, &server_nonce);
-                            let grant_mac = compute_resume_ack_mac(&resume_secret.unwrap(), session_id, &client_nonce, &server_nonce);
-                            let v = {
-                                let mut enc = transport_for_pump.encryption.lock().await;
-                                enc.restore_session(embedded_node_id, working)
-                            };
-                            println!("[ws-server] 🔁 RESUME {} v{} (session {:#x}, new addr {})",
-                                     hex::encode(&embedded_node_id.0[..8]), v, session_id, crate::util::logsafe::a(&addr));
-                            let mut peer = PeerInfo::new(embedded_node_id, &conn.peer_addr);
-                            peer.touch();
-                            transport_for_pump.peers.lock().await.insert(embedded_node_id, peer);
-                            // ответ открытым текстом с подписью: клиент проверит её и выведет тот же ключ. Он уходит ДО публикации маршрута:
-                            // иначе зашифрованный кадр фонового обмена мог обогнать его, а клиент ждёт grant первым
-                            let _ = conn.outgoing.send(encode_resume_ack_grant(&server_nonce, &grant_mac)).await;
-                            transport_for_pump.ws_outgoing.lock().await
-                                .insert(embedded_node_id, conn.outgoing.clone());
-                            embedded_node_id
-                        } else {
+                        let peer_id: HashId = {
                             // ----- classical Hello flow -----
                             let hello = match HelloPacket::from_bytes(&first_bytes) {
                                 Ok(h) => h,
@@ -2285,19 +2196,6 @@ impl P2PTransport {
         sig_bytes.copy_from_slice(&signature);
         hello.signature = crate::netlayer::packet::Signature(sig_bytes);
         Ok(hello)
-    }
-
-    /// RESUME binding: the node id claimed in a plaintext RESUME must be the one derived from the Ed25519 key the token was
-    /// issued to (store key = client signing key, hex); the first resume also remembers it in the token (`SessionToken::node_id_hex`).
-    fn resume_node_matches(client_pubkey_hex: &str, claimed: &HashId) -> bool {
-        match hex::decode(client_pubkey_hex) {
-            Ok(b) if b.len() == 32 => {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(&b);
-                crate::util::types::id_acceptable(&claimed.0, &k)
-            }
-            _ => false,
-        }
     }
 
     /// Node Identity Binding Fix: true if `node_id` is pinned (from the
@@ -4891,128 +4789,8 @@ impl P2PTransport {
             .map_err(|e| format!("WS connect: {}", e))?;
         println!("[ws-client] 🌐 connected to {}", crate::util::logsafe::a(&conn.peer_addr));
 
-        // 🔐 Hardening Step 2: попытка resume по сохранённому SessionToken (с session-key).
-        // Если получится — пропускаем Hello/ECDH; иначе fallback на обычный Hello flow.
-        let resume_candidate = {
-            let store = self.paired_anchors.lock().await;
-            // Ищем entry чей URL соответствует anchor_url и есть session_token с session_key.
-            store.anchors.iter().find_map(|e| {
-                if e.payload.anchor_url == anchor_url {
-                    e.session.as_ref().and_then(|tok| {
-                        if tok.is_expired() { return None; }
-                        let sk = tok.session_key()?;
-                        Some((e.payload.anchor_id, tok.session_id, tok.resume_secret().ok()?, sk))
-                    })
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let Some((anchor_id, session_id, resume_secret, session_key)) = resume_candidate {
-            use crate::netlayer::pairing::{
-                compute_resume_ack_mac, compute_resume_mac, decode_resume_ack, decode_resume_ack_grant, derive_resume_key,
-                encode_resume, ResumeStatus,
-            };
-            // Регистрируем peer заранее, чтобы send_encrypted/decrypt смогли его найти.
-            let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
-            peer.touch();
-            self.peers.lock().await.insert(anchor_id, peer);
-            // маршрут ws_outgoing публикуется только после проверенного grant и нового ключа: до этого общий трафик не должен
-            // уходить в соединение, где сервер ждёт именно RESUME
-
-            let my_node_id = self.identity.node_id();
-            let client_nonce: [u8; crate::netlayer::pairing::RESUME_NONCE_LEN] = rand::random();
-            let mac = compute_resume_mac(&resume_secret, session_id, &conn.peer_addr, &client_nonce);
-            let resume_bytes = encode_resume(my_node_id, session_id, &conn.peer_addr, &client_nonce, &mac);
-            if let Err(e) = conn.outgoing.send(resume_bytes).await {
-                return Err(format!("RESUME send: {}", e));
-            }
-            println!("[ws-client] 🔁 RESUME sent (session {:#x})", session_id);
-
-            // Ждём 0xC1 ACK (encrypted). Один decrypt-проход.
-            let ack_bytes = match tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                conn.incoming.recv(),
-            ).await {
-                Ok(Some(b)) => b,
-                Ok(None) => return Err("RESUME_ACK: connection closed".to_string()),
-                Err(_) => return Err("RESUME_ACK timeout".to_string()),
-            };
-
-            // ответ узла: значение узла и подпись, привязанная к нашему свежему значению
-            let verified_grant = decode_resume_ack_grant(&ack_bytes)
-                .filter(|(sn, m)| *m == compute_resume_ack_mac(&resume_secret, session_id, &client_nonce, sn));
-
-            match decode_resume_ack(&ack_bytes) {
-                Ok((ResumeStatus::Ok, _)) if verified_grant.is_some() => {
-                    let (server_nonce, _) = verified_grant.unwrap();
-                    // рабочий ключ этого возобновления (тот же, что вывел узел)
-                    let working = derive_resume_key(&session_key, &client_nonce, &server_nonce);
-                    {
-                        let mut enc = self.encryption.lock().await;
-                        let _ = enc.restore_session(anchor_id, working);
-                    }
-                    self.ws_outgoing.lock().await.insert(anchor_id, conn.outgoing.clone());
-                    println!("[ws-client] ✅ RESUME accepted, skipping Hello");
-
-                    // Spawn decrypt pump — тот же что и в Hello-flow.
-                    let transport_clone = self.clone();
-                    tokio::spawn(async move {
-                        while let Some(bytes) = conn.incoming.recv().await {
-                            let dec = {
-                                let mut enc = transport_clone.encryption.lock().await;
-                                enc.decrypt_by_peer_id(&bytes)
-                            };
-                            match dec {
-                                Ok((sender_id, plain)) => {
-                                    if sender_id != anchor_id {
-                                        eprintln!("[ws-client] dropped: packet from {} on a connection bound to {}",
-                                                  hex::encode(&sender_id.0[..8]), hex::encode(&anchor_id.0[..8]));
-                                        continue;
-                                    }
-                                    if let Some(p) = transport_clone.peers.lock().await.get_mut(&sender_id) {
-                                        p.touch();
-                                    }
-                                    let handled = transport_clone
-                                        .dispatch_decrypted_wagon(sender_id, &plain, WagonSource::Ws)
-                                        .await;
-                                    if !handled {
-                                        println!("[ws-client/resume] 📥 wagon {} B from {} (0x{:02x})",
-                                                 plain.len(),
-                                                 hex::encode(&sender_id.0[..8]),
-                                                 plain.first().copied().unwrap_or(0));
-                                    }
-                                }
-                                Err(e) => eprintln!("[ws-client/resume] decrypt failed: {}", e),
-                            }
-                        }
-                        transport_clone.drop_ws_route(&anchor_id, &conn.outgoing).await;
-                        println!("[ws-client/resume] 🛑 anchor connection closed");
-                    });
-                    return Ok(anchor_id);
-                }
-                Ok((status, _)) => {
-                    eprintln!("[ws-client] RESUME rejected: {:?}; fallback на Hello", status);
-                    // Прежний токен этому якорю не подходит (забыт, просрочен, чужая подпись): локально он больше не используется,
-                    // и следующая попытка пойдёт обычным Hello, а не повторит тот же отказ до конца срока токена.
-                    {
-                        let mut store = self.paired_anchors.lock().await;
-                        for e in store.anchors.iter_mut().filter(|e| e.payload.anchor_id == anchor_id) {
-                            e.session = None;
-                        }
-                        let _ = store.save(&crate::netlayer::pairing::default_paired_anchors_path());
-                    }
-                    // Conn потерян — нужно переподключиться. Сообщаем caller'у что нужен retry.
-                    return Err(format!("RESUME status {:?}, reconnect for Hello", status));
-                }
-                Err(e) => {
-                    eprintln!("[ws-client] RESUME_ACK decode failed: {}", e);
-                    return Err(format!("RESUME_ACK decode: {}", e));
-                }
-            }
-        }
-
+        // Соединение всегда начинается с подписанного Hello: у каждого подключения новые эфемерные ключи (прямая секретность).
+        // Сохранённых ключей сеанса и «возобновления» нет (docs/RESUME_REDESIGN.md).
         // Шлём Hello (тот же формат что по UDP discovery).
         let my_node_id = self.identity.node_id();
         let mut cid8 = [0u8; 8];
@@ -5654,25 +5432,6 @@ impl P2PTransport {
             return false;
         }
         match plaintext[0] {
-            // 🔐 Step 4: RESUME (0xC0). Mobile запрашивает восстановление session по session_id+HMAC.
-            crate::netlayer::pairing::PKT_RESUME => {
-                let _ = source;
-                self.handle_resume_packet(sender, plaintext).await;
-                true
-            }
-            // 🔐 Step 4: RESUME_ACK (0xC1). Mobile получает ответ от anchor'а.
-            crate::netlayer::pairing::PKT_RESUME_ACK => {
-                let _ = source;
-                self.handle_resume_ack(sender, plaintext).await;
-                true
-            }
-            // 🆕 Hardening Step 3: SESSION_ISSUE (0xC2). Mobile получает session_token
-            // от anchor'а после успешного pair'инга. Сохраняем в PairedAnchorStore.
-            crate::netlayer::pairing::PKT_SESSION_ISSUE => {
-                let _ = source;
-                self.handle_session_issue(sender, plaintext).await;
-                true
-            }
             // Цепочки через несколько узлов (0xD9..0xDC): построение, ячейки, закрытие.
             crate::hops::PKT_CREATE | crate::hops::PKT_CREATED | crate::hops::PKT_CELL | crate::hops::PKT_DESTROY => {
                 let _ = source;
@@ -5696,197 +5455,6 @@ impl P2PTransport {
                 true
             }
             _ => false,
-        }
-    }
-
-    /// Hardening Step 3 — mobile-сторона обработки 0xC2 SESSION_ISSUE.
-    /// Anchor прислал нам SessionToken (после QR-pair'инга). Сохраняем в store.
-    async fn handle_session_issue(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::decode_session_issue;
-        let (tok, _sk) = match decode_session_issue(plaintext) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[session-issue] decode failed from {}: {}",
-                          hex::encode(&sender.0[..8]), e);
-                return;
-            }
-        };
-        let mut store = self.paired_anchors.lock().await;
-        // Anchor должен уже быть в store (mobile делал pair-import заранее).
-        // Only an anchor paired by the owner (QR import) may issue a session; an ordinary authenticated peer must not
-        // be able to write itself into the pairing store.
-        let exists = store.anchors.iter().any(|e| e.payload.anchor_id == sender);
-        if !exists {
-            eprintln!("[session-issue] refused: {} is not a paired anchor", hex::encode(&sender.0[..8]));
-            return;
-        }
-        if !exists {
-            // Создаём placeholder с anchor_id и пустыми остальными полями. URL и fingerprint
-            // mobile получит позже (через QR-import или /pair/qr).
-            use crate::netlayer::pairing::{PairedAnchorEntry, PairingPayload};
-            store.anchors.push(PairedAnchorEntry {
-                payload: PairingPayload {
-                    anchor_id: sender,
-                    anchor_x25519_hex: String::new(),
-                    fingerprint_hex: String::new(),
-                    anchor_url: String::new(),
-                },
-                session: None,
-                preference: u32::MAX,
-            });
-        }
-        let updated = store.set_session(&sender, tok.clone());
-        let path = crate::netlayer::pairing::default_paired_anchors_path();
-        if let Err(e) = store.save(&path) {
-            eprintln!("[session-issue] persist failed: {}", e);
-        }
-        println!("[session-issue] ✅ session {:#x} from {} saved (existed={})",
-                 tok.session_id, hex::encode(&sender.0[..8]), updated);
-    }
-
-    /// Step 4 / Hardening Step 2 — anchor-сторона обработки 0xC0.
-    /// Lookup session_id во всех paired-токенах (ключ store'а — pubkey_hex клиента),
-    /// verify HMAC, refresh TTL, восстанавливаем session-key в EncryptionManager
-    /// (если он был сохранён в SessionToken на момент pair'инга), затем отвечаем
-    /// 0xC1 RESUME_ACK encrypted (status=Ok). Если session-key не сохранён —
-    /// шлём ACK plaintext (legacy-токен из старого pair'инга), mobile может его
-    /// прочитать без сессии.
-    async fn handle_resume_packet(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::{
-            compute_resume_ack_mac, decode_resume, derive_resume_key, encode_resume_ack, encode_resume_ack_grant,
-            verify_resume_mac, ResumeStatus, DEFAULT_SESSION_TTL_SECS,
-        };
-        let (embedded_node_id, session_id, addr, client_nonce, mac) = match decode_resume(plaintext) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[resume] decode failed: {}", e);
-                return;
-            }
-        };
-        // Если sender ещё не известен (plaintext pre-Hello flow в WS-server'е), берём
-        // node_id из payload. Иначе ожидаем что embedded совпадает с sender'ом — иначе reject.
-        let resolved_sender = if sender == HashId([0u8; 32]) {
-            embedded_node_id
-        } else {
-            if sender != embedded_node_id {
-                eprintln!("[resume] sender mismatch: ws={}, packet={}",
-                          hex::encode(&sender.0[..8]),
-                          hex::encode(&embedded_node_id.0[..8]));
-                return;
-            }
-            sender
-        };
-        let sender = resolved_sender;
-        let mut status = ResumeStatus::Unknown;
-        let mut hit_pubkey: Option<String> = None;
-        let mut saved_session_key: Option<[u8; 32]> = None;
-        let mut resume_secret: Option<[u8; 32]> = None;
-        {
-            let store = self.paired_clients.lock().await;
-            for (pk, tok) in store.clients.iter() {
-                if tok.session_id == session_id {
-                    if tok.is_expired() {
-                        status = ResumeStatus::Expired;
-                        hit_pubkey = Some(pk.clone());
-                        break;
-                    }
-                    let secret = match tok.resume_secret() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    if verify_resume_mac(&secret, session_id, &addr, &client_nonce, &mac) {
-                        status = ResumeStatus::Ok;
-                        hit_pubkey = Some(pk.clone());
-                        saved_session_key = tok.session_key();
-                        resume_secret = Some(secret);
-                    } else {
-                        status = ResumeStatus::BadMac;
-                        hit_pubkey = Some(pk.clone());
-                    }
-                    break;
-                }
-            }
-        }
-        match (status, hit_pubkey.clone()) {
-            (ResumeStatus::Ok, Some(pk)) => {
-                let path = crate::netlayer::pairing::default_paired_clients_path();
-                let mut store = self.paired_clients.lock().await;
-                store.refresh(&pk, DEFAULT_SESSION_TTL_SECS);
-                if let Err(e) = store.save(&path) {
-                    eprintln!("[resume] persist failed: {}", e);
-                }
-                println!("[resume] ✅ session {:#x} from {} ({}): verified, TTL refreshed",
-                         session_id, hex::encode(&sender.0[..8]), crate::util::logsafe::a(&addr));
-            }
-            (ResumeStatus::BadMac, _) => {
-                eprintln!("[resume] ❌ session {:#x} from {}: BadMac",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            (ResumeStatus::Expired, _) => {
-                eprintln!("[resume] ⌛ session {:#x} from {}: expired",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            (ResumeStatus::Unknown, _) => {
-                eprintln!("[resume] ❓ session {:#x} from {}: unknown",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            _ => {}
-        }
-
-        // Успех: рабочий ключ возобновления выводится из сохранённого ключа и свежих значений обеих сторон; ответ — открытым текстом
-        // с подписью (клиент проверит её и выведет тот же ключ). Прежнее поведение — тот же сохранённый ключ при каждом RESUME —
-        // позволяло проиграть записанные пакеты.
-        if let (ResumeStatus::Ok, Some(session_key), Some(secret)) = (status, saved_session_key, resume_secret) {
-            let server_nonce: [u8; crate::netlayer::pairing::RESUME_NONCE_LEN] = rand::random();
-            let working = derive_resume_key(&session_key, &client_nonce, &server_nonce);
-            let mac = compute_resume_ack_mac(&secret, session_id, &client_nonce, &server_nonce);
-            let v = {
-                let mut enc = self.encryption.lock().await;
-                enc.restore_session(sender, working)
-            };
-            println!("[resume] 🔁 working key v{} derived for {}", v, hex::encode(&sender.0[..8]));
-            let _ = self.send_plaintext_best_effort(sender, &encode_resume_ack_grant(&server_nonce, &mac)).await;
-            return;
-        }
-        let _ = self.send_plaintext_best_effort(sender, &encode_resume_ack(status, None)).await;
-    }
-
-    /// Hardening Step 2: лучший доступный канал доставки plaintext-пакета
-    /// (WS-outgoing если есть, иначе UDP data-socket с last-known address).
-    /// Используется только для resume-ACK fallback'а; основной путь — encrypted.
-    async fn send_plaintext_best_effort(self: &Arc<Self>, peer_id: HashId, bytes: &[u8]) -> Result<(), String> {
-        if let Some(out) = self.ws_outgoing.lock().await.get(&peer_id).cloned() {
-            out.send(bytes.to_vec()).await
-                .map_err(|e| format!("ws send: {}", e))?;
-            return Ok(());
-        }
-        let dest = {
-            let peers = self.peers.lock().await;
-            let p = peers.get(&peer_id)
-                .ok_or_else(|| format!("peer {} not in table", hex::encode(&peer_id.0[..8])))?;
-            p.data_addr.clone().unwrap_or_else(|| p.addr.clone())
-        };
-        self.socket_manager.data().await.send_to(bytes, &dest).await
-            .map_err(|e| format!("udp send to {}: {}", dest, e))?;
-        Ok(())
-    }
-
-    /// Step 4 — mobile-сторона обработки 0xC1. Если status Ok и есть new_secret — обновить
-    /// `PairedAnchorStore`. На текущем шаге — только лог; сам store на mobile-стороне
-    /// подключим в Step 6 (auto-reconnect).
-    async fn handle_resume_ack(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::decode_resume_ack;
-        match decode_resume_ack(plaintext) {
-            Ok((status, secret)) => {
-                println!("[resume-ack] from {}: status={:?}, new_secret={}",
-                         hex::encode(&sender.0[..8]),
-                         status,
-                         secret.is_some());
-                // TODO Step 6: обновить PairedAnchorStore::set_session с новым secret.
-            }
-            Err(e) => {
-                eprintln!("[resume-ack] decode failed: {}", e);
-            }
         }
     }
 
@@ -6853,18 +6421,6 @@ mod identity_pin_tests {
 
     fn key(byte: u8) -> [u8; 32] {
         [byte; 32]
-    }
-
-    #[test]
-    fn resume_is_bound_to_the_node_id_of_the_paired_key() {
-        let pk = [7u8; 32];
-        let own = HashId(crate::util::types::derive_node_id(&pk));
-        let other_bound = HashId(crate::util::types::derive_node_id(&[8u8; 32]));
-        let legacy = HashId([9u8; 32]);
-        assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &own));
-        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other_bound), "a bound id of another key is refused");
-        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &legacy), "a random id is refused");
-        assert!(!P2PTransport::resume_node_matches("zz", &own));
     }
 
     #[test]

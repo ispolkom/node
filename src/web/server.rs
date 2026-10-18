@@ -6008,11 +6008,9 @@ struct PairIssueRequest {
 #[derive(Debug, Serialize)]
 struct PairIssueResponse {
     status: String,
+    /// Номер выданного права (не секрет). Секретов в ответе нет: рабочих ключей и секретов возобновления больше не существует.
     session_id: Option<String>,
-    resume_secret_hex: Option<String>,
     expires_at: Option<u64>,
-    /// hex(32B) session-key — mobile сохраняет одновременно с resume_secret.
-    session_key_hex: Option<String>,
     message: Option<String>,
 }
 
@@ -6045,9 +6043,7 @@ async fn pair_issue_handler(
                 Json(PairIssueResponse {
                     status: "error".into(),
                     session_id: None,
-                    resume_secret_hex: None,
                     expires_at: None,
-                    session_key_hex: None,
                     message: Some(format!("origin {} blocked (host {})", origin, host)),
                 }),
             )
@@ -6063,9 +6059,7 @@ async fn pair_issue_handler(
                 Json(PairIssueResponse {
                     status: "error".into(),
                     session_id: None,
-                    resume_secret_hex: None,
                     expires_at: None,
-                    session_key_hex: None,
                     message: Some("P2P transport not available".into()),
                 }),
             )
@@ -6082,9 +6076,7 @@ async fn pair_issue_handler(
             Json(PairIssueResponse {
                 status: "error".into(),
                 session_id: None,
-                resume_secret_hex: None,
                 expires_at: None,
-                session_key_hex: None,
                 message: Some("client_pubkey_hex must be 64 hex characters".into()),
             }),
         )
@@ -6099,13 +6091,8 @@ async fn pair_issue_handler(
         .ttl_secs
         .unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
 
-    // Генерируем session_key прямо здесь (32 случайных байта). Anchor должен
-    // отдать тот же session_key мобилке через 0xC2 при первом encrypted connect'е.
-    use rand::RngCore;
-    let mut session_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut session_key);
-
-    let tok = crate::netlayer::pairing::SessionToken::new_with_session_key(ttl, &session_key);
+    // Право клиента — запись без секретов (docs/RESUME_REDESIGN.md): кому и до какого срока.
+    let tok = crate::netlayer::pairing::ClientGrant::new(ttl);
 
     // Сохраняем в paired_clients store (key = client_pubkey_hex).
     let mut store = transport.paired_clients.lock().await;
@@ -6119,9 +6106,7 @@ async fn pair_issue_handler(
             Json(PairIssueResponse {
                 status: "error".into(),
                 session_id: None,
-                resume_secret_hex: None,
                 expires_at: None,
-                session_key_hex: None,
                 message: Some(format!("persist failed: {}", e)),
             }),
         )
@@ -6129,8 +6114,8 @@ async fn pair_issue_handler(
     }
 
     info!(
-        "[pair/issue] issued session {:#x} for pubkey {}",
-        tok.session_id,
+        "[pair/issue] issued grant {} for pubkey {}",
+        tok.session_id_hex,
         &req.client_pubkey_hex[..16.min(req.client_pubkey_hex.len())]
     );
 
@@ -6138,10 +6123,8 @@ async fn pair_issue_handler(
         StatusCode::OK,
         Json(PairIssueResponse {
             status: "ok".into(),
-            session_id: Some(format!("{:#x}", tok.session_id)),
-            resume_secret_hex: Some(tok.resume_secret_hex.clone()),
+            session_id: Some(tok.session_id_hex.clone()),
             expires_at: Some(tok.expires_at),
-            session_key_hex: Some(hex::encode(session_key)),
             message: None,
         }),
     )

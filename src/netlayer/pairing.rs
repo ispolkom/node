@@ -1,47 +1,39 @@
 // src/netlayer/pairing.rs
-//! Pairing + session resume для YANDI (Iter 4).
-//!
-//! Цель — мобилка перманентно «приземлена» на свой anchor, переживает смену IP/сети
-//! без полного re-handshake'а.
+//! Сопряжение клиента с якорем: что показывается в QR и какие записи о праве хранятся на диске.
 //!
 //! **Что здесь:**
-//! - `PairingPayload` — то, что anchor показывает в QR (anchor_id, pubkey, fingerprint, url).
-//! - Парсинг QR-payload'а в обе стороны (compact JSON).
-//! - `SessionToken { session_id, resume_secret, expires_at }`.
-//! - HMAC-resume (`hmac(resume_secret, new_addr || session_id)`) — blake3 keyed.
-//! - `PairedClientStore` — anchor хранит `{client_pubkey → SessionToken}` в `~/.yandi/paired_clients.json`.
-//! - `PairedAnchorStore` — mobile хранит `Vec<PairingPayload>` (preference order) в
-//!   `~/.yandi/paired_anchors.json`.
-//! - Wire 0xC0 RESUME / 0xC1 RESUME_ACK encode/decode.
+//! - `PairingPayload` — публичное содержимое QR (anchor_id, открытый X25519, отпечаток TLS, адрес). Секретов в нём нет.
+//! - `ClientGrant` — запись якоря о праве клиента: кто (ключ подписи клиента) и до какого срока. Это **не секрет**: по ней нельзя
+//!   ни расшифровать трафик, ни войти без закрытого ключа клиента. Рабочих ключей и секретов возобновления на диске нет.
+//! - `PairedClientStore` (`paired_clients.json`) и `PairedAnchorStore` (`paired_anchors.json`) — файлы формата версии 2 со строгим
+//!   читателем и миграцией со старого формата (`read_*`).
 //!
-//! **Чего НЕТ (намеренно):**
-//! - Реальной QR-генерации в web UI (PNG-image render) — это интеграция;
-//!   payload-формат готов, embed в HTML делается отдельно.
-//! - Auto-reconnect loop в transport — ядро (parsing+verify) готово; цикл подключается
-//!   при integration-фазе. План 4.6 → known issue до полной интеграции.
-//! - Ротации resume_secret per-resume (план 4.3 «обновляется») — Iter 4.x: при первом
-//!   успешном resume anchor возвращает новый `resume_secret`. На текущем шаге выдача
-//!   токена есть, явная ротация — TODO: добавить `rotate_secret()` поверх store при integration.
+//! **Чего больше нет (docs/RESUME_REDESIGN.md, этап 2а):** возобновления сеанса по сохранённым секретам (пакеты 0xC0/0xC1/0xC2),
+//! `session_key_hex`, `resume_secret_hex`. Соединение после обрыва восстанавливается обычным подписанным Hello с новыми эфемерными
+//! ключами. Старый файл с секретами не принимается как действующий: при чтении он переписывается без секретных полей, а права
+//! клиентов из него **не переносятся** (новое сопряжение выдаёт новое право).
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::util::HashId;
 
-/// Wire byte для RESUME-пакета (mobile → anchor).
-pub const PKT_RESUME: u8 = 0xC0;
-/// Wire byte для RESUME_ACK (anchor → mobile).
-pub const PKT_RESUME_ACK: u8 = 0xC1;
-/// 🆕 Hardening Step 3: anchor выдаёт session_token первой синхронизацией после pair'инга.
-/// `0xC2 SESSION_ISSUE`: encrypted payload через WS-канал mobile↔anchor.
-pub const PKT_SESSION_ISSUE: u8 = 0xC2;
+/// Версия формата файлов `paired_clients.json` и `paired_anchors.json`.
+pub const STORE_VERSION: u32 = 2;
+
+/// Поля старого формата, которые были секретными; в формате v2 их быть не должно ни в каком виде.
+pub const LEGACY_SECRET_FIELDS: [&str; 2] = ["resume_secret_hex", "session_key_hex"];
 
 /// 7 дней TTL по умолчанию.
 pub const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
+
+/// Один писатель или мигратор за раз: чтение–преобразование–запись файла не пересекаются между потоками этого процесса.
+static STORE_LOCK: Mutex<()> = Mutex::new(());
 
 // ----------------- Payload (QR) -----------------
 
@@ -49,8 +41,7 @@ pub const DEFAULT_SESSION_TTL_SECS: u64 = 7 * 24 * 3600;
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PairingPayload {
     pub anchor_id: HashId,
-    /// Hex-encoded X25519 public key anchor'а (для будущего ECDH; в Iter 4 не используется напрямую,
-    /// но валидируется при resume).
+    /// Hex-encoded X25519 public key anchor'а (открытый, не секрет).
     pub anchor_x25519_hex: String,
     /// SHA-256 fingerprint TLS-сертификата anchor'а (тот же, что `TlsIdentity::fingerprint_hex`).
     pub fingerprint_hex: String,
@@ -59,8 +50,7 @@ pub struct PairingPayload {
 }
 
 impl PairingPayload {
-    /// Сериализовать в compact JSON (то что попадёт в QR). Принципиально читабельно
-    /// чтобы дебажить из консоли.
+    /// Сериализовать в compact JSON (то что попадёт в QR).
     pub fn to_qr_string(&self) -> String {
         serde_json::to_string(self).expect("serialize PairingPayload")
     }
@@ -70,51 +60,23 @@ impl PairingPayload {
     }
 }
 
-// ----------------- Session Token -----------------
+// ----------------- Grant -----------------
 
+/// Запись якоря о праве клиента. Секретного материала не содержит.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionToken {
-    pub session_id: u128,
-    /// 32 байта секрета, HMAC-key для resume. Anchor И mobile хранят одинаковый.
-    pub resume_secret_hex: String,
+#[serde(deny_unknown_fields)]
+pub struct ClientGrant {
+    /// Случайный номер права (32 hex-знака); служит только для различения записей и сообщений, не секрет.
+    pub session_id_hex: String,
     pub expires_at: u64,
-    /// 🔐 Hardening Step 2: 32-байтный AES-256 session-key, который существовал на момент
-    /// pair'инга. Anchor И mobile хранят одинаковый, чтобы при resume можно было сразу
-    /// восстановить encrypted-channel (без полного ECDH-handshake'а). Optional для
-    /// backward-compat'a со старыми (Iter 4) токенами — там этого поля не было.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub session_key_hex: Option<String>,
-    /// Node id this token was first resumed under (remembered at the first resume): later resumes must claim the same id.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub node_id_hex: Option<String>,
 }
 
-impl SessionToken {
+impl ClientGrant {
     pub fn new(ttl_secs: u64) -> Self {
         use rand::RngCore;
-        let mut rng = rand::thread_rng();
-        let session_id = {
-            let mut b = [0u8; 16];
-            rng.fill_bytes(&mut b);
-            u128::from_be_bytes(b)
-        };
-        let mut secret = [0u8; 32];
-        rng.fill_bytes(&mut secret);
-        Self {
-            session_id,
-            resume_secret_hex: hex::encode(secret),
-            expires_at: now_secs().saturating_add(ttl_secs),
-            session_key_hex: None,
-            node_id_hex: None,
-        }
-    }
-
-    /// Step 2: создать токен сразу с известным session-key (используется при первой
-    /// успешной key-exchange'е, чтобы потом resume не требовал ECDH).
-    pub fn new_with_session_key(ttl_secs: u64, session_key: &[u8; 32]) -> Self {
-        let mut tok = Self::new(ttl_secs);
-        tok.session_key_hex = Some(hex::encode(session_key));
-        tok
+        let mut b = [0u8; 16];
+        rand::thread_rng().fill_bytes(&mut b);
+        Self { session_id_hex: hex::encode(b), expires_at: now_secs().saturating_add(ttl_secs) }
     }
 
     pub fn is_expired(&self) -> bool {
@@ -124,284 +86,153 @@ impl SessionToken {
     pub fn refresh(&mut self, ttl_secs: u64) {
         self.expires_at = now_secs().saturating_add(ttl_secs);
     }
+}
 
-    pub fn resume_secret(&self) -> Result<[u8; 32]> {
-        let bytes = hex::decode(&self.resume_secret_hex)
-            .context("hex decode resume_secret")?;
-        if bytes.len() != 32 {
-            anyhow::bail!("resume_secret length != 32");
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Ok(out)
+// ----------------- Чтение файлов со строгим результатом -----------------
+
+/// Чем закончилось чтение файла хранилища. Ошибки не превращаются в «пустое состояние»: повреждённый или нечитаемый файл не
+/// перезаписывается молча.
+#[derive(Debug)]
+pub enum StoreRead<T> {
+    /// Файла нет — чистое начало.
+    Missing,
+    /// Формат v2, прочитан строго.
+    Current(T),
+    /// Старый формат (v1, возможно с секретами): содержимое очищено от секретов, права клиентов не перенесены.
+    Migrated(T),
+    /// Версия выше известной: файл не трогаем.
+    Unsupported(u32),
+    /// Не разобран как ни один из известных форматов.
+    Corrupt(String),
+    /// Ошибка ввода-вывода или прав доступа.
+    Io(String),
+}
+
+fn read_text(path: &Path) -> std::result::Result<Option<String>, String> {
+    match fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{e}")),
+        Ok(m) if m.file_type().is_symlink() || !m.is_file() => return Err("не обычный файл".into()),
+        Ok(m) if m.len() > 4 * 1024 * 1024 => return Err("файл слишком велик".into()),
+        Ok(_) => {}
     }
+    fs::read_to_string(path).map(Some).map_err(|e| e.to_string())
+}
 
-    /// Step 2: декодировать сохранённый session-key (32 байта). `None` если поле
-    /// не выставлено (старый токен без session-key resume) или формат битый.
-    pub fn session_key(&self) -> Option<[u8; 32]> {
-        let hex_str = self.session_key_hex.as_ref()?;
-        let bytes = hex::decode(hex_str).ok()?;
-        if bytes.len() != 32 {
-            return None;
-        }
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&bytes);
-        Some(out)
+/// Есть ли в тексте имена секретных полей старого формата (поиск по тексту, а не по разобранному дереву: старые номера сеансов — 128-битные
+/// числа, которые общее дерево JSON не вмещает).
+fn has_legacy_secret(text: &str) -> bool {
+    LEGACY_SECRET_FIELDS.iter().any(|f| text.contains(f))
+}
+
+/// Только версия формата; остальное не разбирается.
+fn probe_version(text: &str) -> std::result::Result<Option<u32>, String> {
+    #[derive(Deserialize)]
+    struct Probe {
+        #[serde(default)]
+        version: Option<u32>,
     }
-
-    /// Step 2: задать session-key пост-фактум (например, после успешного ECDH).
-    pub fn set_session_key(&mut self, session_key: &[u8; 32]) {
-        self.session_key_hex = Some(hex::encode(session_key));
-    }
+    serde_json::from_str::<Probe>(text).map(|p| p.version).map_err(|e| format!("не JSON-объект: {e}"))
 }
 
-/// Длина свежих случайных значений возобновления (клиентского и серверного).
-pub const RESUME_NONCE_LEN: usize = 16;
-
-/// HMAC-resume: blake3 keyed hash от (session_id_be_16 || client_nonce || new_addr_utf8).
-/// Свежее значение клиента делает каждое RESUME новым: записанное RESUME нельзя проиграть заново и получить прежний ключ.
-pub fn compute_resume_mac(secret: &[u8; 32], session_id: u128, new_addr: &str, client_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_keyed(secret);
-    hasher.update(&session_id.to_be_bytes());
-    hasher.update(client_nonce);
-    hasher.update(new_addr.as_bytes());
-    *hasher.finalize().as_bytes()
+#[derive(Deserialize)]
+struct OldAnchorEntry {
+    payload: PairingPayload,
+    #[serde(default)]
+    preference: u32,
 }
 
-pub fn verify_resume_mac(
-    secret: &[u8; 32],
-    session_id: u128,
-    new_addr: &str,
-    client_nonce: &[u8; RESUME_NONCE_LEN],
-    provided: &[u8; 32],
-) -> bool {
-    let expected = compute_resume_mac(secret, session_id, new_addr, client_nonce);
-    constant_time_eq(&expected, provided)
+#[derive(Deserialize)]
+struct OldAnchors {
+    anchors: Vec<OldAnchorEntry>,
 }
 
-/// Подпись ответа узла: связывает серверное значение с клиентским (запись прошлого ответа не подойдёт к новому RESUME).
-pub fn compute_resume_ack_mac(secret: &[u8; 32], session_id: u128, client_nonce: &[u8; RESUME_NONCE_LEN], server_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
-    let mut hasher = blake3::Hasher::new_keyed(secret);
-    hasher.update(b"yandi-resume-ack-v1");
-    hasher.update(&session_id.to_be_bytes());
-    hasher.update(client_nonce);
-    hasher.update(server_nonce);
-    *hasher.finalize().as_bytes()
-}
-
-/// Рабочий ключ этого возобновления: из сохранённого ключа сеанса и обоих свежих значений. Сохранённый ключ сам по себе пакеты не
-/// защищает — после каждого RESUME ключ другой, поэтому записанные пакеты прежнего возобновления не проходят проверку.
-pub fn derive_resume_key(session_key: &[u8; 32], client_nonce: &[u8; RESUME_NONCE_LEN], server_nonce: &[u8; RESUME_NONCE_LEN]) -> [u8; 32] {
-    use hkdf::Hkdf;
-    use sha2::Sha256;
-    let mut salt = [0u8; 2 * RESUME_NONCE_LEN];
-    salt[..RESUME_NONCE_LEN].copy_from_slice(client_nonce);
-    salt[RESUME_NONCE_LEN..].copy_from_slice(server_nonce);
-    let hk = Hkdf::<Sha256>::new(Some(&salt), session_key);
-    let mut out = [0u8; 32];
-    hk.expand(b"yandi-resume-key-v1", &mut out).expect("hkdf 32 bytes");
-    out
-}
-
-fn constant_time_eq(a: &[u8; 32], b: &[u8; 32]) -> bool {
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-// ----------------- Wire format -----------------
-
-/// Hardening Step 2: `0xC0 RESUME` (v2 — с node_id для plaintext pre-Hello-flow'а).
-///
-/// `[C0][node_id:32][session_id:16][addr_len:1][addr…][mac:32]`
-///
-/// Mobile шлёт это плейнтекстом ДО Hello: anchor по session_id находит paired-token,
-/// проверяет HMAC, восстанавливает session-key через `EncryptionManager::restore_session`
-/// и отвечает 0xC1 ACK encrypted (используя восстановленный ключ).
-pub fn encode_resume(node_id: HashId, session_id: u128, new_addr: &str, client_nonce: &[u8; RESUME_NONCE_LEN], mac: &[u8; 32]) -> Vec<u8> {
-    let addr = new_addr.as_bytes();
-    let alen = addr.len().min(255);
-    let mut buf = Vec::with_capacity(1 + 32 + 16 + 1 + alen + RESUME_NONCE_LEN + 32);
-    buf.push(PKT_RESUME);
-    buf.extend_from_slice(&node_id.0);
-    buf.extend_from_slice(&session_id.to_be_bytes());
-    buf.push(alen as u8);
-    buf.extend_from_slice(&addr[..alen]);
-    buf.extend_from_slice(client_nonce);
-    buf.extend_from_slice(mac);
-    buf
-}
-
-pub fn decode_resume(data: &[u8]) -> Result<(HashId, u128, String, [u8; RESUME_NONCE_LEN], [u8; 32])> {
-    if data.len() < 1 + 32 + 16 + 1 + RESUME_NONCE_LEN + 32 {
-        anyhow::bail!("RESUME too short");
-    }
-    if data[0] != PKT_RESUME {
-        anyhow::bail!("RESUME bad magic: 0x{:02x}", data[0]);
-    }
-    let mut nid = [0u8; 32];
-    nid.copy_from_slice(&data[1..33]);
-    let node_id = HashId(nid);
-    let mut sid = [0u8; 16];
-    sid.copy_from_slice(&data[33..49]);
-    let session_id = u128::from_be_bytes(sid);
-    let alen = data[49] as usize;
-    if data.len() < 50 + alen + RESUME_NONCE_LEN + 32 {
-        anyhow::bail!("RESUME truncated addr");
-    }
-    let addr = String::from_utf8(data[50..50 + alen].to_vec())
-        .context("RESUME addr not utf8")?;
-    let mut cn = [0u8; RESUME_NONCE_LEN];
-    cn.copy_from_slice(&data[50 + alen..50 + alen + RESUME_NONCE_LEN]);
-    let mut mac = [0u8; 32];
-    mac.copy_from_slice(&data[50 + alen + RESUME_NONCE_LEN..50 + alen + RESUME_NONCE_LEN + 32]);
-    Ok((node_id, session_id, addr, cn, mac))
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ResumeStatus {
-    Ok = 0,
-    BadMac = 1,
-    Expired = 2,
-    Unknown = 3,
-}
-
-impl ResumeStatus {
-    pub fn from_byte(b: u8) -> Self {
-        match b {
-            0 => Self::Ok,
-            1 => Self::BadMac,
-            2 => Self::Expired,
-            _ => Self::Unknown,
-        }
-    }
-}
-
-/// `0xC1 RESUME_ACK`: `[C1][status:1][optional new_secret_flag:1][optional new_secret:32]`.
-/// Если status != Ok — без секрета.
-pub fn encode_resume_ack(status: ResumeStatus, new_secret: Option<&[u8; 32]>) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(1 + 1 + 1 + 32);
-    buf.push(PKT_RESUME_ACK);
-    buf.push(status as u8);
-    if let Some(s) = new_secret {
-        buf.push(1);
-        buf.extend_from_slice(s);
-    } else {
-        buf.push(0);
-    }
-    buf
-}
-
-/// Успешный ответ на RESUME: `[C1][0][2][server_nonce:16][mac:32]` (открытым текстом: клиент проверяет подпись и сам выводит ключ).
-pub fn encode_resume_ack_grant(server_nonce: &[u8; RESUME_NONCE_LEN], mac: &[u8; 32]) -> Vec<u8> {
-    let mut buf = Vec::with_capacity(3 + RESUME_NONCE_LEN + 32);
-    buf.push(PKT_RESUME_ACK);
-    buf.push(ResumeStatus::Ok as u8);
-    buf.push(2);
-    buf.extend_from_slice(server_nonce);
-    buf.extend_from_slice(mac);
-    buf
-}
-
-/// Разобрать успешный ответ: серверное значение и подпись.
-pub fn decode_resume_ack_grant(data: &[u8]) -> Option<([u8; RESUME_NONCE_LEN], [u8; 32])> {
-    if data.len() < 3 + RESUME_NONCE_LEN + 32 || data[0] != PKT_RESUME_ACK || data[1] != ResumeStatus::Ok as u8 || data[2] != 2 {
-        return None;
-    }
-    let mut sn = [0u8; RESUME_NONCE_LEN];
-    sn.copy_from_slice(&data[3..3 + RESUME_NONCE_LEN]);
-    let mut mac = [0u8; 32];
-    mac.copy_from_slice(&data[3 + RESUME_NONCE_LEN..3 + RESUME_NONCE_LEN + 32]);
-    Some((sn, mac))
-}
-
-/// Hardening Step 3: 0xC2 SESSION_ISSUE — anchor выдаёт SessionToken после успешного
-/// pair'инга (QR-сканинг + первое Hello). Payload encrypted (через `send_encrypted`)
-/// чтобы session-key/resume-secret не утекли. Wire-layout (внутри plaintext'а после
-/// decrypt'a):
-///
-/// `[C2][session_id:16][expires_at:8][resume_secret:32][session_key:32]`
-///
-/// `expires_at` — UNIX-секунды.
-pub fn encode_session_issue(tok: &SessionToken, session_key: &[u8; 32]) -> Result<Vec<u8>> {
-    let resume_secret = tok.resume_secret()?;
-    let mut buf = Vec::with_capacity(1 + 16 + 8 + 32 + 32);
-    buf.push(PKT_SESSION_ISSUE);
-    buf.extend_from_slice(&tok.session_id.to_be_bytes());
-    buf.extend_from_slice(&tok.expires_at.to_be_bytes());
-    buf.extend_from_slice(&resume_secret);
-    buf.extend_from_slice(session_key);
-    Ok(buf)
-}
-
-pub fn decode_session_issue(data: &[u8]) -> Result<(SessionToken, [u8; 32])> {
-    if data.len() < 1 + 16 + 8 + 32 + 32 {
-        anyhow::bail!("SESSION_ISSUE too short");
-    }
-    if data[0] != PKT_SESSION_ISSUE {
-        anyhow::bail!("SESSION_ISSUE bad magic: 0x{:02x}", data[0]);
-    }
-    let mut sid = [0u8; 16];
-    sid.copy_from_slice(&data[1..17]);
-    let session_id = u128::from_be_bytes(sid);
-    let mut exp = [0u8; 8];
-    exp.copy_from_slice(&data[17..25]);
-    let expires_at = u64::from_be_bytes(exp);
-    let mut resume_secret = [0u8; 32];
-    resume_secret.copy_from_slice(&data[25..57]);
-    let mut session_key = [0u8; 32];
-    session_key.copy_from_slice(&data[57..89]);
-    let tok = SessionToken {
-        session_id,
-        resume_secret_hex: hex::encode(resume_secret),
-        expires_at,
-        session_key_hex: Some(hex::encode(session_key)),
-        node_id_hex: None,
-    };
-    Ok((tok, session_key))
-}
-
-pub fn decode_resume_ack(data: &[u8]) -> Result<(ResumeStatus, Option<[u8; 32]>)> {
-    if data.len() < 1 + 1 + 1 {
-        anyhow::bail!("RESUME_ACK too short");
-    }
-    if data[0] != PKT_RESUME_ACK {
-        anyhow::bail!("RESUME_ACK bad magic: 0x{:02x}", data[0]);
-    }
-    let status = ResumeStatus::from_byte(data[1]);
-    let secret = if data[2] == 1 {
-        if data.len() < 3 + 32 {
-            anyhow::bail!("RESUME_ACK truncated secret");
-        }
-        let mut s = [0u8; 32];
-        s.copy_from_slice(&data[3..35]);
-        Some(s)
-    } else {
-        None
-    };
-    Ok((status, secret))
+#[derive(Deserialize)]
+struct OldClients {
+    #[serde(default)]
+    #[allow(dead_code)]
+    clients: HashMap<String, serde::de::IgnoredAny>,
 }
 
 // ----------------- Stores -----------------
 
-/// На anchor-стороне: кого мы спарили, какой токен у каждого.
-/// Ключ — hex public_key мобилки (Ed25519 32B).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// На anchor-стороне: кому выдано право. Ключ — hex public_key клиента (Ed25519 32B).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairedClientStore {
-    pub clients: HashMap<String, SessionToken>,
+    pub version: u32,
+    pub clients: HashMap<String, ClientGrant>,
+    /// Файл не удалось прочитать как известный формат: хранилище пустое в памяти и **записывать его нельзя**, чтобы не затереть файл.
+    #[serde(skip)]
+    pub blocked: Option<String>,
+}
+
+impl Default for PairedClientStore {
+    fn default() -> Self {
+        Self { version: STORE_VERSION, clients: HashMap::new(), blocked: None }
+    }
 }
 
 impl PairedClientStore {
-    pub fn load_or_default(path: &Path) -> Self {
-        match fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+    /// Строгое чтение. Старый формат (v1): права клиентов НЕ переносятся (новое сопряжение выдаст новое право), файл переписывается без секретов.
+    pub fn read(path: &Path) -> StoreRead<Self> {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let text = match read_text(path) {
+            Ok(None) => return StoreRead::Missing,
+            Ok(Some(t)) => t,
+            Err(e) => return StoreRead::Io(e),
+        };
+        let ver = match probe_version(&text) {
+            Ok(x) => x,
+            Err(e) => return StoreRead::Corrupt(e),
+        };
+        match ver {
+            Some(STORE_VERSION) => {
+                if has_legacy_secret(&text) {
+                    return StoreRead::Corrupt("в файле формата v2 найдены поля старого формата с секретами".into());
+                }
+                match serde_json::from_str::<Self>(&text) {
+                    Ok(s) => StoreRead::Current(s),
+                    Err(e) => StoreRead::Corrupt(format!("схема v2: {e}")),
+                }
+            }
+            Some(v) => StoreRead::Unsupported(v),
+            None => match serde_json::from_str::<OldClients>(&text) {
+                // старый формат: права клиентов не переносятся
+                Ok(_) => StoreRead::Migrated(Self::default()),
+                Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
+            },
         }
     }
 
+    /// Загрузка для работы узла: `Migrated` сразу переписывает файл без секретов; повреждённое/нечитаемое/будущее — пустое хранилище с
+    /// `blocked` (файл не трогается), причина — в журнал без значений.
+    pub fn load_or_default(path: &Path) -> Self {
+        match Self::read(path) {
+            StoreRead::Missing => Self::default(),
+            StoreRead::Current(s) => s,
+            StoreRead::Migrated(s) => {
+                match s.save(path) {
+                    Ok(()) => eprintln!("[pairing] {}: старый формат с секретами заменён пустым списком формата v2 (права клиентов не перенесены, нужно новое сопряжение)", path.display()),
+                    Err(e) => eprintln!("[pairing] {}: старый формат не удалось заменить ({e}); файл не используется", path.display()),
+                }
+                s
+            }
+            StoreRead::Unsupported(v) => Self::blocked_with(format!("версия формата {v} выше известной")),
+            StoreRead::Corrupt(e) => Self::blocked_with(format!("файл повреждён: {e}")),
+            StoreRead::Io(e) => Self::blocked_with(format!("файл не читается: {e}")),
+        }
+    }
+
+    fn blocked_with(reason: String) -> Self {
+        Self { blocked: Some(reason), ..Self::default() }
+    }
+
     pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(why) = &self.blocked {
+            anyhow::bail!("хранилище не записывается: {why}");
+        }
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
         }
@@ -410,13 +241,13 @@ impl PairedClientStore {
         Ok(())
     }
 
-    pub fn issue(&mut self, client_pubkey_hex: String, ttl_secs: u64) -> SessionToken {
-        let tok = SessionToken::new(ttl_secs);
-        self.clients.insert(client_pubkey_hex, tok.clone());
-        tok
+    pub fn issue(&mut self, client_pubkey_hex: String, ttl_secs: u64) -> ClientGrant {
+        let g = ClientGrant::new(ttl_secs);
+        self.clients.insert(client_pubkey_hex, g.clone());
+        g
     }
 
-    pub fn get(&self, client_pubkey_hex: &str) -> Option<&SessionToken> {
+    pub fn get(&self, client_pubkey_hex: &str) -> Option<&ClientGrant> {
         self.clients.get(client_pubkey_hex)
     }
 
@@ -440,30 +271,87 @@ impl PairedClientStore {
     }
 }
 
-/// На mobile-стороне: список наших anchor'ов в порядке предпочтения. Также храним
-/// session_token для каждого (resume_secret + session_id).
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+/// На клиентской стороне: наши якоря в порядке предпочтения. Секретов нет: только то, что было в QR, и порядок.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct PairedAnchorStore {
+    pub version: u32,
     pub anchors: Vec<PairedAnchorEntry>,
+    #[serde(skip)]
+    pub blocked: Option<String>,
+}
+
+impl Default for PairedAnchorStore {
+    fn default() -> Self {
+        Self { version: STORE_VERSION, anchors: Vec::new(), blocked: None }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct PairedAnchorEntry {
     pub payload: PairingPayload,
-    pub session: Option<SessionToken>,
     /// Преферанс (меньше — выше в очереди). Не обязательно уникальный.
     pub preference: u32,
 }
 
 impl PairedAnchorStore {
+    /// Строгое чтение. Старый формат: сохраняются `payload` и `preference` (публичные данные QR и порядок), поле `session` отбрасывается.
+    pub fn read(path: &Path) -> StoreRead<Self> {
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let text = match read_text(path) {
+            Ok(None) => return StoreRead::Missing,
+            Ok(Some(t)) => t,
+            Err(e) => return StoreRead::Io(e),
+        };
+        let ver = match probe_version(&text) {
+            Ok(x) => x,
+            Err(e) => return StoreRead::Corrupt(e),
+        };
+        match ver {
+            Some(STORE_VERSION) => {
+                if has_legacy_secret(&text) {
+                    return StoreRead::Corrupt("в файле формата v2 найдены поля старого формата с секретами".into());
+                }
+                match serde_json::from_str::<Self>(&text) {
+                    Ok(s) => StoreRead::Current(s),
+                    Err(e) => StoreRead::Corrupt(format!("схема v2: {e}")),
+                }
+            }
+            Some(v) => StoreRead::Unsupported(v),
+            None => match serde_json::from_str::<OldAnchors>(&text) {
+                Ok(o) => StoreRead::Migrated(Self {
+                    version: STORE_VERSION,
+                    anchors: o.anchors.into_iter().map(|e| PairedAnchorEntry { payload: e.payload, preference: e.preference }).collect(),
+                    blocked: None,
+                }),
+                Err(e) => StoreRead::Corrupt(format!("схема v1: {e}")),
+            },
+        }
+    }
+
     pub fn load_or_default(path: &Path) -> Self {
-        match fs::read_to_string(path) {
-            Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
-            Err(_) => Self::default(),
+        match Self::read(path) {
+            StoreRead::Missing => Self::default(),
+            StoreRead::Current(s) => s,
+            StoreRead::Migrated(s) => {
+                match s.save(path) {
+                    Ok(()) => eprintln!("[pairing] {}: старый формат заменён форматом v2 без секретов (адреса и порядок якорей сохранены; нужно новое сопряжение для права на якоре)", path.display()),
+                    Err(e) => eprintln!("[pairing] {}: старый формат не удалось заменить ({e}); файл не используется", path.display()),
+                }
+                s
+            }
+            StoreRead::Unsupported(v) => Self { blocked: Some(format!("версия формата {v} выше известной")), ..Self::default() },
+            StoreRead::Corrupt(e) => Self { blocked: Some(format!("файл повреждён: {e}")), ..Self::default() },
+            StoreRead::Io(e) => Self { blocked: Some(format!("файл не читается: {e}")), ..Self::default() },
         }
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
+        if let Some(why) = &self.blocked {
+            anyhow::bail!("хранилище не записывается: {why}");
+        }
+        let _g = STORE_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
         }
@@ -477,23 +365,45 @@ impl PairedAnchorStore {
             existing.payload = payload;
             existing.preference = preference;
         } else {
-            self.anchors.push(PairedAnchorEntry { payload, session: None, preference });
+            self.anchors.push(PairedAnchorEntry { payload, preference });
         }
         self.anchors.sort_by_key(|e| e.preference);
-    }
-
-    pub fn set_session(&mut self, anchor_id: &HashId, session: SessionToken) -> bool {
-        if let Some(e) = self.anchors.iter_mut().find(|e| e.payload.anchor_id == *anchor_id) {
-            e.session = Some(session);
-            true
-        } else {
-            false
-        }
     }
 
     pub fn primary(&self) -> Option<&PairedAnchorEntry> {
         self.anchors.first()
     }
+}
+
+/// Очистка текста файла хранилища от секретов старого формата для резервной копии и восстановления: возвращает текст формата v2 без
+/// секретов или `None`, если файл нельзя разобрать (такой файл в копию не кладётся, чтобы в неё не попали остатки секретов).
+pub fn sanitized_store_text(kind: StoreKind, bytes: &[u8]) -> Option<String> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let ver = probe_version(text).ok()?;
+    match (kind, ver) {
+        (StoreKind::Clients, Some(STORE_VERSION)) if !has_legacy_secret(text) => serde_json::from_str::<PairedClientStore>(text).ok().map(|_| text.to_string()),
+        (StoreKind::Clients, None) => {
+            serde_json::from_str::<OldClients>(text).ok()?;
+            serde_json::to_string_pretty(&PairedClientStore::default()).ok()
+        }
+        (StoreKind::Anchors, Some(STORE_VERSION)) if !has_legacy_secret(text) => serde_json::from_str::<PairedAnchorStore>(text).ok().map(|_| text.to_string()),
+        (StoreKind::Anchors, None) => {
+            let o: OldAnchors = serde_json::from_str(text).ok()?;
+            let s = PairedAnchorStore {
+                version: STORE_VERSION,
+                anchors: o.anchors.into_iter().map(|e| PairedAnchorEntry { payload: e.payload, preference: e.preference }).collect(),
+                blocked: None,
+            };
+            serde_json::to_string_pretty(&s).ok()
+        }
+        _ => None,
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StoreKind {
+    Clients,
+    Anchors,
 }
 
 pub fn default_paired_clients_path() -> PathBuf {
@@ -522,201 +432,181 @@ mod tests {
     use super::*;
     use tempfile::tempdir;
 
-    #[test]
-    fn pairing_payload_qr_roundtrip() {
-        let p = PairingPayload {
+    /// Известные «секреты» старого формата: тесты проверяют, что их нет ни в новых файлах, ни в копиях.
+    const OLD_RESUME_SECRET: &str = "11aa22bb33cc44dd55ee66ff77008899aabbccddeeff00112233445566778899";
+    const OLD_SESSION_KEY: &str = "99887766554433221100ffeeddccbbaa99887766554433221100ffeeddccbbaa";
+    const BIG_SESSION_ID: &str = "340282366920938463463374607431768211455"; // u128::MAX: старые номера не помещались в общее дерево JSON
+
+    fn old_clients_json() -> String {
+        format!(
+            r#"{{"clients":{{"{pk}":{{"session_id":{BIG_SESSION_ID},"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":4102444800,"session_key_hex":"{OLD_SESSION_KEY}","node_id_hex":"{pk}"}}}}}}"#,
+            pk = "ab".repeat(32)
+        )
+    }
+
+    fn payload() -> PairingPayload {
+        PairingPayload {
             anchor_id: HashId([0xAB; 32]),
             anchor_x25519_hex: hex::encode([0x33u8; 32]),
             fingerprint_hex: "abcdef".repeat(10) + "abcd",
             anchor_url: "wss://anchor.example:443/".into(),
-        };
-        let s = p.to_qr_string();
-        let back = PairingPayload::from_qr_string(&s).unwrap();
+        }
+    }
+
+    fn old_anchors_json() -> String {
+        let p = serde_json::to_string(&payload()).unwrap();
+        format!(
+            r#"{{"anchors":[{{"payload":{p},"session":{{"session_id":{BIG_SESSION_ID},"resume_secret_hex":"{OLD_RESUME_SECRET}","expires_at":4102444800,"session_key_hex":"{OLD_SESSION_KEY}"}},"preference":3}}]}}"#
+        )
+    }
+
+    fn no_old_secrets(text: &str) {
+        for needle in [OLD_RESUME_SECRET, OLD_SESSION_KEY, "resume_secret_hex", "session_key_hex", BIG_SESSION_ID] {
+            assert!(!text.contains(needle), "в файле остался {needle}");
+        }
+    }
+
+    #[test]
+    fn pairing_payload_qr_roundtrip() {
+        let p = payload();
+        let back = PairingPayload::from_qr_string(&p.to_qr_string()).unwrap();
         assert_eq!(p, back);
     }
 
     #[test]
-    fn session_token_new_unique_and_not_expired() {
-        let a = SessionToken::new(100);
-        let b = SessionToken::new(100);
-        assert_ne!(a.session_id, b.session_id);
-        assert_ne!(a.resume_secret_hex, b.resume_secret_hex);
+    fn a_grant_is_unique_not_a_secret_and_expires() {
+        let a = ClientGrant::new(100);
+        let b = ClientGrant::new(100);
+        assert_ne!(a.session_id_hex, b.session_id_hex);
         assert!(!a.is_expired());
-        assert_eq!(a.resume_secret().unwrap().len(), 32);
-    }
-
-    #[test]
-    fn session_token_expires() {
-        let mut t = SessionToken::new(60);
-        t.expires_at = 1; // в прошлом
+        let mut t = ClientGrant::new(60);
+        t.expires_at = 1;
         assert!(t.is_expired());
         t.refresh(60);
         assert!(!t.is_expired());
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("session_id_hex") && json.contains("expires_at") && !json.contains("secret") && !json.contains("key"), "{json}");
     }
 
     #[test]
-    fn resume_mac_verify_roundtrip() {
-        let secret = [0xAFu8; 32];
-        let sid: u128 = 0x1234_5678_9ABC_DEF0_1122_3344_5566_7788;
-        let addr = "1.2.3.4:9000";
-        let cn = [0x11u8; RESUME_NONCE_LEN];
-        let mac = compute_resume_mac(&secret, sid, addr, &cn);
-        assert!(verify_resume_mac(&secret, sid, addr, &cn, &mac));
-        // wrong addr — must fail
-        assert!(!verify_resume_mac(&secret, sid, "5.6.7.8:9000", &cn, &mac));
-        // wrong secret — must fail
-        assert!(!verify_resume_mac(&[0u8; 32], sid, addr, &cn, &mac));
-        // другое свежее значение клиента — не подходит
-        assert!(!verify_resume_mac(&secret, sid, addr, &[0x22u8; RESUME_NONCE_LEN], &mac));
-    }
-
-    #[test]
-    fn resume_packet_roundtrip() {
-        let mac = [0x77u8; 32];
-        let cn = [0x33u8; RESUME_NONCE_LEN];
-        let nid = HashId([0xCDu8; 32]);
-        let bytes = encode_resume(nid, 99u128, "1.2.3.4:5000", &cn, &mac);
-        let (nid2, sid, addr, cn2, mac2) = decode_resume(&bytes).unwrap();
-        assert_eq!(nid2, nid);
-        assert_eq!(sid, 99u128);
-        assert_eq!(addr, "1.2.3.4:5000");
-        assert_eq!(cn2, cn);
-        assert_eq!(mac2, mac);
-    }
-
-    /// Каждое возобновление даёт свой рабочий ключ: записанные пакеты прежнего возобновления нового ключа не проходят.
-    #[test]
-    fn every_resume_gets_its_own_working_key() {
-        let base = [0x42u8; 32];
-        let (cn1, sn1) = ([1u8; RESUME_NONCE_LEN], [2u8; RESUME_NONCE_LEN]);
-        let k1 = derive_resume_key(&base, &cn1, &sn1);
-        assert_eq!(k1, derive_resume_key(&base, &cn1, &sn1), "обе стороны выводят одно и то же");
-        assert_ne!(k1, base);
-        assert_ne!(k1, derive_resume_key(&base, &[9u8; RESUME_NONCE_LEN], &sn1), "другое значение клиента");
-        assert_ne!(k1, derive_resume_key(&base, &cn1, &[9u8; RESUME_NONCE_LEN]), "другое значение узла");
-        // ответ узла привязан к значению клиента: запись прошлого ответа не подойдёт к новому RESUME
-        let secret = [0xAAu8; 32];
-        let m1 = compute_resume_ack_mac(&secret, 7, &cn1, &sn1);
-        assert_ne!(m1, compute_resume_ack_mac(&secret, 7, &[8u8; RESUME_NONCE_LEN], &sn1));
-        let bytes = encode_resume_ack_grant(&sn1, &m1);
-        assert_eq!(decode_resume_ack_grant(&bytes), Some((sn1, m1)));
-        assert!(decode_resume_ack_grant(&encode_resume_ack(ResumeStatus::Ok, None)).is_none());
-    }
-
-    #[test]
-    fn session_issue_roundtrip() {
-        let sk = [0x5Au8; 32];
-        let tok = SessionToken::new_with_session_key(60, &sk);
-        let bytes = encode_session_issue(&tok, &sk).unwrap();
-        let (tok2, sk2) = decode_session_issue(&bytes).unwrap();
-        assert_eq!(tok.session_id, tok2.session_id);
-        assert_eq!(tok.resume_secret_hex, tok2.resume_secret_hex);
-        assert_eq!(tok.expires_at, tok2.expires_at);
-        assert_eq!(sk2, sk);
-        assert_eq!(tok2.session_key(), Some(sk));
-    }
-
-    #[test]
-    fn session_token_new_with_session_key_stores_and_recovers() {
-        let key = [0xA7u8; 32];
-        let tok = SessionToken::new_with_session_key(60, &key);
-        assert_eq!(tok.session_key(), Some(key));
-        // Старый токен без session_key
-        let mut legacy = SessionToken::new(60);
-        assert!(legacy.session_key().is_none());
-        legacy.set_session_key(&key);
-        assert_eq!(legacy.session_key(), Some(key));
-    }
-
-    #[test]
-    fn resume_ack_roundtrip_no_secret() {
-        let bytes = encode_resume_ack(ResumeStatus::Ok, None);
-        let (status, secret) = decode_resume_ack(&bytes).unwrap();
-        assert_eq!(status, ResumeStatus::Ok);
-        assert!(secret.is_none());
-    }
-
-    #[test]
-    fn resume_ack_roundtrip_with_new_secret() {
-        let s = [0x42u8; 32];
-        let bytes = encode_resume_ack(ResumeStatus::Ok, Some(&s));
-        let (status, secret) = decode_resume_ack(&bytes).unwrap();
-        assert_eq!(status, ResumeStatus::Ok);
-        assert_eq!(secret.unwrap(), s);
-    }
-
-    #[test]
-    fn paired_client_store_issue_lookup_revoke_persist() {
+    fn the_client_store_roundtrips_in_v2_without_any_secret_fields() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("paired_clients.json");
-        let mut store = PairedClientStore::default();
-        let pubkey_hex = "deadbeef".to_string();
-        let tok = store.issue(pubkey_hex.clone(), 60);
-        assert!(store.get(&pubkey_hex).is_some());
-        store.save(&path).unwrap();
-
-        // reload
-        let store2 = PairedClientStore::load_or_default(&path);
-        let tok2 = store2.get(&pubkey_hex).unwrap();
-        assert_eq!(tok.session_id, tok2.session_id);
-        assert_eq!(tok.resume_secret_hex, tok2.resume_secret_hex);
-
-        // revoke
-        let mut store3 = store2;
-        assert!(store3.revoke(&pubkey_hex));
-        assert!(store3.get(&pubkey_hex).is_none());
+        let mut st = PairedClientStore::default();
+        let g = st.issue("cd".repeat(32), 3600);
+        st.save(&path).unwrap();
+        let text = fs::read_to_string(&path).unwrap();
+        assert!(text.contains("\"version\": 2") && !has_legacy_secret(&text), "{text}");
+        match PairedClientStore::read(&path) {
+            StoreRead::Current(back) => assert_eq!(back.get(&"cd".repeat(32)), Some(&g)),
+            other => panic!("{other:?}"),
+        }
+        assert!(st.revoke(&"cd".repeat(32)) && !st.revoke(&"cd".repeat(32)));
+        let mut e = PairedClientStore::default();
+        e.clients.insert("x".into(), ClientGrant { session_id_hex: "0".repeat(32), expires_at: 1 });
+        assert_eq!(e.gc_expired(), 1);
     }
 
     #[test]
-    fn paired_client_store_gc_expired() {
-        let mut store = PairedClientStore::default();
-        let _ = store.issue("a".into(), 60);
-        store.clients.get_mut("a").unwrap().expires_at = 1;
-        let _ = store.issue("b".into(), 60);
-        let cleared = store.gc_expired();
-        assert_eq!(cleared, 1);
-        assert!(store.get("a").is_none());
-        assert!(store.get("b").is_some());
+    fn an_old_clients_file_is_rewritten_without_secrets_and_its_rights_are_not_carried_over() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paired_clients.json");
+        fs::write(&path, old_clients_json()).unwrap();
+        assert!(matches!(PairedClientStore::read(&path), StoreRead::Migrated(_)));
+        let st = PairedClientStore::load_or_default(&path);
+        assert!(st.clients.is_empty(), "право из старого файла новым не становится");
+        assert!(st.blocked.is_none());
+        let text = fs::read_to_string(&path).unwrap();
+        no_old_secrets(&text);
+        assert!(matches!(PairedClientStore::read(&path), StoreRead::Current(_)), "после переписывания файл читается как v2");
     }
 
     #[test]
-    fn paired_anchor_store_preference_order() {
-        let mut s = PairedAnchorStore::default();
-        let p1 = PairingPayload {
-            anchor_id: HashId([1u8; 32]),
-            anchor_x25519_hex: "00".into(),
-            fingerprint_hex: "ff".into(),
-            anchor_url: "wss://primary/".into(),
-        };
-        let p2 = PairingPayload {
-            anchor_id: HashId([2u8; 32]),
-            anchor_x25519_hex: "00".into(),
-            fingerprint_hex: "ff".into(),
-            anchor_url: "wss://secondary/".into(),
-        };
-        s.add_or_update(p2.clone(), 5);
-        s.add_or_update(p1.clone(), 1);
-        assert_eq!(s.primary().unwrap().payload, p1);
-    }
-
-    #[test]
-    fn paired_anchor_store_set_session_persist() {
+    fn an_old_anchors_file_keeps_the_public_data_and_order_but_loses_the_session() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("paired_anchors.json");
-        let mut s = PairedAnchorStore::default();
-        let payload = PairingPayload {
-            anchor_id: HashId([9u8; 32]),
-            anchor_x25519_hex: "ab".into(),
-            fingerprint_hex: "cd".into(),
-            anchor_url: "wss://a/".into(),
-        };
-        s.add_or_update(payload.clone(), 0);
-        let tok = SessionToken::new(60);
-        assert!(s.set_session(&payload.anchor_id, tok.clone()));
-        s.save(&path).unwrap();
+        fs::write(&path, old_anchors_json()).unwrap();
+        let st = PairedAnchorStore::load_or_default(&path);
+        assert_eq!(st.anchors.len(), 1);
+        assert_eq!(st.anchors[0].payload, payload());
+        assert_eq!(st.anchors[0].preference, 3);
+        no_old_secrets(&fs::read_to_string(&path).unwrap());
+    }
 
-        let s2 = PairedAnchorStore::load_or_default(&path);
-        let entry = s2.anchors.iter().find(|e| e.payload.anchor_id == payload.anchor_id).unwrap();
-        assert_eq!(entry.session.as_ref().unwrap().session_id, tok.session_id);
+    #[test]
+    fn a_v2_file_with_old_secret_fields_is_refused_and_left_untouched() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paired_clients.json");
+        let text = format!(r#"{{"version":2,"clients":{{"{pk}":{{"session_id_hex":"{z}","expires_at":9,"resume_secret_hex":"{OLD_RESUME_SECRET}"}}}}}}"#, pk = "ab".repeat(32), z = "0".repeat(32));
+        fs::write(&path, &text).unwrap();
+        assert!(matches!(PairedClientStore::read(&path), StoreRead::Corrupt(_)), "старое поле нельзя прочитать как новое");
+        let st = PairedClientStore::load_or_default(&path);
+        assert!(st.blocked.is_some() && st.clients.is_empty());
+        assert!(st.save(&path).is_err(), "заблокированное хранилище не записывается");
+        assert_eq!(fs::read_to_string(&path).unwrap(), text, "файл не изменён");
+    }
+
+    #[test]
+    fn corrupt_future_and_unreadable_files_are_not_replaced_by_an_empty_state() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("paired_anchors.json");
+        fs::write(&path, b"{not json").unwrap();
+        assert!(matches!(PairedAnchorStore::read(&path), StoreRead::Corrupt(_)));
+        let st = PairedAnchorStore::load_or_default(&path);
+        assert!(st.blocked.is_some() && st.save(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{not json");
+        fs::write(&path, br#"{"version":99,"anchors":[]}"#).unwrap();
+        assert!(matches!(PairedAnchorStore::read(&path), StoreRead::Unsupported(99)));
+        assert!(PairedAnchorStore::load_or_default(&path).blocked.is_some());
+        // каталог на месте файла: ошибка ввода-вывода, а не «пусто»
+        let d = dir.path().join("dir.json");
+        fs::create_dir(&d).unwrap();
+        assert!(matches!(PairedAnchorStore::read(&d), StoreRead::Io(_)));
+        assert!(matches!(PairedAnchorStore::read(&dir.path().join("none.json")), StoreRead::Missing));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_is_not_followed() {
+        let dir = tempdir().unwrap();
+        let real = dir.path().join("real.json");
+        fs::write(&real, old_clients_json()).unwrap();
+        let link = dir.path().join("paired_clients.json");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(matches!(PairedClientStore::read(&link), StoreRead::Io(_)));
+        assert_eq!(fs::read_to_string(&real).unwrap(), old_clients_json(), "цель ссылки не тронута");
+    }
+
+    #[test]
+    fn backups_and_restores_sanitize_both_files_and_drop_what_cannot_be_read() {
+        let c = sanitized_store_text(StoreKind::Clients, old_clients_json().as_bytes()).unwrap();
+        no_old_secrets(&c);
+        let a = sanitized_store_text(StoreKind::Anchors, old_anchors_json().as_bytes()).unwrap();
+        no_old_secrets(&a);
+        assert!(a.contains("\"preference\": 3"));
+        // уже чистый v2 проходит как есть
+        let v2 = serde_json::to_string_pretty(&PairedClientStore::default()).unwrap();
+        assert_eq!(sanitized_store_text(StoreKind::Clients, v2.as_bytes()).unwrap(), v2);
+        // мусор, будущая версия, v2 с секретным полем — в копию не попадают
+        assert!(sanitized_store_text(StoreKind::Clients, b"\xff\xfe").is_none());
+        assert!(sanitized_store_text(StoreKind::Anchors, b"{oops").is_none());
+        assert!(sanitized_store_text(StoreKind::Clients, br#"{"version":9,"clients":{}}"#).is_none());
+        assert!(sanitized_store_text(StoreKind::Clients, format!(r#"{{"version":2,"clients":{{}},"resume_secret_hex":"{OLD_RESUME_SECRET}"}}"#).as_bytes()).is_none());
+    }
+
+    /// Страж по исходникам: механизма возобновления и хранения рабочего ключа в коде больше нет.
+    #[test]
+    fn the_resume_mechanism_is_gone_from_the_sources() {
+        let sources = [
+            ("transport.rs", include_str!("transport.rs")),
+            ("server.rs", include_str!("../web/server.rs")),
+            ("node_backup.rs", include_str!("../node_backup.rs")),
+            ("pairing.rs (до тестов)", include_str!("pairing.rs").split("#[cfg(test)]\nmod tests {").next().unwrap()),
+        ];
+        for (name, text) in sources {
+            for banned in ["PKT_RESUME", "PKT_SESSION_ISSUE", "compute_resume_mac", "derive_resume_key", "new_with_session_key", "resume_secret()", "session_key()", "SessionToken", "handle_resume_packet", "handle_session_issue", "encode_resume", "decode_resume"] {
+                assert!(!text.contains(banned), "{name}: осталось {banned}");
+            }
+        }
     }
 }
