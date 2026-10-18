@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_desktop/transport/api.dart' show AdminToken;
 import 'shell_m2_test.dart' as m2;
 import 'shell_m2_test.dart' show FeatureApi;
 import 'widget_test.dart' show FakeApi, start, click, stop, admin;
@@ -58,6 +59,24 @@ void main() {
     await click(t, 'Сохранить пароль администратора');
     expect(api.calls.contains('/api/admin/password'), true);
     expect(find.text('Пароль администратора сохранён.'), findsOneWidget);
+    await stop(t);
+  });
+
+  testWidgets('потеря фокуса окна не отзывает токен администратора (иначе страницы управления отвечали бы 403)', (t) async {
+    final api = FakeApi();
+    await start(t, api);
+    await click(t, 'Войти');
+    await admin(t, 'Статус узла');
+    expect(AdminToken.value, 'tok-test', reason: 'после ввода пароля токен выдан');
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump();
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pumpAndSettle();
+    expect(AdminToken.value, 'tok-test', reason: 'переключение окна токен не сбрасывает');
+    expect(find.text('Личный аккаунт'), findsWidgets, reason: 'админ-меню осталось');
+    // а выход из админ-панели токен отзывает
+    await click(t, 'Личный аккаунт');
+    expect(AdminToken.value, isNull);
     await stop(t);
   });
 }

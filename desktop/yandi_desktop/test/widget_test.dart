@@ -38,7 +38,7 @@ class FakeApi implements Api {
     if (path == '/api/admin/session') {
       if (method == 'DELETE') adminActive = false;
       if (body != null) adminActive = true;
-      return {'ok': true, 'active': adminActive};
+      return {'ok': true, 'active': adminActive, if (body != null) 'token': 'tok-test'};
     }
     if (path == '/api/notices') return {'items': notices, 'unread': notices.length, 'admin_active': adminActive};
     if (path == '/api/notices/ack') return {'ok': true};

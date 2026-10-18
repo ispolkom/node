@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'theme.dart';
 import 'package:flutter/material.dart';
 import 'transport/api.dart';
@@ -693,14 +694,24 @@ class _GuestPairingPanelState extends State<GuestPairingPanel> {
     load();
   }
 
+  Timer? retry;
+  int attempts = 0;
+  @override
+  void dispose() {
+    retry?.cancel();
+    super.dispose();
+  }
+
+  /// Результат принимается, пока панель на экране; при сбое загрузка повторяется (иначе переключатель оставался бы выключенным навсегда).
   Future<void> load() async {
+    retry?.cancel();
     try {
       final d = await widget.api.request('/api/guest-pairing');
-      if (active) setState(() { data = d; error = null; });
+      if (mounted) setState(() { data = d; error = null; attempts = 0; });
     } catch (e) {
-      if (active) {
-        setState(() => error = e is ApiFailure ? e.message : const ApiFailure('protocol').message);
-      }
+      if (!mounted) return;
+      setState(() => error = e is ApiFailure ? (e.status == 403 ? 'Нужен сеанс администратора: выйдите из админ-панели и войдите снова.' : e.message) : const ApiFailure('protocol').message);
+      if (attempts++ < 5) retry = Timer(const Duration(seconds: 3), () { if (mounted && data == null) load(); });
     }
   }
 
@@ -754,6 +765,8 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
   final days = TextEditingController();
   Map<String, dynamic>? data;
   String? error, saved;
+  int attempts = 0;
+  Timer? retry;
   bool get active => mounted && widget.isActive();
   @override
   void initState() {
@@ -763,16 +776,32 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
 
   @override
   void dispose() {
+    retry?.cancel();
     days.dispose();
     super.dispose();
   }
 
+  /// Понятный текст: сеанс администратора мог закончиться (узел перезапущен, прошло 15 минут) — это не «протокол».
+  String describe(Object e) {
+    if (e is ApiFailure) {
+      if (e.status == 403) return 'Нужен сеанс администратора: выйдите из админ-панели и войдите снова.';
+      return e.message;
+    }
+    return const ApiFailure('protocol').message;
+  }
+
+  /// Первая загрузка не должна оставлять поле выключенным навсегда: результат принимается, пока панель на экране (а не только пока страница
+  /// «активна» в смысле опроса), а при сбое загрузка повторяется несколько раз и есть кнопка «Повторить».
   Future<void> load() async {
+    retry?.cancel();
     try {
       final d = await widget.api.request('/api/mail-policy');
-      if (active) setState(() { data = d; days.text = '${d['days']}'; error = null; });
+      if (!mounted) return;
+      setState(() { data = d; days.text = '${d['days']}'; error = null; attempts = 0; });
     } catch (e) {
-      if (active) setState(() => error = e is ApiFailure ? e.message : const ApiFailure('protocol').message);
+      if (!mounted) return;
+      setState(() => error = describe(e));
+      if (attempts++ < 5) retry = Timer(const Duration(seconds: 3), () { if (mounted && data == null) load(); });
     }
   }
 
@@ -784,8 +813,13 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
       return;
     }
     await widget.mutate(() async {
-      await widget.api.request('/api/mail-policy', body: {'days': n});
-      if (active) {
+      try {
+        await widget.api.request('/api/mail-policy', body: {'days': n});
+      } catch (e) {
+        if (mounted) setState(() { error = describe(e); saved = null; });
+        return;
+      }
+      if (mounted) {
         setState(() { error = null; saved = 'Срок хранения почты сохранён.'; });
         await load();
       }
@@ -798,14 +832,16 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
       const UiText('Срок хранения почты', style: TextStyle(fontSize: 22)),
       if (error != null) UiText(error!),
       if (saved != null) UiText(saved!),
+      if (data == null) SolidButton('Повторить загрузку', onPressed: () { attempts = 0; load(); }),
       const UiText('Сообщения между устройствами лежат на узле (шифртекстом), пока получатель не заберёт, но не дольше этого срока. Короче срок — меньше следов, если узел попадёт в чужие руки; длиннее — дольше ждёт телефон, который давно не выходил на связь. Гостям срок всегда сутки.'),
       TextField(
         controller: days,
-        enabled: !widget.busy && data != null,
+        // поле доступно всегда, пока не идёт сохранение: пределы по умолчанию 1–30 до загрузки, а сбой загрузки виден текстом выше
+        enabled: !widget.busy,
         keyboardType: TextInputType.number,
         decoration: InputDecoration(labelText: tr(context, 'Суток (1–30)'), border: const OutlineInputBorder(), contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 14)),
       ),
-      SolidButton('Сохранить срок', onPressed: widget.busy || data == null ? null : save),
+      SolidButton('Сохранить срок', onPressed: widget.busy ? null : save),
     ],
   );
 }

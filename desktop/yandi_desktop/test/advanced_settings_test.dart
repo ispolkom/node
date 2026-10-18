@@ -7,12 +7,18 @@ import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
 
 class SettingsApi extends m2.FeatureApi {
+  /// Сколько первых загрузок `/api/mail-policy` отвечают 403 (сеанс администратора ещё не действует).
+  int failMailPolicyLoads = 0;
   @override
   Future<Map<String, dynamic>> request(
     String path, {
     Map<String, dynamic>? body,
     String? method,
   }) async {
+    if (path == '/api/mail-policy' && body == null && failMailPolicyLoads > 0) {
+      failMailPolicyLoads--;
+      throw const ApiFailure('forbidden', 403);
+    }
     if (path == '/api/settings') {
       if (body != null) {
         calls.add(path);
@@ -310,6 +316,20 @@ void main() {
     expect(api.bodies.last, {'days': 3});
     expect(find.text('Срок хранения почты сохранён.'), findsOneWidget);
     expect(errors, isEmpty);
+    await m1.stop(t);
+  });
+  testWidgets('срок почты: сбой первой загрузки не выключает поле навсегда — есть текст, повтор и работающее сохранение', (t) async {
+    final api = SettingsApi()..failMailPolicyLoads = 1;
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: SingleChildScrollView(child: MailPolicyPanel(api: api, busy: false, isActive: () => false, mutate: (a) async { await a(); })))));
+    await t.pumpAndSettle();
+    expect(find.textContaining('Нужен сеанс администратора'), findsOneWidget, reason: 'причина показана человеку');
+    expect(t.widget<TextField>(find.byType(TextField)).enabled, true, reason: 'поле не выключено, даже когда страница не «активна» и загрузка не удалась');
+    await m1.click(t, 'Повторить загрузку');
+    expect(t.widget<TextField>(find.byType(TextField)).controller!.text, '7', reason: 'после повтора значение загружено');
+    await t.enterText(find.byType(TextField), '5');
+    await m1.click(t, 'Сохранить срок');
+    expect(api.bodies.last, {'days': 5});
+    expect(find.text('Срок хранения почты сохранён.'), findsOneWidget);
     await m1.stop(t);
   });
   test('the erase confirmation accepts the word of either language in any case', () {

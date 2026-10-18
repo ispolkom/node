@@ -91,12 +91,19 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       timer = Timer.periodic(const Duration(seconds: 1), (_) => poll());
   }
 
-  void wipe() {
-    // сеанс администратора не переживает блокировку, выход и смену пользователя: токен забывается, админ-страницы закрываются
-    AdminToken.value = null;
-    adminMode = false;
-    notices = [];
-    unreadNotices = 0;
+  static const adminPages = {'Статус узла', 'Шлюзы', 'Жалобы', 'Настройки узла'};
+
+  /// [keepAdmin]: потеря фокуса окна стирает содержимое, но не сеанс администратора — он живёт на узле ограниченное время и ничего личного
+  /// не содержит; иначе после любого переключения окна страницы управления остались бы на экране без токена и отвечали бы 403.
+  void wipe({bool keepAdmin = false}) {
+    if (!keepAdmin) {
+      // сеанс администратора не переживает блокировку, выход, обрыв связи и смену пользователя: токен забывается, админ-страницы закрываются
+      AdminToken.value = null;
+      adminMode = false;
+      if (adminPages.contains(page)) page = 'Панель';
+      notices = [];
+      unreadNotices = 0;
+    }
     preferences.reset();
     background.reset();
     epoch++;
@@ -141,7 +148,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       });
     }
     timer?.cancel();
-    wipe();
+    wipe(keepAdmin: true);
     if (mounted) setState(() {});
     if (visible) {
       checkAuth(preserveEntry: entered);
