@@ -688,12 +688,26 @@ fn inject_rollback_write_failure() -> bool {
     }
 }
 
-/// Все замки файлов связи, которые затрагивает восстановление, берутся ДО первой замены и держатся до конца отката (P19-1); порядок
-/// фиксированный (по пути), один и тот же путь не берётся дважды.
-fn with_locks<R>(paths: &[PathBuf], f: &mut dyn FnMut() -> R) -> Result<R, String> {
-    match paths.split_first() {
-        None => Ok(f()),
-        Some((p, rest)) => crate::netlayer::pairing::locked(p, || with_locks(rest, f)).map_err(|e| e.to_string())?,
+/// Физическое имя цели для сравнения: самый глубокий существующий родитель приводится к реальному пути (ссылки и `..` раскрываются), остаток
+/// дописывается. Два разных написания одного и того же файла дают один ключ.
+fn physical_key(p: &Path) -> PathBuf {
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut cur = p.to_path_buf();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&cur) {
+            let mut out = real;
+            for part in rest.iter().rev() {
+                out.push(part);
+            }
+            return out;
+        }
+        match (cur.parent().map(|d| d.to_path_buf()), cur.file_name().map(|n| n.to_os_string())) {
+            (Some(parent), Some(name)) if parent != cur => {
+                rest.push(name);
+                cur = parent;
+            }
+            _ => return p.to_path_buf(),
+        }
     }
 }
 
@@ -703,6 +717,17 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
     let mut targets = Vec::new();
     for e in &entries {
         targets.push(target_path_with(l, e.area, &e.path, anchors_override)?);
+    }
+    // две записи копии (или запись и путь --anchor-store) не должны вести в один и тот же физический файл: иначе замена и откат
+    // перезаписывали бы друг друга (P20-2), а блокировки алиасов висели бы друг на друге (P20-1); проверка — до любой записи
+    {
+        let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        for (e, t) in entries.iter().zip(&targets) {
+            let label = format!("{:?}/{}", e.area, e.path);
+            if let Some(first) = seen.insert(physical_key(t), label.clone()) {
+                return Err(RestoreFailure::from(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено, ничего не изменено", t.display())));
+            }
+        }
     }
     if !opt.force {
         let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
@@ -800,7 +825,7 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
             let mut old: Option<PathBuf> = None;
             if let Some(kind) = pairing_kind {
                 let prior = crate::netlayer::pairing::read_bytes_nofollow(path).and_then(|b| crate::netlayer::pairing::sanitized_store_text(*kind, &b)).map(|t| t.into_bytes());
-                pairing_rollback.insert(path.clone(), prior);
+                pairing_rollback.entry(path.clone()).or_insert(prior); // исходное состояние запоминается один раз
             } else if path.exists() && !inject_swap_failure(i) {
                 let o = path.with_file_name(format!("{}.before-restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
                 if let Err(er) = std::fs::rename(path, &o) {
@@ -858,7 +883,7 @@ fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_overr
         }
         sw
     };
-    let sw = match with_locks(&lock_paths, &mut swap_body) {
+    let sw = match crate::netlayer::pairing::locked_many(&lock_paths, &mut swap_body).map_err(|e| e.to_string()) {
         Ok(sw) => sw,
         Err(er) => {
             // замок взять не удалось: ни одна замена не начата
@@ -1639,6 +1664,53 @@ mod tests {
         FAIL_SWAP_AT.with(|c| c.set(None));
         assert!(!err.files_changed, "{err:?}");
         assert!(!t.home.join("paired_clients.json").exists(), "созданный восстановлением файл связи после отката остался");
+    }
+
+    /// P20-2: две записи копии на один файл (текстовый дубликат) отклоняются до любого изменения.
+    #[cfg(unix)]
+    #[test]
+    fn p20_2_duplicate_entries_for_one_file_are_rejected_before_any_change() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_clients.json");
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: br#"{"version":2,"clients":{}}"#.to_vec() });
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: br#"{"version":2,"clients":{}}"#.to_vec() });
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        let before = br#"{"version":2,"clients":{}}"#;
+        std::fs::write(t.home.join("paired_clients.json"), before).unwrap();
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        assert!(err.message.contains("один и тот же файл"), "{}", err.message);
+        assert!(!err.files_changed);
+        assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), before, "ничего не изменено");
+        assert!(!t.keys.exists() && !t.data.exists(), "каталоги других областей не созданы");
+    }
+
+    /// P20-1: путь --anchor-store, который через ссылку ведёт в тот же файл, что и файл клиентов, отклоняется сразу и не зависает на блокировках.
+    #[cfg(unix)]
+    #[test]
+    fn p20_1_an_alias_of_the_clients_file_is_rejected_and_never_hangs() {
+        let (opened, _last, _) = pairing_copy();
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = d.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let t = Layout { keys: d.path().join("keys"), data: d.path().join("data"), home: link, port: 9000 };
+        let alias = real.join("paired_clients.json"); // тот же файл, что и «home-link/paired_clients.json»
+        let alias_s = alias.to_str().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(restore_core(&opened, &t, &RestoreOptions { force: true }, Some(&alias_s)).map(|_| ()).map_err(|f| f.message));
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("восстановление зависло на блокировках алиасов");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("один и тот же файл"), "{msg}");
+        assert!(!alias.exists(), "ничего не записано");
     }
 
     /// P19-2 и P19-4: откат не удался — это в предупреждениях и в признаке изменённых файлов; пропущенные файлы связи не теряются.

@@ -273,40 +273,86 @@ fn read_text(path: &Path) -> std::result::Result<Option<String>, String> {
     }
 }
 
+/// Единственный замок на не-Unix: один и тот же для одиночных транзакций и для `locked_many`, чтобы они исключали друг друга.
+#[cfg(not(unix))]
+static FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Открыть (создав) файл блокировки `<имя>.lock` рядом с файлом хранилища, ещё не блокируя его.
+#[cfg(unix)]
+fn open_lock_file(path: &Path) -> Result<(fs::File, PathBuf)> {
+    use std::os::unix::fs::OpenOptionsExt;
+    if let Some(parent) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
+    }
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "store".into());
+    let lock_path = path.with_file_name(format!(".{name}.lock"));
+    let lock = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(&lock_path)
+        .with_context(|| format!("блокировка {:?}", lock_path))?;
+    Ok((lock, lock_path))
+}
+
+#[cfg(unix)]
+fn flock_exclusive(lock: &fs::File, lock_path: &Path) -> Result<()> {
+    use std::os::unix::io::AsRawFd;
+    // flock принадлежит открытому описанию файла: каждый вызов открывает файл заново, поэтому потоки одного процесса тоже исключают друг друга
+    if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
+        bail!("flock {:?}: {}", lock_path, std::io::Error::last_os_error());
+    }
+    Ok(())
+}
+
 /// Одна транзакция над файлом хранилища: блокировка на стабильном соседнем файле `<имя>.lock` (flock) держится на всё чтение,
 /// преобразование и запись — и между потоками, и между процессами (CLI-импорт, выдача права, миграция, восстановление).
-/// Вложенный вызов из того же потока не допускается (взаимная блокировка).
+/// Вложенный вызов из того же потока не допускается (взаимная блокировка); нескольким файлам — `locked_many`.
 fn with_lock<R>(path: &Path, f: impl FnOnce() -> R) -> Result<R> {
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        use std::os::unix::io::AsRawFd;
-        if let Some(parent) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
-            fs::create_dir_all(parent).with_context(|| format!("create_dir_all {:?}", parent))?;
-        }
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_else(|| "store".into());
-        let lock_path = path.with_file_name(format!(".{name}.lock"));
-        let lock = fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
-            .open(&lock_path)
-            .with_context(|| format!("блокировка {:?}", lock_path))?;
-        // flock принадлежит открытому описанию файла: каждый вызов открывает файл заново, поэтому потоки одного процесса тоже исключают друг друга
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX) } != 0 {
-            bail!("flock {:?}: {}", lock_path, std::io::Error::last_os_error());
-        }
+        let (lock, lock_path) = open_lock_file(path)?;
+        flock_exclusive(&lock, &lock_path)?;
         let r = f();
         drop(lock); // закрытие снимает блокировку
         Ok(r)
     }
     #[cfg(not(unix))]
     {
-        static FALLBACK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _g = FALLBACK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = path;
+        Ok(f())
+    }
+}
+
+/// Блокировка нескольких файлов хранилища разом (восстановление): все блокировки берутся ДО `f` и держатся до его конца. Порядок — по
+/// физическому объекту (устройство, inode файла блокировки), а не по написанию пути, поэтому разные пути-алиасы одного и того же файла
+/// не зависают друг на друге и порядок у всех вызывающих одинаковый (P20-1). На не-Unix берётся один общий замок один раз.
+pub(crate) fn locked_many<R>(paths: &[PathBuf], f: impl FnOnce() -> R) -> Result<R> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let mut opened: Vec<((u64, u64), fs::File, PathBuf)> = Vec::new();
+        for p in paths {
+            let (file, lock_path) = open_lock_file(p)?;
+            let m = file.metadata().with_context(|| format!("блокировка {:?}", lock_path))?;
+            opened.push(((m.dev(), m.ino()), file, lock_path));
+        }
+        opened.sort_by_key(|(id, _, _)| *id);
+        opened.dedup_by_key(|(id, _, _)| *id);
+        for (_, file, lock_path) in &opened {
+            flock_exclusive(file, lock_path)?;
+        }
+        let r = f();
+        drop(opened);
+        Ok(r)
+    }
+    #[cfg(not(unix))]
+    {
+        let _g = FALLBACK.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = paths;
         Ok(f())
     }
 }
