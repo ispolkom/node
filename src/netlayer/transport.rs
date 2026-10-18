@@ -1148,7 +1148,9 @@ impl P2PTransport {
                                     Ok(k) => k,
                                     Err(e) => {
                                         eprintln!("[ws-server] {} session not established: {}", crate::util::logsafe::a(&conn.peer_addr), e);
-                                        transport_for_pump.ws_outgoing.lock().await.remove(&hello.node_id);
+                                        // маршрут этого канала ещё не опубликован (он встаёт после Hello-Ack); чужой действующий маршрут того же узла
+                                        // сбросить нельзя (H18-5): убирается только свой, если он вдруг уже есть
+                                        remove_route_if_same(&mut *transport_for_pump.ws_outgoing.lock().await, &hello.node_id, &conn.outgoing);
                                         return;
                                     }
                                 }
