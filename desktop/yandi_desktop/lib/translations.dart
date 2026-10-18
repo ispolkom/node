@@ -4,7 +4,7 @@ const moreEnglishLabels = <String, String>{
   'Быстро и без пароля стирает закрытую среду этого компьютера. Нужно только подтвердить словом, чтобы не нажать случайно.': 'Quickly erases this computer\'s closed environment without a password. Only a confirmation word is needed, to avoid pressing it by accident.',
   'Стереть закрытую среду?': 'Erase the closed environment?',
   'Будут стёрты ключи и зашифрованные данные закрытой среды на этом компьютере: история, группы, ключи собеседника, пул прокси. Вернуть их нельзя ни по паролю, ни по сид-фразе. Личность узла и файл резервной копии останутся.': 'Keys and encrypted data of the closed environment on this computer will be erased: history, groups, the contact key, the proxy pool. They cannot be recovered with a password or a seed phrase. The node identity and the backup file remain.',
-  'Введите слово СТЕРЕТЬ': 'Type the word СТЕРЕТЬ',
+  'Введите слово СТЕРЕТЬ': 'Type the word DELETE',
   'Стереть': 'Erase',
   'Стереть закрытую среду': 'Erase the closed environment',
   'Слово не совпало: ничего не стёрто.': 'The word did not match: nothing was erased.',

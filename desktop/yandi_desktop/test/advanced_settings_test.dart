@@ -312,6 +312,14 @@ void main() {
     expect(errors, isEmpty);
     await m1.stop(t);
   });
+  test('the erase confirmation accepts the word of either language in any case', () {
+    for (final ok in ['СТЕРЕТЬ', ' стереть ', 'DELETE', 'delete', 'Delete']) {
+      expect(PanicPanel.confirmed(ok), true, reason: ok);
+    }
+    for (final no in ['', 'нет', 'ERASE', 'DELET', 'СТЕРЕТЬ!']) {
+      expect(PanicPanel.confirmed(no), false, reason: no);
+    }
+  });
   testWidgets('emergency erase: needs the confirmation word, the wrong word sends nothing', (t) async {
     final api = SettingsApi();
     final errors = <Object>[];

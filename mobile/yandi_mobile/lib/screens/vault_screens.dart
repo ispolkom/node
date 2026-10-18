@@ -617,9 +617,12 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
 /// Быстрое стирание всех данных YANDI на телефоне без пароля (когда нет времени или пароля под рукой): подтверждается только словом.
 class VaultPanicScreen extends StatefulWidget {
   const VaultPanicScreen({super.key});
-  static const word = 'СТЕРЕТЬ';
-  /// Подтверждено ли стирание введённым словом (регистр и пробелы по краям не важны).
-  static bool confirmed(String typed) => typed.trim().toUpperCase() == word;
+  static const word = 'СТЕРЕТЬ', wordEn = 'DELETE';
+  /// Подтверждено ли стирание введённым словом: русское или английское (на клавиатуре может не быть кириллицы), регистр и пробелы по краям не важны.
+  static bool confirmed(String typed) {
+    final t = typed.trim().toUpperCase();
+    return t == word || t == wordEn;
+  }
   @override
   State<VaultPanicScreen> createState() => _VaultPanicScreenState();
 }
@@ -638,7 +641,7 @@ class _VaultPanicScreenState extends State<VaultPanicScreen> {
   Future<void> _erase() async {
     if (_busy) return;
     if (!VaultPanicScreen.confirmed(_word.text)) {
-      setState(() => _error = 'Для стирания введите слово ${VaultPanicScreen.word}');
+      setState(() => _error = 'Для стирания введите слово ${VaultPanicScreen.word} (по-английски ${VaultPanicScreen.wordEn})');
       return;
     }
     setState(() { _busy = true; _error = null; });
@@ -656,7 +659,7 @@ class _VaultPanicScreenState extends State<VaultPanicScreen> {
       appBar: AppBar(backgroundColor: AppTheme.surface, iconTheme: const IconThemeData(color: AppTheme.text), title: const Text('Экстренное стирание', style: TextStyle(color: AppTheme.text))),
       body: ListView(padding: const EdgeInsets.all(16), children: [
         const Text('Сразу, без пароля, будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Вернуть их нельзя ни по паролю, ни по секретным словам. '
-            'Чтобы не нажать случайно, введите слово СТЕРЕТЬ.', style: TextStyle(color: AppTheme.textSecondary)),
+            'Чтобы не нажать случайно, введите слово СТЕРЕТЬ (или DELETE, если нет русской клавиатуры).', style: TextStyle(color: AppTheme.textSecondary)),
         const SizedBox(height: 16),
         TextField(
           controller: _word,

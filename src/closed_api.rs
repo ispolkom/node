@@ -408,14 +408,18 @@ struct PanicBody {
 /// Слово, которое нужно ввести для экстренного стирания (защита от случайного нажатия и от чужого запроса без ведома владельца).
 pub const PANIC_WORD: &str = "СТЕРЕТЬ";
 
+/// Слово на другом языке интерфейса: у человека может не быть кириллицы на клавиатуре. Принимаются оба слова в любом регистре.
+pub const PANIC_WORD_EN: &str = "DELETE";
+
 fn panic_word_ok(typed: &str) -> bool {
-    typed.trim() == PANIC_WORD
+    let t = typed.trim().to_uppercase();
+    t == PANIC_WORD || t == PANIC_WORD_EN
 }
 
 async fn panic_erase(Json(b): Json<PanicBody>) -> Response {
     let e = match env() { Ok(e) => e, Err(r) => return r };
     if !panic_word_ok(&b.confirm) {
-        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Для стирания введите слово {PANIC_WORD}")}))).into_response();
+        return (StatusCode::BAD_REQUEST, Json(json!({"error": format!("Для стирания введите слово {PANIC_WORD} (по-английски {PANIC_WORD_EN})")}))).into_response();
     }
     match e.panic_erase().await {
         Ok(()) => ok(e),
@@ -498,8 +502,9 @@ mod tests {
 
     #[test]
     fn the_panic_word_is_exact_apart_from_edge_spaces() {
-        assert!(panic_word_ok("СТЕРЕТЬ") && panic_word_ok("  СТЕРЕТЬ "));
-        for no in ["", "нет", "стереть", "СТЕРЕТЬ!", "ERASE"] {
+        assert!(panic_word_ok("СТЕРЕТЬ") && panic_word_ok("  СТЕРЕТЬ ") && panic_word_ok("стереть"), "регистр не важен");
+        assert!(panic_word_ok("DELETE") && panic_word_ok(" delete ") && panic_word_ok("Delete"), "английское слово для клавиатур без кириллицы");
+        for no in ["", "нет", "СТЕРЕТЬ!", "ERASE", "DELET", "стереть всё"] {
             assert!(!panic_word_ok(no), "{no}");
         }
     }

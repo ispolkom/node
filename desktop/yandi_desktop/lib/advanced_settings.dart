@@ -812,7 +812,13 @@ class _MailPolicyPanelState extends State<MailPolicyPanel> {
 
 /// Экстренное стирание закрытой среды (история ПК, группы ПК, ключи собеседника, пул прокси): без пароля, но только со словом-подтверждением.
 class PanicPanel extends StatefulWidget {
-  static const word = 'СТЕРЕТЬ';
+  static const word = 'СТЕРЕТЬ', wordEn = 'DELETE';
+  /// Принимаются оба слова в любом регистре: на английском интерфейсе показывается DELETE (на клавиатуре может не быть кириллицы).
+  static bool confirmed(String typed) {
+    final t = typed.trim().toUpperCase();
+    return t == word || t == wordEn;
+  }
+
   final Api api;
   final bool busy;
   final bool Function() isActive;
@@ -829,7 +835,7 @@ class _PanicPanelState extends State<PanicPanel> {
   Future<void> erase() async {
     final typed = await showDialog<String>(context: context, builder: (_) => const _PanicWordDialog());
     if (typed == null || !active) return;
-    if (typed.trim() != PanicPanel.word) {
+    if (!PanicPanel.confirmed(typed)) {
       setState(() => done = 'Слово не совпало: ничего не стёрто.');
       return;
     }
