@@ -507,6 +507,7 @@ impl WebServer {
             .route("/api/status", get(api_status))
             .route("/api/admin/session", get(api_admin_session_get).post(api_admin_session_post).delete(api_admin_session_delete))
             .route("/api/admin/password", post(api_admin_password_post))
+            .route("/api/alerts", get(api_alerts))
             .route("/api/notices", get(api_notices_get))
             .route("/api/notices/ack", post(api_notices_ack))
             .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
@@ -3593,6 +3594,20 @@ async fn api_admin_session_delete(headers: HeaderMap) -> Json<serde_json::Value>
         crate::web::admin::end();
     }
     Json(serde_json::json!({"ok": true}))
+}
+
+/// Счётчики для колокольчика в шапке оболочки. **Только числа** (ни текста, ни имён, ни времени): они не раскрывают содержимого, поэтому
+/// доступны и при запертой закрытой среде. `messages` — сообщения, ожидающие владельца ПК на узле; `notices` — непрочитанные извещения админ-панели.
+async fn api_alerts() -> Json<serde_json::Value> {
+    #[cfg(unix)]
+    let locked = crate::closed_api::is_locked();
+    #[cfg(not(unix))]
+    let locked = false;
+    Json(serde_json::json!({
+        "messages": crate::mobile_api::pc_inbox_pending(),
+        "notices": crate::web::admin::view(None)["unread"].as_u64().unwrap_or(0),
+        "locked": locked,
+    }))
 }
 
 async fn api_notices_get(headers: HeaderMap) -> Json<serde_json::Value> {

@@ -46,6 +46,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   String page = 'Панель';
   /// Режим администратора (docs/ROLES.md): отдельное меню; сеанс держит узел 15 минут по паролю.
   bool adminMode = false;
+  /// Счётчики колокольчика (только числа; считаются узлом без расшифровки, поэтому видны и при запертой среде).
+  int alertMessages = 0, alertNotices = 0;
   /// Предупреждение после восстановления из копии (что не очищено); остаётся на экране, пока его не закроют.
   String? restoreWarning;
   List<Map<String, dynamic>> notices = [];
@@ -248,6 +250,32 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     await poll(force: true);
   }
 
+  /// Колокольчик: сколько сообщений ждёт на узле и сколько непрочитанных извещений админ-панели. Содержимое не запрашивается.
+  Future<void> refreshAlerts(int own) async {
+    try {
+      final r = await widget.api.request('/api/alerts');
+      if (!mounted || own != epoch) return;
+      int n(Object? v) => v is num ? v.toInt().clamp(0, 99999) : 0;
+      final m = n(r['messages']), x = n(r['notices']);
+      if (m != alertMessages || x != alertNotices) setState(() { alertMessages = m; alertNotices = x; });
+    } catch (_) {}
+  }
+
+  /// Число на колокольчике: ожидающие сообщения + непрочитанные чаты текущего сеанса + новые извещения админ-панели.
+  int get alertTotal => alertMessages + background.unread.length + alertNotices;
+
+  /// Подсказка к колокольчику: что именно посчитано (без имён и текста).
+  String get alertHint {
+    final parts = <String>[
+      if (alertMessages > 0) '${preferences.english ? 'Messages waiting' : 'Сообщений ждёт'}: $alertMessages',
+      if (background.unread.isNotEmpty) '${preferences.english ? 'Unread chats' : 'Непрочитанных чатов'}: ${background.unread.length}',
+      if (alertNotices > 0) '${preferences.english ? 'Admin notices' : 'Извещений админ-панели'}: $alertNotices',
+    ];
+    final base = preferences.english ? 'OS notifications' : 'Уведомления ОС';
+    if (parts.isEmpty) return base;
+    return '$base\n${parts.join(' · ')}${preferences.english ? '\nContent is hidden while the vault is locked' : '\nСодержимое скрыто, пока закрытая среда заперта'}';
+  }
+
   /// Извещения администратора и состояние сеанса админ-панели (ошибки не мешают: у старых узлов ручки нет).
   Future<void> refreshNotices(int own) async {
     try {
@@ -357,7 +385,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
         }
       }
       await refreshVault(own);
-      if (force || current % 3 == 0) await refreshNotices(own);
+      if (force || current % 3 == 0) {
+        await refreshNotices(own);
+        await refreshAlerts(own);
+      }
       if (!mounted || own != epoch || page != 'Статус узла') return;
       if (force || current % 5 == 0) {
         final result = await widget.api.request('/api/status');
@@ -971,26 +1002,47 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                     preferences.changed();
                   },
                 ),
-                IconButton(
-                  color: Icq.panel,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 30,
-                    height: 30,
-                  ),
-                  tooltip: preferences.english
-                      ? 'OS notifications'
-                      : 'Уведомления ОС',
-                  icon: Icon(
-                    preferences.notifications
-                        ? Icons.notifications_active_outlined
-                        : Icons.notifications_none,
-                    size: 18,
-                  ),
-                  onPressed: () {
-                    preferences.notifications = !preferences.notifications;
-                    preferences.changed();
-                  },
+                Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    IconButton(
+                      color: Icq.panel,
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 30,
+                        height: 30,
+                      ),
+                      tooltip: alertHint,
+                      icon: Icon(
+                        preferences.notifications
+                            ? Icons.notifications_active_outlined
+                            : Icons.notifications_none,
+                        size: 18,
+                      ),
+                      onPressed: () {
+                        preferences.notifications = !preferences.notifications;
+                        preferences.changed();
+                      },
+                    ),
+                    if (entered && connected && alertTotal > 0)
+                      Positioned(
+                        key: const ValueKey('alert-badge'),
+                        right: -2,
+                        top: -2,
+                        child: IgnorePointer(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
+                            decoration: BoxDecoration(color: const Color(0xffb3261e), borderRadius: BorderRadius.circular(8)),
+                            child: Text(
+                              alertTotal > 99 ? '99+' : '$alertTotal',
+                              textAlign: TextAlign.center,
+                              style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                        ),
+                      ),
+                  ],
                 ),
                 if (entered)
                   IconButton(

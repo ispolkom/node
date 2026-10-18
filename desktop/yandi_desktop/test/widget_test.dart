@@ -22,6 +22,8 @@ class FakeApi implements Api {
   };
   /// Сеанс администратора, как его держит узел, и извещения для личного аккаунта.
   bool adminActive = false;
+  /// Счётчики колокольчика, как их отдаёт узел (только числа).
+  int alertMessages = 0, alertNotices = 0;
   List<Map<String, dynamic>> notices = [];
   @override
   Future<Map<String, dynamic>> request(
@@ -42,6 +44,7 @@ class FakeApi implements Api {
     }
     if (path == '/api/notices') return {'items': notices, 'unread': notices.length, 'admin_active': adminActive};
     if (path == '/api/notices/ack') return {'ok': true};
+    if (path == '/api/alerts') return {'messages': alertMessages, 'notices': alertNotices, 'locked': false};
     if (path == '/api/status') return {'short_id': 'abc', 'status': 'online'};
     if (path == '/api/nodes') return {'nodes': []};
     if (path == '/api/speed') return {'rx_speed': 12};

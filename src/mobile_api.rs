@@ -304,6 +304,13 @@ fn sweep_pc_inbox() {
     }
 }
 
+/// Сколько сообщений ждёт владельца ПК. Только число: содержимое (шифртекст), отправители и время наружу не выдаются, поэтому число можно
+/// показывать и при запертой закрытой среде.
+pub(crate) fn pc_inbox_pending() -> usize {
+    sweep_pc_inbox();
+    with_pc_inbox(|l| l.len())
+}
+
 /// Положить в ожидание. false — очередь переполнена (телефон увидит «не доставлено»).
 fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
     use base64::Engine;
@@ -3049,6 +3056,18 @@ mod hardening_tests {
         // роль в старом devices.json отсутствует — это владелец
         let old: Device = serde_json::from_str(r#"{"token_hash":"t","name":"n","created_ms":7,"acked_ts":0}"#).unwrap();
         assert_eq!(old.role, "owner");
+    }
+
+    #[test]
+    fn the_pending_count_for_the_pc_is_a_bare_number_and_follows_the_queue() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = with_pc_inbox(|l| l.clear());
+        assert_eq!(pc_inbox_pending(), 0);
+        assert!(queue_for_pc("dev-a", b"ciphertext-1"));
+        assert!(queue_for_pc("dev-b", b"ciphertext-2"));
+        assert_eq!(pc_inbox_pending(), 2);
+        let _ = with_pc_inbox(|l| l.clear());
+        assert_eq!(pc_inbox_pending(), 0);
     }
 
     #[test]

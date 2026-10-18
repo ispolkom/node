@@ -79,4 +79,41 @@ void main() {
     expect(AdminToken.value, isNull);
     await stop(t);
   });
+
+  testWidgets('колокольчик: красный кружок с числом (ожидающие сообщения + извещения), без числа — кружка нет', (t) async {
+    final api = FakeApi();
+    await start(t, api);
+    await click(t, 'Войти');
+    expect(find.byKey(const ValueKey('alert-badge')), findsNothing, reason: 'нулевое число — без кружка');
+    api.alertMessages = 3;
+    api.alertNotices = 1;
+    await click(t, 'Главная'); // обновляет опрос
+    await t.pump(const Duration(seconds: 4));
+    await t.pumpAndSettle();
+    final badge = find.byKey(const ValueKey('alert-badge'));
+    expect(badge, findsOneWidget);
+    expect(find.descendant(of: badge, matching: find.text('4')), findsOneWidget, reason: '3 сообщения + 1 извещение');
+    api.alertMessages = 0;
+    api.alertNotices = 0;
+    await click(t, 'Главная');
+    await t.pump(const Duration(seconds: 4));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('alert-badge')), findsNothing, reason: 'после прочтения кружок исчезает');
+    await stop(t);
+  });
+
+  testWidgets('колокольчик показывает число и при запертой закрытой среде (без содержимого)', (t) async {
+    final api = FakeApi()..configured = true..unlocked = false;
+    api.alertMessages = 2;
+    await start(t, api);
+    await click(t, 'Войти');
+    await t.pump(const Duration(seconds: 4));
+    await t.pumpAndSettle();
+    final badge = find.byKey(const ValueKey('alert-badge'));
+    expect(badge, findsOneWidget, reason: 'узел отдаёт числа и при запертой среде');
+    expect(find.descendant(of: badge, matching: find.text('2')), findsOneWidget);
+    expect(api.calls.contains('/api/alerts'), true);
+    expect(api.calls.any((p) => p.startsWith('/api/chat') || p.startsWith('/api/groups')), false, reason: 'содержимое чатов при запертой среде не запрашивалось');
+    await stop(t);
+  });
 }
