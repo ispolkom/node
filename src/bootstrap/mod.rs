@@ -47,9 +47,29 @@ pub struct Entry {
     /// страна (ISO-3166 alpha-2), если известна
     #[serde(default)]
     pub region: Option<String>,
-    /// чем узел помогает: `entry`, `relay`, `exit`
+    /// чем узел помогает: `entry`, `relay`, `exit`, `guest` (принимает гостей-телефонов)
     #[serde(default)]
     pub roles: Vec<String>,
+    /// адреса входа для телефонов `адрес:порт` (до 2; адрес — IP или имя): по ним приложение подключается, а узел сам представляется
+    /// (`/mobile/hello`: подпись своего TLS-сертификата ключом `key` из этого списка), так что отпечаток нигде не вводится руками
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobile: Vec<String>,
+}
+
+/// `адрес:порт` для телефона: IP или имя (буквы, цифры, точка, дефис) и порт 1–65535.
+pub fn valid_mobile_addr(a: &str) -> bool {
+    if a.len() > 262 {
+        return false;
+    }
+    if a.parse::<std::net::SocketAddr>().is_ok() {
+        return true;
+    }
+    let Some((host, port)) = a.rsplit_once(':') else { return false };
+    !host.is_empty()
+        && host.len() <= 253
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !host.starts_with(['.', '-'])
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -147,8 +167,14 @@ impl Doc {
                     return Err(BootstrapError::Shape("страна"));
                 }
             }
-            if e.roles.len() > 8 || e.roles.iter().any(|r| !matches!(r.as_str(), "entry" | "relay" | "exit")) {
+            if e.roles.len() > 8 || e.roles.iter().any(|r| !matches!(r.as_str(), "entry" | "relay" | "exit" | "guest")) {
                 return Err(BootstrapError::Shape("роль"));
+            }
+            if e.mobile.len() > 2 || e.mobile.iter().any(|a| !valid_mobile_addr(a)) {
+                return Err(BootstrapError::Shape("адрес для телефона"));
+            }
+            if e.roles.iter().any(|r| r == "guest") && e.mobile.is_empty() {
+                return Err(BootstrapError::Shape("узел для гостей без адреса для телефона"));
             }
         }
         Ok(())
@@ -314,7 +340,7 @@ mod tests {
         hex::encode(key(n).verifying_key().to_bytes())
     }
     fn entry(n: u8) -> Entry {
-        Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()] }
+        Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()], mobile: vec![] }
     }
     fn doc(seq: u64) -> Doc {
         Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], signer: String::new(), signature: String::new() }.sign(&key(99))

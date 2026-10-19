@@ -2948,8 +2948,42 @@ fn router(st: Arc<MobileState>) -> Router {
             "/mobile/pair/guest",
             post(pair_guest).layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(10))),
         )
+        // представление узла до входа (без пароля): подпись его TLS-сертификата его ключом
+        .route("/mobile/hello", get(hello).layer(tower_http::timeout::TimeoutLayer::new(std::time::Duration::from_secs(10))))
         .merge(guarded)
         .with_state(st)
+}
+
+/// Что подписывает узел, представляясь: метка, случайное число клиента (от повторов) и отпечаток TLS-сертификата, по которому клиент подключился.
+pub fn hello_message(nonce: &[u8], tls_fingerprint_hex: &str) -> Vec<u8> {
+    let mut m = b"YANDI-MOBILE-HELLO-V1\0".to_vec();
+    m.extend_from_slice(nonce);
+    m.extend_from_slice(tls_fingerprint_hex.to_ascii_lowercase().as_bytes());
+    m
+}
+
+/// Представление узла телефону: `GET /mobile/hello?nonce=<hex>`. Узел подписывает свой TLS-сертификат своим ключом подписи; телефон знает ключ
+/// из подписанного списка (bootstrap) и сверяет отпечаток сертификата, по которому подключился, с подписанным. Подставной узел так не представится
+/// (у него нет ключа), а отпечаток никто не вводит руками.
+async fn hello(State(st): State<Arc<MobileState>>, Query(q): Query<std::collections::HashMap<String, String>>) -> Response {
+    use ed25519_dalek::Signer;
+    let nonce = match q.get("nonce").map(|n| hex::decode(n.trim())) {
+        Some(Ok(n)) if (8..=32).contains(&n.len()) => n,
+        _ => return (StatusCode::BAD_REQUEST, Json(json!({"error": "nonce: 8–32 байт в hex"}))).into_response(),
+    };
+    let node_hex = hex::encode(&st.my_id.0[..8]);
+    let Ok(tls) = crate::netlayer::tls_cert::TlsIdentity::load_or_generate_default(&node_hex) else {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "сертификат узла недоступен"}))).into_response();
+    };
+    let sk = st.p2p.sealing_key();
+    let sig = sk.sign(&hello_message(&nonce, &tls.fingerprint_hex));
+    Json(json!({
+        "node_id": hex::encode(st.my_id.0),
+        "key": hex::encode(sk.verifying_key().to_bytes()),
+        "tls_fingerprint": tls.fingerprint_hex,
+        "signature": hex::encode(sig.to_bytes()),
+    }))
+    .into_response()
 }
 
 /// Поток, у которого уже прочитанное начало возвращается читателю первым.
@@ -4215,6 +4249,23 @@ mod invite_tests {
         let (st, _) = redeem_pin(&code, &pin, "inv-rl-real2").await;
         assert_eq!(st, StatusCode::OK);
         reset();
+    }
+
+    #[test]
+    fn the_hello_message_is_a_fixed_vector_the_phone_verifies_the_same_way() {
+        use ed25519_dalek::{Signer, SigningKey, Verifier};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let nonce: Vec<u8> = (1u8..=8).collect();
+        let fp = "AB".repeat(32); // регистр отпечатка не влияет
+        let msg = hello_message(&nonce, &fp);
+        assert!(msg.starts_with(b"YANDI-MOBILE-HELLO-V1\0"));
+        assert!(msg.ends_with("ab".repeat(32).as_bytes()), "отпечаток подписывается в нижнем регистре");
+        let sig = sk.sign(&msg);
+        assert!(sk.verifying_key().verify(&msg, &sig).is_ok());
+        // другой отпечаток или другое число — другая подпись: ответ нельзя перенести на другой сертификат или повторить
+        assert!(sk.verifying_key().verify(&hello_message(&nonce, &"cd".repeat(32)), &sig).is_err());
+        assert!(sk.verifying_key().verify(&hello_message(&[9u8; 8], &fp), &sig).is_err());
+        println!("VECTOR pub={} sig={}", hex::encode(sk.verifying_key().to_bytes()), hex::encode(sig.to_bytes()));
     }
 
     #[tokio::test]

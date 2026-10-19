@@ -99,6 +99,7 @@ pub fn run(args: Vec<String>) -> (i32, String) {
                 addr: all_args(rest, "--addr"),
                 region: arg(rest, "--region").map(|r| r.to_ascii_uppercase()),
                 roles: arg(rest, "--roles").map(|r| r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_else(|| vec!["entry".into()]),
+                mobile: all_args(rest, "--mobile"),
             };
             d.entries.retain(|x| x.id != e.id);
             d.entries.push(e);
@@ -115,7 +116,7 @@ pub fn run(args: Vec<String>) -> (i32, String) {
             let region = arg(rest, "--region").map(|r| r.to_ascii_uppercase());
             let roles = arg(rest, "--roles").map(|r| r.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect()).unwrap_or_else(|| vec!["entry".into(), "relay".into()]);
             d.entries.retain(|x| x.id != card.id);
-            d.entries.push(Entry { id: card.id.clone(), key: card.key.clone(), addr: card.addr.clone(), region, roles });
+            d.entries.push(Entry { id: card.id.clone(), key: card.key.clone(), addr: card.addr.clone(), region, roles, mobile: all_args(rest, "--mobile") });
             d.check_shape().map_err(|e| e.to_string())?;
             d.signature.clear();
             save(&f, &d)?;
@@ -161,7 +162,7 @@ pub fn run(args: Vec<String>) -> (i32, String) {
 }
 
 fn usage() -> String {
-    "Использование:\n  yandi bootstrap keygen <файл-ключа>\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] [--id H] --key H --addr A [--addr A] [--region XX] [--roles entry,relay,exit]\n  yandi bootstrap from-card [файл] <визитка> [--region XX] [--roles ...]\n  yandi bootstrap remove [файл] --id H\n  yandi bootstrap sign [файл] --key <файл-ключа> [--days 90] [--network yandi]".to_string()
+    "Использование:\n  yandi bootstrap keygen <файл-ключа>\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] [--id H] --key H --addr A [--addr A] [--mobile АДРЕС:ПОРТ] [--region XX] [--roles entry,relay,exit,guest]\n  yandi bootstrap from-card [файл] <визитка> [--mobile АДРЕС:ПОРТ] [--region XX] [--roles ...,guest]\n  yandi bootstrap remove [файл] --id H\n  yandi bootstrap sign [файл] --key <файл-ключа> [--days 90] [--network yandi]".to_string()
 }
 
 #[cfg(test)]
