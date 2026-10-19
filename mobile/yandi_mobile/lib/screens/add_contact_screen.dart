@@ -6,6 +6,7 @@ import '../theme.dart';
 import '../widgets/secure_field.dart';
 import 'pair_screen.dart';
 import 'qr_scan_screen.dart';
+import '../l10n.dart';
 
 /// 64 hex-знака ID из любого текста (сообщение, JSON из QR, строка с пробелами или переносами).
 String? extractPeerId(String raw) {
@@ -35,7 +36,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
   }
 
   Future<void> _scan() async {
-    final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => const QrScanScreen(title: 'QR контакта')));
+    final raw = await Navigator.of(context).push<String>(MaterialPageRoute(builder: (_) => QrScanScreen(title: tr('QR контакта'))));
     if (raw == null || !mounted) return;
     if (isPairingPayload(raw)) {
       // это QR сопряжения с узлом, а не ID контакта: открываем сопряжение, оно подключится само
@@ -45,7 +46,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
     final id = extractPeerId(raw);
     setState(() {
       if (id == null) {
-        _error = 'В этом QR нет ID контакта (64 знака).';
+        _error = tr('В этом QR нет ID контакта (64 знака).');
       } else {
         _error = null;
         _id.text = id;
@@ -64,7 +65,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
     if (!mounted) return;
     setState(() {
       if (id == null) {
-        _error = 'В буфере обмена нет ID (64 знака).';
+        _error = tr('В буфере обмена нет ID (64 знака).');
       } else {
         _error = null;
         _id.text = id;
@@ -75,7 +76,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
   Future<void> _add() async {
     final id = extractPeerId(_id.text);
     if (id == null) {
-      setState(() => _error = 'ID должен быть 64 знака 0-9 a-f.');
+      setState(() => _error = tr('ID должен быть 64 знака 0-9 a-f.'));
       return;
     }
     final state = context.read<AppState>();
@@ -89,7 +90,7 @@ class _AddContactScreenState extends State<AddContactScreen> {
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: const Text('Добавить контакт', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Добавить контакт'), style: TextStyle(color: AppTheme.text)),
         iconTheme: const IconThemeData(color: AppTheme.text),
       ),
       body: SingleChildScrollView(
@@ -98,17 +99,17 @@ class _AddContactScreenState extends State<AddContactScreen> {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Row(children: [
-              Expanded(child: ElevatedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner), label: const Text('Сканировать QR'))),
+              Expanded(child: ElevatedButton.icon(onPressed: _scan, icon: const Icon(Icons.qr_code_scanner), label: Text(tr('Сканировать QR')))),
               const SizedBox(width: 8),
-              Expanded(child: OutlinedButton.icon(onPressed: _pasteId, icon: const Icon(Icons.content_paste), label: const Text('ID из буфера'))),
+              Expanded(child: OutlinedButton.icon(onPressed: _pasteId, icon: const Icon(Icons.content_paste), label: Text(tr('ID из буфера')))),
             ]),
             const SizedBox(height: 16),
-            SecureField(controller: _id, hint: 'ID контакта (64 знака)', minLines: 2, maxLines: 3, fontSize: 12),
+            SecureField(controller: _id, hint: tr('ID контакта (64 знака)'), minLines: 2, maxLines: 3, fontSize: 12),
             const SizedBox(height: 8),
-            SecureField(controller: _name, hint: 'Имя (необязательно)', onSubmitted: _add),
+            SecureField(controller: _name, hint: tr('Имя (необязательно)'), onSubmitted: _add),
             if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
             const SizedBox(height: 12),
-            ElevatedButton(onPressed: _add, child: const Text('Добавить')),
+            ElevatedButton(onPressed: _add, child: Text(tr('Добавить'))),
           ],
         ),
       ),

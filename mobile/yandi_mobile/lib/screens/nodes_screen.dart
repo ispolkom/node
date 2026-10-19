@@ -4,6 +4,7 @@ import '../services/app_state.dart';
 import '../models/trusted_node.dart';
 import '../theme.dart';
 import 'pair_screen.dart';
+import '../l10n.dart';
 
 class NodesScreen extends StatelessWidget {
   const NodesScreen({super.key});
@@ -17,7 +18,7 @@ class NodesScreen extends StatelessWidget {
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
         elevation: 0,
-        title: const Text('Ноды', style: TextStyle(
+        title: Text(tr('Ноды'), style: TextStyle(
           color: AppTheme.text, fontWeight: FontWeight.bold)),
         iconTheme: const IconThemeData(color: AppTheme.textSecondary),
       ),
@@ -36,14 +37,14 @@ class NodesScreen extends StatelessWidget {
                   const Icon(Icons.hub_outlined,
                       color: AppTheme.textSecondary, size: 64),
                   const SizedBox(height: 16),
-                  const Text('Нет подключённых нод',
+                  Text(tr('Нет подключённых нод'),
                       style: TextStyle(color: AppTheme.textSecondary)),
                   const SizedBox(height: 8),
                   TextButton.icon(
                     onPressed: () => Navigator.push(context,
                         MaterialPageRoute(builder: (_) => const PairScreen())),
                     icon: const Icon(Icons.qr_code_scanner, color: AppTheme.accent),
-                    label: const Text('Добавить ноду',
+                    label: Text(tr('Добавить ноду'),
                         style: TextStyle(color: AppTheme.accent)),
                   ),
                 ],
@@ -70,14 +71,14 @@ class NodesScreen extends StatelessWidget {
       context: context,
       builder: (_) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: const Text('Удалить ноду?',
+        title: Text(tr('Удалить ноду?'),
             style: TextStyle(color: AppTheme.text)),
-        content: Text('${node.name} будет удалена.',
+        content: Text(trf('{n} будет удалена.', {'n': node.name}),
             style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context),
-            child: const Text('Отмена',
+            child: Text(tr('Отмена'),
                 style: TextStyle(color: AppTheme.textSecondary)),
           ),
           TextButton(
@@ -85,7 +86,7 @@ class NodesScreen extends StatelessWidget {
               Navigator.pop(context);
               state.removeNode(node.id);
             },
-            child: const Text('Удалить',
+            child: Text(tr('Удалить'),
                 style: TextStyle(color: Colors.redAccent)),
           ),
         ],
@@ -147,7 +148,7 @@ class _NodeTile extends StatelessWidget {
                         color: AppTheme.accent.withOpacity(0.15),
                         borderRadius: BorderRadius.circular(4),
                       ),
-                      child: const Text('активна',
+                      child: Text(tr('активна'),
                           style: TextStyle(
                               color: AppTheme.accent, fontSize: 10)),
                     ),
@@ -170,11 +171,11 @@ class _NodeTile extends StatelessWidget {
               if (v == 'del') onDelete();
             },
             itemBuilder: (_) => [
-              const PopupMenuItem(value: 'set',
-                  child: Text('Сделать активной',
+              PopupMenuItem(value: 'set',
+                  child: Text(tr('Сделать активной'),
                       style: TextStyle(color: AppTheme.text))),
-              const PopupMenuItem(value: 'del',
-                  child: Text('Удалить',
+              PopupMenuItem(value: 'del',
+                  child: Text(tr('Удалить'),
                       style: TextStyle(color: Colors.redAccent))),
             ],
           ),

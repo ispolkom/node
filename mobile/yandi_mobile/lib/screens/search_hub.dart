@@ -9,6 +9,7 @@ import '../widgets/secure_field.dart';
 import '../widgets/group_logo.dart';
 import '../widgets/complaint_sheet.dart';
 import 'home_screen.dart' show showSaveContactDialog;
+import '../l10n.dart';
 
 /// Видимые пользователи: сопряжённые с узлом и не удалённые им за бездействие (давно не бывшие в сети не показываются).
 List<Contact> visibleUsers(AppState state, {bool withHidden = false}) {
@@ -49,9 +50,9 @@ class _SearchHubState extends State<SearchHub> {
       children: [
         _HubCard(
           icon: Icons.people_alt_outlined,
-          title: 'Пользователи',
+          title: tr('Пользователи'),
           count: '$users',
-          subtitle: 'Сопряжённые с узлом: ники, аватарки, статус',
+          subtitle: tr('Сопряжённые с узлом: ники, аватарки, статус'),
           onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const UsersScreen())),
         ),
         const SizedBox(height: 10),
@@ -61,9 +62,9 @@ class _SearchHubState extends State<SearchHub> {
             final n = [for (final g in snap.data ?? const <DiscoverGroup>[]) if (!state.hiddenGroups.contains(g.id)) g].length;
             return _HubCard(
               icon: Icons.groups_2_outlined,
-              title: 'Группы',
+              title: tr('Группы'),
               count: snap.connectionState == ConnectionState.done ? '$n' : '…',
-              subtitle: 'Все группы этого узла: вступить или попросить приглашение',
+              subtitle: tr('Все группы этого узла: вступить или попросить приглашение'),
               onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GroupsCatalogScreen())),
             );
           },
@@ -118,7 +119,7 @@ class StatusBadge extends StatelessWidget {
     return Row(mainAxisSize: MainAxisSize.min, children: [
       Container(width: 10, height: 10, decoration: BoxDecoration(shape: BoxShape.circle, color: color)),
       const SizedBox(width: 6),
-      Text(online ? 'Онлайн' : 'Не в сети', style: TextStyle(color: color, fontSize: 12)),
+      Text(online ? tr('Онлайн') : tr('Не в сети'), style: TextStyle(color: color, fontSize: 12)),
     ]);
   }
 }
@@ -158,7 +159,7 @@ class _UsersScreenState extends State<UsersScreen> {
           if (!c.saved)
             ListTile(
               leading: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
-              title: const Text('Добавить в контакты', style: TextStyle(color: AppTheme.text)),
+              title: Text(tr('Добавить в контакты'), style: TextStyle(color: AppTheme.text)),
               onTap: () {
                 Navigator.pop(ctx);
                 showSaveContactDialog(context, c.peerId, c.displayName);
@@ -166,7 +167,7 @@ class _UsersScreenState extends State<UsersScreen> {
             ),
           ListTile(
             leading: Icon(hidden ? Icons.visibility : Icons.visibility_off, color: AppTheme.textSecondary),
-            title: Text(hidden ? 'Показать' : 'Скрыть', style: const TextStyle(color: AppTheme.text)),
+            title: Text(hidden ? tr('Показать') : tr('Скрыть'), style: const TextStyle(color: AppTheme.text)),
             onTap: () {
               Navigator.pop(ctx);
               state.setHidden(group: false, id: c.peerId, hidden: !hidden);
@@ -174,7 +175,7 @@ class _UsersScreenState extends State<UsersScreen> {
           ),
           ListTile(
             leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
-            title: const Text('Пожаловаться', style: TextStyle(color: AppTheme.text)),
+            title: Text(tr('Пожаловаться'), style: TextStyle(color: AppTheme.text)),
             onTap: () {
               Navigator.pop(ctx);
               showComplaintSheet(context, kind: 'user', targetId: c.peerId, title: c.displayName);
@@ -196,13 +197,13 @@ class _UsersScreenState extends State<UsersScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
         iconTheme: const IconThemeData(color: AppTheme.text),
-        title: Text('Пользователи (${all.length - hiddenCount})', style: const TextStyle(color: AppTheme.text)),
+        title: Text(trf('Пользователи ({n})', {'n': all.length - hiddenCount}), style: const TextStyle(color: AppTheme.text)),
       ),
       body: ListView(children: [
         if (shown.isEmpty)
-          const Padding(
+          Padding(
             padding: EdgeInsets.all(32),
-            child: Center(child: Text('Пока никого нет', style: TextStyle(color: AppTheme.textSecondary))),
+            child: Center(child: Text(tr('Пока никого нет'), style: TextStyle(color: AppTheme.textSecondary))),
           ),
         for (final c in shown)
           InkWell(
@@ -220,13 +221,13 @@ class _UsersScreenState extends State<UsersScreen> {
                     const SizedBox(height: 3),
                     Row(children: [
                       StatusBadge(online: c.online),
-                      if (c.saved) const Padding(
+                      if (c.saved) Padding(
                         padding: EdgeInsets.only(left: 10),
-                        child: Text('в контактах', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                        child: Text(tr('в контактах'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                       ),
-                      if (state.hiddenUsers.contains(c.peerId)) const Padding(
+                      if (state.hiddenUsers.contains(c.peerId)) Padding(
                         padding: EdgeInsets.only(left: 10),
-                        child: Text('скрыт', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                        child: Text(tr('скрыт'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                       ),
                     ]),
                   ]),
@@ -238,7 +239,7 @@ class _UsersScreenState extends State<UsersScreen> {
         if (hiddenCount > 0)
           TextButton(
             onPressed: () => setState(() => _showHidden = !_showHidden),
-            child: Text(_showHidden ? 'Не показывать скрытых' : 'Показать скрытых ($hiddenCount)',
+            child: Text(_showHidden ? tr('Не показывать скрытых') : trf('Показать скрытых ({n})', {'n': hiddenCount}),
                 style: const TextStyle(color: AppTheme.textSecondary)),
           ),
       ]),
@@ -272,11 +273,11 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
         backgroundColor: AppTheme.surface,
         title: Text(title, style: const TextStyle(color: AppTheme.text)),
         content: SingleChildScrollView(
-          child: SecureField(controller: ctrl, hint: 'Ваше имя в группе', onSubmitted: () => Navigator.pop(ctx, ctrl.text.trim())),
+          child: SecureField(controller: ctrl, hint: tr('Ваше имя в группе'), onSubmitted: () => Navigator.pop(ctx, ctrl.text.trim())),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
-          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const Text('Продолжить', style: TextStyle(color: AppTheme.accent))),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: Text(tr('Продолжить'), style: TextStyle(color: AppTheme.accent))),
         ],
       ),
     );
@@ -286,22 +287,22 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
     final state = context.read<AppState>();
     final messenger = ScaffoldMessenger.of(context);
     if (!g.ownerPresent) {
-      messenger.showSnackBar(const SnackBar(content: Text('Владелец группы отсутствует: ключ вам выдать некому, вступить нельзя')));
+      messenger.showSnackBar(SnackBar(content: Text(tr('Владелец группы отсутствует: ключ вам выдать некому, вступить нельзя'))));
       return;
     }
-    final name = await _askName(context, g.isOpen ? 'Вступить в «${g.name}»' : 'Попросить вход в «${g.name}»');
+    final name = await _askName(context, g.isOpen ? trf('Вступить в «{n}»', {'n': g.name}) : trf('Попросить вход в «{n}»', {'n': g.name}));
     if (name == null || name.isEmpty || !mounted) return;
     try {
       if (g.isOpen) {
         await state.groups!.join(g.id, displayName: name);
         await state.syncGroups();
-        messenger.showSnackBar(const SnackBar(content: Text('Вы в группе — она во вкладке «Группы»')));
+        messenger.showSnackBar(SnackBar(content: Text(tr('Вы в группе — она во вкладке «Группы»'))));
       } else {
         await state.groups!.requestInvite(g.id, name);
-        messenger.showSnackBar(const SnackBar(content: Text('Запрос отправлен владельцу и модераторам. Когда подтвердят, придёт карточка-приглашение')));
+        messenger.showSnackBar(SnackBar(content: Text(tr('Запрос отправлен владельцу и модераторам. Когда подтвердят, придёт карточка-приглашение'))));
       }
     } catch (e) {
-      messenger.showSnackBar(SnackBar(content: Text('Не получилось: $e')));
+      messenger.showSnackBar(SnackBar(content: Text(trf('Не получилось: {e}', {'e': e}))));
     }
     if (mounted) setState(() => _future = _load());
   }
@@ -317,7 +318,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
           ListTile(title: Text(g.name, style: const TextStyle(color: AppTheme.text, fontWeight: FontWeight.w700)), subtitle: Text(g.topic, style: const TextStyle(color: AppTheme.textSecondary))),
           ListTile(
             leading: Icon(g.isOpen ? Icons.login : Icons.mail_outline, color: AppTheme.accent),
-            title: Text(g.requested ? 'Запрос уже отправлен' : (g.isOpen ? 'Вступить' : 'Попросить вход'), style: const TextStyle(color: AppTheme.text)),
+            title: Text(g.requested ? tr('Запрос уже отправлен') : (g.isOpen ? tr('Вступить') : tr('Попросить вход')), style: const TextStyle(color: AppTheme.text)),
             enabled: !g.requested,
             onTap: () {
               Navigator.pop(ctx);
@@ -326,7 +327,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
           ),
           ListTile(
             leading: Icon(hidden ? Icons.visibility : Icons.visibility_off, color: AppTheme.textSecondary),
-            title: Text(hidden ? 'Показать' : 'Скрыть', style: const TextStyle(color: AppTheme.text)),
+            title: Text(hidden ? tr('Показать') : tr('Скрыть'), style: const TextStyle(color: AppTheme.text)),
             onTap: () {
               Navigator.pop(ctx);
               state.setHidden(group: true, id: g.id, hidden: !hidden);
@@ -334,7 +335,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
           ),
           ListTile(
             leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
-            title: const Text('Пожаловаться', style: TextStyle(color: AppTheme.text)),
+            title: Text(tr('Пожаловаться'), style: TextStyle(color: AppTheme.text)),
             onTap: () {
               Navigator.pop(ctx);
               showComplaintSheet(context, kind: 'group', targetId: g.id, title: g.name);
@@ -353,7 +354,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
         iconTheme: const IconThemeData(color: AppTheme.text),
-        title: const Text('Группы', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Группы'), style: TextStyle(color: AppTheme.text)),
         actions: [IconButton(icon: const Icon(Icons.refresh), onPressed: () => setState(() => _future = _load()))],
       ),
       body: FutureBuilder<List<DiscoverGroup>>(
@@ -363,14 +364,14 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
             return const Center(child: CircularProgressIndicator(color: AppTheme.accent));
           }
           if (snap.hasError) {
-            return const Center(child: Text('Не удалось получить список групп узла', style: TextStyle(color: AppTheme.textSecondary)));
+            return Center(child: Text(tr('Не удалось получить список групп узла'), style: TextStyle(color: AppTheme.textSecondary)));
           }
           final all = snap.data ?? const <DiscoverGroup>[];
           final hiddenCount = all.where((g) => state.hiddenGroups.contains(g.id)).length;
           final shown = _showHidden ? all : all.where((g) => !state.hiddenGroups.contains(g.id)).toList();
           return ListView(children: [
             if (shown.isEmpty)
-              const Padding(padding: EdgeInsets.all(32), child: Center(child: Text('Групп пока нет', style: TextStyle(color: AppTheme.textSecondary)))),
+              Padding(padding: EdgeInsets.all(32), child: Center(child: Text(tr('Групп пока нет'), style: TextStyle(color: AppTheme.textSecondary)))),
             for (final g in shown)
               InkWell(
                 onTap: () => _menu(g),
@@ -388,12 +389,12 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
                       Row(mainAxisSize: MainAxisSize.min, children: [
                         Icon(g.isOpen ? Icons.lock_open : Icons.lock_outline, size: 14, color: AppTheme.accent),
                         const SizedBox(width: 4),
-                        Text(g.isOpen ? 'Открытая' : 'По приглашению', style: const TextStyle(color: AppTheme.accent, fontSize: 12)),
+                        Text(g.isOpen ? tr('Открытая') : tr('По приглашению'), style: const TextStyle(color: AppTheme.accent, fontSize: 12)),
                       ]),
-                      Text('${g.members} уч.', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                      if (!g.ownerPresent) const Text('владелец отсутствует', style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
-                      if (g.requested) const Text('запрос отправлен', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-                      if (state.hiddenGroups.contains(g.id)) const Text('скрыта', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                      Text(trf('{n} уч.', {'n': g.members}), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                      if (!g.ownerPresent) Text(tr('владелец отсутствует'), style: TextStyle(color: Colors.orangeAccent, fontSize: 12)),
+                      if (g.requested) Text(tr('запрос отправлен'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                      if (state.hiddenGroups.contains(g.id)) Text(tr('скрыта'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                     ]),
                   ])),
                   ]),
@@ -402,7 +403,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
             if (hiddenCount > 0)
               TextButton(
                 onPressed: () => setState(() => _showHidden = !_showHidden),
-                child: Text(_showHidden ? 'Не показывать скрытые' : 'Показать скрытые ($hiddenCount)', style: const TextStyle(color: AppTheme.textSecondary)),
+                child: Text(_showHidden ? tr('Не показывать скрытые') : trf('Показать скрытые ({n})', {'n': hiddenCount}), style: const TextStyle(color: AppTheme.textSecondary)),
               ),
           ]);
         },

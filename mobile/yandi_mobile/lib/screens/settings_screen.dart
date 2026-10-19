@@ -9,6 +9,7 @@ import 'support_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/avatar_circle.dart';
+import '../l10n.dart';
 
 const _emojis = ['😀','😎','🤓','🥳','😇','🤠','😺','🐱','🐶','🦊','🐼','🦁','🐯','🐸','🐵','🦉','🐧','🐢','🦄','🐙',
   '🌞','🌙','⭐','🔥','🌈','🍀','🌸','🌵','🍉','🍕','🎸','⚽','🚀','🛡️','🔑','💎','🎯','🧩','🪐','⚓'];
@@ -23,18 +24,18 @@ class SettingsScreen extends StatelessWidget {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Мой ник'), style: TextStyle(color: AppTheme.text)),
         content: SecureTextField(
           key: const ValueKey('nick-field'),
           controller: ctl,
           maxLength: 40,
           autofocus: true,
           style: const TextStyle(color: AppTheme.text),
-          decoration: const InputDecoration(hintText: 'Например: Доктор Хаус', helperText: 'Его увидят контакты и участники групп. Не указывайте ФИО.', helperMaxLines: 2),
+          decoration: InputDecoration(hintText: tr('Например: Доктор Хаус'), helperText: tr('Его увидят контакты и участники групп. Не указывайте ФИО.'), helperMaxLines: 2),
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Сохранить')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Сохранить'))),
         ],
       ),
     );
@@ -56,10 +57,10 @@ class SettingsScreen extends StatelessWidget {
       backgroundColor: AppTheme.surface,
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          ListTile(leading: const Icon(Icons.photo_outlined), title: const Text('Выбрать фото'), onTap: () => Navigator.pop(ctx, 'photo')),
-          ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: const Text('Выбрать эмодзи'), onTap: () => Navigator.pop(ctx, 'emoji')),
+          ListTile(leading: const Icon(Icons.photo_outlined), title: Text(tr('Выбрать фото')), onTap: () => Navigator.pop(ctx, 'photo')),
+          ListTile(leading: const Icon(Icons.emoji_emotions_outlined), title: Text(tr('Выбрать эмодзи')), onTap: () => Navigator.pop(ctx, 'emoji')),
           if (state.myAvatarBytes != null)
-            ListTile(leading: const Icon(Icons.delete_outline, color: Colors.redAccent), title: const Text('Убрать картинку', style: TextStyle(color: Colors.redAccent)), onTap: () => Navigator.pop(ctx, 'clear')),
+            ListTile(leading: const Icon(Icons.delete_outline, color: Colors.redAccent), title: Text(tr('Убрать картинку'), style: TextStyle(color: Colors.redAccent)), onTap: () => Navigator.pop(ctx, 'clear')),
         ]),
       ),
     );
@@ -73,14 +74,14 @@ class SettingsScreen extends StatelessWidget {
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: AppTheme.surface,
-          title: const Text('Личное фото — риск', style: TextStyle(color: AppTheme.text)),
-          content: const Text(
-              'Личное фото может вас скомпрометировать: по лицу и обстановке вас могут узнать. Надёжнее выбрать эмодзи или нейтральную картинку.\n\n'
-              'Метаданные снимка (место, время, модель телефона) будут удалены, картинка пересоберётся заново и сохранится зашифрованной.',
+          title: Text(tr('Личное фото — риск'), style: TextStyle(color: AppTheme.text)),
+          content: Text(
+              tr('Личное фото может вас скомпрометировать: по лицу и обстановке вас могут узнать. Надёжнее выбрать эмодзи или нейтральную картинку.\n\n'
+              'Метаданные снимка (место, время, модель телефона) будут удалены, картинка пересоберётся заново и сохранится зашифрованной.'),
               style: TextStyle(color: AppTheme.textSecondary)),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
-            TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Всё равно выбрать фото', style: TextStyle(color: Colors.redAccent))),
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.textSecondary))),
+            TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Всё равно выбрать фото'), style: TextStyle(color: Colors.redAccent))),
           ],
         ),
       );
@@ -101,7 +102,7 @@ class SettingsScreen extends StatelessWidget {
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: AppTheme.surface,
-          title: const Text('Эмодзи', style: TextStyle(color: AppTheme.text)),
+          title: Text(tr('Эмодзи'), style: TextStyle(color: AppTheme.text)),
           content: SizedBox(
             width: 300,
             child: GridView.count(
@@ -127,93 +128,93 @@ class SettingsScreen extends StatelessWidget {
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: const Text('Настройки', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Настройки'), style: TextStyle(color: AppTheme.text)),
         iconTheme: const IconThemeData(color: AppTheme.text),
       ),
       body: ListView(
         children: [
           if (state.canInvite || state.myRole == 'invited') ...[
-            _Section(title: 'Приглашения'),
+            _Section(title: tr('Приглашения')),
             if (state.canInvite)
               ListTile(
                 key: const ValueKey('invite-device'),
                 leading: const Icon(Icons.qr_code_2, color: AppTheme.textSecondary),
-                title: const Text('Пригласить устройство', style: TextStyle(color: AppTheme.text)),
-                subtitle: const Text('QR или код для друга: он подключится к этому узлу. Приглашённый приглашать сам не сможет.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                title: Text(tr('Пригласить устройство'), style: TextStyle(color: AppTheme.text)),
+                subtitle: Text(tr('QR или код для друга: он подключится к этому узлу. Приглашённый приглашать сам не сможет.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => InviteDeviceScreen(create: state.createDeviceInvite, revoke: state.revokeDeviceInvites, restore: state.activeDeviceInvite),
                 )),
               )
             else
-              const ListTile(
+              ListTile(
                 key: ValueKey('invite-device-locked'),
                 leading: Icon(Icons.lock_outline, color: AppTheme.textSecondary),
-                title: Text('Приглашать другие устройства', style: TextStyle(color: AppTheme.text)),
-                subtitle: Text('Вас пригласили: право приглашать даёт администратор узла.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                title: Text(tr('Приглашать другие устройства'), style: TextStyle(color: AppTheme.text)),
+                subtitle: Text(tr('Вас пригласили: право приглашать даёт администратор узла.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
               ),
           ],
-          _Section(title: 'Проект'),
+          _Section(title: tr('Проект')),
           ListTile(
             key: const ValueKey('support-project'),
             leading: const Icon(Icons.favorite_border, color: AppTheme.textSecondary),
-            title: const Text('Поддержать проект', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Добровольное пожертвование на серверы и разработку (кошелёк проекта, а не узла).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Поддержать проект'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Добровольное пожертвование на серверы и разработку (кошелёк проекта, а не узла).'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SupportScreen(wallets: context.read<AppState>().wallets))),
           ),
           // Профиль
-          _Section(title: 'Профиль'),
+          _Section(title: tr('Профиль')),
           ListTile(
             key: const ValueKey('profile-nick'),
             leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
-            title: const Text('Мой ник', style: TextStyle(color: AppTheme.text)),
+            title: Text(tr('Мой ник'), style: TextStyle(color: AppTheme.text)),
             subtitle: Text(
-              state.myNick.isEmpty ? 'Не задан. Ник и картинку увидят контакты и участники ваших групп. Не указывайте ФИО и личные фото; ник один на ПК и все ваши телефоны.' : state.myNick,
+              state.myNick.isEmpty ? tr('Не задан. Ник и картинку увидят контакты и участники ваших групп. Не указывайте ФИО и личные фото; ник один на ПК и все ваши телефоны.') : state.myNick,
               style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
             onTap: () => _nickDialog(context),
           ),
           ListTile(
-            leading: const AvatarCircle.mine(label: 'Я', radius: 28),
-            title: const Text('Моя картинка', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Её увидят контакты и участники ваших групп. Не ставьте личные фото. Метаданные не передаются: картинка собирается заново.',
+            leading: AvatarCircle.mine(label: tr('Я'), radius: 28),
+            title: Text(tr('Моя картинка'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Её увидят контакты и участники ваших групп. Не ставьте личные фото. Метаданные не передаются: картинка собирается заново.'),
                 style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => _avatarSheet(context),
           ),
           SwitchListTile(
             secondary: const Icon(Icons.keyboard_outlined, color: AppTheme.textSecondary),
-            title: const Text('Своя клавиатура в чате', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Системная клавиатура видит каждое нажатие и может учиться на нём. Своя работает только внутри приложения; '
-                'без автозамены и голосового ввода.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Своя клавиатура в чате'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Системная клавиатура видит каждое нажатие и может учиться на нём. Своя работает только внутри приложения; '
+                'без автозамены и голосового ввода.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             value: state.secureKeyboard,
             activeColor: AppTheme.accent,
             onChanged: (v) => state.setSecureKeyboard(v),
           ),
           // Нода
-          _Section(title: 'Нода'),
+          _Section(title: tr('Нода')),
           _InfoTile(label: 'Node ID', value: state.myNodeId?.substring(0, 16) ?? '—'),
           _InfoTile(
-            label: 'Статус',
-            value: state.nodeOnline ? 'Онлайн' : 'Офлайн',
+            label: tr('Статус'),
+            value: state.nodeOnline ? tr('Онлайн') : tr('Офлайн'),
             valueColor: state.nodeOnline ? Colors.greenAccent : Colors.redAccent,
           ),
           if (state.nodeError != null)
-            _InfoTile(label: 'Ошибка', value: state.nodeError!, valueColor: Colors.redAccent),
+            _InfoTile(label: tr('Ошибка'), value: state.nodeError!, valueColor: Colors.redAccent),
 
           // Прокси
-          _Section(title: 'Прокси'),
+          _Section(title: tr('Прокси')),
           _InfoTile(
             label: 'SOCKS5',
             value: state.proxyHost != null
                 ? '${state.proxyHost}:${state.proxyPort}'
                 : state.proxyUnreachable
-                    ? 'Узел не ответил — проверьте связь и откройте настройки снова'
-                    : 'Не запущен (включите в веб-интерфейсе ноды)',
+                    ? tr('Узел не ответил — проверьте связь и откройте настройки снова')
+                    : tr('Не запущен (включите в веб-интерфейсе ноды)'),
           ),
           ListTile(
             tileColor: AppTheme.surface,
-            title: const Text('VPN через YANDI', style: TextStyle(color: AppTheme.text)),
+            title: Text(tr('VPN через YANDI'), style: TextStyle(color: AppTheme.text)),
             subtitle: Text(
-              state.vpnRunning ? 'Включён — трафик идёт через YANDI' : 'Выключен',
+              state.vpnRunning ? tr('Включён — трафик идёт через YANDI') : tr('Выключен'),
               style: TextStyle(
                   color: state.vpnRunning ? Colors.greenAccent : AppTheme.textSecondary),
             ),
@@ -227,64 +228,64 @@ class SettingsScreen extends StatelessWidget {
           ),
 
           // Защита
-          _Section(title: 'Защита'),
+          _Section(title: tr('Защита')),
           if (state.protectionWarning != null)
             ListTile(
               tileColor: AppTheme.surface,
               leading: const Icon(Icons.warning_amber_rounded, color: Colors.orangeAccent),
-              title: const Text('Защита доведена не до конца', style: TextStyle(color: Colors.orangeAccent)),
+              title: Text(tr('Защита доведена не до конца'), style: TextStyle(color: Colors.orangeAccent)),
               subtitle: Text(state.protectionWarning!, style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             ),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.lock_outline, color: AppTheme.textSecondary),
-            title: const Text('Заблокировать сейчас', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Иначе приложение блокируется само через минуту после выхода из него.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Заблокировать сейчас'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Иначе приложение блокируется само через минуту после выхода из него.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => VaultLockObserver.instance?.lockNow(manual: true),
           ),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.password_outlined, color: AppTheme.textSecondary),
-            title: const Text('Сменить пароль', style: TextStyle(color: AppTheme.text)),
+            title: Text(tr('Сменить пароль'), style: TextStyle(color: AppTheme.text)),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultChangePasswordScreen())),
           ),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.delete_forever_outlined, color: Colors.redAccent),
-            title: const Text('Удалить всё', style: TextStyle(color: Colors.redAccent)),
-            subtitle: const Text('Стереть все данные приложения с этого телефона (нужен пароль).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Удалить всё'), style: TextStyle(color: Colors.redAccent)),
+            subtitle: Text(tr('Стереть все данные приложения с этого телефона (нужен пароль).'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultEraseScreen())),
           ),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.warning_amber_outlined, color: Colors.redAccent),
-            title: const Text('Экстренное стирание', style: TextStyle(color: Colors.redAccent)),
-            subtitle: const Text('Стереть всё сразу, без пароля: нужно ввести слово-подтверждение.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Экстренное стирание'), style: TextStyle(color: Colors.redAccent)),
+            subtitle: Text(tr('Стереть всё сразу, без пароля: нужно ввести слово-подтверждение.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultPanicScreen())),
           ),
 
           // Аккаунт
-          _Section(title: 'Устройство'),
+          _Section(title: tr('Устройство')),
           ListTile(
             tileColor: AppTheme.surface,
             leading: const Icon(Icons.logout, color: Colors.redAccent),
-            title: const Text('Отвязать устройство',
+            title: Text(tr('Отвязать устройство'),
                 style: TextStyle(color: Colors.redAccent)),
             onTap: () async {
               final confirm = await showDialog<bool>(
                 context: context,
                 builder: (ctx) => AlertDialog(
                   backgroundColor: AppTheme.surface,
-                  title: const Text('Отвязать?', style: TextStyle(color: AppTheme.text)),
-                  content: const Text('Токен будет удалён. Потребуется повторный паринг.',
+                  title: Text(tr('Отвязать?'), style: TextStyle(color: AppTheme.text)),
+                  content: Text(tr('Токен будет удалён. Потребуется повторный паринг.'),
                       style: TextStyle(color: AppTheme.textSecondary)),
                   actions: [
                     TextButton(
                         onPressed: () => Navigator.pop(ctx, false),
-                        child: const Text('Отмена')),
+                        child: Text(tr('Отмена'))),
                     TextButton(
                         onPressed: () => Navigator.pop(ctx, true),
-                        child: const Text('Отвязать',
+                        child: Text(tr('Отвязать'),
                             style: TextStyle(color: Colors.redAccent))),
                   ],
                 ),

@@ -9,7 +9,7 @@ Set<String> keysIn(String src) {
   final out = <String>{};
   final call = RegExp(r"\btrf?\(((?:\s*'(?:[^'\\]|\\.)*'\s*)+)");
   for (final m in call.allMatches(src)) {
-    final body = RegExp(r"'((?:[^'\\]|\\.)*)'").allMatches(m.group(1)!).map((x) => x.group(1)!).join().replaceAll("\\'", "'");
+    final body = RegExp(r"'((?:[^'\\]|\\.)*)'").allMatches(m.group(1)!).map((x) => x.group(1)!).join().replaceAll("\\'", "'").replaceAll('\\n', '\n').replaceAll('\\\$', '\$');
     out.add(body);
   }
   return out;
