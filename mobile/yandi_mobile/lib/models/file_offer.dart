@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../l10n_core.dart';
 
 /// Предложение файла внутри чата. Едет обычным сообщением, которое телефон шифрует для получателя (E2E): в нём имя файла,
 /// размер, номер передачи на узле, ключ шифрования кусков и контрольная сумма. Узел видит только зашифрованные куски.
@@ -61,9 +62,9 @@ class FileOffer {
   bool get isImage => mime.startsWith('image/');
 
   static String humanSize(int bytes) {
-    if (bytes < 1024) return '$bytes Б';
-    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} КБ';
-    if (bytes < 1024 * 1024 * 1024) return '${(bytes / 1024 / 1024).toStringAsFixed(1)} МБ';
-    return '${(bytes / 1024 / 1024 / 1024).toStringAsFixed(2)} ГБ';
+    if (bytes < 1024) return trf('{n} Б', {'n': bytes});
+    if (bytes < 1024 * 1024) return trf('{n} КБ', {'n': (bytes / 1024).toStringAsFixed(1)});
+    if (bytes < 1024 * 1024 * 1024) return trf('{n} МБ', {'n': (bytes / 1024 / 1024).toStringAsFixed(1)});
+    return trf('{n} ГБ', {'n': (bytes / 1024 / 1024 / 1024).toStringAsFixed(2)});
   }
 }

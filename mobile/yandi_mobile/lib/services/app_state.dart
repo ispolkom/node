@@ -48,6 +48,7 @@ import '../models/call_signal.dart';
 import '../screens/call_screen.dart';
 import 'package:flutter/material.dart' show MaterialPageRoute;
 import 'package:flutter/painting.dart' show PaintingBinding;
+import '../l10n_core.dart';
 
 /// Центральный state приложения.
 ///
@@ -176,7 +177,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       _api = null;
       _ws = null;
       nodeOnline = false;
-      nodeError = 'Узел ${node.name}: нет отпечатка сертификата. Сопрягите телефон с узлом заново (QR). ($e)';
+      nodeError = trf('Узел {n}: нет отпечатка сертификата. Сопрягите телефон с узлом заново (QR). ({e})', {'n': node.name, 'e': e});
       notifyListeners();
       return;
     }
@@ -451,7 +452,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         final payloadBytes = base64.decode(payloadB64);
         if (payloadBytes.isNotEmpty && (payloadBytes[0] == 0xE2 || payloadBytes[0] == 0xE3)) {
           // Preserve legacy unread mail: never ACK/delete it as an E4 failure.
-          nodeError = 'В очереди есть старые неподписанные E2/E3 сообщения. Они сохранены на узле; нужен согласованный перенос.';
+          nodeError = tr('В очереди есть старые неподписанные E2/E3 сообщения. Они сохранены на узле; нужен согласованный перенос.');
           notifyListeners();
           continue;
         }
@@ -755,7 +756,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Позвонить своему устройству. null — звонок начат, иначе причина отказа.
   Future<String?> startCall(String peerId, {required bool video}) async {
     if (!await canSendFiles(peerId)) {
-      return 'Звонить можно только на свои устройства (у этого собеседника нет ключа шифрования)';
+      return tr('Звонить можно только на свои устройства (у этого собеседника нет ключа шифрования)');
     }
     return calls.start(peerId, withVideo: video);
   }
@@ -824,14 +825,14 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (!_copies.beginWipe(path)) return;
       try {
         if (!await wipeFile(realPath) && await file.exists()) {
-          protectionWarning = 'Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.';
+          protectionWarning = tr('Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.');
           notifyListeners();
         }
       } finally {
         _copies.endWipe(path);
       }
     } catch (_) {
-      protectionWarning = 'Проверка временной копии выбранного файла не завершилась.';
+      protectionWarning = tr('Проверка временной копии выбранного файла не завершилась.');
       notifyListeners();
     }
   }
@@ -857,10 +858,10 @@ class AppState extends ChangeNotifier implements FilesHost {
       await _sweepPickerCache();
       final failed = vf.migrationFailures + vf.cleanupFailures + (avatars?.cleanupFailures ?? 0) + StorageService.cleanupFailures;
       if (failed > 0) {
-        protectionWarning = '${protectionWarning == null ? '' : '${protectionWarning!} '}Не все файлы удалось зашифровать или затереть ($failed); попытка повторится при следующем входе.';
+        protectionWarning = '${protectionWarning == null ? '' : '${protectionWarning!} '}${trf('Не все файлы удалось зашифровать или затереть ({n}); попытка повторится при следующем входе.', {'n': failed})}';
       }
     } catch (e) {
-      protectionWarning = 'Проверка защиты файлов не завершилась: $e';
+      protectionWarning = trf('Проверка защиты файлов не завершилась: {e}', {'e': e});
     }
     notifyListeners();
   }
@@ -897,7 +898,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final realCache = await cache.resolveSymbolicLinks();
     final realPicker = await d.resolveSymbolicLinks();
     if (!realPicker.startsWith('$realCache${Platform.pathSeparator}')) {
-      protectionWarning = 'Каталог временных копий выходит за пределы кеша; затирание отменено.';
+      protectionWarning = tr('Каталог временных копий выходит за пределы кеша; затирание отменено.');
       return;
     }
     var failed = 0;
@@ -906,7 +907,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         try { if (!await wipeFile(e.path) && await e.exists()) failed++; } catch (_) { failed++; }
       }
     }
-    if (failed > 0) protectionWarning = 'Не удалось затереть временных копий выбора файлов: $failed; попытка повторится при следующем входе.';
+    if (failed > 0) protectionWarning = trf('Не удалось затереть временных копий выбора файлов: {n}; попытка повторится при следующем входе.', {'n': failed});
   }
 
   /// Файлы можно слать только на своё устройство: у него есть ключ для E2E.
@@ -935,7 +936,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     try {
       // тот же источник, который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления
       // сообщения файл отправляли повторно
-      if (_prep.hasSource(peerId, path)) return '«$label» уже готовится к отправке';
+      if (_prep.hasSource(peerId, path)) return trf('«{n}» уже готовится к отправке', {'n': label});
       final prep = _prep.start(peerId, label, path);
       notifyListeners();
       try {
@@ -950,16 +951,16 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   Future<String?> _sendFile(String peerId, String path, {String? name, void Function()? onPrepared}) async {
-    if (_api == null || _ws == null) return 'Нет связи с узлом';
+    if (_api == null || _ws == null) return tr('Нет связи с узлом');
     final svc = FileTransferService(_api!, vault: await VaultService.instance.files());
     late FileOffer offer;
     try {
-      if (!await canSendFiles(peerId)) return 'Файлы можно отправлять только на свои устройства, у этого собеседника нет ключа';
+      if (!await canSendFiles(peerId)) return tr('Файлы можно отправлять только на свои устройства, у этого собеседника нет ключа');
       offer = await svc.prepare(toPeerId: peerId, path: path, name: name);
     } on TransferException catch (e) {
       return e.message;
     } catch (e) {
-      return 'Не удалось начать отправку: $e';
+      return trf('Не удалось начать отправку: {e}', {'e': e});
     }
     // Источник отправки — всегда зашифрованная копия в хранилище под номером передачи: открытая копия из выбора файла не остаётся,
     // а отправленный файл виден во вкладке «Файлы» и в чате.
@@ -970,7 +971,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         source = (await vf.importAs(path, offer.tid, name: name, mime: offer.mime)).path;
       } catch (e) {
         try { await _api!.deleteTransfer(offer.tid); } catch (_) {}
-        return 'Не удалось положить файл в защищённое хранилище: $e';
+        return trf('Не удалось положить файл в защищённое хранилище: {e}', {'e': e});
       }
     }
     _outgoingPaths[offer.tid] = source;
@@ -990,7 +991,7 @@ class AppState extends ChangeNotifier implements FilesHost {
         notifyListeners();
       });
       final sent = await _ws!.sendEncryptedOnly(peerId, done.encode());
-      if (!sent) throw TransferException('Файл залит, но предложение не отправлено: нет связи или ключа получателя');
+      if (!sent) throw TransferException(tr('Файл залит, но предложение не отправлено: нет связи или ключа получателя'));
       fileStates.remove(offer.tid);
       final delivered = msg.copyWith(status: MessageStatus.delivered);
       _replaceMessage(peerId, msg.id, delivered);
@@ -1028,7 +1029,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       });
       fileStates.remove(o.tid);
     } catch (e) {
-      fileStates[o.tid] = FileState.failed(e is TransferException ? e.message : 'Не удалось скачать: $e');
+      fileStates[o.tid] = FileState.failed(e is TransferException ? e.message : trf('Не удалось скачать: {e}', {'e': e}));
     }
     notifyListeners();
   }
@@ -1131,7 +1132,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<({String text, String link, String code, String pin, int ttlSecs})> createDeviceInvite() async {
     final node = activeNode;
     final api = _api;
-    if (node == null || api == null) throw StateError('Нет связи с узлом');
+    if (node == null || api == null) throw StateError(tr('Нет связи с узлом'));
     final inv = await api.createDeviceInvite();
     final expMs = DateTime.now().millisecondsSinceEpoch + inv.ttlSecs * 1000;
     final text = inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint, expiresAtSecs: expMs ~/ 1000);
@@ -1234,7 +1235,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       _profileChanged();
       return null;
     } catch (e) {
-      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+      return trf('Не удалось подготовить картинку: {e}', {'e': e.toString().split('\n').first});
     }
   }
 
@@ -1246,7 +1247,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       _profileChanged();
       return null;
     } catch (e) {
-      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+      return trf('Не удалось подготовить картинку: {e}', {'e': e.toString().split('\n').first});
     }
   }
 
@@ -1258,7 +1259,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       notifyListeners();
       return null;
     } catch (e) {
-      return 'Не удалось подготовить картинку: ${e.toString().split('\n').first}';
+      return trf('Не удалось подготовить картинку: {e}', {'e': e.toString().split('\n').first});
     }
   }
 
@@ -1308,8 +1309,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Задать свой ник (виден контактам и в группах). null — готово, иначе причина.
   Future<String?> setMyNick(String nick) async {
     final n = nick.trim();
-    if (n.isEmpty) return 'Ник не может быть пустым';
-    if (n.runes.length > 40) return 'Ник не длиннее 40 знаков';
+    if (n.isEmpty) return tr('Ник не может быть пустым');
+    if (n.runes.length > 40) return tr('Ник не длиннее 40 знаков');
     myNick = n;
     notifyListeners();
     _profileChanged();
@@ -1334,7 +1335,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Жалоба узлу. [attachRecent] — приложить последние входящие сообщения этого человека (доказательства выбирает заявитель).
   Future<String?> complain({required String kind, required String targetId, required String reason, required String text, bool attachRecent = false}) {
     final api = _api;
-    if (api == null) return Future.value('Нет связи с узлом');
+    if (api == null) return Future.value(tr('Нет связи с узлом'));
     final evidence = <String>[];
     if (attachRecent && kind == 'user') {
       final inc = messagesFor(targetId).where((m) => !m.outgoing).toList();
@@ -1550,10 +1551,10 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Поставить смайл на сообщение (тот же смайл ещё раз — снять). null — готово, иначе причина.
   Future<String?> react(ChatMessage m, String emoji) async {
-    if (!MsgChannel.reactionSet.contains(emoji)) return 'Такого смайла нет';
+    if (!MsgChannel.reactionSet.contains(emoji)) return tr('Такого смайла нет');
     final key = _remoteKey(m);
-    if (key == null) return 'Это сообщение пришло без номера — на него нельзя отреагировать';
-    if (!_receiptCapable.contains(m.peerId)) return 'Собеседнику нужно обновить приложение, чтобы видеть смайлы';
+    if (key == null) return tr('Это сообщение пришло без номера — на него нельзя отреагировать');
+    if (!_receiptCapable.contains(m.peerId)) return tr('Собеседнику нужно обновить приложение, чтобы видеть смайлы');
     await _loadRx();
     final cur = _rx[m.id]?['me'] ?? '';
     final next = cur == emoji ? '' : emoji;

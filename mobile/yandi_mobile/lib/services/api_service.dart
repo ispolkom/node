@@ -12,6 +12,7 @@ import '../crypto/identity.dart';
 import '../crypto/peer_trust.dart';
 import 'storage_service.dart';
 import 'limited_client.dart';
+import '../l10n_core.dart';
 
 class ApiService {
   TrustedNode _node;
@@ -136,12 +137,12 @@ class ApiService {
       if (res.statusCode == 200) return null;
       try {
         final j = jsonDecode(res.body) as Map<String, dynamic>;
-        return (j['error'] as String?) ?? 'Не удалось отправить жалобу';
+        return (j['error'] as String?) ?? tr('Не удалось отправить жалобу');
       } catch (_) {
-        return 'Не удалось отправить жалобу (код ${res.statusCode})';
+        return trf('Не удалось отправить жалобу (код {c})', {'c': res.statusCode});
       }
     } catch (_) {
-      return 'Узел не отвечает: жалоба не отправлена';
+      return tr('Узел не отвечает: жалоба не отправлена');
     }
   }
 
@@ -244,15 +245,15 @@ class ApiService {
     final body = res.body.isEmpty ? <String, dynamic>{} : (jsonDecode(res.body) as Map<String, dynamic>);
     if (res.statusCode != 200) {
       final msg = body['error'];
-      throw StateError(msg is String && msg.length < 300 ? msg : 'Не удалось получить код приглашения (${res.statusCode})');
+      throw StateError(msg is String && msg.length < 300 ? msg : trf('Не удалось получить код приглашения ({c})', {'c': res.statusCode}));
     }
     final code = body['code'];
     final ttl = body['expires_in_secs'];
     if (code is! String || !RegExp(r'^[0-9]{8}$').hasMatch(code) || ttl is! int || ttl <= 0 || ttl > 3600) {
-      throw StateError('Узел вернул неверный код приглашения');
+      throw StateError(tr('Узел вернул неверный код приглашения'));
     }
     final pin = body['pin'];
-    if (pin is! String || !RegExp(r'^[0-9]{4}$').hasMatch(pin)) throw StateError('Узел не вернул PIN приглашения');
+    if (pin is! String || !RegExp(r'^[0-9]{4}$').hasMatch(pin)) throw StateError(tr('Узел не вернул PIN приглашения'));
     return (code: code, pin: pin, ttlSecs: ttl);
   }
 
@@ -261,7 +262,7 @@ class ApiService {
     final res = await _client
         .delete(_url('/mobile/device-invite'), headers: _headers)
         .timeout(const Duration(seconds: 10));
-    if (res.statusCode != 200) throw StateError('Не удалось отозвать коды (${res.statusCode})');
+    if (res.statusCode != 200) throw StateError(trf('Не удалось отозвать коды ({c})', {'c': res.statusCode}));
   }
 
   Future<Map<String, dynamic>> getProxyInfo() async {
@@ -339,8 +340,8 @@ class ApiService {
       ).timeout(const Duration(seconds: 10));
       if (res.statusCode != 200) {
         throw StateError(res.statusCode == 409
-          ? 'Ключ этого устройства изменился: нужно новое сопряжение после проверки владельцем.'
-          : 'Узел не сохранил связку ключей (${res.statusCode}).');
+          ? tr('Ключ этого устройства изменился: нужно новое сопряжение после проверки владельцем.')
+          : trf('Узел не сохранил связку ключей ({c}).', {'c': res.statusCode}));
       }
     } on StateError catch (e) {
       onSecurityError?.call(e.toString());

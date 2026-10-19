@@ -18,7 +18,7 @@ Set<String> keysIn(String src) {
 void main() {
   test('у каждой надписи в коде есть английский перевод, подстановки {имя} совпадают', () {
     final keys = <String>{};
-    for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart') && !f.path.endsWith('l10n_en.dart') && !f.path.endsWith('l10n.dart'))) {
+    for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart') && !f.path.endsWith('l10n_en.dart') && !f.path.endsWith('l10n.dart') && !f.path.endsWith('l10n_core.dart'))) {
       keys.addAll(keysIn(f.readAsStringSync()));
     }
     expect(keys, isNotEmpty);
@@ -34,7 +34,7 @@ void main() {
 
   test('в таблице нет лишних ключей и пустых переводов', () {
     final keys = <String>{};
-    for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart') && !f.path.endsWith('l10n_en.dart') && !f.path.endsWith('l10n.dart'))) {
+    for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart') && !f.path.endsWith('l10n_en.dart') && !f.path.endsWith('l10n.dart') && !f.path.endsWith('l10n_core.dart'))) {
       keys.addAll(keysIn(f.readAsStringSync()));
     }
     // команды меню сообщения показываются через tr(команда), их ключи берутся из констант, а не из tr('…')

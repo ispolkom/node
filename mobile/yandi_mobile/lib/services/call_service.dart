@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/call_signal.dart';
+import '../l10n_core.dart';
 
 enum CallPhase { idle, calling, ringing, connecting, active, ended }
 
@@ -70,7 +71,7 @@ class CallService extends ChangeNotifier {
   // ── Исходящий ──────────────────────────────────────────────────────────────
 
   Future<String?> start(String toPeerId, {required bool withVideo}) async {
-    if (busy) return 'Вы уже разговариваете';
+    if (busy) return tr('Вы уже разговариваете');
     _reset();
     peerId = toPeerId; cid = _newCid(); video = withVideo; incoming = false;
     phase = CallPhase.calling; endReason = '';
@@ -79,13 +80,13 @@ class CallService extends ChangeNotifier {
     showScreen();
     final ok = await sendSignal(toPeerId, CallSignal.now('invite', cid!, video: video).encode());
     if (!ok) {
-      _finish('Нет связи с узлом или это не ваше устройство', log: false);
+      _finish(tr('Нет связи с узлом или это не ваше устройство'), log: false);
       return null;
     }
     _playRing('sounds/call_out.mp3');
     _ringTimer = Timer(const Duration(seconds: 45), () {
       _signal('hangup');
-      _finish('Нет ответа', log: true);
+      _finish(tr('Нет ответа'), log: true);
     });
     return null;
   }
@@ -117,7 +118,7 @@ class CallService extends ChangeNotifier {
         notifyListeners();
         onIncomingNotify(from, nameOf(from), video);
         _playRing('sounds/calling.mp3');
-        _ringTimer = Timer(const Duration(seconds: 45), () => _finish('Пропущенный звонок', log: true));
+        _ringTimer = Timer(const Duration(seconds: 45), () => _finish(tr('Пропущенный звонок'), log: true));
         showScreen();
       case 'accept':
         if (_mine(from, s) && !incoming && phase == CallPhase.calling) {
@@ -135,17 +136,17 @@ class CallService extends ChangeNotifier {
       case 'ice':
         if (_mine(from, s) && s.cand != null) await _onRemoteIce(s.cand!);
       case 'reject':
-        if (_mine(from, s)) _finish('Звонок отклонён', log: true);
+        if (_mine(from, s)) _finish(tr('Звонок отклонён'), log: true);
       case 'busy':
-        if (_mine(from, s)) _finish('Абонент занят', log: true);
+        if (_mine(from, s)) _finish(tr('Абонент занят'), log: true);
       case 'hangup':
-        if (_mine(from, s)) _finish(phase == CallPhase.ringing ? 'Пропущенный звонок' : 'Собеседник завершил звонок', log: true);
+        if (_mine(from, s)) _finish(phase == CallPhase.ringing ? tr('Пропущенный звонок') : tr('Собеседник завершил звонок'), log: true);
     }
   }
 
   /// Узел сообщил, что устройство не на связи.
   void onPeerOffline(String id) {
-    if (id == peerId && phase == CallPhase.calling) _finish('Абонент не в сети', log: true);
+    if (id == peerId && phase == CallPhase.calling) _finish(tr('Абонент не в сети'), log: true);
   }
 
   /// Срок установления соединения: собеседник мог принять звонок и не прислать SDP — без срока звонок вечно «соединяется» и держит
@@ -155,7 +156,7 @@ class CallService extends ChangeNotifier {
     _connectTimer = Timer(const Duration(seconds: 45), () {
       if (phase == CallPhase.connecting) {
         unawaited(_signal('hangup'));
-        _finish('Не удалось соединиться', log: true);
+        _finish(tr('Не удалось соединиться'), log: true);
       }
     });
   }
@@ -167,20 +168,20 @@ class CallService extends ChangeNotifier {
     _stopRing(); _ringTimer?.cancel(); onIncomingCancel();
     phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
     final ok = await sendSignal(peerId!, CallSignal.now('accept', cid!, video: video).encode());
-    if (!ok) { _finish('Нет связи с узлом', log: false); return; }
+    if (!ok) { _finish(tr('Нет связи с узлом'), log: false); return; }
     await _startMedia(offerer: false);
   }
 
   Future<void> reject() async {
     if (phase != CallPhase.ringing) return;
     await sendSignal(peerId!, CallSignal.now('reject', cid!).encode());
-    _finish('Звонок отклонён', log: true);
+    _finish(tr('Звонок отклонён'), log: true);
   }
 
   Future<void> hangup() async {
     if (!busy || phase == CallPhase.ended) return;
     await _signal('hangup');
-    _finish(phase == CallPhase.calling ? 'Звонок отменён' : 'Звонок завершён', log: true);
+    _finish(phase == CallPhase.calling ? tr('Звонок отменён') : tr('Звонок завершён'), log: true);
   }
 
   Future<bool> _signal(String type, {String? sdp, Map<String, dynamic>? cand}) {
@@ -247,10 +248,10 @@ class CallService extends ChangeNotifier {
       if (offerer) {
         final o = await _pc!.createOffer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': video ? 1 : 0});
         await _pc!.setLocalDescription(o);
-        if (!await _signal('offer', sdp: o.sdp)) _finish('Нет связи с узлом', log: false);
+        if (!await _signal('offer', sdp: o.sdp)) _finish(tr('Нет связи с узлом'), log: false);
       }
     } catch (e) {
-      _finish('Не удалось начать звонок: ${_short(e)}', log: false);
+      _finish(trf('Не удалось начать звонок: {e}', {'e': _short(e)}), log: false);
     }
   }
 
@@ -296,9 +297,9 @@ class CallService extends ChangeNotifier {
       if (!same()) return;
       await pc.setLocalDescription(a);
       if (!same()) return;
-      if (!await _signal('answer', sdp: a.sdp)) { if (same()) _finish('Нет связи с узлом', log: false); }
+      if (!await _signal('answer', sdp: a.sdp)) { if (same()) _finish(tr('Нет связи с узлом'), log: false); }
     } catch (e) {
-      if (same()) _finish('Не удалось ответить: ${_short(e)}', log: false);
+      if (same()) _finish(trf('Не удалось ответить: {e}', {'e': _short(e)}), log: false);
     }
   }
 
@@ -327,11 +328,11 @@ class CallService extends ChangeNotifier {
       }
     } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
       _lostTimer?.cancel();
-      _lostTimer = Timer(const Duration(seconds: 10), () => _finish('Связь потеряна', log: true));
+      _lostTimer = Timer(const Duration(seconds: 10), () => _finish(tr('Связь потеряна'), log: true));
     } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
       _finish(turnMissing
-          ? 'Не удалось соединиться. Сервер звонков на узле не настроен: без него звонок работает только в одной сети'
-          : 'Не удалось соединиться', log: true);
+          ? tr('Не удалось соединиться. Сервер звонков на узле не настроен: без него звонок работает только в одной сети')
+          : tr('Не удалось соединиться'), log: true);
     }
   }
 
@@ -369,7 +370,7 @@ class CallService extends ChangeNotifier {
     final dur = elapsed;
     final p = peerId, out = !incoming, v = video;
     if (log && p != null) {
-      final what = v ? 'Видеозвонок' : 'Звонок';
+      final what = v ? tr('Видеозвонок') : tr('Звонок');
       final text = wasActive
           ? '📞 $what · ${_fmt(dur)}'
           : (out ? '📞 $what: $reason' : '📞 $reason');

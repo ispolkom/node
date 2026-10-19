@@ -1,6 +1,7 @@
 import 'vault_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../l10n_core.dart';
 
 /// Сервис локальных уведомлений (без Firebase/Google).
 ///
@@ -68,8 +69,8 @@ class NotificationService {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
         'yandi_messages',
-        'Сообщения',
-        channelDescription: 'Входящие сообщения YANDI',
+        tr('Сообщения'),
+        channelDescription: tr('Входящие сообщения YANDI'),
         importance:   Importance.high,
         priority:     Priority.high,
         icon:         '@drawable/ic_notification',
@@ -86,7 +87,7 @@ class NotificationService {
     await _plugin.show(
       _stableId(fromPeerId),
       'YANDI',
-      'Новое сообщение',
+      tr('Новое сообщение'),
       details,
       payload: fromPeerId,
     );
@@ -99,11 +100,11 @@ class NotificationService {
     required String displayName,
     required String fileName,
   }) async {
-    const details = NotificationDetails(
+    final details = NotificationDetails(
       android: AndroidNotificationDetails(
         'yandi_files',
-        'Файлы',
-        channelDescription: 'Входящие файлы YANDI',
+        tr('Файлы'),
+        channelDescription: tr('Входящие файлы YANDI'),
         importance: Importance.high,
         priority:   Priority.high,
         icon:       '@drawable/ic_notification',
@@ -113,7 +114,7 @@ class NotificationService {
     await _plugin.show(
       _stableId('file_$fromPeerId'),
       'YANDI',
-      'Новый файл',
+      tr('Новый файл'),
       details,
       payload: fromPeerId,
     );
@@ -127,8 +128,8 @@ class NotificationService {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
         'yandi_calls',
-        'Звонки',
-        channelDescription: 'Входящие звонки и видеозвонки YANDI',
+        tr('Звонки'),
+        channelDescription: tr('Входящие звонки и видеозвонки YANDI'),
         importance: Importance.max,
         priority:   Priority.max,
         icon:       '@drawable/ic_notification',
@@ -142,7 +143,7 @@ class NotificationService {
         timeoutAfter: 45000,
       ),
     );
-    await _plugin.show(_callId, 'YANDI', video ? 'Входящий видеозвонок' : 'Входящий звонок', details, payload: fromPeerId);
+    await _plugin.show(_callId, 'YANDI', video ? tr('Входящий видеозвонок') : tr('Входящий звонок'), details, payload: fromPeerId);
   }
 
   static Future<void> cancelIncomingCall() async {

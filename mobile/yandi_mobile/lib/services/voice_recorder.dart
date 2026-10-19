@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:record/record.dart';
+import '../l10n_core.dart';
 
 /// Запись голосового сообщения. Абстракция нужна, чтобы экран чата проверялся без микрофона.
 abstract class VoiceBackend {
@@ -52,7 +53,7 @@ class VoiceRecording extends ChangeNotifier {
   /// null — запись идёт; иначе — причина, почему не началась.
   Future<String?> start() async {
     if (active || _disposed) return null;
-    if (_starting) return 'Микрофон ещё запускается';   // двойное нажатие не запускает второй запуск поверх первого
+    if (_starting) return tr('Микрофон ещё запускается');   // двойное нажатие не запускает второй запуск поверх первого
     _starting = true;
     try {
       return await _startOnce();
@@ -64,20 +65,20 @@ class VoiceRecording extends ChangeNotifier {
   Future<String?> _startOnce() async {
     final gen = ++_gen;
     bool stale() => _disposed || gen != _gen;
-    if (!await backend.hasPermission()) return 'Нет доступа к микрофону: разрешите его в настройках телефона';
-    if (stale()) return 'Запись отменена';
+    if (!await backend.hasPermission()) return tr('Нет доступа к микрофону: разрешите его в настройках телефона');
+    if (stale()) return tr('Запись отменена');
     final p = await newPath();
-    if (stale()) return 'Запись отменена';
+    if (stale()) return tr('Запись отменена');
     try {
       await backend.start(p);
     } catch (e) {
-      return 'Не удалось начать запись: $e';
+      return trf('Не удалось начать запись: {e}', {'e': e});
     }
     if (stale()) {
       // чат закрыли (или запись отменили), пока запускался микрофон: остановить и стереть уже созданный файл
       try { await backend.stop(); } catch (_) {}
       await wipeLateFile(p);
-      return 'Запись отменена';
+      return tr('Запись отменена');
     }
     path = p;
     active = true;

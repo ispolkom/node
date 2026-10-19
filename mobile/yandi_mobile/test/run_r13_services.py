@@ -10,7 +10,7 @@ def method(s,sig):
  start=s.index(sig);return s[start:s.index('\n  }',start)+4]
 storage=src('services/storage_service.dart')
 code="import 'dart:collection';\nimport 'dart:async';\nimport 'dart:convert';\nimport 'dart:io';\nimport 'dart:math';\nimport 'dart:typed_data';\nimport 'package:cryptography/cryptography.dart';\nimport 'package:path/path.dart' as p;\nimport 'package:crypto/crypto.dart' show sha256;\n"
-for f in ['crypto/file_vault.dart','crypto/replay_ledger.dart','models/avatar_msg.dart','models/file_offer.dart']:
+for f in ['crypto/file_vault.dart','crypto/replay_ledger.dart','models/avatar_msg.dart','models/file_offer.dart','l10n_core.dart']:
  code+=f"import '{(APP/'lib'/f).as_uri()}';\n"
 code+='''
 class ChangeNotifier {void notifyListeners(){} }

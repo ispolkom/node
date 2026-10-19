@@ -1,6 +1,6 @@
 import 'dart:convert';
 import 'package:http/http.dart' as http;
-import '../l10n.dart';
+import '../l10n_core.dart';
 import '../models/guest_node.dart';
 import '../models/trusted_node.dart';
 

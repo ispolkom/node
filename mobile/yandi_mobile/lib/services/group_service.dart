@@ -6,6 +6,7 @@ import '../models/group.dart';
 import '../crypto/identity.dart';
 import 'group_api.dart';
 import 'group_store.dart';
+import '../l10n_core.dart';
 
 /// Отказ отправить запись (запрещённый вид, заглушён и т.п.) — с причиной для человека.
 class GroupSendRefused implements Exception {
@@ -666,14 +667,14 @@ class GroupService {
   /// Прежний владелец становится админом, новый создаст новое поколение ключа.
   Future<void> transferOwner(String gid, String alias) async {
     final g = byId(gid);
-    if (g == null || !g.isOwner) throw const GroupSendRefused('Передать группу может только её владелец');
+    if (g == null || !g.isOwner) throw GroupSendRefused(tr('Передать группу может только её владелец'));
     final m = await api.members(gid);
     final target = (m['members'] as List? ?? const []).cast<Map>().where((x) => x['alias'] == alias).toList();
-    if (target.isEmpty) throw const GroupSendRefused('Участник не найден');
+    if (target.isEmpty) throw GroupSendRefused(tr('Участник не найден'));
     final pub = target.first['member_pub'] as String?;
-    if (pub == null) throw const GroupSendRefused('У участника ещё нет ключа группы: он должен открыть приложение');
+    if (pub == null) throw GroupSendRefused(tr('У участника ещё нет ключа группы: он должен открыть приложение'));
     final key = await _groupKey(gid, g.epoch);
-    if (key == null) throw const GroupSendRefused('Ключ группы не создан');
+    if (key == null) throw GroupSendRefused(tr('Ключ группы не создан'));
     await _append(g, GroupKind.system, {'op': 'handover', 'to': alias, 'pub': pub}, key);
     await api.transferOwner(gid, alias);
     await sync(only: gid);
@@ -750,20 +751,20 @@ class GroupService {
   /// Отправить запись. Запрещённый правилами группы вид отвергается ещё здесь; получатели тоже скрывают такие записи.
   Future<int> send(String gid, int kind, Map<String, dynamic> body) async {
     final g = byId(gid);
-    if (g == null) throw const GroupSendRefused('Группа не найдена');
-    if (g.muted) throw const GroupSendRefused('Вы заглушены в этой группе');
-    if (kind != GroupKind.system && !rules(gid).allows(kind)) throw const GroupSendRefused('В этой группе запрещён такой вид сообщений');
+    if (g == null) throw GroupSendRefused(tr('Группа не найдена'));
+    if (g.muted) throw GroupSendRefused(tr('Вы заглушены в этой группе'));
+    if (kind != GroupKind.system && !rules(gid).allows(kind)) throw GroupSendRefused(tr('В этой группе запрещён такой вид сообщений'));
     final key = await _groupKey(gid, g.epoch);
-    if (key == null) throw const GroupSendRefused('Ключ группы ещё не получен — подождите владельца');
+    if (key == null) throw GroupSendRefused(tr('Ключ группы ещё не получен — подождите владельца'));
     return _append(g, kind, body, key);
   }
 
   /// Владелец: запретить виды записей в группе (служебная запись, видна только участникам).
   Future<void> setRules(String gid, GroupRules r) async {
     final g = byId(gid);
-    if (g == null || !g.canManage) throw const GroupSendRefused('Правила задают владелец и админ группы');
+    if (g == null || !g.canManage) throw GroupSendRefused(tr('Правила задают владелец и админ группы'));
     final key = await _groupKey(gid, g.epoch);
-    if (key == null) throw const GroupSendRefused('Ключ группы не создан');
+    if (key == null) throw GroupSendRefused(tr('Ключ группы не создан'));
     await _append(g, GroupKind.system, r.toBody(), key);
     _rules[gid] = r;
     onChanged?.call(gid);
@@ -790,7 +791,7 @@ class GroupService {
   /// Проголосовать за запись: 1 — одобряю, -1 — не одобряю; повтор того же голоса снимает его.
   Future<void> vote(String gid, int seq, int v) async {
     final g = byId(gid);
-    if (g == null) throw const GroupSendRefused('Группа не найдена');
+    if (g == null) throw GroupSendRefused(tr('Группа не найдена'));
     final next = myVote(gid, seq) == v ? 0 : v;
     await send(gid, GroupKind.reaction, {'s': seq, 'v': next});
     final mine = _myVotes.putIfAbsent(gid, () => {});
