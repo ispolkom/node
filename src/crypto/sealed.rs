@@ -96,6 +96,11 @@ pub fn seal(sender: &SigningKey, recipient: &VerifyingKey, from: &[u8; 32], to: 
 
 /// Открыть конверт. Сначала проверяется подпись отправителя, потом расшифровывается. Любая неудача — одна и та же ошибка без подробностей.
 pub fn open(recipient: &SigningKey, sender: &VerifyingKey, from: &[u8; 32], to: &[u8; 32], now_ms: u64, data: &[u8]) -> Result<(u64, Vec<u8>)> {
+    open_within(recipient, sender, from, to, now_ms, MAX_AGE_MS, data)
+}
+
+/// То же с собственным пределом возраста конверта (короткое окно для сигналов: чем уже окно, тем меньше памяти для защиты от повторов).
+pub fn open_within(recipient: &SigningKey, sender: &VerifyingKey, from: &[u8; 32], to: &[u8; 32], now_ms: u64, max_age_ms: u64, data: &[u8]) -> Result<(u64, Vec<u8>)> {
     let bad = || anyhow::anyhow!("конверт отвергнут");
     if data.len() < HEADER + 16 + 64 || &data[..4] != MAGIC {
         return Err(bad());
@@ -109,11 +114,12 @@ pub fn open(recipient: &SigningKey, sender: &VerifyingKey, from: &[u8; 32], to: 
     }
     let ct = &data[HEADER..HEADER + len];
     let sig = Signature::from_slice(&data[HEADER + len..]).map_err(|_| bad())?;
-    let a = aad(&eph, &nonce, created_ms, from, to);
-    sender.verify(&sig_input(&a, ct), &sig).map_err(|_| bad())?;
-    if created_ms > now_ms.saturating_add(MAX_AHEAD_MS) || now_ms.saturating_sub(created_ms) > MAX_AGE_MS {
+    // окно времени проверяется до подписи: просроченный конверт отвергается без дорогих операций
+    if created_ms > now_ms.saturating_add(MAX_AHEAD_MS) || now_ms.saturating_sub(created_ms) > max_age_ms {
         return Err(bad());
     }
+    let a = aad(&eph, &nonce, created_ms, from, to);
+    sender.verify(&sig_input(&a, ct), &sig).map_err(|_| bad())?;
     let my_x_secret = StaticSecret::from(recipient.to_scalar_bytes());
     let my_x_pub = PublicKey::from(&my_x_secret).to_bytes();
     let shared = my_x_secret.diffie_hellman(&PublicKey::from(eph)).to_bytes();
@@ -188,5 +194,13 @@ mod tests {
         assert_eq!(open(&b, &a.verifying_key(), &id(1), &id(2), NOW, &big).unwrap().1.len(), MAX_PLAINTEXT);
         let empty = seal(&a, &b.verifying_key(), &id(1), &id(2), NOW, b"").unwrap();
         assert!(open(&b, &a.verifying_key(), &id(1), &id(2), NOW, &empty).unwrap().1.is_empty());
+    }
+
+    #[test]
+    fn a_short_window_refuses_old_envelopes_before_the_signature() {
+        let (a, b) = (sk(1), sk(2));
+        let env = seal(&a, &b.verifying_key(), &id(1), &id(2), NOW, b"x").unwrap();
+        assert!(open_within(&b, &a.verifying_key(), &id(1), &id(2), NOW + 1_000, 5_000, &env).is_ok());
+        assert!(open_within(&b, &a.verifying_key(), &id(1), &id(2), NOW + 6_000, 5_000, &env).is_err());
     }
 }

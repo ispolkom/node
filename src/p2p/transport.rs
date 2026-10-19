@@ -185,6 +185,61 @@ pub fn configured_ports() -> (u16, u16) {
 
 /// Типы пакетов, которые всегда идут запечатанными на ключ собеседника. Кроме `ChatMessage` (запечатывает слой чата) и `FileChunk`
 /// (свой ключ файла от сеанса) и служебных пакетов самого транспорта (связь, пробивка NAT, ретрансляция).
+/// Окно свежести запечатанных управляющих пакетов и ограничения защиты от повторов и стоимости.
+pub(crate) const SIGNAL_WINDOW_MS: u64 = 5 * 60 * 1000;
+const SEAL_REPLAY_CAP: usize = 16_384;
+const SEAL_RATE_PER_SEC: f64 = 100.0;
+const SEAL_BURST: f64 = 200.0;
+const SEAL_PEERS_CAP: usize = 4096;
+
+/// Память отпечатков принятых конвертов на окно свежести и ведро токенов на собеседника: тяжёлые операции (подпись, DH) выполняются только в рамках бюджета.
+#[derive(Default)]
+pub(crate) struct SealGuard {
+    seen: std::collections::HashSet<[u8; 32]>,
+    order: std::collections::VecDeque<([u8; 32], std::time::Instant)>,
+    buckets: HashMap<HashId, (f64, std::time::Instant)>,
+}
+
+impl SealGuard {
+    /// Можно ли сейчас потратить одну дорогую проверку на пакет от `peer`.
+    pub(crate) fn allow(&mut self, peer: HashId, now: std::time::Instant) -> bool {
+        if self.buckets.len() >= SEAL_PEERS_CAP && !self.buckets.contains_key(&peer) {
+            self.buckets.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 60);
+            if self.buckets.len() >= SEAL_PEERS_CAP {
+                return false;
+            }
+        }
+        let b = self.buckets.entry(peer).or_insert((SEAL_BURST, now));
+        let dt = now.duration_since(b.1).as_secs_f64();
+        b.0 = (b.0 + dt * SEAL_RATE_PER_SEC).min(SEAL_BURST);
+        b.1 = now;
+        if b.0 >= 1.0 {
+            b.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Запомнить принятый конверт; false — такой уже был в окне (повтор).
+    pub(crate) fn remember(&mut self, fingerprint: [u8; 32], now: std::time::Instant) -> bool {
+        let window = std::time::Duration::from_millis(SIGNAL_WINDOW_MS + 60_000);
+        while let Some((fp, t)) = self.order.front().copied() {
+            if now.duration_since(t) > window || self.order.len() >= SEAL_REPLAY_CAP {
+                self.order.pop_front();
+                self.seen.remove(&fp);
+            } else {
+                break;
+            }
+        }
+        if !self.seen.insert(fingerprint) {
+            return false;
+        }
+        self.order.push_back((fingerprint, now));
+        true
+    }
+}
+
 pub(crate) fn must_seal(t: P2PPacketType) -> bool {
     use P2PPacketType as T;
     matches!(
@@ -249,6 +304,8 @@ pub struct P2PTransport {
     admission: Arc<Mutex<crate::netlayer::admission::Admission>>,
     /// Когда в последний раз просили новый ключ у узла (не чаще раза в минуту)
     rekey_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
+    /// бюджет и память повторов для запечатанных пакетов (P26-1, P26-2)
+    seal_guard: Arc<std::sync::Mutex<SealGuard>>,
     /// when a broken session with a peer was last repaired by a new handshake (see `request_resync`)
     resync_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
     /// hole punching through introducers (src/p2p/punch.rs)
@@ -336,6 +393,7 @@ impl P2PTransport {
             bootstrap_fingerprints: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(Mutex::new(HashMap::new())),
+            seal_guard: Arc::new(std::sync::Mutex::new(SealGuard::default())),
             resync_requested: Arc::new(Mutex::new(HashMap::new())),
             punch: Arc::new(punch::PunchState::default()),
             relay: Arc::new(relay::RelayState::default()),
@@ -423,12 +481,28 @@ impl P2PTransport {
 
     /// Открыть запечатанный пакет от `sender`: подпись отправителя, адресат — мы, тип пакета внутри совпадает с внешним. Иначе None.
     pub async fn open_signal(&self, sender: HashId, packet_type: P2PPacketType, payload: &[u8]) -> Option<Vec<u8>> {
+        // бюджет тяжёлых проверок на собеседника (P26-2): сверх него пакет отбрасывается до подписи и DH
+        if !self.seal_guard.lock().ok()?.allow(sender, std::time::Instant::now()) {
+            return None;
+        }
         let pk = self.peer_signing_key(&sender).await?;
         let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).ok()?;
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
-        let (_, plain) = crate::crypto::sealed::open(&self.sealing_key(), &vk, &sender.0, &self.node_id().0, now, payload).ok()?;
+        let (_, plain) = crate::crypto::sealed::open_within(&self.sealing_key(), &vk, &sender.0, &self.node_id().0, now, SIGNAL_WINDOW_MS, payload).ok()?;
         let (first, rest) = plain.split_first()?;
-        (*first == packet_type.to_byte()).then(|| rest.to_vec())
+        if *first != packet_type.to_byte() {
+            return None;
+        }
+        // повтор того же конверта в окне свежести отвергается (P26-1)
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(sender.0);
+        h.update(payload);
+        let fp: [u8; 32] = h.finalize().into();
+        if !self.seal_guard.lock().ok()?.remember(fp, std::time::Instant::now()) {
+            return None;
+        }
+        Some(rest.to_vec())
     }
 
     /// Ключ подписи этого узла для запечатанных конвертов.

@@ -1078,8 +1078,11 @@ mod tests {
         // порты берутся из переменных окружения процесса: проверки, которым нужен транспорт, идут строго по одной
         static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let guard = SERIAL.lock().await;
-        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
-        std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
+        // у каждой проверки свои порты: транспорт прежней проверки может ещё не освободить сокеты
+        static NEXT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(19401);
+        let base = NEXT_PORT.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", base.to_string());
+        std::env::set_var("YANDI_P2P_DATA_PORT", (base + 1).to_string());
         let identity = NodeIdentity::new();
         let my_node_id = identity.node_id();
         let transport = P2PTransport::new(identity, 0)
@@ -1330,7 +1333,7 @@ mod tests {
         cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
         // исходящее: запечатано, не содержит текста, открывается ключом собеседника только для него
         let env = cm.seal_for(peer, "секрет".as_bytes()).await.unwrap();
-        assert!(!env.windows(6).any(|w| w == "секрет".as_bytes()));
+        assert!(!env.windows("секрет".len()).any(|w| w == "секрет".as_bytes()));
         let me_vk = cm.transport.sealing_key().verifying_key();
         let (_, back) = crate::crypto::sealed::open(&peer_key, &me_vk, &cm.my_node_id.0, &peer.0, now_ms(), &env).unwrap();
         assert_eq!(back, "секрет".as_bytes());
@@ -1382,5 +1385,38 @@ mod tests {
         for t in [T::ChatMessage, T::FileChunk, T::PunchReq, T::PunchIntro, T::RelayReq, T::RelayGrant, T::PathChallenge, T::PathResponse] {
             assert!(!must_seal(t), "{t:?} не должен запечатываться этим слоем");
         }
+    }
+
+    /// P26-1: тот же конверт сигнала во второй раз не принимается, а просроченный по короткому окну отвергается.
+    #[tokio::test]
+    async fn a_replayed_or_stale_call_signal_is_refused() {
+        use crate::p2p::P2PPacketType as T;
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[93u8; 32]);
+        let peer = HashId([93u8; 32]);
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let make = |at: u64| {
+            let mut plain = vec![T::VoiceCallRequest.to_byte()];
+            plain.extend_from_slice(br#"{"call_id":"abc"}"#);
+            crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, at, &plain).unwrap()
+        };
+        let env = make(now_ms());
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &env).await.is_some());
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &env).await.is_none(), "повтор принят");
+        let old = make(now_ms() - crate::p2p::transport::SIGNAL_WINDOW_MS - 1_000);
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &old).await.is_none(), "просроченный сигнал принят");
+    }
+
+    /// P26-2: поток запечатанных пакетов от одного собеседника упирается в бюджет дорогих проверок.
+    #[test]
+    fn expensive_opens_per_peer_are_budgeted() {
+        let mut g = crate::p2p::transport::SealGuard::default();
+        let peer = HashId([5u8; 32]);
+        let t0 = std::time::Instant::now();
+        let allowed = (0..1000).filter(|_| g.allow(peer, t0)).count();
+        assert!(allowed <= 200, "пропущено {allowed} подряд");
+        assert!(g.allow(HashId([6u8; 32]), t0), "другой собеседник не должен страдать");
+        assert!(g.allow(peer, t0 + std::time::Duration::from_secs(1)), "бюджет восстанавливается");
     }
 }
