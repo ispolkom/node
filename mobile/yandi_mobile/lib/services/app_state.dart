@@ -234,8 +234,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   Map<String, dynamic>? appUpdate;
 
   /// Кошелёк проекта из подписанного манифеста узла; заменяет вшитый (адрес меняется одной строкой манифеста).
-  SupportWallet? signedWallet;
-  List<SupportWallet> get wallets => signedWallet != null ? [signedWallet!] : supportWallets;
+  List<SupportWallet> signedWallets = const [];
+  List<SupportWallet> get wallets => signedWallets.isNotEmpty ? signedWallets : supportWallets;
   String? _updateDismissed;
   async_lib.Timer? _updateTimer;
 
@@ -243,9 +243,9 @@ class AppState extends ChangeNotifier implements FilesHost {
     final ans = await _api?.getUpdateAnswer(kAppVersion);
     final av = ans?['available'];
     final a = av is Map<String, dynamic> ? av : null;
-    final w = SupportWallet.fromSigned(ans?['support']);
-    if (w != null && (signedWallet?.address != w.address || signedWallet?.coin != w.coin || signedWallet?.network != w.network)) {
-      signedWallet = w;
+    final w = SupportWallet.listFromSigned(ans?['support']);
+    if (w.isNotEmpty && w.map((x) => '${x.id}|${x.address}').join(',') != signedWallets.map((x) => '${x.id}|${x.address}').join(',')) {
+      signedWallets = w;
       notifyListeners();
     }
     final next = (a != null && a['version'] != _updateDismissed) ? a : null;

@@ -54,7 +54,7 @@ void main() {
     await t.pumpAndSettle();
     expect(find.text('Поддержать проект'), findsOneWidget);
     expect(find.text(addr), findsOneWidget);
-    await t.tap(find.byKey(const ValueKey('copy-Bitcoin')));
+    await t.tap(find.byKey(const ValueKey('copy-Bitcoin|BTC')));
     await t.pumpAndSettle();
     expect(copied, [addr]);
     expect(find.text('Скопировано'), findsOneWidget);
@@ -67,16 +67,26 @@ void main() {
     expect(find.byKey(const ValueKey('support-empty')), findsOneWidget);
   });
 
-  testWidgets('поддержка: адрес из подписанного манифеста заменяет вшитый; мусор игнорируется', (t) async {
-    const embedded = '{"wallets":[{"coin":"USDT","network":"Tron","address":"TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB"}]}';
-    const fresh = 'TNewAddressNewAddressNewAddress12345';
-    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const {'asset': 'USDT', 'network': 'Tron (TRC20)', 'address': fresh})));
+  testWidgets('поддержка: кошельки из подписанного манифеста заменяют вшитые; мусор игнорируется', (t) async {
+    const embedded = '{"wallets":[{"coin":"USDT","network":"Tron","address":"TPeLtLuE9qx64neroHn14LjWwRn5jmupHY"}]}';
+    const evm = '0x00afCEFc2428B3D00f7d6B739C071339de4c2521';
+    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const [
+      {'asset': 'USDT/USDC', 'network': 'Polygon (PoS)', 'address': evm},
+      {'asset': 'USDT/USDC', 'network': 'Ethereum (ERC-20)', 'address': evm},
+    ])));
     await t.pump();
-    expect(find.text(fresh), findsOneWidget);
-    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsNothing);
-    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const {'asset': 'USDT', 'network': 'x', 'address': 'bad address!'})));
+    expect(find.text(evm), findsNWidgets(2), reason: 'адрес EVM один, строк две (по сетям)');
+    expect(find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY'), findsNothing, reason: 'вшитый заменён');
+    expect(find.byKey(const ValueKey('qr-USDT/USDC|Polygon (PoS)')), findsOneWidget);
+    // неверные записи пропускаются; если верных нет — остаётся вшитый список
+    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const [
+      {'asset': 'USDT', 'network': 'x', 'address': 'bad address!'},
+    ])));
     await t.pump();
-    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsOneWidget);
+    expect(find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY'), findsOneWidget);
+    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const {'asset': 'USDT'})));
+    await t.pump();
+    expect(find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY'), findsOneWidget, reason: 'не список — игнорируется');
   });
 
   testWidgets('главная страница оболочки: сверху закреплённые новости и обновления, ниже «Поддержать проект» с адресом', (t) async {
@@ -90,8 +100,8 @@ void main() {
     final news = t.getTopLeft(find.byKey(const ValueKey('news-block'))).dy;
     final support = t.getTopLeft(find.byKey(const ValueKey('support-block'))).dy;
     expect(news < support, isTrue, reason: 'новости выше поддержки');
-    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsOneWidget, reason: 'адрес виден и его можно скопировать');
-    expect(find.byKey(const ValueKey('qr-USDT')), findsOneWidget);
+    expect(find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY'), findsOneWidget, reason: 'адрес виден и его можно скопировать');
+    expect(find.byKey(const ValueKey('qr-USDT|Tron (TRC-20)')), findsOneWidget);
     await m1.stop(t);
   });
 }

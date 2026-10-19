@@ -68,6 +68,16 @@ void main() {
           if (scene == 'Чат') await click(t, 'Открыть чат');
           if (scene == 'Группы') await click(t, 'Семья · владелец');
         }
+        if (scene == 'Главная') {
+          // блок поддержки читает вшитый файл адресов асинхронно: ждём, пока строки с адресами реально появятся (а не фиксированную паузу),
+          // иначе снимок зависит от порядка запуска и загруженности машины
+          final firstAddress = find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY');
+          for (var i = 0; i < 50 && firstAddress.evaluate().isEmpty; i++) {
+            await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+            await t.pump();
+          }
+          expect(firstAddress, findsOneWidget, reason: 'кошельки проекта загружены до снимка');
+        }
         expect(
           t.takeException(),
           isNull,

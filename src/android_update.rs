@@ -13,7 +13,7 @@ const PUBKEY_HEX: &str = include_str!("../release/yandi-release-pubkey.hex");
 
 static AVAILABLE: Mutex<Option<Value>> = Mutex::new(None);
 /// кошелёк проекта из подписанного манифеста Android
-static SUPPORT: Mutex<Option<Value>> = Mutex::new(None);
+static SUPPORT: Mutex<Vec<Value>> = Mutex::new(Vec::new());
 
 fn channels() -> Vec<Channel> {
     vec![Channel { name: "yandi.su".into(), base: "https://yandi.su/update/android/".into() }]
@@ -63,8 +63,8 @@ pub async fn refresh() {
             if g.as_ref().is_none_or(|old| old["seq"].as_u64().unwrap_or(0) <= f.manifest.seq) {
                 *g = Some(v);
                 // кошелёк обновляется только вместе с принятым выпуском: старый подписанный манифест адрес не откатит
-                if let Some(w) = &f.manifest.support {
-                    *SUPPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!(w));
+                if !f.manifest.support.is_empty() {
+                    *SUPPORT.lock().unwrap_or_else(|e| e.into_inner()) = f.manifest.support.iter().map(|w| json!(w)).collect();
                 }
             }
         }
@@ -112,7 +112,7 @@ mod tests {
             platform: platform.into(),
             expires: 0,
             notes: "n".into(),
-            support: None,
+            support: Vec::new(),
         }
     }
 

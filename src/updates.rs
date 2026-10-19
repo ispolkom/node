@@ -30,6 +30,14 @@ impl Default for Settings {
     }
 }
 
+fn wallets_compat<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Value>, D::Error> {
+    Ok(match Value::deserialize(d)? {
+        Value::Array(a) => a,
+        o @ Value::Object(_) => vec![o],
+        _ => Vec::new(),
+    })
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct State {
     /// самый большой номер выпуска, подтверждённый подписью: меньший (откат) не принимается
@@ -41,9 +49,9 @@ struct State {
     available: Option<Value>,
     #[serde(default)]
     errors: Vec<String>,
-    /// кошелёк проекта из последнего проверенного подписанного манифеста
-    #[serde(default)]
-    support: Option<Value>,
+    /// кошельки проекта из последнего проверенного подписанного манифеста (старый файл: пусто, null или один объект)
+    #[serde(default, deserialize_with = "wallets_compat")]
+    support: Vec<Value>,
     /// порог отката утрачен (файл состояния и его копия есть, но не читаются): кандидаты не принимаются, пока владелец не удалит оба файла
     #[serde(skip)]
     refuse: bool,
@@ -185,8 +193,8 @@ pub async fn check_now() -> Value {
             Some(f) if f.manifest.seq < st.max_seq => {}
             Some(f) => {
                 st.max_seq = st.max_seq.max(f.manifest.seq);
-                if f.manifest.support.is_some() {
-                    st.support = f.manifest.support.as_ref().map(|w| json!(w));
+                if !f.manifest.support.is_empty() {
+                    st.support = f.manifest.support.iter().map(|w| json!(w)).collect();
                 }
                 st.available = if is_newer(&f.manifest.version, &own_version()) {
                     Some(json!({
@@ -227,6 +235,18 @@ pub fn spawn() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn an_old_state_file_with_one_wallet_or_null_still_loads_and_keeps_the_rollback_threshold() {
+        let old_null: State = serde_json::from_str(r#"{"max_seq": 7, "support": null}"#).unwrap();
+        assert_eq!((old_null.max_seq, old_null.support.len()), (7, 0));
+        let old_obj: State = serde_json::from_str(r#"{"max_seq": 8, "support": {"asset":"USDT","network":"Tron","address":"T"}}"#).unwrap();
+        assert_eq!((old_obj.max_seq, old_obj.support.len()), (8, 1));
+        let new: State = serde_json::from_str(r#"{"max_seq": 9, "support": [{"a":1},{"a":2}]}"#).unwrap();
+        assert_eq!((new.max_seq, new.support.len()), (9, 2));
+        let none: State = serde_json::from_str(r#"{"max_seq": 3}"#).unwrap();
+        assert_eq!(none.support.len(), 0);
+    }
+
     #[test]
     fn an_offer_below_the_accepted_seq_is_never_shown() {
         let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());

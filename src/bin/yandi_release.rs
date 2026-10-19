@@ -191,9 +191,9 @@ async fn main() {
                 .unwrap_or(120);
             m.expires = if days == 0 { 0 } else { now + days * 86_400 };
             m.notes = std::env::var("YANDI_RELEASE_NOTES").unwrap_or_default().chars().take(2000).collect();
-            // кошелёк проекта: YANDI_RELEASE_WALLET="Монета|Сеть|Адрес"
+            // кошельки проекта: YANDI_RELEASE_WALLET="Монета|Сеть|Адрес;Монета|Сеть|Адрес…"
             if let Ok(w) = std::env::var("YANDI_RELEASE_WALLET") {
-                m.support = Some(SupportWallet::parse(&w).unwrap_or_else(|| die("YANDI_RELEASE_WALLET: нужен вид Монета|Сеть|Адрес")));
+                m.support = SupportWallet::parse_list(&w).unwrap_or_else(|| die("YANDI_RELEASE_WALLET: нужен вид Монета|Сеть|Адрес (несколько — через «;»), адреса проверяются контрольной суммой"));
             }
             validate_manifest(&m).unwrap_or_else(|e| die(&e.to_string()));
             std::fs::write(dir.join(MANIFEST_NAME), manifest_bytes(&m))

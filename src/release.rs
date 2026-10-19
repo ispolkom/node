@@ -49,8 +49,8 @@ pub struct Manifest {
     #[serde(default)]
     pub notes: String,
     /// кошелёк поддержки проекта (не узла): подписан вместе с выпуском, меняется одной строкой манифеста
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub support: Option<SupportWallet>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub support: Vec<SupportWallet>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -59,6 +59,44 @@ pub struct SupportWallet {
     pub asset: String,
     pub network: String,
     pub address: String,
+}
+
+pub const MAX_WALLETS: usize = 8;
+
+fn has_duplicate_wallets(w: &[SupportWallet]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    w.iter().any(|x| !seen.insert((x.asset.as_str(), x.network.as_str(), x.address.as_str())))
+}
+
+/// Адрес EVM-сети (Ethereum, BNB Smart Chain, Polygon…): `0x` и 40 шестнадцатеричных знаков, регистр букв — контрольная сумма EIP-55
+/// (Keccak-256 от адреса в нижнем регистре). Адрес целиком в одном регистре контрольной суммы не несёт и не принимается.
+pub fn evm_address_ok(addr: &str) -> bool {
+    use sha3::{Digest, Keccak256};
+    let Some(h) = addr.strip_prefix("0x") else { return false };
+    if h.len() != 40 || !h.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return false;
+    }
+    let lower = h.to_ascii_lowercase();
+    let digest = Keccak256::digest(lower.as_bytes());
+    let expect: String = lower
+        .chars()
+        .enumerate()
+        .map(|(i, c)| {
+            let nib = if i % 2 == 0 { digest[i / 2] >> 4 } else { digest[i / 2] & 0xf };
+            if c.is_ascii_alphabetic() && nib >= 8 { c.to_ascii_uppercase() } else { c }
+        })
+        .collect();
+    expect == h
+}
+
+/// Адрес по виду: Tron (`T…`, сеть должна называться Tron) или EVM (`0x…`, сеть — не Tron). Чужой вид адреса для сети не принимается.
+pub fn wallet_address_ok(network: &str, addr: &str) -> bool {
+    let is_tron_net = network.trim_start().to_ascii_lowercase().starts_with("tron");
+    if addr.starts_with("0x") {
+        !is_tron_net && evm_address_ok(addr)
+    } else {
+        is_tron_net && tron_address_ok(addr)
+    }
 }
 
 /// Адрес Tron: Base58Check, 25 байт, префикс сети 0x41, контрольные 4 байта — двойной SHA-256. Опечатка в адресе поддержки — потерянные деньги,
@@ -87,6 +125,12 @@ pub fn tron_address_ok(addr: &str) -> bool {
 }
 
 impl SupportWallet {
+    /// Список кошельков при выпуске: `Монета|Сеть|Адрес`, несколько — через `;` или перевод строки.
+    pub fn parse_list(s: &str) -> Option<Vec<Self>> {
+        let v: Option<Vec<Self>> = s.split([';', '\n']).map(str::trim).filter(|x| !x.is_empty()).map(Self::parse).collect();
+        v.filter(|v| !v.is_empty() && v.len() <= MAX_WALLETS && !has_duplicate_wallets(v))
+    }
+
     /// Разбор `Монета|Сеть|Адрес` (так задаётся при выпуске).
     pub fn parse(s: &str) -> Option<Self> {
         let mut it = s.split('|');
@@ -97,7 +141,7 @@ impl SupportWallet {
         (1..=16).contains(&self.asset.chars().count())
             && (1..=32).contains(&self.network.chars().count())
             && !self.asset.chars().chain(self.network.chars()).any(|c| c.is_control() || c == '|')
-            && tron_address_ok(&self.address)
+            && wallet_address_ok(&self.network, &self.address)
     }
 }
 
@@ -344,7 +388,7 @@ pub fn build_manifest(
         platform: String::new(),
         expires: 0,
         notes: String::new(),
-        support: None,
+        support: Vec::new(),
     };
     validate_manifest(&m).map_err(|e| e.to_string())?;
     Ok(m)
@@ -444,7 +488,9 @@ pub fn validate_manifest(m: &Manifest) -> Result<(), VerifyError> {
         || m.platform.len() > 32
         || !m.platform.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         || m.notes.chars().count() > 2000
-        || m.support.as_ref().is_some_and(|w| !w.valid())
+        || m.support.len() > MAX_WALLETS
+        || m.support.iter().any(|w| !w.valid())
+        || has_duplicate_wallets(&m.support)
     {
         return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
     }
@@ -764,7 +810,7 @@ mod tests {
             platform: String::new(),
             expires: 0,
             notes: String::new(),
-            support: None,
+            support: Vec::new(),
         };
         let eb = manifest_bytes(&evil);
         let es = hex::encode(k.sign(&[SIG_DOMAIN, &eb].concat()).to_bytes());
@@ -775,23 +821,32 @@ mod tests {
     }
 
     #[test]
-    fn support_wallet_is_signed_optional_and_validated() {
-        let w = SupportWallet::parse("USDT|Tron (TRC20)|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB").expect("valid");
+    fn support_wallets_are_signed_optional_and_each_address_is_checked_by_its_own_rules() {
+        let tron = "TPeLtLuE9qx64neroHn14LjWwRn5jmupHY";
+        let evm = "0x00afCEFc2428B3D00f7d6B739C071339de4c2521";
+        let list = SupportWallet::parse_list(&format!("USDT|Tron (TRC-20)|{tron};USDT/USDC|Ethereum (ERC-20)|{evm}\nUSDT/USDC|BNB Smart Chain (BEP-20)|{evm}; USDT/USDC|Polygon (PoS)|{evm}")).expect("четыре кошелька");
+        assert_eq!(list.len(), 4);
         let mut m = parse_manifest(&{
             let d = tmpdir();
             release(d.path(), 1).0
         })
         .unwrap();
-        assert!(m.support.is_none() && !String::from_utf8(manifest_bytes(&m)).unwrap().contains("support"), "без кошелька поле не пишется");
-        m.support = Some(w.clone());
-        let back = parse_manifest(&manifest_bytes(&m)).unwrap();
-        assert_eq!(back.support, Some(w));
-        m.support = Some(SupportWallet { address: "x y".into(), ..m.support.clone().unwrap() });
-        assert!(validate_manifest(&m).is_err());
-        assert!(SupportWallet::parse("USDT|Tron (TRC20)|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsC").is_none(), "опечатка в последнем знаке: контрольная сумма не сходится");
-        assert!(SupportWallet::parse("USDT|Tron (TRC20)|00000000000000000000000000").is_none());
-        assert!(SupportWallet::parse("USDTUSDTUSDTUSDTU|Tron|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB").is_none(), "монета длиннее 16 знаков");
+        assert!(m.support.is_empty() && !String::from_utf8(manifest_bytes(&m)).unwrap().contains("support"), "без кошельков поле не пишется");
+        m.support = list.clone();
+        assert_eq!(parse_manifest(&manifest_bytes(&m)).unwrap().support, list);
+        // Tron: опечатка, нули; EVM: испорченный регистр (контрольная сумма), чужой вид адреса для сети, дубликаты
+        assert!(SupportWallet::parse("USDT|Tron|TPeLtLuE9qx64neroHn14LjWwRn5jmupHZ").is_none(), "опечатка в Tron");
+        assert!(SupportWallet::parse("USDT|Tron|00000000000000000000000000").is_none());
+        assert!(SupportWallet::parse("USDT|Polygon|0x00afcefc2428B3D00f7d6B739C071339de4c2521").is_none(), "регистр букв не сходится с EIP-55");
+        assert!(SupportWallet::parse(&format!("USDT|Polygon|{}", evm.to_ascii_lowercase())).is_none(), "адрес без контрольного регистра не принимается");
+        assert!(SupportWallet::parse(&format!("USDT|Tron|{evm}")).is_none(), "адрес EVM для сети Tron");
+        assert!(SupportWallet::parse(&format!("USDT|Polygon|{tron}")).is_none(), "адрес Tron для сети Polygon");
+        assert!(SupportWallet::parse("USDTUSDTUSDTUSDTU|Tron|TPeLtLuE9qx64neroHn14LjWwRn5jmupHY").is_none(), "монета длиннее 16 знаков");
         assert!(SupportWallet::parse("USDT|Tron").is_none() && SupportWallet::parse("a|b|c|d").is_none());
+        assert!(SupportWallet::parse_list(&format!("USDT|Tron|{tron};USDT|Tron|{tron}")).is_none(), "дубликат");
+        let mut bad = m.clone();
+        bad.support[0].address = "x y".into();
+        assert!(validate_manifest(&bad).is_err());
     }
 
     #[test]

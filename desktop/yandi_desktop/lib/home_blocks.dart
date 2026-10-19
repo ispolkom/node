@@ -62,12 +62,21 @@ class Wallet {
   final String coin, network, address;
   const Wallet(this.coin, this.network, this.address);
 
-  /// Кошелёк из подписанного манифеста выпуска (узел отдаёт его в `support`); неверный вид — null, остаётся вшитый.
-  static Wallet? fromSigned(Object? m) {
-    if (m is! Map) return null;
-    final coin = NewsBlock.clean(m['asset'], max: 24), net = NewsBlock.clean(m['network'], max: 32), addr = '${m['address'] ?? ''}'.trim();
-    if (coin.isEmpty || addr.length < 20 || addr.length > 128 || !RegExp(r'^[A-Za-z0-9:_\-\.]+$').hasMatch(addr)) return null;
-    return Wallet(coin, net, addr);
+  /// Ключ строки: адрес EVM один на несколько сетей, поэтому различаем по монете и сети.
+  String get id => '$coin|$network';
+
+  /// Кошельки из подписанного манифеста выпуска (узел отдаёт их в `support`): до 8 верных; неверные пропускаются, пусто — остаётся вшитый список.
+  static List<Wallet> listFromSigned(Object? m) {
+    if (m is! List) return const [];
+    final out = <Wallet>[];
+    for (final x in m.take(8)) {
+      if (x is! Map) continue;
+      final coin = NewsBlock.clean(x['asset'], max: 24), net = NewsBlock.clean(x['network'], max: 32), addr = '${x['address'] ?? ''}'.trim();
+      // Tron (T…, 34 знака) или EVM (0x + 40 hex): контрольные суммы проверены при выпуске, здесь только вид
+      if (coin.isEmpty || net.isEmpty || !RegExp(r'^(T[1-9A-HJ-NP-Za-km-z]{33}|0x[0-9a-fA-F]{40})$').hasMatch(addr)) continue;
+      out.add(Wallet(coin, net, addr));
+    }
+    return out;
   }
 
   /// Разбор вшитого файла: только непустые адреса из безопасного набора знаков и разумной длины.
@@ -78,7 +87,7 @@ class Wallet {
       final out = <Wallet>[];
       for (final w in data['wallets'] as List) {
         if (w is! Map) continue;
-        final coin = NewsBlock.clean(w['coin'], max: 24), net = NewsBlock.clean(w['network'], max: 16), addr = '${w['address'] ?? ''}'.trim();
+        final coin = NewsBlock.clean(w['coin'], max: 24), net = NewsBlock.clean(w['network'], max: 32), addr = '${w['address'] ?? ''}'.trim();
         if (coin.isEmpty || addr.length < 20 || addr.length > 128 || !RegExp(r'^[A-Za-z0-9:_\-\.]+$').hasMatch(addr)) continue;
         out.add(Wallet(coin, net, addr));
         if (out.length >= 8) break;
@@ -97,7 +106,7 @@ class SupportBlock extends StatefulWidget {
   /// Кошелёк из подписанного манифеста (`support` в ответе узла): заменяет вшитый, чтобы смена адреса шла одной строкой манифеста.
   final Object? signed;
   const SupportBlock({super.key, this.load = _defaultLoad, this.signed});
-  static Future<String> _defaultLoad() => rootBundle.loadString('assets/support.json');
+  static Future<String> _defaultLoad() => rootBundle.loadString('assets/support.json', cache: false);
   @override
   State<SupportBlock> createState() => _SupportBlockState();
 }
@@ -122,7 +131,8 @@ class _SupportBlockState extends State<SupportBlock> {
 
   @override
   Widget build(BuildContext context) {
-    final wallets = Wallet.fromSigned(widget.signed) != null ? [Wallet.fromSigned(widget.signed)!] : this.wallets;
+    final fresh = Wallet.listFromSigned(widget.signed);
+    final wallets = fresh.isNotEmpty ? fresh : this.wallets;
     return Panel(
       key: const ValueKey('support-block'),
       title: 'Поддержать проект',
@@ -147,7 +157,7 @@ class _SupportBlockState extends State<SupportBlock> {
                   Container(
                     color: Colors.white,
                     padding: const EdgeInsets.all(6),
-                    child: QrImageView(key: ValueKey('qr-${w.coin}'), data: w.address, size: 132, backgroundColor: Colors.white),
+                    child: QrImageView(key: ValueKey('qr-${w.id}'), data: w.address, size: 132, backgroundColor: Colors.white),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -156,16 +166,16 @@ class _SupportBlockState extends State<SupportBlock> {
                       children: [
                         Text('${w.coin}${w.network.isEmpty ? '' : ' · сеть ${w.network}'}', style: const TextStyle(fontWeight: FontWeight.bold, color: Icq.text)),
                         const SizedBox(height: 4),
-                        SelectableText(w.address, key: ValueKey('wallet-${w.coin}'), style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Icq.text)),
+                        SelectableText(w.address, key: ValueKey('wallet-${w.id}'), style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Icq.text)),
                         const SizedBox(height: 4),
                         Text('Отправляйте только ${w.coin}${w.network.isEmpty ? '' : ' в сети ${w.network}'}: перевод в другой сети будет потерян.', style: const TextStyle(fontSize: 12, color: Icq.peer)),
                         TextButton(
-                          key: ValueKey('copy-${w.coin}'),
+                          key: ValueKey('copy-${w.id}'),
                           onPressed: () async {
                             await Clipboard.setData(ClipboardData(text: w.address));
-                            if (mounted) setState(() => copied = w.coin);
+                            if (mounted) setState(() => copied = w.id);
                           },
-                          child: Text(copied == w.coin ? 'Скопировано' : 'Скопировать адрес'),
+                          child: Text(copied == w.id ? 'Скопировано' : 'Скопировать адрес'),
                         ),
                       ],
                     ),

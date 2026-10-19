@@ -115,6 +115,42 @@ def tron_ok(addr):
     raw = n.to_bytes(25, "big")
     return raw[0] == 0x41 and hashlib.sha256(hashlib.sha256(raw[:21]).digest()).digest()[:4] == raw[21:]
 
+def keccak256(data):
+    RC = [0x1, 0x8082, 0x800000000000808A, 0x8000000080008000, 0x808B, 0x80000001, 0x8000000080008081, 0x8000000000008009, 0x8A, 0x88, 0x80008009, 0x8000000A, 0x8000808B, 0x800000000000008B, 0x8000000000008089, 0x8000000000008003, 0x8000000000008002, 0x8000000000000080, 0x800A, 0x800000008000000A, 0x8000000080008081, 0x8000000000008080, 0x80000001, 0x8000000080008008]
+    R = [[0, 36, 3, 41, 18], [1, 44, 10, 45, 2], [62, 6, 43, 15, 61], [28, 55, 25, 21, 56], [27, 20, 39, 8, 14]]
+    M = (1 << 64) - 1
+    rol = lambda x, n: ((x << n) | (x >> (64 - n))) & M if n else x
+    s = [[0] * 5 for _ in range(5)]
+    p = bytearray(data) + b"\x01"
+    p += b"\x00" * ((-len(p)) % 136)
+    p[-1] |= 0x80
+    for i in range(0, len(p), 136):
+        for j in range(17):
+            s[j % 5][j // 5] ^= int.from_bytes(p[i + 8 * j:i + 8 * j + 8], "little")
+        for rc in RC:
+            C = [s[x][0] ^ s[x][1] ^ s[x][2] ^ s[x][3] ^ s[x][4] for x in range(5)]
+            D = [C[(x - 1) % 5] ^ rol(C[(x + 1) % 5], 1) for x in range(5)]
+            s = [[s[x][y] ^ D[x] for y in range(5)] for x in range(5)]
+            B = [[0] * 5 for _ in range(5)]
+            for x in range(5):
+                for y in range(5):
+                    B[y][(2 * x + 3 * y) % 5] = rol(s[x][y], R[x][y])
+            s = [[B[x][y] ^ ((~B[(x + 1) % 5][y]) & B[(x + 2) % 5][y]) for y in range(5)] for x in range(5)]
+            s[0][0] ^= rc
+    return b"".join(s[j % 5][j // 5].to_bytes(8, "little") for j in range(4))
+
+def evm_ok(addr):
+    # EIP-55: регистр букв несёт контрольную сумму; адрес целиком в одном регистре не принимается (как в src/release.rs)
+    if not (addr.startswith("0x") and len(addr) == 42 and all(c in "0123456789abcdefABCDEF" for c in addr[2:])):
+        return False
+    low = addr[2:].lower()
+    k = keccak256(low.encode()).hex()
+    return addr[2:] == "".join(c.upper() if c.isalpha() and int(k[i], 16) >= 8 else c for i, c in enumerate(low))
+
+def wallet_ok(net, addr):
+    tron_net = net.lstrip().lower().startswith("tron")
+    return (not tron_net and evm_ok(addr)) if addr.startswith("0x") else (tron_net and tron_ok(addr))
+
 # схема совпадает с src/release.rs: validate_manifest (deny_unknown_fields)
 ROOT_REQUIRED = {"format", "product", "version", "seq", "created", "key_id", "files"}
 ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes", "support"}
@@ -138,13 +174,19 @@ try:
     need(m["key_id"] == sys.argv[2], "идентификатор ключа в манифесте не совпадает с закреплённым ключом")
     notes = m.get("notes", "")
     need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
-    sw = m.get("support")
-    if sw is not None:
-        # те же правила, что в src/release.rs (SupportWallet::valid): монета 1..16, сеть 1..32 знаков без управляющих и «|», адрес Tron с Base58Check
-        need(type(sw) is dict and set(sw) == {"asset", "network", "address"} and all(type(x) is str for x in sw.values()), "неверный кошелёк поддержки")
-        need(1 <= len(sw["asset"]) <= 16 and 1 <= len(sw["network"]) <= 32, "неверная длина монеты или сети кошелька")
-        need(not any(unicodedata.category(c) == "Cc" or c == "|" for c in sw["asset"] + sw["network"]), "недопустимые знаки в монете или сети кошелька")
-        need(tron_ok(sw["address"]), "адрес кошелька не проходит проверку контрольной суммы Tron")
+    sw = m.get("support", [])
+    # кошельки проекта: до 8, те же правила, что в src/release.rs (SupportWallet::valid): монета 1..16, сеть 1..32 знаков без управляющих и «|»,
+    # адрес Tron с Base58Check или EVM с EIP-55, дубликатов нет
+    need(type(sw) is list and len(sw) <= 8, "неверный список кошельков поддержки")
+    seen = set()
+    for w in sw:
+        need(type(w) is dict and set(w) == {"asset", "network", "address"} and all(type(x) is str for x in w.values()), "неверный кошелёк поддержки")
+        need(1 <= len(w["asset"]) <= 16 and 1 <= len(w["network"]) <= 32, "неверная длина монеты или сети кошелька")
+        need(not any(unicodedata.category(c) == "Cc" or c == "|" for c in w["asset"] + w["network"]), "недопустимые знаки в монете или сети кошелька")
+        need(wallet_ok(w["network"], w["address"]), "адрес кошелька не проходит проверку контрольной суммы")
+        key = (w["asset"], w["network"], w["address"])
+        need(key not in seen, "кошелёк указан дважды")
+        seen.add(key)
     files = m["files"]
     need(type(files) is list and 1 <= len(files) <= 32, "неверный список файлов")
     names = set()
