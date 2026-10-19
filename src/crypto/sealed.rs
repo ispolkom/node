@@ -68,16 +68,22 @@ fn sig_input(aad: &[u8], ct: &[u8]) -> Vec<u8> {
 
 /// Запечатать `plaintext` для `recipient`. `from`/`to` — идентификаторы узлов (входят в AAD и ключ).
 pub fn seal(sender: &SigningKey, recipient: &VerifyingKey, from: &[u8; 32], to: &[u8; 32], created_ms: u64, plaintext: &[u8]) -> Result<Vec<u8>> {
+    let eph_sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
+    let mut nonce = [0u8; 12];
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    seal_with(sender, recipient, from, to, created_ms, plaintext, eph_sk, nonce)
+}
+
+/// То же с заданными одноразовым ключом и nonce: нужно только для сверки с независимыми векторами (`tests/yse_vectors.json`).
+/// В работе ключ и nonce всегда случайные (`seal`): повтор пары ломает шифр.
+fn seal_with(sender: &SigningKey, recipient: &VerifyingKey, from: &[u8; 32], to: &[u8; 32], created_ms: u64, plaintext: &[u8], eph_sk: StaticSecret, nonce: [u8; 12]) -> Result<Vec<u8>> {
     if plaintext.len() > MAX_PLAINTEXT {
         bail!("сообщение слишком велико для конверта");
     }
     let recipient_x = recipient.to_montgomery().to_bytes();
-    let eph_sk = StaticSecret::random_from_rng(rand::rngs::OsRng);
     let eph_pub = PublicKey::from(&eph_sk).to_bytes();
     let shared = eph_sk.diffie_hellman(&PublicKey::from(recipient_x)).to_bytes();
     let Some(key) = derive_key(&shared, &eph_pub, &recipient_x, from, to) else { bail!("получатель дал недопустимый ключ") };
-    let mut nonce = [0u8; 12];
-    rand::rngs::OsRng.fill_bytes(&mut nonce);
     let a = aad(&eph_pub, &nonce, created_ms, from, to);
     let ct = ChaCha20Poly1305::new((&key).into())
         .encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: &a })
@@ -202,5 +208,35 @@ mod tests {
         let env = seal(&a, &b.verifying_key(), &id(1), &id(2), NOW, b"x").unwrap();
         assert!(open_within(&b, &a.verifying_key(), &id(1), &id(2), NOW + 1_000, 5_000, &env).is_ok());
         assert!(open_within(&b, &a.verifying_key(), &id(1), &id(2), NOW + 6_000, 5_000, &env).is_err());
+    }
+
+    fn hex_arr<const N: usize>(h: &str) -> [u8; N] {
+        hex::decode(h).unwrap().try_into().unwrap()
+    }
+
+    /// Независимая реализация на Python (tools/yse_vectors.py, RFC 7748/8032/8439): та же упаковка байт в обе стороны.
+    #[test]
+    fn the_rust_envelope_matches_the_independent_python_vectors() {
+        let v: serde_json::Value = serde_json::from_str(include_str!("../../tests/yse_vectors.json")).unwrap();
+        assert_eq!(v["format"], "YSE1");
+        let cases = v["cases"].as_array().unwrap();
+        assert!(cases.len() >= 3);
+        for c in cases {
+            let name = c["name"].as_str().unwrap();
+            let sender = SigningKey::from_bytes(&hex_arr::<32>(c["sender_seed"].as_str().unwrap()));
+            let recipient = SigningKey::from_bytes(&hex_arr::<32>(c["recipient_seed"].as_str().unwrap()));
+            let from: [u8; 32] = hex_arr(c["from"].as_str().unwrap());
+            let to: [u8; 32] = hex_arr(c["to"].as_str().unwrap());
+            let created = c["created_ms"].as_u64().unwrap();
+            let plain = hex::decode(c["plaintext"].as_str().unwrap()).unwrap();
+            let expected = hex::decode(c["envelope"].as_str().unwrap()).unwrap();
+            let eph = StaticSecret::from(hex_arr::<32>(c["eph_secret"].as_str().unwrap()));
+            let nonce: [u8; 12] = hex_arr(c["nonce"].as_str().unwrap());
+            assert_eq!(recipient.verifying_key().to_montgomery().to_bytes(), hex_arr::<32>(c["recipient_x"].as_str().unwrap()), "{name}: X25519 получателя");
+            let got = seal_with(&sender, &recipient.verifying_key(), &from, &to, created, &plain, eph, nonce).unwrap();
+            assert_eq!(got, expected, "{name}: конверт расходится с Python");
+            let (t, back) = open(&recipient, &sender.verifying_key(), &from, &to, created + 1000, &expected).unwrap();
+            assert_eq!((t, back), (created, plain), "{name}: открытие вектора Python");
+        }
     }
 }

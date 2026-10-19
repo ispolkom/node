@@ -42,7 +42,7 @@ cargo build --release
 ./target/release/yandi            # start a node; control is the YANDI shell over the local owner socket (no TCP port)
 ```
 
-On first start the node opens a small page on `127.0.0.1`: create a login password and a master password in the browser; the node then creates its identity (keys, stored encrypted with the master password). Everything else is configured on the web page ("Settings").
+On first start the node waits for the first setup, from the YANDI shell or from the console: `yandi setup` asks for a password, creates the keys and the closed environment and shows a recovery phrase (12 or 24 words, shown only in a terminal or written to a new 0600 file). A server needs no shell: `yandi admin` is a console menu with sub-commands (pairing code and QR, devices, proxies, the closed environment, erase), and `tools/install.sh` installs from a signed release (the signature and every file hash are checked before anything is installed) with a choice between "node only" and "node and shell". See [`docs/CONSOLE.md`](docs/CONSOLE.md).
 
 **A training network on one machine** (several node copies with their own folders and ports):
 
