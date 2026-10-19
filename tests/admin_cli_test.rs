@@ -101,6 +101,20 @@ fn first_setup_and_admin_work_from_the_console() {
     let (rc, out) = run(&["admin", "vault", "status"], "", &sock);
     assert_eq!(rc, 0, "{out}");
     assert!(out.contains("\"configured\": true"), "{out}");
+    // команды, которые меняют состояние или читают разные части узла: ни одна не должна отвечать пустым успехом (строгий разбор ответа)
+    for (args, stdin) in [
+        (vec!["admin", "alerts"], ""),
+        (vec!["admin", "update"], ""),
+        (vec!["admin", "status"], ""),
+        (vec!["admin", "proxies", "list", "--admin-password-stdin"], "testpass123\n"),
+        (vec!["admin", "proxies", "settings", "--enabled", "on", "--strict", "off", "--max-clients", "7", "--admin-password-stdin"], "testpass123\n"),
+        (vec!["admin", "vault", "lock"], ""),
+        (vec!["admin", "vault", "unlock", "--admin-password-stdin"], "testpass123\n"),
+        (vec!["admin", "vault", "status"], ""),
+    ] {
+        let (rc, out) = run(&args, stdin, &sock);
+        assert_eq!(rc, 0, "{args:?}: {out}");
+    }
     // админская команда: неверный пароль отказывает, верный пускает
     let (rc, out) = run(&["admin", "devices", "--admin-password-stdin"], "wrongwrong\n", &sock);
     assert_ne!(rc, 0);

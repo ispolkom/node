@@ -29,4 +29,18 @@ void main() {
     expect(t.done('p', b), isTrue);
     expect(t.labels('p'), isEmpty);
   });
+
+  test('копией выбора владеют все читатели: стирает последний, отказ повтора и очистка экрана не затирают чужой источник', () {
+    final c = CopyOwners();
+    c.acquire('/cache/report.pdf'); // операция A
+    c.acquire('/cache/report.pdf'); // повтор B (будет отклонён)
+    expect(c.inUse('/cache/report.pdf'), isTrue);
+    expect(c.release('/cache/report.pdf'), isFalse, reason: 'B отпустил, A ещё читает');
+    expect(c.inUse('/cache/report.pdf'), isTrue, reason: 'очистка экрана выбора в это время не должна стирать');
+    c.acquire('/cache/report.pdf'); // C принят после onPrepared A
+    expect(c.release('/cache/report.pdf'), isFalse, reason: 'A закончила, C ещё читает');
+    expect(c.release('/cache/report.pdf'), isTrue, reason: 'последний отпустил — можно стирать');
+    expect(c.inUse('/cache/report.pdf'), isFalse);
+    expect(c.release('/cache/other.bin'), isTrue, reason: 'лишнее освобождение безопасно');
+  });
 }

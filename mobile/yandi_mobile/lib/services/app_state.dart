@@ -771,6 +771,14 @@ class AppState extends ChangeNotifier implements FilesHost {
   VaultFiles? _vaultFiles;
 
   /// Открытая копия, которую сделал выбор файла (в кеше приложения), после шифрования затирается; чужие файлы не трогаем.
+  final CopyOwners _copies = CopyOwners();
+
+  /// То же, но не трогает копию, которую сейчас читает операция отправки (её затрёт последняя, когда отпустит).
+  Future<void> dropPickerCopyIfFree(String path) async {
+    if (_copies.inUse(path)) return;
+    await dropPickerCopy(path);
+  }
+
   Future<void> dropPickerCopy(String path) async {
     try {
       final cache = await pp.getTemporaryDirectory();
@@ -883,17 +891,23 @@ class AppState extends ChangeNotifier implements FilesHost {
   @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
     final label = _prepLabel(path, name);
-    // тот же источник (путь), который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления
-    // сообщения файл отправляли повторно. Копию выбора отклонённого повтора НЕ стираем: ею пользуется уже идущая операция.
-    if (_prep.hasSource(peerId, path)) return '«$label» уже готовится к отправке';
-    final prep = _prep.start(peerId, label, path);
-    notifyListeners();
+    // Копией выбора владеют все операции, которые её читают: стирает последняя, кто отпустил (и отклонённый повтор, и очистка в
+    // экране выбора не затирают источник идущей отправки).
+    _copies.acquire(path);
     try {
-      return await _sendFile(peerId, path, name: name, onPrepared: () => _prepDone(peerId, prep));
+      // тот же источник, который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления
+      // сообщения файл отправляли повторно
+      if (_prep.hasSource(peerId, path)) return '«$label» уже готовится к отправке';
+      final prep = _prep.start(peerId, label, path);
+      notifyListeners();
+      try {
+        return await _sendFile(peerId, path, name: name, onPrepared: () => _prepDone(peerId, prep));
+      } finally {
+        _prepDone(peerId, prep);
+      }
     } finally {
-      _prepDone(peerId, prep);
-      // при любом исходе (отказ узла, ошибка, успех) открытая копия из выбора файла затирается
-      if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
+      // при любом исходе (отказ узла, ошибка, успех) открытая копия из выбора файла затирается — когда её отпустил последний читатель
+      if (_copies.release(path) && !FileVault.isVaultPath(path)) await dropPickerCopy(path);
     }
   }
 

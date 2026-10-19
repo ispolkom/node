@@ -77,48 +77,91 @@ echo "Подпись выпуска верна (ключ ${PUBKEY:0:16}…). С�
 # --- содержимое манифеста: строгий разбор JSON (данные уже подписаны, но формат проверяется целиком) ---
 command -v python3 >/dev/null || die "нужен python3 (разбор манифеста): sudo apt install python3-minimal"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-PARSED=$(python3 - "$W/MANIFEST.json" <<'PY'
+PARSED=$(python3 -I -B - "$W/MANIFEST.json" <<'PY'
 import json, re, sys, time
+
+class Bad(Exception):
+    pass
+
+def need(cond, msg):
+    if not cond:
+        raise Bad(msg)
+
+def is_int(x):
+    return type(x) is int
+
 def pairs(items):
     d = {}
     for k, v in items:
-        if k in d: raise ValueError("повторяющееся поле " + k)
+        need(k not in d, "повторяющееся поле " + k)
         d[k] = v
     return d
+
+def nofloat(x):
+    raise Bad("недопустимое число " + x)
+
+# схема совпадает с src/release.rs: validate_manifest (deny_unknown_fields)
+ROOT_REQUIRED = {"format", "product", "version", "seq", "created", "key_id", "files"}
+ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes"}
 try:
-    m = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"), object_pairs_hook=pairs)
-    assert isinstance(m, dict)
-    assert m.get("format") == 1, "формат манифеста не поддерживается"
-    assert m.get("product") == "yandi-node", "это не выпуск yandi-node"
-    assert m.get("platform") == "deb", "это не выпуск для Debian/Ubuntu"
-    exp, seq = m.get("expires"), m.get("seq")
-    assert isinstance(exp, int) and not isinstance(exp, bool) and exp > time.time(), "срок действия выпуска истёк или не указан"
-    assert isinstance(seq, int) and not isinstance(seq, bool) and 0 <= seq < 2**53, "неверный номер выпуска"
-    files = m.get("files")
-    assert isinstance(files, list) and 1 <= len(files) <= 32, "в манифесте неверный список файлов"
+    raw = open(sys.argv[1], "rb").read()
+    need(len(raw) <= 1 << 20, "манифест слишком велик")
+    m = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_float=nofloat, parse_constant=nofloat)
+    need(type(m) is dict, "корень манифеста — не объект")
+    need(ROOT_REQUIRED <= set(m) <= ROOT_ALLOWED, "состав полей манифеста не совпадает со схемой")
+    need(is_int(m["format"]) and m["format"] == 1, "формат манифеста не поддерживается")
+    need(m["product"] == "yandi-node", "это не выпуск yandi-node")
+    need(m.get("platform") == "deb", "это не выпуск для Debian/Ubuntu")
+    v = m["version"]
+    need(type(v) is str and 1 <= len(v) <= 200 and not any(ord(c) < 32 or ord(c) == 127 for c in v), "неверная версия")
+    seq, created, exp = m["seq"], m["created"], m.get("expires")
+    need(is_int(seq) and 1 <= seq < 2**53, "неверный номер выпуска")
+    need(is_int(created) and 0 <= created < 2**63, "неверное время выпуска")
+    need(is_int(exp) and 0 < exp < 2**63 and exp > time.time(), "срок действия выпуска истёк или не указан")
+    need(type(m["key_id"]) is str and re.fullmatch(r"[0-9a-f]{16}", m["key_id"]), "неверный идентификатор ключа")
+    notes = m.get("notes", "")
+    need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
+    files = m["files"]
+    need(type(files) is list and 1 <= len(files) <= 32, "неверный список файлов")
     names = set()
     out = ["SEQ %d" % seq]
     for f in files:
-        assert isinstance(f, dict) and set(f) == {"name", "sha256", "size"}, "запись файла должна содержать ровно name, sha256, size"
+        need(type(f) is dict and set(f) == {"name", "sha256", "size"}, "запись файла должна содержать ровно name, sha256, size")
         n, h, z = f["name"], f["sha256"], f["size"]
-        assert isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", n) and not n.startswith("."), "недопустимое имя файла"
-        assert isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h), "неверная сумма"
-        assert isinstance(z, int) and not isinstance(z, bool) and 1 <= z <= 256 * 1024 * 1024, "неверный размер"
-        assert n not in names, "файл указан дважды"
+        need(type(n) is str and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", n) and not n.startswith("."), "недопустимое имя файла")
+        need(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h), "неверная сумма")
+        need(is_int(z) and 1 <= z <= 256 * 1024 * 1024, "неверный размер")
+        need(n not in names, "файл указан дважды")
         names.add(n)
         out.append("FILE %s %s %d" % (n, h, z))
     print("\n".join(out))
+except Bad as e:
+    sys.stderr.write("манифест отвергнут: %s\n" % e)
+    sys.exit(1)
 except Exception as e:
     sys.stderr.write("манифест отвергнут: %s\n" % e)
     sys.exit(1)
 PY
 ) || die "манифест не прошёл строгую проверку"
 SEQ=$(awk '$1=="SEQ"{print $2}' <<<"$PARSED")
+# Номер последнего установленного выпуска (защита от отката). Состояние должно быть нашим обычным файлом в нашем закрытом каталоге;
+# повреждённое или чужое — отказ, а не «защиты нет». Чтение, проверка и запись идут под одной блокировкой.
 STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yandi"; SEQ_FILE="$STATE_DIR/installed-seq"
-if [ -r "$SEQ_FILE" ]; then
-  OLD=$(tr -dc '0-9' < "$SEQ_FILE")
-  [ -z "$OLD" ] || [ "$SEQ" -ge "$OLD" ] || die "выпуск №$SEQ старше уже установленного №$OLD (откат): установка отменена"
-fi
+mkdir -p -m 0700 "$STATE_DIR" 2>/dev/null || true
+[ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] && [ "$(stat -c %u "$STATE_DIR")" = "$(id -u)" ] && [ -z "$(find "$STATE_DIR" -maxdepth 0 -perm /022)" ] \
+  || die "каталог состояния $STATE_DIR небезопасен (ссылка, чужой владелец или запись для других)"
+command -v flock >/dev/null || die "нужен flock (пакет util-linux)"
+exec 9>"$STATE_DIR/lock"; flock -x 9
+read_seq() {
+  [ ! -L "$SEQ_FILE" ] || die "файл $SEQ_FILE — символическая ссылка: небезопасно"
+  [ -e "$SEQ_FILE" ] || { echo 0; return; }
+  [ -f "$SEQ_FILE" ] && [ ! -L "$SEQ_FILE" ] && [ "$(stat -c %u "$SEQ_FILE")" = "$(id -u)" ] && [ -r "$SEQ_FILE" ] || die "файл $SEQ_FILE небезопасен или нечитаем"
+  local v; v=$(cat "$SEQ_FILE") || die "файл $SEQ_FILE нечитаем"
+  [[ "$v" =~ ^[0-9]{1,15}$ ]] || die "файл $SEQ_FILE повреждён (ожидалось одно число): удалите его, если уверены в выпуске"
+  echo "$v"
+}
+OLD=$(read_seq)
+[ "$SEQ" -ge "$OLD" ] || die "выпуск №$SEQ старше уже установленного №$OLD (откат): установка отменена"
 mapfile -t ROWS < <(awk '$1=="FILE"{print $2" "$3" "$4}' <<<"$PARSED")
 want=("yandi-node_")
 [ "$MODE" = desktop ] && want+=("yandi-desktop_")
@@ -139,7 +182,9 @@ done
 
 # --- установка ---
 sudo apt-get install -y "${DEBS[@]}"
-mkdir -p "$STATE_DIR" && printf '%s\n' "$SEQ" > "$SEQ_FILE"
+# номер фиксируется как максимум под той же блокировкой, атомарной заменой файла
+CUR=$(read_seq); [ "$SEQ" -ge "$CUR" ] || SEQ="$CUR"
+printf '%s\n' "$SEQ" > "$SEQ_FILE.new.$$" && chmod 600 "$SEQ_FILE.new.$$" && mv -f "$SEQ_FILE.new.$$" "$SEQ_FILE"
 if [ "$NO_SERVICE" = 0 ]; then
   UNIT=$(mktemp); trap 'rm -rf "$W" "$UNIT"' EXIT
   cat > "$UNIT" <<UNITEOF
@@ -194,5 +239,5 @@ echo "  yandi admin        управление узлом; yandi admin pairing 
 echo "  Порты: откройте в брандмауэре порты узла (см. /usr/share/doc/yandi-node/DEPLOYMENT.md)."
 if [ "$YES" = 0 ] && [ -t 0 ] && [ -t 1 ] && command -v yandi >/dev/null; then
   read -r -p "Запустить первую настройку сейчас? [Y/n]: " a
-  case "$a" in n|N) ;; *) exec yandi setup;; esac
+  case "$a" in n|N) ;; *) exec 9>&-; exec yandi setup;; esac
 fi

@@ -359,7 +359,19 @@ class _ChatScreenState extends State<ChatScreen> {
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
 
+  bool _pickActive = false; // выбор файла уже идёт: второй не начинаем, иначе баннер и очистка путаются
+
   Future<void> _pickAndSend() async {
+    if (_pickActive) return;
+    _pickActive = true;
+    try {
+      await _pickAndSendInner();
+    } finally {
+      _pickActive = false;
+    }
+  }
+
+  Future<void> _pickAndSendInner() async {
     final state = context.read<AppState>();
     if (!await state.canSendFiles(widget.peerId)) {
       _snack('Файлы можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)');
@@ -397,7 +409,7 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     } finally {
       // В том числе файл, отвергнутый по размеру до вызова sendFile.
-      for (final f in res.files) { if (f.path != null) await state.dropPickerCopy(f.path!); }
+      for (final f in res.files) { if (f.path != null) await state.dropPickerCopyIfFree(f.path!); }
     }
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }

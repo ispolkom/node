@@ -28,28 +28,43 @@ pub fn default_socket() -> PathBuf {
 
 // ───────────────────────── HTTP по Unix-сокету ─────────────────────────
 
-/// Разобрать ответ HTTP/1.1 строго: тело обязано соответствовать `Content-Length` или `chunked` с завершающим нулевым куском.
-/// Оборванный или противоречивый ответ — ошибка, а не «пустой успех».
+/// Разобрать ответ HTTP/1.1 строго: тело обязано соответствовать `Content-Length` (только цифры) либо единственной кодировке `chunked`
+/// с завершающим нулевым куском и разобранными заголовками-трейлерами. Неоднозначное обрамление (оба заголовка, иные кодировки,
+/// мусор после конца) — ошибка, а не «пустой успех».
 pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("ответ узла оборван")?;
     let head = std::str::from_utf8(&raw[..split]).map_err(|_| "ответ узла не текст")?;
     let mut lines = head.split("\r\n");
     let status = lines.next().ok_or("пустой ответ")?;
     let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("нет кода ответа")?;
-    let mut chunked = false;
+    let mut encodings: Option<Vec<String>> = None;
     let mut length: Option<usize> = None;
     for l in lines {
         let lower = l.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("transfer-encoding:") {
-            chunked |= v.contains("chunked");
+            if encodings.replace(v.split(',').map(|t| t.trim().to_string()).collect()).is_some() {
+                return Err("повторный заголовок кодировки".into());
+            }
         } else if let Some(v) = lower.strip_prefix("content-length:") {
-            let n: usize = v.trim().parse().map_err(|_| "неверная длина тела")?;
+            let v = v.trim();
+            if v.is_empty() || v.len() > 15 || !v.bytes().all(|b| b.is_ascii_digit()) {
+                return Err("неверная длина тела".into());
+            }
+            let n: usize = v.parse().map_err(|_| "неверная длина тела")?;
             if length.replace(n).is_some_and(|prev| prev != n) {
                 return Err("противоречивая длина тела".into());
             }
         }
     }
     let body = &raw[split + 4..];
+    let chunked = match encodings.as_deref() {
+        None => false,
+        Some([only]) if only == "chunked" => true,
+        Some(_) => return Err("неподдерживаемая кодировка ответа".into()),
+    };
+    if chunked && length.is_some() {
+        return Err("неоднозначное обрамление: и кодировка, и длина".into());
+    }
     if !chunked {
         return match length {
             Some(n) if body.len() == n => Ok((code, body.to_vec())),
@@ -62,11 +77,25 @@ pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     loop {
         let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or("оборван ответ по частям")?;
         let size_text = std::str::from_utf8(&rest[..eol]).map_err(|_| "размер части не текст")?;
-        let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16).map_err(|_| "неверный размер части")?;
+        let size_hex = size_text.split(';').next().unwrap_or("").trim();
+        if size_hex.is_empty() || size_hex.len() > 15 || !size_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err("неверный размер части".into());
+        }
+        let size = usize::from_str_radix(size_hex, 16).map_err(|_| "неверный размер части")?;
         rest = &rest[eol + 2..];
         if size == 0 {
-            // после нулевого куска допустимы только завершающие заголовки и пустая строка
-            return if rest.ends_with(b"\r\n") { Ok((code, out)) } else { Err("ответ по частям не завершён".into()) };
+            // трейлеры: строки «имя: значение» до пустой строки; после неё ничего не должно быть
+            loop {
+                let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or("ответ по частям не завершён")?;
+                let line = &rest[..eol];
+                rest = &rest[eol + 2..];
+                if line.is_empty() {
+                    return if rest.is_empty() { Ok((code, out)) } else { Err("лишние данные после конца ответа".into()) };
+                }
+                if !line.contains(&b':') {
+                    return Err("неверный заголовок в конце ответа".into());
+                }
+            }
         }
         let end = size.checked_add(2).filter(|e| *e <= rest.len()).ok_or("оборван ответ по частям")?;
         if &rest[size..end] != b"\r\n" {
@@ -126,6 +155,10 @@ pub fn roundtrip(socket: &Path, method: &str, path: &str, body: Option<&Value>, 
     }
     let (code, bytes) = parse_response(&raw)?;
     let value = if bytes.is_empty() {
+        // пустое тело успешного ответа допустимо только у 204; иначе узел нарушил протокол (ответ — всегда JSON)
+        if (200..300).contains(&code) && code != 204 {
+            return Err("ответ узла пуст: ожидался JSON".into());
+        }
         Value::Null
     } else {
         match serde_json::from_slice(&bytes) {
@@ -997,5 +1030,32 @@ mod tests {
         // значение параметра с именем help не отменяет команду (до разбора сокета дело не доходит из-за неверного параметра)
         assert_eq!(run_setup(vec!["--seed-file".into(), "help".into(), "--bogus".into()]), 2);
         assert_eq!(run_admin(vec!["--bogus-flag".into(), "help".into(), "x".into()]), 1);
+    }
+
+    #[test]
+    fn ambiguous_framing_and_empty_successes_are_refused() {
+        // обрыв и хвосты после нулевого куска
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nX: unfinished\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\nGARBAGE\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nX: ok\r\n\r\n").is_ok());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\nbad line\r\n\r\n").is_err());
+        // кодировки и длина
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: notchunked\r\n\r\n0\r\n\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\nContent-Length: 999\r\n\r\n0\r\n\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 2\r\n\r\n2\r\n{}\r\n0\r\n\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: +2\r\n\r\n{}").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 0x2\r\n\r\n{}").is_err());
+        // пустой успех — ошибка протокола, кроме 204; пустая ошибка допустима
+        let dir = tempfile::tempdir().unwrap();
+        let (sock, h) = serve_once(dir.path(), "e.sock", b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n".to_vec());
+        let e = roundtrip(&sock, "POST", "/api/node/stop", None, None, Duration::from_secs(5)).unwrap_err();
+        h.join().unwrap();
+        assert!(e.contains("пуст"), "{e}");
+        let (sock, h) = serve_once(dir.path(), "f.sock", b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n".to_vec());
+        assert_eq!(roundtrip(&sock, "POST", "/api/x", None, None, Duration::from_secs(5)).unwrap(), (204, Value::Null));
+        h.join().unwrap();
+        let (sock, h) = serve_once(dir.path(), "g.sock", b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec());
+        assert_eq!(roundtrip(&sock, "GET", "/api/x", None, None, Duration::from_secs(5)).unwrap(), (500, Value::Null));
+        h.join().unwrap();
     }
 }

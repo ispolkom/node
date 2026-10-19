@@ -26,3 +26,23 @@ class PrepTracker {
     return true;
   }
 }
+
+/// Владение временной копией выбранного файла в кеше: пока хоть одна операция её читает, затирать нельзя; стирает последний, кто отпустил.
+class CopyOwners {
+  final Map<String, int> _users = {};
+
+  void acquire(String path) => _users[path] = (_users[path] ?? 0) + 1;
+
+  /// true — читателей не осталось, копию можно стирать.
+  bool release(String path) {
+    final n = (_users[path] ?? 0) - 1;
+    if (n > 0) {
+      _users[path] = n;
+      return false;
+    }
+    _users.remove(path);
+    return true;
+  }
+
+  bool inUse(String path) => (_users[path] ?? 0) > 0;
+}
