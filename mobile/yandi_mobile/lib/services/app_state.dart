@@ -788,9 +788,15 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (!await file.exists()) return;
       final realPath = await file.resolveSymbolicLinks();
       if (!realPath.startsWith('$realCache${Platform.pathSeparator}')) return;
-      if (!await wipeFile(realPath) && await file.exists()) {
-        protectionWarning = 'Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.';
-        notifyListeners();
+      // читатель мог появиться, пока проверялся каталог: тогда копию затрёт последний, кто её отпустит
+      if (!_copies.beginWipe(path)) return;
+      try {
+        if (!await wipeFile(realPath) && await file.exists()) {
+          protectionWarning = 'Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.';
+          notifyListeners();
+        }
+      } finally {
+        _copies.endWipe(path);
       }
     } catch (_) {
       protectionWarning = 'Проверка временной копии выбранного файла не завершилась.';
@@ -893,7 +899,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final label = _prepLabel(path, name);
     // Копией выбора владеют все операции, которые её читают: стирает последняя, кто отпустил (и отклонённый повтор, и очистка в
     // экране выбора не затирают источник идущей отправки).
-    _copies.acquire(path);
+    await _copies.acquire(path);
     try {
       // тот же источник, который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления
       // сообщения файл отправляли повторно

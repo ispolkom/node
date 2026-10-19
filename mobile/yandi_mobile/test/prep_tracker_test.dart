@@ -30,17 +30,35 @@ void main() {
     expect(t.labels('p'), isEmpty);
   });
 
-  test('копией выбора владеют все читатели: стирает последний, отказ повтора и очистка экрана не затирают чужой источник', () {
+  test('копией выбора владеют все читатели: стирает последний, отказ повтора и очистка экрана не затирают чужой источник', () async {
     final c = CopyOwners();
-    c.acquire('/cache/report.pdf'); // операция A
-    c.acquire('/cache/report.pdf'); // повтор B (будет отклонён)
+    await c.acquire('/cache/report.pdf'); // операция A
+    await c.acquire('/cache/report.pdf'); // повтор B (будет отклонён)
     expect(c.inUse('/cache/report.pdf'), isTrue);
     expect(c.release('/cache/report.pdf'), isFalse, reason: 'B отпустил, A ещё читает');
     expect(c.inUse('/cache/report.pdf'), isTrue, reason: 'очистка экрана выбора в это время не должна стирать');
-    c.acquire('/cache/report.pdf'); // C принят после onPrepared A
+    await c.acquire('/cache/report.pdf'); // C принят после onPrepared A
     expect(c.release('/cache/report.pdf'), isFalse, reason: 'A закончила, C ещё читает');
     expect(c.release('/cache/report.pdf'), isTrue, reason: 'последний отпустил — можно стирать');
     expect(c.inUse('/cache/report.pdf'), isFalse);
     expect(c.release('/cache/other.bin'), isTrue, reason: 'лишнее освобождение безопасно');
+  });
+
+  test('затирание и новый читатель не пересекаются: занятую копию не затирают, а читатель ждёт конца затирания', () async {
+    final c = CopyOwners();
+    await c.acquire('/c/a.bin');
+    expect(c.beginWipe('/c/a.bin'), isFalse, reason: 'копию читают — затирать нельзя');
+    expect(c.release('/c/a.bin'), isTrue);
+    expect(c.beginWipe('/c/a.bin'), isTrue, reason: 'читателей нет — затирание началось');
+    expect(c.beginWipe('/c/a.bin'), isFalse, reason: 'второе затирание того же пути не начинаем');
+    var acquired = false;
+    final waiter = c.acquire('/c/a.bin').then((_) => acquired = true);
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(acquired, isFalse, reason: 'новый читатель ждёт, пока копию затирают');
+    c.endWipe('/c/a.bin');
+    await waiter;
+    expect(acquired, isTrue);
+    expect(c.inUse('/c/a.bin'), isTrue);
+    expect(c.beginWipe('/c/a.bin'), isFalse, reason: 'после захвата читателем затирать снова нельзя');
   });
 }

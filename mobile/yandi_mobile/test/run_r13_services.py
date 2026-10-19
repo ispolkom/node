@@ -39,11 +39,13 @@ class VaultService {
 }
 '''+strip(src('services/vault_bytes_cache.dart'))
 app=src('services/app_state.dart')
+code+=strip(src('services/prep_tracker.dart'))
 code+='''
 class FakeDb {final rows=<Map<String,Object?>>[];Future<List<Map<String,Object?>>> query(String t,{List<String>? columns,String? where,List<String>? whereArgs})async=>rows;}
 class pp {static late Directory cache;static Future<Directory> getTemporaryDirectory()async=>cache;}
 class AppState extends ChangeNotifier {
  late VaultFiles vf; AvatarService? avatars; String? protectionWarning;static Future<bool> Function(String)? hook;
+ final CopyOwners _copies = CopyOwners();
  static Future<bool> wipeFile(String s)async=>await hook?.call(s)??false;
  Future<VaultFiles> vaultFiles()async=>vf;
 '''

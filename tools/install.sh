@@ -64,7 +64,8 @@ fetch MANIFEST.json; fetch MANIFEST.json.sig
 
 # --- подпись: Ed25519 над «YANDI-RELEASE-MANIFEST-V1\0» + байты манифеста ---
 printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "$W/pub.der"
-echo "$PUBKEY" | sed 's/../\\x&/g' | xargs -0 printf > "$W/pub.raw"
+printf '%s' "$PUBKEY" | sed 's/../\\x&/g' | xargs -0 printf > "$W/pub.raw"
+[ "$(stat -c %s "$W/pub.raw")" = 32 ] || die "ключ должен быть ровно 32 байта"
 cat "$W/pub.raw" >> "$W/pub.der"
 openssl pkey -pubin -inform DER -in "$W/pub.der" -out "$W/pub.pem" 2>/dev/null || die "ключ не читается"
 tr -d ' \n\r' < "$W/MANIFEST.json.sig" | grep -Eq '^[0-9a-f]{128}$' || die "подпись должна быть 128 шестнадцатеричных знаков"
@@ -77,8 +78,9 @@ echo "Подпись выпуска верна (ключ ${PUBKEY:0:16}…). С�
 # --- содержимое манифеста: строгий разбор JSON (данные уже подписаны, но формат проверяется целиком) ---
 command -v python3 >/dev/null || die "нужен python3 (разбор манифеста): sudo apt install python3-minimal"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-PARSED=$(python3 -I -B - "$W/MANIFEST.json" <<'PY'
-import json, re, sys, time
+KEY_ID=$(sha256sum "$W/pub.raw" | cut -c1-16)
+PARSED=$(python3 -I -B - "$W/MANIFEST.json" "$KEY_ID" <<'PY'
+import json, re, sys, time, unicodedata
 
 class Bad(Exception):
     pass
@@ -113,12 +115,14 @@ try:
     need(m["product"] == "yandi-node", "это не выпуск yandi-node")
     need(m.get("platform") == "deb", "это не выпуск для Debian/Ubuntu")
     v = m["version"]
-    need(type(v) is str and 1 <= len(v) <= 200 and not any(ord(c) < 32 or ord(c) == 127 for c in v), "неверная версия")
+    # как в src/release.rs: до 200 БАЙТ UTF-8, без управляющих знаков Юникода (категория Cc, включая C1)
+    need(type(v) is str and 1 <= len(v.encode("utf-8")) <= 200 and not any(unicodedata.category(c) == "Cc" for c in v), "неверная версия")
     seq, created, exp = m["seq"], m["created"], m.get("expires")
     need(is_int(seq) and 1 <= seq < 2**53, "неверный номер выпуска")
     need(is_int(created) and 0 <= created < 2**63, "неверное время выпуска")
     need(is_int(exp) and 0 < exp < 2**63 and exp > time.time(), "срок действия выпуска истёк или не указан")
     need(type(m["key_id"]) is str and re.fullmatch(r"[0-9a-f]{16}", m["key_id"]), "неверный идентификатор ключа")
+    need(m["key_id"] == sys.argv[2], "идентификатор ключа в манифесте не совпадает с закреплённым ключом")
     notes = m.get("notes", "")
     need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
     files = m["files"]
@@ -146,18 +150,38 @@ PY
 SEQ=$(awk '$1=="SEQ"{print $2}' <<<"$PARSED")
 # Номер последнего установленного выпуска (защита от отката). Состояние должно быть нашим обычным файлом в нашем закрытом каталоге;
 # повреждённое или чужое — отказ, а не «защиты нет». Чтение, проверка и запись идут под одной блокировкой.
-STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yandi"; SEQ_FILE="$STATE_DIR/installed-seq"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yandi"; SEQ_FILE="$STATE_DIR/installed-seq"; LOCK_FILE="$STATE_DIR/lock"
+ME=$(id -u)
+# все каталоги пути обязаны быть нашими (или root) и не открытыми для записи другим (кроме каталогов с sticky-битом, как /tmp)
+safe_dir_chain() {
+  local d="$1" mode owner
+  while [ "$d" != "/" ] && [ -n "$d" ]; do
+    if [ -e "$d" ]; then
+      [ -d "$d" ] || return 1
+      owner=$(stat -c %u "$d"); mode=$(stat -c %a "$d")
+      [ "$owner" = "$ME" ] || [ "$owner" = 0 ] || return 1
+      if [ $(( 0$mode & 0022 )) -ne 0 ] && [ $(( 0$mode & 01000 )) -eq 0 ]; then return 1; fi
+    fi
+    d=$(dirname "$d")
+  done
+  return 0
+}
 mkdir -p -m 0700 "$STATE_DIR" 2>/dev/null || true
-[ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] && [ "$(stat -c %u "$STATE_DIR")" = "$(id -u)" ] && [ -z "$(find "$STATE_DIR" -maxdepth 0 -perm /022)" ] \
-  || die "каталог состояния $STATE_DIR небезопасен (ссылка, чужой владелец или запись для других)"
+[ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] && [ "$(stat -c %u "$STATE_DIR")" = "$ME" ] && [ -z "$(find "$STATE_DIR" -maxdepth 0 -perm /077)" ] && safe_dir_chain "$STATE_DIR" \
+  || die "каталог состояния $STATE_DIR небезопасен (ссылка, чужой владелец, доступ другим или небезопасный родитель); нужен закрытый каталог 0700"
 command -v flock >/dev/null || die "нужен flock (пакет util-linux)"
-exec 9>"$STATE_DIR/lock"; flock -x 9
+# файл блокировки: только обычный файл нашего владельца, без ссылок и каналов; открывается без обрезания
+if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
+  [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] && [ "$(stat -c %u "$LOCK_FILE")" = "$ME" ] && [ -z "$(find "$LOCK_FILE" -maxdepth 0 -perm /022)" ] || die "файл блокировки $LOCK_FILE небезопасен"
+fi
+exec 9>>"$LOCK_FILE" || die "не удалось открыть файл блокировки"
+flock -x 9
 read_seq() {
   [ ! -L "$SEQ_FILE" ] || die "файл $SEQ_FILE — символическая ссылка: небезопасно"
   [ -e "$SEQ_FILE" ] || { echo 0; return; }
-  [ -f "$SEQ_FILE" ] && [ ! -L "$SEQ_FILE" ] && [ "$(stat -c %u "$SEQ_FILE")" = "$(id -u)" ] && [ -r "$SEQ_FILE" ] || die "файл $SEQ_FILE небезопасен или нечитаем"
+  [ -f "$SEQ_FILE" ] && [ "$(stat -c %u "$SEQ_FILE")" = "$ME" ] && [ -r "$SEQ_FILE" ] && [ -z "$(find "$SEQ_FILE" -maxdepth 0 -perm /022)" ] || die "файл $SEQ_FILE небезопасен или нечитаем"
   local v; v=$(cat "$SEQ_FILE") || die "файл $SEQ_FILE нечитаем"
-  [[ "$v" =~ ^[0-9]{1,15}$ ]] || die "файл $SEQ_FILE повреждён (ожидалось одно число): удалите его, если уверены в выпуске"
+  [[ "$v" =~ ^[0-9]{1,16}$ ]] && [ "$v" -lt 9007199254740992 ] || die "файл $SEQ_FILE повреждён (ожидалось одно число): удалите его, если уверены в выпуске"
   echo "$v"
 }
 OLD=$(read_seq)
@@ -184,7 +208,8 @@ done
 sudo apt-get install -y "${DEBS[@]}"
 # номер фиксируется как максимум под той же блокировкой, атомарной заменой файла
 CUR=$(read_seq); [ "$SEQ" -ge "$CUR" ] || SEQ="$CUR"
-printf '%s\n' "$SEQ" > "$SEQ_FILE.new.$$" && chmod 600 "$SEQ_FILE.new.$$" && mv -f "$SEQ_FILE.new.$$" "$SEQ_FILE"
+TMP_SEQ=$(mktemp "$STATE_DIR/installed-seq.XXXXXX") || die "пакеты установлены, но номер выпуска не сохранён (не создать временный файл в $STATE_DIR)"
+{ printf '%s\n' "$SEQ" > "$TMP_SEQ" && chmod 600 "$TMP_SEQ" && mv -f "$TMP_SEQ" "$SEQ_FILE"; } || { rm -f "$TMP_SEQ"; die "пакеты установлены, но номер выпуска не сохранён в $SEQ_FILE: защита от отката не обновлена"; }
 if [ "$NO_SERVICE" = 0 ]; then
   UNIT=$(mktemp); trap 'rm -rf "$W" "$UNIT"' EXIT
   cat > "$UNIT" <<UNITEOF
