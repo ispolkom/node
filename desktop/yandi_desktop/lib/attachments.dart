@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/material.dart';
 import 'domain/file_repository.dart';
+import 'embedded_player.dart';
 import 'media_player.dart';
 import 'message_actions.dart';
 import 'platform_files.dart';
@@ -53,6 +54,7 @@ class _AttachmentViewState extends State<AttachmentView> {
   @override
   void dispose() {
     watch?.cancel();
+    if (embeddedOpen) EmbeddedPlayer.closeAll.value++; // закрыть окно проигрывателя: расшифрованные данные в памяти будут затёрты
     player?.kill();
     media?.stop();
     image?.evict();
@@ -110,6 +112,7 @@ class _AttachmentViewState extends State<AttachmentView> {
 
   LoopbackMedia? media;
   Process? player;
+  bool embeddedOpen = false; // открыт встроенный проигрыватель этой карточки
   bool playing = false;
 
   Future<void> stopPlayback() async {
@@ -155,6 +158,20 @@ class _AttachmentViewState extends State<AttachmentView> {
         if (identical(media, m)) media = null;
         return;
       }
+      // Встроенный проигрыватель в окне оболочки (libmpv); если его нет — внешний проигрыватель, как раньше.
+      if (EmbeddedPlayer.enabled && mounted) {
+        final isVideo = FileRepository.mime('${widget.attachment['filename']}').startsWith('video/');
+        embeddedOpen = true;
+        PlaybackGuard.enter();
+        unawaited(
+          EmbeddedPlayer.show(context, url, '${widget.attachment['filename']}', isVideo).whenComplete(() {
+            embeddedOpen = false;
+            PlaybackGuard.leave();
+            return stopPlayback();
+          }),
+        );
+        return;
+      }
       final p = await MediaPlayerLauncher.launcher(
         url,
         '${widget.attachment['filename']}',
@@ -177,7 +194,11 @@ class _AttachmentViewState extends State<AttachmentView> {
         return;
       }
       player = p;
-      p.exitCode.then((_) => stopPlayback());
+      PlaybackGuard.enter();
+      p.exitCode.then((_) {
+        PlaybackGuard.leave();
+        return stopPlayback();
+      });
     });
     if (mounted && player == null && media == null) {
       setState(() => playing = false);

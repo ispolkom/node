@@ -5,6 +5,7 @@ import 'dart:typed_data';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/domain/file_repository.dart';
+import 'package:yandi_desktop/embedded_player.dart';
 import 'package:yandi_desktop/media_player.dart';
 import 'package:yandi_desktop/platform_files.dart';
 import 'package:yandi_desktop/transport/api.dart';
@@ -329,6 +330,109 @@ void main() {
     expect(seen?.host, '127.0.0.1');
     expect(find.textContaining('Не найден проигрыватель'), findsOneWidget);
     await m1.stop(t);
+  });
+
+  testWidgets('встроенный проигрыватель получает адрес петли, внешний не запускается, после закрытия память освобождается', (t) async {
+    final api = FileApi()..exists = true;
+    api.historyRows.first['attachment'] = {
+      'filename': 'clip.mov',
+      'size': png.length,
+      'mime_type': 'video/quicktime',
+      'file_ref': {'file_id': 'file_3', 'total_chunks': 1},
+    };
+    Uri? shown;
+    String? shownTitle;
+    bool? shownVideo;
+    final close = Completer<void>();
+    final savedShow = EmbeddedPlayer.show;
+    final savedEnabled = EmbeddedPlayer.enabled;
+    final savedLauncher = MediaPlayerLauncher.launcher;
+    var externalCalls = 0;
+    EmbeddedPlayer.enabled = true;
+    EmbeddedPlayer.show = (ctx, url, title, video) {
+      shown = url;
+      shownTitle = title;
+      shownVideo = video;
+      return close.future;
+    };
+    MediaPlayerLauncher.launcher = (url, title) async {
+      externalCalls++;
+      return null;
+    };
+    addTearDown(() {
+      EmbeddedPlayer.show = savedShow;
+      EmbeddedPlayer.enabled = savedEnabled;
+      MediaPlayerLauncher.launcher = savedLauncher;
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await t.ensureVisible(find.text('Смотреть'));
+    await t.runAsync(() async {
+      await t.tap(find.text('Смотреть'));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await t.pump();
+    expect(shown?.host, '127.0.0.1');
+    expect(shownTitle, 'clip.mov');
+    expect(shownVideo, isTrue);
+    expect(externalCalls, 0, reason: 'внешний проигрыватель не нужен, пока работает встроенный');
+    expect(find.text('Остановить'), findsOneWidget, reason: 'карточка показывает, что идёт воспроизведение');
+    // закрытие окна проигрывателя останавливает воспроизведение и сервер в памяти
+    close.complete();
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await t.pump();
+    expect(find.text('Остановить'), findsNothing);
+    expect(find.text('Смотреть'), findsOneWidget);
+    await m1.stop(t);
+  });
+
+  testWidgets('окно проигрывателя забирает фокус: пока оно открыто, чат не стирается, после закрытия правило снова действует', (t) async {
+    final api = FileApi()..exists = true;
+    api.historyRows.first['attachment'] = {
+      'filename': 'clip.mov',
+      'size': png.length,
+      'mime_type': 'video/quicktime',
+      'file_ref': {'file_id': 'file_4', 'total_chunks': 1},
+    };
+    final close = Completer<void>();
+    final savedShow = EmbeddedPlayer.show;
+    final savedEnabled = EmbeddedPlayer.enabled;
+    EmbeddedPlayer.enabled = true;
+    EmbeddedPlayer.show = (ctx, url, title, video) => close.future;
+    addTearDown(() {
+      EmbeddedPlayer.show = savedShow;
+      EmbeddedPlayer.enabled = savedEnabled;
+      PlaybackGuard.reset();
+    });
+    await m2.open(t, api, 'Чат');
+    await m1.click(t, 'Открыть чат');
+    await t.ensureVisible(find.text('Смотреть'));
+    await t.runAsync(() async {
+      await t.tap(find.text('Смотреть'));
+      await Future<void>.delayed(const Duration(milliseconds: 300));
+    });
+    await t.pump();
+    expect(PlaybackGuard.active, isTrue);
+    // проигрыватель забрал фокус — чат остаётся
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump();
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pump(const Duration(seconds: 1));
+    expect(find.text('Остановить'), findsOneWidget, reason: 'воспроизведение и чат на месте');
+    // окно закрыто — защита снята, обычная потеря фокуса снова стирает содержимое
+    close.complete();
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+    await t.pump();
+    expect(PlaybackGuard.active, isFalse);
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pump();
+    expect(find.text('Смотреть'), findsNothing, reason: 'после закрытия проигрывателя потеря фокуса стирает чат как раньше');
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pump(const Duration(seconds: 1));
+  });
+
+  test('без libmpv встроенный проигрыватель выключен и оболочка использует внешний', () {
+    expect(EmbeddedPlayer.enabled, isFalse, reason: 'в тестах библиотека не инициализируется');
   });
 
   test('все разрешённые политикой форматы видео и аудио узнаются: кнопки «Смотреть» и «Слушать» не пропадают для .mov/.mkv/.3gp/.amr', () {

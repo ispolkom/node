@@ -4,12 +4,14 @@ import 'app.dart';
 import 'theme.dart';
 import 'transport/api.dart';
 
+import 'embedded_player.dart';
 import 'voice.dart' show sweepTempFiles;
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
   try {
     sweepTempFiles();
+    EmbeddedPlayer.init(); // встроенный проигрыватель, если на машине есть libmpv
     runApp(DesktopApp(api: UnixApi(resolveSocket(args, Platform.environment))));
   } on FormatException catch (e) {
     runApp(

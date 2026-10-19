@@ -1,4 +1,5 @@
 import 'admin_panel.dart';
+import 'embedded_player.dart' show PlaybackGuard;
 import 'theme.dart';
 import 'dashboard.dart';
 import 'preferences.dart';
@@ -131,6 +132,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Окно проигрывателя (встроенное или внешнее) забирает фокус: пока оно открыто, чат не стирается. Когда воспроизведение кончилось,
+    // обычное правило действует снова (следующая потеря фокуса стирает содержимое).
+    if (PlaybackGuard.active) {
+      blurIgnored = state != AppLifecycleState.resumed;
+      return;
+    }
     // Системный диалог выбора файла забирает фокус: не стираем содержимое.
     if (PlatformFiles.choosing) {
       blurIgnored = state != AppLifecycleState.resumed;
