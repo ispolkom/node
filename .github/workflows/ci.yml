@@ -36,6 +36,7 @@ jobs:
           cargo test --test testnet_test -- --ignored
           cargo test --test testnet_comms_test -- --ignored
           cargo test --test testnet_rekey_test -- --ignored
+          cargo test --test admin_cli_test -- --ignored
   supply-chain:
     runs-on: ubuntu-latest
     steps:

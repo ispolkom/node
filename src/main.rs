@@ -21,9 +21,11 @@ async fn main() -> anyhow::Result<()> {
     {
         let argv: Vec<String> = std::env::args().collect();
         // Справка и версия НЕ запускают узел: раньше неизвестный ключ (в том числе `--help`) молча стартовал полноценный узел.
-        if argv.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "help" | "-help")) {
+        // у подкоманд своя справка (`yandi admin --help`, `yandi setup --help`)
+        let own_help = matches!(argv.get(1).map(String::as_str), Some("admin" | "setup" | "backup" | "testnet" | "bootstrap"));
+        if !own_help && argv.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "help" | "-help")) {
             println!(
-                "YANDI v{}\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).",
+                "YANDI v{}\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: setup (первая настройка), admin (управление узлом), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).",
                 env!("CARGO_PKG_VERSION")
             );
             std::process::exit(0);
@@ -42,6 +44,15 @@ async fn main() -> anyhow::Result<()> {
         if argv.get(1).map(|a| a.as_str()) == Some("backup") {
             let code = yandi::backup_cli::run(argv[2..].to_vec());
             std::process::exit(code);
+        }
+        // `yandi setup` — первая настройка запущенного узла из консоли; `yandi admin` — управление им (меню и подкоманды)
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("setup") {
+            std::process::exit(yandi::admin_cli::run_setup(argv[2..].to_vec()));
+        }
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("admin") {
+            std::process::exit(yandi::admin_cli::run_admin(argv[2..].to_vec()));
         }
         // `yandi bootstrap keygen|show|verify|add|from-card|remove|sign` — инструменты владельца списка входных узлов
         if argv.get(1).map(|a| a.as_str()) == Some("bootstrap") {

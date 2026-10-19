@@ -45,6 +45,8 @@ pub mod node_backup;
 #[cfg(unix)]
 pub mod backup_api;
 #[cfg(unix)]
+pub mod admin_cli;
+#[cfg(unix)]
 pub mod backup_cli;
 pub mod communication;
 pub mod core;
