@@ -107,7 +107,11 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text('Теперь назовите приглашённому этот PIN другим способом (голосом, в другом чате). В ссылке его нет.'),
+            const Text(
+              'Внимание! Не отправляйте ссылку-приглашение и PIN в одно место. Лучше продиктуйте PIN по телефону или вышлите по почте, в SMS или в другом мессенджере. '
+              'Злоумышленники могут воспользоваться ссылкой вместе с PIN, и тогда приглашённый получит ссылку, которая уже не будет работать.',
+              key: ValueKey('invite-pin-warning'),
+            ),
             const SizedBox(height: 12),
             Text(pin!, style: const TextStyle(fontSize: 36, letterSpacing: 8, fontWeight: FontWeight.bold)),
           ],

@@ -104,5 +104,6 @@ void main() {
     await t.pump(const Duration(milliseconds: 300));
     expect(find.byKey(const ValueKey('invite-pin-dialog')), findsOneWidget);
     expect(find.text('0042'), findsOneWidget);
+    expect(find.textContaining('Не отправляйте ссылку-приглашение и PIN в одно место'), findsOneWidget);
   });
 }
