@@ -391,6 +391,23 @@ impl P2PTransport {
         format!("{}:{}", self.external_ip, port)
     }
 
+    /// Проверенный Ed25519-ключ собеседника (из подписанного Hello, привязан к его идентификатору).
+    pub async fn peer_signing_key(&self, id: &HashId) -> Option<[u8; 32]> {
+        self.peers.lock().await.get(id).and_then(|p| p.ed25519_public)
+    }
+
+    #[cfg(test)]
+    pub async fn test_add_peer_key(&self, id: HashId, key: [u8; 32]) {
+        use crate::p2p::peer::P2PPeer;
+        let p = P2PPeer { id, addr: String::new(), data_addr: None, p2p_data_addr: None, local_addr: None, public_addr: None, ipv6_virtual: None, last_seen: 0, nat_status: P2PNatStatus::Unknown, ed25519_public: Some(key) };
+        self.peers.lock().await.insert(id, p);
+    }
+
+    /// Ключ подписи этого узла для запечатанных конвертов.
+    pub fn sealing_key(&self) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&self.identity.signing_private_key)
+    }
+
     /// Get node ID
     pub fn node_id(&self) -> HashId {
         self.identity.node_id()

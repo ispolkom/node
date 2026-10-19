@@ -40,6 +40,10 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 /// Менеджер чата
 pub struct ChatManager {
     my_node_id: HashId,
@@ -338,11 +342,29 @@ impl ChatManager {
         }
     }
 
+    /// Запечатать содержимое на ключ личности собеседника. Нет проверенного ключа — отказ (сообщение остаётся в очереди), открытого пути нет.
+    async fn seal_for(&self, to: HashId, plain: &[u8]) -> Result<Vec<u8>> {
+        let Some(pk) = self.transport.peer_signing_key(&to).await else {
+            return Err(anyhow::anyhow!("ключ собеседника ещё не получен: сообщение ждёт соединения"));
+        };
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| anyhow::anyhow!("недопустимый ключ собеседника"))?;
+        crate::crypto::sealed::seal(&self.transport.sealing_key(), &vk, &self.my_node_id.0, &to.0, now_ms(), plain)
+    }
+
+    /// Открыть присланное содержимое: конверт обязан быть от `from` и адресован нам; прежний открытый формат не принимается.
+    async fn open_from(&self, from: HashId, data: &[u8]) -> Result<Vec<u8>> {
+        let Some(pk) = self.transport.peer_signing_key(&from).await else {
+            return Err(anyhow::anyhow!("ключ отправителя неизвестен"));
+        };
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| anyhow::anyhow!("недопустимый ключ отправителя"))?;
+        let (_, plain) = crate::crypto::sealed::open(&self.transport.sealing_key(), &vk, &from.0, &self.my_node_id.0, now_ms(), data)?;
+        Ok(plain)
+    }
+
     /// One attempt to put a message on the wire.
     async fn send_once(&self, msg: &ChatMessage) -> Result<()> {
-        let msg_data = serde_json::to_vec(msg)?;
-        // P2PTransport applies the authenticated PFS session envelope to the
-        // whole packet. Do not add the unavailable legacy E2E stub here.
+        let msg_data = self.seal_for(msg.to, &serde_json::to_vec(msg)?).await?;
+        // содержимое запечатано на ключ получателя (E2E), поверх него транспорт добавляет сеансовое шифрование
         let p2p_packet =
             P2PPacket::new(P2PPacketType::ChatMessage, self.my_node_id, false, msg_data);
         self.transport
@@ -664,7 +686,15 @@ impl ChatManager {
                 info!("💬 ChatMessage from {}", hex::encode(&from.0[..8]));
 
                 // Расшифровать и обработать сообщение
-                match self.handle_incoming_message(from, packet.data).await {
+                let opened = match self.open_from(from, &packet.data).await {
+                    Ok(plain) => Ok(plain),
+                    Err(e) => Err(e),
+                };
+                let handled = match opened {
+                    Ok(plain) => self.handle_incoming_message(from, plain).await,
+                    Err(e) => Err(e),
+                };
+                match handled {
                     Ok(msg) => {
                         info!("✅ Chat message processed: {} bytes", msg.text.len());
 
@@ -1285,5 +1315,30 @@ mod tests {
     fn resend_pauses_grow_and_stop_at_a_minute() {
         let d: Vec<u64> = (1..=9).map(|n| retry_delay(n).as_secs()).collect();
         assert_eq!(d, vec![3, 6, 12, 24, 48, 60, 60, 60, 60]);
+    }
+
+    /// E2E v1: содержимое чата запечатывается на ключ собеседника; чужой, подмена отправителя и прежний открытый вид отвергаются.
+    #[tokio::test]
+    async fn chat_content_is_sealed_end_to_end_and_plaintext_is_refused() {
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
+        let peer = HashId([77u8; 32]);
+        let other = HashId([78u8; 32]);
+        // ключа собеседника ещё нет: отправка отказывает, открытого пути нет
+        assert!(cm.seal_for(peer, b"x").await.is_err());
+        assert!(cm.open_from(peer, b"{\"text\":\"hi\"}").await.is_err());
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        // исходящее: запечатано, не содержит текста, открывается ключом собеседника только для него
+        let env = cm.seal_for(peer, "секрет".as_bytes()).await.unwrap();
+        assert!(!env.windows(6).any(|w| w == "секрет".as_bytes()));
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let (_, back) = crate::crypto::sealed::open(&peer_key, &me_vk, &cm.my_node_id.0, &peer.0, now_ms(), &env).unwrap();
+        assert_eq!(back, "секрет".as_bytes());
+        // входящее: от собеседника открывается, прежний открытый JSON — нет, чужой отправитель — нет
+        let to_me = crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), b"hello").unwrap();
+        assert_eq!(cm.open_from(peer, &to_me).await.unwrap(), b"hello");
+        assert!(cm.open_from(peer, b"{\"text\":\"hi\"}").await.is_err(), "открытый вид принят");
+        cm.transport.test_add_peer_key(other, ed25519_dalek::SigningKey::from_bytes(&[78u8; 32]).verifying_key().to_bytes()).await;
+        assert!(cm.open_from(other, &to_me).await.is_err(), "конверт, подписанный другим, принят от третьего");
     }
 }
