@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 import 'package:flutter/painting.dart';
 import '../models/avatar_msg.dart';
+import '../l10n_core.dart';
 
 /// Готовит аватарку к отправке. Картинка всегда СОБИРАЕТСЯ ЗАНОВО из пикселей (центральный квадрат, не больше 128×128, PNG), исходные
 /// байты не копируются — поэтому в неё не попадают EXIF (GPS, время, модель телефона), XMP, встроенные эскизы и прочие метки.
@@ -22,7 +23,7 @@ class AvatarProcessor {
         });
         if (png.length <= AvatarMsg.maxPng) return png;
       }
-      throw StateError('Картинка слишком сложная для аватарки');
+      throw StateError(tr('Картинка слишком сложная для аватарки'));
     } finally {
       img.dispose();
       codec.dispose();
@@ -49,7 +50,7 @@ class AvatarProcessor {
     final out = await pic.toImage(size, size);
     try {
       final data = await out.toByteData(format: ui.ImageByteFormat.png);
-      if (data == null) throw StateError('Не удалось закодировать картинку');
+      if (data == null) throw StateError(tr('Не удалось закодировать картинку'));
       return data.buffer.asUint8List();
     } finally {
       out.dispose();

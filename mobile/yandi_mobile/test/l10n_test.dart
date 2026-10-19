@@ -3,6 +3,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/l10n.dart';
 import 'package:yandi_mobile/l10n_en.dart';
+import 'package:yandi_mobile/models/guest_node.dart';
+import 'package:yandi_mobile/models/support_wallet.dart';
+import 'package:yandi_mobile/screens/guest_screen.dart';
+import 'package:yandi_mobile/screens/invite_device_screen.dart';
+import 'package:yandi_mobile/screens/support_screen.dart';
+import 'package:yandi_mobile/models/invite_payload.dart';
 
 /// Ключи `tr('…')`/`trf('…')` из исходников: склеенные соседние литералы, как их видит компилятор.
 Set<String> keysIn(String src) {
@@ -75,5 +81,36 @@ void main() {
     await t.tap(find.byKey(const ValueKey('lang-ru')));
     await t.pump();
     expect(find.text('Отмена'), findsOneWidget);
+  });
+
+  testWidgets('по-английски на экранах нет русских надписей (поддержка, приглашение, гость)', (t) async {
+    Lang.forTests(AppLang.en);
+    addTearDown(() => Lang.forTests(AppLang.ru));
+    t.view.physicalSize = const Size(900, 3000);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    final cyr = RegExp(r'[А-Яа-яЁё]');
+    List<String> russian() => [
+          for (final w in find.byType(Text, skipOffstage: false).evaluate().map((e) => e.widget as Text)) if (w.data != null && cyr.hasMatch(w.data!)) w.data!,
+          for (final w in find.byType(SelectableText, skipOffstage: false).evaluate().map((e) => e.widget as SelectableText)) if (w.data != null && cyr.hasMatch(w.data!)) w.data!,
+        ];
+    await t.pumpWidget(const MaterialApp(home: SupportScreen()));
+    expect(russian(), isEmpty, reason: 'экран поддержки');
+    final tx = inviteText(host: 'h', port: 1, code: '11112222', fingerprint: 'cd' * 32);
+    await t.pumpWidget(MaterialApp(
+      home: InviteDeviceScreen(
+        key: const ValueKey('inv'),
+        create: () async => throw StateError('x'),
+        revoke: () async {},
+        restore: () async => (text: tx, link: inviteLink(tx), code: '11112222', pin: '0042', ttlSecs: 1800),
+      ),
+    ));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    expect(russian(), isEmpty, reason: 'экран приглашения');
+    await t.pumpWidget(MaterialApp(home: GuestScreen(key: const ValueKey('g'), nodes: [GuestNode('Node', '203.0.113.7', 8444, 'ab' * 32)])));
+    await t.pump();
+    expect(russian(), isEmpty, reason: 'экран гостя');
+    expect(supportWallets, isNotEmpty);
   });
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import '../models/avatar_msg.dart';
+import '../l10n_core.dart';
 
 /// Шифрование картинок ключом хранилища (AES-256-GCM, хэш картинки входит в проверку).
 class AvatarSealer {
@@ -157,7 +158,7 @@ class AvatarService extends ChangeNotifier {
 
   /// Установить свою картинку (уже подготовленный PNG). Возвращает её хэш.
   Future<String> setMine(Uint8List png) async {
-    if (!AvatarMsg.validPng(png)) throw StateError('Некорректная картинка');
+    if (!AvatarMsg.validPng(png)) throw StateError(tr('Некорректная картинка'));
     final h = AvatarMsg.hashOf(png);
     await _store(png, h);
     _mine = h;
@@ -241,7 +242,7 @@ class AvatarService extends ChangeNotifier {
 
   /// Поставить контакту свою картинку (уже подготовленный PNG): видна только мне.
   Future<void> setLocal(String peerId, Uint8List png) async {
-    if (!AvatarMsg.validPng(png)) throw StateError('Некорректная картинка');
+    if (!AvatarMsg.validPng(png)) throw StateError(tr('Некорректная картинка'));
     final h = AvatarMsg.hashOf(png);
     await _store(png, h);
     _local[peerId] = h;

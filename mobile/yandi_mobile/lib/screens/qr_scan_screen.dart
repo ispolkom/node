@@ -1,11 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Камера для чтения одного QR: закрывается и возвращает текст кода. Камера выключается при выходе.
 class QrScanScreen extends StatefulWidget {
-  final String title;
-  const QrScanScreen({super.key, this.title = 'Сканировать QR'});
+  final String? title;
+  const QrScanScreen({super.key, this.title});
   @override
   State<QrScanScreen> createState() => _QrScanScreenState();
 }
@@ -34,7 +35,7 @@ class _QrScanScreenState extends State<QrScanScreen> {
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: Text(widget.title, style: const TextStyle(color: AppTheme.text)),
+        title: Text((widget.title ?? tr('Сканировать QR')), style: const TextStyle(color: AppTheme.text)),
         iconTheme: const IconThemeData(color: AppTheme.text),
       ),
       body: Stack(

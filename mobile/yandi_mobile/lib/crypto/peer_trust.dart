@@ -1,4 +1,5 @@
 import 'dart:convert';
+import '../l10n_core.dart';
 
 class PeerKeyBundle {
   final List<int> x25519, ed25519;
@@ -19,7 +20,7 @@ class PeerTrust {
       final old = await read(key);
       if (old != null && old != encoded) {
         throw StateError(
-            'Ключ собеседника $peer изменился. Отправка запрещена: проверьте отпечаток вне YANDI.');
+            trf('Ключ собеседника {p} изменился. Отправка запрещена: проверьте отпечаток вне YANDI.', {'p': peer}));
       }
       if (old == null) await write(key, encoded);
     });

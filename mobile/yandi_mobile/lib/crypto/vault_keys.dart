@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import '../l10n_core.dart';
 
 /// Ядро «закрытой среды»: один случайный ключ данных (DK), которым шифруется всё содержимое приложения (база, файлы).
 /// Сам DK на диск не попадает, лежит только в обёрнутом виде, под двумя независимыми замками:
@@ -70,7 +71,7 @@ class VaultWrongSecret implements Exception {
   final int failures;
   VaultWrongSecret(this.failures);
   @override
-  String toString() => 'Неверный пароль или фраза (попыток подряд: $failures)';
+  String toString() => trf('Неверный пароль или фраза (попыток подряд: {n})', {'n': failures});
 }
 
 /// Слишком много неверных попыток: подождать.
@@ -78,13 +79,13 @@ class VaultThrottled implements Exception {
   final Duration wait;
   VaultThrottled(this.wait);
   @override
-  String toString() => 'Слишком много попыток, подождите ${wait.inSeconds} с';
+  String toString() => trf('Слишком много попыток, подождите {n} с', {'n': wait.inSeconds});
 }
 
 /// Фразу при создании не вводили: забытый пароль восстановить нельзя.
 class VaultNoRecovery implements Exception {
   @override
-  String toString() => 'Фраза восстановления не задана';
+  String toString() => tr('Фраза восстановления не задана');
 }
 
 /// Файл ключей повреждён или не наш: не перезаписываем его, а сообщаем.
@@ -92,7 +93,7 @@ class VaultCorrupt implements Exception {
   final String why;
   VaultCorrupt(this.why);
   @override
-  String toString() => 'Хранилище ключей повреждено: $why';
+  String toString() => trf('Хранилище ключей повреждено: {why}', {'why': why});
 }
 
 class VaultKeys {
@@ -180,10 +181,10 @@ class VaultKeys {
     bool legacyPhraseEncoding = false,
   }) async {
     if (await exists(b)) throw StateError('хранилище уже создано');
-    if (password.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    if (password.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
     final hasPhrase = phraseFields != null && _normalizedList(phraseFields).any((x) => x.isNotEmpty);
     if (hasPhrase && (phraseFields.length != phraseFieldCount || !phraseStrongEnough(phraseFields))) {
-      throw VaultPolicyError('Фраза: $phraseFieldCount разных слова, в каждом не меньше $minPhraseFieldChars знаков');
+      throw VaultPolicyError(trf('Фраза: {n} разных слова, в каждом не меньше {m} знаков', {'n': phraseFieldCount, 'm': minPhraseFieldChars}));
     }
     final phrase = !hasPhrase ? null : (legacyPhraseEncoding ? normalizePhrase(phraseFields) : canonicalPhrase(phraseFields));
     final rnd = Random.secure();
@@ -242,8 +243,8 @@ class VaultKeys {
     await _checkGeneration(b, f);
     final ph = f['ph'] as Map<String, dynamic>?;
     if (ph == null) throw VaultNoRecovery();
-    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
-    if (phraseFields.length != phraseFieldCount) throw VaultPolicyError('Нужно $phraseFieldCount слова');
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
+    if (phraseFields.length != phraseFieldCount) throw VaultPolicyError(trf('Нужно {n} слова', {'n': phraseFieldCount}));
     await _gate(b, _kFailPh, _kNextPh);
     final failures = await _bump(b, _kFailPh, _kNextPh);
     // новые замки записывают слова однозначно (JSON); старые — как были (поля через «|»)
@@ -265,7 +266,7 @@ class VaultKeys {
 
   /// Сменить пароль (хранилище должно быть открыто; старый пароль проверяется заново).
   Future<void> changePassword(String oldPassword, String newPassword) async {
-    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
     final generation = _generation;
     void alive() {
       if (_dk == null || generation != _generation) throw StateError('смена пароля прервана блокировкой');
