@@ -4,7 +4,13 @@ import 'dart:convert';
 class GuestNode {
   final String name, host, fingerprint;
   final int port;
-  const GuestNode(this.name, this.host, this.port, this.fingerprint);
+
+  /// Номер и ключ узла из подписанного списка: по ним проверяется представление узла (`/mobile/hello`), отпечаток сертификата тогда не нужен.
+  final String id, key;
+  const GuestNode(this.name, this.host, this.port, this.fingerprint, {this.id = '', this.key = ''});
+
+  /// Тот же узел с проверенным отпечатком сертификата (после представления).
+  GuestNode withFingerprint(String fp) => GuestNode(name, host, port, fp, id: id, key: key);
 
   /// Разбор списка из вшитого файла или подписанного ответа: только верные записи (адрес, порт 1–65535, отпечаток 64 hex), не больше 16.
   static List<GuestNode> parseList(Object? raw) {

@@ -69,4 +69,4 @@ flutter:
   assets:
     - assets/images/
     - assets/sounds/
-    - assets/guest_nodes.json
+    - assets/bootstrap.json

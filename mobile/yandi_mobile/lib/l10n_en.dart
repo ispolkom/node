@@ -730,4 +730,6 @@ const Map<String, String> enTable = {
   'Фраза восстановления не задана': 'The recovery phrase is not set',
   'Фраза: {n} разных слова, в каждом не меньше {m} знаков': 'Phrase: {n} different words, each at least {m} characters',
   'Хранилище ключей повреждено: {why}': 'The key storage is damaged: {why}',
+  'Узел не подтвердил, что он тот самый из списка: вход отменён.': 'The node did not confirm that it is the one from the list: sign-in cancelled.',
+  'Не удалось проверить узел: вход гостем отменён.': 'Could not verify the node: the guest sign-in is cancelled.',
 };

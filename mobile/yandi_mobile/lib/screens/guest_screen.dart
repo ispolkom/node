@@ -1,12 +1,13 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart' show rootBundle;
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import '../l10n.dart';
 import '../models/guest_node.dart';
 import '../models/trusted_node.dart';
 import '../services/app_state.dart';
+import '../services/bootstrap_loader.dart';
 import '../services/guest_pair.dart';
+import '../services/node_hello.dart';
 import '../theme.dart';
 import 'pair_screen.dart';
 
@@ -16,7 +17,8 @@ class GuestScreen extends StatefulWidget {
   final List<GuestNode>? nodes;
   final Future<TrustedNode> Function(GuestNode)? enter;
   final void Function(BuildContext)? onEntered;
-  const GuestScreen({super.key, this.nodes, this.enter, this.onEntered});
+  final BootstrapLoader? loader;
+  const GuestScreen({super.key, this.nodes, this.enter, this.onEntered, this.loader});
   @override
   State<GuestScreen> createState() => _GuestScreenState();
 }
@@ -32,8 +34,9 @@ class _GuestScreenState extends State<GuestScreen> {
     if (widget.nodes != null) {
       _nodes = widget.nodes;
     } else {
-      rootBundle.loadString('assets/guest_nodes.json', cache: false).then((j) {
-        if (mounted) setState(() => _nodes = GuestNode.parseList(j));
+      // подписанный список входных узлов: сеть, копия на телефоне, вшитая копия (проверка подписи в BootstrapLoader)
+      (widget.loader ?? BootstrapLoader()).load().then((r) {
+        if (mounted) setState(() => _nodes = r?.doc.guestNodes() ?? const []);
       }).catchError((_) {
         if (mounted) setState(() => _nodes = const []);
       });
@@ -47,9 +50,7 @@ class _GuestScreenState extends State<GuestScreen> {
       _error = null;
     });
     try {
-      final node = widget.enter != null
-          ? await widget.enter!(n)
-          : await guestPair(n, client: buildPinnedPairClient(n.fingerprint), deviceName: newDeviceLabel());
+      final node = widget.enter != null ? await widget.enter!(n) : await _realEnter(n);
       if (!mounted) return;
       if (widget.onEntered == null) await context.read<AppState>().completePairing(node);
       if (!mounted) return;
@@ -65,6 +66,13 @@ class _GuestScreenState extends State<GuestScreen> {
     } finally {
       if (mounted) setState(() => _busy = null);
     }
+  }
+
+  /// Узел из подписанного списка сначала представляется (подпись его сертификата ключом из списка), и только с проверенным отпечатком идёт вход.
+  Future<TrustedNode> _realEnter(GuestNode n) async {
+    final verified = n.key.isNotEmpty ? n.withFingerprint(await verifyNodeHello(n)) : n;
+    if (verified.fingerprint.isEmpty) throw GuestPairError(tr('Не удалось проверить узел: вход гостем отменён.'));
+    return guestPair(verified, client: buildPinnedPairClient(verified.fingerprint), deviceName: newDeviceLabel());
   }
 
   @override
