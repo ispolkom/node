@@ -59,7 +59,12 @@ class _PlayerDialog extends StatefulWidget {
 
 class _PlayerDialogState extends State<_PlayerDialog> {
   late final Player player = Player();
-  late final VideoController controller = VideoController(player);
+  // Программный рендеринг: аппаратный (текстура GL) на ряде видеокарт Linux роняет весь процесс (SIGSEGV в TextureGL сразу после
+  // создания вывода). Программного вывода хватает для видео до full HD, звук от рендеринга не зависит.
+  late final VideoController controller = VideoController(
+    player,
+    configuration: const VideoControllerConfiguration(enableHardwareAcceleration: false),
+  );
   String? error;
   StreamSubscription<String>? errors;
 

@@ -128,6 +128,17 @@ class _AttachmentViewState extends State<AttachmentView> {
   /// served to the player over loopback; no plaintext file is written.
   Future<void> play() async {
     if (playing) return;
+    // Защита от стирания чата на потерю фокуса действует с самого нажатия: проверка среды, загрузка и запуск проигрывателя тоже
+    // отнимают фокус или идут во время него (окно проигрывателя может появиться раньше, чем запуск вернёт управление).
+    PlaybackGuard.enter();
+    try {
+      await _play();
+    } finally {
+      PlaybackGuard.leave();
+    }
+  }
+
+  Future<void> _play() async {
     final size = widget.attachment['size'];
     if (size is! num || size <= 0 || size > 512 * 1024 * 1024) {
       setState(() => error = 'Файл слишком большой для воспроизведения.');
