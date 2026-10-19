@@ -28,6 +28,7 @@ import '../services/voice_recorder.dart';
 import '../widgets/inline_media.dart';
 import '../widgets/recipients_sheet.dart';
 import 'package:path_provider/path_provider.dart' as pp;
+import '../l10n.dart';
 
 /// Звено цепочки ответов: запись (seq) либо, если её уже нет, то, что осталось в карточке (known == false).
 typedef ThreadItem = ({int? seq, String author, String text, bool known});
@@ -55,13 +56,13 @@ List<ThreadItem> replyChain(List<GroupEntry> entries, GroupEntry e, String Funct
 }
 
 /// Разделы-фильтры группы: вид записи → подпись.
-const groupSections = <(int?, String)>[
-  (null, 'Все'),
-  (GroupKind.image, 'Картинки'),
-  (GroupKind.file, 'Файлы'),
-  (GroupKind.audio, 'Аудио'),
-  (GroupKind.video, 'Видео'),
-  (GroupKind.link, 'Ссылки'),
+List<(int?, String)> get groupSections => <(int?, String)>[
+  (null, tr('Все')),
+  (GroupKind.image, tr('Картинки')),
+  (GroupKind.file, tr('Файлы')),
+  (GroupKind.audio, tr('Аудио')),
+  (GroupKind.video, tr('Видео')),
+  (GroupKind.link, tr('Ссылки')),
 ];
 
 /// Вид записи по тексту: ссылка — отдельный вид, чтобы группа могла её запретить.
@@ -157,7 +158,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
   }
 
-  String _fmtSize(int b) => b >= 1 << 20 ? '${(b / (1 << 20)).toStringAsFixed(1)} МБ' : '${(b / 1024).ceil()} КБ';
+  String _fmtSize(int b) => b >= 1 << 20 ? trf('{n} МБ', {'n': (b / (1 << 20)).toStringAsFixed(1)}) : trf('{n} КБ', {'n': (b / 1024).ceil()});
 
   Future<void> _attach() async {
     final r = await FilePicker.platform.pickFiles(allowMultiple: false);
@@ -174,7 +175,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       final bad = await attachmentVerdict(path, name);
       if (bad != null) { _toast('«$name»: $bad'); return; }
       final kind = GroupFiles.kindForName(name);
-      if (!svc.rules(widget.gid).allows(kind)) { _toast('В этой группе запрещён такой вид файлов'); return; }
+      if (!svc.rules(widget.gid).allows(kind)) { _toast(tr('В этой группе запрещён такой вид файлов')); return; }
       setState(() => _progress['up'] = 0);
       final d = await GroupFiles(svc.api, vault: await VaultService.instance.files()).upload(widget.gid, File(path), name, onProgress: (done, total) {
         if (mounted) setState(() => _progress['up'] = done / total);
@@ -196,7 +197,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     } on GroupSendRefused catch (e) {
       _toast(e.reason);
     } catch (e) {
-      _toast('Файл не отправлен: $e');
+      _toast(trf('Файл не отправлен: {e}', {'e': e}));
     } finally {
       if (mounted) setState(() => _progress.remove('up'));
       // открытая копия из выбора файла затирается при любом исходе (запрет вида файла, отказ, успех)
@@ -230,7 +231,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         if (mounted) setState(() => _progress[fid] = done / total);
       });
     } catch (e) {
-      _toast('Не скачано: $e');
+      _toast(trf('Не скачано: {e}', {'e': e}));
       try { if (await part.exists()) await part.delete(); } catch (_) {}
       return null;
     } finally {
@@ -285,7 +286,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     } on GroupSendRefused catch (e) {
       _toast(e.reason);
     } catch (e) {
-      _toast('Не отправлено: $e');
+      _toast(trf('Не отправлено: {e}', {'e': e}));
     }
   }
 
@@ -349,24 +350,24 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       case cmdDelete:
         await _deleteEntries(g, [e]);
       case cmdMute:
-        try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast('Заглушён'); } catch (err) { _toast('$err'); }
+        try { await _svc!.moderate(g.id, 'mute', alias: e.from); _toast(tr('Заглушён')); } catch (err) { _toast('$err'); }
     }
   }
 
   /// Стереть записи у всех участников группы (только по правам): с подтверждением.
   Future<void> _deleteEntries(GroupInfo g, List<GroupEntry> list) async {
     final allowed = list.where((e) => _canDelete(g, e)).toList();
-    if (allowed.isEmpty) { _toast('Эти сообщения вам удалять нельзя'); return; }
+    if (allowed.isEmpty) { _toast(tr('Эти сообщения вам удалять нельзя')); return; }
     final n = allowed.length;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: Text(n == 1 ? 'Удалить сообщение?' : 'Удалить сообщения ($n)?', style: const TextStyle(color: AppTheme.text)),
-        content: const Text('Сообщение исчезнет у всех участников группы.', style: TextStyle(color: AppTheme.textSecondary)),
+        title: Text(n == 1 ? tr('Удалить сообщение?') : trf('Удалить сообщения ({n})?', {'n': n}), style: const TextStyle(color: AppTheme.text)),
+        content: Text(tr('Сообщение исчезнет у всех участников группы.'), style: TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -385,12 +386,12 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     if (list.isEmpty) return;
     final state = context.read<AppState>();
     final to = await pickRecipients(context,
-        title: list.length == 1 ? 'Переслать сообщение' : 'Переслать сообщения (${list.length})',
+        title: list.length == 1 ? tr('Переслать сообщение') : trf('Переслать сообщения ({n})', {'n': list.length}),
         contacts: forwardCandidates(state.contacts));
     if (to == null || to.isEmpty || !mounted) return;
     for (final e in list) {
       if ({...?_fwdTo[e.seq], ...to.map((c) => c.peerId)}.length > 20) {
-        _toast('Одно сообщение — не больше 20 получателей');
+        _toast(tr('Одно сообщение — не больше 20 получателей'));
         return;
       }
     }
@@ -405,7 +406,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       _fwdTo.putIfAbsent(e.seq, () => {}).addAll(to.map((c) => c.peerId));
       for (final c in to) {
         if (local != null) {
-          state.sendFile(c.peerId, local, name: '${e.body['n'] ?? 'файл'}').then((err) { if (err != null && mounted) _toast('${e.body['n']} → ${c.displayName}: $err'); });
+          state.sendFile(c.peerId, local, name: '${e.body['n'] ?? tr('файл')}').then((err) { if (err != null && mounted) _toast('${e.body['n']} → ${c.displayName}: $err'); });
         } else {
           state.sendMessage(c.peerId, '${e.body['t'] ?? ''}');
         }
@@ -413,7 +414,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
     }
     if (mounted) {
       setState(_selected.clear);
-      _toast('Отправка → ${to.map((c) => c.displayName).join(', ')}${skipped > 0 ? '. Не скачанных файлов пропущено: $skipped' : ''}');
+      _toast(trf('Отправка → {names}', {'names': to.map((c) => c.displayName).join(', ')}) + (skipped > 0 ? trf('. Не скачанных файлов пропущено: {n}', {'n': skipped}) : ''));
     }
   }
 
@@ -435,7 +436,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         String two(int n) => n.toString().padLeft(2, '0');
         await _sendFilePath(path, 'Голосовое_${now.year}${two(now.month)}${two(now.day)}_${two(now.hour)}${two(now.minute)}${two(now.second)}.m4a');
       } else if (send) {
-        _toast('Запись слишком короткая');
+        _toast(tr('Запись слишком короткая'));
       }
     } finally {
       if (path != null) await state.dropPickerCopy(path);
@@ -463,9 +464,9 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         child: ConstrainedBox(
           constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.7),
           child: ListView(shrinkWrap: true, padding: const EdgeInsets.all(12), children: [
-            const Padding(
+            Padding(
               padding: EdgeInsets.only(bottom: 8),
-              child: Text('Цепочка ответов: сверху — с чего всё началось', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              child: Text(tr('Цепочка ответов: сверху — с чего всё началось'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             ),
             for (var i = 0; i < chain.length; i++)
               Padding(
@@ -480,7 +481,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                       border: const Border(left: BorderSide(color: AppTheme.accent, width: 3)),
                     ),
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                      Text('${chain[i].author}${chain[i].known ? '' : ' · сообщение недоступно'}',
+                      Text('${chain[i].author}${chain[i].known ? '' : tr(' · сообщение недоступно')}',
                           style: const TextStyle(color: AppTheme.accent, fontSize: 12, fontWeight: FontWeight.bold)),
                       Text(chain[i].text, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
                     ]),
@@ -522,7 +523,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       if (mounted && (list.length != _entries.length || (list.isNotEmpty && _entries.isNotEmpty && list.last.seq != _entries.last.seq))) _load();
     });
     if (g == null || svc == null) {
-      return Scaffold(appBar: AppBar(title: const Text('Группа')), body: const Center(child: Text('Группа недоступна', style: TextStyle(color: AppTheme.textSecondary))));
+      return Scaffold(appBar: AppBar(title: Text(tr('Группа'))), body: Center(child: Text(tr('Группа недоступна'), style: TextStyle(color: AppTheme.textSecondary))));
     }
     final noKey = !state.groups!.hasProblem(g.id) && g.epoch == 0;
     final selectedEntries = _entries.where((e) => _selected.contains(e.seq)).toList();
@@ -533,11 +534,11 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               backgroundColor: AppTheme.surface,
               elevation: 0,
               leading: IconButton(icon: const Icon(Icons.close), onPressed: () => setState(_selected.clear)),
-              title: Text('Выбрано: ${_selected.length}', style: const TextStyle(fontSize: 16)),
+              title: Text(trf('Выбрано: {n}', {'n': _selected.length}), style: const TextStyle(fontSize: 16)),
               actions: [
                 IconButton(
                   key: const ValueKey('group-forward-selected'),
-                  tooltip: 'Переслать',
+                  tooltip: tr('Переслать'),
                   icon: const Icon(Icons.forward_to_inbox_outlined),
                   onPressed: () => _forwardEntries(g, selectedEntries),
                 ),
@@ -545,7 +546,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 if (canDeleteAll)
                   IconButton(
                     key: const ValueKey('group-delete-selected'),
-                    tooltip: 'Удалить',
+                    tooltip: tr('Удалить'),
                     icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                     onPressed: () => _deleteEntries(g, selectedEntries),
                   ),
@@ -556,10 +557,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))),
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
             Text(g.name, style: const TextStyle(fontSize: 16)),
-            Text('${g.members} уч. · вы: ${g.myAlias}', style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+            Text(trf('{n} уч. · вы: {alias}', {'n': g.members, 'alias': g.myAlias}), style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
           ]),
         ),
-        actions: [IconButton(icon: const Icon(Icons.settings_outlined), tooltip: 'Настройки группы', onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))))],
+        actions: [IconButton(icon: const Icon(Icons.settings_outlined), tooltip: tr('Настройки группы'), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupInfoScreen(gid: g.id))))],
       ),
       body: Column(children: [
         // навигационная строка: «Файлы группы» — папка только этой группы (то, что уже у меня; наружу не выносится)
@@ -571,7 +572,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                 if (e.body['f'] is String)
                   FileOffer(
                     tid: e.body['f'] as String,
-                    name: '${e.body['n'] ?? 'файл'}',
+                    name: '${e.body['n'] ?? tr('файл')}',
                     size: e.body['z'] is int ? e.body['z'] as int : 0,
                     chunks: e.body['c'] is int ? e.body['c'] as int : 0,
                     mime: FileTransferService.guessMime('${e.body['n'] ?? ''}'),
@@ -582,7 +583,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             Navigator.push(context, MaterialPageRoute(
               builder: (_) => ChatFilesScreen(title: g.name, shortId: g.id.substring(0, 8), offers: offers,
                   // не скачанные файлы группы тоже в папке: нажатие скачивает их в закрытую среду
-                  onFetch: (o) async => bodies[o.tid] != null && await _fetchFile(bodies[o.tid]!) != null, emptyHint: 'В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.',
+                  onFetch: (o) async => bodies[o.tid] != null && await _fetchFile(bodies[o.tid]!) != null, emptyHint: tr('В этой папке пока нет файлов. Файлы группы, которые вы скачали или отправили, появятся здесь.'),
                   links: [
                     for (final e in _entries)
                       if (e.body['t'] is String) ...FileLink.inText(stripLinks(e.body['t'] as String), DateTime.fromMillisecondsSinceEpoch(e.ts)),
@@ -593,10 +594,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             width: double.infinity,
             color: AppTheme.surface,
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-            child: Row(children: const [
+            child: Row(children: [
               Icon(Icons.folder_outlined, size: 18, color: AppTheme.accent),
               SizedBox(width: 8),
-              Text('Файлы группы', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+              Text(tr('Файлы группы'), style: TextStyle(color: AppTheme.text, fontSize: 14)),
               Spacer(),
               Icon(Icons.chevron_right, size: 18, color: AppTheme.textSecondary),
             ]),
@@ -605,16 +606,16 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         if (svc.hasProblem(g.id))
           Container(
             width: double.infinity, color: AppTheme.incoming.withOpacity(0.15), padding: const EdgeInsets.all(8),
-            child: const Text('Ключ владельца группы изменился. Не доверяйте новым ключам, пока не проверите владельца лично.', style: TextStyle(color: AppTheme.incoming, fontSize: 12)),
+            child: Text(tr('Ключ владельца группы изменился. Не доверяйте новым ключам, пока не проверите владельца лично.'), style: TextStyle(color: AppTheme.incoming, fontSize: 12)),
           )
         else if (noKey)
           Container(
             width: double.infinity, color: AppTheme.surface, padding: const EdgeInsets.all(8),
-            child: const Text('Ключ группы ещё не создан владельцем. Сообщения появятся, когда он откроет приложение.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            child: Text(tr('Ключ группы ещё не создан владельцем. Сообщения появятся, когда он откроет приложение.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
         Expanded(
           child: _entries.isEmpty && _requests.isEmpty
-              ? Center(child: Text(_section == null ? 'Сообщений пока нет' : 'В этом разделе пусто', style: const TextStyle(color: AppTheme.textSecondary)))
+              ? Center(child: Text(_section == null ? tr('Сообщений пока нет') : tr('В этом разделе пусто'), style: const TextStyle(color: AppTheme.textSecondary)))
               : ListView.builder(
                   controller: _scroll,
                   padding: const EdgeInsets.all(12),
@@ -657,10 +658,10 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           Container(
             width: double.infinity, color: AppTheme.surface, padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Row(children: [
-              Expanded(child: Text('Скрыто пользователей: ${_hidden.length}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+              Expanded(child: Text(trf('Скрыто пользователей: {n}', {'n': _hidden.length}), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
               GestureDetector(
                 onTap: () async { setState(() => _hidden = {}); await _saveHidden(); },
-                child: const Text('Показать скрытых', style: TextStyle(color: AppTheme.accent, fontSize: 12, decoration: TextDecoration.underline)),
+                child: Text(tr('Показать скрытых'), style: TextStyle(color: AppTheme.accent, fontSize: 12, decoration: TextDecoration.underline)),
               ),
             ]),
           ),
@@ -688,7 +689,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
           child: Row(children: [
             IconButton(
               key: const ValueKey('voice-cancel'),
-              tooltip: 'Отменить запись',
+              tooltip: tr('Отменить запись'),
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
               onPressed: () => _finishVoice(send: false),
             ),
@@ -696,7 +697,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
             const SizedBox(width: 8),
             Text(mmss(_rec.seconds), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
             const SizedBox(width: 12),
-            const Expanded(child: Text('Идёт запись…', style: TextStyle(color: AppTheme.textSecondary))),
+            Expanded(child: Text(tr('Идёт запись…'), style: TextStyle(color: AppTheme.textSecondary))),
             GestureDetector(
               key: const ValueKey('voice-send'),
               onTap: () => _finishVoice(send: true),
@@ -717,7 +718,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
         top: false,
         child: Row(children: [
           IconButton(
-            tooltip: 'Прикрепить файл',
+            tooltip: tr('Прикрепить файл'),
             icon: Icon(Icons.attach_file, color: _progress.containsKey('up') ? AppTheme.accent : AppTheme.textSecondary),
             onPressed: denied || _progress.containsKey('up') ? null : _attach,
           ),
@@ -734,8 +735,8 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
               enableIMEPersonalizedLearning: !state.secureKeyboard,
               decoration: InputDecoration(
                 hintText: denied
-                    ? 'Вы заглушены в этой группе'
-                    : (!g.ownerPresent ? 'Владелец группы отсутствует: писать может не получиться' : 'Сообщение…'),
+                    ? tr('Вы заглушены в этой группе')
+                    : (!g.ownerPresent ? tr('Владелец группы отсутствует: писать может не получиться') : tr('Сообщение…')),
                 hintStyle: const TextStyle(color: AppTheme.textSecondary),
                 filled: true,
                 fillColor: AppTheme.bg,
@@ -773,27 +774,27 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
       backgroundColor: AppTheme.surface,
       builder: (ctx) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          Padding(padding: const EdgeInsets.all(16), child: Text('${r.name.isEmpty ? 'Кто-то' : r.name} просит приглашение в группу', style: const TextStyle(color: AppTheme.text, fontSize: 16))),
+          Padding(padding: const EdgeInsets.all(16), child: Text(trf('{n} просит приглашение в группу', {'n': r.name.isEmpty ? tr('Кто-то') : r.name}), style: const TextStyle(color: AppTheme.text, fontSize: 16))),
           ListTile(
             leading: const Icon(Icons.person_add_alt, color: AppTheme.accent),
-            title: const Text('Добавить', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Ему уйдёт приглашение личным сообщением', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            title: Text(tr('Добавить'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Ему уйдёт приглашение личным сообщением'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             onTap: () { Navigator.pop(ctx); run(() async {
               final code = await _svc!.newInvite(g.id, uses: 1, ttlHours: 72);
               await state.sendMessage(r.peerId, GroupInviteMsg.encode(g.id, code, g.name));
               await _svc!.closeRequest(g.id, r.id);
-            }, 'Приглашение отправлено'); },
+            }, tr('Приглашение отправлено')); },
           ),
           ListTile(
             leading: const Icon(Icons.close, color: AppTheme.textSecondary),
-            title: const Text('Игнорировать', style: TextStyle(color: AppTheme.text)),
-            onTap: () { Navigator.pop(ctx); run(() => _svc!.closeRequest(g.id, r.id), 'Просьба закрыта'); },
+            title: Text(tr('Игнорировать'), style: TextStyle(color: AppTheme.text)),
+            onTap: () { Navigator.pop(ctx); run(() => _svc!.closeRequest(g.id, r.id), tr('Просьба закрыта')); },
           ),
           ListTile(
             leading: const Icon(Icons.notifications_off_outlined, color: AppTheme.incoming),
-            title: const Text('Больше не напоминать', style: TextStyle(color: AppTheme.text)),
-            subtitle: const Text('Его просьбы в эту группу вы больше не увидите', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-            onTap: () { Navigator.pop(ctx); run(() => _svc!.ignoreRequester(g.id, r), 'Готово, напоминаний не будет'); },
+            title: Text(tr('Больше не напоминать'), style: TextStyle(color: AppTheme.text)),
+            subtitle: Text(tr('Его просьбы в эту группу вы больше не увидите'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () { Navigator.pop(ctx); run(() => _svc!.ignoreRequester(g.id, r), tr('Готово, напоминаний не будет')); },
           ),
         ]),
       ),
@@ -830,9 +831,9 @@ class _GroupBubble extends StatelessWidget {
     // файл с типом, который в сети не передаётся (чужой клиент): не показывается как файл и не скачивается
     final blockedFile = entry.body['f'] is String ? attachmentProblem('${entry.body['n'] ?? ''}') : null;
     final text = entry.body['op'] == 'lost' && entry.kind == GroupKind.system
-        ? '🔒 Сообщение недоступно: ключ этого поколения уже удалён с узла'
+        ? tr('🔒 Сообщение недоступно: ключ этого поколения уже удалён с узла')
         : entry.body['op'] == 'bad' && entry.kind == GroupKind.system
-            ? '⚠ Повреждённое сообщение: не прошло проверку'
+            ? tr('⚠ Повреждённое сообщение: не прошло проверку')
             : (t is String ? t : (name is String ? name : ''));
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
@@ -861,7 +862,7 @@ class _GroupBubble extends StatelessWidget {
               ]),
             if (quote != null) QuoteBox(author: quote!.$1, text: quote!.$2, onTap: onQuoteTap),
             if (blockedFile != null)
-              Text('Файл не принят: $blockedFile', style: const TextStyle(color: AppTheme.incoming, fontSize: 13))
+              Text(trf('Файл не принят: {n}', {'n': blockedFile}), style: const TextStyle(color: AppTheme.incoming, fontSize: 13))
             else if (entry.body['f'] is String && localPath != null && progress == null && entry.kind == GroupKind.audio && entry.body['z'] is int && (entry.body['z'] as int) <= InlineAudio.maxInline)
               InlineAudio(
                 key: ValueKey('ga-${entry.body['f']}'),
@@ -883,8 +884,8 @@ class _GroupBubble extends StatelessWidget {
                   Icon(entry.kind == GroupKind.image ? Icons.image_outlined : entry.kind == GroupKind.audio ? Icons.music_note : entry.kind == GroupKind.video ? Icons.movie_outlined : Icons.insert_drive_file_outlined, color: AppTheme.accent),
                   const SizedBox(width: 8),
                   Flexible(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                    Text('${entry.body['n'] ?? 'файл'}', style: const TextStyle(color: AppTheme.text, fontSize: 14), overflow: TextOverflow.ellipsis),
-                    Text(progress != null ? 'загрузка ${(progress! * 100).round()}%' : (sizeLabel ?? ''), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                    Text('${entry.body['n'] ?? tr('файл')}', style: const TextStyle(color: AppTheme.text, fontSize: 14), overflow: TextOverflow.ellipsis),
+                    Text(progress != null ? trf('загрузка {n}%', {'n': (progress! * 100).round()}) : (sizeLabel ?? ''), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
                   ])),
                 ]),
               )
@@ -985,12 +986,12 @@ class _RequestCard extends StatelessWidget {
             Row(mainAxisSize: MainAxisSize.min, children: [
               const Icon(Icons.how_to_reg_outlined, color: AppTheme.incoming, size: 18),
               const SizedBox(width: 6),
-              Flexible(child: Text(request.name.isEmpty ? 'Новая просьба' : request.name, style: const TextStyle(color: AppTheme.incoming, fontSize: 13, fontWeight: FontWeight.bold))),
+              Flexible(child: Text(request.name.isEmpty ? tr('Новая просьба') : request.name, style: const TextStyle(color: AppTheme.incoming, fontSize: 13, fontWeight: FontWeight.bold))),
             ]),
             const SizedBox(height: 4),
-            const Text('просит добавить его в группу или прислать приглашение', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+            Text(tr('просит добавить его в группу или прислать приглашение'), style: TextStyle(color: AppTheme.text, fontSize: 14)),
             const SizedBox(height: 4),
-            const Text('служебное: видят владелец и модераторы · нажмите, чтобы ответить', style: TextStyle(color: AppTheme.textSecondary, fontSize: 10)),
+            Text(tr('служебное: видят владелец и модераторы · нажмите, чтобы ответить'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 10)),
           ]),
         ),
       ),

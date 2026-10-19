@@ -14,6 +14,7 @@ import '../services/vault_bytes_cache.dart';
 import '../services/vault_files.dart';
 import '../services/vault_service.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Просмотр файла внутри приложения, без передачи другим программам: картинки, текст, звук. Остальное — только сведения о файле.
 /// Файл расшифровывается в памяти; открытой копии на диске нет.
@@ -81,7 +82,7 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       if (mounted) setState(() {});
       await c.play();
     } catch (_) {
-      if (mounted) setState(() => _videoError = 'Не удалось воспроизвести: файл повреждён или формат не поддерживается');
+      if (mounted) setState(() => _videoError = tr('Не удалось воспроизвести: файл повреждён или формат не поддерживается'));
     }
   }
 
@@ -115,9 +116,9 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
   }
 
   static String humanSize(int b) {
-    if (b < 1024) return '$b Б';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} КБ';
-    return '${(b / 1024 / 1024).toStringAsFixed(1)} МБ';
+    if (b < 1024) return trf('{n} Б', {'n': b});
+    if (b < 1024 * 1024) return trf('{n} КБ', {'n': (b / 1024).toStringAsFixed(1)});
+    return trf('{n} МБ', {'n': (b / 1024 / 1024).toStringAsFixed(1)});
   }
 
   static String _mmss(Duration d) => '${d.inMinutes.toString().padLeft(2, '0')}:${(d.inSeconds % 60).toString().padLeft(2, '0')}';
@@ -128,9 +129,9 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       const limit = 256 * 1024;
       final bytes = await (await VaultService.instance.files()).readPrefix(File(f.path), limit);
       final text = utf8.decode(bytes, allowMalformed: true);
-      return f.size > limit ? '$text\n\n… показаны первые 256 КБ из ${humanSize(f.size)}' : text;
+      return f.size > limit ? trf('{text}\n\n… показаны первые 256 КБ из {size}', {'text': text, 'size': humanSize(f.size)}) : text;
     } catch (_) {
-      return 'Не удалось прочитать файл';
+      return tr('Не удалось прочитать файл');
     }
   }
 
@@ -143,8 +144,8 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
             future: VaultBytesCache.load(f.path),
             builder: (_, snap) {
               final b = snap.data;
-              if (b == null) return snap.connectionState == ConnectionState.done ? _info('Не удалось показать картинку: файл повреждён или слишком большой') : const CircularProgressIndicator(color: AppTheme.accent);
-              return Image.memory(b, errorBuilder: (_, __, ___) => _info('Не удалось показать картинку: файл повреждён или формат не поддерживается'));
+              if (b == null) return snap.connectionState == ConnectionState.done ? _info(tr('Не удалось показать картинку: файл повреждён или слишком большой')) : const CircularProgressIndicator(color: AppTheme.accent);
+              return Image.memory(b, errorBuilder: (_, __, ___) => _info(tr('Не удалось показать картинку: файл повреждён или формат не поддерживается')));
             },
           ),
         ),
@@ -155,7 +156,7 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
         future: _readText(),
         builder: (c, snap) => SingleChildScrollView(
           padding: const EdgeInsets.all(16),
-          child: SelectableText(snap.data ?? 'Чтение…', style: const TextStyle(color: AppTheme.text, fontSize: 14)),
+          child: SelectableText(snap.data ?? tr('Чтение…'), style: const TextStyle(color: AppTheme.text, fontSize: 14)),
         ),
       );
     }
@@ -192,7 +193,7 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
                   try {
                     await p.play(BytesSource(await (await VaultService.instance.files()).readAll(File(f.path))));
                   } catch (_) {
-                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Не удалось воспроизвести: файл повреждён')));
+                    if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Не удалось воспроизвести: файл повреждён'))));
                   }
                 }
               },
@@ -216,8 +217,8 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       );
     }
     return _info(f.isVideo
-        ? 'Видео внутри приложения пока не воспроизводится. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.'
-        : 'Этот тип файла внутри приложения не открывается. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.');
+        ? tr('Видео внутри приложения пока не воспроизводится. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.')
+        : tr('Этот тип файла внутри приложения не открывается. Файл остаётся в защищённом пространстве; его можно переслать контакту YANDI.'));
   }
 
   Widget _info(String text) => Center(
@@ -240,11 +241,11 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: const Text('Удалить файл?', style: TextStyle(color: AppTheme.text)),
-        content: Text('«${f.name}» будет удалён сразу и насовсем, без корзины.', style: const TextStyle(color: AppTheme.textSecondary)),
+        title: Text(tr('Удалить файл?'), style: TextStyle(color: AppTheme.text)),
+        content: Text(trf('«{n}» будет удалён сразу и насовсем, без корзины.', {'n': f.name}), style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -268,8 +269,8 @@ class _FileViewerScreenState extends State<FileViewerScreen> {
         appBar: full ? null : AppBar(
           title: Text(f.name, overflow: TextOverflow.ellipsis),
           actions: [
-            if (widget.onShare != null) IconButton(tooltip: 'Переслать контакту', icon: const Icon(Icons.share_outlined), onPressed: widget.onShare),
-            if (widget.onDelete != null) IconButton(tooltip: 'Удалить', icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: _confirmDelete),
+            if (widget.onShare != null) IconButton(tooltip: tr('Переслать контакту'), icon: const Icon(Icons.share_outlined), onPressed: widget.onShare),
+            if (widget.onDelete != null) IconButton(tooltip: tr('Удалить'), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), onPressed: _confirmDelete),
           ],
         ),
         body: _body(),

@@ -30,6 +30,7 @@ import '../theme.dart';
 import '../content_policy.dart';
 import '../widgets/link_guard.dart';
 import 'home_screen.dart' show showSaveContactDialog;
+import '../l10n.dart';
 
 class ChatScreen extends StatefulWidget {
   final String peerId;
@@ -57,16 +58,14 @@ class _ChatScreenState extends State<ChatScreen> {
     final bundle = await state.apiService.getPeerBundle(widget.peerId);
     if (!mounted) return;
     if (bundle == null || state.identity == null) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(state.nodeError ?? 'Проверенная связка ключей недоступна')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(state.nodeError ?? tr('Проверенная связка ключей недоступна'))));
       return;
     }
     await showDialog<void>(context:context,builder:(ctx)=>AlertDialog(
-      title: const Text('Проверка ключей'),
+      title: Text(tr('Проверка ключей')),
       content: SingleChildScrollView(child: SelectableText(
-        'Сравните отпечатки лично или по независимому каналу. Первое получение (TOFU) не подтверждает личность. При смене ключа отправка блокируется.\n\n'
-        'Мой Ed25519 SHA-256:\n${crypto.sha256.convert(state.identity!.ed25519PublicBytes)}\n\n'
-        'Собеседник Ed25519 SHA-256:\n${crypto.sha256.convert(bundle.ed25519)}')),
-      actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:const Text('Закрыть'))],
+        trf('Сравните отпечатки лично или по независимому каналу. Первое получение (TOFU) не подтверждает личность. При смене ключа отправка блокируется.\n\nМой Ed25519 SHA-256:\n{mine}\n\nСобеседник Ed25519 SHA-256:\n{peer}', {'mine': crypto.sha256.convert(state.identity!.ed25519PublicBytes), 'peer': crypto.sha256.convert(bundle.ed25519)}))),
+      actions:[TextButton(onPressed:()=>Navigator.pop(ctx),child:Text(tr('Закрыть')))],
     ));
   }
 
@@ -88,12 +87,12 @@ class _ChatScreenState extends State<ChatScreen> {
     final state = context.read<AppState>();
     final contacts = forwardCandidates(state.contacts, exclude: widget.peerId);
     final to = await pickRecipients(context,
-        title: msgs.length == 1 ? 'Переслать сообщение' : 'Переслать сообщения (${msgs.length})', contacts: contacts);
+        title: msgs.length == 1 ? tr('Переслать сообщение') : trf('Переслать сообщения ({n})', {'n': msgs.length}), contacts: contacts);
     if (to == null || to.isEmpty || !mounted) return;
     for (final m in msgs) {
       final all = {...?_fwdTo[m.id], ...to.map((c) => c.peerId)};
       if (all.length > _maxPerMessage) {
-        _snack('Одно сообщение — не больше $_maxPerMessage получателей (уже ${_fwdTo[m.id]?.length ?? 0})');
+        _snack(trf('Одно сообщение — не больше {max} получателей (уже {n})', {'max': _maxPerMessage, 'n': _fwdTo[m.id]?.length ?? 0}));
         return;
       }
     }
@@ -115,8 +114,8 @@ class _ChatScreenState extends State<ChatScreen> {
     if (mounted) {
       setState(() => _selected.clear());
       _snack(skipped > 0
-          ? 'Отправка → ${to.map((c) => c.displayName).join(', ')}. Файлов без копии на телефоне пропущено: $skipped'
-          : 'Отправка → ${to.map((c) => c.displayName).join(', ')}');
+          ? trf('Отправка → {names}. Файлов без копии на телефоне пропущено: {n}', {'names': to.map((c) => c.displayName).join(', '), 'n': skipped})
+          : trf('Отправка → {names}', {'names': to.map((c) => c.displayName).join(', ')}));
     }
   }
 
@@ -132,17 +131,17 @@ class _ChatScreenState extends State<ChatScreen> {
       for (final c in state.contacts)
         if (c.saved && c.peerId.length == 64 && c.peerId != widget.peerId && c.peerId != state.nodePeerId && !RegExp(r'^\s*[\u{1F4F1}\u{1F4BB}\u{1F5A5}]', unicode: true).hasMatch(c.displayName)) c,
     ];
-    final picked = await pickRecipients(context, title: 'Поделиться контактами', contacts: candidates, max: 5);
+    final picked = await pickRecipients(context, title: tr('Поделиться контактами'), contacts: candidates, max: 5);
     if (picked == null || picked.isEmpty || !mounted) return;
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: const Text('Поделиться контактами?', style: TextStyle(color: AppTheme.text)),
-        content: Text('${picked.map((c) => c.displayName).join(', ')} — собеседник получит адрес и имя и сам решит, сохранять ли. Эти люди об этом не узнают.', style: const TextStyle(color: AppTheme.textSecondary)),
+        title: Text(tr('Поделиться контактами?'), style: TextStyle(color: AppTheme.text)),
+        content: Text(trf('{names} — собеседник получит адрес и имя и сам решит, сохранять ли. Эти люди об этом не узнают.', {'names': picked.map((c) => c.displayName).join(', ')}), style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Поделиться', style: TextStyle(color: AppTheme.accent))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Поделиться'), style: TextStyle(color: AppTheme.accent))),
         ],
       ),
     );
@@ -224,14 +223,14 @@ class _ChatScreenState extends State<ChatScreen> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: Text('Удалить $n ${_plural(n)}?', style: const TextStyle(color: AppTheme.text)),
-        content: const Text('Удалится только у вас. У собеседника останется.',
+        title: Text(trf('Удалить {n} {what}?', {'n': n, 'what': _plural(n)}), style: const TextStyle(color: AppTheme.text)),
+        content: Text(tr('Удалится только у вас. У собеседника останется.'),
             style: TextStyle(color: AppTheme.textSecondary)),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
+              child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.textSecondary))),
           TextButton(onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+              child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -250,10 +249,10 @@ class _ChatScreenState extends State<ChatScreen> {
 
   static String _plural(int n) {
     final a = n % 100, b = n % 10;
-    if (a >= 11 && a <= 14) return 'сообщений';
-    if (b == 1) return 'сообщение';
-    if (b >= 2 && b <= 4) return 'сообщения';
-    return 'сообщений';
+    if (a >= 11 && a <= 14) return tr('сообщений');
+    if (b == 1) return tr('сообщение');
+    if (b >= 2 && b <= 4) return tr('сообщения');
+    return tr('сообщений');
   }
 
   @override
@@ -328,7 +327,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _startVoice() async {
     final state = context.read<AppState>();
     if (!await state.canSendFiles(widget.peerId)) {
-      _snack('Голосовые можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)');
+      _snack(tr('Голосовые можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)'));
       return;
     }
     _rec.onLimit = () => _finishVoice(send: true);
@@ -350,7 +349,7 @@ class _ChatScreenState extends State<ChatScreen> {
         final err = await state.sendFile(widget.peerId, path, name: name);
         if (err != null) _snack(err);
       } else if (send) {
-        _snack('Запись слишком короткая');
+        _snack(tr('Запись слишком короткая'));
       }
     } finally {
       if (path != null) await state.dropPickerCopy(path);
@@ -374,7 +373,7 @@ class _ChatScreenState extends State<ChatScreen> {
   Future<void> _pickAndSendInner() async {
     final state = context.read<AppState>();
     if (!await state.canSendFiles(widget.peerId)) {
-      _snack('Файлы можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)');
+      _snack(tr('Файлы можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)'));
       return;
     }
     // выбор большого файла: система копирует его в кэш приложения, это занимает секунды; пока копируется, говорим об этом
@@ -385,7 +384,7 @@ class _ChatScreenState extends State<ChatScreen> {
         onFileLoading: (st) { if (mounted) setState(() => _picking = st == FilePickerStatus.picking); },
       );
     } catch (e) {
-      if (mounted) _snack('Не удалось выбрать файл: $e');
+      if (mounted) _snack(trf('Не удалось выбрать файл: {e}', {'e': e}));
     } finally {
       // баннер копирования не должен остаться, если выбор закончился ошибкой или отменой
       if (mounted && _picking) setState(() => _picking = false);
@@ -396,7 +395,7 @@ class _ChatScreenState extends State<ChatScreen> {
       final path = f.path;
       if (path == null) continue;
       if (f.size > maxFileSize) {
-        _snack('«${f.name}» больше 1 ГБ: слишком большой');
+        _snack(trf('«{n}» больше 1 ГБ: слишком большой', {'n': f.name}));
         continue;
       }
       final bad = await attachmentVerdict(path, f.name);
@@ -448,11 +447,11 @@ class _ChatScreenState extends State<ChatScreen> {
                 icon: const Icon(Icons.close),
                 onPressed: () => setState(() => _selected.clear()),
               ),
-              title: Text('Выбрано: ${_selected.length}', style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+              title: Text(trf('Выбрано: {n}', {'n': _selected.length}), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
               actions: [
                 if (_selected.length == 1 && _singleOutgoing(context))
                   IconButton(
-                    tooltip: 'Изменить',
+                    tooltip: tr('Изменить'),
                     icon: const Icon(Icons.edit_outlined, color: AppTheme.text),
                     onPressed: () {
                       final id = _selected.first;
@@ -462,7 +461,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
                 IconButton(
                   key: const ValueKey('chat-forward-selected'),
-                  tooltip: 'Переслать',
+                  tooltip: tr('Переслать'),
                   icon: const Icon(Icons.forward_to_inbox_outlined, color: AppTheme.text),
                   onPressed: () {
                     final all = context.read<AppState>().messagesFor(widget.peerId);
@@ -470,7 +469,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   },
                 ),
                 IconButton(
-                  tooltip: 'Удалить',
+                  tooltip: tr('Удалить'),
                   icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                   onPressed: _deleteSelected,
                 ),
@@ -495,21 +494,21 @@ class _ChatScreenState extends State<ChatScreen> {
               ]),
               iconTheme: const IconThemeData(color: AppTheme.text),
               actions: [
-                IconButton(tooltip: 'Поделиться контактом', icon: const Icon(Icons.share_outlined), onPressed: _shareContacts),
-                IconButton(tooltip:'Проверить ключи',icon:const Icon(Icons.security),onPressed:_showFingerprints),
+                IconButton(tooltip: tr('Поделиться контактом'), icon: const Icon(Icons.share_outlined), onPressed: _shareContacts),
+                IconButton(tooltip:tr('Проверить ключи'),icon:const Icon(Icons.security),onPressed:_showFingerprints),
                 IconButton(
-                  tooltip: 'Позвонить',
+                  tooltip: tr('Позвонить'),
                   icon: const Icon(Icons.call, color: AppTheme.accent),
                   onPressed: () => _call(video: false),
                 ),
                 IconButton(
-                  tooltip: 'Видеозвонок',
+                  tooltip: tr('Видеозвонок'),
                   icon: const Icon(Icons.videocam, color: AppTheme.accent),
                   onPressed: () => _call(video: true),
                 ),
                 if (!saved)
                   IconButton(
-                    tooltip: 'Добавить в контакты',
+                    tooltip: tr('Добавить в контакты'),
                     icon: const Icon(Icons.person_add_alt_1, color: AppTheme.accent),
                     onPressed: () => showSaveContactDialog(context, widget.peerId, title),
                   ),
@@ -541,10 +540,10 @@ class _ChatScreenState extends State<ChatScreen> {
               width: double.infinity,
               color: AppTheme.surface,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-              child: Row(children: const [
+              child: Row(children: [
                 Icon(Icons.folder_outlined, size: 18, color: AppTheme.accent),
                 SizedBox(width: 8),
-                Text('Файлы чата', style: TextStyle(color: AppTheme.text, fontSize: 14)),
+                Text(tr('Файлы чата'), style: TextStyle(color: AppTheme.text, fontSize: 14)),
                 Spacer(),
                 Icon(Icons.chevron_right, size: 18, color: AppTheme.textSecondary),
               ]),
@@ -555,14 +554,14 @@ class _ChatScreenState extends State<ChatScreen> {
               color: AppTheme.accent.withOpacity(0.12),
               child: InkWell(
                 onTap: () => showSaveContactDialog(context, widget.peerId, title),
-                child: const Padding(
+                child: Padding(
                   padding: EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   child: Row(
                     children: [
                       Icon(Icons.info_outline, size: 18, color: AppTheme.accent),
                       SizedBox(width: 10),
                       Expanded(
-                        child: Text('Этого человека нет в ваших контактах. Нажмите, чтобы добавить.',
+                        child: Text(tr('Этого человека нет в ваших контактах. Нажмите, чтобы добавить.'),
                             style: TextStyle(color: AppTheme.text, fontSize: 13)),
                       ),
                       Icon(Icons.person_add_alt_1, size: 18, color: AppTheme.accent),
@@ -573,7 +572,7 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           Expanded(
             child: (messages.isEmpty && state.preparingFor(widget.peerId).isEmpty)
-                ? const Center(child: Text('Нет сообщений',
+                ? Center(child: Text(tr('Нет сообщений'),
                     style: TextStyle(color: AppTheme.textSecondary)))
                 : ListView.builder(
                     controller: _scrollCtrl,
@@ -592,7 +591,7 @@ class _ChatScreenState extends State<ChatScreen> {
                             child: Row(mainAxisSize: MainAxisSize.min, children: [
                               const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
                               const SizedBox(width: 10),
-                              Flexible(child: Text('«$label» — подготовка к отправке…', style: const TextStyle(color: AppTheme.textSecondary))),
+                              Flexible(child: Text(trf('«{n}» — подготовка к отправке…', {'n': label}), style: const TextStyle(color: AppTheme.textSecondary))),
                             ]),
                           ),
                         );
@@ -614,7 +613,7 @@ class _ChatScreenState extends State<ChatScreen> {
                               _MessageBubble(
                                 msg: m,
                                 edited: state.isEdited(m.id),
-                                quoteAuthor: target == null ? null : (target.outgoing ? 'Вы' : title),
+                                quoteAuthor: target == null ? null : (target.outgoing ? tr('Вы') : title),
                                 onQuoteTap: target == null ? null : () => _jumpTo(target, messages),
                               ),
                               Builder(builder: (_) {
@@ -644,10 +643,10 @@ class _ChatScreenState extends State<ChatScreen> {
               width: double.infinity,
               color: AppTheme.surface,
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              child: Row(children: const [
+              child: Row(children: [
                 SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
                 SizedBox(width: 10),
-                Text('Копирование выбранного файла…', style: TextStyle(color: AppTheme.textSecondary)),
+                Text(tr('Копирование выбранного файла…'), style: TextStyle(color: AppTheme.textSecondary)),
               ]),
             ),
           if (_editingId != null)
@@ -657,7 +656,7 @@ class _ChatScreenState extends State<ChatScreen> {
               child: Row(children: [
                 const Icon(Icons.edit_outlined, size: 16, color: AppTheme.accent),
                 const SizedBox(width: 8),
-                const Expanded(child: Text('Редактирование сообщения', style: TextStyle(color: AppTheme.accent, fontSize: 13))),
+                Expanded(child: Text(tr('Редактирование сообщения'), style: TextStyle(color: AppTheme.accent, fontSize: 13))),
                 IconButton(icon: const Icon(Icons.close, size: 18, color: AppTheme.textSecondary), onPressed: _cancelEdit),
               ]),
             ),
@@ -666,7 +665,7 @@ class _ChatScreenState extends State<ChatScreen> {
               color: AppTheme.surface,
               padding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
               child: QuoteBox(
-                author: _replyTo!.outgoing ? 'Вы' : title,
+                author: _replyTo!.outgoing ? tr('Вы') : title,
                 text: FileOffer.tryParse(_replyTo!.text)?.name ?? _replyTo!.text,
                 onClose: () => setState(() => _replyTo = null),
               ),
@@ -740,9 +739,9 @@ class _MessageBubble extends StatelessWidget {
               mainAxisSize: MainAxisSize.min,
               children: [
                 if (edited)
-                  const Padding(
+                  Padding(
                     padding: EdgeInsets.only(right: 4),
-                    child: Text('изменено', style: TextStyle(color: AppTheme.textSecondary, fontSize: 10, fontStyle: FontStyle.italic)),
+                    child: Text(tr('изменено'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 10, fontStyle: FontStyle.italic)),
                   ),
                 Text(time, style: const TextStyle(
                     color: AppTheme.textSecondary, fontSize: 10)),
@@ -800,7 +799,7 @@ class _InputBar extends StatelessWidget {
             ? Row(children: [
                 IconButton(
                   key: const ValueKey('voice-cancel'),
-                  tooltip: 'Отменить запись',
+                  tooltip: tr('Отменить запись'),
                   icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
                   onPressed: onRecordCancel,
                 ),
@@ -808,7 +807,7 @@ class _InputBar extends StatelessWidget {
                 const SizedBox(width: 8),
                 Text(_mmss(recordSeconds), key: const ValueKey('voice-timer'), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
                 const SizedBox(width: 12),
-                const Expanded(child: Text('Идёт запись…', style: TextStyle(color: AppTheme.textSecondary))),
+                Expanded(child: Text(tr('Идёт запись…'), style: TextStyle(color: AppTheme.textSecondary))),
                 GestureDetector(
                   key: const ValueKey('voice-send'),
                   onTap: onRecordSend,
@@ -822,7 +821,7 @@ class _InputBar extends StatelessWidget {
             : Row(
           children: [
             IconButton(
-              tooltip: 'Отправить файл',
+              tooltip: tr('Отправить файл'),
               icon: const Icon(Icons.attach_file, color: AppTheme.textSecondary),
               onPressed: onAttach,
             ),
@@ -839,7 +838,7 @@ class _InputBar extends StatelessWidget {
                 enableIMEPersonalizedLearning: !ownKeyboard,
                 textCapitalization: TextCapitalization.sentences,
                 decoration: InputDecoration(
-                  hintText: 'Сообщение...',
+                  hintText: tr('Сообщение...'),
                   hintStyle: const TextStyle(color: AppTheme.textSecondary),
                   filled: true,
                   fillColor: AppTheme.bg,
@@ -919,9 +918,9 @@ class _FileCard extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(offer.name.startsWith('Голосовое_') ? 'Голосовое сообщение' : offer.name, maxLines: 2, overflow: TextOverflow.ellipsis,
+                  Text(offer.name.startsWith('Голосовое_') ? tr('Голосовое сообщение') : offer.name, maxLines: 2, overflow: TextOverflow.ellipsis,
                       style: const TextStyle(color: AppTheme.text, fontSize: 15, fontWeight: FontWeight.w600)),
-                  Text(FileOffer.humanSize(offer.size) + ' · зашифровано',
+                  Text(FileOffer.humanSize(offer.size) + tr(' · зашифровано'),
                       style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
                 ],
               ),
@@ -952,21 +951,21 @@ class _FileCard extends StatelessWidget {
           LinearProgressIndicator(value: fs.progress == 0 ? null : fs.progress,
               backgroundColor: Colors.black26, color: AppTheme.text),
           const SizedBox(height: 4),
-          Text(outgoing ? 'Отправка ${(fs.progress * 100).round()}%' : 'Скачивание ${(fs.progress * 100).round()}%',
+          Text(outgoing ? trf('Отправка {n}%', {'n': (fs.progress * 100).round()}) : trf('Скачивание {n}%', {'n': (fs.progress * 100).round()}),
               style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
         ] else if (error != null) ...[
           Text(error, style: const TextStyle(color: Colors.redAccent, fontSize: 12)),
           if (!outgoing)
-            _Action(icon: Icons.refresh, label: 'Повторить', onTap: () => state.downloadFile(offer)),
+            _Action(icon: Icons.refresh, label: tr('Повторить'), onTap: () => state.downloadFile(offer)),
         ] else if (outgoing) ...[
-          Text(failed ? 'Не отправлено' : 'Отправлено',
+          Text(failed ? tr('Не отправлено') : tr('Отправлено'),
               style: TextStyle(color: failed ? Colors.redAccent : AppTheme.textSecondary, fontSize: 11)),
           if (local != null && !failed && !inlineAudio && !inlineVideo) Wrap(children: _openActions(context, state, local)),
         ] else if (local != null) ...[
           // у звука и видео своё воспроизведение прямо в сообщении: «Открыть» лишнее
           if (!inlineAudio && !inlineVideo) Wrap(children: _openActions(context, state, local)),
         ] else ...[
-          _Action(icon: Icons.download, label: 'Скачать', onTap: () => state.downloadFile(offer)),
+          _Action(icon: Icons.download, label: tr('Скачать'), onTap: () => state.downloadFile(offer)),
         ],
       ],
     );
@@ -974,7 +973,7 @@ class _FileCard extends StatelessWidget {
 
   List<Widget> _openActions(BuildContext context, AppState state, String path) => [
     // Просмотр — внутри приложения (файл не передаётся другим программам).
-    _Action(icon: Icons.open_in_new, label: 'Открыть', onTap: () async {
+    _Action(icon: Icons.open_in_new, label: tr('Открыть'), onTap: () async {
       final v = await (await state.vaultFiles()).describe(path);
       if (!context.mounted) return;
       await Navigator.push(context, MaterialPageRoute(builder: (_) => FileViewerScreen(file: v)));
@@ -1028,11 +1027,11 @@ class _ContactCardView extends StatelessWidget {
       Row(mainAxisSize: MainAxisSize.min, children: [
         const Icon(Icons.person_outline, color: AppTheme.accent),
         const SizedBox(width: 8),
-        Flexible(child: Text(card.name.isEmpty ? 'Контакт' : card.name, style: const TextStyle(color: AppTheme.text, fontSize: 15, fontWeight: FontWeight.bold))),
+        Flexible(child: Text(card.name.isEmpty ? tr('Контакт') : card.name, style: const TextStyle(color: AppTheme.text, fontSize: 15, fontWeight: FontWeight.bold))),
       ]),
       const SizedBox(height: 4),
       Text(
-        outgoing ? 'Контакт отправлен' : known ? 'Уже в ваших контактах' : card.fullId.isEmpty ? 'Контакт без полного адреса: сохранить нельзя' : 'Контакт от собеседника',
+        outgoing ? tr('Контакт отправлен') : known ? tr('Уже в ваших контактах') : card.fullId.isEmpty ? tr('Контакт без полного адреса: сохранить нельзя') : tr('Контакт от собеседника'),
         style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
       ),
       if (!outgoing && !known && card.fullId.isNotEmpty)
@@ -1040,7 +1039,7 @@ class _ContactCardView extends StatelessWidget {
           key: const Key('save-shared-contact'),
           style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
           onPressed: () => showSaveContactDialog(context, card.fullId, card.name),
-          child: const Text('Сохранить'),
+          child: Text(tr('Сохранить')),
         ),
     ]);
   }
@@ -1063,29 +1062,29 @@ class _InviteCard extends StatelessWidget {
             TextButton(
               style: TextButton.styleFrom(padding: EdgeInsets.zero, minimumSize: const Size(0, 28), alignment: Alignment.centerLeft),
               onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => GroupChatScreen(gid: gid))),
-              child: const Text('Открыть группу', style: TextStyle(color: AppTheme.accent)),
+              child: Text(tr('Открыть группу'), style: TextStyle(color: AppTheme.accent)),
             ),
         ]);
     return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
       Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(Icons.group_add_outlined, color: inGroup && !outgoing ? AppTheme.textSecondary : AppTheme.accent),
         const SizedBox(width: 8),
-        Flexible(child: Text('Приглашение в группу${invite.name.isEmpty ? '' : ' «${invite.name}»'}', style: const TextStyle(color: AppTheme.text, fontSize: 15))),
+        Flexible(child: Text((invite.name.isEmpty ? tr('Приглашение в группу') : trf('Приглашение в группу «{n}»', {'n': invite.name})), style: const TextStyle(color: AppTheme.text, fontSize: 15))),
       ]),
       const SizedBox(height: 6),
       if (outgoing)
-        const Text('Приглашение отправлено (действует сутки, один раз)', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))
+        Text(tr('Приглашение отправлено (действует сутки, один раз)'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))
       else if (inGroup)
-        status('Вы уже в этой группе', openBtn: true)
+        status(tr('Вы уже в этой группе'), openBtn: true)
       else
         FutureBuilder<bool>(
           future: state.groups?.inviteSpent(gid, invite.invite.code) ?? Future.value(false),
           builder: (_, snap) => snap.data == true
-              ? status('Приглашение уже недействительно')
+              ? status(tr('Приглашение уже недействительно'))
               : FilledButton(
                   style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
                   onPressed: () => joinInvited(context, invite),
-                  child: const Text('Вступить'),
+                  child: Text(tr('Вступить')),
                 ),
         ),
     ]);

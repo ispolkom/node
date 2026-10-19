@@ -10,13 +10,15 @@ import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/logo_picker.dart';
 import '../widgets/complaint_sheet.dart';
+import '../l10n.dart';
 
-const _kindLabels = <int, String>{
-  GroupKind.image: 'Картинки',
-  GroupKind.file: 'Файлы',
-  GroupKind.audio: 'Аудио',
-  GroupKind.video: 'Видео',
-  GroupKind.link: 'Ссылки',
+/// Подписи видов записей: вычисляются при обращении (язык может смениться).
+Map<int, String> get _kindLabels => <int, String>{
+  GroupKind.image: tr('Картинки'),
+  GroupKind.file: tr('Файлы'),
+  GroupKind.audio: tr('Аудио'),
+  GroupKind.video: tr('Видео'),
+  GroupKind.link: tr('Ссылки'),
 };
 
 /// О группе: участники и модерация, правила содержимого (владелец), приглашения, выход.
@@ -57,11 +59,11 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
 
   Future<void> _saveSettings(GroupInfo g) async {
     final messenger = ScaffoldMessenger.of(context);
-    if (_nameCtrl.text.trim().isEmpty) { messenger.showSnackBar(const SnackBar(content: Text('Название не может быть пустым'))); return; }
-    if (_topicCtrl.text.trim().isEmpty) { messenger.showSnackBar(const SnackBar(content: Text('Укажите тематику группы'))); return; }
+    if (_nameCtrl.text.trim().isEmpty) { messenger.showSnackBar(SnackBar(content: Text(tr('Название не может быть пустым')))); return; }
+    if (_topicCtrl.text.trim().isEmpty) { messenger.showSnackBar(SnackBar(content: Text(tr('Укажите тематику группы')))); return; }
     try {
       await _svc.updateSettings(g.id, name: _nameCtrl.text.trim(), topic: _topicCtrl.text.trim(), about: _aboutCtrl.text.trim());
-      messenger.showSnackBar(const SnackBar(content: Text('Сохранено')));
+      messenger.showSnackBar(SnackBar(content: Text(tr('Сохранено'))));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
     }
@@ -117,25 +119,25 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           padding: EdgeInsets.only(bottom: MediaQuery.of(ctx).viewInsets.bottom),
           child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
             Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(name, style: const TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
-            Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text('${m.alias} · ${_roleName(m.role)}${m.muted ? ' · заглушён' : ''}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+            Padding(padding: const EdgeInsets.fromLTRB(16, 0, 16, 8), child: Text('${m.alias} · ${_roleName(m.role)}${m.muted ? tr(' · заглушён') : ''}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
             ListTile(
               leading: Icon(m.muted ? Icons.volume_up_outlined : Icons.volume_off_outlined, color: AppTheme.textSecondary),
-              title: Text(m.muted ? 'Разрешить писать' : 'Заглушить', style: const TextStyle(color: AppTheme.text)),
+              title: Text(m.muted ? tr('Разрешить писать') : tr('Заглушить'), style: const TextStyle(color: AppTheme.text)),
               onTap: () { Navigator.pop(ctx); _act(m.muted ? 'unmute' : 'mute', m.alias); },
             ),
             ListTile(
               leading: const Icon(Icons.person_remove_outlined, color: AppTheme.incoming),
-              title: const Text('Выгнать', style: TextStyle(color: AppTheme.incoming)),
-              onTap: () async { Navigator.pop(ctx); if (await _confirm('Выгнать «$name»?')) _act('kick', m.alias); },
+              title: Text(tr('Выгнать'), style: TextStyle(color: AppTheme.incoming)),
+              onTap: () async { Navigator.pop(ctx); if (await _confirm(trf('Выгнать «{n}»?', {'n': name}))) _act('kick', m.alias); },
             ),
             ListTile(
               leading: const Icon(Icons.block, color: AppTheme.incoming),
-              title: const Text('Запретить вход', style: TextStyle(color: AppTheme.incoming)),
-              onTap: () async { Navigator.pop(ctx); if (await _confirm('Запретить «$name» вход в группу?')) _act('ban', m.alias); },
+              title: Text(tr('Запретить вход'), style: TextStyle(color: AppTheme.incoming)),
+              onTap: () async { Navigator.pop(ctx); if (await _confirm(trf('Запретить «{n}» вход в группу?', {'n': name}))) _act('ban', m.alias); },
             ),
             if (g.canManage) ...[
               const Divider(),
-              const Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 4), child: Text('Администрирование', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+              Padding(padding: EdgeInsets.fromLTRB(16, 4, 16, 4), child: Text(tr('Администрирование'), style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
                 child: Row(children: [
@@ -143,11 +145,11 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                     child: DropdownButtonFormField<String>(
                       value: role,
                       dropdownColor: AppTheme.surface,
-                      decoration: const InputDecoration(labelText: 'Назначить'),
+                      decoration: InputDecoration(labelText: tr('Назначить')),
                       items: [
-                        const DropdownMenuItem(value: 'member', child: Text('Участник')),
-                        const DropdownMenuItem(value: 'moderator', child: Text('Модератор')),
-                        if (g.isOwner) const DropdownMenuItem(value: 'admin', child: Text('Админ')),
+                        DropdownMenuItem(value: 'member', child: Text(tr('Участник'))),
+                        DropdownMenuItem(value: 'moderator', child: Text(tr('Модератор'))),
+                        if (g.isOwner) DropdownMenuItem(value: 'admin', child: Text(tr('Админ'))),
                       ],
                       onChanged: (v) => setS(() => role = v ?? role),
                     ),
@@ -159,7 +161,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                       Navigator.pop(ctx);
                       if (role != m.role) _act(switch (role) { 'admin' => 'make_admin', 'moderator' => 'promote', _ => 'demote' }, m.alias);
                     },
-                    child: const Text('ОК'),
+                    child: Text(tr('ОК')),
                   ),
                 ]),
               ),
@@ -179,7 +181,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     return false;
   }
 
-  String _roleName(String r) => switch (r) { 'owner' => 'владелец', 'admin' => 'админ', 'moderator' => 'модератор', _ => 'участник' };
+  String _roleName(String r) => switch (r) { 'owner' => tr('владелец'), 'admin' => tr('админ'), 'moderator' => tr('модератор'), _ => tr('участник') };
 
   /// Передача владения: выбор участника из списка с прокруткой → «Вы уверены?» (кнопка «Да» оживает через 3 секунды).
   Future<void> _transferOwnership(GroupInfo g) async {
@@ -192,7 +194,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       backgroundColor: AppTheme.surface,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(padding: EdgeInsets.all(16), child: Text('Кому передать группу', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+          Padding(padding: EdgeInsets.all(16), child: Text(tr('Кому передать группу'), style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
           ConstrainedBox(
             constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.5),
             child: ListView(shrinkWrap: true, children: [
@@ -210,9 +212,9 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
           Padding(
             padding: const EdgeInsets.all(16),
             child: Row(children: [
-              Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Отмена'))),
+              Expanded(child: TextButton(onPressed: () => Navigator.pop(ctx), child: Text(tr('Отмена')))),
               const SizedBox(width: 12),
-              Expanded(child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: pick == null ? null : () => Navigator.pop(ctx, pick), child: const Text('ОК'))),
+              Expanded(child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: pick == null ? null : () => Navigator.pop(ctx, pick), child: Text(tr('ОК')))),
             ]),
           ),
         ]),
@@ -227,7 +229,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     if (sure != true) return;
     try {
       await _svc.transferOwner(g.id, chosen);
-      messenger.showSnackBar(const SnackBar(content: Text('Группа передана. Вы теперь админ.')));
+      messenger.showSnackBar(SnackBar(content: Text(tr('Группа передана. Вы теперь админ.'))));
       await _load();
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
@@ -241,8 +243,8 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         backgroundColor: AppTheme.surface,
         content: Text(text, style: const TextStyle(color: AppTheme.text)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Нет')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Да', style: TextStyle(color: AppTheme.incoming))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Нет'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Да'), style: TextStyle(color: AppTheme.incoming))),
         ],
       ),
     );
@@ -254,7 +256,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
     final state = context.read<AppState>();
     final people = state.contacts.where((c) => c.saved && !state.isBlocked(c.peerId)).toList();
     if (people.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Нет контактов для приглашения')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Нет контактов для приглашения'))));
       return;
     }
     final chosen = <String>{};
@@ -264,7 +266,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
       backgroundColor: AppTheme.surface,
       builder: (ctx) => StatefulBuilder(builder: (ctx, setS) => SafeArea(
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(padding: EdgeInsets.all(16), child: Text('Кого пригласить', style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
+          Padding(padding: EdgeInsets.all(16), child: Text(tr('Кого пригласить'), style: TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
           Flexible(
             child: ListView(shrinkWrap: true, children: [
               for (final c in people)
@@ -283,7 +285,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
               child: FilledButton(
                 style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
                 onPressed: chosen.isEmpty ? null : () => Navigator.pop(ctx, true),
-                child: Text('Отправить приглашение (${chosen.length})'),
+                child: Text(trf('Отправить приглашение ({n})', {'n': chosen.length})),
               ),
             ),
           ),
@@ -300,7 +302,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         await state.sendMessage(id, GroupInviteMsg.encode(g.id, code, g.name));
         sent++;
       }
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Приглашений отправлено: $sent')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(trf('Приглашений отправлено: {n}', {'n': sent}))));
     } catch (e) {
       if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$e')));
     }
@@ -316,7 +318,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         await state.sendMessage(r.peerId, GroupInviteMsg.encode(g.id, code, g.name));
       }
       await _svc.closeRequest(g.id, r.id);
-      messenger.showSnackBar(SnackBar(content: Text(accept ? 'Приглашение отправлено' : 'Просьба отклонена')));
+      messenger.showSnackBar(SnackBar(content: Text(accept ? tr('Приглашение отправлено') : tr('Просьба отклонена'))));
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('$e')));
     }
@@ -332,11 +334,11 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         context: context,
         builder: (ctx) => AlertDialog(
           backgroundColor: AppTheme.surface,
-          title: const Text('Приглашение', style: TextStyle(color: AppTheme.text)),
-          content: SelectableText('$text\n\nДействует сутки, один раз. Передайте его лично или по защищённому каналу.', style: const TextStyle(color: AppTheme.text)),
+          title: Text(tr('Приглашение'), style: TextStyle(color: AppTheme.text)),
+          content: SelectableText(trf('{text}\n\nДействует сутки, один раз. Передайте его лично или по защищённому каналу.', {'text': text}), style: const TextStyle(color: AppTheme.text)),
           actions: [
-            TextButton(onPressed: () { Clipboard.setData(ClipboardData(text: text)); Navigator.pop(ctx); }, child: const Text('Скопировать')),
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Закрыть')),
+            TextButton(onPressed: () { Clipboard.setData(ClipboardData(text: text)); Navigator.pop(ctx); }, child: Text(tr('Скопировать'))),
+            TextButton(onPressed: () => Navigator.pop(ctx), child: Text(tr('Закрыть'))),
           ],
         ),
       );
@@ -349,10 +351,10 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
     final g = state.groups?.byId(widget.gid);
-    if (g == null) return Scaffold(appBar: AppBar(title: const Text('Группа')), body: const SizedBox());
+    if (g == null) return Scaffold(appBar: AppBar(title: Text(tr('Группа'))), body: const SizedBox());
     final rules = state.groups!.rules(g.id);
     return Scaffold(
-      appBar: AppBar(title: const Text('Настройки группы')),
+      appBar: AppBar(title: Text(tr('Настройки группы'))),
       body: ListView(children: [
         if (g.canManage) ...[
           Builder(builder: (_) { _fillFields(g); return const SizedBox.shrink(); }),
@@ -369,51 +371,51 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
                 },
               ),
               const SizedBox(height: 8),
-              SecureTextField(controller: _nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Название')),
-              SecureTextField(controller: _topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Тематика')),
-              SecureTextField(controller: _aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: const InputDecoration(labelText: 'Описание (необязательно)')),
-              Align(alignment: Alignment.centerRight, child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: () => _saveSettings(g), child: const Text('Сохранить'))),
+              SecureTextField(controller: _nameCtrl, maxLength: 64, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: tr('Название'))),
+              SecureTextField(controller: _topicCtrl, maxLength: 40, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: tr('Тематика'))),
+              SecureTextField(controller: _aboutCtrl, maxLength: 300, maxLines: 2, style: const TextStyle(color: AppTheme.text), decoration: InputDecoration(labelText: tr('Описание (необязательно)'))),
+              Align(alignment: Alignment.centerRight, child: FilledButton(style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black), onPressed: () => _saveSettings(g), child: Text(tr('Сохранить')))),
             ]),
           ),
         ] else ...[
           Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 0), child: Text(g.name, style: const TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold))),
-          if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text('Тематика: ${g.topic}', style: const TextStyle(color: AppTheme.textSecondary))),
+          if (g.topic.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text(trf('Тематика: {t}', {'t': g.topic}), style: const TextStyle(color: AppTheme.textSecondary))),
           if (g.about.isNotEmpty) Padding(padding: const EdgeInsets.fromLTRB(16, 4, 16, 0), child: Text(g.about, style: const TextStyle(color: AppTheme.text))),
         ],
         ListTile(
           leading: const Icon(Icons.flag_outlined, color: Colors.redAccent),
-          title: const Text('Пожаловаться на группу', style: TextStyle(color: AppTheme.text)),
-          subtitle: const Text('Жалобу получит владелец узла', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          title: Text(tr('Пожаловаться на группу'), style: TextStyle(color: AppTheme.text)),
+          subtitle: Text(tr('Жалобу получит владелец узла'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           onTap: () => showComplaintSheet(context, kind: 'group', targetId: g.id, title: g.name),
         ),
         ListTile(
           leading: const Icon(Icons.badge_outlined, color: AppTheme.textSecondary),
-          title: Text('Ваш псевдоним: ${g.myAlias}', style: const TextStyle(color: AppTheme.text)),
-          subtitle: const Text('Свой в каждой группе; узел не знает, кто вы', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+          title: Text(trf('Ваш псевдоним: {n}', {'n': g.myAlias}), style: const TextStyle(color: AppTheme.text)),
+          subtitle: Text(tr('Свой в каждой группе; узел не знает, кто вы'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
         ),
         if (g.canModerate)
-          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: const Text('Пригласить из контактов', style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
+          ListTile(leading: const Icon(Icons.person_add_alt, color: AppTheme.accent), title: Text(tr('Пригласить из контактов'), style: TextStyle(color: AppTheme.text)), onTap: () => _inviteContacts(g)),
         if (g.canModerate && g.kind != 'open')
-          ListTile(leading: const Icon(Icons.link, color: AppTheme.textSecondary), title: const Text('Код приглашения', style: TextStyle(color: AppTheme.text)), subtitle: const Text('Передать самому', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)), onTap: () => _invite(g)),
+          ListTile(leading: const Icon(Icons.link, color: AppTheme.textSecondary), title: Text(tr('Код приглашения'), style: TextStyle(color: AppTheme.text)), subtitle: Text(tr('Передать самому'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)), onTap: () => _invite(g)),
         if (_requests.isNotEmpty) ...[
-          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Просятся в группу (${_requests.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(trf('Просятся в группу ({n})', {'n': _requests.length}), style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
           for (final r in _requests)
             ListTile(
               dense: true,
               leading: const Icon(Icons.person_outline, color: AppTheme.incoming),
-              title: Text(r.name.isEmpty ? 'Без имени' : r.name, style: const TextStyle(color: AppTheme.text)),
-              subtitle: const Text('просит прислать приглашение', style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+              title: Text(r.name.isEmpty ? tr('Без имени') : r.name, style: const TextStyle(color: AppTheme.text)),
+              subtitle: Text(tr('просит прислать приглашение'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
               trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-                IconButton(tooltip: 'Отклонить', icon: const Icon(Icons.close, color: AppTheme.textSecondary), onPressed: () => _answerRequest(g, r, false)),
-                IconButton(tooltip: 'Отправить приглашение', icon: const Icon(Icons.check, color: AppTheme.accent), onPressed: () => _answerRequest(g, r, true)),
+                IconButton(tooltip: tr('Отклонить'), icon: const Icon(Icons.close, color: AppTheme.textSecondary), onPressed: () => _answerRequest(g, r, false)),
+                IconButton(tooltip: tr('Отправить приглашение'), icon: const Icon(Icons.check, color: AppTheme.accent), onPressed: () => _answerRequest(g, r, true)),
               ]),
             ),
         ],
         if (g.canManage) ...[
-          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запретить в группе', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
-          const Padding(
+          Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(tr('Запретить в группе'), style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+          Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Text('Содержимое зашифровано, узел его не видит: запрет держат приложения участников (не отправляют и не показывают).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            child: Text(tr('Содержимое зашифровано, узел его не видит: запрет держат приложения участников (не отправляют и не показывают).'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
           for (final e in _kindLabels.entries)
             SwitchListTile(
@@ -429,20 +431,20 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         ] else if (rules.deny.isNotEmpty)
           Padding(
             padding: const EdgeInsets.all(16),
-            child: Text('Запрещено в группе: ${rules.deny.map((k) => _kindLabels[k] ?? '').where((s) => s.isNotEmpty).join(', ')}', style: const TextStyle(color: AppTheme.textSecondary)),
+            child: Text(trf('Запрещено в группе: {list}', {'list': rules.deny.map((k) => _kindLabels[k] ?? '').where((s) => s.isNotEmpty).join(', ')}), style: const TextStyle(color: AppTheme.textSecondary)),
           ),
         // автоочистка: владелец выбирает срок; остальные видят действующее правило (чтобы не было сюрпризов)
         if (g.isOwner) ...[
-          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Автоочистка неактивных', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
-          const Padding(
+          Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(tr('Автоочистка неактивных'), style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+          Padding(
             padding: EdgeInsets.symmetric(horizontal: 16),
-            child: Text('Рядовые участники, которые ни разу не написали за этот срок, исключаются. Чтение без записей не считается. Владельца, админов, модераторов и заглушённых это не касается.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            child: Text(tr('Рядовые участники, которые ни разу не написали за этот срок, исключаются. Чтение без записей не считается. Владельца, админов, модераторов и заглушённых это не касается.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
           for (final d in const [0, 30, 60, 90])
             RadioListTile<int>(
               key: ValueKey('autoclean-$d'),
               dense: true,
-              title: Text(d == 0 ? 'Выключена' : '$d дней', style: const TextStyle(color: AppTheme.text)),
+              title: Text(d == 0 ? tr('Выключена') : trf('{n} дней', {'n': d}), style: const TextStyle(color: AppTheme.text)),
               value: d,
               groupValue: g.autoCleanDays,
               activeColor: AppTheme.accent,
@@ -455,18 +457,18 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
         ] else if (g.autoCleanDays > 0)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
-            child: Text('В группе включена автоочистка: кто не пишет ${g.autoCleanDays} дней, исключается.', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            child: Text(trf('В группе включена автоочистка: кто не пишет {n} дней, исключается.', {'n': g.autoCleanDays}), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
-        const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Участники', style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
+        Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(tr('Участники'), style: TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold))),
         if (g.canModerate)
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 4),
             child: Text(
               g.isOwner
-                  ? 'Нажмите на участника: назначить админа или модератора, разжаловать, заглушить, выгнать. Роли — только участникам этой группы.'
+                  ? tr('Нажмите на участника: назначить админа или модератора, разжаловать, заглушить, выгнать. Роли — только участникам этой группы.')
                   : g.isAdmin
-                      ? 'Нажмите на участника: назначить или снять модератора, заглушить, выгнать. Админов назначает только владелец.'
-                      : 'Нажмите на участника: заглушить, выгнать, запретить вход. Роли назначают владелец и админы.',
+                      ? tr('Нажмите на участника: назначить или снять модератора, заглушить, выгнать. Админов назначает только владелец.')
+                      : tr('Нажмите на участника: заглушить, выгнать, запретить вход. Роли назначают владелец и админы.'),
               style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
             ),
           ),
@@ -479,27 +481,27 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
               ListTile(
                 dense: true,
                 leading: Icon(m.role == 'owner' ? Icons.star : m.role == 'admin' ? Icons.admin_panel_settings_outlined : m.role == 'moderator' ? Icons.shield_outlined : Icons.person_outline, color: m.role == 'member' ? AppTheme.textSecondary : AppTheme.accent),
-                title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? ' (вы)' : ''), style: const TextStyle(color: AppTheme.text)),
-                subtitle: Text('${_roleName(m.role)} · ${m.alias}${m.muted ? ' · заглушён' : ''}${m.hasKey || m.role == 'owner' ? '' : ' · ждёт ключ'}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
+                title: Text(state.groups!.displayName(g.id, m.alias) + (m.alias == g.myAlias ? tr(' (вы)') : ''), style: const TextStyle(color: AppTheme.text)),
+                subtitle: Text('${_roleName(m.role)} · ${m.alias}${m.muted ? tr(' · заглушён') : ''}${m.hasKey || m.role == 'owner' ? '' : tr(' · ждёт ключ')}', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
                 trailing: g.canModerate && _canActOn(g, m) ? const Icon(Icons.chevron_right, color: AppTheme.textSecondary, size: 18) : null,
                 onTap: g.canModerate && _canActOn(g, m) ? () => _memberMenu(g, m) : null,
               ),
           ]),
         ),
         if (g.canModerate && _banned.isNotEmpty) ...[
-          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Запрещён вход (${_banned.length})', style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          Padding(padding: const EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(trf('Запрещён вход ({n})', {'n': _banned.length}), style: const TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
           for (final al in _banned)
-            ListTile(dense: true, title: Text(al, style: const TextStyle(color: AppTheme.text)), trailing: TextButton(onPressed: () => _act('unban', al), child: const Text('Разрешить вход'))),
+            ListTile(dense: true, title: Text(al, style: const TextStyle(color: AppTheme.text)), trailing: TextButton(onPressed: () => _act('unban', al), child: Text(tr('Разрешить вход')))),
         ],
         if (g.isOwner && _members.length > 1) ...[
-          const Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text('Передача владения', style: TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
-          const Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text('Передайте группу другому участнику. Вы станете админом.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
-          ListTile(leading: const Icon(Icons.swap_horiz, color: AppTheme.incoming), title: const Text('Передать группу…', style: TextStyle(color: AppTheme.incoming)), onTap: () => _transferOwnership(g)),
+          Padding(padding: EdgeInsets.fromLTRB(16, 16, 16, 4), child: Text(tr('Передача владения'), style: TextStyle(color: AppTheme.incoming, fontWeight: FontWeight.bold))),
+          Padding(padding: EdgeInsets.symmetric(horizontal: 16), child: Text(tr('Передайте группу другому участнику. Вы станете админом.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+          ListTile(leading: const Icon(Icons.swap_horiz, color: AppTheme.incoming), title: Text(tr('Передать группу…'), style: TextStyle(color: AppTheme.incoming)), onTap: () => _transferOwnership(g)),
         ],
         if (!g.isOwner)
           ListTile(
             leading: const Icon(Icons.logout, color: AppTheme.incoming),
-            title: const Text('Выйти из группы', style: TextStyle(color: AppTheme.incoming)),
+            title: Text(tr('Выйти из группы'), style: TextStyle(color: AppTheme.incoming)),
             onTap: () async {
               final nav = Navigator.of(context);
               try { await _svc.leave(g.id); } catch (_) {}
@@ -507,7 +509,7 @@ class _GroupInfoScreenState extends State<GroupInfoScreen> {
             },
           )
         else
-          const Padding(padding: EdgeInsets.all(16), child: Text('Группу удаляют только на странице узла, по паролю.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
+          Padding(padding: EdgeInsets.all(16), child: Text(tr('Группу удаляют только на странице узла, по паролю.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12))),
       ]),
     );
   }
@@ -531,11 +533,11 @@ class _SureDialogState extends State<_SureDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: const Text('Вы уверены?', style: TextStyle(color: AppTheme.text)),
-        content: const Text('Вы уверены, что хотите передать права на группу? Это действие необратимо без согласия нового владельца.', style: TextStyle(color: AppTheme.textSecondary)),
+        title: Text(tr('Вы уверены?'), style: TextStyle(color: AppTheme.text)),
+        content: Text(tr('Вы уверены, что хотите передать права на группу? Это действие необратимо без согласия нового владельца.'), style: TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Нет')),
-          TextButton(onPressed: _ready ? () => Navigator.pop(context, true) : null, child: Text(_ready ? 'Да' : 'Да (3 с)', style: TextStyle(color: _ready ? AppTheme.incoming : AppTheme.textSecondary))),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(tr('Нет'))),
+          TextButton(onPressed: _ready ? () => Navigator.pop(context, true) : null, child: Text(_ready ? tr('Да') : tr('Да (3 с)'), style: TextStyle(color: _ready ? AppTheme.incoming : AppTheme.textSecondary))),
         ],
       );
 }

@@ -11,17 +11,18 @@ import '../services/vault_files.dart';
 import '../theme.dart';
 import '../widgets/recipients_sheet.dart';
 import 'file_viewer_screen.dart';
+import '../l10n.dart';
 
 /// Вид файла для раздела папки.
 enum FileKind { documents, music, video, pictures, archives, other }
 
-const _kindTitles = {
-  FileKind.documents: 'Документы',
-  FileKind.music: 'Музыка',
-  FileKind.video: 'Видео',
-  FileKind.pictures: 'Картинки',
-  FileKind.archives: 'Архивы',
-  FileKind.other: 'Прочее',
+Map<FileKind, String> get _kindTitles => {
+  FileKind.documents: tr('Документы'),
+  FileKind.music: tr('Музыка'),
+  FileKind.video: tr('Видео'),
+  FileKind.pictures: tr('Картинки'),
+  FileKind.archives: tr('Архивы'),
+  FileKind.other: tr('Прочее'),
 };
 
 FileKind fileKindOf(String name, String mime) {
@@ -59,7 +60,7 @@ class FileLink {
 }
 
 /// Разделы-вкладки папки (как в мессенджерах): вид содержимого, без сообщений.
-const _tabs = ['Все', 'Картинки', 'Файлы', 'Аудио', 'Видео', 'Ссылки'];
+List<String> get _tabs => [tr('Все'), tr('Картинки'), tr('Файлы'), tr('Аудио'), tr('Видео'), tr('Ссылки')];
 
 /// «Файлы чата»: отдельная папка внутри защищённого пространства — только файлы этого собеседника (и присланные, и отправленные).
 /// Папка называется коротким идентификатором контакта. Файлы можно открыть и посмотреть или послушать внутри приложения,
@@ -141,10 +142,10 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
   }
 
   static String _size(int b) {
-    if (b < 1024) return '$b Б';
-    if (b < 1024 * 1024) return '${(b / 1024).toStringAsFixed(1)} КБ';
-    if (b < 1024 * 1024 * 1024) return '${(b / 1024 / 1024).toStringAsFixed(1)} МБ';
-    return '${(b / 1024 / 1024 / 1024).toStringAsFixed(2)} ГБ';
+    if (b < 1024) return trf('{n} Б', {'n': b});
+    if (b < 1024 * 1024) return trf('{n} КБ', {'n': (b / 1024).toStringAsFixed(1)});
+    if (b < 1024 * 1024 * 1024) return trf('{n} МБ', {'n': (b / 1024 / 1024).toStringAsFixed(1)});
+    return trf('{n} ГБ', {'n': (b / 1024 / 1024 / 1024).toStringAsFixed(2)});
   }
 
   IconData _icon(FileKind k) => switch (k) {
@@ -156,7 +157,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
         FileKind.other => Icons.insert_drive_file_outlined,
       };
 
-  Future<bool> _confirm(String title, String text, {String yes = 'Да', String no = 'Нет'}) async {
+  Future<bool> _confirm(String title, String text, {String? yes, String? no}) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
@@ -164,8 +165,8 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
         title: Text(title, style: const TextStyle(color: AppTheme.text)),
         content: Text(text, style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(no)),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(yes, style: const TextStyle(color: Colors.redAccent))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(no ?? tr('Нет'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(yes ?? tr('Да'), style: const TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -176,8 +177,8 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     final files = _files.where((f) => _selected.contains(f.path)).toList();
     if (files.isEmpty) return;
     final n = files.length;
-    if (!await _confirm(n == 1 ? 'Удалить файл?' : 'Удалить файлы ($n)?',
-        'Будет удалено сразу и насовсем, без корзины.')) {
+    if (!await _confirm(n == 1 ? tr('Удалить файл?') : trf('Удалить файлы ({n})?', {'n': n}),
+        tr('Будет удалено сразу и насовсем, без корзины.'))) {
       return;
     }
     await _vault?.deleteAll(files.map((f) => f.path));
@@ -187,7 +188,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
 
   Future<void> _clearFolder() async {
     if (_files.isEmpty) return;
-    if (!await _confirm('Уверены?', 'Все файлы этого чата (${_files.length}) будут удалены сразу и насовсем, без корзины.')) return;
+    if (!await _confirm(tr('Уверены?'), trf('Все файлы этого чата ({n}) будут удалены сразу и насовсем, без корзины.', {'n': _files.length}))) return;
     await _vault?.deleteAll(_files.map((f) => f.path).toList());
     _selected.clear();
     await reload();
@@ -199,9 +200,9 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       context: context,
       color: AppTheme.surface,
       position: RelativeRect.fromLTRB(size.width, kToolbarHeight + MediaQuery.of(context).padding.top, 0, 0),
-      items: const [
-        PopupMenuItem(value: 'clear', child: Text('Очистить папку', style: TextStyle(color: Colors.redAccent))),
-        PopupMenuItem(value: 'cancel', child: Text('Отмена', style: TextStyle(color: AppTheme.text))),
+      items: [
+        PopupMenuItem(value: 'clear', child: Text(tr('Очистить папку'), style: TextStyle(color: Colors.redAccent))),
+        PopupMenuItem(value: 'cancel', child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.text))),
       ],
     );
     if (choice == 'clear') await _clearFolder();
@@ -212,11 +213,11 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     final FilesHost host = widget.host ?? context.read<AppState>();
     final contacts = forwardCandidates(host.contacts);
     if (contacts.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Некому отправлять: в списке нет контактов')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Некому отправлять: в списке нет контактов'))));
       return;
     }
     final to = await pickRecipients(context,
-        title: files.length == 1 ? 'Переслать «${files.first.name}»' : 'Переслать файлы (${files.length})', contacts: contacts);
+        title: files.length == 1 ? trf('Переслать «{n}»', {'n': files.first.name}) : trf('Переслать файлы ({n})', {'n': files.length}), contacts: contacts);
     if (to == null || to.isEmpty || !mounted) return;
     // предел на файл: всего не больше 20 разных получателей
     for (final f in files) {
@@ -224,12 +225,12 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       if (all.length > widget.maxPerFile) {
         ScaffoldMessenger.of(context).clearSnackBars();
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('«${f.name}»: не больше ${widget.maxPerFile} получателей на файл (уже ${_sentTo[f.path]?.length ?? 0})')));
+            content: Text(trf('«{name}»: не больше {max} получателей на файл (уже {n})', {'name': f.name, 'max': widget.maxPerFile, 'n': _sentTo[f.path]?.length ?? 0}))));
         return;
       }
     }
     final names = to.map((c) => c.displayName).join(', ');
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправка → $names. Ход — в чатах с ними.')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(trf('Отправка → {names}. Ход — в чатах с ними.', {'names': names}))));
     for (final f in files) {
       _sentTo.putIfAbsent(f.path, () => {}).addAll(to.map((c) => c.peerId));
       for (final c in to) {
@@ -250,10 +251,10 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
       context: context,
       color: AppTheme.surface,
       position: RelativeRect.fromLTRB(at.dx, at.dy, size.width - at.dx, size.height - at.dy),
-      items: const [
-        PopupMenuItem(value: 'forward', height: 44, child: Text('Переслать', style: TextStyle(color: AppTheme.text, fontSize: 15))),
-        PopupMenuItem(value: 'select', height: 44, child: Text('Выбрать', style: TextStyle(color: AppTheme.text, fontSize: 15))),
-        PopupMenuItem(value: 'delete', height: 44, child: Text('Удалить', style: TextStyle(color: Colors.redAccent, fontSize: 15))),
+      items: [
+        PopupMenuItem(value: 'forward', height: 44, child: Text(tr('Переслать'), style: TextStyle(color: AppTheme.text, fontSize: 15))),
+        PopupMenuItem(value: 'select', height: 44, child: Text(tr('Выбрать'), style: TextStyle(color: AppTheme.text, fontSize: 15))),
+        PopupMenuItem(value: 'delete', height: 44, child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent, fontSize: 15))),
       ],
     );
     if (!mounted) return;
@@ -300,12 +301,12 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
     return Scaffold(
       appBar: AppBar(
         leading: selecting
-            ? IconButton(icon: const Icon(Icons.close), tooltip: 'Снять выбор', onPressed: () => setState(_selected.clear))
+            ? IconButton(icon: const Icon(Icons.close), tooltip: tr('Снять выбор'), onPressed: () => setState(_selected.clear))
             : null,
         title: selecting
-            ? Text('Выбрано: ${_selected.length}', style: const TextStyle(fontSize: 16))
+            ? Text(trf('Выбрано: {n}', {'n': _selected.length}), style: const TextStyle(fontSize: 16))
             : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                const Text('Файлы чата', style: TextStyle(fontSize: 16)),
+                Text(tr('Файлы чата'), style: TextStyle(fontSize: 16)),
                 Text('${widget.title} · ${widget.shortId}',
                     overflow: TextOverflow.ellipsis, style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
               ]),
@@ -313,21 +314,21 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
           if (selecting)
             IconButton(
               key: const ValueKey('files-forward-selected'),
-              tooltip: 'Переслать выбранные',
+              tooltip: tr('Переслать выбранные'),
               icon: const Icon(Icons.forward_to_inbox_outlined),
               onPressed: () => _forward(_files.where((f) => _selected.contains(f.path)).toList()),
             ),
           if (selecting)
             IconButton(
               key: const ValueKey('files-delete-selected'),
-              tooltip: 'Удалить выбранные',
+              tooltip: tr('Удалить выбранные'),
               icon: const Icon(Icons.delete_outline, color: Colors.redAccent),
               onPressed: _deleteSelected,
             )
           else
             IconButton(
               key: const ValueKey('files-trash'),
-              tooltip: 'Корзина',
+              tooltip: tr('Корзина'),
               icon: const Icon(Icons.delete_outline),
               onPressed: _trashMenu,
             ),
@@ -339,7 +340,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
               ? Center(
                   child: Padding(
                     padding: const EdgeInsets.all(32),
-                    child: Text(widget.emptyHint ?? 'В этой папке пока нет файлов. Файлы, которые вы получаете и отправляете в этом чате, появятся здесь.',
+                    child: Text(widget.emptyHint ?? tr('В этой папке пока нет файлов. Файлы, которые вы получаете и отправляете в этом чате, появятся здесь.'),
                         textAlign: TextAlign.center, style: const TextStyle(color: AppTheme.textSecondary)),
                   ),
                 )
@@ -367,14 +368,14 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                       ),
                     ),
                     if (groups.isEmpty && missingBy.isEmpty && !showLinks)
-                      const Padding(
+                      Padding(
                         padding: EdgeInsets.all(32),
-                        child: Center(child: Text('В этом разделе пусто', style: TextStyle(color: AppTheme.textSecondary))),
+                        child: Center(child: Text(tr('В этом разделе пусто'), style: TextStyle(color: AppTheme.textSecondary))),
                       ),
                     if (showLinks) ...[
                       Padding(
                         padding: const EdgeInsets.fromLTRB(16, 14, 16, 4),
-                        child: Text('Ссылки · ${widget.links.length}',
+                        child: Text(trf('Ссылки · {n}', {'n': widget.links.length}),
                             style: const TextStyle(color: AppTheme.accent, fontSize: 13, fontWeight: FontWeight.bold)),
                       ),
                       for (final l in widget.links)
@@ -388,7 +389,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                             await Clipboard.setData(ClipboardData(text: l.url));
                             if (!mounted) return;
                             ScaffoldMessenger.of(context).clearSnackBars();
-                            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+                            ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Ссылка скопирована'))));
                           },
                         ),
                     ],
@@ -406,7 +407,7 @@ class ChatFilesScreenState extends State<ChatFilesScreen> {
                                 ? const SizedBox(width: 24, height: 24, child: CircularProgressIndicator(strokeWidth: 2))
                                 : const Icon(Icons.cloud_download_outlined, color: AppTheme.textSecondary),
                             title: Text(o.name, maxLines: 1, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
-                            subtitle: Text('не скачан · ${_size(o.size)} · нажмите, чтобы скачать',
+                            subtitle: Text(trf('не скачан · {size} · нажмите, чтобы скачать', {'size': _size(o.size)}),
                                 style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                             onTap: _fetching.contains(o.tid) || widget.onFetch == null
                                 ? null
