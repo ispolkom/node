@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../models/contact.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Контакты, которым можно что-то переслать: сохранённые и недавно активные устройства; в сети — выше.
 List<Contact> forwardCandidates(List<Contact> all, {String? exclude}) {
@@ -27,14 +28,14 @@ Future<List<Contact>?> pickRecipients(BuildContext context, {required String tit
             ),
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Text('Выберите до $max получателей. Уходит зашифрованным, ход виден в чатах с ними.',
+              child: Text(trf('Выберите до {max} получателей. Уходит зашифрованным, ход виден в чатах с ними.', {'max': max}),
                   style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             ),
             Flexible(
               child: contacts.isEmpty
-                  ? const Padding(
+                  ? Padding(
                       padding: EdgeInsets.all(24),
-                      child: Text('Некому пересылать: в списке нет контактов', style: TextStyle(color: AppTheme.textSecondary)),
+                      child: Text(tr('Некому пересылать: в списке нет контактов'), style: TextStyle(color: AppTheme.textSecondary)),
                     )
                   : ListView(shrinkWrap: true, children: [
                       for (final c in contacts)
@@ -45,10 +46,10 @@ Future<List<Contact>?> pickRecipients(BuildContext context, {required String tit
                           controlAffinity: ListTileControlAffinity.trailing,
                           secondary: Icon(Icons.person_outline, color: c.online ? AppTheme.accent : AppTheme.textSecondary),
                           title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
-                          subtitle: Text(c.online ? 'в сети' : 'не в сети', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                          subtitle: Text(c.online ? tr('в сети') : tr('не в сети'), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                           onChanged: (v) {
                             if (v == true && chosen.length >= max) {
-                              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('Не больше $max получателей за раз')));
+                              ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text(trf('Не больше {max} получателей за раз', {'max': max}))));
                               return;
                             }
                             setSheet(() => v == true ? chosen.add(c.peerId) : chosen.remove(c.peerId));
@@ -64,7 +65,7 @@ Future<List<Contact>?> pickRecipients(BuildContext context, {required String tit
                   key: const ValueKey('rcpt-send'),
                   style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black),
                   onPressed: chosen.isEmpty ? null : () => Navigator.pop(ctx, contacts.where((c) => chosen.contains(c.peerId)).toList()),
-                  child: Text(chosen.isEmpty ? 'Выберите получателей' : 'Отправить (${chosen.length})'),
+                  child: Text(chosen.isEmpty ? tr('Выберите получателей') : trf('Отправить ({n})', {'n': chosen.length})),
                 ),
               ),
             ),

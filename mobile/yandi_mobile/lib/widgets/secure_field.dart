@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../theme.dart';
 import 'secure_keyboard.dart';
+import '../l10n.dart';
 
 /// Поле ввода со своей клавиатурой приложения: системная не подключается к вводу вовсе (как в чате и группах).
 /// Под полем — «Вставить» (из буфера обмена) и «Очистить»; клавиатура появляется под полем, пока оно в фокусе.
@@ -86,12 +87,12 @@ class _SecureFieldState extends State<SecureField> {
             TextButton.icon(
               onPressed: widget.enabled ? _paste : null,
               icon: const Icon(Icons.content_paste, size: 18, color: AppTheme.accent),
-              label: const Text('Вставить', style: TextStyle(color: AppTheme.accent)),
+              label: Text(tr('Вставить'), style: TextStyle(color: AppTheme.accent)),
             ),
             TextButton.icon(
               onPressed: widget.enabled ? () => widget.controller.clear() : null,
               icon: const Icon(Icons.backspace_outlined, size: 18, color: AppTheme.textSecondary),
-              label: const Text('Очистить', style: TextStyle(color: AppTheme.textSecondary)),
+              label: Text(tr('Очистить'), style: TextStyle(color: AppTheme.textSecondary)),
             ),
           ],
         ),

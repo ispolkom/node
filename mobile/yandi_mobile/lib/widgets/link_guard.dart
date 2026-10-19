@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import '../content_policy.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Если в тексте есть ссылка — объясняет, что ссылки в YANDI не передаются, и предлагает удалить её.
 /// Возвращает текст, который можно отправлять (без ссылок), либо null, если отправитель отказался или после удаления пусто.
@@ -13,14 +14,14 @@ Future<String?> guardLinks(BuildContext context, String text) async {
     context: context,
     builder: (ctx) => AlertDialog(
       backgroundColor: AppTheme.surface,
-      title: const Text('Ссылки не передаются', style: TextStyle(color: AppTheme.text)),
+      title: Text(tr('Ссылки не передаются'), style: TextStyle(color: AppTheme.text)),
       content: Text(
-        'В YANDI нельзя отправлять ссылки: сеть их не пропускает.\n\nНайдено: «${link.length > 60 ? '${link.substring(0, 60)}…' : link}»',
+        trf('В YANDI нельзя отправлять ссылки: сеть их не пропускает.\n\nНайдено: «{l}»', {'l': link.length > 60 ? '${link.substring(0, 60)}…' : link}),
         style: const TextStyle(color: AppTheme.textSecondary),
       ),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена', style: TextStyle(color: AppTheme.textSecondary))),
-        TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить ссылку', style: TextStyle(color: AppTheme.accent))),
+        TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'), style: TextStyle(color: AppTheme.textSecondary))),
+        TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Удалить ссылку'), style: TextStyle(color: AppTheme.accent))),
       ],
     ),
   );
@@ -41,6 +42,6 @@ Future<String?> attachmentVerdict(String path, String name) async {
       await raf.close();
     }
   } catch (_) {
-    return 'Не удалось прочитать файл для проверки';
+    return tr('Не удалось прочитать файл для проверки');
   }
 }

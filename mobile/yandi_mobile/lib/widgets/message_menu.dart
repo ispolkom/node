@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Команды сообщения — слова в меню, а не кнопки.
 const cmdEdit = 'Изменить',
@@ -89,10 +90,10 @@ Future<String?> showMessageMenu(
         ),
       for (final c in commands)
         PopupMenuItem<String>(
-          value: c,
+          value: c, // значение — русская команда (по ней переключаются экраны), надпись переводится
           height: 44,
           child: Text(
-            c,
+            tr(c),
             style: TextStyle(
               color: c == cmdDelete || c == cmdEraseAll
                   ? Colors.redAccent
@@ -190,15 +191,15 @@ Future<ShareTarget?> pickShareTarget(BuildContext context, List<ShareTarget> tar
       child: ConstrainedBox(
         constraints: BoxConstraints(maxHeight: MediaQuery.of(ctx).size.height * 0.6),
         child: Column(mainAxisSize: MainAxisSize.min, children: [
-          const Padding(
-            padding: EdgeInsets.all(14),
-            child: Text('Поделиться с…', style: TextStyle(color: AppTheme.text, fontSize: 16)),
+          Padding(
+            padding: const EdgeInsets.all(14),
+            child: Text(tr('Поделиться с…'), style: TextStyle(color: AppTheme.text, fontSize: 16)),
           ),
           Flexible(
             child: targets.isEmpty
-                ? const Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Text('Некому пересылать', style: TextStyle(color: AppTheme.textSecondary)),
+                ? Padding(
+                    padding: const EdgeInsets.all(20),
+                    child: Text(tr('Некому пересылать'), style: TextStyle(color: AppTheme.textSecondary)),
                   )
                 : ListView(shrinkWrap: true, children: [
                     for (final t in targets)

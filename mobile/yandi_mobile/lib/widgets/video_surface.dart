@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:video_player/video_player.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Видео как на YouTube: тап по картинке показывает/скрывает управление, по центру белый треугольник «играть» (на паузе) или пауза,
 /// внизу время, полоса перемотки и значок «на весь экран» в правом нижнем углу. Во время воспроизведения управление скрывается само
@@ -155,7 +156,7 @@ class _VideoSurfaceState extends State<VideoSurface> {
                   const Spacer(),
                   IconButton(
                     key: const ValueKey('video-fullscreen'),
-                    tooltip: widget.fullscreen ? 'Свернуть' : 'На весь экран',
+                    tooltip: widget.fullscreen ? tr('Свернуть') : tr('На весь экран'),
                     icon: Icon(widget.fullscreen ? Icons.fullscreen_exit : Icons.fullscreen, color: Colors.white),
                     onPressed: () {
                       widget.onToggleFullscreen();

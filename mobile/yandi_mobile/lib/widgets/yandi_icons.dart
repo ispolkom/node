@@ -1,5 +1,6 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import '../l10n.dart';
 
 /// Фирменные значки меню: рисуются кодом (никаких картинок и сторонних пакетов), одна толщина линии, сетка 24×24.
 enum YandiGlyph { contacts, groups, search, settings, blacklist, offline, folder }

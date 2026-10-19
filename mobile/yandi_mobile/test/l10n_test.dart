@@ -37,9 +37,21 @@ void main() {
     for (final f in Directory('lib').listSync(recursive: true).whereType<File>().where((f) => f.path.endsWith('.dart') && !f.path.endsWith('l10n_en.dart') && !f.path.endsWith('l10n.dart'))) {
       keys.addAll(keysIn(f.readAsStringSync()));
     }
-    final extra = enTable.keys.where((k) => !keys.contains(k)).toList();
+    // команды меню сообщения показываются через tr(команда), их ключи берутся из констант, а не из tr('…')
+    final cmds = RegExp(r"cmd\w+ = '([^']+)'").allMatches(File('lib/widgets/message_menu.dart').readAsStringSync()).map((m) => m.group(1)!).toSet();
+    final extra = enTable.keys.where((k) => !keys.contains(k) && !cmds.contains(k)).toList();
     expect(extra, isEmpty, reason: 'лишние ключи: ${extra.take(5)}');
     expect(enTable.values.every((v) => v.trim().isNotEmpty), isTrue);
+  });
+
+  test('команды меню сообщения: значение — русская команда, у каждой есть английская надпись', () {
+    // значения команд — идентификаторы (по ним переключаются экраны), показываются через tr(команда)
+    final src = File('lib/widgets/message_menu.dart').readAsStringSync();
+    final cmds = RegExp(r"cmd\w+ = '([^']+)'").allMatches(src).map((m) => m.group(1)!).toList();
+    expect(cmds.length, greaterThanOrEqualTo(11));
+    for (final c in cmds) {
+      expect(enTable.containsKey(c), isTrue, reason: 'нет перевода команды: $c');
+    }
   });
 
   test('tr и trf: русский по умолчанию в тестах, английский после переключения; подстановки', () {

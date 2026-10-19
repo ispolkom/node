@@ -7,6 +7,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../services/avatar_processor.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Выбор логотипа группы: картинка из галереи собирается заново (квадрат, без метаданных) и отдаётся как base64.
 /// [onPicked] получает base64 PNG либо пустую строку (убрать логотип).
@@ -37,12 +38,12 @@ class _LogoPickerState extends State<LogoPicker> {
       picked = path;
       if (path == null) return;
       final raw = await File(path).readAsBytes();
-      if (raw.length > 12 * 1024 * 1024) { _error = 'Картинка слишком большая'; return; }
+      if (raw.length > 12 * 1024 * 1024) { _error = tr('Картинка слишком большая'); return; }
       final png = await AvatarProcessor.fromImageBytes(raw);
       await widget.onPicked(base64.encode(png), png);
       if (mounted) setState(() => _preview = png);
     } catch (e) {
-      _error = 'Не удалось подготовить картинку';
+      _error = tr('Не удалось подготовить картинку');
     } finally {
       // исходное фото (с метаданными) — копия выбора файла в кеше приложения: стирается при любом исходе
       if (picked != null) { try { await app.dropPickerCopy(picked); } catch (_) {} }
@@ -56,7 +57,7 @@ class _LogoPickerState extends State<LogoPicker> {
       await widget.onPicked('', null);
       if (mounted) setState(() => _preview = null);
     } catch (_) {
-      _error = 'Не удалось убрать логотип';
+      _error = tr('Не удалось убрать логотип');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -79,10 +80,10 @@ class _LogoPickerState extends State<LogoPicker> {
             OutlinedButton.icon(
               onPressed: _busy ? null : _pick,
               icon: const Icon(Icons.image_outlined, size: 18),
-              label: const Text('Логотип'),
+              label: Text(tr('Логотип')),
             ),
             if (_shown != null)
-              TextButton(onPressed: _busy ? null : _remove, child: const Text('Убрать', style: TextStyle(color: AppTheme.textSecondary))),
+              TextButton(onPressed: _busy ? null : _remove, child: Text(tr('Убрать'), style: TextStyle(color: AppTheme.textSecondary))),
           ]),
         ),
       ]),

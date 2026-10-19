@@ -8,6 +8,7 @@ import '../services/loopback_media.dart';
 import '../services/vault_service.dart';
 import '../services/video_frames.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Одновременно играет только одно: пока идёт одно вложение, другое останавливается.
 class PlaybackHub {
@@ -94,7 +95,7 @@ class _InlineAudioState extends State<InlineAudio> {
       await p.play(BytesSource(bytes));
       _loaded = true;
     } catch (_) {
-      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Не удалось воспроизвести: файл повреждён')));
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Не удалось воспроизвести: файл повреждён'))));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -215,7 +216,7 @@ class _InlineVideoState extends State<InlineVideo> {
       if (mounted) setState(() {});
       await c.play();
     } catch (_) {
-      if (mounted) setState(() => _error = 'Не удалось воспроизвести');
+      if (mounted) setState(() => _error = tr('Не удалось воспроизвести'));
     } finally {
       if (mounted) setState(() => _starting = false);
     }

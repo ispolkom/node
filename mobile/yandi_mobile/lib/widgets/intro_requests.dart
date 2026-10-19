@@ -4,6 +4,7 @@ import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
 import 'avatar_circle.dart';
+import '../l10n.dart';
 
 /// «Хотят познакомиться»: люди не из ваших контактов, которые вам написали. Принять, заблокировать (только у вас) или игнорировать.
 class IntroRequests extends StatelessWidget {
@@ -18,7 +19,7 @@ class IntroRequests extends StatelessWidget {
       color: AppTheme.surface,
       padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
       child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Text('Хотят познакомиться (${peers.length})', style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.w700, fontSize: 13)),
+        Text(trf('Хотят познакомиться ({n})', {'n': peers.length}), style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.w700, fontSize: 13)),
         const SizedBox(height: 6),
         for (final c in peers) _card(context, state, c),
       ]),
@@ -51,12 +52,12 @@ class IntroRequests extends StatelessWidget {
             FilledButton(
               style: FilledButton.styleFrom(backgroundColor: AppTheme.accent, foregroundColor: Colors.black, visualDensity: VisualDensity.compact),
               onPressed: () => onAccept(c),
-              child: const Text('Принять'),
+              child: Text(tr('Принять')),
             ),
             OutlinedButton(
               style: OutlinedButton.styleFrom(visualDensity: VisualDensity.compact),
               onPressed: () => state.dismissIntro(c.peerId),
-              child: const Text('Игнорировать'),
+              child: Text(tr('Игнорировать')),
             ),
             TextButton(
               onPressed: () async {
@@ -64,18 +65,18 @@ class IntroRequests extends StatelessWidget {
                   context: context,
                   builder: (ctx) => AlertDialog(
                     backgroundColor: AppTheme.surface,
-                    title: const Text('Заблокировать?', style: TextStyle(color: AppTheme.text)),
-                    content: const Text('Он не сможет вам писать и видеть вас в сети. Для остальных на узле ничего не меняется.',
+                    title: Text(tr('Заблокировать?'), style: TextStyle(color: AppTheme.text)),
+                    content: Text(tr('Он не сможет вам писать и видеть вас в сети. Для остальных на узле ничего не меняется.'),
                         style: TextStyle(color: AppTheme.textSecondary)),
                     actions: [
-                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-                      TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Заблокировать', style: TextStyle(color: Colors.redAccent))),
+                      TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'))),
+                      TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Заблокировать'), style: TextStyle(color: Colors.redAccent))),
                     ],
                   ),
                 );
                 if (ok == true) await state.blockContact(c.peerId, c.displayName);
               },
-              child: const Text('Заблокировать', style: TextStyle(color: Colors.redAccent)),
+              child: Text(tr('Заблокировать'), style: TextStyle(color: Colors.redAccent)),
             ),
           ]),
         ]),
