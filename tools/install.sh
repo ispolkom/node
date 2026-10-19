@@ -102,6 +102,19 @@ def pairs(items):
 def nofloat(x):
     raise Bad("недопустимое число " + x)
 
+def tron_ok(addr):
+    import hashlib
+    alpha = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+    if len(addr) != 34 or any(c not in alpha for c in addr):
+        return False
+    n = 0
+    for c in addr:
+        n = n * 58 + alpha.index(c)
+    if n >= 1 << 200:
+        return False
+    raw = n.to_bytes(25, "big")
+    return raw[0] == 0x41 and hashlib.sha256(hashlib.sha256(raw[:21]).digest()).digest()[:4] == raw[21:]
+
 # схема совпадает с src/release.rs: validate_manifest (deny_unknown_fields)
 ROOT_REQUIRED = {"format", "product", "version", "seq", "created", "key_id", "files"}
 ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes", "support"}
@@ -126,7 +139,12 @@ try:
     notes = m.get("notes", "")
     need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
     sw = m.get("support")
-    need(sw is None or (type(sw) is dict and set(sw) == {"asset", "network", "address"} and all(type(x) is str and 1 <= len(x) <= 64 for x in sw.values())), "неверный кошелёк поддержки")
+    if sw is not None:
+        # те же правила, что в src/release.rs (SupportWallet::valid): монета 1..16, сеть 1..32 знаков без управляющих и «|», адрес Tron с Base58Check
+        need(type(sw) is dict and set(sw) == {"asset", "network", "address"} and all(type(x) is str for x in sw.values()), "неверный кошелёк поддержки")
+        need(1 <= len(sw["asset"]) <= 16 and 1 <= len(sw["network"]) <= 32, "неверная длина монеты или сети кошелька")
+        need(not any(unicodedata.category(c) == "Cc" or c == "|" for c in sw["asset"] + sw["network"]), "недопустимые знаки в монете или сети кошелька")
+        need(tron_ok(sw["address"]), "адрес кошелька не проходит проверку контрольной суммы Tron")
     files = m["files"]
     need(type(files) is list and 1 <= len(files) <= 32, "неверный список файлов")
     names = set()

@@ -61,6 +61,31 @@ pub struct SupportWallet {
     pub address: String,
 }
 
+/// Адрес Tron: Base58Check, 25 байт, префикс сети 0x41, контрольные 4 байта — двойной SHA-256. Опечатка в адресе поддержки — потерянные деньги,
+/// поэтому в подписанный выпуск попадает только проверенный адрес (пока поддерживается только сеть Tron).
+pub fn tron_address_ok(addr: &str) -> bool {
+    use sha2::{Digest, Sha256};
+    const B58: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    if addr.len() != 34 {
+        return false;
+    }
+    let mut num = [0u8; 25];
+    for c in addr.bytes() {
+        let Some(d) = B58.iter().position(|b| *b == c) else { return false };
+        let mut carry = d as u32;
+        for b in num.iter_mut().rev() {
+            carry += 58 * (*b as u32);
+            *b = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        if carry != 0 {
+            return false;
+        }
+    }
+    let sum = Sha256::digest(Sha256::digest(&num[..21]));
+    num[0] == 0x41 && sum[..4] == num[21..]
+}
+
 impl SupportWallet {
     /// Разбор `Монета|Сеть|Адрес` (так задаётся при выпуске).
     pub fn parse(s: &str) -> Option<Self> {
@@ -69,12 +94,10 @@ impl SupportWallet {
         (it.next().is_none() && w.valid()).then_some(w)
     }
     fn valid(&self) -> bool {
-        const B58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
         (1..=16).contains(&self.asset.chars().count())
             && (1..=32).contains(&self.network.chars().count())
             && !self.asset.chars().chain(self.network.chars()).any(|c| c.is_control() || c == '|')
-            && (26..=64).contains(&self.address.len())
-            && self.address.chars().all(|c| B58.contains(c) || c.is_ascii_hexdigit() || c == 'x')
+            && tron_address_ok(&self.address)
     }
 }
 
@@ -765,6 +788,9 @@ mod tests {
         assert_eq!(back.support, Some(w));
         m.support = Some(SupportWallet { address: "x y".into(), ..m.support.clone().unwrap() });
         assert!(validate_manifest(&m).is_err());
+        assert!(SupportWallet::parse("USDT|Tron (TRC20)|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsC").is_none(), "опечатка в последнем знаке: контрольная сумма не сходится");
+        assert!(SupportWallet::parse("USDT|Tron (TRC20)|00000000000000000000000000").is_none());
+        assert!(SupportWallet::parse("USDTUSDTUSDTUSDTU|Tron|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB").is_none(), "монета длиннее 16 знаков");
         assert!(SupportWallet::parse("USDT|Tron").is_none() && SupportWallet::parse("a|b|c|d").is_none());
     }
 

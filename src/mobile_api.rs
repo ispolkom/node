@@ -503,6 +503,10 @@ pub enum RedeemError {
     PinRequired,
     PinWrong,
     PinBurned,
+    /// слишком много неизвестных кодов за короткое время: временно не принимаем (приглашение при этом цело)
+    RateLimited,
+    /// администратор выключил приглашения
+    Disabled,
 }
 
 impl RedeemError {
@@ -514,6 +518,8 @@ impl RedeemError {
             RedeemError::PinRequired => "pin_required",
             RedeemError::PinWrong => "pin_wrong",
             RedeemError::PinBurned => "pin_burned",
+            RedeemError::RateLimited => "rate_limited",
+            RedeemError::Disabled => "disabled",
         }
     }
     fn message(self) -> &'static str {
@@ -524,6 +530,8 @@ impl RedeemError {
             RedeemError::PinRequired => "введите PIN приглашения: его вам должен назвать пригласивший",
             RedeemError::PinWrong => "неверный PIN",
             RedeemError::PinBurned => "PIN введён неверно слишком много раз: приглашение погашено, попросите новое",
+            RedeemError::RateLimited => "слишком много неверных кодов за короткое время: подождите несколько минут и повторите",
+            RedeemError::Disabled => "приглашения на этом узле выключены администратором",
         }
     }
 }
@@ -632,7 +640,13 @@ pub fn issue_device_invite(inviter: &str) -> Result<(String, String, u64), Invit
             log.retain(|_, v| v.iter().any(|t| now.saturating_sub(*t) < 24 * 3600 * 1000));
         }
     }
-    let code = format!("{:08}", rand::thread_rng().gen_range(0..100_000_000u32));
+    // код не должен совпасть ни с живым, ни со следом прежнего (иначе новый сразу оказался бы «использованным» или чужим)
+    let code = loop {
+        let c = format!("{:08}", rand::thread_rng().gen_range(0..100_000_000u32));
+        if !codes.iter().any(|x| x.code == c) {
+            break c;
+        }
+    };
     let pin = format!("{:04}", rand::thread_rng().gen_range(0..10_000u32));
     codes.push(InviteCode { code: code.clone(), pin: pin.clone(), pin_fails: 0, used: false, expires: Instant::now() + INVITE_TTL, inviter: inviter.to_string() });
     Ok((code, pin, INVITE_TTL.as_secs()))
@@ -655,9 +669,13 @@ fn redeem_device_invite(code: &str, pin: &str) -> Result<String, RedeemError> {
             if start.elapsed() > INVITE_FAIL_WINDOW {
                 *f = None;
             } else if *n >= INVITE_FAIL_LIMIT {
-                return Err(RedeemError::Bad);
+                return Err(RedeemError::RateLimited);
             }
         }
+    }
+    // администратор мог выключить приглашения уже после выдачи кода
+    if !invite_policy().enabled {
+        return Err(RedeemError::Disabled);
     }
     let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
     purge_invites(&mut codes);
@@ -719,31 +737,47 @@ pub fn promote_device(id: &str) -> Result<(), String> {
 }
 
 /// Номера устройств ветки: само устройство и все, кого оно пригласило, и те, кого пригласили они (цепочка `invited_by`, без циклов).
-pub fn branch_of(peer: &str) -> Vec<String> {
-    with_devices(|d| {
-        let mut out = vec![peer.to_string()];
-        let mut i = 0;
-        while i < out.len() && out.len() <= 4096 {
-            let cur = out[i].clone();
-            for x in d.iter() {
-                let p = x.peer_id();
-                if x.invited_by.as_deref() == Some(cur.as_str()) && !out.contains(&p) {
-                    out.push(p);
-                }
+fn branch_in(d: &[Device], peer: &str) -> Vec<String> {
+    let mut out = vec![peer.to_string()];
+    let mut i = 0;
+    while i < out.len() && out.len() <= 4096 {
+        let cur = out[i].clone();
+        for x in d.iter() {
+            let p = x.peer_id();
+            if x.invited_by.as_deref() == Some(cur.as_str()) && !out.contains(&p) {
+                out.push(p);
             }
-            i += 1;
         }
-        out
-    })
+        i += 1;
+    }
+    out
 }
 
-/// Отозвать устройство вместе со всей его веткой приглашённых. Возвращает, сколько устройств удалено.
+pub fn branch_of(peer: &str) -> Vec<String> {
+    with_devices(|d| branch_in(d, peer))
+}
+
+/// Отозвать устройство вместе со всей его веткой приглашённых. Ветка вычисляется и убирается из реестра ОДНИМ действием под замком списка:
+/// подключение, начатое в это время, не добавит устройство под уже убранным родителем (оно проверяет пригласившего под тем же замком).
+/// Возвращает, сколько устройств удалено.
 pub fn remove_branch(id: &str) -> usize {
     let Some(peer) = resolve_device(id) else { return 0 };
-    let branch = branch_of(&peer);
-    revoke_device_invites(&peer);
+    let before = with_devices(|d| d.clone());
+    let mut branch: Vec<String> = Vec::new();
+    let ((), saved) = devices_apply(|d| {
+        branch = branch_in(d, &peer);
+        d.retain(|x| !branch.contains(&x.peer_id()));
+    });
+    if !saved {
+        devices_apply(|d| *d = before);
+        return 0;
+    }
     // сначала самые дальние (дети), потом корень: порядок обхода в ширину, значит идём с конца
-    branch.iter().rev().filter(|p| remove_device(p)).count()
+    for p in branch.iter().rev() {
+        revoke_device_invites(p);
+        after_forget(p.clone());
+    }
+    branch.len()
 }
 
 pub fn issue_pairing_code_for(role: &str) -> String {
@@ -1424,7 +1458,11 @@ async fn pair_guest(Json(req): Json<GuestPairReq>) -> Response {
 }
 
 async fn pair(Json(req): Json<PairReq>) -> Response {
-    let granted: Option<String> = {
+    // код администратора шестизначный, приглашения восьмизначные: приглашение не считается неверной попыткой ввода кода администратора
+    let admin_code = req.pairing_code.trim().len() == 6;
+    let granted: Option<String> = if !admin_code {
+        None
+    } else {
         let mut g = PAIRING.lock().unwrap_or_else(|e| e.into_inner());
         match g.as_mut() {
             Some(p) if Instant::now() < p.expires && p.fails < PAIRING_MAX_FAILS => {
@@ -1444,15 +1482,11 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     let (role, invited_by) = match granted {
         Some(role) => (role, None),
         None => match redeem_device_invite(&req.pairing_code, &req.pin) {
-            Ok(inviter) => {
-                // приглашения никого не вытесняют: нет места — отказ (код при этом уже погашен, пригласивший выдаст новый)
-                if with_devices(|d| d.iter().filter(|x| x.role == "invited").count()) >= MAX_INVITED {
-                    return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": InviteError::NodeFull.message()}))).into_response();
-                }
-                ("invited".to_string(), Some(inviter))
-            }
+            // вместимость и жив ли пригласивший проверяются позже, под замком списка вместе со вставкой устройства
+            Ok(inviter) => ("invited".to_string(), Some(inviter)),
             Err(e) => {
-                return (StatusCode::FORBIDDEN, Json(json!({"error": e.message(), "reason": e.reason()}))).into_response();
+                let status = if e == RedeemError::RateLimited { StatusCode::TOO_MANY_REQUESTS } else { StatusCode::FORBIDDEN };
+                return (status, Json(json!({"error": e.message(), "reason": e.reason()}))).into_response();
             }
         },
     };
@@ -1470,7 +1504,21 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     let mut evicted: Option<String> = None;
     let mut evicted_device: Option<Device> = None;
     let th = token_hash(&token);
-    let ((), saved) = devices_apply(|d| {
+    enum Refuse {
+        InviterGone,
+        Full,
+    }
+    let (refused, saved) = devices_apply(|d| -> Option<Refuse> {
+        // приглашение: пригласивший ещё жив с правом приглашать и место есть — проверяется под тем же замком, что и вставка (гонки с отзывом ветки и между собой нет)
+        if role == "invited" {
+            let alive = invited_by.as_deref().is_some_and(|b| d.iter().any(|x| x.peer_id() == b && (x.role == "owner" || x.role == "user")));
+            if !alive {
+                return Some(Refuse::InviterGone);
+            }
+            if d.iter().filter(|x| x.role == "invited").count() >= MAX_INVITED {
+                return Some(Refuse::Full);
+            }
+        }
         // гости считаются отдельно: поток гостей не вытесняет устройства владельца и пользователей
         // приглашённые считаются отдельно и никого не вытесняют
         if role != "invited" && d.iter().filter(|x| x.role != "guest" && x.role != "invited").count() >= MAX_DEVICES {
@@ -1498,7 +1546,13 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             role,
             invited_by,
         });
+        None
     });
+    match refused {
+        Some(Refuse::InviterGone) => return (StatusCode::FORBIDDEN, Json(json!({"error": RedeemError::Bad.message(), "reason": RedeemError::Bad.reason()}))).into_response(),
+        Some(Refuse::Full) => return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": InviteError::NodeFull.message()}))).into_response(),
+        None => {}
+    }
     crate::backup_signal::notify_critical(); // новое устройство в реестре: копия нужна сразу
     if !saved {
         // сопряжение подтверждается только после записи списка: иначе токен не пережил бы перезапуск, а вытесненное устройство
@@ -4122,6 +4176,48 @@ mod invite_tests {
     }
 
     #[tokio::test]
+    async fn disabled_invitations_stop_even_live_codes_and_the_admin_qr_is_not_spent_by_invitations() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "dis-a");
+        let (code, pin, _) = issue_device_invite(&a).unwrap();
+        // администратор выключил приглашения, пока код жил
+        set_invite_policy(InvitePolicy { enabled: false, ..invite_policy() }).unwrap();
+        assert_eq!(redeem_device_invite(&code, &pin), Err(RedeemError::Disabled));
+        let (st, _) = redeem_pin(&code, &pin, "inv-dis-b").await;
+        assert_eq!(st, StatusCode::FORBIDDEN);
+        set_invite_policy(InvitePolicy { enabled: true, ..invite_policy() }).unwrap();
+        // пять запросов с кодом приглашения не тратят попытки действующего QR администратора
+        let admin = issue_pairing_code();
+        let (code2, _pin2, _) = issue_device_invite(&a).unwrap();
+        for _ in 0..6 {
+            let _ = redeem_pin(&code2, "", "inv-dis-c").await;
+        }
+        let r = pair(Json(PairReq { pairing_code: admin, device_name: "inv-dis-admin".into(), pin: String::new() })).await;
+        assert_eq!(r.status(), StatusCode::OK, "код администратора цел");
+        *PAIRING.lock().unwrap() = None;
+        reset();
+    }
+
+    #[tokio::test]
+    async fn the_node_wide_pause_answers_429_and_does_not_touch_the_live_invite() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "rl-a");
+        let (code, pin, _) = issue_device_invite(&a).unwrap();
+        for i in 0..INVITE_FAIL_LIMIT {
+            let _ = redeem_pin("00000000", "1111", &format!("inv-rl-{i}")).await;
+        }
+        let r = pair(Json(PairReq { pairing_code: code.clone(), device_name: "inv-rl-real".into(), pin: pin.clone() })).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS, "пауза: отдельный ответ, а не «неверный код»");
+        // окно прошло — тот же код и PIN принимаются: приглашение не пострадало
+        *INVITE_FAILS.lock().unwrap() = None;
+        let (st, _) = redeem_pin(&code, &pin, "inv-rl-real2").await;
+        assert_eq!(st, StatusCode::OK);
+        reset();
+    }
+
+    #[tokio::test]
     async fn guessing_codes_is_stopped_for_the_whole_node() {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
@@ -4133,7 +4229,7 @@ mod invite_tests {
             assert_eq!(st, StatusCode::FORBIDDEN);
         }
         let (st, _) = redeem(&good, "inv-guess-real").await;
-        assert_eq!(st, StatusCode::FORBIDDEN, "после череды неверных попыток верный код временно не принимается");
+        assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "после череды неверных попыток верный код временно не принимается");
         reset();
     }
 

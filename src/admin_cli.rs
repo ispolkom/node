@@ -608,7 +608,21 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             if !confirm_word("Отозвать ветку?", "ДА")? {
                 return Err("не подтверждено".into());
             }
-            let r = s.ok("POST", &format!("/api/mobile/devices/{id}/revoke-branch"), Some(&json!({})))?;
+            let path = format!("/api/mobile/devices/{id}/revoke-branch");
+            let (code, v) = s.call("POST", &path, Some(&json!({})))?;
+            let r = if code == 403 && v["error"] == "password_required" {
+                // в ветке есть владельцы групп: их удаление требует пароль узла ещё раз
+                let pw = s.secrets.ask("Пароль узла (в ветке есть владельцы групп): ")?;
+                let (code, v) = s.call("POST", &path, Some(&json!({ "password": pw })))?;
+                if !(200..300).contains(&code) {
+                    return Err(error_text(code, &v));
+                }
+                v
+            } else if !(200..300).contains(&code) {
+                return Err(error_text(code, &v));
+            } else {
+                v
+            };
             println!("Отозвано устройств: {}.", field(&r, "removed"));
         }
         "invites" => cmd_invites(s, rest)?,

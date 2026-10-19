@@ -5774,8 +5774,35 @@ async fn mobile_device_promote_handler(axum::extract::Path(id): axum::extract::P
 }
 
 /// Отозвать устройство вместе со всеми, кого оно пригласило (и кого пригласили они). Админский маршрут.
-async fn mobile_device_revoke_branch_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
-    let removed = crate::mobile_api::remove_branch(&id);
+async fn mobile_device_revoke_branch_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(peer) = crate::mobile_api::resolve_device(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    };
+    // отзыв ветки уносит и группы, которыми владеют её устройства: как при удалении одного устройства, нужен повторный пароль узла
+    let mut names: Vec<String> = Vec::new();
+    for p in crate::mobile_api::branch_of(&peer) {
+        names.extend(crate::mobile_groups::owned_by(&p).into_iter().map(|(_, name, _)| name));
+    }
+    if !names.is_empty() {
+        let password = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string));
+        if password.is_none() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"status": "error", "error": "password_required", "message": "в ветке есть устройства, владеющие группами; для отзыва нужен пароль узла", "groups": names})),
+            )
+                .into_response();
+        }
+        if let Err(resp) = require_step_up(&state, password.as_deref()).await {
+            return resp;
+        }
+    }
+    let removed = crate::mobile_api::remove_branch(&peer);
     if removed == 0 {
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
     }

@@ -57,14 +57,15 @@ pub async fn refresh() {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (found, _errors) = check(&channels(), &vk, 0, now).await;
     if let Some(f) = found {
-        if let Some(w) = &f.manifest.support {
-            *SUPPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!(w));
-        }
         if let Some(v) = acceptable(&f.manifest) {
             let mut g = AVAILABLE.lock().unwrap_or_else(|e| e.into_inner());
             // откат на более старый подписанный выпуск не принимается
             if g.as_ref().is_none_or(|old| old["seq"].as_u64().unwrap_or(0) <= f.manifest.seq) {
                 *g = Some(v);
+                // кошелёк обновляется только вместе с принятым выпуском: старый подписанный манифест адрес не откатит
+                if let Some(w) = &f.manifest.support {
+                    *SUPPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!(w));
+                }
             }
         }
     }

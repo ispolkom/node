@@ -143,10 +143,24 @@ class _DevicesPanelState extends State<DevicesPanel> {
     if (!active || ok != true) return;
     clear();
     await widget.mutate(() async {
-      await widget.api.request(
-        '/api/mobile/devices/${d['peer_id']}/${promote ? 'promote' : 'revoke-branch'}',
-        body: const {},
-      );
+      final path = '/api/mobile/devices/${d['peer_id']}/${promote ? 'promote' : 'revoke-branch'}';
+      try {
+        await widget.api.request(path, body: const {});
+      } on ApiFailure catch (e) {
+        // в ветке есть владельцы групп: их удаление требует повторного ввода пароля узла
+        if (promote || e.status != 403) rethrow;
+        if (!mounted) return;
+        final value = await showDialog<List<String>>(
+          context: context,
+          builder: (_) => const GroupForm(
+            title: 'В ветке есть владельцы групп. Группы будут удалены',
+            labels: ['Пароль входа узла'],
+            secret: true,
+          ),
+        );
+        if (!active || value == null) return;
+        await widget.api.request(path, body: {'password': value[0]});
+      }
       if (active) await widget.onChanged?.call();
     });
     if (active) await refresh();
