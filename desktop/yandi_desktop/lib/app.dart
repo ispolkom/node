@@ -823,7 +823,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               vaultPanel(),
-              if (vault!.configured) ...[const SizedBox(height: 12), const SupportBlock()],
+              if (vault!.configured) ...[const SizedBox(height: 12), SupportBlock(signed: updateStatus?['support'])],
             ],
           )
         else if (page == 'Панель')

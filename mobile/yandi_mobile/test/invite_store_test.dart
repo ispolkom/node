@@ -22,7 +22,7 @@ void main() {
   });
 
   test('выданное приглашение живёт час и переживает «закрытие приложения»; после срока стирается', () async {
-    await InviteStore.saveIssued(text: 'YANDI-PAIR-1:x', code: '12345678', pin: '4821', expMs: now + 3600 * 1000);
+    await InviteStore.saveIssued(node: 'n1', text: 'YANDI-PAIR-1:x', code: '12345678', pin: '4821', expMs: now + 3600 * 1000);
     now += 59 * 60 * 1000;
     final m = await InviteStore.issued();
     expect(m?['pin'], '4821');

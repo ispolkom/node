@@ -98,6 +98,7 @@ class _PairScreenState extends State<PairScreen> {
   void dispose() {
     _scanner.dispose();
     _manual.dispose();
+    _pin.dispose();
     super.dispose();
   }
 
@@ -255,8 +256,14 @@ class _PairScreenState extends State<PairScreen> {
               throw const _PinWrong('Неверный PIN. Осталось меньше попыток: три ошибки — и приглашение сгорит.');
             case 'pin_required':
               throw const _PinWrong('Введите PIN из 4 цифр.');
+            case 'rate_limited':
+              // узел временно не принимает коды: приглашение цело, ссылка остаётся
+              throw const _PinWrong('Слишком много неверных кодов за короткое время. Подождите несколько минут и нажмите «Подключиться» снова: приглашение цело.');
+            case 'disabled':
+              throw const _PinWrong('Приглашения на этом узле сейчас выключены администратором. Ссылка сохранена: попробуйте позже.');
           }
         }
+        if (isInvite && res.statusCode == 503) throw const _PinWrong('На узле сейчас нет места для новых приглашённых устройств. Попросите администратора или повторите позже.');
         throw Exception('Pairing failed: ${res.body}');
       }
       await InviteStore.clearPending();
@@ -295,9 +302,15 @@ class _PairScreenState extends State<PairScreen> {
       setState(() { _processing = false; _pinError = e.message; });
     } on _InviteGone catch (e) {
       _recognized = false;
+      _pin.clear();
       if (!mounted) return;
       setState(() { _processing = false; _inviteRaw = null; _error = e.message; });
     } catch (e) {
+      // на экране PIN ошибку (нет связи, отказ узла) показываем прямо там, а не прячем под карточкой
+      if (pin != null && mounted) {
+        setState(() { _processing = false; _pinError = _humanError(e); });
+        return;
+      }
       _recognized = false;
       _resetScan('Не вышло подключиться. Наведите камеру на QR ещё раз');
       if (!mounted) return;
@@ -365,7 +378,12 @@ class _PairScreenState extends State<PairScreen> {
           TextButton(
             onPressed: _processing ? null : () async {
               await InviteStore.clearPending();
-              if (mounted) setState(() { _inviteRaw = null; _pinError = null; });
+              if (!mounted) return;
+              // камера снова принимает QR: прежнее «распознано» и накопленный кандидат сбрасываются
+              _recognized = false;
+              _pin.clear();
+              setState(() { _inviteRaw = null; _pinError = null; });
+              if (_scanMode) _resetScan('Наведите камеру на QR: код должен целиком поместиться в рамку');
             },
             child: const Text('Отмена'),
           ),

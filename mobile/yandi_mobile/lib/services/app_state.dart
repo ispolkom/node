@@ -243,7 +243,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final av = ans?['available'];
     final a = av is Map<String, dynamic> ? av : null;
     final w = SupportWallet.fromSigned(ans?['support']);
-    if (w != null && (signedWallet?.address != w.address)) {
+    if (w != null && (signedWallet?.address != w.address || signedWallet?.coin != w.coin || signedWallet?.network != w.network)) {
       signedWallet = w;
       notifyListeners();
     }
@@ -1119,14 +1119,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     final inv = await api.createDeviceInvite();
     final expMs = DateTime.now().millisecondsSinceEpoch + inv.ttlSecs * 1000;
     final text = inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint, expiresAtSecs: expMs ~/ 1000);
-    await InviteStore.saveIssued(text: text, code: inv.code, pin: inv.pin, expMs: expMs);
+    await InviteStore.saveIssued(node: node.id, text: text, code: inv.code, pin: inv.pin, expMs: expMs);
     return (text: text, link: inviteLink(text), code: inv.code, pin: inv.pin, ttlSecs: inv.ttlSecs);
   }
 
   /// Ещё живое выданное приглашение (после повторного открытия приложения) или null.
   Future<({String text, String link, String code, String pin, int ttlSecs})?> activeDeviceInvite() async {
     final m = await InviteStore.issued();
-    if (m == null) return null;
+    // приглашение выдано на другом узле: здесь его не показываем (и отзывать на этом узле было бы неверно)
+    if (m == null || m['node'] != activeNode?.id) return null;
     final left = ((m['exp'] as int) - DateTime.now().millisecondsSinceEpoch) ~/ 1000;
     if (left <= 0) return null;
     final text = '${m['text']}';
@@ -1134,8 +1135,10 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   Future<void> revokeDeviceInvites() async {
-    await InviteStore.clearIssued();
+    // сначала узел: при ошибке код продолжает действовать, и запись у нас остаётся, чтобы отзыв можно было повторить
     await _api?.revokeDeviceInvites();
+    final m = await InviteStore.issued();
+    if (m != null && m['node'] == activeNode?.id) await InviteStore.clearIssued();
   }
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();

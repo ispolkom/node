@@ -40,10 +40,11 @@ class InviteStore {
     return null;
   }
 
-  static Future<void> saveIssued({required String text, required String code, required String pin, required int expMs}) async =>
-      backend.write(_issued, jsonEncode({'text': text, 'code': code, 'pin': pin, 'exp': expMs}));
+  /// [node] — узел, на котором выдано приглашение: показывать и отзывать его можно только на нём.
+  static Future<void> saveIssued({required String node, required String text, required String code, required String pin, required int expMs}) async =>
+      backend.write(_issued, jsonEncode({'node': node, 'text': text, 'code': code, 'pin': pin, 'exp': expMs}));
 
-  /// {text, code, pin, exp(мс)} живого выданного приглашения или null.
+  /// {node, text, code, pin, exp(мс)} живого выданного приглашения или null.
   static Future<Map<String, dynamic>?> issued() => _load(_issued);
   static Future<void> clearIssued() => backend.delete(_issued);
 

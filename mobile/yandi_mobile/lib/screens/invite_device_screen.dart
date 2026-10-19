@@ -34,6 +34,7 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
   int remaining = 0;
   bool busy = false;
   Timer? timer;
+  bool _dialogOpen = false;
 
   @override
   void initState() {
@@ -53,9 +54,20 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
       if (text == null || !mounted) return;
       setState(() {
         remaining--;
-        if (remaining <= 0) _clear();
+        if (remaining <= 0) {
+          _clear();
+          _closePinDialog();
+        }
       });
     });
+  }
+
+  /// Окно с PIN не переживает приглашение: истекло или отозвано — окно закрывается, чтобы не показывать и не копировать уже мёртвый PIN.
+  void _closePinDialog() {
+    if (_dialogOpen && mounted) {
+      _dialogOpen = false;
+      Navigator.of(context).pop();
+    }
   }
 
   void _clear() {
@@ -98,7 +110,9 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
 
   /// После копирования или отправки напоминаем PIN: его называют приглашённому другим каналом, он в ссылку не входит.
   Future<void> _pinReminder(String what) async {
-    if (!mounted || pin == null) return;
+    final shown = pin;
+    if (!mounted || shown == null) return;
+    _dialogOpen = true;
     await showDialog<void>(
       context: context,
       builder: (c) => AlertDialog(
@@ -113,22 +127,32 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
               key: ValueKey('invite-pin-warning'),
             ),
             const SizedBox(height: 12),
-            Text(pin!, style: const TextStyle(fontSize: 36, letterSpacing: 8, fontWeight: FontWeight.bold)),
+            Text(shown, style: const TextStyle(fontSize: 36, letterSpacing: 8, fontWeight: FontWeight.bold)),
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: pin!)), child: const Text('Копировать PIN')),
-          TextButton(onPressed: () => Navigator.of(c).pop(), child: const Text('Понятно')),
+          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: shown)), child: const Text('Копировать PIN')),
+          TextButton(onPressed: () { _dialogOpen = false; Navigator.of(c).pop(); }, child: const Text('Понятно')),
         ],
       ),
     );
+    _dialogOpen = false;
   }
 
   Future<void> _revoke() async {
     try {
       await widget.revoke();
-    } catch (_) {}
-    if (mounted) setState(_clear);
+    } catch (e) {
+      // узел отзыв не принял: код продолжает действовать, поэтому с экрана он не убирается, а ошибка видна
+      if (mounted) setState(() => error = e is StateError ? e.message : 'Не удалось отозвать код: нет связи с узлом. Код ещё действует, повторите.');
+      return;
+    }
+    if (!mounted) return;
+    _closePinDialog();
+    setState(() {
+      error = null;
+      _clear();
+    });
   }
 
   @override

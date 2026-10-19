@@ -106,4 +106,46 @@ void main() {
     expect(find.text('0042'), findsOneWidget);
     expect(find.textContaining('Не отправляйте ссылку-приглашение и PIN в одно место'), findsOneWidget);
   });
+
+  testWidgets('ошибка отзыва: код остаётся на экране и ошибка видна (узел его ещё принимает)', (t) async {
+    final tx = inviteText(host: 'h', port: 1, code: '11112222', fingerprint: 'cd' * 32);
+    await t.pumpWidget(MaterialApp(
+      home: InviteDeviceScreen(
+        create: () async => throw StateError('нет'),
+        revoke: () async => throw StateError('Не удалось отозвать коды (503)'),
+        restore: () async => (text: tx, link: inviteLink(tx), code: '11112222', pin: '0042', ttlSecs: 1800),
+      ),
+    ));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    await t.scrollUntilVisible(find.byKey(const ValueKey('invite-revoke')), 200, scrollable: find.byType(Scrollable).first);
+    await t.tap(find.byKey(const ValueKey('invite-revoke')));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    expect(find.text('Не удалось отозвать коды (503)', skipOffstage: false), findsOneWidget);
+    expect(find.byKey(const ValueKey('invite-qr'), skipOffstage: false), findsOneWidget, reason: 'код не убран: он ещё действует');
+  });
+
+  testWidgets('окно PIN закрывается, когда приглашение истекло, и не падает при копировании', (t) async {
+    final tx = inviteText(host: 'h', port: 1, code: '11112222', fingerprint: 'cd' * 32);
+    await t.pumpWidget(MaterialApp(
+      home: InviteDeviceScreen(
+        create: () async => throw StateError('нет'),
+        revoke: () async {},
+        restore: () async => (text: tx, link: inviteLink(tx), code: '11112222', pin: '0042', ttlSecs: 2),
+      ),
+    ));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    await t.scrollUntilVisible(find.byKey(const ValueKey('invite-copy')), 200, scrollable: find.byType(Scrollable).first);
+    await t.tap(find.byKey(const ValueKey('invite-copy')), warnIfMissed: false);
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('invite-pin-dialog')), findsOneWidget);
+    await t.pump(const Duration(seconds: 3));
+    await t.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('invite-pin-dialog')), findsNothing, reason: 'мёртвый PIN не остаётся на экране');
+    expect(t.takeException(), isNull);
+  });
 }
