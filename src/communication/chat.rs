@@ -1341,4 +1341,33 @@ mod tests {
         cm.transport.test_add_peer_key(other, ed25519_dalek::SigningKey::from_bytes(&[78u8; 32]).verifying_key().to_bytes()).await;
         assert!(cm.open_from(other, &to_me).await.is_err(), "конверт, подписанный другим, принят от третьего");
     }
+
+    /// E2E для сигнализации звонков: принимается только запечатанный подписанный сигнал с верным типом; открытый, чужой и с подменённым типом — нет.
+    #[tokio::test]
+    async fn call_signals_are_accepted_only_sealed_signed_and_with_the_right_type() {
+        use crate::p2p::P2PPacketType as T;
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
+        let peer = HashId([91u8; 32]);
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let make = |ty: T, body: &[u8]| {
+            let mut plain = vec![ty.to_byte()];
+            plain.extend_from_slice(body);
+            crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), &plain).unwrap()
+        };
+        let offer = make(T::VoiceData, br#"{"sdp":"v=0 a=fingerprint:sha-256 AA"}"#);
+        // ключа собеседника нет — отвергается
+        assert!(cm.transport.open_signal(peer, T::VoiceData, &offer).await.is_none());
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        assert_eq!(cm.transport.open_signal(peer, T::VoiceData, &offer).await.unwrap(), br#"{"sdp":"v=0 a=fingerprint:sha-256 AA"}"#);
+        // подмена внешнего типа (конверт от VoiceData выдан за запрос на видео) и открытый текст
+        assert!(cm.transport.open_signal(peer, T::VideoCallRequest, &offer).await.is_none());
+        assert!(cm.transport.open_signal(peer, T::VoiceData, br#"{"sdp":"x"}"#).await.is_none());
+        // конверт другого отправителя, выданный за пакет от peer
+        let evil = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);
+        let mut plain = vec![T::VoiceData.to_byte()];
+        plain.extend_from_slice(b"{}");
+        let forged = crate::crypto::sealed::seal(&evil, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), &plain).unwrap();
+        assert!(cm.transport.open_signal(peer, T::VoiceData, &forged).await.is_none());
+    }
 }

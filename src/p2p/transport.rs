@@ -403,6 +403,29 @@ impl P2PTransport {
         self.peers.lock().await.insert(id, p);
     }
 
+    /// Отправить пакет сигнализации звонка (запрос, ответ, отказ, конец, SDP/ICE), запечатав его на ключ собеседника (E2E): внутри конверта
+    /// байт типа пакета, чтобы тип нельзя было подменить. Нет проверенного ключа — отказ, открытого пути нет.
+    pub async fn send_sealed(&self, peer: HashId, mut packet: P2PPacket) -> Result<(), String> {
+        let pk = self.peer_signing_key(&peer).await.ok_or_else(|| "ключ собеседника ещё не получен".to_string())?;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| "недопустимый ключ собеседника".to_string())?;
+        let mut plain = Vec::with_capacity(1 + packet.payload.len());
+        plain.push(packet.packet_type.to_byte());
+        plain.extend_from_slice(&packet.payload);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        packet.payload = crate::crypto::sealed::seal(&self.sealing_key(), &vk, &self.node_id().0, &peer.0, now, &plain).map_err(|e| e.to_string())?;
+        self.send_packet_dual_path(peer, packet).await
+    }
+
+    /// Открыть сигнал звонка от `sender`: подпись отправителя, адресат — мы, тип пакета внутри совпадает с внешним. Иначе None.
+    pub async fn open_signal(&self, sender: HashId, packet_type: P2PPacketType, payload: &[u8]) -> Option<Vec<u8>> {
+        let pk = self.peer_signing_key(&sender).await?;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).ok()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let (_, plain) = crate::crypto::sealed::open(&self.sealing_key(), &vk, &sender.0, &self.node_id().0, now, payload).ok()?;
+        let (first, rest) = plain.split_first()?;
+        (*first == packet_type.to_byte()).then(|| rest.to_vec())
+    }
+
     /// Ключ подписи этого узла для запечатанных конвертов.
     pub fn sealing_key(&self) -> ed25519_dalek::SigningKey {
         ed25519_dalek::SigningKey::from_bytes(&self.identity.signing_private_key)
@@ -1326,8 +1349,13 @@ impl P2PTransport {
             P2PPacketType::VoiceCallRequest | P2PPacketType::VoiceCallAccept |
             P2PPacketType::VoiceCallEnd | P2PPacketType::VoiceCallReject |
             P2PPacketType::VoiceData => {
+                // сигнал звонка принимается только запечатанным и подписанным отправителем (E2E)
+                let Some(payload) = self.open_signal(sender, p2p_packet.packet_type, &p2p_packet.payload).await else {
+                    debug!("📞 сигнал от {} отвергнут: нет верного конверта", hex::encode(&sender.0[..8]));
+                    return Ok(());
+                };
                 if let Some(ref tx) = self.media_signal_tx {
-                    let _ = tx.send((sender, p2p_packet.packet_type, p2p_packet.payload)).await;
+                    let _ = tx.send((sender, p2p_packet.packet_type, payload)).await;
                 } else {
                     debug!("📞 Received Voice packet from {} (no media handler)",
                         hex::encode(&sender.0[..8]));
@@ -1338,8 +1366,13 @@ impl P2PTransport {
             P2PPacketType::VideoCallRequest | P2PPacketType::VideoCallAccept |
             P2PPacketType::VideoCallEnd | P2PPacketType::VideoCallReject |
             P2PPacketType::VideoData => {
+                // сигнал звонка принимается только запечатанным и подписанным отправителем (E2E)
+                let Some(payload) = self.open_signal(sender, p2p_packet.packet_type, &p2p_packet.payload).await else {
+                    debug!("📹 сигнал от {} отвергнут: нет верного конверта", hex::encode(&sender.0[..8]));
+                    return Ok(());
+                };
                 if let Some(ref tx) = self.media_signal_tx {
-                    let _ = tx.send((sender, p2p_packet.packet_type, p2p_packet.payload)).await;
+                    let _ = tx.send((sender, p2p_packet.packet_type, payload)).await;
                 } else {
                     debug!("📹 Received Video packet from {} (no media handler)",
                         hex::encode(&sender.0[..8]));
