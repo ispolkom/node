@@ -233,6 +233,32 @@ class ApiService {
     }
   }
 
+  /// Выдать код приглашения нового устройства (только устройство, сопряжённое по QR). Ошибка узла — исключение с его текстом.
+  Future<({String code, int ttlSecs})> createDeviceInvite() async {
+    final res = await _client
+        .post(_url('/mobile/device-invite'), headers: _headers, body: '{}')
+        .timeout(const Duration(seconds: 10));
+    final body = res.body.isEmpty ? <String, dynamic>{} : (jsonDecode(res.body) as Map<String, dynamic>);
+    if (res.statusCode != 200) {
+      final msg = body['error'];
+      throw StateError(msg is String && msg.length < 300 ? msg : 'Не удалось получить код приглашения (${res.statusCode})');
+    }
+    final code = body['code'];
+    final ttl = body['expires_in_secs'];
+    if (code is! String || !RegExp(r'^[0-9]{8}$').hasMatch(code) || ttl is! int || ttl <= 0 || ttl > 3600) {
+      throw StateError('Узел вернул неверный код приглашения');
+    }
+    return (code: code, ttlSecs: ttl);
+  }
+
+  /// Отозвать свои действующие коды приглашений.
+  Future<void> revokeDeviceInvites() async {
+    final res = await _client
+        .delete(_url('/mobile/device-invite'), headers: _headers)
+        .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) throw StateError('Не удалось отозвать коды (${res.statusCode})');
+  }
+
   Future<Map<String, dynamic>> getProxyInfo() async {
     try {
       final res = await _client

@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import '../services/app_state.dart';
 import '../services/vault_lock.dart';
 import 'vault_screens.dart';
+import 'invite_device_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/avatar_circle.dart';
@@ -130,6 +131,26 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: ListView(
         children: [
+          if (state.canInvite || state.myRole == 'invited') ...[
+            _Section(title: 'Приглашения'),
+            if (state.canInvite)
+              ListTile(
+                key: const ValueKey('invite-device'),
+                leading: const Icon(Icons.qr_code_2, color: AppTheme.textSecondary),
+                title: const Text('Пригласить устройство', style: TextStyle(color: AppTheme.text)),
+                subtitle: const Text('QR или код для друга: он подключится к этому узлу. Приглашённый приглашать сам не сможет.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => InviteDeviceScreen(create: state.createDeviceInvite, revoke: state.revokeDeviceInvites),
+                )),
+              )
+            else
+              const ListTile(
+                key: ValueKey('invite-device-locked'),
+                leading: Icon(Icons.lock_outline, color: AppTheme.textSecondary),
+                title: Text('Приглашать другие устройства', style: TextStyle(color: AppTheme.text)),
+                subtitle: Text('Вас пригласили: право приглашать даёт администратор узла.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              ),
+          ],
           // Профиль
           _Section(title: 'Профиль'),
           ListTile(

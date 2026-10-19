@@ -30,6 +30,7 @@ dependencies:
 
   # UI / QR
   mobile_scanner: ^5.2.3
+  qr_flutter: ^4.1.0
   cupertino_icons: ^1.0.8
 
   # Media / Audio

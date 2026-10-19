@@ -13,6 +13,7 @@ import 'package:path_provider/path_provider.dart' as pp;
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
 import '../models/trusted_node.dart';
+import '../models/invite_payload.dart';
 import '../models/contact.dart';
 import '../models/group_invite.dart';
 import '../models/contact_card.dart';
@@ -377,6 +378,8 @@ class AppState extends ChangeNotifier implements FilesHost {
       final info = await _api!.getInfo();
       nodeOnline = info['online'] as bool? ?? false;
       _nodePeerId = info['node_id'] as String?;   // сам компьютер — не «человек»: аватарки ему не шлём
+      myRole = info['role'] as String?;
+      canInvite = info['can_invite'] == true;
 
       // Регистрируем свои публичные ключи на ноде (для E2E входящих)
       if (identity != null) {
@@ -1089,6 +1092,21 @@ class AppState extends ChangeNotifier implements FilesHost {
   AvatarService? avatars;
   String? _nodePeerId;
   String? get nodePeerId => _nodePeerId;
+
+  /// Роль этого устройства на узле (`owner` | `user` | `invited` | `guest`) и право приглашать другие устройства — от узла.
+  String? myRole;
+  bool canInvite = false;
+
+  /// Код приглашения для нового устройства: текст `YANDI-PAIR-1:…` (его же показывает QR) и 8-значный код, срок жизни в секундах.
+  Future<({String text, String code, int ttlSecs})> createDeviceInvite() async {
+    final node = activeNode;
+    final api = _api;
+    if (node == null || api == null) throw StateError('Нет связи с узлом');
+    final inv = await api.createDeviceInvite();
+    return (text: inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint), code: inv.code, ttlSecs: inv.ttlSecs);
+  }
+
+  Future<void> revokeDeviceInvites() async => await _api?.revokeDeviceInvites();
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();
 
