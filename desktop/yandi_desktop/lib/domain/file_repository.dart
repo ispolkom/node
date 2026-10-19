@@ -23,8 +23,14 @@ class FileRepository {
         'm4a' || 'aac' => 'audio/mp4',
         'opus' => 'audio/ogg',
         'flac' => 'audio/flac',
-        'mp4' => 'video/mp4',
+        'mp4' || 'm4v' => 'video/mp4',
         'webm' => 'video/webm',
+        'mov' => 'video/quicktime',
+        'mkv' => 'video/x-matroska',
+        '3gp' || '3gpp' => 'video/3gpp',
+        'avi' => 'video/x-msvideo',
+        'amr' => 'audio/amr',
+        'mka' => 'audio/x-matroska',
         _ => 'application/octet-stream',
       };
   static bool raster(Uint8List b) =>

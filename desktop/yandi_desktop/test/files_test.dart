@@ -330,4 +330,13 @@ void main() {
     expect(find.textContaining('Не найден проигрыватель'), findsOneWidget);
     await m1.stop(t);
   });
+
+  test('все разрешённые политикой форматы видео и аудио узнаются: кнопки «Смотреть» и «Слушать» не пропадают для .mov/.mkv/.3gp/.amr', () {
+    const video = {'a.mp4': 'video/mp4', 'a.MOV': 'video/quicktime', 'a.mkv': 'video/x-matroska', 'a.webm': 'video/webm', 'a.3gp': 'video/3gpp'};
+    video.forEach((name, mime) => expect(FileRepository.mime(name), mime, reason: name));
+    for (final n in ['a.mp3', 'a.m4a', 'a.aac', 'a.ogg', 'a.opus', 'a.wav', 'a.flac', 'a.amr']) {
+      expect(FileRepository.mime(n).startsWith('audio/'), isTrue, reason: n);
+    }
+    expect(FileRepository.mime('a.pdf'), 'application/octet-stream');
+  });
 }
