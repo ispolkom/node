@@ -426,6 +426,66 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn role_label(role: &str) -> &str {
+    match role {
+        "owner" => "владелец",
+        "user" => "пользователь",
+        "invited" => "приглашённый",
+        "guest" => "гость",
+        other => other,
+    }
+}
+
+fn check_device_id(id: &str) -> Result<(), String> {
+    if id.len() < 8 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("номер устройства — от 8 до 64 шестнадцатеричных знаков (yandi admin devices)".into());
+    }
+    Ok(())
+}
+
+/// Политика приглашений: показать или изменить (включено, в сутки, живых кодов).
+fn cmd_invites(s: &mut Session, args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str).unwrap_or("show") {
+        "show" => {
+            let p = s.ok("GET", "/api/mobile/invite-policy", None)?;
+            println!("Приглашения устройств: {}; в сутки от одного человека: {}; действующих кодов: {}", if p["enabled"] == true { "включены" } else { "выключены" }, field(&p, "per_day"), field(&p, "max_live"));
+        }
+        "set" => {
+            // разбор до любого запроса: пустая или неверная команда ничего не трогает
+            let mut changes: Vec<(&str, Value)> = Vec::new();
+            let mut it = args[1..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--enabled" => changes.push((
+                        "enabled",
+                        json!(match it.next().map(String::as_str) {
+                            Some("on") => true,
+                            Some("off") => false,
+                            _ => return Err("--enabled: нужно on или off".into()),
+                        }),
+                    )),
+                    "--per-day" | "--max-live" => {
+                        let n: u32 = it.next().and_then(|n| n.parse().ok()).ok_or_else(|| format!("{a} N"))?;
+                        changes.push((if a == "--per-day" { "per_day" } else { "max_live" }, json!(n)));
+                    }
+                    other => return Err(format!("неизвестный параметр {other}")),
+                }
+            }
+            if changes.is_empty() {
+                return Err("укажите --enabled on|off, --per-day N или --max-live N".into());
+            }
+            let mut p = s.ok("GET", "/api/mobile/invite-policy", None)?;
+            for (k, v) in changes {
+                p[k] = v;
+            }
+            s.ok("POST", "/api/mobile/invite-policy", Some(&p))?;
+            println!("Сохранено.");
+        }
+        other => return Err(format!("invites: неизвестное действие «{other}» (show | set)")),
+    }
+    Ok(())
+}
+
 fn cmd_vault(s: &mut Session, args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str).unwrap_or("status") {
         "status" => println!("{}", pretty(&s.ok("GET", "/api/vault/status", None)?)),
@@ -494,7 +554,8 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
                 println!("Сопряжённых устройств нет. Код сопряжения: yandi admin pairing");
             }
             for d in v["devices"].as_array().into_iter().flatten() {
-                println!("  {}  {}  {}", field(d, "peer_id"), field(d, "name"), field(d, "role"));
+                let by = if d["invited_by_name"].is_string() { format!("  (пригласил: {})", field(d, "invited_by_name")) } else if d["invited_by"].is_string() { "  (пригласивший удалён)".to_string() } else { String::new() };
+                println!("  {}  {}  {}{by}", field(d, "peer_id"), field(d, "name"), role_label(&field(d, "role")));
             }
         }
         "device-remove" => {
@@ -520,6 +581,25 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             }
             println!("Устройство отвязано.");
         }
+        "device-promote" => {
+            let id = rest.first().ok_or("device-promote ID (yandi admin devices)")?;
+            check_device_id(id)?;
+            s.ensure_admin()?;
+            s.ok("POST", &format!("/api/mobile/devices/{id}/promote"), Some(&json!({})))?;
+            println!("Устройство повышено до пользователя: теперь оно может приглашать само.");
+        }
+        "device-revoke-branch" => {
+            let id = rest.first().ok_or("device-revoke-branch ID (yandi admin devices)")?;
+            check_device_id(id)?;
+            s.ensure_admin()?;
+            eprintln!("Будет отозвано это устройство и ВСЕ, кого оно пригласило (и кого пригласили они).");
+            if !confirm_word("Отозвать ветку?", "ДА")? {
+                return Err("не подтверждено".into());
+            }
+            let r = s.ok("POST", &format!("/api/mobile/devices/{id}/revoke-branch"), Some(&json!({})))?;
+            println!("Отозвано устройств: {}.", field(&r, "removed"));
+        }
+        "invites" => cmd_invites(s, rest)?,
         "phone-action" => {
             let peer = rest.first().ok_or("phone-action ПИР ДЕЙСТВИЕ")?;
             let action = rest.get(1).ok_or("phone-action ПИР ДЕЙСТВИЕ")?;
@@ -563,6 +643,9 @@ const HELP: &str = "yandi admin — управление запущенным у
                                    код и QR сопряжения телефона
   yandi admin devices              сопряжённые устройства
   yandi admin device-remove ID     отвязать устройство
+  yandi admin device-promote ID    повысить приглашённое устройство до пользователя (оно сможет приглашать само)
+  yandi admin device-revoke-branch ID   отозвать устройство и всех, кого оно пригласило
+  yandi admin invites show | set --enabled on|off --per-day N --max-live N
   yandi admin phone-action ПИР ДЕЙСТВИЕ
   yandi admin proxies list|add [вид]|remove ID|test [вид]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase
@@ -1059,5 +1142,17 @@ mod tests {
         let (sock, h) = serve_once(dir.path(), "g.sock", b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n".to_vec());
         assert_eq!(roundtrip(&sock, "GET", "/api/x", None, None, Duration::from_secs(5)).unwrap(), (500, Value::Null));
         h.join().unwrap();
+    }
+
+    #[test]
+    fn invitation_commands_validate_before_any_request() {
+        let mut s = Session::new(PathBuf::from("/nonexistent/s.sock"), true);
+        let bad = |s: &mut Session, a: &[&str]| dispatch(s, &a.iter().map(|x| x.to_string()).collect::<Vec<_>>()).unwrap_err();
+        assert!(bad(&mut s, &["device-promote", "zz"]).contains("номер устройства"));
+        assert!(bad(&mut s, &["device-promote"]).contains("device-promote ID"));
+        assert!(bad(&mut s, &["device-revoke-branch", "../x"]).contains("номер устройства"));
+        assert!(bad(&mut s, &["invites", "set"]).contains("--enabled"), "без параметров ничего не меняем");
+        assert!(bad(&mut s, &["invites", "bogus"]).contains("неизвестное"));
+        assert_eq!(role_label("invited"), "приглашённый");
     }
 }
