@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
@@ -89,11 +90,35 @@ class _PlayerDialogState extends State<_PlayerDialog> {
         // адрес петли идёт напрямую, даже если в окружении пользователя стоит http_proxy
         await native.setProperty('stream-lavf-o', 'http_proxy=');
         await native.setProperty('network-timeout', '15');
+        // Собственное имя звукового клиента: звуковой сервер хранит громкость потока по имени программы, и у общего имени «mpv» могла
+        // остаться нулевая громкость (видео без звука при исправном воспроизведении); у нового имени громкость начинается со 100%.
+        await native.setProperty('audio-client-name', 'YANDI');
       }
+      await player.setVolume(100);
       await player.open(Media(widget.url.toString()), play: true);
+      _debugTrace();
     } catch (_) {
       if (mounted) setState(() => error = 'Не удалось открыть проигрыватель');
     }
+  }
+
+  /// Диагностика звука и видео по запросу: YANDI_PLAYER_DEBUG=1 пишет технические сведения (дорожки, устройство вывода, громкость, ошибки
+  /// libmpv) в /tmp/yandi_player_debug.log. Содержимое файла и переписка не пишутся.
+  void _debugTrace() {
+    if (Platform.environment['YANDI_PLAYER_DEBUG'] != '1') return;
+    void out(String t) {
+      try {
+        File('/tmp/yandi_player_debug.log').writeAsStringSync('${DateTime.now().toIso8601String().substring(11, 23)} $t\n', mode: FileMode.append);
+      } catch (_) {}
+    }
+    player.stream.log.listen((l) {
+      if (RegExp(r'ao|audio|volume|mute|error|fail|decoder|track', caseSensitive: false).hasMatch('${l.prefix} ${l.text}')) out('mpv ${l.prefix}: ${l.text.trim()}');
+    });
+    Timer(const Duration(seconds: 4), () {
+      final s = player.state;
+      out('STATE volume=${s.volume} playing=${s.playing} pos=${s.position} dur=${s.duration} audioParams=${s.audioParams} audioDevice=${s.audioDevice} '
+          'audioTracks=${s.tracks.audio.map((t) => '${t.id}:${t.codec}:${t.channels}:${t.language}').toList()} videoTracks=${s.tracks.video.map((t) => '${t.id}:${t.codec}').toList()} track=${s.track.audio}');
+    });
   }
 
   @override
