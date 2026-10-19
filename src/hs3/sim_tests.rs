@@ -456,51 +456,119 @@ fn generations_and_peers_are_bounded_numerically() {
     // закрытие пары снимает все её состояния
     let first = v.peer_entries();
     assert!(first > 0);
+    let ids: Vec<PeerId> = (0..12u8).map(|i| Machine::new(100 + i as u64, SigningKey::from_bytes(&[60 + i; 32]), CTX_NETLAYER_UDP).id()).collect();
+    for id in &ids {
+        v.close(id);
+    }
+    assert_eq!(v.peer_entries(), 0, "после закрытия всех пар записей не осталось");
+    assert_eq!(v.slots_used(), 0);
 }
 
-/// P24-3: собственный запуск при полном пуле не создаёт записи о пире, хранится в ограниченной очереди и повторяется по таймеру; лимит личности действует и для start.
+fn pid(n: u32) -> PeerId {
+    let mut p = [7u8; 32];
+    p[..4].copy_from_slice(&n.to_le_bytes());
+    p
+}
+
+fn frame(v: Vec<Out>, ty: MsgType) -> Option<Vec<u8>> {
+    v.into_iter().find_map(|o| match o {
+        Out::Send { bytes, .. } if parse_header(&bytes).unwrap().0 == ty => Some(bytes),
+        _ => None,
+    })
+}
+
+/// Обмен целиком, включая оба KeyConfirm; None, если на каком-то шаге ничего не вышло.
+fn full_exchange(a: &mut Machine, b: &mut Machine, n: u64) -> Option<[u8; 32]> {
+    let r = frame(a.start(n, b.id(), 1), MsgType::Request)?;
+    let ack = frame(b.receive(n + 1, 1, &r), MsgType::Ack)?;
+    let fi = frame(a.receive(n + 2, 1, &ack), MsgType::FinI)?;
+    let fr = frame(b.receive(n + 3, 1, &fi), MsgType::FinR)?;
+    let kc = frame(a.receive(n + 4, 1, &fr), MsgType::KeyConfirm)?;
+    let kc2 = frame(b.receive(n + 5, 1, &kc), MsgType::KeyConfirm)?;
+    a.receive(n + 6, 1, &kc2);
+    Some(Fin::decode(&fi).unwrap().t)
+}
+
+fn fill_pool(v: &mut Machine) {
+    for i in 0..MAX_SLOTS as u32 {
+        assert_eq!(v.start_checked(BASE, pid(i), 1).0, StartStatus::Started);
+    }
+    assert_eq!(v.slots_used(), MAX_SLOTS);
+}
+
+/// P24-3, P25-1: пул заполнен 256 разными пирами; отказанный запуск не создаёт записи о пире, хранится в очереди и повторяется по таймеру.
 #[test]
 fn an_own_start_refused_by_the_pool_is_retried_and_creates_no_peer_entry() {
     let mut v = Machine::new(1, SigningKey::from_bytes(&[200u8; 32]), CTX_NETLAYER_UDP);
-    let targets: Vec<PeerId> = (0..(MAX_SLOTS as u8 + 1)).map(|i| Machine::new(1, SigningKey::from_bytes(&[(i % 250) + 1; 32]), CTX_NETLAYER_UDP).id()).collect();
-    let mut distinct: Vec<PeerId> = Vec::new();
-    for id in targets {
-        if !distinct.contains(&id) {
-            distinct.push(id);
-        }
+    fill_pool(&mut v);
+    let entries = v.peer_entries();
+    let target = pid(10_000);
+    let (st, out) = v.start_checked(BASE + 1, target, 7);
+    assert_eq!(st, StartStatus::Queued);
+    assert!(out.is_empty());
+    assert_eq!(v.peer_entries(), entries, "отказанный запуск создал запись о пире");
+    assert_eq!(v.intents_len(), 1);
+    // повтор объединяется, запись в очереди одна
+    assert_eq!(v.start_checked(BASE + 2, target, 7).0, StartStatus::Queued);
+    assert_eq!(v.intents_len(), 1);
+    // пока пул полон, tick ничего не запускает и желание не теряется
+    assert!(frame(v.tick(BASE + 500), MsgType::Request).is_none());
+    assert_eq!(v.intents_len(), 1);
+    // обмены истекают: желание превращается в реальный запрос и очередь пустеет
+    let out = v.tick(BASE + 10_001);
+    assert!(out.iter().any(|o| matches!(o, Out::Send { path: 7, .. })));
+    assert_eq!(v.intents_len(), 0);
+    assert!(v.slots_used() <= MAX_SLOTS);
+}
+
+/// P25-3: переполнение очереди желаний сообщается владельцу, а не теряется молча.
+#[test]
+fn an_overflowing_intent_queue_tells_the_owner() {
+    let mut v = Machine::new(1, SigningKey::from_bytes(&[200u8; 32]), CTX_NETLAYER_UDP);
+    fill_pool(&mut v);
+    for i in 0..MAX_INTENTS as u32 {
+        assert_eq!(v.start_checked(BASE, pid(20_000 + i), 1).0, StartStatus::Queued);
     }
-    // заполняем пул собственными обменами: каждому из MAX_SLOTS разных пиров
-    let mut started = 0;
-    for id in distinct.iter() {
-        if started >= MAX_SLOTS.min(distinct.len()) {
-            break;
-        }
-        if !v.start(BASE, *id, 1).is_empty() {
-            started += 1;
-        }
+    assert_eq!(v.start_checked(BASE, pid(30_000), 1).0, StartStatus::Dropped);
+    assert_eq!(v.intents_len(), MAX_INTENTS);
+    // уже принятое желание по-прежнему объединяется, а не отбрасывается
+    assert_eq!(v.start_checked(BASE, pid(20_000), 2).0, StartStatus::Queued);
+}
+
+/// P25-4: повторный запуск отложенного пира обновляет рабочий путь.
+#[test]
+fn a_queued_start_takes_the_new_working_path() {
+    let mut v = Machine::new(1, SigningKey::from_bytes(&[200u8; 32]), CTX_NETLAYER_UDP);
+    fill_pool(&mut v);
+    let p = pid(40_000);
+    v.start(BASE, p, 7);
+    v.start(BASE + 1, p, 8);
+    let out = v.tick(BASE + 10_001);
+    assert!(out.iter().any(|o| matches!(o, Out::Send { path: 8, .. })));
+    assert!(!out.iter().any(|o| matches!(o, Out::Send { path: 7, .. })));
+}
+
+/// P25-2: при полном списке поколений новая фиксация откладывается, а старое поколение не снимается до своего срока приёма.
+#[test]
+fn a_full_generation_list_defers_the_commit_instead_of_dropping_an_rx_early() {
+    let mut a = machine(1, CTX_NETLAYER_UDP);
+    let mut b = machine(2, CTX_NETLAYER_UDP);
+    let (aid, bid) = (a.id(), b.id());
+    let t0 = full_exchange(&mut a, &mut b, BASE).unwrap();
+    for k in 1..MAX_GENS_PER_PEER as u64 {
+        full_exchange(&mut a, &mut b, BASE + k * 100).unwrap();
     }
-    let peers_before = v.peer_entries();
-    // пул ещё не полон из-за ограниченного числа различных ключей в этом тесте: добиваем пул ожидающими запросами нельзя, поэтому проверяем лимит личности
-    let one = distinct[0];
-    for _ in 0..(MAX_SLOTS_PER_IDENTITY + 2) {
-        let _ = v.start(BASE, one, 1); // повторный запуск объединяется с идущим
-    }
-    assert_eq!(v.peer_entries(), peers_before, "повторные запуски создают лишние записи о пире");
-    assert!(v.intents_len() <= MAX_INTENTS);
-    // отказ из-за лимита личности (8 слотов): забиваем late/incoming одного пира и пробуем start — запись не создаётся, желание ставится в очередь
-    let mut w = Machine::new(2, SigningKey::from_bytes(&[201u8; 32]), CTX_NETLAYER_UDP);
-    let wid = w.id();
-    let mut busy = Machine::new(3, SigningKey::from_bytes(&[202u8; 32]), CTX_NETLAYER_UDP);
-    for i in 0..MAX_PENDING_PER_IDENTITY {
-        let outs = busy.start(BASE + i as u64 * 10, wid, 1);
-        for o in outs {
-            if let Out::Send { bytes, .. } = o {
-                let _ = w.receive(BASE + 5 + i as u64 * 10, 1, &bytes);
-            }
-        }
-        // свежий запрос другого обмена той же личности: expire не снимает, но busy уже имеет outgoing — запускаем новые попытки через tick
-    }
-    let _ = (w, busy);
+    assert!(a.accepts(&bid, &t0) && b.accepts(&aid, &t0));
+    // пятый обмен в тот же момент: места нет, фиксации нет, K0 остаётся
+    assert!(full_exchange(&mut a, &mut b, BASE + 400).is_none());
+    assert!(a.accepts(&bid, &t0) && b.accepts(&aid, &t0));
+    assert!(a.gens_count(&bid) <= MAX_GENS_PER_PEER && b.gens_count(&aid) <= MAX_GENS_PER_PEER);
+    // после срока приёма прежние поколения снимаются, и обмен проходит
+    a.tick(BASE + 40_000);
+    b.tick(BASE + 40_000);
+    assert!(!a.accepts(&bid, &t0));
+    let t5 = full_exchange(&mut a, &mut b, BASE + 40_100).expect("после снятия по сроку обмен проходит");
+    assert!(a.accepts(&bid, &t5) && b.accepts(&aid, &t5));
 }
 
 /// P24-4: срок старого приёма назначается один раз и не продлевается новыми коммитами.

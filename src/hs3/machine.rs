@@ -35,11 +35,24 @@ pub const MAX_SLOTS_PER_IDENTITY: usize = 8;
 pub const MAX_PENDING_PER_IDENTITY: usize = 4;
 /// Зафиксированных поколений на пару (действующее и до трёх прежних) и пар всего: память поколений ограничена числом, а не только слотами.
 pub const MAX_GENS_PER_PEER: usize = 4;
-pub const MAX_PEERS: usize = 4096;
+pub const MAX_PEERS: usize = 2048;
 /// Желаний собственного запуска, не поместившихся в пул, которые автомат повторяет по таймеру.
 pub const MAX_INTENTS: usize = 64;
 const RETX_AT_MS: [u64; 3] = [1_000, 3_000, 7_000]; // повторы с отступами 1, 2, 4 секунды от начала
 const NEW_TRY_AT_MS: [u64; 2] = [4_000, 8_000]; // свежий запрос (новые Ea и nonce), если ответа нет
+
+/// Что произошло с желанием собственного запуска.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StartStatus {
+    /// Запрос отправлен.
+    Started,
+    /// Объединено с идущим обменом.
+    Merged,
+    /// Отложено в ограниченную очередь, повторится по таймеру.
+    Queued,
+    /// Не принято (очередь заполнена или запуск к себе): владелец должен удержать желание и повторить сам.
+    Dropped,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
@@ -335,8 +348,13 @@ impl Machine {
     /// Запустить обмен с пиром. Повторный запуск при идущем обмене объединяется с ним. Если пул полон или достигнут предел личности, запись о
     /// пире не создаётся, а желание хранится в ограниченной очереди и повторяется по таймеру (P24-3).
     pub fn start(&mut self, now: u64, peer: PeerId, path: PathId) -> Vec<Out> {
+        self.start_checked(now, peer, path).1
+    }
+
+    /// То же, но сообщает владельцу, что произошло с желанием: `Dropped` значит, что оно не принято и его нужно удержать и повторить снаружи (P25-3).
+    pub fn start_checked(&mut self, now: u64, peer: PeerId, path: PathId) -> (StartStatus, Vec<Out>) {
         if peer == self.id {
-            return vec![];
+            return (StartStatus::Dropped, vec![]);
         }
         self.expire(now);
         let slots = self.slots_used();
@@ -345,14 +363,20 @@ impl Machine {
             let p = self.peers.get_mut(&peer).unwrap();
             p.want = true;
             p.last_path = path;
-            return vec![];
+            return (StartStatus::Merged, vec![]);
         }
         let blocked = slots >= MAX_SLOTS || existing.is_some_and(|p| p.slots() >= MAX_SLOTS_PER_IDENTITY) || (existing.is_none() && self.peers.len() >= self.max_peers);
         if blocked {
-            if !self.intents.iter().any(|(p, _)| *p == peer) && self.intents.len() < MAX_INTENTS {
-                self.intents.push((peer, path));
+            // повторный запуск того же пира обновляет рабочий путь (P25-4)
+            if let Some(i) = self.intents.iter_mut().find(|(p, _)| *p == peer) {
+                i.1 = path;
+                return (StartStatus::Queued, vec![]);
             }
-            return vec![];
+            if self.intents.len() < MAX_INTENTS {
+                self.intents.push((peer, path));
+                return (StartStatus::Queued, vec![]);
+            }
+            return (StartStatus::Dropped, vec![]);
         }
         self.intents.retain(|(p, _)| *p != peer);
         {
@@ -365,7 +389,7 @@ impl Machine {
         p.restart_at = None;
         let r = t.r.clone();
         p.outgoing = Some(Outgoing { tries: vec![t], started: now, path, phase: OutPhase::WaitAck, retx_done: 0, new_tries_done: 0 });
-        vec![Out::Send { path, bytes: r }]
+        (StartStatus::Started, vec![Out::Send { path, bytes: r }])
     }
 
     pub fn receive(&mut self, now: u64, path: PathId, bytes: &[u8]) -> Vec<Out> {
@@ -477,6 +501,12 @@ impl Machine {
         vec![Out::Send { path, bytes: fin_i }]
     }
 
+    /// Есть ли место под новое поколение без вытеснения прежнего, срок приёма которого ещё не наступил (P25-2). Без места фиксация откладывается:
+    /// повтор Fin/старт позже сработает, когда старое поколение будет снято по сроку.
+    fn has_room(&self, peer: &PeerId) -> bool {
+        self.peers.get(peer).map_or(true, |p| p.gens.len() < MAX_GENS_PER_PEER)
+    }
+
     /// Зафиксировать поколение, если его ключ порядка строго больше зафиксированного. Отменяет только более старые состояния.
     fn commit(&mut self, now: u64, peer: PeerId, key: OrderKey, t: [u8; 32], keys: Keys, role: Role) -> bool {
         let p = self.peers.get_mut(&peer).unwrap();
@@ -545,6 +575,9 @@ impl Machine {
             return vec![]; // Fin допускается только с пути-кандидата
         }
         let (key, t, keys) = (inc.key, inc.t, inc.keys.clone());
+        if !self.has_room(&peer) {
+            return vec![]; // обратное давление: запись остаётся, Fin будет повторён
+        }
         if !self.commit(now, peer, key, t, keys.clone(), Role::Responder) {
             // обмен старше зафиксированного: запись снимается, подтверждение не отправляется
             let p = self.peers.get_mut(&peer).unwrap();
@@ -575,6 +608,9 @@ impl Machine {
         let Some((peer, (key, keys, back_path))) = found else { return vec![] };
         if !kdf::mac_eq(&kdf::fin_mac(&keys.kc_r, false, &fin.t), &fin.mac) {
             return vec![];
+        }
+        if !self.has_room(&peer) {
+            return vec![]; // обратное давление (P25-2): FinR будет получен повторно, когда освободится место
         }
         if !self.commit(now, peer, key, fin.t, keys, Role::Initiator) {
             return vec![]; // поздний Fin вытесненной попытки отвергается независимо от верного MAC
