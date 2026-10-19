@@ -41,6 +41,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   /// Сообщение «Доступно обновление …» из /api/update/status (null — нет).
   String? updateNotice;
+  /// Ответ `/api/update/status` целиком (для закреплённого блока новостей на главной).
+  Map<String, dynamic>? updateStatus;
   bool polling = false, lockUnconfirmed = false;
   int epoch = 0, tick = 0, formVersion = 0, operation = 0;
   String? error, notice;
@@ -427,6 +429,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           if (!mounted || own != epoch) return;
           final a = u['available'];
           setState(() {
+            updateStatus = u;
             updateNotice = a is Map && a['version'] is String
                 ? 'Доступно обновление YANDI ${a['version']}'
                 : null;
@@ -558,6 +561,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     ),
   );
   Widget dashboard() => DashboardView(
+    update: updateStatus,
     status: status,
     speed: speed,
     nodes: nodes,

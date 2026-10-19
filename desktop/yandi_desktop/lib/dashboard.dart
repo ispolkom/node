@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'preferences.dart';
+import 'home_blocks.dart';
 import 'theme.dart';
 
 /// «Главная»: отдельные карточки, как в веб-интерфейсе узла — статус, управление, обнаруженные узлы и плитки метрик.
@@ -7,12 +8,15 @@ class DashboardView extends StatelessWidget {
   final Map<String, dynamic>? status, speed;
   final List<dynamic> nodes;
   final Widget controls;
+  /// Ответ `/api/update/status` (подписанная лента выпусков, проверенная узлом): закреплённый блок новостей и обновлений.
+  final Map<String, dynamic>? update;
   const DashboardView({
     super.key,
     required this.status,
     required this.speed,
     required this.nodes,
     required this.controls,
+    this.update,
   });
 
   static String rate(dynamic bytesPerSecond) {
@@ -50,6 +54,10 @@ class DashboardView extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
+        NewsBlock(update: update),
+        gap,
+        const SupportBlock(),
+        gap,
         Panel(title: 'Управление', child: controls),
         gap,
         Panel(
