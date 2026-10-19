@@ -4,12 +4,15 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import '../models/trusted_node.dart';
 import '../services/app_state.dart';
+import '../services/invite_store.dart';
+import '../models/invite_payload.dart';
 import '../theme.dart';
 import '../widgets/secure_field.dart';
 
@@ -25,7 +28,7 @@ class PairScreen extends StatefulWidget {
 /// Это QR сопряжения с узлом (а не ID контакта)?
 bool isPairingPayload(String raw) {
   final t = raw.trim();
-  return t.startsWith('YANDI-PAIR-1:') || (t.startsWith('{') && t.contains('"pairing_code"'));
+  return t.startsWith('YANDI-PAIR-1:') || t.startsWith('yandi://invite') || (t.startsWith('{') && t.contains('"pairing_code"'));
 }
 
 class _PairScreenState extends State<PairScreen> {
@@ -35,8 +38,18 @@ class _PairScreenState extends State<PairScreen> {
     final p = widget.initialPayload;
     if (p != null && p.isNotEmpty) {
       WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _onQr(p); });
+    } else {
+      // принятая ранее ссылка-приглашение живёт час даже после закрытия приложения: ждём только PIN
+      InviteStore.pending().then((m) {
+        if (m != null && mounted && _inviteRaw == null) _onQr('${m['text']}');
+      }).catchError((_) {});
     }
   }
+
+  /// Приглашение от доверенного устройства: ждёт PIN, который пригласивший называет другим каналом.
+  String? _inviteRaw;
+  final TextEditingController _pin = TextEditingController();
+  String? _pinError;
 
   bool _processing = false;
   String? _error;
@@ -172,17 +185,34 @@ class _PairScreenState extends State<PairScreen> {
     await _onQr(raw);
   }
 
-  Future<void> _onQr(String raw) async {
+  Future<void> _onQr(String raw, {String? pin}) async {
     if (_processing) return;
     setState(() { _processing = true; _error = null; });
 
     try {
       // Новый формат — непрозрачный blob YANDI-PAIR-1:<base64 JSON>; старый — открытый JSON. Понимаем оба.
       var payload = raw.trim();
+      final fromLink = inviteTextFromLink(payload);
+      if (fromLink != null) payload = fromLink;
       if (payload.startsWith('YANDI-PAIR-1:')) {
         payload = utf8.decode(base64.decode(payload.substring('YANDI-PAIR-1:'.length).trim()));
       }
       final data        = jsonDecode(payload) as Map<String, dynamic>;
+      final isInvite    = data['invite'] == true;
+      if (isInvite) {
+        final exp = data['exp'];
+        if (exp is int && exp * 1000 < DateTime.now().millisecondsSinceEpoch) {
+          await InviteStore.clearPending();
+          throw const _InviteGone('Срок действия приглашения истёк. Попросите прислать новое.');
+        }
+        if (pin == null) {
+          // сохраняем ссылку на час и спрашиваем PIN
+          if (exp is int) await InviteStore.savePending(text: raw.trim(), expMs: exp * 1000);
+          if (!mounted) return;
+          setState(() { _processing = false; _inviteRaw = raw; _pinError = null; _pin.clear(); });
+          return;
+        }
+      }
       final host        = data['host']            as String;
       final port        = data['port']            as int;
       final code        = data['pairing_code']    as String;
@@ -202,10 +232,34 @@ class _PairScreenState extends State<PairScreen> {
         body: jsonEncode({
           'pairing_code': code,
           'device_name':  _deviceLabel(),
+          if (pin != null) 'pin': pin,
         }),
       ).timeout(const Duration(seconds: 10));
 
-      if (res.statusCode != 200) throw Exception('Pairing failed: ${res.body}');
+      if (res.statusCode != 200) {
+        if (isInvite) {
+          String? reason;
+          try { reason = (jsonDecode(res.body) as Map)['reason'] as String?; } catch (_) {}
+          switch (reason) {
+            case 'used':
+              await InviteStore.clearPending();
+              throw const _InviteGone('Ссылка уже активирована и больше не действительна.');
+            case 'expired':
+            case 'bad':
+              await InviteStore.clearPending();
+              throw const _InviteGone('Срок действия приглашения истёк или ссылка недействительна.');
+            case 'pin_burned':
+              await InviteStore.clearPending();
+              throw const _InviteGone('PIN введён неверно слишком много раз: приглашение погашено. Попросите новое.');
+            case 'pin_wrong':
+              throw const _PinWrong('Неверный PIN. Осталось меньше попыток: три ошибки — и приглашение сгорит.');
+            case 'pin_required':
+              throw const _PinWrong('Введите PIN из 4 цифр.');
+          }
+        }
+        throw Exception('Pairing failed: ${res.body}');
+      }
+      await InviteStore.clearPending();
 
       final body  = jsonDecode(res.body) as Map<String, dynamic>;
       final token = body['token'] as String;
@@ -236,6 +290,13 @@ class _PairScreenState extends State<PairScreen> {
       await context.read<AppState>().completePairing(node);
       if (!mounted) return;
       Navigator.of(context).pushReplacementNamed('/home');
+    } on _PinWrong catch (e) {
+      if (!mounted) return;
+      setState(() { _processing = false; _pinError = e.message; });
+    } on _InviteGone catch (e) {
+      _recognized = false;
+      if (!mounted) return;
+      setState(() { _processing = false; _inviteRaw = null; _error = e.message; });
     } catch (e) {
       _recognized = false;
       _resetScan('Не вышло подключиться. Наведите камеру на QR ещё раз');
@@ -258,8 +319,64 @@ class _PairScreenState extends State<PairScreen> {
     return LimitedClient(IOClient(ioClient));
   }
 
+  Widget _pinCard() {
+    return Scaffold(
+      backgroundColor: AppTheme.bg,
+      appBar: AppBar(
+        backgroundColor: AppTheme.surface,
+        title: const Text('Приглашение в YANDI', style: TextStyle(color: AppTheme.text)),
+        automaticallyImplyLeading: false,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          const Text(
+            'Вас пригласили подключиться к узлу. Введите PIN из 4 цифр: его должен назвать тот, кто прислал ссылку (голосом или в другом чате, не вместе со ссылкой). '
+            'Ссылка одноразовая и действует час.',
+            style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('invite-pin-field'),
+            controller: _pin,
+            enabled: !_processing,
+            keyboardType: TextInputType.number,
+            maxLength: 4,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            style: const TextStyle(color: AppTheme.text, fontSize: 28, letterSpacing: 8),
+            textAlign: TextAlign.center,
+            decoration: const InputDecoration(hintText: 'PIN', counterText: ''),
+          ),
+          if (_pinError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_pinError!, key: const ValueKey('invite-pin-error'), style: const TextStyle(color: Colors.redAccent)),
+            ),
+          const SizedBox(height: 16),
+          FilledButton(
+            key: const ValueKey('invite-pin-go'),
+            onPressed: _processing ? null : () {
+              final v = _pin.text.trim();
+              if (v.length != 4) { setState(() => _pinError = 'Введите PIN из 4 цифр.'); return; }
+              _onQr(_inviteRaw!, pin: v);
+            },
+            child: Text(_processing ? 'Подключаюсь…' : 'Подключиться'),
+          ),
+          TextButton(
+            onPressed: _processing ? null : () async {
+              await InviteStore.clearPending();
+              if (mounted) setState(() { _inviteRaw = null; _pinError = null; });
+            },
+            child: const Text('Отмена'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (_inviteRaw != null) return _pinCard();
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
@@ -393,4 +510,16 @@ class _PairScreenState extends State<PairScreen> {
       ),
     );
   }
+}
+
+/// Неверный или недостающий PIN: приглашение живо, можно повторить.
+class _PinWrong implements Exception {
+  final String message;
+  const _PinWrong(this.message);
+}
+
+/// Приглашение больше не действует (истекло, использовано, сгорело).
+class _InviteGone implements Exception {
+  final String message;
+  const _InviteGone(this.message);
 }

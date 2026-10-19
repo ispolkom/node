@@ -1,5 +1,6 @@
 import '../models/support_wallet.dart';
 import 'prep_tracker.dart';
+import 'invite_store.dart';
 import '../app_version.dart';
 import 'group_service.dart';
 import 'group_api_http.dart';
@@ -1109,16 +1110,33 @@ class AppState extends ChangeNotifier implements FilesHost {
   String? myRole;
   bool canInvite = false;
 
-  /// Код приглашения для нового устройства: текст `YANDI-PAIR-1:…` (его же показывает QR) и 8-значный код, срок жизни в секундах.
-  Future<({String text, String code, int ttlSecs})> createDeviceInvite() async {
+  /// Приглашение для нового устройства: текст `YANDI-PAIR-1:…` (его же показывает QR), ссылка `yandi://invite?…`, 8-значный код, PIN из 4 цифр
+  /// (его называют приглашённому другим каналом) и срок жизни. Живёт час и переживает закрытие приложения.
+  Future<({String text, String link, String code, String pin, int ttlSecs})> createDeviceInvite() async {
     final node = activeNode;
     final api = _api;
     if (node == null || api == null) throw StateError('Нет связи с узлом');
     final inv = await api.createDeviceInvite();
-    return (text: inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint), code: inv.code, ttlSecs: inv.ttlSecs);
+    final expMs = DateTime.now().millisecondsSinceEpoch + inv.ttlSecs * 1000;
+    final text = inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint, expiresAtSecs: expMs ~/ 1000);
+    await InviteStore.saveIssued(text: text, code: inv.code, pin: inv.pin, expMs: expMs);
+    return (text: text, link: inviteLink(text), code: inv.code, pin: inv.pin, ttlSecs: inv.ttlSecs);
   }
 
-  Future<void> revokeDeviceInvites() async => await _api?.revokeDeviceInvites();
+  /// Ещё живое выданное приглашение (после повторного открытия приложения) или null.
+  Future<({String text, String link, String code, String pin, int ttlSecs})?> activeDeviceInvite() async {
+    final m = await InviteStore.issued();
+    if (m == null) return null;
+    final left = ((m['exp'] as int) - DateTime.now().millisecondsSinceEpoch) ~/ 1000;
+    if (left <= 0) return null;
+    final text = '${m['text']}';
+    return (text: text, link: inviteLink(text), code: '${m['code']}', pin: '${m['pin']}', ttlSecs: left);
+  }
+
+  Future<void> revokeDeviceInvites() async {
+    await InviteStore.clearIssued();
+    await _api?.revokeDeviceInvites();
+  }
   final Set<String> _avatarAnnounced = {};
   DateTime _lastAvatarSync = DateTime.now();
 

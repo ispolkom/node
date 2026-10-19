@@ -2,22 +2,34 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
+import '../services/share_text.dart';
 import '../theme.dart';
 
 /// Код приглашения нового устройства: QR и текст (можно переслать).
-typedef InviteMaker = Future<({String text, String code, int ttlSecs})> Function();
+typedef Invite = ({String text, String link, String code, String pin, int ttlSecs});
+typedef InviteMaker = Future<Invite> Function();
 
 class InviteDeviceScreen extends StatefulWidget {
   final InviteMaker create;
   final Future<void> Function() revoke;
-  const InviteDeviceScreen({super.key, required this.create, required this.revoke});
+
+  /// Ещё живое приглашение (после закрытия и повторного открытия приложения); null — нет.
+  final Future<Invite?> Function()? restore;
+  const InviteDeviceScreen({super.key, required this.create, required this.revoke, this.restore});
   @override
   State<InviteDeviceScreen> createState() => _InviteDeviceScreenState();
+}
+
+String _left(int s) {
+  final v = s.clamp(0, 99999);
+  return v >= 60 ? '${v ~/ 60} мин ${v % 60} с' : '$v с';
 }
 
 class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
   String? text;
   String? code;
+  String? pin;
+  String? link;
   String? error;
   int remaining = 0;
   bool busy = false;
@@ -26,6 +38,17 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
   @override
   void initState() {
     super.initState();
+    widget.restore?.call().then((inv) {
+      if (inv != null && mounted && text == null) {
+        setState(() {
+          text = inv.text;
+          link = inv.link;
+          code = inv.code;
+          pin = inv.pin;
+          remaining = inv.ttlSecs;
+        });
+      }
+    }).catchError((_) {});
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
       if (text == null || !mounted) return;
       setState(() {
@@ -38,6 +61,8 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
   void _clear() {
     text = null;
     code = null;
+    pin = null;
+    link = null;
   }
 
   @override
@@ -59,7 +84,9 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
       if (!mounted) return;
       setState(() {
         text = inv.text;
+        link = inv.link;
         code = inv.code;
+        pin = inv.pin;
         remaining = inv.ttlSecs;
       });
     } catch (e) {
@@ -89,8 +116,8 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
         padding: const EdgeInsets.all(16),
         children: [
           const Text(
-            'Покажите QR или перешлите текстовый код тому, кого приглашаете: он подключится к этому же узлу. Код одноразовый и живёт '
-            'несколько минут. Приглашённый получит права обычного пользователя узла, но сам приглашать не сможет, пока администратор узла '
+            'Покажите QR или перешлите ссылку тому, кого приглашаете: он подключится к этому же узлу. Ссылка одноразовая и живёт час. '
+            'Чтобы её не мог использовать чужой, приглашённому понадобится PIN из 4 цифр: назовите его другим способом (голосом, в другом чате). Приглашённый получит права обычного пользователя узла, но сам приглашать не сможет, пока администратор узла '
             'этого не разрешит. Администратор видит, кто кого пригласил.',
             style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
           ),
@@ -115,17 +142,30 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            Text('Код действует ещё ${remaining.clamp(0, 99999)} с', key: const ValueKey('invite-timer'), style: const TextStyle(color: AppTheme.textSecondary)),
+            Text('Приглашение действует ещё ${_left(remaining)}', key: const ValueKey('invite-timer'), style: const TextStyle(color: AppTheme.textSecondary)),
+            const SizedBox(height: 8),
+            Text('PIN: $pin', key: const ValueKey('invite-pin'), style: const TextStyle(color: AppTheme.text, fontSize: 28, letterSpacing: 6, fontWeight: FontWeight.bold)),
+            const Text('Назовите PIN приглашённому другим каналом, не вместе со ссылкой.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             const SizedBox(height: 8),
             SelectableText('Код: $code', key: const ValueKey('invite-code'), style: const TextStyle(color: AppTheme.text, fontSize: 20, letterSpacing: 2)),
             const SizedBox(height: 8),
-            Row(
+            Wrap(
               children: [
+                TextButton.icon(
+                  key: const ValueKey('invite-share'),
+                  onPressed: () async {
+                    final ok = await shareText(link!);
+                    if (!ok) await Clipboard.setData(ClipboardData(text: link!));
+                    if (context.mounted && !ok) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+                  },
+                  icon: const Icon(Icons.share, size: 18),
+                  label: const Text('Отправить ссылку'),
+                ),
                 TextButton.icon(
                   key: const ValueKey('invite-copy'),
                   onPressed: () => Clipboard.setData(ClipboardData(text: text!)),
                   icon: const Icon(Icons.copy, size: 18),
-                  label: const Text('Скопировать текст приглашения'),
+                  label: const Text('Скопировать текст'),
                 ),
               ],
             ),

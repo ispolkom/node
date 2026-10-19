@@ -10,7 +10,7 @@ void main() {
     final t = inviteText(host: '203.0.113.7', port: 8444, code: '12345678', fingerprint: 'ab' * 32);
     expect(t.startsWith('YANDI-PAIR-1:'), isTrue);
     final j = jsonDecode(utf8.decode(base64.decode(t.substring('YANDI-PAIR-1:'.length)))) as Map<String, dynamic>;
-    expect(j, {'host': '203.0.113.7', 'port': 8444, 'pairing_code': '12345678', 'tls_fingerprint': 'ab' * 32, 'tls': true});
+    expect(j, {'host': '203.0.113.7', 'port': 8444, 'pairing_code': '12345678', 'tls_fingerprint': 'ab' * 32, 'tls': true, 'invite': true});
   });
 
   testWidgets('экран: код и QR показываются, отсчёт идёт, по истечении и по «Отозвать» код исчезает; ошибка узла видна', (t) async {
@@ -21,7 +21,8 @@ void main() {
         create: () async {
           makes++;
           if (makes == 1) throw StateError('дневной предел приглашений исчерпан');
-          return (text: inviteText(host: 'h', port: 1, code: '87654321', fingerprint: 'cd' * 32), code: '87654321', ttlSecs: 3);
+          final tx = inviteText(host: 'h', port: 1, code: '87654321', fingerprint: 'cd' * 32);
+          return (text: tx, link: inviteLink(tx), code: '87654321', pin: '4821', ttlSecs: 3);
         },
         revoke: () async => revoked++,
       ),
@@ -35,7 +36,8 @@ void main() {
     await t.pump();
     await t.pump(const Duration(milliseconds: 10));
     expect(find.byKey(const ValueKey('invite-qr')), findsOneWidget);
-    expect(find.text('Код: 87654321'), findsOneWidget);
+    expect(find.text('Код: 87654321', skipOffstage: false), findsOneWidget);
+    expect(find.text('PIN: 4821'), findsOneWidget, reason: 'PIN виден пригласившему, чтобы назвать его другим каналом');
     await t.pump(const Duration(seconds: 1));
     expect(find.textContaining('ещё 2 с'), findsOneWidget);
     // «Отозвать код» убирает код и сообщает узлу
@@ -53,5 +55,34 @@ void main() {
     await t.pump(const Duration(seconds: 4));
     expect(find.byKey(const ValueKey('invite-qr')), findsNothing, reason: 'истёкший код с экрана убирается');
     expect(find.byKey(const ValueKey('invite-make')), findsOneWidget);
+  });
+
+  test('ссылка-приглашение: туда и обратно; чужая и битая ссылка отвергаются; срок читается из текста', () {
+    final t = inviteText(host: 'h', port: 1, code: '12345678', fingerprint: 'ab' * 32, expiresAtSecs: 1900000000);
+    final link = inviteLink(t);
+    expect(link.startsWith('yandi://invite?d='), isTrue);
+    expect(inviteTextFromLink(link), t);
+    expect(inviteExpiryFromText(t), 1900000000);
+    expect(inviteTextFromLink('https://evil.example/invite?d=abc'), isNull);
+    expect(inviteTextFromLink('yandi://other?d=abc'), isNull);
+    expect(inviteTextFromLink('yandi://invite?d=!!!'), isNull);
+    expect(inviteTextFromLink('yandi://invite?d=${base64Url.encode(utf8.encode('не наш формат'))}'), isNull);
+    expect(inviteExpiryFromText(inviteText(host: 'h', port: 1, code: '1', fingerprint: 'x')), isNull);
+  });
+
+  testWidgets('экран: после закрытия приложения живое приглашение возвращается вместе с PIN', (t) async {
+    final tx = inviteText(host: 'h', port: 1, code: '11112222', fingerprint: 'cd' * 32);
+    await t.pumpWidget(MaterialApp(
+      home: InviteDeviceScreen(
+        create: () async => throw StateError('не должно вызываться'),
+        revoke: () async {},
+        restore: () async => (text: tx, link: inviteLink(tx), code: '11112222', pin: '0042', ttlSecs: 1800),
+      ),
+    ));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    expect(find.text('PIN: 0042'), findsOneWidget);
+    expect(find.text('Код: 11112222', skipOffstage: false), findsOneWidget);
+    expect(find.textContaining('30 мин'), findsOneWidget);
   });
 }

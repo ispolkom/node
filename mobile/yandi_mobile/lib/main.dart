@@ -12,6 +12,9 @@ import 'screens/pair_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/nodes_screen.dart';
 import 'theme.dart';
+import 'models/invite_payload.dart';
+import 'services/invite_store.dart';
+import 'services/vault_service.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,6 +30,28 @@ void main() async {
   // Уведомления и фоновая задача не должны задерживать первый экран: запрос
   // разрешения может не вернуться, и приложение осталось бы чёрным.
   _initInBackground();
+  _listenForInviteLinks();
+}
+
+/// Ссылка-приглашение `yandi://invite?d=…` (нажали в мессенджере или браузере): запоминаем её на час и, если закрытая среда открыта, сразу
+/// показываем экран подключения, где нужно лишь ввести PIN. Иначе ссылка подхватится на экране подключения после входа.
+void _listenForInviteLinks() {
+  const ch = MethodChannel('com.yandi.yandi_mobile/link');
+  Future<void> handle(String? link) async {
+    final text = link == null ? null : inviteTextFromLink(link);
+    if (text == null) return;
+    final exp = inviteExpiryFromText(text);
+    final expMs = exp != null ? exp * 1000 : DateTime.now().millisecondsSinceEpoch + 3600 * 1000;
+    if (expMs <= DateTime.now().millisecondsSinceEpoch) return;
+    await InviteStore.savePending(text: text, expMs: expMs);
+    if (VaultService.instance.unlocked) {
+      NotificationService.navigatorKey.currentState?.push(MaterialPageRoute(builder: (_) => PairScreen(initialPayload: text)));
+    }
+  }
+  ch.setMethodCallHandler((call) async {
+    if (call.method == 'link') await handle(call.arguments as String?);
+  });
+  ch.invokeMethod<String>('initial').then(handle).catchError((_) {});
 }
 
 Future<void> _initInBackground() async {

@@ -237,7 +237,7 @@ class ApiService {
   }
 
   /// Выдать код приглашения нового устройства (только устройство, сопряжённое по QR). Ошибка узла — исключение с его текстом.
-  Future<({String code, int ttlSecs})> createDeviceInvite() async {
+  Future<({String code, String pin, int ttlSecs})> createDeviceInvite() async {
     final res = await _client
         .post(_url('/mobile/device-invite'), headers: _headers, body: '{}')
         .timeout(const Duration(seconds: 10));
@@ -251,7 +251,9 @@ class ApiService {
     if (code is! String || !RegExp(r'^[0-9]{8}$').hasMatch(code) || ttl is! int || ttl <= 0 || ttl > 3600) {
       throw StateError('Узел вернул неверный код приглашения');
     }
-    return (code: code, ttlSecs: ttl);
+    final pin = body['pin'];
+    if (pin is! String || !RegExp(r'^[0-9]{4}$').hasMatch(pin)) throw StateError('Узел не вернул PIN приглашения');
+    return (code: code, pin: pin, ttlSecs: ttl);
   }
 
   /// Отозвать свои действующие коды приглашений.

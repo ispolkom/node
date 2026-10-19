@@ -37,7 +37,11 @@ const MAX_DEVICES: usize = 16;
 const MAX_INVITED: usize = 48;
 /// Живых кодов приглашений на всём узле одновременно.
 const MAX_LIVE_INVITES: usize = 64;
-const INVITE_TTL: Duration = Duration::from_secs(600);
+const INVITE_TTL: Duration = Duration::from_secs(3600);
+/// сколько неверных PIN терпит один код: после этого он сгорает (PIN из 4 цифр защищён не длиной, а числом попыток)
+const INVITE_PIN_FAILS: u8 = 3;
+/// сколько хранится след погашенного/истёкшего кода, чтобы сказать «уже активирована» / «срок истёк», а не просто «неверный»
+const INVITE_TOMB: Duration = Duration::from_secs(24 * 3600);
 /// Неверных попыток ввода кода приглашения на весь узел за окно: больше — приглашения временно не принимаются (подбор кода).
 const INVITE_FAIL_LIMIT: u32 = 20;
 const INVITE_FAIL_WINDOW: Duration = Duration::from_secs(300);
@@ -475,8 +479,53 @@ pub fn issue_pairing_code() -> String {
 
 struct InviteCode {
     code: String,
+    /// 4 цифры; пригласивший диктует их приглашённому другим каналом
+    pin: String,
+    pin_fails: u8,
+    /// код погашен (след остаётся, чтобы повторное использование получило честный ответ)
+    used: bool,
     expires: Instant,
     inviter: String,
+}
+
+impl InviteCode {
+    fn live(&self) -> bool {
+        !self.used && self.expires > Instant::now()
+    }
+}
+
+/// Почему код не принят (для ответа приглашённому).
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum RedeemError {
+    Bad,
+    Used,
+    Expired,
+    PinRequired,
+    PinWrong,
+    PinBurned,
+}
+
+impl RedeemError {
+    fn reason(self) -> &'static str {
+        match self {
+            RedeemError::Bad => "bad",
+            RedeemError::Used => "used",
+            RedeemError::Expired => "expired",
+            RedeemError::PinRequired => "pin_required",
+            RedeemError::PinWrong => "pin_wrong",
+            RedeemError::PinBurned => "pin_burned",
+        }
+    }
+    fn message(self) -> &'static str {
+        match self {
+            RedeemError::Bad => "bad or expired pairing code",
+            RedeemError::Used => "ссылка уже активирована и больше не действительна",
+            RedeemError::Expired => "срок действия приглашения истёк",
+            RedeemError::PinRequired => "введите PIN приглашения: его вам должен назвать пригласивший",
+            RedeemError::PinWrong => "неверный PIN",
+            RedeemError::PinBurned => "PIN введён неверно слишком много раз: приглашение погашено, попросите новое",
+        }
+    }
 }
 
 static INVITE_CODES: Mutex<Vec<InviteCode>> = Mutex::new(Vec::new());
@@ -543,7 +592,7 @@ impl InviteError {
 
 fn purge_invites(codes: &mut Vec<InviteCode>) {
     let now = Instant::now();
-    codes.retain(|c| c.expires > now);
+    codes.retain(|c| c.expires + INVITE_TOMB > now);
 }
 
 /// Может ли устройство приглашать: роль `owner` или `user` и приглашения не выключены.
@@ -552,7 +601,7 @@ fn may_invite(peer: &str) -> bool {
 }
 
 /// Выдать одноразовый код приглашения от устройства `inviter` (номер устройства). Возвращает код и срок жизни в секундах.
-pub fn issue_device_invite(inviter: &str) -> Result<(String, u64), InviteError> {
+pub fn issue_device_invite(inviter: &str) -> Result<(String, String, u64), InviteError> {
     use rand::Rng;
     let policy = invite_policy();
     if !policy.enabled {
@@ -566,7 +615,7 @@ pub fn issue_device_invite(inviter: &str) -> Result<(String, u64), InviteError> 
     }
     let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
     purge_invites(&mut codes);
-    if codes.len() >= MAX_LIVE_INVITES || codes.iter().filter(|c| c.inviter == inviter).count() as u32 >= policy.max_live {
+    if codes.iter().filter(|c| c.live()).count() >= MAX_LIVE_INVITES || codes.iter().filter(|c| c.live() && c.inviter == inviter).count() as u32 >= policy.max_live {
         return Err(InviteError::TooManyLive);
     }
     let now = now_ms();
@@ -584,8 +633,9 @@ pub fn issue_device_invite(inviter: &str) -> Result<(String, u64), InviteError> 
         }
     }
     let code = format!("{:08}", rand::thread_rng().gen_range(0..100_000_000u32));
-    codes.push(InviteCode { code: code.clone(), expires: Instant::now() + INVITE_TTL, inviter: inviter.to_string() });
-    Ok((code, INVITE_TTL.as_secs()))
+    let pin = format!("{:04}", rand::thread_rng().gen_range(0..10_000u32));
+    codes.push(InviteCode { code: code.clone(), pin: pin.clone(), pin_fails: 0, used: false, expires: Instant::now() + INVITE_TTL, inviter: inviter.to_string() });
+    Ok((code, pin, INVITE_TTL.as_secs()))
 }
 
 /// Отозвать все живые коды этого пригласившего.
@@ -596,39 +646,55 @@ pub fn revoke_device_invites(inviter: &str) -> usize {
     before - codes.len()
 }
 
-/// Подошёл ли код приглашения: если да, он погашается и возвращается номер пригласившего. Неверные попытки считаются на весь узел.
-fn redeem_device_invite(code: &str) -> Option<String> {
+/// Подошёл ли код приглашения с PIN: если да, он погашается и возвращается номер пригласившего. Неверные коды считаются на весь узел,
+/// неверные PIN — на сам код (три — и он сгорает).
+fn redeem_device_invite(code: &str, pin: &str) -> Result<String, RedeemError> {
     {
         let mut f = INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((start, n)) = f.as_mut() {
             if start.elapsed() > INVITE_FAIL_WINDOW {
                 *f = None;
             } else if *n >= INVITE_FAIL_LIMIT {
-                return None;
+                return Err(RedeemError::Bad);
             }
         }
     }
     let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
     purge_invites(&mut codes);
     let hit = codes.iter().position(|c| same(&c.code, code.trim()));
-    match hit {
-        Some(i) => {
-            let c = codes.remove(i);
-            // пригласивший мог потерять право (отозван, понижен) между выдачей и вводом
-            if may_invite(&c.inviter) {
-                Some(c.inviter)
-            } else {
-                None
-            }
+    let Some(i) = hit else {
+        let mut f = INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+        match f.as_mut() {
+            Some((_, n)) => *n += 1,
+            None => *f = Some((Instant::now(), 1)),
         }
-        None => {
-            let mut f = INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
-            match f.as_mut() {
-                Some((_, n)) => *n += 1,
-                None => *f = Some((Instant::now(), 1)),
-            }
-            None
+        return Err(RedeemError::Bad);
+    };
+    let c = &mut codes[i];
+    if c.used {
+        return Err(if c.pin_fails >= INVITE_PIN_FAILS { RedeemError::PinBurned } else { RedeemError::Used });
+    }
+    if c.expires <= Instant::now() {
+        return Err(RedeemError::Expired);
+    }
+    let pin = pin.trim();
+    if pin.is_empty() {
+        return Err(RedeemError::PinRequired);
+    }
+    if !same(&c.pin, pin) {
+        c.pin_fails += 1;
+        if c.pin_fails >= INVITE_PIN_FAILS {
+            c.used = true; // сгорел
+            return Err(RedeemError::PinBurned);
         }
+        return Err(RedeemError::PinWrong);
+    }
+    c.used = true;
+    // пригласивший мог потерять право (отозван, понижен) между выдачей и вводом
+    if may_invite(&c.inviter) {
+        Ok(c.inviter.clone())
+    } else {
+        Err(RedeemError::Bad)
     }
 }
 
@@ -1011,6 +1077,9 @@ struct PairReq {
     pairing_code: String,
     #[serde(default)]
     device_name: String,
+    /// PIN приглашения (4 цифры, его называет пригласивший); для кода администратора не нужен
+    #[serde(default)]
+    pin: String,
 }
 
 
@@ -1366,16 +1435,16 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     // не код администратора — тогда код приглашения от доверенного устройства
     let (role, invited_by) = match granted {
         Some(role) => (role, None),
-        None => match redeem_device_invite(&req.pairing_code) {
-            Some(inviter) => {
+        None => match redeem_device_invite(&req.pairing_code, &req.pin) {
+            Ok(inviter) => {
                 // приглашения никого не вытесняют: нет места — отказ (код при этом уже погашен, пригласивший выдаст новый)
                 if with_devices(|d| d.iter().filter(|x| x.role == "invited").count()) >= MAX_INVITED {
                     return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": InviteError::NodeFull.message()}))).into_response();
                 }
                 ("invited".to_string(), Some(inviter))
             }
-            None => {
-                return (StatusCode::FORBIDDEN, Json(json!({"error": "bad or expired pairing code"}))).into_response();
+            Err(e) => {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": e.message(), "reason": e.reason()}))).into_response();
             }
         },
     };
@@ -1900,7 +1969,7 @@ async fn info(
 async fn device_invite_issue(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
     let me = me_peer_of(&dev);
     match issue_device_invite(&me) {
-        Ok((code, ttl)) => Json(json!({"code": code, "expires_in_secs": ttl})).into_response(),
+        Ok((code, pin, ttl)) => Json(json!({"code": code, "pin": pin, "expires_in_secs": ttl})).into_response(),
         Err(e) => {
             let status = match e {
                 InviteError::Disabled | InviteError::NotAllowed => StatusCode::FORBIDDEN,
@@ -3359,14 +3428,14 @@ mod hardening_tests {
         let code = issue_pairing_code();
         let _ = std::fs::remove_file(&p);
         std::fs::create_dir_all(&p).unwrap(); // записать список невозможно
-        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into() })).await;
+        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into(), pin: String::new() })).await;
         assert_eq!(r.status(), StatusCode::INTERNAL_SERVER_ERROR);
         assert_eq!(with_devices(|d| d.len()), before, "устройство не осталось в памяти");
         assert!(with_devices(|d| d.iter().all(|x| x.name != "тест-сохранения")));
         std::fs::remove_dir_all(&p).unwrap();
         // исправно записываемое сопряжение проходит
         let code = issue_pairing_code();
-        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into() })).await;
+        let r = pair(Json(PairReq { pairing_code: code, device_name: "тест-сохранения".into(), pin: String::new() })).await;
         assert_eq!(r.status(), StatusCode::OK);
         with_devices(|d| d.retain(|x| x.name != "тест-сохранения"));
     }
@@ -3908,7 +3977,13 @@ mod invite_tests {
     }
 
     async fn redeem(code: &str, name: &str) -> (StatusCode, Option<String>) {
-        let r = pair(Json(PairReq { pairing_code: code.into(), device_name: name.into() })).await;
+        // верный PIN берём у самого кода (если код неизвестен — пустой)
+        let pin = INVITE_CODES.lock().unwrap().iter().find(|c| c.code == code).map(|c| c.pin.clone()).unwrap_or_default();
+        redeem_pin(code, &pin, name).await
+    }
+
+    async fn redeem_pin(code: &str, pin: &str, name: &str) -> (StatusCode, Option<String>) {
+        let r = pair(Json(PairReq { pairing_code: code.into(), device_name: name.into(), pin: pin.into() })).await;
         let status = r.status();
         let peer = with_devices(|d| d.iter().find(|x| x.name == name).map(|x| x.peer_id()));
         (status, peer)
@@ -3958,9 +4033,9 @@ mod invite_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = add("user", "chain-a");
-        let (code, ttl) = issue_device_invite(&a).unwrap();
+        let (code, _pin, ttl) = issue_device_invite(&a).unwrap();
         assert_eq!(code.len(), 8);
-        assert_eq!(ttl, 600);
+        assert_eq!(ttl, 3600);
         let (st, b) = redeem(&code, "inv-chain-b").await;
         assert_eq!(st, StatusCode::OK);
         let b = b.expect("устройство добавлено");
@@ -3987,17 +4062,54 @@ mod invite_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = add("user", "dead-a");
-        let (code, _) = issue_device_invite(&a).unwrap();
+        let (code, _, _) = issue_device_invite(&a).unwrap();
         // пригласившего отозвали, пока код жил
         with_devices(|d| d.retain(|x| x.peer_id() != a));
         let (st, _) = redeem(&code, "inv-dead-b").await;
         assert_eq!(st, StatusCode::FORBIDDEN, "код отозванного пригласившего не работает");
         // истёкший код
         let a2 = add("user", "dead-a2");
-        let (code2, _) = issue_device_invite(&a2).unwrap();
+        let (code2, _, _) = issue_device_invite(&a2).unwrap();
         INVITE_CODES.lock().unwrap().iter_mut().for_each(|c| c.expires = Instant::now() - Duration::from_secs(1));
         let (st, _) = redeem(&code2, "inv-dead-c").await;
         assert_eq!(st, StatusCode::FORBIDDEN, "истёкший код не работает");
+        reset();
+    }
+
+    #[tokio::test]
+    async fn the_pin_is_required_three_wrong_burn_the_code_and_a_second_use_is_told_so() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "pin-a");
+        let (code, pin, ttl) = issue_device_invite(&a).unwrap();
+        assert_eq!(ttl, 3600);
+        assert_eq!(pin.len(), 4);
+        assert!(pin.bytes().all(|b| b.is_ascii_digit()));
+        // без PIN — просят PIN, код цел
+        assert_eq!(redeem_device_invite(&code, ""), Err(RedeemError::PinRequired));
+        // два неверных — код жив
+        let wrong = if pin == "0000" { "1111" } else { "0000" };
+        assert_eq!(redeem_device_invite(&code, wrong), Err(RedeemError::PinWrong));
+        assert_eq!(redeem_device_invite(&code, wrong), Err(RedeemError::PinWrong));
+        // верный PIN принимается один раз
+        let (st, peer) = redeem_pin(&code, &pin, "inv-pin-b").await;
+        assert_eq!(st, StatusCode::OK);
+        assert!(peer.is_some());
+        assert_eq!(redeem_device_invite(&code, &pin), Err(RedeemError::Used), "повтор: ссылка уже активирована");
+        // третий неверный сжигает код, верный PIN после этого не помогает
+        let (code2, pin2, _) = issue_device_invite(&a).unwrap();
+        let wrong2 = if pin2 == "0000" { "1111" } else { "0000" };
+        for _ in 0..2 {
+            assert_eq!(redeem_device_invite(&code2, wrong2), Err(RedeemError::PinWrong));
+        }
+        assert_eq!(redeem_device_invite(&code2, wrong2), Err(RedeemError::PinBurned));
+        assert_eq!(redeem_device_invite(&code2, &pin2), Err(RedeemError::PinBurned));
+        // истёкший код говорит «срок истёк»
+        let (code3, pin3, _) = issue_device_invite(&a).unwrap();
+        INVITE_CODES.lock().unwrap().iter_mut().filter(|c| c.code == code3).for_each(|c| c.expires = Instant::now() - Duration::from_secs(1));
+        assert_eq!(redeem_device_invite(&code3, &pin3), Err(RedeemError::Expired));
+        // отозванный и неизвестный — «неверный»
+        assert_eq!(redeem_device_invite("12345678", "1234"), Err(RedeemError::Bad));
         reset();
     }
 
@@ -4006,7 +4118,7 @@ mod invite_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = add("user", "guess-a");
-        let (good, _) = issue_device_invite(&a).unwrap();
+        let (good, _, _) = issue_device_invite(&a).unwrap();
         let wrong = if good == "00000000" { "11111111" } else { "00000000" };
         for i in 0..INVITE_FAIL_LIMIT {
             let (st, _) = redeem(wrong, &format!("inv-guess-{i}")).await;
@@ -4022,7 +4134,7 @@ mod invite_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = add("user", "full-a");
-        let (code, _) = issue_device_invite(&a).unwrap();
+        let (code, _, _) = issue_device_invite(&a).unwrap();
         let before_owners = with_devices(|d| d.iter().filter(|x| x.role != "invited" && x.role != "guest").count());
         for i in 0..MAX_INVITED {
             add("invited", &format!("fill{i:03}"));
@@ -4040,11 +4152,11 @@ mod invite_tests {
         let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset();
         let a = add("user", "br-a");
-        let (c1, _) = issue_device_invite(&a).unwrap();
+        let (c1, _, _) = issue_device_invite(&a).unwrap();
         let (_, b) = redeem(&c1, "inv-br-b").await;
         let b = b.unwrap();
         promote_device(&b[..16]).unwrap();
-        let (c2, _) = issue_device_invite(&b).unwrap();
+        let (c2, _, _) = issue_device_invite(&b).unwrap();
         let (_, c) = redeem(&c2, "inv-br-c").await;
         let c = c.unwrap();
         let other = add("user", "br-other");

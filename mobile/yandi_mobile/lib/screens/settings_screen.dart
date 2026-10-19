@@ -141,7 +141,7 @@ class SettingsScreen extends StatelessWidget {
                 title: const Text('Пригласить устройство', style: TextStyle(color: AppTheme.text)),
                 subtitle: const Text('QR или код для друга: он подключится к этому узлу. Приглашённый приглашать сам не сможет.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                 onTap: () => Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => InviteDeviceScreen(create: state.createDeviceInvite, revoke: state.revokeDeviceInvites),
+                  builder: (_) => InviteDeviceScreen(create: state.createDeviceInvite, revoke: state.revokeDeviceInvites, restore: state.activeDeviceInvite),
                 )),
               )
             else

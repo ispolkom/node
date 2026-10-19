@@ -14,11 +14,34 @@ import io.flutter.plugin.common.MethodChannel
 class MainActivity : FlutterActivity() {
 
     private var pendingPrepare: MethodChannel.Result? = null
+    private var linkChannel: MethodChannel? = null
+    private var initialLink: String? = null
+
+    /// ссылка-приглашение yandi://invite?d=…: отдаём её только нашей схеме и хосту, остальное игнорируем
+    private fun inviteLink(i: Intent?): String? {
+        val d = i?.data ?: return null
+        return if (i.action == Intent.ACTION_VIEW && d.scheme == "yandi" && d.host == "invite") d.toString() else null
+    }
+
+    override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        super.onCreate(savedInstanceState)
+        initialLink = inviteLink(intent)
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        inviteLink(intent)?.let { linkChannel?.invokeMethod("link", it) }
+    }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         val messenger = flutterEngine.dartExecutor.binaryMessenger
 
+        linkChannel = MethodChannel(messenger, "com.yandi.yandi_mobile/link").also { ch ->
+            ch.setMethodCallHandler { call, result ->
+                if (call.method == "initial") { result.success(initialLink); initialLink = null } else result.notImplemented()
+            }
+        }
         MethodChannel(messenger, "com.yandi.yandi_mobile/vpn").setMethodCallHandler { call, result -> vpn(call, result) }
         // в прокси-режиме пакеты через приложение не идут; канал нужен, чтобы подписка из Dart не падала
         EventChannel(messenger, "com.yandi.yandi_mobile/vpn_events").setStreamHandler(object : EventChannel.StreamHandler {
@@ -71,6 +94,15 @@ class MainActivity : FlutterActivity() {
                         startActivity(Intent(Intent.ACTION_DELETE, android.net.Uri.parse("package:$packageName")).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }
                     result.success(true)
+                }
+                // переслать текст (адрес кошелька проекта) через системное окно «Поделиться»: в другое приложение, мессенджер, кошелёк
+                "shareText" -> {
+                    val text = call.argument<String>("text")
+                    if (text.isNullOrEmpty() || text.length > 4096) { result.error("arg", "нет текста", null); return@setMethodCallHandler }
+                    runCatching {
+                        val send = Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT, text)
+                        startActivity(Intent.createChooser(send, "Отправить адрес").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }.fold({ result.success(true) }, { result.error("share", it.message, null) })
                 }
                 // окно закрыто от скриншотов, записи экрана и превью в списке приложений (экраны ввода пароля и секретных слов)
                 "secure" -> {
