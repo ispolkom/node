@@ -1370,4 +1370,17 @@ mod tests {
         let forged = crate::crypto::sealed::seal(&evil, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), &plain).unwrap();
         assert!(cm.transport.open_signal(peer, T::VoiceData, &forged).await.is_none());
     }
+
+    /// Какие пакеты идут только запечатанными; служебные пакеты самого транспорта и куски файла (свой ключ) — нет.
+    #[test]
+    fn the_sealed_packet_set_covers_control_traffic_only() {
+        use crate::p2p::P2PPacketType as T;
+        use crate::p2p::transport::must_seal;
+        for t in [T::ChatAck, T::ChatRead, T::ChatTyping, T::ChatDeleteMessage, T::VoiceCallRequest, T::VoiceData, T::VideoCallReject, T::VideoData, T::FileTransferStart, T::FileTransferEnd, T::FileTransferCancel, T::FileMissing, T::FileComplete] {
+            assert!(must_seal(t), "{t:?} должен идти запечатанным");
+        }
+        for t in [T::ChatMessage, T::FileChunk, T::PunchReq, T::PunchIntro, T::RelayReq, T::RelayGrant, T::PathChallenge, T::PathResponse] {
+            assert!(!must_seal(t), "{t:?} не должен запечатываться этим слоем");
+        }
+    }
 }
