@@ -5,6 +5,7 @@ import 'preferences.dart';
 import 'transport/api.dart';
 import 'domain/shell_repository.dart';
 import 'groups.dart';
+import 'contact_avatar.dart';
 
 /// Only daemon-issued pairing material. No SVG engine, links or disk cache.
 class DevicesPanel extends StatefulWidget {
@@ -133,9 +134,9 @@ class _DevicesPanelState extends State<DevicesPanel> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => GroupConfirm(
-        title: promote ? 'Повысить до пользователя?' : 'Отозвать устройство и всех, кого оно пригласило?',
+        title: promote ? 'Подтвердить пользователя?' : 'Отозвать устройство и всех, кого оно пригласило?',
         detail: promote
-            ? 'Устройство получит право приглашать другие устройства по своему коду.'
+            ? 'Вы знаете этого человека. Устройство станет пользователем и получит право приглашать другие устройства по своему коду.'
             : 'Будут отозваны это устройство, его приглашённые и приглашённые ими. Это нельзя отменить.',
       ),
     );
@@ -149,6 +150,14 @@ class _DevicesPanelState extends State<DevicesPanel> {
       if (active) await widget.onChanged?.call();
     });
     if (active) await refresh();
+  }
+
+  /// Ник, который человек задал себе сам; пусто — устройство без ника.
+  static bool _hasNick(Map<String, dynamic> d) => d['nick'] is String && (d['nick'] as String).trim().isNotEmpty;
+  static String _shownName(Map<String, dynamic> d) => _hasNick(d) ? '${d['nick']}'.trim() : '${d['name']}';
+  static String _inviterName(Map<String, dynamic> d) {
+    final n = d['invited_by_nick'];
+    return n is String && n.trim().isNotEmpty ? n.trim() : '${d['invited_by_name']}';
   }
 
   static const roleLabels = {
@@ -262,13 +271,56 @@ class _DevicesPanelState extends State<DevicesPanel> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('${d['name']}'),
-                SelectableText('${d['peer_id']}'),
-                UiText(d['online'] == true ? 'В сети' : 'Не в сети'),
+                // ник и картинка, которые человек задал себе сам; без них — техническое имя
+                Row(
+                  key: ValueKey('device-head-${d['peer_id']}'),
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    ContactAvatar(
+                      api: widget.api,
+                      avatarId: (d['avatar_hash'] is String && (d['avatar_hash'] as String).isNotEmpty) ? '${d['peer_id']}' : '',
+                      name: _shownName(d),
+                      size: 44,
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(_shownName(d), key: ValueKey('device-nick-${d['peer_id']}'), style: const TextStyle(fontSize: 17, fontWeight: FontWeight.bold)),
+                          if (_hasNick(d)) Text('${d['name']}', style: const TextStyle(fontSize: 12)),
+                          UiText(d['online'] == true ? 'В сети' : 'Не в сети'),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+                SelectableText('${d['peer_id']}', style: const TextStyle(fontSize: 11)),
                 if (widget.paired && d['role'] is String)
                   UiText(
                     'Роль: ${roleLabels[d['role']] ?? roleLabels['unknown']}'
-                    '${d['invited_by_name'] is String ? ' · пригласил: ${d['invited_by_name']}' : d['invited_by'] is String ? ' · пригласивший удалён' : ''}',
+                    '${d['role'] == 'invited' ? ' · ждёт подтверждения' : ''}',
+                  ),
+                if (widget.paired && d['invited_by'] is String)
+                  Padding(
+                    key: ValueKey('invited-by-${d['peer_id']}'),
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Row(
+                      children: [
+                        const Text('Пригласил: ', style: TextStyle(fontSize: 12)),
+                        if (d['invited_by_name'] is String) ...[
+                          ContactAvatar(
+                            api: widget.api,
+                            avatarId: (d['invited_by_avatar_hash'] is String && (d['invited_by_avatar_hash'] as String).isNotEmpty) ? '${d['invited_by']}' : '',
+                            name: _inviterName(d),
+                            size: 20,
+                          ),
+                          const SizedBox(width: 6),
+                          Flexible(child: Text(_inviterName(d), style: const TextStyle(fontSize: 12))),
+                        ] else
+                          const Text('пригласивший удалён', style: TextStyle(fontSize: 12)),
+                      ],
+                    ),
                   ),
                 if (widget.paired)
                   UiText(
@@ -297,7 +349,7 @@ class _DevicesPanelState extends State<DevicesPanel> {
                       TextButton(
                         key: ValueKey('promote-${d['peer_id']}'),
                         onPressed: widget.busy ? null : () => inviteAction(d, 'promote'),
-                        child: const UiText('Повысить до пользователя'),
+                        child: const UiText('Подтвердить пользователя'),
                       ),
                     if (widget.paired && (d['role'] == 'invited' || devices.any((x) => x['invited_by'] == d['peer_id'])))
                       TextButton(

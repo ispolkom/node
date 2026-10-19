@@ -842,10 +842,14 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
         .unwrap_or_default();
     let all = with_devices(|d| d.clone());
     let names: std::collections::HashMap<String, String> = all.iter().map(|x| (x.peer_id(), x.name.clone())).collect();
+    // ник и картинка, которые человек задал себе сам (если не скрыл их): по ним админ узнаёт, кого подтверждать
+    let profiles: std::collections::HashMap<String, (String, String)> = all.iter().map(|x| (x.peer_id(), crate::device_profile::public(&x.peer_id()))).collect();
     all.into_iter()
         .map(|x| {
             let pid = x.peer_id();
             let n = live_count(&pid);
+            let (nick, avatar_hash) = profiles.get(&pid).cloned().unwrap_or_default();
+            let by = x.invited_by.as_deref().and_then(|b| profiles.get(b));
             json!({
                 "id": pid[..16].to_string(),
                 "name": x.name,
@@ -858,6 +862,10 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
                 "role": x.role,
                 "invited_by": x.invited_by,
                 "invited_by_name": x.invited_by.as_deref().and_then(|b| names.get(b).cloned()),
+                "nick": nick,
+                "avatar_hash": avatar_hash,
+                "invited_by_nick": by.map(|p| p.0.clone()).unwrap_or_default(),
+                "invited_by_avatar_hash": by.map(|p| p.1.clone()).unwrap_or_default(),
             })
         })
         .collect()
@@ -4186,6 +4194,19 @@ mod invite_tests {
         assert_eq!(row["role"], "invited");
         assert_eq!(row["invited_by"], a.as_str());
         assert_eq!(row["invited_by_name"], "inv-ov-a");
+        assert_eq!(row["nick"], "", "ника ещё нет — поле пустое, админ видит техническое имя");
+        // человек задал себе ник: админ видит его у него и у того, кого он пригласил
+        crate::device_profile::put(&a, Some("Вася"), None, None).expect("профиль");
+        let ov = devices_overview();
+        let mine = ov.iter().find(|r| r["peer_id"] == a.as_str()).unwrap();
+        assert_eq!(mine["nick"], "Вася");
+        let row = ov.iter().find(|r| r["name"] == "inv-ov-b").unwrap();
+        assert_eq!(row["invited_by_nick"], "Вася");
+        // скрыл профиль — ник не показывается
+        crate::device_profile::put(&a, None, None, Some(true)).expect("профиль");
+        let ov = devices_overview();
+        assert_eq!(ov.iter().find(|r| r["peer_id"] == a.as_str()).unwrap()["nick"], "");
+        crate::device_profile::forget(&a);
         reset();
     }
 

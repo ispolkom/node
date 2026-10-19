@@ -50,8 +50,8 @@ class InviteDeviceApi extends DeviceApi {
     if (path == '/api/mobile/devices') {
       return {
         'devices': [
-          {'name': 'Мама', 'peer_id': 'a' * 64, 'online': true, 'connections': 1, 'last_seen_ms': 0, 'role': 'user'},
-          {'name': 'Тётя', 'peer_id': 'b' * 64, 'online': false, 'connections': 0, 'last_seen_ms': 0, 'role': 'invited', 'invited_by': 'a' * 64, 'invited_by_name': 'Мама'},
+          {'name': 'Мама', 'peer_id': 'a' * 64, 'online': true, 'connections': 1, 'last_seen_ms': 0, 'role': 'user', 'nick': 'Мама Лена', 'avatar_hash': ''},
+          {'name': 'Тётя', 'peer_id': 'b' * 64, 'online': false, 'connections': 0, 'last_seen_ms': 0, 'role': 'invited', 'invited_by': 'a' * 64, 'invited_by_name': 'Мама', 'invited_by_nick': 'Мама Лена', 'invited_by_avatar_hash': ''},
           {'name': 'Чужой', 'peer_id': 'c' * 64, 'online': false, 'connections': 0, 'last_seen_ms': 0, 'role': 'вредное <b>значение</b>'},
         ],
       };
@@ -122,17 +122,23 @@ void main() {
   testWidgets('роль и пригласивший видны; повысить можно только приглашённого; отзыв ветки — с подтверждением', (t) async {
     final api = InviteDeviceApi();
     await m2.openAdmin(t, api, 'Настройки узла');
-    expect(find.textContaining('Роль: Приглашённый · пригласил: Мама'), findsOneWidget);
+    expect(find.textContaining('Роль: Приглашённый · ждёт подтверждения'), findsOneWidget);
     expect(find.textContaining('Роль: Пользователь'), findsOneWidget);
+    // ник, который человек задал себе сам, — крупно; техническое имя — мелко; у приглашённого видно, кто пригласил
+    expect(find.byKey(ValueKey('device-nick-${'a' * 64}')), findsOneWidget);
+    expect((t.widget(find.byKey(ValueKey('device-nick-${'a' * 64}'))) as Text).data, 'Мама Лена');
+    expect((t.widget(find.byKey(ValueKey('device-nick-${'b' * 64}'))) as Text).data, 'Тётя', reason: 'нет ника — техническое имя');
+    final by = find.descendant(of: find.byKey(ValueKey('invited-by-${'b' * 64}')), matching: find.text('Мама Лена'));
+    expect(by, findsOneWidget, reason: 'пригласил: ник пригласившего');
     expect(find.textContaining('Неизвестная роль'), findsOneWidget, reason: 'неизвестная роль от узла не показывается как есть');
     expect(find.textContaining('<b>'), findsNothing);
-    expect(find.text('Повысить до пользователя'), findsOneWidget, reason: 'только у приглашённого');
+    expect(find.text('Подтвердить пользователя'), findsOneWidget, reason: 'только у приглашённого');
     // повышение
-    await t.ensureVisible(find.text('Повысить до пользователя'));
-    await m1.click(t, 'Повысить до пользователя');
+    await t.ensureVisible(find.text('Подтвердить пользователя'));
+    await m1.click(t, 'Подтвердить пользователя');
     await m1.click(t, 'Отмена');
     expect(api.calls.any((c) => c.endsWith('/promote')), false);
-    await m1.click(t, 'Повысить до пользователя');
+    await m1.click(t, 'Подтвердить пользователя');
     await m1.click(t, 'Подтвердить');
     expect(api.calls.contains('/api/mobile/devices/${'b' * 64}/promote'), true);
     // отзыв ветки у того, кто пригласил (у «Мамы» есть приглашённый)

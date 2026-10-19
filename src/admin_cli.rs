@@ -554,8 +554,20 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
                 println!("Сопряжённых устройств нет. Код сопряжения: yandi admin pairing");
             }
             for d in v["devices"].as_array().into_iter().flatten() {
-                let by = if d["invited_by_name"].is_string() { format!("  (пригласил: {})", field(d, "invited_by_name")) } else if d["invited_by"].is_string() { "  (пригласивший удалён)".to_string() } else { String::new() };
-                println!("  {}  {}  {}{by}", field(d, "peer_id"), field(d, "name"), role_label(&field(d, "role")));
+                // ник, который человек задал себе сам, главнее технического имени устройства
+                let nick = d["nick"].as_str().map(str::trim).filter(|n| !n.is_empty());
+                let who = match nick {
+                    Some(n) => format!("{n} [{}]", field(d, "name")),
+                    None => field(d, "name"),
+                };
+                let inviter = d["invited_by_nick"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).or_else(|| d["invited_by_name"].as_str().map(str::to_string));
+                let by = match (&inviter, d["invited_by"].is_string()) {
+                    (Some(n), _) => format!("  (пригласил: {n})"),
+                    (None, true) => "  (пригласивший удалён)".to_string(),
+                    _ => String::new(),
+                };
+                let wait = if d["role"] == "invited" { ", ждёт подтверждения" } else { "" };
+                println!("  {}  {}  {}{wait}{by}", field(d, "peer_id"), who, role_label(&field(d, "role")));
             }
         }
         "device-remove" => {
@@ -643,7 +655,7 @@ const HELP: &str = "yandi admin — управление запущенным у
                                    код и QR сопряжения телефона
   yandi admin devices              сопряжённые устройства
   yandi admin device-remove ID     отвязать устройство
-  yandi admin device-promote ID    повысить приглашённое устройство до пользователя (оно сможет приглашать само)
+  yandi admin device-promote ID    подтвердить приглашённое устройство: оно станет пользователем и сможет приглашать само
   yandi admin device-revoke-branch ID   отозвать устройство и всех, кого оно пригласило
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
   yandi admin phone-action ПИР ДЕЙСТВИЕ
