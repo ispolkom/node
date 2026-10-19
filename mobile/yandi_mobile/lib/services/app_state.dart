@@ -217,6 +217,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _presenceTimer = async_lib.Timer.periodic(const Duration(seconds: 20), (_) {
       unawaited(refreshContacts());
       unawaited(syncProfile());
+      unawaited(refreshRole());
     });
 
     unawaited(checkAppUpdate());
@@ -383,6 +384,21 @@ class AppState extends ChangeNotifier implements FilesHost {
     } else {
       unawaited(syncGroups());
     }
+  }
+
+  /// Роль и право приглашать могут измениться на узле (администратор подтвердил устройство): подтягиваем их вместе с остальным, не дожидаясь переподключения.
+  Future<void> refreshRole() async {
+    try {
+      final info = await _api?.getInfo();
+      if (info == null) return;
+      final role = info['role'] as String?;
+      final can = info['can_invite'] == true;
+      if (role != myRole || can != canInvite) {
+        myRole = role;
+        canInvite = can;
+        notifyListeners();
+      }
+    } catch (_) {}
   }
 
   Future<void> _loadInitialData() async {
