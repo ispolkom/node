@@ -431,13 +431,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       floatingActionButton: _tabs.index == 2
           ? null
           : _tabs.index == 3
-          ? FloatingActionButton(
-              backgroundColor: AppTheme.accent,
-              foregroundColor: Colors.black,
-              tooltip: 'Добавить файл в хранилище',
-              onPressed: () => _filesKey.currentState?.addFiles(),
-              child: const Icon(Icons.add),
-            )
+          ? null // файлы сюда вручную не добавляются: только то, что пришло в чатах и группах
           : FloatingActionButton(
               backgroundColor: AppTheme.accent,
               foregroundColor: Colors.black,

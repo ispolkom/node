@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -16,8 +15,7 @@ class FilesTab extends StatefulWidget {
   /// Для тестов: готовое хранилище вместо папки приложения.
   final VaultFiles? vault;
   final FilesHost? host;
-  final Future<void> Function(String)? dropPickerCopy;
-  const FilesTab({super.key, this.vault, this.host, this.dropPickerCopy});
+  const FilesTab({super.key, this.vault, this.host});
   @override
   State<FilesTab> createState() => FilesTabState();
 }
@@ -50,37 +48,6 @@ class FilesTabState extends State<FilesTab> {
       _loading = false;
       _selected.removeWhere((p) => !list.any((f) => f.path == p));
     });
-  }
-
-  /// «+» на вкладке: взять файл из памяти телефона и положить в хранилище (чтобы переслать оттуда). Временную копию выбора сразу чистим.
-  Future<void> addFiles() async {
-    final cleanup = widget.dropPickerCopy ?? context.read<AppState>().dropPickerCopy;
-    final res = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (res == null) return;
-    var failed = 0;
-    try {
-      final v = _vault;
-      if (v == null) return;
-      for (final f in res.files) {
-        final p = f.path;
-        if (p == null) continue;
-        try {
-          await v.importFile(p, name: f.name);
-        } catch (_) {
-          failed++;
-        }
-      }
-    } finally {
-      // открытая копия выбора не должна остаться во временном каталоге ни при какой ошибке
-      for (final file in res.files) {
-        final path = file.path;
-        if (path != null) await cleanup(path);
-      }
-    }
-    if (failed > 0 && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось добавить файлов: $failed (нет места или нет доступа)')));
-    }
-    await reload();
   }
 
   Future<void> _open(VaultFile f) async {
@@ -202,7 +169,7 @@ class FilesTabState extends State<FilesTab> {
                 Center(child: Text('Файлов пока нет', style: TextStyle(color: AppTheme.textSecondary))),
                 Padding(
                   padding: EdgeInsets.all(24),
-                  child: Text('Здесь лежит всё, что вы получили, и то, что добавили кнопкой «+». Хранилище изолировано: другие приложения его не видят.',
+                  child: Text('Здесь лежит всё, что вы получили в чатах и группах. Добавить файл отсюда нельзя: отправляйте файлы из чата или группы. Хранилище изолировано: другие приложения его не видят.',
                       textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                 ),
               ])
