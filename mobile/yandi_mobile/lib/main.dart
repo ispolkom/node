@@ -12,6 +12,7 @@ import 'screens/pair_screen.dart';
 import 'screens/home_screen.dart';
 import 'screens/nodes_screen.dart';
 import 'theme.dart';
+import 'l10n.dart';
 import 'models/invite_payload.dart';
 import 'services/invite_store.dart';
 import 'services/vault_service.dart';
@@ -19,6 +20,7 @@ import 'services/vault_service.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   FlutterCryptography.enable();
+  await Lang.load();   // сохранённый язык интерфейса (иначе язык системы)
   SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
   VaultLockObserver(NotificationService.navigatorKey).attach();
   runApp(

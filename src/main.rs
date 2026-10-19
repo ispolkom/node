@@ -24,10 +24,11 @@ async fn main() -> anyhow::Result<()> {
         // у подкоманд своя справка (`yandi admin --help`, `yandi setup --help`)
         let own_help = matches!(argv.get(1).map(String::as_str), Some("admin" | "setup"));
         if !own_help && argv.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "help" | "-help")) {
-            println!(
-                "YANDI v{}\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: setup (первая настройка), admin (управление узлом), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).",
-                env!("CARGO_PKG_VERSION")
-            );
+            // язык справки: YANDI_LANG, сохранённый выбор или язык системы
+            yandi::i18n::set(yandi::i18n::detect(None).unwrap_or(yandi::i18n::Lang::Ru));
+            let ru = "\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: setup (первая настройка), admin (управление узлом), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).";
+            let en = "\n\nUsage: yandi [options]\n  --anchor               force the Anchor role\n  --lite | --mobile      light client\n  --anchor-url <wss://…> --anchor-fp <hex>   connect to an anchor with fingerprint pinning\n  --ws-bind <addr>       WebSocket listener\n  --jurisdiction <XX>    node jurisdiction\n  --exit-jurisdiction <XX>\n  --anchor-store <path>  paired_anchors.json file\n  --import-pairing <…>   import an invitation\n  --version, -V          version\n  --help, -h             this help\nSubcommands: setup (first-time setup), admin (node management), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nConfiguration: the YANDI_CONFIG variable (path to config.yaml). Console language: --lang ru|en or YANDI_LANG.";
+            println!("YANDI v{}{}", env!("CARGO_PKG_VERSION"), yandi::t!(ru, en));
             std::process::exit(0);
         }
         if !own_help && argv.iter().skip(1).any(|a| matches!(a.as_str(), "--version" | "-V" | "version")) {

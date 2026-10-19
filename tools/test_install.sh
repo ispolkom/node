@@ -7,6 +7,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
+# сообщения проверяются по-русски; выбор языка не пишется в настоящий ~/.config
+export YANDI_LANG=ru XDG_CONFIG_HOME="$W/cfg"
 fail=0
 ok()  { echo "ok   $*"; }
 bad() { echo "FAIL $*"; fail=1; }
@@ -135,6 +137,56 @@ echo 5 > "$STATE/yandi/installed-seq"
 ( STUB_SLEEP=2 PATH="$W/bin:$PATH" XDG_STATE_HOME="$STATE" STUB_LOG="$W/sudoA.log" bash "$HERE/install.sh" --no-service --yes --server --from "$W/s10" --pubkey "$PUB" >"$W/A.txt" 2>&1; echo $? > "$W/A.rc" ) & sleep 0.5
 PATH="$W/bin:$PATH" XDG_STATE_HOME="$STATE" STUB_LOG="$W/sudoB.log" bash "$HERE/install.sh" --no-service --yes --server --from "$W/s50" --pubkey "$PUB" >"$W/B.txt" 2>&1; echo $? > "$W/B.rc"; wait
 [ "$(cat "$W/B.rc")" = 0 ] && [ "$(cat "$STATE/yandi/installed-seq")" = 50 ] && { [ "$(cat "$W/A.rc")" = 0 ] || grep -q "откат" "$W/A.txt"; } && ok "параллельные установки: B успешна, итог 50, A завершилась или отказала откатом" || bad "параллельные установки: A=$(cat "$W/A.rc") B=$(cat "$W/B.rc") номер=$(cat "$STATE/yandi/installed-seq")"
+
+# --- два языка и подтверждение установки строго по раскладке выбранного языка
+run_inst_en() { rm -rf "$W/state-en"; XDG_STATE_HOME="$W/state-en" bash "$HERE/install.sh" --lang en --verify-only "$@" >"$W/out.txt" 2>&1; }
+run_inst_en --server --from "$W/good" --pubkey "$OTHER" && bad "английский: чужой ключ принят" || { grep -q "RELEASE SIGNATURE DOES NOT MATCH" "$W/out.txt" && ! grep -q "ПОДПИСЬ" "$W/out.txt" && ok "английский: отказ по причине, на английском" || { bad "английский: не та диагностика"; tail -3 "$W/out.txt"; }; }
+run_inst_en --server --from "$W/good" --pubkey "$PUB" && grep -q "The release signature is valid" "$W/out.txt" && ok "английский: проверка верного выпуска" || bad "английский: верный выпуск"
+bash "$HERE/install.sh" --lang de >"$W/out.txt" 2>&1; [ $? = 2 ] && ok "неизвестный язык — отказ" || bad "неизвестный язык принят"
+# диалог в настоящем терминале (pty): ответ другой раскладки не засчитывается, правильный — да/нет
+pty_dialog() { # pty_dialog ЯЗЫК ОТВЕТ… → вывод в $W/pty.txt, код возврата — установщика
+  rm -rf "$W/state-pty"; PATH="$W/bin:$PATH" XDG_STATE_HOME="$W/state-pty" STUB_LOG="$W/sudo.pty.log" python3 - "$HERE/install.sh" "$W/good" "$PUB" "$W/pty.txt" "$@" <<'PY'
+import os, pty, select, sys, time
+script, rel, pub, out, lang, *answers = sys.argv[1:]
+pid, fd = pty.fork()
+if pid == 0:
+    os.execvp("bash", ["bash", script, "--lang", lang, "--no-service", "--server", "--from", rel, "--pubkey", pub])
+buf = b""
+def read(t):
+    global buf
+    end = time.time() + t
+    while time.time() < end:
+        r, _, _ = select.select([fd], [], [], 0.2)
+        if r:
+            try:
+                d = os.read(fd, 4096)
+            except OSError:
+                return
+            if not d:
+                return
+            buf += d
+for a in answers:
+    read(2)
+    try:
+        os.write(fd, (a + "\n").encode())
+    except OSError:
+        break  # установщик уже завершился (последнего вопроса не было, например нет команды yandi)
+read(4)
+_, st = os.waitpid(pid, 0)
+open(out, "w").write(buf.decode("utf-8", "replace"))
+sys.exit(os.waitstatus_to_exitcode(st))
+PY
+}
+rm -f "$W/sudo.pty.log"
+pty_dialog ru y н; rc=$?
+{ grep -q "Подтвердите установку? \[Д/н\]" "$W/pty.txt" && grep -q "Введите Д или Н" "$W/pty.txt" && [ "$rc" != 0 ] && [ ! -s "$W/sudo.pty.log" ] && grep -q "Установка отменена" "$W/pty.txt" && ok "русский: латинская y не засчитана, «н» — отмена, ничего не установлено" || { bad "русский диалог (код $rc)"; tail -6 "$W/pty.txt"; }; }
+pty_dialog en н n; rc=$?
+{ grep -q "Confirm the installation? \[Y/n\]" "$W/pty.txt" && grep -q "Did not understand" "$W/pty.txt" && [ "$rc" != 0 ] && [ ! -s "$W/sudo.pty.log" ] && grep -q "Installation cancelled" "$W/pty.txt" && ok "английский: кириллическая «н» не засчитана, n — отмена, ничего не установлено" || { bad "английский диалог (код $rc)"; tail -6 "$W/pty.txt"; }; }
+pty_dialog en "" n; rc=$?
+{ grep -q "^apt-get install" "$W/sudo.pty.log" 2>/dev/null && ok "английский: Enter — «да» по умолчанию, установка выполнена" || { bad "английский: Enter не подтвердил установку (код $rc)"; tail -6 "$W/pty.txt"; }; }
+rm -f "$W/sudo.pty.log"
+pty_dialog ru Д н; rc=$?
+{ grep -q "^apt-get install" "$W/sudo.pty.log" 2>/dev/null && ok "русский: «Д» — установка выполнена" || { bad "русский: Д не подтвердил установку (код $rc)"; tail -6 "$W/pty.txt"; }; }
 
 [ -n "${1:-}" ] && { STATE="$W/state-real"; pass "настоящий выпуск (сервер)" --server --from "$1"; pass "настоящий выпуск (оболочка)" --desktop --from "$1"; }
 [ $fail = 0 ] && echo "ВСЕ ПРОВЕРКИ УСТАНОВЩИКА ПРОШЛИ" || { echo "ЕСТЬ ОШИБКИ"; exit 1; }

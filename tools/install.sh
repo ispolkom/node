@@ -10,80 +10,129 @@
 #               --verify-only            скачать и проверить, ничего не ставить
 #               --no-service             не создавать службу systemd
 #               --yes                    не задавать вопросов (первую настройку не запускать)
+#               --lang ru|en             язык сообщений (без ключа спрашивается в терминале; выбор запоминается)
+# Подтверждение установки — строго по раскладке выбранного языка: по-русски Д/н (кириллица), по-английски Y/n (латиница).
 # Нужны: bash, curl (для URL), openssl 3, sha256sum, sudo. Фраза восстановления и пароли вводятся только в `yandi setup`.
 set -euo pipefail
 
 PUBKEY_DEFAULT="427e076fe0d91d06157cc2cf342310a2df9ee0ca8a0112e384798e080251395f"
 FROM="https://yandi.su/update/deb/"
-MODE=""; VERIFY_ONLY=0; NO_SERVICE=0; YES=0; PUBKEY="$PUBKEY_DEFAULT"
+MODE=""; VERIFY_ONLY=0; NO_SERVICE=0; YES=0; PUBKEY="$PUBKEY_DEFAULT"; LANG_ARG=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) MODE=server;; --desktop) MODE=desktop;;
-    --from) FROM="${2:?--from требует значение}"; shift;;
-    --pubkey) PUBKEY="${2:?--pubkey требует значение}"; shift;;
+    --from) FROM="${2:?--from: нужно значение / needs a value}"; shift;;
+    --pubkey) PUBKEY="${2:?--pubkey: нужно значение / needs a value}"; shift;;
+    --lang) LANG_ARG="${2:?--lang ru|en}"; shift;;
     --verify-only) VERIFY_ONLY=1;; --no-service) NO_SERVICE=1;; --yes) YES=1;;
     -h|--help) sed -n 2,14p "$0"; exit 0;;
-    *) echo "неизвестный параметр: $1" >&2; exit 2;;
+    *) echo "неизвестный параметр / unknown option: $1" >&2; exit 2;;
   esac; shift
 done
 
-die() { echo "ОШИБКА: $*" >&2; exit 1; }
+# Язык: ключ --lang, YANDI_LANG, сохранённый выбор (~/.config/yandi/lang, его читает и сама программа), язык системы. В терминале без явного
+# выбора спрашивает «Выберите язык / Select language» и запоминает ответ.
+case "$LANG_ARG" in ""|ru|en) ;; *) echo "--lang: ru | en" >&2; exit 2;; esac
+LANG_CFG="${XDG_CONFIG_HOME:-$HOME/.config}/yandi/lang"
+LANG_SEL="$LANG_ARG"
+[ -n "$LANG_SEL" ] || case "${YANDI_LANG:-}" in ru|en) LANG_SEL="${YANDI_LANG}";; esac
+LANG_EXPLICIT=0; [ -z "$LANG_SEL" ] || LANG_EXPLICIT=1
+if [ -z "$LANG_SEL" ] && [ -r "$LANG_CFG" ] && [ ! -L "$LANG_CFG" ]; then
+  case "$(head -c 8 "$LANG_CFG" | tr -d ' \n\r')" in ru) LANG_SEL=ru;; en) LANG_SEL=en;; esac
+fi
+if [ -z "$LANG_SEL" ]; then
+  case "${LC_ALL:-${LC_MESSAGES:-${LANG:-}}}" in ru*|RU*) LANG_SEL=ru;; *) LANG_SEL=en;; esac
+fi
+LANG_SAVE=0; [ -z "$LANG_ARG" ] || LANG_SAVE=1
+if [ "$LANG_EXPLICIT" = 0 ] && [ "$YES" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
+  LANG_SAVE=1
+  for _ in 1 2 3; do
+    read -r -p "Выберите язык / Select language [ru/en] ($LANG_SEL): " c || break
+    case "$c" in "") break;; ru|RU|Ru|рус|русский) LANG_SEL=ru; break;; en|EN|En|eng|english) LANG_SEL=en; break;; *) echo "ru | en";; esac
+  done
+fi
+if [ "$LANG_SAVE" = 1 ]; then
+  mkdir -p -m 0700 "$(dirname "$LANG_CFG")" 2>/dev/null && [ ! -L "$LANG_CFG" ] && printf '%s\n' "$LANG_SEL" > "$LANG_CFG" 2>/dev/null || true
+fi
+T() { if [ "$LANG_SEL" = ru ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
+die() { echo "$(T 'ОШИБКА' 'ERROR'): $*" >&2; exit 1; }
+# Вопрос «да/нет» строго по раскладке выбранного языка: русский принимает только кириллицу (Д/н), английский только латиницу (Y/n).
+# Чужая раскладка не угадывается (латинская Y на русской раскладке печатает «н»): вопрос повторяется. Возврат: 0 — да, 1 — нет, 2 — нет внятного ответа.
+ask_yn() { # ask_yn "вопрос ru" "question en" y|n
+  local q hint a
+  if [ "$LANG_SEL" = ru ]; then q="$1"; [ "$3" = y ] && hint="[Д/н]" || hint="[д/Н]"; else q="$2"; [ "$3" = y ] && hint="[Y/n]" || hint="[y/N]"; fi
+  for _ in 1 2 3 4 5; do
+    read -r -p "$q $hint: " a || return 2
+    if [ -z "$a" ]; then [ "$3" = y ] && return 0 || return 1; fi
+    if [ "$LANG_SEL" = ru ]; then
+      case "$a" in д|Д|да|Да|дА|ДА) return 0;; н|Н|нет|Нет|нЕт|НЕТ) return 1;; esac
+      echo "Не понял ответ. Введите Д или Н (кириллицей), переключите раскладку на русскую."
+    else
+      case "$a" in y|Y|yes|Yes|YES|yEs|yeS) return 0;; n|N|no|No|NO) return 1;; esac
+      echo "Did not understand. Type Y or N (Latin letters); switch the keyboard layout to English."
+    fi
+  done
+  return 2
+}
 if [ "$VERIFY_ONLY" = 0 ]; then
-  [ "$(id -u)" != 0 ] || die "запустите скрипт от обычного пользователя (данные узла лежат в его домашней папке); sudo он вызовет сам"
-  command -v sudo >/dev/null || die "нужен sudo"
+  [ "$(id -u)" != 0 ] || die "$(T "запустите скрипт от обычного пользователя (данные узла лежат в его домашней папке); sudo он вызовет сам" "run the script as a regular user (the node data lives in their home folder); it calls sudo itself")"
+  command -v sudo >/dev/null || die "$(T "нужен sudo" "sudo is required")"
   if [ "$NO_SERVICE" = 0 ]; then
     U=$(id -un); G=$(id -gn); H=$(getent passwd "$U" | cut -d: -f6)
     # значения попадают в unit-файл systemd (там пробелы разделяют аргументы, а % — подстановка): допускаем только безопасные знаки
-    [[ "$U" =~ ^[A-Za-z0-9._-]+$ && "$G" =~ ^[A-Za-z0-9._-]+$ ]] || die "имя пользователя или группы содержит знаки, которые нельзя безопасно записать в службу systemd; создайте службу вручную (--no-service)"
-    [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "домашняя папка «$H» содержит пробелы или %, ... — службу так не создать; используйте --no-service и опишите службу вручную"
+    [[ "$U" =~ ^[A-Za-z0-9._-]+$ && "$G" =~ ^[A-Za-z0-9._-]+$ ]] || die "$(T "имя пользователя или группы содержит знаки, которые нельзя безопасно записать в службу systemd; создайте службу вручную (--no-service)" "the user or group name contains characters that cannot be written safely into a systemd service; create the service by hand (--no-service)")"
+    [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "$(T "домашняя папка «$H» содержит пробелы или %, ... — службу так не создать; используйте --no-service и опишите службу вручную" "the home folder “$H” contains spaces or %, ... — the service cannot be created like that; use --no-service and describe the service by hand")"
   fi
 fi
-[[ "$PUBKEY" =~ ^[0-9a-f]{64}$ ]] || die "ключ — 64 шестнадцатеричных знака"
-for t in openssl sha256sum awk; do command -v "$t" >/dev/null || die "нужна программа $t"; done
-openssl version | grep -q "OpenSSL 3" || die "нужен OpenSSL 3 (проверка Ed25519)"
-case "$FROM" in http://*) die "только https:// или каталог";; https://*) command -v curl >/dev/null || die "нужен curl"; FROM="${FROM%/}/";; *) [ -d "$FROM" ] || die "нет каталога $FROM"; FROM="${FROM%/}/";; esac
+[[ "$PUBKEY" =~ ^[0-9a-f]{64}$ ]] || die "$(T "ключ — 64 шестнадцатеричных знака" "the key is 64 hexadecimal characters")"
+for t in openssl sha256sum awk; do command -v "$t" >/dev/null || die "$(T "нужна программа $t" "the program $t is required")"; done
+openssl version | grep -q "OpenSSL 3" || die "$(T "нужен OpenSSL 3 (проверка Ed25519)" "OpenSSL 3 is required (Ed25519 verification)")"
+case "$FROM" in http://*) die "$(T "только https:// или каталог" "only https:// or a directory")";; https://*) command -v curl >/dev/null || die "$(T "нужен curl" "curl is required")"; FROM="${FROM%/}/";; *) [ -d "$FROM" ] || die "$(T "нет каталога $FROM" "no such directory: $FROM")"; FROM="${FROM%/}/";; esac
 
 if [ -z "$MODE" ]; then
   if [ "$YES" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
-    echo "Что установить?"
-    echo "  1) Узел для сервера (без оболочки) — управление из консоли: yandi setup, yandi admin"
-    echo "  2) Узел и оболочка ПК (окно программы)"
-    read -r -p "Выбор [1/2]: " c
+    echo "$(T "Что установить?" "What to install?")"
+    echo "$(T "  1) Узел для сервера (без оболочки) — управление из консоли: yandi setup, yandi admin" "  1) Node for a server (no shell) — managed from the console: yandi setup, yandi admin")"
+    echo "$(T "  2) Узел и оболочка ПК (окно программы)" "  2) Node and the desktop shell (a program window)")"
+    read -r -p "$(T "Выбор" "Choice") [1/2]: " c
     case "$c" in 2) MODE=desktop;; *) MODE=server;; esac
   else MODE=server; fi
 fi
-echo "Режим: $MODE"
+echo "$(T "Режим: $MODE" "Mode: $MODE")"
 
 W=$(mktemp -d); chmod 700 "$W"; trap 'rm -rf "$W"' EXIT
 fetch() { # имя -> файл в $W
   case "$FROM" in https://*) curl --fail --silent --show-error --proto '=https' --tlsv1.2 --max-redirs 0 --max-time 600 -o "$W/$1" "${FROM}$1";; *) cp -- "${FROM}$1" "$W/$1";; esac
 }
 fetch MANIFEST.json; fetch MANIFEST.json.sig
-[ "$(stat -c %s "$W/MANIFEST.json")" -le 1048576 ] || die "манифест слишком велик"
+[ "$(stat -c %s "$W/MANIFEST.json")" -le 1048576 ] || die "$(T "манифест слишком велик" "the manifest is too large")"
 
 # --- подпись: Ed25519 над «YANDI-RELEASE-MANIFEST-V1\0» + байты манифеста ---
 printf '\x30\x2a\x30\x05\x06\x03\x2b\x65\x70\x03\x21\x00' > "$W/pub.der"
 printf '%s' "$PUBKEY" | sed 's/../\\x&/g' | xargs -0 printf > "$W/pub.raw"
-[ "$(stat -c %s "$W/pub.raw")" = 32 ] || die "ключ должен быть ровно 32 байта"
+[ "$(stat -c %s "$W/pub.raw")" = 32 ] || die "$(T "ключ должен быть ровно 32 байта" "the key must be exactly 32 bytes")"
 cat "$W/pub.raw" >> "$W/pub.der"
-openssl pkey -pubin -inform DER -in "$W/pub.der" -out "$W/pub.pem" 2>/dev/null || die "ключ не читается"
-tr -d ' \n\r' < "$W/MANIFEST.json.sig" | grep -Eq '^[0-9a-f]{128}$' || die "подпись должна быть 128 шестнадцатеричных знаков"
+openssl pkey -pubin -inform DER -in "$W/pub.der" -out "$W/pub.pem" 2>/dev/null || die "$(T "ключ не читается" "the key cannot be read")"
+tr -d ' \n\r' < "$W/MANIFEST.json.sig" | grep -Eq '^[0-9a-f]{128}$' || die "$(T "подпись должна быть 128 шестнадцатеричных знаков" "the signature must be 128 hexadecimal characters")"
 tr -d ' \n\r' < "$W/MANIFEST.json.sig" | sed 's/../\\x&/g' | xargs -0 printf > "$W/sig.bin"
 { printf 'YANDI-RELEASE-MANIFEST-V1\0'; cat "$W/MANIFEST.json"; } > "$W/signed.bin"
 openssl pkeyutl -verify -rawin -pubin -inkey "$W/pub.pem" -in "$W/signed.bin" -sigfile "$W/sig.bin" >/dev/null 2>&1 \
-  || die "ПОДПИСЬ ВЫПУСКА НЕ СОВПАДАЕТ — не устанавливайте этот выпуск"
-echo "Подпись выпуска верна (ключ ${PUBKEY:0:16}…). Сверьте этот отпечаток с сайтом yandi.su/network/downloads."
+  || die "$(T "ПОДПИСЬ ВЫПУСКА НЕ СОВПАДАЕТ — не устанавливайте этот выпуск" "RELEASE SIGNATURE DOES NOT MATCH — do not install this release")"
+echo "$(T "Подпись выпуска верна (ключ ${PUBKEY:0:16}…). Сверьте этот отпечаток с сайтом yandi.su/network/downloads." "The release signature is valid (key ${PUBKEY:0:16}…). Compare this fingerprint with the site yandi.su/network/downloads.")"
 
 # --- содержимое манифеста: строгий разбор JSON (данные уже подписаны, но формат проверяется целиком) ---
-command -v python3 >/dev/null || die "нужен python3 (разбор манифеста): sudo apt install python3-minimal"
+command -v python3 >/dev/null || die "$(T "нужен python3 (разбор манифеста): sudo apt install python3-minimal" "python3 is required (manifest parsing): sudo apt install python3-minimal")"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
 KEY_ID=$(sha256sum "$W/pub.raw" | cut -c1-16)
-PARSED=$(python3 -I -B - "$W/MANIFEST.json" "$KEY_ID" <<'PY'
+PARSED=$(python3 -I -B - "$W/MANIFEST.json" "$KEY_ID" "$LANG_SEL" <<'PY'
 import json, re, sys, time, unicodedata
 
 class Bad(Exception):
     pass
+
+# язык сообщений: третий аргумент (ru | en)
+L = (lambda ru, en: ru) if sys.argv[3] == "ru" else (lambda ru, en: en)
 
 def need(cond, msg):
     if not cond:
@@ -95,12 +144,12 @@ def is_int(x):
 def pairs(items):
     d = {}
     for k, v in items:
-        need(k not in d, "повторяющееся поле " + k)
+        need(k not in d, L("повторяющееся поле ", "duplicate field ") + k)
         d[k] = v
     return d
 
 def nofloat(x):
-    raise Bad("недопустимое число " + x)
+    raise Bad(L("недопустимое число ", "invalid number ") + x)
 
 def tron_ok(addr):
     import hashlib
@@ -156,59 +205,59 @@ ROOT_REQUIRED = {"format", "product", "version", "seq", "created", "key_id", "fi
 ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes", "support"}
 try:
     raw = open(sys.argv[1], "rb").read()
-    need(len(raw) <= 1 << 20, "манифест слишком велик")
+    need(len(raw) <= 1 << 20, L("манифест слишком велик", "the manifest is too large"))
     m = json.loads(raw.decode("utf-8"), object_pairs_hook=pairs, parse_float=nofloat, parse_constant=nofloat)
-    need(type(m) is dict, "корень манифеста — не объект")
-    need(ROOT_REQUIRED <= set(m) <= ROOT_ALLOWED, "состав полей манифеста не совпадает со схемой")
-    need(is_int(m["format"]) and m["format"] == 1, "формат манифеста не поддерживается")
-    need(m["product"] == "yandi-node", "это не выпуск yandi-node")
-    need(m.get("platform") == "deb", "это не выпуск для Debian/Ubuntu")
+    need(type(m) is dict, L("корень манифеста — не объект", "the manifest root is not an object"))
+    need(ROOT_REQUIRED <= set(m) <= ROOT_ALLOWED, L("состав полей манифеста не совпадает со схемой", "the manifest fields do not match the schema"))
+    need(is_int(m["format"]) and m["format"] == 1, L("формат манифеста не поддерживается", "the manifest format is not supported"))
+    need(m["product"] == "yandi-node", L("это не выпуск yandi-node", "this is not a yandi-node release"))
+    need(m.get("platform") == "deb", L("это не выпуск для Debian/Ubuntu", "this is not a release for Debian/Ubuntu"))
     v = m["version"]
     # как в src/release.rs: до 200 БАЙТ UTF-8, без управляющих знаков Юникода (категория Cc, включая C1)
-    need(type(v) is str and 1 <= len(v.encode("utf-8")) <= 200 and not any(unicodedata.category(c) == "Cc" for c in v), "неверная версия")
+    need(type(v) is str and 1 <= len(v.encode("utf-8")) <= 200 and not any(unicodedata.category(c) == "Cc" for c in v), L("неверная версия", "invalid version"))
     seq, created, exp = m["seq"], m["created"], m.get("expires")
-    need(is_int(seq) and 1 <= seq < 2**53, "неверный номер выпуска")
-    need(is_int(created) and 0 <= created < 2**63, "неверное время выпуска")
-    need(is_int(exp) and 0 < exp < 2**63 and exp > time.time(), "срок действия выпуска истёк или не указан")
-    need(type(m["key_id"]) is str and re.fullmatch(r"[0-9a-f]{16}", m["key_id"]), "неверный идентификатор ключа")
-    need(m["key_id"] == sys.argv[2], "идентификатор ключа в манифесте не совпадает с закреплённым ключом")
+    need(is_int(seq) and 1 <= seq < 2**53, L("неверный номер выпуска", "invalid release number"))
+    need(is_int(created) and 0 <= created < 2**63, L("неверное время выпуска", "invalid release time"))
+    need(is_int(exp) and 0 < exp < 2**63 and exp > time.time(), L("срок действия выпуска истёк или не указан", "the release has expired or has no expiry"))
+    need(type(m["key_id"]) is str and re.fullmatch(r"[0-9a-f]{16}", m["key_id"]), L("неверный идентификатор ключа", "invalid key id"))
+    need(m["key_id"] == sys.argv[2], L("идентификатор ключа в манифесте не совпадает с закреплённым ключом", "the key id in the manifest does not match the pinned key"))
     notes = m.get("notes", "")
-    need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
+    need(type(notes) is str and len(notes) <= 2000, L("неверные заметки", "invalid notes"))
     sw = m.get("support", [])
     # кошельки проекта: до 8, те же правила, что в src/release.rs (SupportWallet::valid): монета 1..16, сеть 1..32 знаков без управляющих и «|»,
     # адрес Tron с Base58Check или EVM с EIP-55, дубликатов нет
-    need(type(sw) is list and len(sw) <= 8, "неверный список кошельков поддержки")
+    need(type(sw) is list and len(sw) <= 8, L("неверный список кошельков поддержки", "invalid list of support wallets"))
     seen = set()
     for w in sw:
-        need(type(w) is dict and set(w) == {"asset", "network", "address"} and all(type(x) is str for x in w.values()), "неверный кошелёк поддержки")
-        need(1 <= len(w["asset"]) <= 16 and 1 <= len(w["network"]) <= 32, "неверная длина монеты или сети кошелька")
-        need(not any(unicodedata.category(c) == "Cc" or c == "|" for c in w["asset"] + w["network"]), "недопустимые знаки в монете или сети кошелька")
-        need(wallet_ok(w["network"], w["address"]), "адрес кошелька не проходит проверку контрольной суммы")
+        need(type(w) is dict and set(w) == {"asset", "network", "address"} and all(type(x) is str for x in w.values()), L("неверный кошелёк поддержки", "invalid support wallet"))
+        need(1 <= len(w["asset"]) <= 16 and 1 <= len(w["network"]) <= 32, L("неверная длина монеты или сети кошелька", "invalid length of the wallet coin or network"))
+        need(not any(unicodedata.category(c) == "Cc" or c == "|" for c in w["asset"] + w["network"]), L("недопустимые знаки в монете или сети кошелька", "invalid characters in the wallet coin or network"))
+        need(wallet_ok(w["network"], w["address"]), L("адрес кошелька не проходит проверку контрольной суммы", "the wallet address fails the checksum check"))
         key = (w["asset"], w["network"], w["address"])
-        need(key not in seen, "кошелёк указан дважды")
+        need(key not in seen, L("кошелёк указан дважды", "the wallet is listed twice"))
         seen.add(key)
     files = m["files"]
-    need(type(files) is list and 1 <= len(files) <= 32, "неверный список файлов")
+    need(type(files) is list and 1 <= len(files) <= 32, L("неверный список файлов", "invalid file list"))
     names = set()
     out = ["SEQ %d" % seq]
     for f in files:
-        need(type(f) is dict and set(f) == {"name", "sha256", "size"}, "запись файла должна содержать ровно name, sha256, size")
+        need(type(f) is dict and set(f) == {"name", "sha256", "size"}, L("запись файла должна содержать ровно name, sha256, size", "a file entry must contain exactly name, sha256, size"))
         n, h, z = f["name"], f["sha256"], f["size"]
-        need(type(n) is str and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", n) and not n.startswith("."), "недопустимое имя файла")
-        need(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h), "неверная сумма")
-        need(is_int(z) and 1 <= z <= 256 * 1024 * 1024, "неверный размер")
-        need(n not in names, "файл указан дважды")
+        need(type(n) is str and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", n) and not n.startswith("."), L("недопустимое имя файла", "invalid file name"))
+        need(type(h) is str and re.fullmatch(r"[0-9a-f]{64}", h), L("неверная сумма", "invalid checksum"))
+        need(is_int(z) and 1 <= z <= 256 * 1024 * 1024, L("неверный размер", "invalid size"))
+        need(n not in names, L("файл указан дважды", "the file is listed twice"))
         names.add(n)
         out.append("FILE %s %s %d" % (n, h, z))
     print("\n".join(out))
 except Bad as e:
-    sys.stderr.write("манифест отвергнут: %s\n" % e)
+    sys.stderr.write(L("манифест отвергнут: %s\n", "manifest rejected: %s\n") % e)
     sys.exit(1)
 except Exception as e:
-    sys.stderr.write("манифест отвергнут: %s\n" % e)
+    sys.stderr.write(L("манифест отвергнут: %s\n", "manifest rejected: %s\n") % e)
     sys.exit(1)
 PY
-) || die "манифест не прошёл строгую проверку"
+) || die "$(T "манифест не прошёл строгую проверку" "the manifest failed the strict check")"
 SEQ=$(awk '$1=="SEQ"{print $2}' <<<"$PARSED")
 # Номер последнего установленного выпуска (защита от отката). Состояние должно быть нашим обычным файлом в нашем закрытом каталоге;
 # повреждённое или чужое — отказ, а не «защиты нет». Чтение, проверка и запись идут под одной блокировкой.
@@ -230,24 +279,24 @@ safe_dir_chain() {
 }
 mkdir -p -m 0700 "$STATE_DIR" 2>/dev/null || true
 [ -d "$STATE_DIR" ] && [ ! -L "$STATE_DIR" ] && [ "$(stat -c %u "$STATE_DIR")" = "$ME" ] && [ -z "$(find "$STATE_DIR" -maxdepth 0 -perm /077)" ] && safe_dir_chain "$STATE_DIR" \
-  || die "каталог состояния $STATE_DIR небезопасен (ссылка, чужой владелец, доступ другим или небезопасный родитель); нужен закрытый каталог 0700"
-command -v flock >/dev/null || die "нужен flock (пакет util-linux)"
+  || die "$(T "каталог состояния $STATE_DIR небезопасен (ссылка, чужой владелец, доступ другим или небезопасный родитель); нужен закрытый каталог 0700" "the state directory $STATE_DIR is unsafe (a link, a foreign owner, access for others or an unsafe parent); a private 0700 directory is required")"
+command -v flock >/dev/null || die "$(T "нужен flock (пакет util-linux)" "flock is required (package util-linux)")"
 # файл блокировки: только обычный файл нашего владельца, без ссылок и каналов; открывается без обрезания
 if [ -e "$LOCK_FILE" ] || [ -L "$LOCK_FILE" ]; then
-  [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] && [ "$(stat -c %u "$LOCK_FILE")" = "$ME" ] && [ -z "$(find "$LOCK_FILE" -maxdepth 0 -perm /022)" ] || die "файл блокировки $LOCK_FILE небезопасен"
+  [ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] && [ "$(stat -c %u "$LOCK_FILE")" = "$ME" ] && [ -z "$(find "$LOCK_FILE" -maxdepth 0 -perm /022)" ] || die "$(T "файл блокировки $LOCK_FILE небезопасен" "the lock file $LOCK_FILE is unsafe")"
 fi
-exec 9>>"$LOCK_FILE" || die "не удалось открыть файл блокировки"
+exec 9>>"$LOCK_FILE" || die "$(T "не удалось открыть файл блокировки" "could not open the lock file")"
 flock -x 9
 read_seq() {
-  [ ! -L "$SEQ_FILE" ] || die "файл $SEQ_FILE — символическая ссылка: небезопасно"
+  [ ! -L "$SEQ_FILE" ] || die "$(T "файл $SEQ_FILE — символическая ссылка: небезопасно" "the file $SEQ_FILE is a symbolic link: unsafe")"
   [ -e "$SEQ_FILE" ] || { echo 0; return; }
-  [ -f "$SEQ_FILE" ] && [ "$(stat -c %u "$SEQ_FILE")" = "$ME" ] && [ -r "$SEQ_FILE" ] && [ -z "$(find "$SEQ_FILE" -maxdepth 0 -perm /022)" ] || die "файл $SEQ_FILE небезопасен или нечитаем"
-  local v; v=$(cat "$SEQ_FILE") || die "файл $SEQ_FILE нечитаем"
-  [[ "$v" =~ ^[0-9]{1,16}$ ]] && [ "$v" -lt 9007199254740992 ] || die "файл $SEQ_FILE повреждён (ожидалось одно число): удалите его, если уверены в выпуске"
+  [ -f "$SEQ_FILE" ] && [ "$(stat -c %u "$SEQ_FILE")" = "$ME" ] && [ -r "$SEQ_FILE" ] && [ -z "$(find "$SEQ_FILE" -maxdepth 0 -perm /022)" ] || die "$(T "файл $SEQ_FILE небезопасен или нечитаем" "the file $SEQ_FILE is unsafe or unreadable")"
+  local v; v=$(cat "$SEQ_FILE") || die "$(T "файл $SEQ_FILE нечитаем" "the file $SEQ_FILE is unreadable")"
+  [[ "$v" =~ ^[0-9]{1,16}$ ]] && [ "$v" -lt 9007199254740992 ] || die "$(T "файл $SEQ_FILE повреждён (ожидалось одно число): удалите его, если уверены в выпуске" "the file $SEQ_FILE is damaged (a single number was expected): delete it if you trust the release")"
   echo "$v"
 }
 OLD=$(read_seq)
-[ "$SEQ" -ge "$OLD" ] || die "выпуск №$SEQ старше уже установленного №$OLD (откат): установка отменена"
+[ "$SEQ" -ge "$OLD" ] || die "$(T "выпуск №$SEQ старше уже установленного №$OLD (откат): установка отменена" "release #$SEQ is older than the installed #$OLD (a rollback): installation cancelled")"
 mapfile -t ROWS < <(awk '$1=="FILE"{print $2" "$3" "$4}' <<<"$PARSED")
 want=("yandi-node_")
 [ "$MODE" = desktop ] && want+=("yandi-desktop_")
@@ -258,20 +307,27 @@ for prefix in "${want[@]}"; do
     read -r name sha size <<<"$row"
     [[ "$name" == ${prefix}*_${ARCH}.deb ]] || continue
     fetch "$name"
-    [ "$(stat -c %s "$W/$name")" = "$size" ] || die "$name: размер не совпадает с манифестом"
-    [ "$(sha256sum "$W/$name" | cut -d' ' -f1)" = "$sha" ] || die "$name: СУММА НЕ СОВПАДАЕТ — файл подменён или повреждён"
-    echo "Файл проверен: $name"; found="$W/$name"; DEBS+=("$found")
+    [ "$(stat -c %s "$W/$name")" = "$size" ] || die "$(T "$name: размер не совпадает с манифестом" "$name: the size does not match the manifest")"
+    [ "$(sha256sum "$W/$name" | cut -d' ' -f1)" = "$sha" ] || die "$(T "$name: СУММА НЕ СОВПАДАЕТ — файл подменён или повреждён" "$name: CHECKSUM DOES NOT MATCH — the file was replaced or damaged")"
+    echo "$(T "Файл проверен: $name" "File verified: $name")"; found="$W/$name"; DEBS+=("$found")
   done
-  [ -n "$found" ] || die "в выпуске нет пакета ${prefix}…_${ARCH}.deb"
+  [ -n "$found" ] || die "$(T "в выпуске нет пакета ${prefix}…_${ARCH}.deb" "the release has no package ${prefix}…_${ARCH}.deb")"
 done
-[ "$VERIFY_ONLY" = 1 ] && { echo "Проверка выпуска завершена (--verify-only): ничего не установлено."; exit 0; }
+[ "$VERIFY_ONLY" = 1 ] && { echo "$(T "Проверка выпуска завершена (--verify-only): ничего не установлено." "Release verification finished (--verify-only): nothing was installed.")"; exit 0; }
+# подтверждение установки (в терминале; --yes и работа без терминала — без вопроса). Ответ строго по раскладке выбранного языка.
+if [ "$YES" = 0 ] && [ -t 0 ] && [ -t 1 ]; then
+  echo "$(T "Будет установлено:" "To be installed:")"
+  for d in "${DEBS[@]}"; do echo "  $(basename "$d")"; done
+  rc=0; ask_yn "Подтвердите установку?" "Confirm the installation?" y || rc=$?
+  [ "$rc" = 0 ] || { echo "$(T "Установка отменена." "Installation cancelled.")"; exit 1; }
+fi
 
 # --- установка ---
 sudo apt-get install -y "${DEBS[@]}"
 # номер фиксируется как максимум под той же блокировкой, атомарной заменой файла
 CUR=$(read_seq); [ "$SEQ" -ge "$CUR" ] || SEQ="$CUR"
-TMP_SEQ=$(mktemp "$STATE_DIR/installed-seq.XXXXXX") || die "пакеты установлены, но номер выпуска не сохранён (не создать временный файл в $STATE_DIR)"
-{ printf '%s\n' "$SEQ" > "$TMP_SEQ" && chmod 600 "$TMP_SEQ" && mv -f "$TMP_SEQ" "$SEQ_FILE"; } || { rm -f "$TMP_SEQ"; die "пакеты установлены, но номер выпуска не сохранён в $SEQ_FILE: защита от отката не обновлена"; }
+TMP_SEQ=$(mktemp "$STATE_DIR/installed-seq.XXXXXX") || die "$(T "пакеты установлены, но номер выпуска не сохранён (не создать временный файл в $STATE_DIR)" "packages are installed, but the release number was not saved (cannot create a temporary file in $STATE_DIR)")"
+{ printf '%s\n' "$SEQ" > "$TMP_SEQ" && chmod 600 "$TMP_SEQ" && mv -f "$TMP_SEQ" "$SEQ_FILE"; } || { rm -f "$TMP_SEQ"; die "$(T "пакеты установлены, но номер выпуска не сохранён в $SEQ_FILE: защита от отката не обновлена" "packages are installed, but the release number was not saved to $SEQ_FILE: rollback protection was not updated")"; }
 if [ "$NO_SERVICE" = 0 ]; then
   UNIT=$(mktemp); trap 'rm -rf "$W" "$UNIT"' EXIT
   cat > "$UNIT" <<UNITEOF
@@ -317,14 +373,14 @@ UNITEOF
   sudo systemctl enable --now yandi-node
   SOCK="$H/.local/share/yandi/run/yandi-ui.sock"
   for _ in $(seq 1 60); do [ -S "$SOCK" ] && break; sleep 1; done
-  [ -S "$SOCK" ] || echo "Узел ещё запускается: смотрите journalctl -u yandi-node"
+  [ -S "$SOCK" ] || echo "$(T "Узел ещё запускается: смотрите journalctl -u yandi-node" "The node is still starting: see journalctl -u yandi-node")"
 fi
 echo
-echo "Установлено. Дальше:"
-echo "  yandi setup        первая настройка (пароль и фраза восстановления)"
-echo "  yandi admin        управление узлом; yandi admin pairing — код сопряжения телефона"
-echo "  Порты: откройте в брандмауэре порты узла (см. /usr/share/doc/yandi-node/DEPLOYMENT.md)."
+echo "$(T "Установлено. Дальше:" "Installed. Next:")"
+echo "$(T "  yandi setup        первая настройка (пароль и фраза восстановления)" "  yandi setup        first-time setup (password and recovery phrase)")"
+echo "$(T "  yandi admin        управление узлом; yandi admin pairing — код сопряжения телефона" "  yandi admin        node management; yandi admin pairing — phone pairing code")"
+echo "$(T "  Порты: откройте в брандмауэре порты узла (см. /usr/share/doc/yandi-node/DEPLOYMENT.md)." "  Ports: open the node ports in the firewall (see /usr/share/doc/yandi-node/DEPLOYMENT.md).")"
 if [ "$YES" = 0 ] && [ -t 0 ] && [ -t 1 ] && command -v yandi >/dev/null; then
-  read -r -p "Запустить первую настройку сейчас? [Y/n]: " a
-  case "$a" in n|N) ;; *) exec 9>&-; exec yandi setup;; esac
+  rc=0; ask_yn "Запустить первую настройку сейчас?" "Run the first-time setup now?" y || rc=$?
+  if [ "$rc" = 0 ]; then exec 9>&-; exec yandi setup; fi
 fi

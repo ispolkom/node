@@ -13,6 +13,7 @@
 //!
 //! Общие параметры: `--socket ПУТЬ`, `--admin-password-stdin` (пароль администратора первой строкой стандартного ввода).
 //! Секреты вводятся без эха и нигде не печатаются; фраза восстановления показывается только в терминале (иначе нужен `--seed-file`).
+use crate::t;
 use serde_json::{json, Value};
 use std::io::{BufRead, Read, Write};
 use std::os::unix::net::UnixStream;
@@ -32,27 +33,27 @@ pub fn default_socket() -> PathBuf {
 /// с завершающим нулевым куском и разобранными заголовками-трейлерами. Неоднозначное обрамление (оба заголовка, иные кодировки,
 /// мусор после конца) — ошибка, а не «пустой успех».
 pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
-    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("ответ узла оборван")?;
-    let head = std::str::from_utf8(&raw[..split]).map_err(|_| "ответ узла не текст")?;
+    let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or(t!("ответ узла оборван", "node reply is truncated"))?;
+    let head = std::str::from_utf8(&raw[..split]).map_err(|_| t!("ответ узла не текст", "node reply is not text"))?;
     let mut lines = head.split("\r\n");
-    let status = lines.next().ok_or("пустой ответ")?;
-    let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("нет кода ответа")?;
+    let status = lines.next().ok_or(t!("пустой ответ", "empty reply"))?;
+    let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or(t!("нет кода ответа", "no reply status code"))?;
     let mut encodings: Option<Vec<String>> = None;
     let mut length: Option<usize> = None;
     for l in lines {
         let lower = l.to_ascii_lowercase();
         if let Some(v) = lower.strip_prefix("transfer-encoding:") {
             if encodings.replace(v.split(',').map(|t| t.trim().to_string()).collect()).is_some() {
-                return Err("повторный заголовок кодировки".into());
+                return Err(t!("повторный заголовок кодировки", "duplicate encoding header").into());
             }
         } else if let Some(v) = lower.strip_prefix("content-length:") {
             let v = v.trim();
             if v.is_empty() || v.len() > 15 || !v.bytes().all(|b| b.is_ascii_digit()) {
-                return Err("неверная длина тела".into());
+                return Err(t!("неверная длина тела", "invalid body length").into());
             }
-            let n: usize = v.parse().map_err(|_| "неверная длина тела")?;
+            let n: usize = v.parse().map_err(|_| t!("неверная длина тела", "invalid body length"))?;
             if length.replace(n).is_some_and(|prev| prev != n) {
-                return Err("противоречивая длина тела".into());
+                return Err(t!("противоречивая длина тела", "conflicting body length").into());
             }
         }
     }
@@ -60,46 +61,46 @@ pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let chunked = match encodings.as_deref() {
         None => false,
         Some([only]) if only == "chunked" => true,
-        Some(_) => return Err("неподдерживаемая кодировка ответа".into()),
+        Some(_) => return Err(t!("неподдерживаемая кодировка ответа", "unsupported reply encoding").into()),
     };
     if chunked && length.is_some() {
-        return Err("неоднозначное обрамление: и кодировка, и длина".into());
+        return Err(t!("неоднозначное обрамление: и кодировка, и длина", "ambiguous framing: both encoding and length").into());
     }
     if !chunked {
         return match length {
             Some(n) if body.len() == n => Ok((code, body.to_vec())),
-            Some(_) => Err("тело ответа не совпадает с заявленной длиной (ответ оборван)".into()),
+            Some(_) => Err(t!("тело ответа не совпадает с заявленной длиной (ответ оборван)", "reply body does not match the declared length (truncated)").into()),
             None => Ok((code, body.to_vec())),
         };
     }
     let mut out = Vec::new();
     let mut rest = body;
     loop {
-        let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or("оборван ответ по частям")?;
-        let size_text = std::str::from_utf8(&rest[..eol]).map_err(|_| "размер части не текст")?;
+        let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or(t!("оборван ответ по частям", "chunked reply is truncated"))?;
+        let size_text = std::str::from_utf8(&rest[..eol]).map_err(|_| t!("размер части не текст", "chunk size is not text"))?;
         let size_hex = size_text.split(';').next().unwrap_or("").trim();
         if size_hex.is_empty() || size_hex.len() > 15 || !size_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err("неверный размер части".into());
+            return Err(t!("неверный размер части", "invalid chunk size").into());
         }
-        let size = usize::from_str_radix(size_hex, 16).map_err(|_| "неверный размер части")?;
+        let size = usize::from_str_radix(size_hex, 16).map_err(|_| t!("неверный размер части", "invalid chunk size"))?;
         rest = &rest[eol + 2..];
         if size == 0 {
             // трейлеры: строки «имя: значение» до пустой строки; после неё ничего не должно быть
             loop {
-                let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or("ответ по частям не завершён")?;
+                let eol = rest.windows(2).position(|w| w == b"\r\n").ok_or(t!("ответ по частям не завершён", "chunked reply is not finished"))?;
                 let line = &rest[..eol];
                 rest = &rest[eol + 2..];
                 if line.is_empty() {
-                    return if rest.is_empty() { Ok((code, out)) } else { Err("лишние данные после конца ответа".into()) };
+                    return if rest.is_empty() { Ok((code, out)) } else { Err(t!("лишние данные после конца ответа", "extra data after the end of the reply").into()) };
                 }
                 if !line.contains(&b':') {
-                    return Err("неверный заголовок в конце ответа".into());
+                    return Err(t!("неверный заголовок в конце ответа", "invalid trailer at the end of the reply").into());
                 }
             }
         }
-        let end = size.checked_add(2).filter(|e| *e <= rest.len()).ok_or("оборван ответ по частям")?;
+        let end = size.checked_add(2).filter(|e| *e <= rest.len()).ok_or(t!("оборван ответ по частям", "chunked reply is truncated"))?;
         if &rest[size..end] != b"\r\n" {
-            return Err("часть ответа не завершена CRLF".into());
+            return Err(t!("часть ответа не завершена CRLF", "reply chunk is not terminated by CRLF").into());
         }
         out.extend_from_slice(&rest[..size]);
         rest = &rest[end..];
@@ -132,7 +133,7 @@ pub fn connect(socket: &Path) -> std::io::Result<UnixStream> {
 
 /// Один запрос к узлу. Тело и ответ — JSON.
 pub fn roundtrip(socket: &Path, method: &str, path: &str, body: Option<&Value>, admin_token: Option<&str>, timeout: Duration) -> Result<(u16, Value), String> {
-    let mut s = connect(socket).map_err(|_| "узел не отвечает: он запущен под вашим пользователем? (сокет yandi-ui.sock)".to_string())?;
+    let mut s = connect(socket).map_err(|_| t!("узел не отвечает: он запущен под вашим пользователем? (сокет yandi-ui.sock)", "the node does not answer: is it running under your user? (socket yandi-ui.sock)").to_string())?;
     s.set_read_timeout(Some(timeout)).ok();
     s.set_write_timeout(Some(timeout)).ok();
     let payload = body.map(|b| b.to_string());
@@ -144,27 +145,27 @@ pub fn roundtrip(socket: &Path, method: &str, path: &str, body: Option<&Value>, 
         req.push_str(&format!("Content-Type: application/json\r\nContent-Length: {}\r\n", p.len()));
     }
     req.push_str("\r\n");
-    s.write_all(req.as_bytes()).map_err(|_| "не удалось отправить запрос узлу".to_string())?;
+    s.write_all(req.as_bytes()).map_err(|_| t!("не удалось отправить запрос узлу", "could not send the request to the node").to_string())?;
     if let Some(p) = &payload {
-        s.write_all(p.as_bytes()).map_err(|_| "не удалось отправить запрос узлу".to_string())?;
+        s.write_all(p.as_bytes()).map_err(|_| t!("не удалось отправить запрос узлу", "could not send the request to the node").to_string())?;
     }
     let mut raw = Vec::new();
-    s.take(MAX_RESPONSE as u64 + 1).read_to_end(&mut raw).map_err(|_| "узел не ответил вовремя".to_string())?;
+    s.take(MAX_RESPONSE as u64 + 1).read_to_end(&mut raw).map_err(|_| t!("узел не ответил вовремя", "the node did not answer in time").to_string())?;
     if raw.len() > MAX_RESPONSE {
-        return Err("ответ узла слишком велик".into());
+        return Err(t!("ответ узла слишком велик", "the node reply is too large").into());
     }
     let (code, bytes) = parse_response(&raw)?;
     let value = if bytes.is_empty() {
         // пустое тело успешного ответа допустимо только у 204; иначе узел нарушил протокол (ответ — всегда JSON)
         if (200..300).contains(&code) && code != 204 {
-            return Err("ответ узла пуст: ожидался JSON".into());
+            return Err(t!("ответ узла пуст: ожидался JSON", "empty node reply: JSON expected").into());
         }
         Value::Null
     } else {
         match serde_json::from_slice(&bytes) {
             Ok(v) => v,
             // успешный ответ обязан быть JSON; текст ошибки без JSON допустим (его покажет error_text по коду)
-            Err(_) if (200..300).contains(&code) => return Err("ответ узла не соответствует протоколу (не JSON)".into()),
+            Err(_) if (200..300).contains(&code) => return Err(t!("ответ узла не соответствует протоколу (не JSON)", "the node reply violates the protocol (not JSON)").into()),
             Err(_) => Value::Null,
         }
     };
@@ -185,7 +186,7 @@ impl Secrets {
         let mut line = String::new();
         let n = std::io::stdin().lock().read_line(&mut line).map_err(|e| e.to_string())?;
         if n == 0 {
-            return Err("конец ввода: ожидалась ещё строка".into());
+            return Err(t!("конец ввода: ожидалась ещё строка", "end of input: another line was expected").into());
         }
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
@@ -201,7 +202,7 @@ impl Secrets {
         let _ = std::io::stderr().flush();
         unsafe {
             if libc::isatty(0) != 1 {
-                return Err("стандартный ввод — не терминал: запустите команду в терминале или передайте секрет через --…-stdin".into());
+                return Err(t!("стандартный ввод — не терминал: запустите команду в терминале или передайте секрет через --…-stdin", "standard input is not a terminal: run the command in a terminal or pass the secret with --…-stdin").into());
             }
             let mut old: libc::termios = std::mem::zeroed();
             libc::tcgetattr(0, &mut old);
@@ -274,7 +275,7 @@ impl Session {
     }
 
     fn login_admin(&mut self) -> Result<(), String> {
-        let pw = self.secrets.ask("Пароль администратора: ")?;
+        let pw = self.secrets.ask(t!("Пароль администратора: ", "Administrator password: "))?;
         let (code, v) = self.raw("POST", "/api/admin/session", Some(&json!({ "password": pw })))?;
         if code == 200 {
             self.token = v["token"].as_str().map(str::to_string);
@@ -290,10 +291,10 @@ impl Session {
 pub fn error_text(code: u16, v: &Value) -> String {
     let msg = v["error"].as_str().or_else(|| v["message"].as_str()).unwrap_or("");
     match (code, msg) {
-        (401, _) => "неверный пароль или доступ запрещён".to_string(),
-        (429, _) => "слишком много попыток: подождите и повторите".to_string(),
-        (_, m) if !m.is_empty() => format!("узел ответил {code}: {}", m.chars().take(300).collect::<String>()),
-        _ => format!("узел ответил {code}"),
+        (401, _) => t!("неверный пароль или доступ запрещён", "wrong password or access denied").to_string(),
+        (429, _) => t!("слишком много попыток: подождите и повторите", "too many attempts: wait and try again").to_string(),
+        (_, m) if !m.is_empty() => t!(format!("узел ответил {code}: {}", m.chars().take(300).collect::<String>()), format!("the node answered {code}: {}", m.chars().take(300).collect::<String>())),
+        _ => t!(format!("узел ответил {code}"), format!("the node answered {code}")),
     }
 }
 
@@ -319,29 +320,30 @@ fn field(v: &Value, k: &str) -> String {
 // ───────────────────────── команды admin ─────────────────────────
 
 fn print_pairing(v: &Value) {
-    println!("Код сопряжения телефона (действует {} с):", v["expires_in_secs"].as_u64().unwrap_or(300));
-    println!("  адрес узла : {}:{}", field(v, "host"), field(v, "port"));
-    println!("  отпечаток  : {}", field(v, "fingerprint"));
+    println!("{}", t!(format!("Код сопряжения телефона (действует {} с):", v["expires_in_secs"].as_u64().unwrap_or(300)), format!("Phone pairing code (valid for {} s):", v["expires_in_secs"].as_u64().unwrap_or(300))));
+    println!("{}{}:{}", t!("  адрес узла : ", "  node address: "), field(v, "host"), field(v, "port"));
+    println!("{}{}", t!("  отпечаток  : ", "  fingerprint : "), field(v, "fingerprint"));
     if let Some(qr) = v["qr_text"].as_str() {
         if stdout_is_tty() {
             if let Some(art) = qr_to_terminal(qr) {
                 println!("{art}");
             }
         }
-        println!("Текст кода (если камера не считывает QR):\n{qr}");
+        println!("{}\n{qr}", t!("Текст кода (если камера не считывает QR):", "Code text (if the camera cannot read the QR):"));
     }
 }
 
 fn confirm_word(prompt: &str, word: &str) -> Result<bool, String> {
-    let typed = Secrets::ask_visible(&format!("{prompt}\nДля подтверждения введите «{word}»: "))?;
-    Ok(typed.trim() == word)
+    let typed = Secrets::ask_visible(&format!("{prompt}\n{}", t!(format!("Для подтверждения введите «{word}»: "), format!("To confirm, type “{word}”: "))))?;
+    // регистр не важен; слово строго на выбранном языке (кириллица в английском режиме и наоборот не засчитывается)
+    Ok(typed.trim().to_lowercase() == word.to_lowercase())
 }
 
 fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str).unwrap_or("list") {
         "list" => {
             let v = s.ok("GET", "/api/upstream-proxies", None)?;
-            println!("Пул: {}; строго: {}; клиентов на прокси: {}", field(&v, "enabled"), field(&v, "strict"), field(&v, "max_clients"));
+            println!("{}", t!(format!("Пул: {}; строго: {}; клиентов на прокси: {}", field(&v, "enabled"), field(&v, "strict"), field(&v, "max_clients")), format!("Pool: {}; strict: {}; clients per proxy: {}", field(&v, "enabled"), field(&v, "strict"), field(&v, "max_clients"))));
             for p in v["proxies"].as_array().into_iter().flatten() {
                 println!("  {}  {}  {}:{}", field(p, "id"), field(p, "kind"), field(p, "host"), field(p, "port"));
             }
@@ -349,10 +351,10 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
         "add" => {
             let kind = args.get(1).map(String::as_str).unwrap_or("socks5");
             if !matches!(kind, "socks5" | "http_connect") {
-                return Err("вид прокси: socks5 или http_connect".into());
+                return Err(t!("вид прокси: socks5 или http_connect", "proxy kind: socks5 or http_connect").into());
             }
             s.ensure_admin()?; // пароль администратора — первой строкой стандартного ввода, до списка прокси
-            eprintln!("Введите прокси по одному в строке (host:port или host:port:пользователь:пароль), пустая строка — конец:");
+            eprintln!("{}", t!("Введите прокси по одному в строке (host:port или host:port:пользователь:пароль), пустая строка — конец:", "Enter proxies one per line (host:port or host:port:user:password), an empty line ends the list:"));
             let mut text = String::new();
             let stdin = std::io::stdin();
             for line in stdin.lock().lines() {
@@ -365,23 +367,23 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
             }
             let r = s.ok("POST", "/api/upstream-proxies", Some(&json!({ "text": text, "kind": kind })))?;
             for e in r["errors"].as_array().into_iter().flatten() {
-                eprintln!("  не принято: {}", e.as_str().unwrap_or("?"));
+                eprintln!("{}{}", t!("  не принято: ", "  rejected: "), e.as_str().unwrap_or("?"));
             }
-            println!("Готово.");
+            println!("{}", t!("Готово.", "Done."));
         }
         "remove" => {
-            let id = args.get(1).ok_or("нужен идентификатор прокси (yandi admin proxies list)")?;
+            let id = args.get(1).ok_or(t!("нужен идентификатор прокси (yandi admin proxies list)", "proxy id needed (yandi admin proxies list)"))?;
             if !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-                return Err("неверный идентификатор".into());
+                return Err(t!("неверный идентификатор", "invalid id").into());
             }
             s.ok("DELETE", &format!("/api/upstream-proxies/{id}"), None)?;
-            println!("Удалено.");
+            println!("{}", t!("Удалено.", "Removed."));
         }
         "test" => {
             let kind = args.get(1).map(String::as_str).unwrap_or("socks5");
             s.ensure_admin()?;
             let mut text = String::new();
-            eprintln!("Проверить прокси (строки как при добавлении), пустая строка — конец:");
+            eprintln!("{}", t!("Проверить прокси (строки как при добавлении), пустая строка — конец:", "Proxies to test (lines as when adding), an empty line ends the list:"));
             for line in std::io::stdin().lock().lines() {
                 let line = line.map_err(|e| e.to_string())?;
                 if line.trim().is_empty() {
@@ -392,7 +394,7 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
             }
             let r = s.ok("POST", "/api/upstream-proxies/test", Some(&json!({ "text": text, "kind": kind })))?;
             for x in r["results"].as_array().into_iter().flatten() {
-                println!("  {}", if x["ok"] == true { "работает" } else { "не отвечает" });
+                println!("  {}", if x["ok"] == true { t!("работает", "works") } else { t!("не отвечает", "does not answer") });
             }
         }
         "settings" => {
@@ -404,7 +406,7 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
                         let on = match it.next().map(String::as_str) {
                             Some("on") => true,
                             Some("off") => false,
-                            _ => return Err(format!("{a}: нужно on или off")),
+                            _ => return Err(t!(format!("{a}: нужно on или off"), format!("{a}: on or off"))),
                         };
                         body.insert(a.trim_start_matches("--").into(), json!(on));
                     }
@@ -412,33 +414,33 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
                         let n: u32 = it.next().and_then(|n| n.parse().ok()).ok_or("--max-clients N")?;
                         body.insert("max_clients".into(), json!(n));
                     }
-                    other => return Err(format!("неизвестный параметр {other}")),
+                    other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
                 }
             }
             if body.is_empty() {
-                return Err("укажите --enabled on|off, --strict on|off или --max-clients N".into());
+                return Err(t!("укажите --enabled on|off, --strict on|off или --max-clients N", "give --enabled on|off, --strict on|off or --max-clients N").into());
             }
             s.ok("POST", "/api/upstream-proxies/settings", Some(&Value::Object(body)))?;
-            println!("Сохранено.");
+            println!("{}", t!("Сохранено.", "Saved."));
         }
-        other => return Err(format!("proxies: неизвестное действие «{other}» (list | add | remove | test | settings)")),
+        other => return Err(t!(format!("proxies: неизвестное действие «{other}» (list | add | remove | test | settings)"), format!("proxies: unknown action “{other}” (list | add | remove | test | settings)"))),
     }
     Ok(())
 }
 
 fn role_label(role: &str) -> &str {
     match role {
-        "owner" => "владелец",
-        "user" => "пользователь",
-        "invited" => "приглашённый",
-        "guest" => "гость",
+        "owner" => t!("владелец", "owner"),
+        "user" => t!("пользователь", "user"),
+        "invited" => t!("приглашённый", "invited"),
+        "guest" => t!("гость", "guest"),
         other => other,
     }
 }
 
 fn check_device_id(id: &str) -> Result<(), String> {
     if id.len() < 8 || id.len() > 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err("номер устройства — от 8 до 64 шестнадцатеричных знаков (yandi admin devices)".into());
+        return Err(t!("номер устройства — от 8 до 64 шестнадцатеричных знаков (yandi admin devices)", "device id: 8 to 64 hexadecimal characters (yandi admin devices)").into());
     }
     Ok(())
 }
@@ -448,7 +450,7 @@ fn cmd_invites(s: &mut Session, args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str).unwrap_or("show") {
         "show" => {
             let p = s.ok("GET", "/api/mobile/invite-policy", None)?;
-            println!("Приглашения устройств: {}; в сутки от одного человека: {}; действующих кодов: {}", if p["enabled"] == true { "включены" } else { "выключены" }, field(&p, "per_day"), field(&p, "max_live"));
+            println!("{}", t!(format!("Приглашения устройств: {}; в сутки от одного человека: {}; действующих кодов: {}", if p["enabled"] == true { "включены" } else { "выключены" }, field(&p, "per_day"), field(&p, "max_live")), format!("Device invitations: {}; per person per day: {}; live codes: {}", if p["enabled"] == true { "on" } else { "off" }, field(&p, "per_day"), field(&p, "max_live"))));
         }
         "set" => {
             // разбор до любого запроса: пустая или неверная команда ничего не трогает
@@ -461,27 +463,27 @@ fn cmd_invites(s: &mut Session, args: &[String]) -> Result<(), String> {
                         json!(match it.next().map(String::as_str) {
                             Some("on") => true,
                             Some("off") => false,
-                            _ => return Err("--enabled: нужно on или off".into()),
+                            _ => return Err(t!("--enabled: нужно on или off", "--enabled: on or off").into()),
                         }),
                     )),
                     "--per-day" | "--max-live" => {
                         let n: u32 = it.next().and_then(|n| n.parse().ok()).ok_or_else(|| format!("{a} N"))?;
                         changes.push((if a == "--per-day" { "per_day" } else { "max_live" }, json!(n)));
                     }
-                    other => return Err(format!("неизвестный параметр {other}")),
+                    other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
                 }
             }
             if changes.is_empty() {
-                return Err("укажите --enabled on|off, --per-day N или --max-live N".into());
+                return Err(t!("укажите --enabled on|off, --per-day N или --max-live N", "give --enabled on|off, --per-day N or --max-live N").into());
             }
             let mut p = s.ok("GET", "/api/mobile/invite-policy", None)?;
             for (k, v) in changes {
                 p[k] = v;
             }
             s.ok("POST", "/api/mobile/invite-policy", Some(&p))?;
-            println!("Сохранено.");
+            println!("{}", t!("Сохранено.", "Saved."));
         }
-        other => return Err(format!("invites: неизвестное действие «{other}» (show | set)")),
+        other => return Err(t!(format!("invites: неизвестное действие «{other}» (show | set)"), format!("invites: unknown action “{other}” (show | set)"))),
     }
     Ok(())
 }
@@ -491,40 +493,40 @@ fn cmd_vault(s: &mut Session, args: &[String]) -> Result<(), String> {
         "status" => println!("{}", pretty(&s.ok("GET", "/api/vault/status", None)?)),
         "lock" => {
             s.ok("POST", "/api/vault/lock", Some(&json!({})))?;
-            println!("Закрытая среда заперта.");
+            println!("{}", t!("Закрытая среда заперта.", "The closed environment is locked."));
         }
         "unlock" => {
-            let pw = s.secrets.ask("Пароль владельца: ")?;
+            let pw = s.secrets.ask(t!("Пароль владельца: ", "Owner password: "))?;
             s.ok("POST", "/api/vault/unlock", Some(&json!({ "password": pw })))?;
-            println!("Закрытая среда открыта.");
+            println!("{}", t!("Закрытая среда открыта.", "The closed environment is unlocked."));
         }
         "change-password" => {
-            let old = s.secrets.ask("Текущий пароль: ")?;
-            let new = s.secrets.ask("Новый пароль: ")?;
-            let again = s.secrets.ask("Новый пароль ещё раз: ")?;
+            let old = s.secrets.ask(t!("Текущий пароль: ", "Current password: "))?;
+            let new = s.secrets.ask(t!("Новый пароль: ", "New password: "))?;
+            let again = s.secrets.ask(t!("Новый пароль ещё раз: ", "New password again: "))?;
             if new != again {
-                return Err("пароли не совпадают".into());
+                return Err(t!("пароли не совпадают", "passwords do not match").into());
             }
             s.ok("POST", "/api/vault/change_password", Some(&json!({ "old_password": old, "new_password": new })))?;
-            println!("Пароль изменён.");
+            println!("{}", t!("Пароль изменён.", "Password changed."));
         }
         "panic-erase" => {
             s.ensure_admin()?;
-            eprintln!("ВНИМАНИЕ: закрытая среда этого узла будет стёрта безвозвратно. Личность восстанавливается по сид-фразе и файлу копии.");
-            if !confirm_word("Стереть закрытую среду?", "СТЕРЕТЬ")? {
-                return Err("не подтверждено: ничего не стёрто".into());
+            eprintln!("{}", t!("ВНИМАНИЕ: закрытая среда этого узла будет стёрта безвозвратно. Личность восстанавливается по сид-фразе и файлу копии.", "WARNING: the closed environment of this node will be erased irreversibly. The identity is restored from the seed phrase and the backup file."));
+            if !confirm_word(t!("Стереть закрытую среду?", "Erase the closed environment?"), t!("СТЕРЕТЬ", "ERASE"))? {
+                return Err(t!("не подтверждено: ничего не стёрто", "not confirmed: nothing was erased").into());
             }
             s.ok("POST", "/api/vault/panic_erase", Some(&json!({ "confirm": "СТЕРЕТЬ" })))?;
-            println!("Закрытая среда стёрта.");
+            println!("{}", t!("Закрытая среда стёрта.", "The closed environment has been erased."));
         }
-        other => return Err(format!("vault: неизвестное действие «{other}» (status | lock | unlock | change-password | panic-erase)")),
+        other => return Err(t!(format!("vault: неизвестное действие «{other}» (status | lock | unlock | change-password | panic-erase)"), format!("vault: unknown action “{other}” (status | lock | unlock | change-password | panic-erase)"))),
     }
     Ok(())
 }
 
 /// Выполнить одну команду admin. `Ok(())` — успех; текст ошибки печатает вызывающий.
 pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
-    let cmd = args.first().map(String::as_str).ok_or("нужна команда")?;
+    let cmd = args.first().map(String::as_str).ok_or(t!("нужна команда", "a command is needed"))?;
     let rest = &args[1..];
     match cmd {
         "status" => println!("{}", pretty(&s.ok("GET", "/api/status", None)?)),
@@ -535,14 +537,14 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             while let Some(a) = it.next() {
                 match a.as_str() {
                     "owner" | "user" => role = a.clone(),
-                    "--host" => host = Some(it.next().ok_or("--host АДРЕС")?.clone()),
-                    other => return Err(format!("неизвестный параметр {other}")),
+                    "--host" => host = Some(it.next().ok_or(t!("--host АДРЕС", "--host ADDRESS"))?.clone()),
+                    other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
                 }
             }
             let mut path = format!("/api/mobile/pairing?role={role}");
             if let Some(h) = host {
                 if h.is_empty() || !h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | ':' | '[' | ']')) {
-                    return Err("адрес: допустимы буквы, цифры, точка, дефис, двоеточие".into());
+                    return Err(t!("адрес: допустимы буквы, цифры, точка, дефис, двоеточие", "address: letters, digits, dot, hyphen and colon only").into());
                 }
                 path.push_str(&format!("&host={h}"));
             }
@@ -551,7 +553,7 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
         "devices" => {
             let v = s.ok("GET", "/api/mobile/devices", None)?;
             if v["devices"].as_array().map_or(true, |a| a.is_empty()) {
-                println!("Сопряжённых устройств нет. Код сопряжения: yandi admin pairing");
+                println!("{}", t!("Сопряжённых устройств нет. Код сопряжения: yandi admin pairing", "No paired devices. Pairing code: yandi admin pairing"));
             }
             for d in v["devices"].as_array().into_iter().flatten() {
                 // ник, который человек задал себе сам, главнее технического имени устройства
@@ -562,28 +564,28 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
                 };
                 let inviter = d["invited_by_nick"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string).or_else(|| d["invited_by_name"].as_str().map(str::to_string));
                 let by = match (&inviter, d["invited_by"].is_string()) {
-                    (Some(n), _) => format!("  (пригласил: {n})"),
-                    (None, true) => "  (пригласивший удалён)".to_string(),
+                    (Some(n), _) => t!(format!("  (пригласил: {n})"), format!("  (invited by: {n})")),
+                    (None, true) => t!("  (пригласивший удалён)", "  (the inviter was removed)").to_string(),
                     _ => String::new(),
                 };
-                let wait = if d["role"] == "invited" { ", ждёт подтверждения" } else { "" };
+                let wait = if d["role"] == "invited" { t!(", ждёт подтверждения", ", awaiting confirmation") } else { "" };
                 println!("  {}  {}  {}{wait}{by}", field(d, "peer_id"), who, role_label(&field(d, "role")));
             }
         }
         "device-remove" => {
-            let id = rest.first().ok_or("нужен peer_id устройства (yandi admin devices)")?;
+            let id = rest.first().ok_or(t!("нужен peer_id устройства (yandi admin devices)", "device peer_id needed (yandi admin devices)"))?;
             if id.len() != 64 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
-                return Err("peer_id — 64 шестнадцатеричных знака".into());
+                return Err(t!("peer_id — 64 шестнадцатеричных знака", "peer_id is 64 hexadecimal characters").into());
             }
             s.ensure_admin()?;
-            if !confirm_word("Отвязать устройство?", "ДА")? {
-                return Err("не подтверждено".into());
+            if !confirm_word(t!("Отвязать устройство?", "Unpair the device?"), crate::i18n::confirm_word())? {
+                return Err(t!("не подтверждено", "not confirmed").into());
             }
             let path = format!("/api/mobile/devices/{id}");
             let (code, v) = s.call("DELETE", &path, None)?;
             if code == 403 && v["error"] != "admin_required" {
                 // устройство владеет группами: их удаление требует пароль узла ещё раз
-                let pw = s.secrets.ask("Пароль узла (устройство владеет группами): ")?;
+                let pw = s.secrets.ask(t!("Пароль узла (устройство владеет группами): ", "Node password (the device owns groups): "))?;
                 let (code, v) = s.call("DELETE", &path, Some(&json!({ "password": pw })))?;
                 if !(200..300).contains(&code) {
                     return Err(error_text(code, &v));
@@ -591,28 +593,28 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             } else if !(200..300).contains(&code) {
                 return Err(error_text(code, &v));
             }
-            println!("Устройство отвязано.");
+            println!("{}", t!("Устройство отвязано.", "Device unpaired."));
         }
         "device-promote" => {
             let id = rest.first().ok_or("device-promote ID (yandi admin devices)")?;
             check_device_id(id)?;
             s.ensure_admin()?;
             s.ok("POST", &format!("/api/mobile/devices/{id}/promote"), Some(&json!({})))?;
-            println!("Устройство повышено до пользователя: теперь оно может приглашать само.");
+            println!("{}", t!("Устройство повышено до пользователя: теперь оно может приглашать само.", "Device confirmed as a user: it can now invite others itself."));
         }
         "device-revoke-branch" => {
             let id = rest.first().ok_or("device-revoke-branch ID (yandi admin devices)")?;
             check_device_id(id)?;
             s.ensure_admin()?;
-            eprintln!("Будет отозвано это устройство и ВСЕ, кого оно пригласило (и кого пригласили они).");
-            if !confirm_word("Отозвать ветку?", "ДА")? {
-                return Err("не подтверждено".into());
+            eprintln!("{}", t!("Будет отозвано это устройство и ВСЕ, кого оно пригласило (и кого пригласили они).", "This device and EVERYONE it invited (and whom they invited) will be revoked."));
+            if !confirm_word(t!("Отозвать ветку?", "Revoke the branch?"), crate::i18n::confirm_word())? {
+                return Err(t!("не подтверждено", "not confirmed").into());
             }
             let path = format!("/api/mobile/devices/{id}/revoke-branch");
             let (code, v) = s.call("POST", &path, Some(&json!({})))?;
             let r = if code == 403 && v["error"] == "password_required" {
                 // в ветке есть владельцы групп: их удаление требует пароль узла ещё раз
-                let pw = s.secrets.ask("Пароль узла (в ветке есть владельцы групп): ")?;
+                let pw = s.secrets.ask(t!("Пароль узла (в ветке есть владельцы групп): ", "Node password (the branch has group owners): "))?;
                 let (code, v) = s.call("POST", &path, Some(&json!({ "password": pw })))?;
                 if !(200..300).contains(&code) {
                     return Err(error_text(code, &v));
@@ -623,45 +625,45 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             } else {
                 v
             };
-            println!("Отозвано устройств: {}.", field(&r, "removed"));
+            println!("{}", t!(format!("Отозвано устройств: {}.", field(&r, "removed")), format!("Devices revoked: {}.", field(&r, "removed"))));
         }
         "invites" => cmd_invites(s, rest)?,
         "phone-action" => {
-            let peer = rest.first().ok_or("phone-action ПИР ДЕЙСТВИЕ")?;
-            let action = rest.get(1).ok_or("phone-action ПИР ДЕЙСТВИЕ")?;
+            let peer = rest.first().ok_or(t!("phone-action ПИР ДЕЙСТВИЕ", "phone-action PEER ACTION"))?;
+            let action = rest.get(1).ok_or(t!("phone-action ПИР ДЕЙСТВИЕ", "phone-action PEER ACTION"))?;
             s.ok("POST", "/api/mobile/phone-action", Some(&json!({ "peer": peer, "action": action })))?;
-            println!("Выполнено.");
+            println!("{}", t!("Выполнено.", "Done."));
         }
         "proxies" => cmd_proxies(s, rest)?,
         "vault" => cmd_vault(s, rest)?,
         "node" => match rest.first().map(String::as_str) {
             Some(a @ ("stop" | "start")) => {
                 s.ok("POST", &format!("/api/node/{a}"), Some(&json!({})))?;
-                println!("Готово.");
+                println!("{}", t!("Готово.", "Done."));
             }
             _ => return Err("node stop | node start".into()),
         },
         "alerts" => println!("{}", pretty(&s.ok("GET", "/api/alerts", None)?)),
         "update" => println!("{}", pretty(&s.ok("GET", "/api/update/status", None)?)),
         "raw" => {
-            let method = rest.first().ok_or("raw МЕТОД ПУТЬ [json]")?.to_ascii_uppercase();
-            let path = rest.get(1).ok_or("raw МЕТОД ПУТЬ [json]")?;
+            let method = rest.first().ok_or(t!("raw МЕТОД ПУТЬ [json]", "raw METHOD PATH [json]"))?.to_ascii_uppercase();
+            let path = rest.get(1).ok_or(t!("raw МЕТОД ПУТЬ [json]", "raw METHOD PATH [json]"))?;
             if !matches!(method.as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") || !path.starts_with("/api/") || path.contains(['\r', '\n', ' ']) {
-                return Err("raw: метод GET/POST/PUT/PATCH/DELETE и путь вида /api/…".into());
+                return Err(t!("raw: метод GET/POST/PUT/PATCH/DELETE и путь вида /api/…", "raw: method GET/POST/PUT/PATCH/DELETE and a path like /api/…").into());
             }
             let body: Option<Value> = match rest.get(2) {
-                Some(j) => Some(serde_json::from_str(j).map_err(|_| "тело — не JSON".to_string())?),
+                Some(j) => Some(serde_json::from_str(j).map_err(|_| t!("тело — не JSON", "the body is not JSON").to_string())?),
                 None => None,
             };
             let (code, v) = s.call(&method, path, body.as_ref())?;
             println!("{code}\n{}", pretty(&v));
         }
-        other => return Err(format!("неизвестная команда «{other}»; yandi admin --help")),
+        other => return Err(t!(format!("неизвестная команда «{other}»; yandi admin --help"), format!("unknown command “{other}”; yandi admin --help"))),
     }
     Ok(())
 }
 
-const HELP: &str = "yandi admin — управление запущенным узлом из консоли
+const HELP_RU: &str = "yandi admin — управление запущенным узлом из консоли
 
   yandi admin                      меню
   yandi admin status               состояние узла
@@ -678,8 +680,32 @@ const HELP: &str = "yandi admin — управление запущенным у
   yandi admin node stop|start
   yandi admin alerts | update
   yandi admin raw МЕТОД /api/путь [json]
-Параметры: --socket ПУТЬ, --admin-password-stdin
+Параметры: --socket ПУТЬ, --admin-password-stdin, --lang ru|en
 Админские действия просят пароль администратора (сеанс 15 минут). Опасные (стирание, отвязка) просят ввести слово подтверждения.";
+
+const HELP_EN: &str = "yandi admin — manage the running node from the console
+
+  yandi admin                      menu
+  yandi admin status               node status
+  yandi admin pairing [owner|user] [--host ADDRESS]
+                                   phone pairing code and QR
+  yandi admin devices              paired devices
+  yandi admin device-remove ID     unpair a device
+  yandi admin device-promote ID    confirm an invited device: it becomes a user and can invite others itself
+  yandi admin device-revoke-branch ID   revoke a device and everyone it invited
+  yandi admin invites show | set --enabled on|off --per-day N --max-live N
+  yandi admin phone-action PEER ACTION
+  yandi admin proxies list|add [kind]|remove ID|test [kind]|settings --enabled on|off --strict on|off --max-clients N
+  yandi admin vault status|lock|unlock|change-password|panic-erase
+  yandi admin node stop|start
+  yandi admin alerts | update
+  yandi admin raw METHOD /api/path [json]
+Options: --socket PATH, --admin-password-stdin, --lang ru|en
+Administrator actions ask for the administrator password (a 15 minute session). Dangerous ones (erase, unpair) ask you to type a confirmation word.";
+
+fn help() -> &'static str {
+    t!(HELP_RU, HELP_EN)
+}
 
 struct Common {
     socket: PathBuf,
@@ -694,7 +720,7 @@ fn common(argv: Vec<String>) -> Result<Common, String> {
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         match a.as_str() {
-            "--socket" => socket = it.next().ok_or("после --socket нужен путь")?.into(),
+            "--socket" => socket = it.next().ok_or(t!("после --socket нужен путь", "--socket needs a path"))?.into(),
             "--admin-password-stdin" => admin_stdin = true,
             _ => rest.push(a),
         }
@@ -703,32 +729,32 @@ fn common(argv: Vec<String>) -> Result<Common, String> {
 }
 
 fn menu(s: &mut Session) -> i32 {
-    const ITEMS: &[(&str, &str)] = &[
-        ("Состояние узла", "status"),
-        ("Сопряжение телефона (код и QR)", "pairing"),
-        ("Сопряжённые устройства", "devices"),
-        ("Прокси узла", "proxies"),
-        ("Закрытая среда", "vault status"),
-        ("Извещения", "alerts"),
-        ("Обновления", "update"),
+    let items: Vec<(&str, &str)> = vec![
+        (t!("Состояние узла", "Node status"), "status"),
+        (t!("Сопряжение телефона (код и QR)", "Phone pairing (code and QR)"), "pairing"),
+        (t!("Сопряжённые устройства", "Paired devices"), "devices"),
+        (t!("Прокси узла", "Node proxies"), "proxies"),
+        (t!("Закрытая среда", "Closed environment"), "vault status"),
+        (t!("Извещения", "Alerts"), "alerts"),
+        (t!("Обновления", "Updates"), "update"),
     ];
     loop {
-        eprintln!("\nYANDI — управление узлом");
-        for (i, (name, _)) in ITEMS.iter().enumerate() {
+        eprintln!("{}", t!("\nYANDI — управление узлом", "\nYANDI — node management"));
+        for (i, (name, _)) in items.iter().enumerate() {
             eprintln!("  {}. {name}", i + 1);
         }
-        eprintln!("  9. Опасные действия (стирание, отвязка, смена пароля)\n  0. Выход");
-        let choice = match Secrets::ask_visible("Пункт: ") {
+        eprintln!("{}", t!("  9. Опасные действия (стирание, отвязка, смена пароля)\n  0. Выход", "  9. Dangerous actions (erase, unpair, change password)\n  0. Exit"));
+        let choice = match Secrets::ask_visible(t!("Пункт: ", "Item: ")) {
             Ok(c) => c,
             Err(_) => return 1,
         };
         let args: Vec<String> = match choice.trim() {
             "0" | "q" | "" => return 0,
             "9" => {
-                eprintln!("  a. Отвязать устройство\n  b. Стереть закрытую среду\n  c. Сменить пароль владельца\n  d. Остановить узел");
-                match Secrets::ask_visible("Действие: ").unwrap_or_default().trim() {
+                eprintln!("{}", t!("  a. Отвязать устройство\n  b. Стереть закрытую среду\n  c. Сменить пароль владельца\n  d. Остановить узел", "  a. Unpair a device\n  b. Erase the closed environment\n  c. Change the owner password\n  d. Stop the node"));
+                match Secrets::ask_visible(t!("Действие: ", "Action: ")).unwrap_or_default().trim() {
                     "a" => {
-                        let id = Secrets::ask_visible("peer_id устройства: ").unwrap_or_default();
+                        let id = Secrets::ask_visible(t!("peer_id устройства: ", "Device peer_id: ")).unwrap_or_default();
                         vec!["device-remove".into(), id.trim().to_string()]
                     }
                     "b" => vec!["vault".into(), "panic-erase".into()],
@@ -737,20 +763,70 @@ fn menu(s: &mut Session) -> i32 {
                     _ => continue,
                 }
             }
-            n => match n.parse::<usize>().ok().and_then(|n| ITEMS.get(n.wrapping_sub(1))) {
+            n => match n.parse::<usize>().ok().and_then(|n| items.get(n.wrapping_sub(1))) {
                 Some((_, cmd)) => cmd.split(' ').map(String::from).collect(),
                 None => continue,
             },
         };
         if let Err(e) = dispatch(s, &args) {
-            eprintln!("Ошибка: {e}");
+            eprintln!("{}{e}", t!("Ошибка: ", "Error: "));
         }
     }
 }
 
+/// Выбрать язык консоли: ключ `--lang` (убирается из аргументов), `YANDI_LANG`, сохранённый выбор, язык системы. В `yandi setup` при запуске
+/// в терминале без явного выбора спрашивает язык и запоминает ответ.
+fn init_lang(argv: Vec<String>, ask: bool) -> Result<Vec<String>, String> {
+    use crate::i18n::{self, Lang};
+    let mut rest = Vec::new();
+    let mut flag: Option<String> = None;
+    let mut it = argv.into_iter();
+    while let Some(a) = it.next() {
+        if a == "--lang" {
+            flag = Some(it.next().ok_or("--lang: ru | en")?);
+        } else if let Some(v) = a.strip_prefix("--lang=") {
+            flag = Some(v.to_string());
+        } else {
+            rest.push(a);
+        }
+    }
+    let explicit = flag.is_some() || std::env::var("YANDI_LANG").ok().as_deref().and_then(i18n::parse).is_some();
+    let lang = i18n::detect(flag.as_deref())?;
+    i18n::set(lang);
+    let help = rest.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "help"));
+    if ask && !help {
+        let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(2) == 1 };
+        let mut chosen = lang;
+        if !explicit && tty {
+            let q = format!("Выберите язык / Select language [ru/en] ({}): ", if lang == Lang::Ru { "ru" } else { "en" });
+            for _ in 0..3 {
+                let a = Secrets::ask_visible(&q)?;
+                if a.trim().is_empty() {
+                    break;
+                }
+                if let Some(l) = i18n::parse(&a) {
+                    chosen = l;
+                    break;
+                }
+                eprintln!("ru | en");
+            }
+            i18n::set(chosen);
+        }
+        i18n::save(chosen);
+    }
+    Ok(rest)
+}
+
 pub fn run_admin(argv: Vec<String>) -> i32 {
+    let argv = match init_lang(argv, false) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("yandi admin: {e}");
+            return 2;
+        }
+    };
     if argv.first().is_some_and(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
-        println!("{HELP}");
+        println!("{}", help());
         return 0;
     }
     let c = match common(argv) {
@@ -778,10 +854,10 @@ pub fn run_admin(argv: Vec<String>) -> i32 {
 /// Пароль не короче порога, который называет сам узел.
 fn check_password_pair(a: &str, b: &str, min: usize) -> Result<(), String> {
     if a.chars().count() < min {
-        return Err(format!("пароль — не короче {min} знаков"));
+        return Err(t!(format!("пароль — не короче {min} знаков"), format!("the password must be at least {min} characters")));
     }
     if a != b {
-        return Err("пароли не совпадают".into());
+        return Err(t!("пароли не совпадают", "passwords do not match").into());
     }
     Ok(())
 }
@@ -798,18 +874,40 @@ fn write_private_new(path: &Path, content: &str) -> Result<(), String> {
     f.sync_all().map_err(|e| e.to_string())
 }
 
-const SETUP_HELP: &str = "yandi setup — первая настройка узла из консоли
+const SETUP_HELP_RU: &str = "yandi setup — первая настройка узла из консоли
 
-  yandi setup [--words 12|24] [--seed-file ФАЙЛ] [--password-stdin] [--socket ПУТЬ]
+  yandi setup [--words 12|24] [--seed-file ФАЙЛ] [--password-stdin] [--socket ПУТЬ] [--lang ru|en]
 
 Узел должен быть уже запущен (служба yandi-node) и ещё не настроен. Мастер спрашивает пароль, создаёт ключи и закрытую среду, показывает
 фразу восстановления (12 или 24 слова). Запишите её на бумаге: по ней и по файлу копии личность восстанавливается на новой машине.
 Фраза показывается только в терминале; без терминала нужен --seed-file (новый файл с правами 0600 — удалите его после переписывания).
---password-stdin: пароль входа первой строкой стандартного ввода (для скриптов).";
+--password-stdin: пароль входа первой строкой стандартного ввода (для скриптов).
+--lang ru|en: язык консоли (без ключа спрашивается в начале; выбор запоминается).";
+
+const SETUP_HELP_EN: &str = "yandi setup — first-time node setup from the console
+
+  yandi setup [--words 12|24] [--seed-file FILE] [--password-stdin] [--socket PATH] [--lang ru|en]
+
+The node must already be running (the yandi-node service) and not set up yet. The wizard asks for a password, creates the keys and the closed environment,
+and shows the recovery phrase (12 or 24 words). Write it down on paper: with it and the backup file the identity is restored on a new machine.
+The phrase is shown only in a terminal; without a terminal use --seed-file (a new file with mode 0600 — delete it after copying).
+--password-stdin: the login password as the first line of standard input (for scripts).
+--lang ru|en: console language (asked at the start if not given; the choice is remembered).";
+
+fn setup_help() -> &'static str {
+    t!(SETUP_HELP_RU, SETUP_HELP_EN)
+}
 
 pub fn run_setup(argv: Vec<String>) -> i32 {
+    let argv = match init_lang(argv, true) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("yandi setup: {e}");
+            return 2;
+        }
+    };
     if argv.first().is_some_and(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
-        println!("{SETUP_HELP}");
+        println!("{}", setup_help());
         return 0;
     }
     let mut socket = default_socket();
@@ -820,11 +918,11 @@ pub fn run_setup(argv: Vec<String>) -> i32 {
     while let Some(a) = it.next() {
         let r: Result<(), String> = (|| {
             match a.as_str() {
-                "--socket" => socket = it.next().ok_or("после --socket нужен путь")?.into(),
-                "--words" => words = it.next().and_then(|n| n.parse().ok()).filter(|n| *n == 12 || *n == 24).ok_or("--words 12 или 24")?,
-                "--seed-file" => seed_file = Some(it.next().ok_or("после --seed-file нужен путь")?.into()),
+                "--socket" => socket = it.next().ok_or(t!("после --socket нужен путь", "--socket needs a path"))?.into(),
+                "--words" => words = it.next().and_then(|n| n.parse().ok()).filter(|n| *n == 12 || *n == 24).ok_or(t!("--words 12 или 24", "--words 12 or 24"))?,
+                "--seed-file" => seed_file = Some(it.next().ok_or(t!("после --seed-file нужен путь", "--seed-file needs a path"))?.into()),
                 "--password-stdin" => password_stdin = true,
-                other => return Err(format!("неизвестный параметр {other}")),
+                other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
             }
             Ok(())
         })();
@@ -849,11 +947,11 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
         return Err(error_text(code, &st));
     }
     if st["setup_required"] != true {
-        return Err("узел уже настроен (для восстановления из копии: yandi backup restore, затем запуск службы)".into());
+        return Err(t!("узел уже настроен (для восстановления из копии: yandi backup restore, затем запуск службы)", "the node is already set up (to restore from a backup: yandi backup restore, then start the service)").into());
     }
     let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(2) == 1 };
     if !tty && seed_file.is_none() {
-        return Err("нет терминала: фразу восстановления некуда безопасно показать; запустите в терминале или добавьте --seed-file ФАЙЛ".into());
+        return Err(t!("нет терминала: фразу восстановления некуда безопасно показать; запустите в терминале или добавьте --seed-file ФАЙЛ", "no terminal: there is nowhere to show the recovery phrase safely; run in a terminal or add --seed-file FILE").into());
     }
     let secrets = Secrets { from_stdin: password_stdin, preset: None };
     // 1. фраза от узла
@@ -861,25 +959,25 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
     if code != 200 {
         return Err(error_text(code, &seed));
     }
-    let list: Vec<String> = seed["words"].as_array().ok_or("узел не вернул слова")?.iter().filter_map(|w| w.as_str().map(String::from)).collect();
+    let list: Vec<String> = seed["words"].as_array().ok_or(t!("узел не вернул слова", "the node did not return the words"))?.iter().filter_map(|w| w.as_str().map(String::from)).collect();
     if list.len() as u32 != words {
-        return Err("узел вернул неверное число слов".into());
+        return Err(t!("узел вернул неверное число слов", "the node returned a wrong number of words").into());
     }
     let min = seed["min_password"].as_u64().unwrap_or(8) as usize;
     let phrase = list.join(" ");
     // 2. пароли
-    let pw = secrets.ask(&format!("Пароль владельца (не короче {min} знаков): "))?;
-    let again = if password_stdin { pw.clone() } else { secrets.ask("Пароль ещё раз: ")? };
+    let pw = secrets.ask(&t!(format!("Пароль владельца (не короче {min} знаков): "), format!("Owner password (at least {min} characters): ")))?;
+    let again = if password_stdin { pw.clone() } else { secrets.ask(t!("Пароль ещё раз: ", "Password again: "))? };
     check_password_pair(&pw, &again, min)?;
     let admin = if password_stdin {
         String::new()
     } else {
-        let a = Secrets::ask_visible("Отдельный пароль администратора? (пусто — тот же, иначе введите следом): ").unwrap_or_default();
+        let a = Secrets::ask_visible(t!("Отдельный пароль администратора? (пусто — тот же, иначе введите следом): ", "A separate administrator password? (empty — the same, otherwise type it now): ")).unwrap_or_default();
         if a.trim().is_empty() {
             String::new()
         } else {
-            let p1 = secrets.ask("Пароль администратора: ")?;
-            let p2 = secrets.ask("Ещё раз: ")?;
+            let p1 = secrets.ask(t!("Пароль администратора: ", "Administrator password: "))?;
+            let p2 = secrets.ask(t!("Ещё раз: ", "Again: "))?;
             check_password_pair(&p1, &p2, min)?;
             p1
         }
@@ -887,16 +985,16 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
     // 3. показать фразу и убедиться, что её записали
     if let Some(path) = seed_file {
         write_private_new(path, &format!("{phrase}\n"))?;
-        eprintln!("Фраза записана в {} (права 0600). Перепишите её и удалите файл.", path.display());
+        eprintln!("{}", t!(format!("Фраза записана в {} (права 0600). Перепишите её и удалите файл.", path.display()), format!("The phrase is written to {} (mode 0600). Copy it down and delete the file.", path.display())));
     } else {
-        eprintln!("\nФраза восстановления ({words} слов). Запишите её на бумаге, порядок важен:\n");
+        eprintln!("{}", t!(format!("\nФраза восстановления ({words} слов). Запишите её на бумаге, порядок важен:\n"), format!("\nRecovery phrase ({words} words). Write it down on paper, the order matters:\n")));
         for (i, w) in list.iter().enumerate() {
             eprintln!("  {:>2}. {w}", i + 1);
         }
         eprintln!();
-        let typed = Secrets::ask_visible("Для проверки введите фразу целиком: ")?;
+        let typed = Secrets::ask_visible(t!("Для проверки введите фразу целиком: ", "To verify, type the whole phrase: "))?;
         if normalize_phrase(&typed) != phrase {
-            return Err("фраза введена неверно: ничего не создано, запустите мастер снова".into());
+            return Err(t!("фраза введена неверно: ничего не создано, запустите мастер снова", "the phrase was typed wrongly: nothing was created, run the wizard again").into());
         }
     }
     // 4. создание ключей, ожидание запуска узла, закрытая среда
@@ -912,7 +1010,7 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
     if code != 200 {
         return Err(error_text(code, &v));
     }
-    eprintln!("Ключи созданы. Узел запускается…");
+    eprintln!("{}", t!("Ключи созданы. Узел запускается…", "Keys created. The node is starting…"));
     let deadline = std::time::Instant::now() + Duration::from_secs(120);
     loop {
         std::thread::sleep(Duration::from_secs(1));
@@ -922,15 +1020,15 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
             }
         }
         if std::time::Instant::now() > deadline {
-            return Err("узел не запустился за 120 секунд: проверьте журнал службы (journalctl -u yandi-node)".into());
+            return Err(t!("узел не запустился за 120 секунд: проверьте журнал службы (journalctl -u yandi-node)", "the node did not start within 120 seconds: check the service log (journalctl -u yandi-node)").into());
         }
     }
     let (code, v) = roundtrip(socket, "POST", "/api/vault/setup", Some(&json!({ "password": pw, "phrase": phrase })), None, Duration::from_secs(300))?;
     if code != 200 {
-        return Err(format!("ключи созданы, но закрытая среда не создана: {}", error_text(code, &v)));
+        return Err(t!(format!("ключи созданы, но закрытая среда не создана: {}", error_text(code, &v)), format!("the keys are created, but the closed environment is not: {}", error_text(code, &v))));
     }
-    eprintln!("Закрытая среда создана. Готово.");
-    eprintln!("Дальше: yandi admin pairing — код сопряжения телефона; yandi admin — меню управления.");
+    eprintln!("{}", t!("Закрытая среда создана. Готово.", "The closed environment is created. Done."));
+    eprintln!("{}", t!("Дальше: yandi admin pairing — код сопряжения телефона; yandi admin — меню управления.", "Next: yandi admin pairing — phone pairing code; yandi admin — the management menu."));
     Ok(())
 }
 
@@ -938,6 +1036,46 @@ fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bo
 mod tests {
     use super::*;
     use std::os::unix::net::UnixListener;
+
+    #[test]
+    fn the_language_flag_is_taken_out_of_the_arguments_and_switches_every_message() {
+        use crate::i18n::{self, Lang};
+        let rest = init_lang(vec!["status".into(), "--lang".into(), "en".into()], false).unwrap();
+        assert_eq!(rest, vec!["status".to_string()], "ключ языка не доходит до команд");
+        assert_eq!(i18n::get(), Lang::En);
+        assert!(help().contains("manage the running node"));
+        assert!(setup_help().contains("first-time node setup"));
+        assert_eq!(error_text(401, &Value::Null), "wrong password or access denied");
+        assert_eq!(error_text(429, &Value::Null), "too many attempts: wait and try again");
+        assert!(error_text(500, &json!({"error": "boom"})).starts_with("the node answered 500"));
+        assert_eq!(role_label("invited"), "invited");
+        // та же консоль по-русски
+        let rest = init_lang(vec!["--lang=ru".into(), "devices".into()], false).unwrap();
+        assert_eq!(rest, vec!["devices".to_string()]);
+        assert_eq!(i18n::get(), Lang::Ru);
+        assert!(help().contains("управление запущенным узлом"));
+        assert_eq!(error_text(401, &Value::Null), "неверный пароль или доступ запрещён");
+        assert_eq!(role_label("invited"), "приглашённый");
+        // неизвестный язык — ошибка на двух языках, а не молчаливый выбор
+        assert!(init_lang(vec!["--lang".into(), "de".into()], false).is_err());
+        assert!(init_lang(vec!["--lang".into()], false).is_err());
+    }
+
+    #[test]
+    fn protocol_errors_and_prompts_follow_the_language_but_the_erase_word_on_the_wire_does_not() {
+        use crate::i18n::{self, Lang};
+        i18n::set(Lang::En);
+        let e = parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab").unwrap_err();
+        assert!(e.contains("does not match the declared length"), "{e}");
+        assert_eq!(t!("СТЕРЕТЬ", "ERASE"), "ERASE", "слово подтверждения по-английски");
+        i18n::set(Lang::Ru);
+        let e = parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nab").unwrap_err();
+        assert!(e.contains("не совпадает с заявленной длиной"), "{e}");
+        // по сети слово остаётся прежним (его ждёт узел), независимо от языка
+        let src = include_str!("admin_cli.rs");
+        assert!(src.contains(r#"json!({ "confirm": "СТЕРЕТЬ" })"#));
+    }
+
 
     fn serve_once(dir: &Path, name: &str, reply: Vec<u8>) -> (PathBuf, std::thread::JoinHandle<String>) {
         let sock = dir.join(name);

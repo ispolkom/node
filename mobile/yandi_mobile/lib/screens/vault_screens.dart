@@ -9,6 +9,7 @@ import '../theme.dart';
 import '../widgets/password_hint.dart';
 import '../widgets/secure_keyboard.dart';
 import 'support_screen.dart';
+import '../l10n.dart';
 
 /// Экраны закрытой среды: создание (секретные слова → повтор → пароль), вход по паролю, восстановление по словам.
 /// На этих экранах окно закрыто от скриншотов и записи экрана, ввод — только нашей клавиатурой (системная не вызывается).
@@ -123,6 +124,7 @@ abstract class _SecretFormState<T extends StatefulWidget> extends State<T> {
         automaticallyImplyLeading: canGoBack,
         iconTheme: const IconThemeData(color: AppTheme.text),
         title: Text(title, style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.bold)),
+        actions: const [LangToggle(), SizedBox(width: 8)],
       ),
       body: SafeArea(
         child: Column(children: [
@@ -162,7 +164,7 @@ abstract class _SecretFormState<T extends StatefulWidget> extends State<T> {
         title: Text(title, style: const TextStyle(color: AppTheme.text)),
         content: Text(text, style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Нет')),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Нет'))),
           TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(yes, style: const TextStyle(color: Colors.redAccent))),
         ],
       ),
@@ -171,8 +173,8 @@ abstract class _SecretFormState<T extends StatefulWidget> extends State<T> {
   }
 
   static String pwProblem(String a, String b) {
-    if (a.runes.length < VaultKeys.minPasswordLength) return 'Пароль не короче ${VaultKeys.minPasswordLength} знаков';
-    if (a != b) return 'Пароли не совпали';
+    if (a.runes.length < VaultKeys.minPasswordLength) return trf('Пароль не короче {n} знаков', {'n': VaultKeys.minPasswordLength});
+    if (a != b) return tr('Пароли не совпали');
     return '';
   }
 
@@ -225,14 +227,14 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
   void _next() {
     final words = _SecretFormState.texts(_w1);
     if (!VaultKeys.phraseStrongEnough(words)) {
-      setState(() => _error = 'Нужно ${VaultKeys.phraseFieldCount} разных слова, в каждом не меньше ${VaultKeys.minPhraseFieldChars} знаков');
+      setState(() => _error = trf('Нужно {n} разных слова, в каждом не меньше {m} знаков', {'n': VaultKeys.phraseFieldCount, 'm': VaultKeys.minPhraseFieldChars}));
       return;
     }
     _goto(1);
   }
 
   Future<void> _skip() async {
-    final ok = await confirm('Без секретных слов?', 'Если вы забудете пароль, восстановить данные будет невозможно: придётся удалить всё и начать заново. Пропустить?', 'Пропустить');
+    final ok = await confirm(tr('Без секретных слов?'), tr('Если вы забудете пароль, восстановить данные будет невозможно: придётся удалить всё и начать заново. Пропустить?'), tr('Пропустить'));
     if (!ok || !mounted) return;
     _phrase = null;
     _SecretFormState.clear(_w1);
@@ -241,7 +243,7 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
 
   void _save() {
     if (!VaultKeys.samePhrase(_SecretFormState.texts(_w1), _SecretFormState.texts(_w2))) {
-      setState(() => _error = 'Слова не совпали. Проверьте и введите ещё раз, или вернитесь назад.');
+      setState(() => _error = tr('Слова не совпали. Проверьте и введите ещё раз, или вернитесь назад.'));
       return;
     }
     _phrase = _SecretFormState.texts(_w1);
@@ -260,7 +262,7 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
       await VaultService.instance.create(_pw.text, _phrase);
     } catch (e) {
       if (!mounted) return;
-      setState(() { _step = 2; _error = e is VaultPolicyError ? e.message : 'Не удалось создать хранилище: $e'; });
+      setState(() { _step = 2; _error = e is VaultPolicyError ? e.message : trf('Не удалось создать хранилище: {e}', {'e': e}); });
       return;
     }
     _SecretFormState.clear([..._w1, ..._w2, _pw, _pw2]);
@@ -273,38 +275,37 @@ class _VaultSetupScreenState extends _SecretFormState<VaultSetupScreen> {
   Widget build(BuildContext context) {
     switch (_step) {
       case 0:
-        return page(title: 'Секретные слова', children: [
-          info('Придумайте ${VaultKeys.phraseFieldCount} слова: каждое не короче ${VaultKeys.minPhraseFieldChars} знаков, все разные. По ним можно будет войти, если вы забудете пароль. '
-              'Запишите их и храните отдельно от телефона: без пароля и без этих слов данные не вернуть. Слова никуда не отправляются.'),
-          for (var i = 0; i < _w1.length; i++) field('Слово ${i + 1}', _w1[i]),
+        return page(title: tr('Секретные слова'), children: [
+          info(trf('Придумайте {n} слова: каждое не короче {m} знаков, все разные. По ним можно будет войти, если вы забудете пароль. Запишите их и храните отдельно от телефона: без пароля и без этих слов данные не вернуть. Слова никуда не отправляются.', {'n': VaultKeys.phraseFieldCount, 'm': VaultKeys.minPhraseFieldChars})),
+          for (var i = 0; i < _w1.length; i++) field(trf('Слово {n}', {'n': i + 1}), _w1[i]),
           errorText(_error),
-          primary('Далее', _next),
-          link('Пропустить (без восстановления)', _skip),
+          primary(tr('Далее'), _next),
+          link(tr('Пропустить (без восстановления)'), _skip),
         ]);
       case 1:
-        return page(title: 'Повторите слова', children: [
-          info('Введите те же слова ещё раз, в тех же полях. Так мы проверим, что вы их записали верно.'),
-          for (var i = 0; i < _w2.length; i++) field('Слово ${i + 1}', _w2[i]),
+        return page(title: tr('Повторите слова'), children: [
+          info(tr('Введите те же слова ещё раз, в тех же полях. Так мы проверим, что вы их записали верно.')),
+          for (var i = 0; i < _w2.length; i++) field(trf('Слово {n}', {'n': i + 1}), _w2[i]),
           errorText(_error),
-          primary('Сохранить', _save),
-          link('Назад', () => _goto(0)),
+          primary(tr('Сохранить'), _save),
+          link(tr('Назад'), () => _goto(0)),
         ]);
       case 2:
-        return page(title: 'Пароль для входа', children: [
-          info('Короткий пароль, не меньше ${VaultKeys.minPasswordLength} знаков. Он нужен при каждом запуске приложения. Без него никто не прочтёт ваши сообщения и файлы.'),
-          field('Пароль', _pw),
+        return page(title: tr('Пароль для входа'), children: [
+          info(trf('Короткий пароль, не меньше {n} знаков. Он нужен при каждом запуске приложения. Без него никто не прочтёт ваши сообщения и файлы.', {'n': VaultKeys.minPasswordLength})),
+          field(tr('Пароль'), _pw),
           PasswordHint(_pw),
-          field('Повторите пароль', _pw2),
+          field(tr('Повторите пароль'), _pw2),
           errorText(_error),
-          primary('Готово', _done),
+          primary(tr('Готово'), _done),
         ]);
       default:
         return Scaffold(
           backgroundColor: AppTheme.bg,
-          body: const Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
             CircularProgressIndicator(color: AppTheme.accent),
             SizedBox(height: 16),
-            Text('Создаём защищённое хранилище…', style: TextStyle(color: AppTheme.textSecondary)),
+            Text(tr('Создаём защищённое хранилище…'), style: TextStyle(color: AppTheme.textSecondary)),
           ])),
         );
     }
@@ -353,7 +354,7 @@ class _VaultUnlockScreenState extends _SecretFormState<VaultUnlockScreen> {
   Future<void> submit() async {
     if (_busy || _waitLeft > 0) return;
     if (_pw.text.isEmpty) {
-      setState(() => _error = 'Введите пароль');
+      setState(() => _error = tr('Введите пароль'));
       return;
     }
     setState(() { _busy = true; _error = null; });
@@ -364,15 +365,15 @@ class _VaultUnlockScreenState extends _SecretFormState<VaultUnlockScreen> {
       await enterVaultedApp(context);
       return;
     } on VaultWrongSecret catch (e) {
-      _error = 'Неверный пароль (подряд неверных: ${e.failures})';
+      _error = trf('Неверный пароль (подряд неверных: {n})', {'n': e.failures});
     } on VaultThrottled catch (e) {
       _startWait(e.wait);
-      _error = 'Слишком много попыток';
+      _error = tr('Слишком много попыток');
     } on VaultCorrupt {
       _corrupt = true;
-      _error = 'Хранилище ключей повреждено. Если резервной копии нет, остаётся удалить всё и начать заново.';
+      _error = tr('Хранилище ключей повреждено. Если резервной копии нет, остаётся удалить всё и начать заново.');
     } catch (e) {
-      _error = 'Не удалось открыть: $e';
+      _error = trf('Не удалось открыть: {e}', {'e': e});
     }
     _pw.clear();
     if (mounted) setState(() => _busy = false);
@@ -385,13 +386,13 @@ class _VaultUnlockScreenState extends _SecretFormState<VaultUnlockScreen> {
       const SizedBox(height: 8),
       Center(child: Image.asset('assets/images/logo.png', width: 72)),
       const SizedBox(height: 16),
-      info(widget.justCreated ? 'Хранилище создано. Введите пароль, чтобы войти.' : 'Введите пароль.'),
-      field('Пароль', _pw),
-      errorText(waiting ? '${_error ?? 'Подождите'}: ещё $_waitLeft с' : _error),
-      primary(_busy ? 'Проверяем…' : 'Войти', (_busy || waiting) ? null : submit),
-      if (!widget.justCreated) link('Забыл пароль', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultRecoverScreen()))),
-      link('Поддержать проект', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SupportScreen(wallets: context.read<AppState>().wallets)))), // адрес не секрет: доступен и без входа
-      if (_corrupt) info('Если резервной копии нет, данные не вернуть: приложение можно только удалить в настройках телефона и поставить заново.'),
+      info(widget.justCreated ? tr('Хранилище создано. Введите пароль, чтобы войти.') : tr('Введите пароль.')),
+      field(tr('Пароль'), _pw),
+      errorText(waiting ? trf('{err}: ещё {n} с', {'err': _error ?? tr('Подождите'), 'n': _waitLeft}) : _error),
+      primary(_busy ? tr('Проверяем…') : tr('Войти'), (_busy || waiting) ? null : submit),
+      if (!widget.justCreated) link(tr('Забыл пароль'), () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultRecoverScreen()))),
+      link(tr('Поддержать проект'), () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SupportScreen(wallets: context.read<AppState>().wallets)))), // адрес не секрет: доступен и без входа
+      if (_corrupt) info(tr('Если резервной копии нет, данные не вернуть: приложение можно только удалить в настройках телефона и поставить заново.')),
     ]);
   }
 }
@@ -440,30 +441,30 @@ class _VaultRecoverScreenState extends _SecretFormState<VaultRecoverScreen> {
       return;
     } on VaultNoRecovery {
       _noWords = true;
-      _error = 'Секретные слова при создании не задавались: восстановить доступ нельзя. Остаётся удалить всё и начать заново.';
+      _error = tr('Секретные слова при создании не задавались: восстановить доступ нельзя. Остаётся удалить всё и начать заново.');
     } on VaultWrongSecret {
-      _error = 'Слова не подошли. Слово 1 должно быть в поле 1, слово 2 в поле 2 и так далее; регистр и «ё/е» не важны.';
+      _error = tr('Слова не подошли. Слово 1 должно быть в поле 1, слово 2 в поле 2 и так далее; регистр и «ё/е» не важны.');
     } on VaultThrottled catch (e) {
-      _error = 'Слишком много попыток, подождите ${e.wait.inSeconds} с';
+      _error = trf('Слишком много попыток, подождите {n} с', {'n': e.wait.inSeconds});
     } on VaultPolicyError catch (e) {
       _error = e.message;
     } catch (e) {
-      _error = 'Не удалось восстановить: $e';
+      _error = trf('Не удалось восстановить: {e}', {'e': e});
     }
     if (mounted) setState(() => _busy = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    return page(title: 'Забыл пароль', children: [
-      info('Введите ваши секретные слова в тех же полях, что при создании, и задайте новый пароль.'),
-      for (var i = 0; i < _w.length; i++) field('Слово ${i + 1}', _w[i]),
-      field('Новый пароль', _pw),
-      field('Повторите новый пароль', _pw2),
+    return page(title: tr('Забыл пароль'), children: [
+      info(tr('Введите ваши секретные слова в тех же полях, что при создании, и задайте новый пароль.')),
+      for (var i = 0; i < _w.length; i++) field(trf('Слово {n}', {'n': i + 1}), _w[i]),
+      field(tr('Новый пароль'), _pw),
+      field(tr('Повторите новый пароль'), _pw2),
       errorText(_error),
-      primary(_busy ? 'Проверяем…' : 'Восстановить', _busy ? null : submit),
-      link('Назад', () => Navigator.of(context).pop()),
-      if (_noWords) info('Без пароля и без слов данные не вернуть. Удалить приложение можно в настройках телефона, потом поставить заново.'),
+      primary(_busy ? tr('Проверяем…') : tr('Восстановить'), _busy ? null : submit),
+      link(tr('Назад'), () => Navigator.of(context).pop()),
+      if (_noWords) info(tr('Без пароля и без слов данные не вернуть. Удалить приложение можно в настройках телефона, потом поставить заново.')),
     ]);
   }
 }
@@ -507,31 +508,31 @@ class _VaultChangePasswordScreenState extends _SecretFormState<VaultChangePasswo
       await VaultService.instance.changePassword(_old.text, _new.text);
       _SecretFormState.clear([_old, _new, _new2]);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Пароль изменён')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Пароль изменён'))));
       Navigator.of(context).pop();
       return;
     } on VaultWrongSecret catch (e) {
-      _error = 'Старый пароль неверный (подряд неверных: ${e.failures})';
+      _error = trf('Старый пароль неверный (подряд неверных: {n})', {'n': e.failures});
     } on VaultThrottled catch (e) {
-      _error = 'Слишком много попыток, подождите ${e.wait.inSeconds} с';
+      _error = trf('Слишком много попыток, подождите {n} с', {'n': e.wait.inSeconds});
     } on VaultPolicyError catch (e) {
       _error = e.message;
     } catch (e) {
-      _error = 'Не удалось сменить пароль: $e';
+      _error = trf('Не удалось сменить пароль: {e}', {'e': e});
     }
     if (mounted) setState(() => _busy = false);
   }
 
   @override
   Widget build(BuildContext context) {
-    return page(title: 'Сменить пароль', canGoBack: true, children: [
-      info('Данные не перешифровываются: меняется только пароль, которым они открываются.'),
-      field('Старый пароль', _old),
-      field('Новый пароль', _new),
+    return page(title: tr('Сменить пароль'), canGoBack: true, children: [
+      info(tr('Данные не перешифровываются: меняется только пароль, которым они открываются.')),
+      field(tr('Старый пароль'), _old),
+      field(tr('Новый пароль'), _new),
       PasswordHint(_new),
-      field('Повторите новый пароль', _new2),
+      field(tr('Повторите новый пароль'), _new2),
       errorText(_error),
-      primary(_busy ? 'Меняем…' : 'Сменить', _busy ? null : submit),
+      primary(_busy ? tr('Меняем…') : tr('Сменить'), _busy ? null : submit),
     ]);
   }
 }
@@ -563,24 +564,24 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
   Future<void> _erase({required bool uninstall}) async {
     if (_busy) return;
     if (_pw.text.isEmpty) {
-      setState(() => _error = 'Введите пароль');
+      setState(() => _error = tr('Введите пароль'));
       return;
     }
     setState(() { _busy = true; _error = null; });
     try {
       await VaultService.instance.verifyPassword(_pw.text);
     } on VaultWrongSecret catch (e) {
-      _fail('Неверный пароль (подряд неверных: ${e.failures})');
+      _fail(trf('Неверный пароль (подряд неверных: {n})', {'n': e.failures}));
       return;
     } on VaultThrottled catch (e) {
-      _fail('Слишком много попыток, подождите ${e.wait.inSeconds} с');
+      _fail(trf('Слишком много попыток, подождите {n} с', {'n': e.wait.inSeconds}));
       return;
     } catch (e) {
-      _fail('Не удалось проверить пароль: $e');
+      _fail(trf('Не удалось проверить пароль: {e}', {'e': e}));
       return;
     }
     if (!mounted) return;
-    final ok = await confirm('Стереть всё?', 'Все данные YANDI на этом телефоне будут стёрты без возможности восстановления: сообщения, файлы, ключи, настройки.', 'Стереть');
+    final ok = await confirm(tr('Стереть всё?'), tr('Все данные YANDI на этом телефоне будут стёрты без возможности восстановления: сообщения, файлы, ключи, настройки.'), tr('Стереть'));
     if (!ok || !mounted) {
       setState(() => _busy = false);
       return;
@@ -588,7 +589,7 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
     final nav = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     final left = await context.read<AppState>().eraseEverything();
-    if (left != null) messenger.showSnackBar(SnackBar(content: Text('Стёрто не всё: $left')));
+    if (left != null) messenger.showSnackBar(SnackBar(content: Text(trf('Стёрто не всё: {n}', {'n': left}))));
     if (uninstall) {
       try { await _ch.invokeMethod('uninstall'); } catch (_) {}
     }
@@ -602,13 +603,13 @@ class _VaultEraseScreenState extends _SecretFormState<VaultEraseScreen> {
 
   @override
   Widget build(BuildContext context) {
-    return page(title: 'Удалить всё', canGoBack: true, children: [
-      info('Будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Для подтверждения введите пароль. '
-          'Вернуть данные потом нельзя: ни по паролю, ни по секретным словам.'),
-      field('Пароль', _pw),
+    return page(title: tr('Удалить всё'), canGoBack: true, children: [
+      info(tr('Будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Для подтверждения введите пароль. '
+          'Вернуть данные потом нельзя: ни по паролю, ни по секретным словам.')),
+      field(tr('Пароль'), _pw),
       errorText(_error),
-      primary(_busy ? 'Проверяем…' : 'Стереть данные', _busy ? null : () => _erase(uninstall: false)),
-      link('Стереть данные и удалить приложение', _busy ? () {} : () => _erase(uninstall: true), color: Colors.redAccent),
+      primary(_busy ? tr('Проверяем…') : tr('Стереть данные'), _busy ? null : () => _erase(uninstall: false)),
+      link(tr('Стереть данные и удалить приложение'), _busy ? () {} : () => _erase(uninstall: true), color: Colors.redAccent),
     ]);
   }
 }
@@ -643,14 +644,14 @@ class _VaultPanicScreenState extends State<VaultPanicScreen> {
   Future<void> _erase() async {
     if (_busy) return;
     if (!VaultPanicScreen.confirmed(_word.text)) {
-      setState(() => _error = 'Для стирания введите слово ${VaultPanicScreen.word} (по-английски ${VaultPanicScreen.wordEn})');
+      setState(() => _error = trf('Для стирания введите слово {w} (по-английски {en})', {'w': VaultPanicScreen.word, 'en': VaultPanicScreen.wordEn}));
       return;
     }
     setState(() { _busy = true; _error = null; });
     final nav = Navigator.of(context);
     final messenger = ScaffoldMessenger.of(context);
     final left = await context.read<AppState>().eraseEverything();
-    if (left != null) messenger.showSnackBar(SnackBar(content: Text('Стёрто не всё: $left')));
+    if (left != null) messenger.showSnackBar(SnackBar(content: Text(trf('Стёрто не всё: {n}', {'n': left}))));
     nav.pushNamedAndRemoveUntil('/vault-setup', (_) => false);
   }
 
@@ -658,17 +659,17 @@ class _VaultPanicScreenState extends State<VaultPanicScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: AppTheme.bg,
-      appBar: AppBar(backgroundColor: AppTheme.surface, iconTheme: const IconThemeData(color: AppTheme.text), title: const Text('Экстренное стирание', style: TextStyle(color: AppTheme.text))),
+      appBar: AppBar(backgroundColor: AppTheme.surface, iconTheme: const IconThemeData(color: AppTheme.text), title: Text(tr('Экстренное стирание'), style: TextStyle(color: AppTheme.text))),
       body: ListView(padding: const EdgeInsets.all(16), children: [
-        const Text('Сразу, без пароля, будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Вернуть их нельзя ни по паролю, ни по секретным словам. '
-            'Чтобы не нажать случайно, введите слово СТЕРЕТЬ (или DELETE, если нет русской клавиатуры).', style: TextStyle(color: AppTheme.textSecondary)),
+        Text(tr('Сразу, без пароля, будут стёрты все данные YANDI на этом телефоне: сообщения, файлы, ключи, настройки. Вернуть их нельзя ни по паролю, ни по секретным словам. '
+            'Чтобы не нажать случайно, введите слово СТЕРЕТЬ (или DELETE, если нет русской клавиатуры).'), style: TextStyle(color: AppTheme.textSecondary)),
         const SizedBox(height: 16),
         TextField(
           controller: _word,
           autocorrect: false,
           enableSuggestions: false,
           style: const TextStyle(color: AppTheme.text),
-          decoration: const InputDecoration(hintText: 'СТЕРЕТЬ', border: OutlineInputBorder()),
+          decoration: InputDecoration(hintText: tr('СТЕРЕТЬ'), border: OutlineInputBorder()),
           onSubmitted: (_) => _erase(),
         ),
         if (_error != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(_error!, style: const TextStyle(color: Colors.redAccent))),
@@ -676,7 +677,7 @@ class _VaultPanicScreenState extends State<VaultPanicScreen> {
         ElevatedButton(
           style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent, foregroundColor: Colors.white),
           onPressed: _busy ? null : _erase,
-          child: Text(_busy ? 'Стираем…' : 'Стереть всё сейчас'),
+          child: Text(_busy ? tr('Стираем…') : tr('Стереть всё сейчас')),
         ),
       ]),
     );

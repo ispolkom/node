@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../services/share_text.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Код приглашения нового устройства: QR и текст (можно переслать).
 typedef Invite = ({String text, String link, String code, String pin, int ttlSecs});
@@ -22,7 +23,7 @@ class InviteDeviceScreen extends StatefulWidget {
 
 String _left(int s) {
   final v = s.clamp(0, 99999);
-  return v >= 60 ? '${v ~/ 60} мин ${v % 60} с' : '$v с';
+  return v >= 60 ? trf('{m} мин {s} с', {'m': v ~/ 60, 's': v % 60}) : trf('{n} с', {'n': v});
 }
 
 class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
@@ -102,7 +103,7 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
         remaining = inv.ttlSecs;
       });
     } catch (e) {
-      if (mounted) setState(() => error = e is StateError ? e.message : 'Не удалось получить код приглашения (${e.runtimeType})');
+      if (mounted) setState(() => error = e is StateError ? e.message : trf('Не удалось получить код приглашения ({t})', {'t': e.runtimeType}));
     } finally {
       if (mounted) setState(() => busy = false);
     }
@@ -121,9 +122,9 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Text(
-              'Внимание! Не отправляйте ссылку-приглашение и PIN в одно место. Лучше продиктуйте PIN по телефону или вышлите по почте, в SMS или в другом мессенджере. '
-              'Злоумышленники могут воспользоваться ссылкой вместе с PIN, и тогда приглашённый получит ссылку, которая уже не будет работать.',
+            Text(
+              tr('Внимание! Не отправляйте ссылку-приглашение и PIN в одно место. Лучше продиктуйте PIN по телефону или вышлите по почте, в SMS или в другом мессенджере. '
+              'Злоумышленники могут воспользоваться ссылкой вместе с PIN, и тогда приглашённый получит ссылку, которая уже не будет работать.'),
               key: ValueKey('invite-pin-warning'),
             ),
             const SizedBox(height: 12),
@@ -131,8 +132,8 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: shown)), child: const Text('Копировать PIN')),
-          TextButton(onPressed: () { _dialogOpen = false; Navigator.of(c).pop(); }, child: const Text('Понятно')),
+          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: shown)), child: Text(tr('Копировать PIN'))),
+          TextButton(onPressed: () { _dialogOpen = false; Navigator.of(c).pop(); }, child: Text(tr('Понятно'))),
         ],
       ),
     );
@@ -144,7 +145,7 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
       await widget.revoke();
     } catch (e) {
       // узел отзыв не принял: код продолжает действовать, поэтому с экрана он не убирается, а ошибка видна
-      if (mounted) setState(() => error = e is StateError ? e.message : 'Не удалось отозвать код: нет связи с узлом. Код ещё действует, повторите.');
+      if (mounted) setState(() => error = e is StateError ? e.message : tr('Не удалось отозвать код: нет связи с узлом. Код ещё действует, повторите.'));
       return;
     }
     if (!mounted) return;
@@ -161,16 +162,16 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: const Text('Пригласить устройство', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Пригласить устройство'), style: TextStyle(color: AppTheme.text)),
         iconTheme: const IconThemeData(color: AppTheme.text),
       ),
       body: ListView(
         padding: const EdgeInsets.all(16),
         children: [
-          const Text(
-            'Покажите QR или перешлите ссылку тому, кого приглашаете: он подключится к этому же узлу. Ссылка одноразовая и живёт час. '
+          Text(
+            tr('Покажите QR или перешлите ссылку тому, кого приглашаете: он подключится к этому же узлу. Ссылка одноразовая и живёт час. '
             'Чтобы её не мог использовать чужой, приглашённому понадобится PIN из 4 цифр: назовите его другим способом (голосом, в другом чате). Приглашённый получит права обычного пользователя узла, но сам приглашать не сможет, пока администратор узла '
-            'этого не разрешит. Администратор видит, кто кого пригласил.',
+            'этого не разрешит. Администратор видит, кто кого пригласил.'),
             style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
           ),
           const SizedBox(height: 16),
@@ -183,7 +184,7 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
             FilledButton(
               key: const ValueKey('invite-make'),
               onPressed: busy ? null : _make,
-              child: Text(busy ? 'Готовлю код…' : 'Получить код приглашения'),
+              child: Text(busy ? tr('Готовлю код…') : tr('Получить код приглашения')),
             )
           else ...[
             Center(
@@ -194,12 +195,12 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
               ),
             ),
             const SizedBox(height: 12),
-            Text('Приглашение действует ещё ${_left(remaining)}', key: const ValueKey('invite-timer'), style: const TextStyle(color: AppTheme.textSecondary)),
+            Text(trf('Приглашение действует ещё {t}', {'t': _left(remaining)}), key: const ValueKey('invite-timer'), style: const TextStyle(color: AppTheme.textSecondary)),
             const SizedBox(height: 8),
             Text('PIN: $pin', key: const ValueKey('invite-pin'), style: const TextStyle(color: AppTheme.text, fontSize: 28, letterSpacing: 6, fontWeight: FontWeight.bold)),
-            const Text('Назовите PIN приглашённому другим каналом, не вместе со ссылкой.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            Text(tr('Назовите PIN приглашённому другим каналом, не вместе со ссылкой.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
             const SizedBox(height: 8),
-            SelectableText('Код: $code', key: const ValueKey('invite-code'), style: const TextStyle(color: AppTheme.text, fontSize: 20, letterSpacing: 2)),
+            SelectableText(trf('Код: {c}', {'c': code}), key: const ValueKey('invite-code'), style: const TextStyle(color: AppTheme.text, fontSize: 20, letterSpacing: 2)),
             const SizedBox(height: 8),
             Wrap(
               children: [
@@ -208,23 +209,23 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
                   onPressed: () async {
                     final ok = await shareText(link!);
                     if (!ok) await Clipboard.setData(ClipboardData(text: link!));
-                    await _pinReminder(ok ? 'Ссылка отправлена.' : 'Ссылка скопирована.');
+                    await _pinReminder(ok ? tr('Ссылка отправлена.') : tr('Ссылка скопирована.'));
                   },
                   icon: const Icon(Icons.share, size: 18),
-                  label: const Text('Отправить ссылку'),
+                  label: Text(tr('Отправить ссылку')),
                 ),
                 TextButton.icon(
                   key: const ValueKey('invite-copy'),
                   onPressed: () async {
                     await Clipboard.setData(ClipboardData(text: text!));
-                    await _pinReminder('Текст приглашения скопирован.');
+                    await _pinReminder(tr('Текст приглашения скопирован.'));
                   },
                   icon: const Icon(Icons.copy, size: 18),
-                  label: const Text('Скопировать текст'),
+                  label: Text(tr('Скопировать текст')),
                 ),
               ],
             ),
-            TextButton(key: const ValueKey('invite-revoke'), onPressed: _revoke, child: const Text('Отозвать код')),
+            TextButton(key: const ValueKey('invite-revoke'), onPressed: _revoke, child: Text(tr('Отозвать код'))),
           ],
         ],
       ),
