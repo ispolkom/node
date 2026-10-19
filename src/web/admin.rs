@@ -117,7 +117,7 @@ pub fn clear_password() -> Result<(), String> {
 
 /// Маршруты, которым нужен сеанс администратора: управление узлом, а не личный аккаунт.
 pub fn is_admin_path(path: &str) -> bool {
-    const PREFIXES: [&str; 12] = [
+    const PREFIXES: [&str; 13] = [
         "/api/admin/password",
         "/api/complaints",
         "/api/pair-requests",
@@ -126,6 +126,7 @@ pub fn is_admin_path(path: &str) -> bool {
         "/api/upstream-prox",
         "/api/mobile/pairing",
         "/api/mobile/devices",
+        "/api/mobile/invite-policy",
         "/api/vault/panic_erase",
         "/api/exit/settings",
         "/pair/issue",

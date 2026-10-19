@@ -33,6 +33,14 @@ use crate::util::HashId;
 const PAIRING_TTL: Duration = Duration::from_secs(300);
 const PAIRING_MAX_FAILS: u32 = 5;
 const MAX_DEVICES: usize = 16;
+/// Приглашённых устройств на узле не больше: приглашения не вытесняют никого, при нехватке места код отклоняется.
+const MAX_INVITED: usize = 48;
+/// Живых кодов приглашений на всём узле одновременно.
+const MAX_LIVE_INVITES: usize = 64;
+const INVITE_TTL: Duration = Duration::from_secs(600);
+/// Неверных попыток ввода кода приглашения на весь узел за окно: больше — приглашения временно не принимаются (подбор кода).
+const INVITE_FAIL_LIMIT: u32 = 20;
+const INVITE_FAIL_WINDOW: Duration = Duration::from_secs(300);
 const MAX_TEXT: usize = 64 * 1024;
 
 const FT_PING: u8 = 0x01;
@@ -134,6 +142,9 @@ struct Device {
     /// `owner` — телефон владельца узла (всё), `user` — посторонний пользователь узла: свои почта, профиль, группы и жалобы
     #[serde(default = "owner_role")]
     role: String,
+    /// Кто пригласил это устройство (номер устройства-пригласившего). Только у роли `invited`; по цепочке находится вся ветка при отзыве.
+    #[serde(default)]
+    invited_by: Option<String>,
 }
 
 fn owner_role() -> String {
@@ -165,7 +176,7 @@ pub(crate) fn test_add_device_with_role(role: &str, tag: &str) -> String {
     let th = format!("{:0<64}", tag);
     with_devices(|d| {
         d.retain(|x| x.token_hash != th);
-        d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into() });
+        d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into(), invited_by: None });
     });
     th
 }
@@ -224,9 +235,9 @@ fn owner_only_path(method: &axum::http::Method, path: &str) -> bool {
 }
 
 impl Device {
-    /// `user` и `guest` не видят личной переписки владельца.
+    /// `user`, `invited` и `guest` не видят личной переписки владельца.
     fn restricted_role(&self) -> bool {
-        self.role == "user" || self.role == "guest"
+        self.role == "user" || self.role == "guest" || self.role == "invited"
     }
 
     /// Когда устройство в последний раз проявляло активность: на связи / отключилось, иначе — когда сопрягли.
@@ -456,6 +467,219 @@ pub fn issue_pairing_code() -> String {
 }
 
 /// То же для роли: `owner` (телефон владельца) или `user` (посторонний пользователь узла).
+// ---- приглашения новых устройств (docs/ROLES.md, «Приглашённый»)
+//
+// Устройство, сопряжённое по QR (роль `owner` или `user`), выдаёт одноразовый код, по которому подключается новое устройство с ролью
+// `invited`: права как у пользователя, но приглашать он не может, пока администратор узла не повысит его до `user`. Кто кого
+// пригласил, записывается (`Device::invited_by`): при злоупотреблении администратор отзывает всю ветку.
+
+struct InviteCode {
+    code: String,
+    expires: Instant,
+    inviter: String,
+}
+
+static INVITE_CODES: Mutex<Vec<InviteCode>> = Mutex::new(Vec::new());
+/// Когда каждый пригласивший выдавал коды (мс): для суточного предела.
+static INVITE_ISSUED: Mutex<Option<std::collections::HashMap<String, Vec<u64>>>> = Mutex::new(None);
+static INVITE_FAILS: Mutex<Option<(Instant, u32)>> = Mutex::new(None);
+
+/// Политика приглашений, задаётся администратором (`mobile_invites.json` в каталоге данных).
+#[derive(Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Debug)]
+#[serde(default, deny_unknown_fields)]
+pub struct InvitePolicy {
+    pub enabled: bool,
+    /// кодов в сутки от одного человека
+    pub per_day: u32,
+    /// живых (не использованных и не истёкших) кодов у одного человека
+    pub max_live: u32,
+}
+
+impl Default for InvitePolicy {
+    fn default() -> Self {
+        Self { enabled: true, per_day: 10, max_live: 3 }
+    }
+}
+
+fn invite_policy_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("mobile_invites.json")
+}
+
+pub fn invite_policy() -> InvitePolicy {
+    match std::fs::read(invite_policy_path()) {
+        Ok(b) => serde_json::from_slice(&b).unwrap_or_else(|_| InvitePolicy { enabled: false, ..InvitePolicy::default() }), // битый файл — приглашения выключены
+        Err(_) => InvitePolicy::default(),
+    }
+}
+
+pub fn set_invite_policy(p: InvitePolicy) -> Result<(), String> {
+    if p.per_day > 100 || p.max_live > 20 {
+        return Err("пределы слишком велики (не больше 100 в сутки и 20 живых кодов)".into());
+    }
+    let bytes = serde_json::to_vec_pretty(&p).map_err(|e| e.to_string())?;
+    crate::util::private_file::write_private(&invite_policy_path(), &bytes).map_err(|e| format!("не удалось сохранить: {e}"))
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum InviteError {
+    Disabled,
+    NotAllowed,
+    TooManyLive,
+    DailyLimit,
+    NodeFull,
+}
+
+impl InviteError {
+    fn message(&self) -> &'static str {
+        match self {
+            InviteError::Disabled => "приглашения на этом узле выключены администратором",
+            InviteError::NotAllowed => "приглашать могут только устройства, сопряжённые по QR; приглашённое устройство получает это право от администратора",
+            InviteError::TooManyLive => "уже выдано максимум действующих кодов: дождитесь их использования или отзовите",
+            InviteError::DailyLimit => "дневной предел приглашений исчерпан",
+            InviteError::NodeFull => "на узле нет места для новых приглашённых устройств",
+        }
+    }
+}
+
+fn purge_invites(codes: &mut Vec<InviteCode>) {
+    let now = Instant::now();
+    codes.retain(|c| c.expires > now);
+}
+
+/// Может ли устройство приглашать: роль `owner` или `user` и приглашения не выключены.
+fn may_invite(peer: &str) -> bool {
+    with_devices(|d| d.iter().any(|x| x.peer_id() == peer && (x.role == "owner" || x.role == "user")))
+}
+
+/// Выдать одноразовый код приглашения от устройства `inviter` (номер устройства). Возвращает код и срок жизни в секундах.
+pub fn issue_device_invite(inviter: &str) -> Result<(String, u64), InviteError> {
+    use rand::Rng;
+    let policy = invite_policy();
+    if !policy.enabled {
+        return Err(InviteError::Disabled);
+    }
+    if !may_invite(inviter) {
+        return Err(InviteError::NotAllowed);
+    }
+    if with_devices(|d| d.iter().filter(|x| x.role == "invited").count()) >= MAX_INVITED {
+        return Err(InviteError::NodeFull);
+    }
+    let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
+    purge_invites(&mut codes);
+    if codes.len() >= MAX_LIVE_INVITES || codes.iter().filter(|c| c.inviter == inviter).count() as u32 >= policy.max_live {
+        return Err(InviteError::TooManyLive);
+    }
+    let now = now_ms();
+    {
+        let mut g = INVITE_ISSUED.lock().unwrap_or_else(|e| e.into_inner());
+        let log = g.get_or_insert_with(Default::default);
+        let mine = log.entry(inviter.to_string()).or_default();
+        mine.retain(|t| now.saturating_sub(*t) < 24 * 3600 * 1000);
+        if mine.len() as u32 >= policy.per_day {
+            return Err(InviteError::DailyLimit);
+        }
+        mine.push(now);
+        if log.len() > 4096 {
+            log.retain(|_, v| v.iter().any(|t| now.saturating_sub(*t) < 24 * 3600 * 1000));
+        }
+    }
+    let code = format!("{:08}", rand::thread_rng().gen_range(0..100_000_000u32));
+    codes.push(InviteCode { code: code.clone(), expires: Instant::now() + INVITE_TTL, inviter: inviter.to_string() });
+    Ok((code, INVITE_TTL.as_secs()))
+}
+
+/// Отозвать все живые коды этого пригласившего.
+pub fn revoke_device_invites(inviter: &str) -> usize {
+    let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
+    let before = codes.len();
+    codes.retain(|c| c.inviter != inviter);
+    before - codes.len()
+}
+
+/// Подошёл ли код приглашения: если да, он погашается и возвращается номер пригласившего. Неверные попытки считаются на весь узел.
+fn redeem_device_invite(code: &str) -> Option<String> {
+    {
+        let mut f = INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((start, n)) = f.as_mut() {
+            if start.elapsed() > INVITE_FAIL_WINDOW {
+                *f = None;
+            } else if *n >= INVITE_FAIL_LIMIT {
+                return None;
+            }
+        }
+    }
+    let mut codes = INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner());
+    purge_invites(&mut codes);
+    let hit = codes.iter().position(|c| same(&c.code, code.trim()));
+    match hit {
+        Some(i) => {
+            let c = codes.remove(i);
+            // пригласивший мог потерять право (отозван, понижен) между выдачей и вводом
+            if may_invite(&c.inviter) {
+                Some(c.inviter)
+            } else {
+                None
+            }
+        }
+        None => {
+            let mut f = INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner());
+            match f.as_mut() {
+                Some((_, n)) => *n += 1,
+                None => *f = Some((Instant::now(), 1)),
+            }
+            None
+        }
+    }
+}
+
+/// Повысить приглашённое устройство до пользователя (после этого оно может приглашать само). Только администратор узла.
+pub fn promote_device(id: &str) -> Result<(), String> {
+    let peer = resolve_device(id).ok_or("нет такого устройства")?;
+    if !with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.role == "invited")) {
+        return Err("повысить можно только приглашённое устройство".into());
+    }
+    let before = with_devices(|d| d.clone());
+    let ((), saved) = devices_apply(|d| {
+        if let Some(x) = d.iter_mut().find(|x| x.peer_id() == peer && x.role == "invited") {
+            x.role = "user".to_string();
+        }
+    });
+    if !saved {
+        devices_apply(|d| *d = before);
+        return Err("не удалось сохранить изменение".into());
+    }
+    crate::backup_signal::notify_critical();
+    Ok(())
+}
+
+/// Номера устройств ветки: само устройство и все, кого оно пригласило, и те, кого пригласили они (цепочка `invited_by`, без циклов).
+pub fn branch_of(peer: &str) -> Vec<String> {
+    with_devices(|d| {
+        let mut out = vec![peer.to_string()];
+        let mut i = 0;
+        while i < out.len() && out.len() <= 4096 {
+            let cur = out[i].clone();
+            for x in d.iter() {
+                let p = x.peer_id();
+                if x.invited_by.as_deref() == Some(cur.as_str()) && !out.contains(&p) {
+                    out.push(p);
+                }
+            }
+            i += 1;
+        }
+        out
+    })
+}
+
+/// Отозвать устройство вместе со всей его веткой приглашённых. Возвращает, сколько устройств удалено.
+pub fn remove_branch(id: &str) -> usize {
+    let Some(peer) = resolve_device(id) else { return 0 };
+    let branch = branch_of(&peer);
+    revoke_device_invites(&peer);
+    // сначала самые дальние (дети), потом корень: порядок обхода в ширину, значит идём с конца
+    branch.iter().rev().filter(|p| remove_device(p)).count()
+}
+
 pub fn issue_pairing_code_for(role: &str) -> String {
     use rand::Rng;
     // повышение — только явным «owner»: опечатка или неизвестное значение даёт меньше прав
@@ -550,8 +774,9 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
         .unwrap_or_else(|e| e.into_inner())
         .clone()
         .unwrap_or_default();
-    with_devices(|d| d.clone())
-        .into_iter()
+    let all = with_devices(|d| d.clone());
+    let names: std::collections::HashMap<String, String> = all.iter().map(|x| (x.peer_id(), x.name.clone())).collect();
+    all.into_iter()
         .map(|x| {
             let pid = x.peer_id();
             let n = live_count(&pid);
@@ -564,6 +789,9 @@ pub fn devices_overview() -> Vec<serde_json::Value> {
                 "last_seen_ms": seen.get(&pid).copied().unwrap_or(0).max(x.last_seen_ms),
                 "has_keys": x.x25519_pub.is_some() && x.key_sig.is_some(),
                 "peer_id": pid,
+                "role": x.role,
+                "invited_by": x.invited_by,
+                "invited_by_name": x.invited_by.as_deref().and_then(|b| names.get(b).cloned()),
             })
         })
         .collect()
@@ -582,6 +810,7 @@ pub(crate) fn test_add_device(token: &str) -> String {
         key_sig: None,
         last_seen_ms: 0,
         role: owner_role(),
+        invited_by: None,
     };
     let peer = dev.peer_id();
     devices_apply(|d| d.push(dev));
@@ -954,7 +1183,7 @@ async fn pair_request_post(axum::Extension(DeviceKey(dev)): axum::Extension<Devi
 /// Что с моим запросом: pending / accepted / rejected / none.
 async fn pair_request_get(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
     let role = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.role.clone()));
-    let state = if matches!(role.as_deref(), Some("user") | Some("owner")) {
+    let state = if matches!(role.as_deref(), Some("user") | Some("owner") | Some("invited")) {
         "accepted"
     } else {
         with_pair_requests(|l| l.iter().find(|r| r.token_hash == dev).map(|r| r.state)).unwrap_or("none")
@@ -1103,6 +1332,7 @@ async fn pair_guest(Json(req): Json<GuestPairReq>) -> Response {
             key_sig: None,
             last_seen_ms: now_ms(),
             role: "guest".to_string(),
+            invited_by: None,
         });
     });
     if full {
@@ -1133,12 +1363,21 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             _ => None,
         }
     };
-    let Some(role) = granted else {
-        return (
-            StatusCode::FORBIDDEN,
-            Json(json!({"error": "bad or expired pairing code"})),
-        )
-            .into_response();
+    // не код администратора — тогда код приглашения от доверенного устройства
+    let (role, invited_by) = match granted {
+        Some(role) => (role, None),
+        None => match redeem_device_invite(&req.pairing_code) {
+            Some(inviter) => {
+                // приглашения никого не вытесняют: нет места — отказ (код при этом уже погашен, пригласивший выдаст новый)
+                if with_devices(|d| d.iter().filter(|x| x.role == "invited").count()) >= MAX_INVITED {
+                    return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": InviteError::NodeFull.message()}))).into_response();
+                }
+                ("invited".to_string(), Some(inviter))
+            }
+            None => {
+                return (StatusCode::FORBIDDEN, Json(json!({"error": "bad or expired pairing code"}))).into_response();
+            }
+        },
     };
     use rand::RngCore;
     let mut raw = [0u8; 32];
@@ -1156,8 +1395,9 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
     let th = token_hash(&token);
     let ((), saved) = devices_apply(|d| {
         // гости считаются отдельно: поток гостей не вытесняет устройства владельца и пользователей
-        if d.iter().filter(|x| x.role != "guest").count() >= MAX_DEVICES {
-            if let Some(i) = d.iter().enumerate().filter(|(_, x)| x.role != "guest").min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
+        // приглашённые считаются отдельно и никого не вытесняют
+        if role != "invited" && d.iter().filter(|x| x.role != "guest" && x.role != "invited").count() >= MAX_DEVICES {
+            if let Some(i) = d.iter().enumerate().filter(|(_, x)| x.role != "guest" && x.role != "invited").min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i) {
                 let gone = d.remove(i);
                 evicted = Some(gone.peer_id());
                 evicted_device = Some(gone);
@@ -1179,6 +1419,7 @@ async fn pair(Json(req): Json<PairReq>) -> Response {
             key_sig: None,
             last_seen_ms: 0,
             role,
+            invited_by,
         });
     });
     crate::backup_signal::notify_critical(); // новое устройство в реестре: копия нужна сразу
@@ -1605,7 +1846,7 @@ async fn auth(mut req: Request, next: Next) -> Response {
             }
         });
     }
-    if role == "user" && owner_only_path(req.method(), req.uri().path()) {
+    if (role == "user" || role == "invited") && owner_only_path(req.method(), req.uri().path()) {
         return (StatusCode::FORBIDDEN, Json(json!({"error": "это устройство подключено как пользователь узла: личная переписка владельца ему недоступна"}))).into_response();
     }
     req.extensions_mut().insert(DeviceKey(h));
@@ -1648,9 +1889,33 @@ async fn info(
             .find(|x| same(&x.token_hash, &dev))
             .map(|x| x.peer_id())
     });
+    let role = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.role.clone()));
+    let can_invite = me.as_deref().is_some_and(may_invite) && invite_policy().enabled;
     Json(
-        json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true}),
+        json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true, "role": role, "can_invite": can_invite}),
     )
+}
+
+/// Выдать код приглашения нового устройства (только устройство, сопряжённое по QR: роль `owner` или `user`).
+async fn device_invite_issue(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let me = me_peer_of(&dev);
+    match issue_device_invite(&me) {
+        Ok((code, ttl)) => Json(json!({"code": code, "expires_in_secs": ttl})).into_response(),
+        Err(e) => {
+            let status = match e {
+                InviteError::Disabled | InviteError::NotAllowed => StatusCode::FORBIDDEN,
+                InviteError::TooManyLive | InviteError::DailyLimit => StatusCode::TOO_MANY_REQUESTS,
+                InviteError::NodeFull => StatusCode::SERVICE_UNAVAILABLE,
+            };
+            (status, Json(json!({"error": e.message()}))).into_response()
+        }
+    }
+}
+
+/// Отозвать свои действующие коды приглашений.
+async fn device_invite_revoke(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let me = me_peer_of(&dev);
+    Json(json!({"revoked": revoke_device_invites(&me)})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -2450,6 +2715,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
 fn router(st: Arc<MobileState>) -> Router {
     let guarded = Router::new()
         .route("/mobile/info", get(info))
+        .route("/mobile/device-invite", post(device_invite_issue).delete(device_invite_revoke))
         .route("/mobile/update", get(app_update))
         .route("/mobile/profile", get(profile_get).put(profile_put))
         .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
@@ -2890,7 +3156,7 @@ mod tests {
     #[test]
     fn the_longest_silent_device_is_evicted_not_the_oldest_paired() {
         let mk = |name: &str, created: u64, seen: u64| Device { token_hash: name.into(), name: name.into(), created_ms: created, acked_ts: 0,
-            x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: seen, role: owner_role() };
+            x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: seen, role: owner_role(), invited_by: None };
         let d = vec![mk("old-but-active", 1_000, 9_000), mk("newer-but-silent", 2_000, 0), mk("recent", 8_000, 8_500)];
         let i = d.iter().enumerate().min_by_key(|(_, x)| x.last_activity_ms()).map(|(i, _)| i).unwrap();
         assert_eq!(d[i].name, "newer-but-silent");
@@ -2909,7 +3175,7 @@ mod tests {
             x25519_pub: b64(&[x;32]), ed25519_pub: b64(&[ed;32]), signature:b64(&[0;64]),
         };
         let mut devices = vec![Device { token_hash:"test-token".into(), name:"test".into(), created_ms:0, acked_ts:0,
-            x25519_pub:None, ed25519_pub:None, key_sig:None, last_seen_ms:0, role: owner_role() }];
+            x25519_pub:None, ed25519_pub:None, key_sig:None, last_seen_ms:0, role: owner_role(), invited_by: None }];
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("devices.json");
         assert_eq!(store_device_bundle(&mut devices,"test-token",request(1,2),&[1;32],&path),StatusCode::OK);
@@ -2972,7 +3238,7 @@ mod tests {
         let th = "r".repeat(64);
         with_devices(|d| {
             d.retain(|x| x.token_hash != th);
-            d.push(Device { token_hash: th.clone(), name: "r".into(), created_ms: 0, acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: 0, role: owner_role() });
+            d.push(Device { token_hash: th.clone(), name: "r".into(), created_ms: 0, acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: 0, role: owner_role(), invited_by: None });
         });
         let peer = device_peer_of(&th).unwrap();
         let ext = || axum::Extension(DeviceKey(th.clone()));
@@ -3140,7 +3406,7 @@ mod guest_tests {
         let th = format!("{:0<64}", tag);
         with_devices(|d| {
             d.retain(|x| x.token_hash != th);
-            d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into() });
+            d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into(), invited_by: None });
         });
         th
     }
@@ -3619,5 +3885,204 @@ mod guest_tests {
         assert_eq!(with_pc_inbox(|l| l.len()), 2);
         with_pc_inbox(|l| l.clear());
         crate::mail_policy::reset_for_test();
+    }
+}
+
+#[cfg(test)]
+mod invite_tests {
+    use super::*;
+
+    static LOCK: Mutex<()> = Mutex::new(());
+
+    fn reset() {
+        INVITE_CODES.lock().unwrap_or_else(|e| e.into_inner()).clear();
+        *INVITE_ISSUED.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        *INVITE_FAILS.lock().unwrap_or_else(|e| e.into_inner()) = None;
+        let _ = std::fs::remove_file(invite_policy_path());
+        with_devices(|d| d.retain(|x| !x.name.starts_with("inv-")));
+    }
+
+    fn add(role: &str, tag: &str) -> String {
+        let th = test_add_device_with_role(role, &format!("inv-{tag}"));
+        device_peer_of(&th).expect("устройство добавлено")
+    }
+
+    async fn redeem(code: &str, name: &str) -> (StatusCode, Option<String>) {
+        let r = pair(Json(PairReq { pairing_code: code.into(), device_name: name.into() })).await;
+        let status = r.status();
+        let peer = with_devices(|d| d.iter().find(|x| x.name == name).map(|x| x.peer_id()));
+        (status, peer)
+    }
+
+    #[test]
+    fn only_devices_paired_by_qr_may_invite() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let owner = add("owner", "o1");
+        let user = add("user", "u1");
+        let invited = add("invited", "i1");
+        let guest = add("guest", "g1");
+        assert!(issue_device_invite(&owner).is_ok());
+        assert!(issue_device_invite(&user).is_ok());
+        assert_eq!(issue_device_invite(&invited), Err(InviteError::NotAllowed));
+        assert_eq!(issue_device_invite(&guest), Err(InviteError::NotAllowed));
+        assert_eq!(issue_device_invite("не-устройство"), Err(InviteError::NotAllowed));
+        reset();
+    }
+
+    #[test]
+    fn limits_and_the_administrators_switch_apply() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let user = add("user", "u2");
+        set_invite_policy(InvitePolicy { enabled: true, per_day: 4, max_live: 2 }).unwrap();
+        assert!(issue_device_invite(&user).is_ok());
+        assert!(issue_device_invite(&user).is_ok());
+        assert_eq!(issue_device_invite(&user), Err(InviteError::TooManyLive));
+        assert_eq!(revoke_device_invites(&user), 2, "отзыв снимает действующие коды");
+        assert!(issue_device_invite(&user).is_ok());
+        assert!(issue_device_invite(&user).is_ok());
+        assert_eq!(revoke_device_invites(&user), 2);
+        assert_eq!(issue_device_invite(&user), Err(InviteError::DailyLimit), "суточный предел считает и отозванные коды");
+        set_invite_policy(InvitePolicy { enabled: false, ..InvitePolicy::default() }).unwrap();
+        assert_eq!(issue_device_invite(&user), Err(InviteError::Disabled));
+        assert!(set_invite_policy(InvitePolicy { enabled: true, per_day: 1000, max_live: 3 }).is_err(), "нелепые пределы отвергаются");
+        // повреждённый файл политики выключает приглашения, а не включает их без пределов
+        std::fs::write(invite_policy_path(), b"{not json").unwrap();
+        assert!(!invite_policy().enabled);
+        reset();
+    }
+
+    #[tokio::test]
+    async fn an_invited_device_cannot_invite_until_promoted_and_the_chain_is_recorded() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "chain-a");
+        let (code, ttl) = issue_device_invite(&a).unwrap();
+        assert_eq!(code.len(), 8);
+        assert_eq!(ttl, 600);
+        let (st, b) = redeem(&code, "inv-chain-b").await;
+        assert_eq!(st, StatusCode::OK);
+        let b = b.expect("устройство добавлено");
+        with_devices(|d| {
+            let x = d.iter().find(|x| x.peer_id() == b).unwrap();
+            assert_eq!(x.role, "invited");
+            assert_eq!(x.invited_by.as_deref(), Some(a.as_str()), "записано, кто пригласил");
+            assert!(x.restricted_role(), "приглашённый ограничен как пользователь");
+        });
+        // код одноразовый
+        let (st2, _) = redeem(&code, "inv-chain-b2").await;
+        assert_eq!(st2, StatusCode::FORBIDDEN);
+        // приглашённый приглашать не может
+        assert_eq!(issue_device_invite(&b), Err(InviteError::NotAllowed));
+        // повысить можно только приглашённого, и только администратор (здесь — функция узла)
+        assert!(promote_device(&a[..16]).is_err(), "пользователя «повышать» нечем");
+        promote_device(&b[..16]).unwrap();
+        assert!(issue_device_invite(&b).is_ok(), "после повышения приглашает сам");
+        reset();
+    }
+
+    #[tokio::test]
+    async fn a_code_dies_with_its_inviter_and_with_time() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "dead-a");
+        let (code, _) = issue_device_invite(&a).unwrap();
+        // пригласившего отозвали, пока код жил
+        with_devices(|d| d.retain(|x| x.peer_id() != a));
+        let (st, _) = redeem(&code, "inv-dead-b").await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "код отозванного пригласившего не работает");
+        // истёкший код
+        let a2 = add("user", "dead-a2");
+        let (code2, _) = issue_device_invite(&a2).unwrap();
+        INVITE_CODES.lock().unwrap().iter_mut().for_each(|c| c.expires = Instant::now() - Duration::from_secs(1));
+        let (st, _) = redeem(&code2, "inv-dead-c").await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "истёкший код не работает");
+        reset();
+    }
+
+    #[tokio::test]
+    async fn guessing_codes_is_stopped_for_the_whole_node() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "guess-a");
+        let (good, _) = issue_device_invite(&a).unwrap();
+        let wrong = if good == "00000000" { "11111111" } else { "00000000" };
+        for i in 0..INVITE_FAIL_LIMIT {
+            let (st, _) = redeem(wrong, &format!("inv-guess-{i}")).await;
+            assert_eq!(st, StatusCode::FORBIDDEN);
+        }
+        let (st, _) = redeem(&good, "inv-guess-real").await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "после череды неверных попыток верный код временно не принимается");
+        reset();
+    }
+
+    #[tokio::test]
+    async fn invitations_never_evict_anyone_and_stop_when_the_node_is_full() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "full-a");
+        let (code, _) = issue_device_invite(&a).unwrap();
+        let before_owners = with_devices(|d| d.iter().filter(|x| x.role != "invited" && x.role != "guest").count());
+        for i in 0..MAX_INVITED {
+            add("invited", &format!("fill{i:03}"));
+        }
+        assert_eq!(issue_device_invite(&a), Err(InviteError::NodeFull));
+        let (st, _) = redeem(&code, "inv-full-new").await;
+        assert_eq!(st, StatusCode::SERVICE_UNAVAILABLE);
+        let after_owners = with_devices(|d| d.iter().filter(|x| x.role != "invited" && x.role != "guest").count());
+        assert_eq!(before_owners, after_owners, "никого не вытеснили");
+        reset();
+    }
+
+    #[tokio::test]
+    async fn revoking_a_branch_removes_the_inviter_and_everyone_below() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "br-a");
+        let (c1, _) = issue_device_invite(&a).unwrap();
+        let (_, b) = redeem(&c1, "inv-br-b").await;
+        let b = b.unwrap();
+        promote_device(&b[..16]).unwrap();
+        let (c2, _) = issue_device_invite(&b).unwrap();
+        let (_, c) = redeem(&c2, "inv-br-c").await;
+        let c = c.unwrap();
+        let other = add("user", "br-other");
+        let mut branch = branch_of(&a);
+        branch.sort();
+        let mut expect = vec![a.clone(), b.clone(), c.clone()];
+        expect.sort();
+        assert_eq!(branch, expect, "ветка: сам, приглашённый им и приглашённый тем");
+        assert_eq!(remove_branch(&a[..16]), 3);
+        with_devices(|d| {
+            assert!(d.iter().all(|x| x.peer_id() != a && x.peer_id() != b && x.peer_id() != c));
+            assert!(d.iter().any(|x| x.peer_id() == other), "чужие не тронуты");
+        });
+        assert_eq!(remove_branch("нет-такого-устройства"), 0);
+        reset();
+    }
+
+    #[test]
+    fn the_overview_shows_roles_and_who_invited_whom() {
+        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        reset();
+        let a = add("user", "ov-a");
+        let th = test_add_device_with_role("invited", "inv-ov-b");
+        with_devices(|d| d.iter_mut().filter(|x| x.token_hash == th).for_each(|x| x.invited_by = Some(a.clone())));
+        let ov = devices_overview();
+        let row = ov.iter().find(|r| r["name"] == "inv-ov-b").expect("есть в списке");
+        assert_eq!(row["role"], "invited");
+        assert_eq!(row["invited_by"], a.as_str());
+        assert_eq!(row["invited_by_name"], "inv-ov-a");
+        reset();
+    }
+
+    #[test]
+    fn the_administrator_routes_need_a_session() {
+        use axum::http::Method;
+        assert!(crate::web::admin::is_admin_route(&Method::POST, "/api/mobile/devices/abcdef0123456789/promote"));
+        assert!(crate::web::admin::is_admin_route(&Method::POST, "/api/mobile/devices/abcdef0123456789/revoke-branch"));
+        assert!(crate::web::admin::is_admin_route(&Method::GET, "/api/mobile/invite-policy"));
+        assert!(crate::web::admin::is_admin_route(&Method::POST, "/api/mobile/invite-policy"));
     }
 }

@@ -644,6 +644,9 @@ impl WebServer {
             .route("/api/complaints/:id/status", post(complaint_status_handler))
             .route("/api/complaints/:id/measure", post(complaint_measure_handler))
             .route("/api/mobile/phone-action", post(mobile_phone_action_handler))
+            .route("/api/mobile/devices/:id/promote", post(mobile_device_promote_handler))
+            .route("/api/mobile/devices/:id/revoke-branch", post(mobile_device_revoke_branch_handler))
+            .route("/api/mobile/invite-policy", get(mobile_invite_policy_get).post(mobile_invite_policy_post))
             .route(
                 "/api/mobile/devices/:id",
                 axum::routing::delete(mobile_device_remove_handler),
@@ -5762,6 +5765,34 @@ async fn mobile_devices_handler() -> impl IntoResponse {
 
 /// Забыть устройство. Если оно владеет группами, удаление уносит и их (журналы, файлы), поэтому нужен повторный ввод пароля узла,
 /// как при прямом удалении группы; устройство без групп забывается без пароля.
+/// Повысить приглашённое устройство до пользователя (оно сможет приглашать само). Админский маршрут.
+async fn mobile_device_promote_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    match crate::mobile_api::promote_device(&id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Err(m) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "message": m}))).into_response(),
+    }
+}
+
+/// Отозвать устройство вместе со всеми, кого оно пригласило (и кого пригласили они). Админский маршрут.
+async fn mobile_device_revoke_branch_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    let removed = crate::mobile_api::remove_branch(&id);
+    if removed == 0 {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok", "removed": removed}))).into_response()
+}
+
+async fn mobile_invite_policy_get() -> Response {
+    Json(serde_json::to_value(crate::mobile_api::invite_policy()).unwrap_or_default()).into_response()
+}
+
+async fn mobile_invite_policy_post(Json(p): Json<crate::mobile_api::InvitePolicy>) -> Response {
+    match crate::mobile_api::set_invite_policy(p) {
+        Ok(()) => Json(serde_json::to_value(crate::mobile_api::invite_policy()).unwrap_or_default()).into_response(),
+        Err(m) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response(),
+    }
+}
+
 async fn mobile_device_remove_handler(
     State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
