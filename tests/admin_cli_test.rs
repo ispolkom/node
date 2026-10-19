@@ -59,6 +59,8 @@ fn run(args: &[&str], stdin: &str, sock: &Path) -> (i32, String) {
         .args(args)
         .arg("--socket")
         .arg(sock)
+        // сообщения проверяются по-русски; язык не зависит от окружения (на CI LANG не задан — был бы английский)
+        .env("YANDI_LANG", "ru")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -84,6 +86,10 @@ fn first_setup_and_admin_work_from_the_console() {
     let (rc, out) = run(&["setup", "--password-stdin"], "testpass123\n", &sock);
     assert_ne!(rc, 0);
     assert!(out.contains("нет терминала"), "{out}");
+    // тот же отказ по-английски: язык задаётся ключом и сильнее переменной окружения
+    let (rc, out) = run(&["setup", "--lang", "en", "--password-stdin"], "testpass123\n", &sock);
+    assert_ne!(rc, 0);
+    assert!(out.contains("no terminal") && !out.contains("нет терминала"), "{out}");
     // настройка с файлом фразы
     let seed = node.dir.join("seed.txt");
     let seed_s = seed.to_str().unwrap();
