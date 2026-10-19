@@ -5,6 +5,7 @@ import '../services/app_state.dart';
 import '../services/vault_lock.dart';
 import 'vault_screens.dart';
 import 'invite_device_screen.dart';
+import 'support_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/avatar_circle.dart';
@@ -151,6 +152,14 @@ class SettingsScreen extends StatelessWidget {
                 subtitle: Text('Вас пригласили: право приглашать даёт администратор узла.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
               ),
           ],
+          _Section(title: 'Проект'),
+          ListTile(
+            key: const ValueKey('support-project'),
+            leading: const Icon(Icons.favorite_border, color: AppTheme.textSecondary),
+            title: const Text('Поддержать проект', style: TextStyle(color: AppTheme.text)),
+            subtitle: const Text('Добровольное пожертвование на серверы и разработку (кошелёк проекта, а не узла).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SupportScreen())),
+          ),
           // Профиль
           _Section(title: 'Профиль'),
           ListTile(

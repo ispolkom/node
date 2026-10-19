@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:qr_flutter/qr_flutter.dart';
 import 'theme.dart';
 
 /// Закреплённый блок вверху главной: новости и обновления. Данные — из подписанной ленты выпусков, которую проверил узел (`/api/update/status`);
@@ -116,8 +117,9 @@ class _SupportBlockState extends State<SupportBlock> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           const Text(
-            'YANDI делают энтузиасты, без рекламы и без слежки. Если проект вам полезен, можно поддержать его криптовалютой. Это добровольное '
-            'пожертвование: оно ни к чему не обязывает и не даёт особых прав. Адрес вшит в программу; сверьте его с сайтом yandi.su.',
+            'YANDI делают энтузиасты, без рекламы и без слежки. Если проект вам полезен, можно поддержать его криптовалютой: деньги идут на серверы '
+            'и инструменты разработки (это кошелёк проекта, а не владельца вашего узла). Пожертвование добровольное: оно ни к чему не обязывает и '
+            'не даёт особых прав. Адрес вшит в программу; сверьте его с сайтом yandi.su.',
             style: TextStyle(color: Icq.text),
           ),
           const SizedBox(height: 10),
@@ -125,19 +127,35 @@ class _SupportBlockState extends State<SupportBlock> {
             const Text('Адрес для поддержки пока не указан.', key: ValueKey('support-empty'), style: TextStyle(color: Icq.dark)),
           for (final w in wallets)
             Padding(
-              padding: const EdgeInsets.only(bottom: 8),
+              padding: const EdgeInsets.only(bottom: 10),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  SizedBox(width: 130, child: Text('${w.coin}${w.network.isEmpty ? '' : ' (${w.network})'}', style: const TextStyle(fontWeight: FontWeight.bold, color: Icq.text))),
-                  Expanded(child: SelectableText(w.address, key: ValueKey('wallet-${w.coin}'), style: const TextStyle(fontFamily: 'monospace', color: Icq.text))),
-                  TextButton(
-                    key: ValueKey('copy-${w.coin}'),
-                    onPressed: () async {
-                      await Clipboard.setData(ClipboardData(text: w.address));
-                      if (mounted) setState(() => copied = w.coin);
-                    },
-                    child: Text(copied == w.coin ? 'Скопировано' : 'Скопировать'),
+                  Container(
+                    color: Colors.white,
+                    padding: const EdgeInsets.all(6),
+                    child: QrImageView(key: ValueKey('qr-${w.coin}'), data: w.address, size: 132, backgroundColor: Colors.white),
+                  ),
+                  const SizedBox(width: 14),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text('${w.coin}${w.network.isEmpty ? '' : ' · сеть ${w.network}'}', style: const TextStyle(fontWeight: FontWeight.bold, color: Icq.text)),
+                        const SizedBox(height: 4),
+                        SelectableText(w.address, key: ValueKey('wallet-${w.coin}'), style: const TextStyle(fontFamily: 'monospace', fontSize: 15, color: Icq.text)),
+                        const SizedBox(height: 4),
+                        Text('Отправляйте только ${w.coin}${w.network.isEmpty ? '' : ' в сети ${w.network}'}: перевод в другой сети будет потерян.', style: const TextStyle(fontSize: 12, color: Icq.peer)),
+                        TextButton(
+                          key: ValueKey('copy-${w.coin}'),
+                          onPressed: () async {
+                            await Clipboard.setData(ClipboardData(text: w.address));
+                            if (mounted) setState(() => copied = w.coin);
+                          },
+                          child: Text(copied == w.coin ? 'Скопировано' : 'Скопировать адрес'),
+                        ),
+                      ],
+                    ),
                   ),
                 ],
               ),
