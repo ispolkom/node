@@ -1016,10 +1016,12 @@ mod tests {
     #[test]
     fn a_long_basename_in_a_short_directory_still_connects() {
         let dir = tempfile::tempdir_in("/tmp").unwrap();
-        let name = "s".repeat(104 - dir.path().as_os_str().len() - 1);
+        // предел sun_path: 108 на Linux, 104 на macOS — берём длину ниже предела, но выше порога запасного пути на Linux
+        let total = if cfg!(target_os = "linux") { 104 } else { 96 };
+        let name = "s".repeat(total - dir.path().as_os_str().len() - 1);
         let p = dir.path().join(&name);
         let l = UnixListener::bind(&p).unwrap();
-        assert!(p.as_os_str().len() < 108, "{}", p.as_os_str().len());
+        assert!(p.as_os_str().len() <= total, "{}", p.as_os_str().len());
         let h = std::thread::spawn(move || l.accept().is_ok());
         assert!(connect(&p).is_ok(), "путь допустимой длины должен подключаться напрямую");
         assert!(h.join().unwrap());
