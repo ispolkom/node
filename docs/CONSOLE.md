@@ -34,6 +34,9 @@ yandi admin                       # меню
 yandi admin status | devices | alerts | update
 yandi admin pairing [owner|user] [--host АДРЕС]       # код и QR сопряжения телефона прямо в терминале
 yandi admin device-remove ID                          # отвязать устройство (слово подтверждения «ДА»)
+yandi admin device-promote ID                         # приглашённое устройство → пользователь (может приглашать само)
+yandi admin device-revoke-branch ID                   # отозвать устройство и всех, кого оно пригласило (слово «ДА»)
+yandi admin invites show | set --enabled on|off --per-day N --max-live N   # политика приглашений
 yandi admin proxies list | add [socks5|http_connect] | remove ID | test | settings --enabled on --strict off --max-clients 5
 yandi admin vault status | lock | unlock | change-password | panic-erase   # стирание: слово «СТЕРЕТЬ»
 yandi admin node stop | start
