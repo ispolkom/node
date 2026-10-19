@@ -45,7 +45,8 @@ class _ChatScreenState extends State<ChatScreen> {
   final _scrollCtrl = ScrollController();
   final _inputFocus = FocusNode();
   final Set<String> _selected = {};
-  String? _editingId;   // id редактируемого сообщения (null — обычная отправка)
+  String? _editingId;
+  bool _picking = false; // система копирует выбранный файл в кэш приложения   // id редактируемого сообщения (null — обычная отправка)
   ChatMessage? _replyTo;   // сообщение, на которое отвечаем (цитата над ответом)
   final Map<String, GlobalKey> _anchors = {};
 
@@ -364,7 +365,12 @@ class _ChatScreenState extends State<ChatScreen> {
       _snack('Файлы можно отправлять только на свои устройства (у этого собеседника нет ключа шифрования)');
       return;
     }
-    final res = await FilePicker.platform.pickFiles(allowMultiple: true);
+    // выбор большого файла: система копирует его в кэш приложения, это занимает секунды; пока копируется, говорим об этом
+    final res = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      onFileLoading: (st) { if (mounted) setState(() => _picking = st == FilePickerStatus.picking); },
+    );
+    if (mounted && _picking) setState(() => _picking = false);
     if (res == null) return;
     try {
     for (final f in res.files) {
@@ -547,14 +553,31 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           Expanded(
-            child: messages.isEmpty
+            child: (messages.isEmpty && state.preparingFor(widget.peerId).isEmpty)
                 ? const Center(child: Text('Нет сообщений',
                     style: TextStyle(color: AppTheme.textSecondary)))
                 : ListView.builder(
                     controller: _scrollCtrl,
                     padding: const EdgeInsets.all(12),
-                    itemCount: messages.length,
+                    itemCount: messages.length + state.preparingFor(widget.peerId).length,
                     itemBuilder: (_, i) {
+                      if (i >= messages.length) {
+                        final label = state.preparingFor(widget.peerId)[i - messages.length];
+                        return Align(
+                          alignment: Alignment.centerRight,
+                          child: Container(
+                            key: ValueKey('preparing-$label'),
+                            margin: const EdgeInsets.symmetric(vertical: 4),
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                            decoration: BoxDecoration(color: AppTheme.surface, borderRadius: BorderRadius.circular(12)),
+                            child: Row(mainAxisSize: MainAxisSize.min, children: [
+                              const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                              const SizedBox(width: 10),
+                              Flexible(child: Text('«$label» — подготовка к отправке…', style: const TextStyle(color: AppTheme.textSecondary))),
+                            ]),
+                          ),
+                        );
+                      }
                       final m = messages[i];
                       final target = m.replyText == null ? null : state.findReplyTarget(widget.peerId, m);
                       var tapAt = Offset.zero;
@@ -596,6 +619,18 @@ class _ChatScreenState extends State<ChatScreen> {
                     },
                   ),
           ),
+          if (_picking)
+            Container(
+              key: const ValueKey('picking-banner'),
+              width: double.infinity,
+              color: AppTheme.surface,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(children: const [
+                SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+                SizedBox(width: 10),
+                Text('Копирование выбранного файла…', style: TextStyle(color: AppTheme.textSecondary)),
+              ]),
+            ),
           if (_editingId != null)
             Container(
               color: AppTheme.surface,

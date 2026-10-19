@@ -869,17 +869,44 @@ class AppState extends ChangeNotifier implements FilesHost {
   @override
   int get transferCount => fileStates.length;
 
+  /// Файлы, которые приложение готовит к отправке (проверка и шифрование в хранилище): в чате они видны сразу, до появления сообщения.
+  final Map<String, List<String>> _preparing = {};
+  List<String> preparingFor(String peerId) => List.unmodifiable(_preparing[peerId] ?? const <String>[]);
+
+  String _prepLabel(String path, String? name) => (name != null && name.isNotEmpty) ? name : path.split('/').last;
+
+  void _prepStart(String peerId, String label) {
+    _preparing.putIfAbsent(peerId, () => []).add(label);
+    notifyListeners();
+  }
+
+  void _prepDone(String peerId, String label) {
+    final l = _preparing[peerId];
+    if (l == null || !l.remove(label)) return;
+    if (l.isEmpty) _preparing.remove(peerId);
+    notifyListeners();
+  }
+
   @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
+    final label = _prepLabel(path, name);
+    // тот же файл, который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления сообщения
+    // файл отправляли повторно, и потом приходили все копии сразу
+    if ((_preparing[peerId] ?? const <String>[]).contains(label)) {
+      if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
+      return '«$label» уже готовится к отправке';
+    }
+    _prepStart(peerId, label);
     try {
-      return await _sendFile(peerId, path, name: name);
+      return await _sendFile(peerId, path, name: name, onPrepared: () => _prepDone(peerId, label));
     } finally {
+      _prepDone(peerId, label);
       // при любом исходе (отказ узла, ошибка, успех) открытая копия из выбора файла затирается
       if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
     }
   }
 
-  Future<String?> _sendFile(String peerId, String path, {String? name}) async {
+  Future<String?> _sendFile(String peerId, String path, {String? name, void Function()? onPrepared}) async {
     if (_api == null || _ws == null) return 'Нет связи с узлом';
     final svc = FileTransferService(_api!, vault: await VaultService.instance.files());
     late FileOffer offer;
@@ -905,6 +932,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     }
     _outgoingPaths[offer.tid] = source;
     fileStates[offer.tid] = FileState.working(0);
+    onPrepared?.call(); // строка «подготовка» уступает место сообщению с ходом отправки
     // сообщение в чате появляется сразу и показывает ход отправки; получателю предложение уйдёт, когда всё залито
     final msg = ChatMessage(
       id: 'file_${offer.tid}', peerId: peerId, outgoing: true, text: offer.encode(),
