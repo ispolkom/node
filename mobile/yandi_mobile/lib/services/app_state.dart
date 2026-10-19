@@ -1,3 +1,4 @@
+import 'prep_tracker.dart';
 import '../app_version.dart';
 import 'group_service.dart';
 import 'group_api_http.dart';
@@ -869,38 +870,28 @@ class AppState extends ChangeNotifier implements FilesHost {
   @override
   int get transferCount => fileStates.length;
 
-  /// Файлы, которые приложение готовит к отправке (проверка и шифрование в хранилище): в чате они видны сразу, до появления сообщения.
-  final Map<String, List<String>> _preparing = {};
-  List<String> preparingFor(String peerId) => List.unmodifiable(_preparing[peerId] ?? const <String>[]);
+  /// Файлы, которые приложение готовит к отправке: в чате они видны сразу, до появления сообщения (см. `PrepTracker`).
+  final PrepTracker _prep = PrepTracker();
+  List<String> preparingFor(String peerId) => _prep.labels(peerId);
 
   String _prepLabel(String path, String? name) => (name != null && name.isNotEmpty) ? name : path.split('/').last;
 
-  void _prepStart(String peerId, String label) {
-    _preparing.putIfAbsent(peerId, () => []).add(label);
-    notifyListeners();
-  }
-
-  void _prepDone(String peerId, String label) {
-    final l = _preparing[peerId];
-    if (l == null || !l.remove(label)) return;
-    if (l.isEmpty) _preparing.remove(peerId);
-    notifyListeners();
+  void _prepDone(String peerId, int id) {
+    if (_prep.done(peerId, id)) notifyListeners();
   }
 
   @override
   Future<String?> sendFile(String peerId, String path, {String? name}) async {
     final label = _prepLabel(path, name);
-    // тот же файл, который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления сообщения
-    // файл отправляли повторно, и потом приходили все копии сразу
-    if ((_preparing[peerId] ?? const <String>[]).contains(label)) {
-      if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
-      return '«$label» уже готовится к отправке';
-    }
-    _prepStart(peerId, label);
+    // тот же источник (путь), который уже готовится для этого собеседника, второй раз не принимается: раньше из-за задержки появления
+    // сообщения файл отправляли повторно. Копию выбора отклонённого повтора НЕ стираем: ею пользуется уже идущая операция.
+    if (_prep.hasSource(peerId, path)) return '«$label» уже готовится к отправке';
+    final prep = _prep.start(peerId, label, path);
+    notifyListeners();
     try {
-      return await _sendFile(peerId, path, name: name, onPrepared: () => _prepDone(peerId, label));
+      return await _sendFile(peerId, path, name: name, onPrepared: () => _prepDone(peerId, prep));
     } finally {
-      _prepDone(peerId, label);
+      _prepDone(peerId, prep);
       // при любом исходе (отказ узла, ошибка, успех) открытая копия из выбора файла затирается
       if (!FileVault.isVaultPath(path)) await dropPickerCopy(path);
     }

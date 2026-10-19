@@ -366,11 +366,18 @@ class _ChatScreenState extends State<ChatScreen> {
       return;
     }
     // выбор большого файла: система копирует его в кэш приложения, это занимает секунды; пока копируется, говорим об этом
-    final res = await FilePicker.platform.pickFiles(
-      allowMultiple: true,
-      onFileLoading: (st) { if (mounted) setState(() => _picking = st == FilePickerStatus.picking); },
-    );
-    if (mounted && _picking) setState(() => _picking = false);
+    FilePickerResult? res;
+    try {
+      res = await FilePicker.platform.pickFiles(
+        allowMultiple: true,
+        onFileLoading: (st) { if (mounted) setState(() => _picking = st == FilePickerStatus.picking); },
+      );
+    } catch (e) {
+      if (mounted) _snack('Не удалось выбрать файл: $e');
+    } finally {
+      // баннер копирования не должен остаться, если выбор закончился ошибкой или отменой
+      if (mounted && _picking) setState(() => _picking = false);
+    }
     if (res == null) return;
     try {
     for (final f in res.files) {

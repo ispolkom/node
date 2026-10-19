@@ -28,20 +28,34 @@ pub fn default_socket() -> PathBuf {
 
 // ───────────────────────── HTTP по Unix-сокету ─────────────────────────
 
-/// Разобрать ответ HTTP/1.1: код, тело (с поддержкой `Transfer-Encoding: chunked`).
+/// Разобрать ответ HTTP/1.1 строго: тело обязано соответствовать `Content-Length` или `chunked` с завершающим нулевым куском.
+/// Оборванный или противоречивый ответ — ошибка, а не «пустой успех».
 pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
     let split = raw.windows(4).position(|w| w == b"\r\n\r\n").ok_or("ответ узла оборван")?;
     let head = std::str::from_utf8(&raw[..split]).map_err(|_| "ответ узла не текст")?;
     let mut lines = head.split("\r\n");
     let status = lines.next().ok_or("пустой ответ")?;
     let code: u16 = status.split_whitespace().nth(1).and_then(|c| c.parse().ok()).ok_or("нет кода ответа")?;
-    let chunked = lines.any(|l| {
-        let l = l.to_ascii_lowercase();
-        l.starts_with("transfer-encoding:") && l.contains("chunked")
-    });
+    let mut chunked = false;
+    let mut length: Option<usize> = None;
+    for l in lines {
+        let lower = l.to_ascii_lowercase();
+        if let Some(v) = lower.strip_prefix("transfer-encoding:") {
+            chunked |= v.contains("chunked");
+        } else if let Some(v) = lower.strip_prefix("content-length:") {
+            let n: usize = v.trim().parse().map_err(|_| "неверная длина тела")?;
+            if length.replace(n).is_some_and(|prev| prev != n) {
+                return Err("противоречивая длина тела".into());
+            }
+        }
+    }
     let body = &raw[split + 4..];
     if !chunked {
-        return Ok((code, body.to_vec()));
+        return match length {
+            Some(n) if body.len() == n => Ok((code, body.to_vec())),
+            Some(_) => Err("тело ответа не совпадает с заявленной длиной (ответ оборван)".into()),
+            None => Ok((code, body.to_vec())),
+        };
     }
     let mut out = Vec::new();
     let mut rest = body;
@@ -51,30 +65,37 @@ pub fn parse_response(raw: &[u8]) -> Result<(u16, Vec<u8>), String> {
         let size = usize::from_str_radix(size_text.split(';').next().unwrap_or("").trim(), 16).map_err(|_| "неверный размер части")?;
         rest = &rest[eol + 2..];
         if size == 0 {
-            break;
+            // после нулевого куска допустимы только завершающие заголовки и пустая строка
+            return if rest.ends_with(b"\r\n") { Ok((code, out)) } else { Err("ответ по частям не завершён".into()) };
         }
-        if rest.len() < size + 2 {
-            return Err("оборван ответ по частям".into());
+        let end = size.checked_add(2).filter(|e| *e <= rest.len()).ok_or("оборван ответ по частям")?;
+        if &rest[size..end] != b"\r\n" {
+            return Err("часть ответа не завершена CRLF".into());
         }
         out.extend_from_slice(&rest[..size]);
-        rest = &rest[size + 2..];
+        rest = &rest[end..];
     }
-    Ok((code, out))
 }
 
-/// Подключиться к сокету. Путь длиннее предела `sun_path` (около 108 знаков) открывается через дескриптор каталога.
+/// Подключиться к сокету. Сначала напрямую; путь, не помещающийся в `sun_path` (около 108 знаков), открывается через дескриптор каталога
+/// (`/proc/self/fd/N/имя`), если такой псевдоним короче.
 pub fn connect(socket: &Path) -> std::io::Result<UnixStream> {
-    if socket.as_os_str().len() < 100 {
-        return UnixStream::connect(socket);
+    match UnixStream::connect(socket) {
+        Ok(s) => return Ok(s),
+        Err(e) if socket.as_os_str().len() < 100 => return Err(e),
+        Err(_) => {}
     }
     #[cfg(target_os = "linux")]
     {
         use std::os::fd::AsRawFd;
+        use std::os::unix::ffi::{OsStrExt, OsStringExt};
         let (Some(dir), Some(name)) = (socket.parent(), socket.file_name()) else {
             return Err(std::io::Error::from(std::io::ErrorKind::InvalidInput));
         };
         let d = std::fs::File::open(dir)?;
-        return UnixStream::connect(format!("/proc/self/fd/{}/{}", d.as_raw_fd(), name.to_string_lossy()));
+        let mut alias = format!("/proc/self/fd/{}/", d.as_raw_fd()).into_bytes();
+        alias.extend_from_slice(name.as_bytes());
+        return UnixStream::connect(std::path::PathBuf::from(std::ffi::OsString::from_vec(alias)));
     }
     #[cfg(not(target_os = "linux"))]
     UnixStream::connect(socket)
@@ -104,7 +125,16 @@ pub fn roundtrip(socket: &Path, method: &str, path: &str, body: Option<&Value>, 
         return Err("ответ узла слишком велик".into());
     }
     let (code, bytes) = parse_response(&raw)?;
-    let value = if bytes.is_empty() { Value::Null } else { serde_json::from_slice(&bytes).unwrap_or(Value::Null) };
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        match serde_json::from_slice(&bytes) {
+            Ok(v) => v,
+            // успешный ответ обязан быть JSON; текст ошибки без JSON допустим (его покажет error_text по коду)
+            Err(_) if (200..300).contains(&code) => return Err("ответ узла не соответствует протоколу (не JSON)".into()),
+            Err(_) => Value::Null,
+        }
+    };
     Ok((code, value))
 }
 
@@ -120,7 +150,10 @@ pub struct Secrets {
 impl Secrets {
     fn line() -> Result<String, String> {
         let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line).map_err(|e| e.to_string())?;
+        let n = std::io::stdin().lock().read_line(&mut line).map_err(|e| e.to_string())?;
+        if n == 0 {
+            return Err("конец ввода: ожидалась ещё строка".into());
+        }
         Ok(line.trim_end_matches(['\r', '\n']).to_string())
     }
 
@@ -285,6 +318,7 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
             if !matches!(kind, "socks5" | "http_connect") {
                 return Err("вид прокси: socks5 или http_connect".into());
             }
+            s.ensure_admin()?; // пароль администратора — первой строкой стандартного ввода, до списка прокси
             eprintln!("Введите прокси по одному в строке (host:port или host:port:пользователь:пароль), пустая строка — конец:");
             let mut text = String::new();
             let stdin = std::io::stdin();
@@ -312,6 +346,7 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
         }
         "test" => {
             let kind = args.get(1).map(String::as_str).unwrap_or("socks5");
+            s.ensure_admin()?;
             let mut text = String::new();
             eprintln!("Проверить прокси (строки как при добавлении), пустая строка — конец:");
             for line in std::io::stdin().lock().lines() {
@@ -332,11 +367,13 @@ fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
             let mut it = args[1..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
-                    "--enabled" => {
-                        body.insert("enabled".into(), json!(it.next().map(String::as_str) == Some("on")));
-                    }
-                    "--strict" => {
-                        body.insert("strict".into(), json!(it.next().map(String::as_str) == Some("on")));
+                    "--enabled" | "--strict" => {
+                        let on = match it.next().map(String::as_str) {
+                            Some("on") => true,
+                            Some("off") => false,
+                            _ => return Err(format!("{a}: нужно on или off")),
+                        };
+                        body.insert(a.trim_start_matches("--").into(), json!(on));
                     }
                     "--max-clients" => {
                         let n: u32 = it.next().and_then(|n| n.parse().ok()).ok_or("--max-clients N")?;
@@ -570,7 +607,7 @@ fn menu(s: &mut Session) -> i32 {
 }
 
 pub fn run_admin(argv: Vec<String>) -> i32 {
-    if argv.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
+    if argv.first().is_some_and(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
         println!("{HELP}");
         return 0;
     }
@@ -629,7 +666,7 @@ const SETUP_HELP: &str = "yandi setup — первая настройка узл
 --password-stdin: пароль входа первой строкой стандартного ввода (для скриптов).";
 
 pub fn run_setup(argv: Vec<String>) -> i32 {
-    if argv.iter().any(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
+    if argv.first().is_some_and(|a| matches!(a.as_str(), "--help" | "-h" | "help")) {
         println!("{SETUP_HELP}");
         return 0;
     }
@@ -904,5 +941,61 @@ mod tests {
         assert!(!seen[0].contains("x-yandi-admin"), "первый запрос без токена");
         assert!(seen[1].starts_with("POST /api/admin/session") && seen[1].contains(r#""password":"adminpw""#));
         assert!(seen[2].starts_with("GET /api/alerts") && seen[2].contains("x-yandi-admin: secrettk"));
+    }
+
+    #[test]
+    fn truncated_or_inconsistent_responses_are_errors_not_empty_successes() {
+        // тело короче заявленного (обрыв) и длиннее
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{\"ok\":").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}xx").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\n{}").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nContent-Length: x\r\n\r\n{}").is_err());
+        // по частям: нет CRLF после данных, нет завершения, огромный размер
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}XX0\r\n\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nffffffffffffffff\r\n{}\r\n").is_err());
+        assert!(parse_response(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n2\r\n{}\r\n0\r\n\r\n").is_ok());
+    }
+
+    #[test]
+    fn a_non_json_success_is_a_protocol_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let (sock, h) = serve_once(dir.path(), "j.sock", http("200 OK", "not json").into_bytes());
+        let e = roundtrip(&sock, "GET", "/api/x", None, None, Duration::from_secs(5)).unwrap_err();
+        h.join().unwrap();
+        assert!(e.contains("не JSON"), "{e}");
+        let (sock, h) = serve_once(dir.path(), "k.sock", http("500 Internal Server Error", "oops").into_bytes());
+        let (code, v) = roundtrip(&sock, "GET", "/api/x", None, None, Duration::from_secs(5)).unwrap();
+        h.join().unwrap();
+        assert_eq!((code, v), (500, Value::Null));
+    }
+
+    #[test]
+    fn proxy_settings_accept_only_on_or_off() {
+        let mut s = Session::new(PathBuf::from("/nonexistent/s.sock"), true);
+        let run = |s: &mut Session, a: &[&str]| dispatch(s, &a.iter().map(|x| x.to_string()).collect::<Vec<_>>()).unwrap_err();
+        for a in [&["proxies", "settings", "--strict"][..], &["proxies", "settings", "--strict", "onn"], &["proxies", "settings", "--enabled", "--strict", "on"], &["proxies", "settings", "--max-clients", "x"]] {
+            let e = run(&mut s, a);
+            assert!(e.contains("on или off") || e.contains("max-clients"), "{a:?}: {e}");
+        }
+    }
+
+    #[test]
+    fn a_long_basename_in_a_short_directory_still_connects() {
+        let dir = tempfile::tempdir_in("/tmp").unwrap();
+        let name = "s".repeat(104 - dir.path().as_os_str().len() - 1);
+        let p = dir.path().join(&name);
+        let l = UnixListener::bind(&p).unwrap();
+        assert!(p.as_os_str().len() < 108, "{}", p.as_os_str().len());
+        let h = std::thread::spawn(move || l.accept().is_ok());
+        assert!(connect(&p).is_ok(), "путь допустимой длины должен подключаться напрямую");
+        assert!(h.join().unwrap());
+    }
+
+    #[test]
+    fn help_is_recognized_only_as_the_first_argument() {
+        // значение параметра с именем help не отменяет команду (до разбора сокета дело не доходит из-за неверного параметра)
+        assert_eq!(run_setup(vec!["--seed-file".into(), "help".into(), "--bogus".into()]), 2);
+        assert_eq!(run_admin(vec!["--bogus-flag".into(), "help".into(), "x".into()]), 1);
     }
 }

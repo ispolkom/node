@@ -29,6 +29,16 @@ while [ $# -gt 0 ]; do
 done
 
 die() { echo "ОШИБКА: $*" >&2; exit 1; }
+if [ "$VERIFY_ONLY" = 0 ]; then
+  [ "$(id -u)" != 0 ] || die "запустите скрипт от обычного пользователя (данные узла лежат в его домашней папке); sudo он вызовет сам"
+  command -v sudo >/dev/null || die "нужен sudo"
+  if [ "$NO_SERVICE" = 0 ]; then
+    U=$(id -un); G=$(id -gn); H=$(getent passwd "$U" | cut -d: -f6)
+    # значения попадают в unit-файл systemd (там пробелы разделяют аргументы, а % — подстановка): допускаем только безопасные знаки
+    [[ "$U" =~ ^[A-Za-z0-9._-]+$ && "$G" =~ ^[A-Za-z0-9._-]+$ ]] || die "имя пользователя или группы содержит знаки, которые нельзя безопасно записать в службу systemd; создайте службу вручную (--no-service)"
+    [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || die "домашняя папка «$H» содержит пробелы или %, ... — службу так не создать; используйте --no-service и опишите службу вручную"
+  fi
+fi
 [[ "$PUBKEY" =~ ^[0-9a-f]{64}$ ]] || die "ключ — 64 шестнадцатеричных знака"
 for t in openssl sha256sum awk; do command -v "$t" >/dev/null || die "нужна программа $t"; done
 openssl version | grep -q "OpenSSL 3" || die "нужен OpenSSL 3 (проверка Ed25519)"
@@ -64,13 +74,52 @@ openssl pkeyutl -verify -rawin -pubin -inkey "$W/pub.pem" -in "$W/signed.bin" -s
   || die "ПОДПИСЬ ВЫПУСКА НЕ СОВПАДАЕТ — не устанавливайте этот выпуск"
 echo "Подпись выпуска верна (ключ ${PUBKEY:0:16}…). Сверьте этот отпечаток с сайтом yandi.su/network/downloads."
 
-# --- содержимое манифеста (данные теперь доверенные, но разбираем строго) ---
-grep -q '"platform": "deb"' "$W/MANIFEST.json" || die "это не выпуск для Debian/Ubuntu"
-EXP=$(awk -F'[:,]' '/"expires"/ {gsub(/ /,"",$2); print $2}' "$W/MANIFEST.json")
-[[ "${EXP:-}" =~ ^[0-9]+$ ]] && [ "$EXP" -gt "$(date +%s)" ] || die "срок действия выпуска истёк или не указан"
+# --- содержимое манифеста: строгий разбор JSON (данные уже подписаны, но формат проверяется целиком) ---
+command -v python3 >/dev/null || die "нужен python3 (разбор манифеста): sudo apt install python3-minimal"
 ARCH=$(dpkg --print-architecture 2>/dev/null || echo amd64)
-mapfile -t ROWS < <(awk '/"name":/ {gsub(/[",]/,"",$2); n=$2} /"sha256":/ {gsub(/[",]/,"",$2); s=$2} /"size":/ {gsub(/[",]/,"",$2); print n" "s" "$2}' "$W/MANIFEST.json")
-[ "${#ROWS[@]}" -ge 1 ] || die "в манифесте нет файлов"
+PARSED=$(python3 - "$W/MANIFEST.json" <<'PY'
+import json, re, sys, time
+def pairs(items):
+    d = {}
+    for k, v in items:
+        if k in d: raise ValueError("повторяющееся поле " + k)
+        d[k] = v
+    return d
+try:
+    m = json.loads(open(sys.argv[1], "rb").read().decode("utf-8"), object_pairs_hook=pairs)
+    assert isinstance(m, dict)
+    assert m.get("format") == 1, "формат манифеста не поддерживается"
+    assert m.get("product") == "yandi-node", "это не выпуск yandi-node"
+    assert m.get("platform") == "deb", "это не выпуск для Debian/Ubuntu"
+    exp, seq = m.get("expires"), m.get("seq")
+    assert isinstance(exp, int) and not isinstance(exp, bool) and exp > time.time(), "срок действия выпуска истёк или не указан"
+    assert isinstance(seq, int) and not isinstance(seq, bool) and 0 <= seq < 2**53, "неверный номер выпуска"
+    files = m.get("files")
+    assert isinstance(files, list) and 1 <= len(files) <= 32, "в манифесте неверный список файлов"
+    names = set()
+    out = ["SEQ %d" % seq]
+    for f in files:
+        assert isinstance(f, dict) and set(f) == {"name", "sha256", "size"}, "запись файла должна содержать ровно name, sha256, size"
+        n, h, z = f["name"], f["sha256"], f["size"]
+        assert isinstance(n, str) and re.fullmatch(r"[A-Za-z0-9._-]{1,128}", n) and not n.startswith("."), "недопустимое имя файла"
+        assert isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h), "неверная сумма"
+        assert isinstance(z, int) and not isinstance(z, bool) and 1 <= z <= 256 * 1024 * 1024, "неверный размер"
+        assert n not in names, "файл указан дважды"
+        names.add(n)
+        out.append("FILE %s %s %d" % (n, h, z))
+    print("\n".join(out))
+except Exception as e:
+    sys.stderr.write("манифест отвергнут: %s\n" % e)
+    sys.exit(1)
+PY
+) || die "манифест не прошёл строгую проверку"
+SEQ=$(awk '$1=="SEQ"{print $2}' <<<"$PARSED")
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/yandi"; SEQ_FILE="$STATE_DIR/installed-seq"
+if [ -r "$SEQ_FILE" ]; then
+  OLD=$(tr -dc '0-9' < "$SEQ_FILE")
+  [ -z "$OLD" ] || [ "$SEQ" -ge "$OLD" ] || die "выпуск №$SEQ старше уже установленного №$OLD (откат): установка отменена"
+fi
+mapfile -t ROWS < <(awk '$1=="FILE"{print $2" "$3" "$4}' <<<"$PARSED")
 want=("yandi-node_")
 [ "$MODE" = desktop ] && want+=("yandi-desktop_")
 DEBS=()
@@ -78,24 +127,20 @@ for prefix in "${want[@]}"; do
   found=""
   for row in "${ROWS[@]}"; do
     read -r name sha size <<<"$row"
-    [[ "$name" =~ ^[A-Za-z0-9._-]+$ ]] || die "недопустимое имя файла в манифесте"
     [[ "$name" == ${prefix}*_${ARCH}.deb ]] || continue
-    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || die "неверная сумма в манифесте"
     fetch "$name"
     [ "$(stat -c %s "$W/$name")" = "$size" ] || die "$name: размер не совпадает с манифестом"
     [ "$(sha256sum "$W/$name" | cut -d' ' -f1)" = "$sha" ] || die "$name: СУММА НЕ СОВПАДАЕТ — файл подменён или повреждён"
     echo "Файл проверен: $name"; found="$W/$name"; DEBS+=("$found")
   done
-  [ -n "$found" ] || die "в выпуске нет пакета $prefix…_${ARCH}.deb"
+  [ -n "$found" ] || die "в выпуске нет пакета ${prefix}…_${ARCH}.deb"
 done
 [ "$VERIFY_ONLY" = 1 ] && { echo "Проверка выпуска завершена (--verify-only): ничего не установлено."; exit 0; }
 
 # --- установка ---
-command -v sudo >/dev/null || die "нужен sudo"
 sudo apt-get install -y "${DEBS[@]}"
+mkdir -p "$STATE_DIR" && printf '%s\n' "$SEQ" > "$SEQ_FILE"
 if [ "$NO_SERVICE" = 0 ]; then
-  U=$(id -un); G=$(id -gn); H=$(getent passwd "$U" | cut -d: -f6)
-  [ "$U" != root ] || die "запустите скрипт от обычного пользователя (данные узла лежат в его домашней папке), sudo он вызовет сам"
   UNIT=$(mktemp); trap 'rm -rf "$W" "$UNIT"' EXIT
   cat > "$UNIT" <<UNITEOF
 [Unit]
