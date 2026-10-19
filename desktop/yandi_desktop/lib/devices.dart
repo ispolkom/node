@@ -1,6 +1,7 @@
 import 'theme.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'preferences.dart';
 import 'transport/api.dart';
 import 'domain/shell_repository.dart';
@@ -54,10 +55,43 @@ class _DevicesPanelState extends State<DevicesPanel> {
     });
   }
 
+  /// Код, который мы положили в буфер обмена: при скрытии и истечении он из буфера убирается (если его там не заменили чем-то другим).
+  String? _copiedCode;
+  bool copied = false;
+  Timer? _copiedTimer;
+
   void clear() {
+    final code = _copiedCode;
+    _copiedCode = null;
+    copied = false;
+    _copiedTimer?.cancel();
     text = null;
     qr = null;
     expires = null;
+    if (code != null) unawaited(_forgetClipboard(code));
+  }
+
+  Future<void> _forgetClipboard(String code) async {
+    try {
+      final now = await Clipboard.getData(Clipboard.kTextPlain);
+      if (now?.text == code) await Clipboard.setData(const ClipboardData(text: ''));
+    } catch (_) {}
+  }
+
+  /// Скопировать код сопряжения (QR-текст): его вставляют в приложение на телефоне, если камера не читает QR.
+  Future<void> copyCode() async {
+    final t = text;
+    if (t == null) return;
+    await Clipboard.setData(ClipboardData(text: t));
+    if (!active || text != t) return;
+    setState(() {
+      _copiedCode = t;
+      copied = true;
+    });
+    _copiedTimer?.cancel();
+    _copiedTimer = Timer(const Duration(seconds: 2), () {
+      if (mounted && copied) setState(() => copied = false);
+    });
   }
 
   @override
@@ -270,7 +304,19 @@ class _DevicesPanelState extends State<DevicesPanel> {
               child: CustomPaint(painter: qr),
             ),
           ),
-        SelectableText(text!),
+        // код сопряжения: справа значок «скопировать» (и надпись «Скопировано» на две секунды)
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(child: SelectableText(text!, key: const ValueKey('pairing-text'))),
+            IconButton(
+              key: const ValueKey('pairing-copy'),
+              tooltip: tr(context, copied ? 'Скопировано' : 'Скопировать код'),
+              icon: Icon(copied ? Icons.check : Icons.copy, size: 20),
+              onPressed: copyCode,
+            ),
+          ],
+        ),
         UiText('Код действует ещё ${remaining.clamp(0, 300)} с'),
         TextButton(
           onPressed: () => setState(clear),

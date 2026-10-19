@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/widgets.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_desktop/devices.dart';
 import 'shell_m2_test.dart' as m2;
@@ -104,6 +105,32 @@ void main() {
     expect(api.bodies.last, {'peer': 'd' * 64, 'action': 'add'});
     await m1.stop(t);
   });
+  testWidgets('код сопряжения копируется значком справа; при «Скрыть код» он убирается из буфера обмена', (t) async {
+    String clip = '';
+    t.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') clip = (call.arguments as Map)['text'] as String;
+      if (call.method == 'Clipboard.getData') return {'text': clip};
+      return null;
+    });
+    addTearDown(() => t.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    final api = DeviceApi();
+    await m2.openAdmin(t, api, 'Настройки узла');
+    await m1.click(t, 'Создать код сопряжения');
+    expect(find.text('daemon-secret'), findsOneWidget);
+    expect(find.byKey(const ValueKey('pairing-copy')), findsOneWidget);
+    await t.ensureVisible(find.byKey(const ValueKey('pairing-copy')));
+    await t.tap(find.byKey(const ValueKey('pairing-copy')));
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await t.pump();
+    expect(clip, 'daemon-secret', reason: 'в буфере именно код сопряжения');
+    // скрыли код — из буфера он убран (если его там не заменили)
+    await m1.click(t, 'Скрыть код');
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await t.pump();
+    expect(clip, '', reason: 'код после скрытия не остаётся в буфере');
+    await m1.stop(t);
+  });
+
   test('QR accepts only rectangles and rejects bounds', () {
     expect(
       QrSquares.parse(

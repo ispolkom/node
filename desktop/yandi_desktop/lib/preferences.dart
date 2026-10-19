@@ -180,6 +180,8 @@ class UiSelectableText extends StatelessWidget {
 }
 
 const englishLabels = <String, String>{
+  'Скопировать код': 'Copy code',
+  'Скопировано': 'Copied',
   ...moreEnglishLabels,
   'Панель': 'Dashboard',
   'Главная': 'Home',
