@@ -85,4 +85,24 @@ void main() {
     expect(find.text('Код: 11112222', skipOffstage: false), findsOneWidget);
     expect(find.textContaining('30 мин'), findsOneWidget);
   });
+
+  testWidgets('после «Скопировать текст» всплывает окно с PIN: его надо назвать другим каналом', (t) async {
+    final tx = inviteText(host: 'h', port: 1, code: '11112222', fingerprint: 'cd' * 32);
+    await t.pumpWidget(MaterialApp(
+      home: InviteDeviceScreen(
+        create: () async => throw StateError('нет'),
+        revoke: () async {},
+        restore: () async => (text: tx, link: inviteLink(tx), code: '11112222', pin: '0042', ttlSecs: 1800),
+      ),
+    ));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    await t.scrollUntilVisible(find.byKey(const ValueKey('invite-copy')), 200, scrollable: find.byType(Scrollable).first);
+    await t.tap(find.byKey(const ValueKey('invite-copy')), warnIfMissed: false);
+    await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 50)));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 300));
+    expect(find.byKey(const ValueKey('invite-pin-dialog')), findsOneWidget);
+    expect(find.text('0042'), findsOneWidget);
+  });
 }

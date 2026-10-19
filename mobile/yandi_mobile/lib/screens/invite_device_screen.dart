@@ -96,6 +96,30 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
     }
   }
 
+  /// После копирования или отправки напоминаем PIN: его называют приглашённому другим каналом, он в ссылку не входит.
+  Future<void> _pinReminder(String what) async {
+    if (!mounted || pin == null) return;
+    await showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        key: const ValueKey('invite-pin-dialog'),
+        title: Text(what),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('Теперь назовите приглашённому этот PIN другим способом (голосом, в другом чате). В ссылке его нет.'),
+            const SizedBox(height: 12),
+            Text(pin!, style: const TextStyle(fontSize: 36, letterSpacing: 8, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Clipboard.setData(ClipboardData(text: pin!)), child: const Text('Копировать PIN')),
+          TextButton(onPressed: () => Navigator.of(c).pop(), child: const Text('Понятно')),
+        ],
+      ),
+    );
+  }
+
   Future<void> _revoke() async {
     try {
       await widget.revoke();
@@ -156,14 +180,17 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
                   onPressed: () async {
                     final ok = await shareText(link!);
                     if (!ok) await Clipboard.setData(ClipboardData(text: link!));
-                    if (context.mounted && !ok) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Ссылка скопирована')));
+                    await _pinReminder(ok ? 'Ссылка отправлена.' : 'Ссылка скопирована.');
                   },
                   icon: const Icon(Icons.share, size: 18),
                   label: const Text('Отправить ссылку'),
                 ),
                 TextButton.icon(
                   key: const ValueKey('invite-copy'),
-                  onPressed: () => Clipboard.setData(ClipboardData(text: text!)),
+                  onPressed: () async {
+                    await Clipboard.setData(ClipboardData(text: text!));
+                    await _pinReminder('Текст приглашения скопирован.');
+                  },
                   icon: const Icon(Icons.copy, size: 18),
                   label: const Text('Скопировать текст'),
                 ),
