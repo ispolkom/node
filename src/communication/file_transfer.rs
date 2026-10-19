@@ -542,11 +542,10 @@ impl FileTransferManager {
         };
 
         // Per-file AES-256-GCM application-layer encryption
-        let file_key = self.transport.derive_file_key(to, file_id).await;
-        let payload = match file_key {
-            Some(ref key) => encrypt_chunk(key, &chunk_data),
-            None => chunk_data.clone(),
-        };
+        // куски идут только зашифрованными ключом файла (из сеанса с получателем); без ключа отправка отказывает, открытого пути нет
+        let file_key = self.transport.derive_file_key(to, file_id).await
+            .ok_or_else(|| anyhow::anyhow!("нет ключа файла: сеанс с получателем не готов"))?;
+        let payload = encrypt_chunk(&file_key, &chunk_data);
 
         let mut binary_data = Vec::new();
         let file_id_bytes = file_id.as_bytes();
@@ -586,11 +585,9 @@ impl FileTransferManager {
         };
 
         // Per-file AES-256-GCM application-layer encryption
-        let file_key = self.transport.derive_file_key(&to, file_id).await;
-        let payload = match file_key {
-            Some(ref key) => encrypt_chunk(key, chunk_data),
-            None => chunk_data.to_vec(),
-        };
+        let file_key = self.transport.derive_file_key(&to, file_id).await
+            .ok_or_else(|| anyhow::anyhow!("нет ключа файла: сеанс с получателем не готов"))?;
+        let payload = encrypt_chunk(&file_key, chunk_data);
 
         let mut binary_data = Vec::with_capacity(1 + file_id.len() + 8 + payload.len());
         let file_id_bytes = file_id.as_bytes();
@@ -830,9 +827,12 @@ impl FileTransferManager {
         total_chunks: u32,
         chunk_data: &[u8],
     ) -> Result<bool> {
-        // Decrypt per-file AES-256-GCM if present (prefix byte 0x01)
+        // принимаются только зашифрованные куски (признак 0x01); открытый кусок — отказ, а не «как есть»
+        if chunk_data.first() != Some(&0x01) || chunk_data.len() <= 13 {
+            return Err(anyhow::anyhow!("кусок файла {file_id} не зашифрован: отвергнут"));
+        }
         let decrypted_buf: Vec<u8>;
-        let plain_data: &[u8] = if chunk_data.first() == Some(&0x01) && chunk_data.len() > 13 {
+        let plain_data: &[u8] = {
             let from_peer = {
                 let incoming = self.incoming.lock().await;
                 incoming.get(file_id).map(|t| t.from_peer)
@@ -842,8 +842,6 @@ impl FileTransferManager {
                 .ok_or_else(|| anyhow::anyhow!("No file key available for {}", file_id))?;
             decrypted_buf = decrypt_chunk(&key, &chunk_data[1..])?;
             &decrypted_buf
-        } else {
-            chunk_data
         };
 
         let mut incoming = self.incoming.lock().await;
