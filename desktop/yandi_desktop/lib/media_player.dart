@@ -93,6 +93,14 @@ class MediaPlayerLauncher {
     ('vlc', ['--play-and-exit', '--no-video-title-show']),
   ];
 
+  /// Окружение проигрывателя: адрес петли (127.0.0.1) не должен идти через прокси из окружения оболочки (в окружении пользователя
+  /// часто стоят http_proxy/https_proxy — проигрыватель тогда сразу закрывался без единого сообщения).
+  static Map<String, String> playerEnvironment() => {
+    for (final k in const ['http_proxy', 'https_proxy', 'all_proxy', 'ftp_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'FTP_PROXY']) k: '',
+    'no_proxy': '127.0.0.1,localhost,::1',
+    'NO_PROXY': '127.0.0.1,localhost,::1',
+  };
+
   /// Replaced in tests.
   static Future<Process?> Function(Uri url, String title) launcher = _launch;
 
@@ -117,7 +125,7 @@ class MediaPlayerLauncher {
           : name == 'mpv'
           ? ['--title=$title']
           : <String>[];
-      return Process.start(path, [...args, ...extra, url.toString()]);
+      return Process.start(path, [...args, ...extra, url.toString()], environment: playerEnvironment());
     }
     return null;
   }

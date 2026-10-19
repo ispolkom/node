@@ -49,4 +49,13 @@ void main() {
     expect(data.every((b) => b == 0), true);
     await expectLater(fetch(url), throwsA(anything));
   });
+
+  test('проигрыватель запускается без прокси из окружения: петля 127.0.0.1 идёт напрямую', () {
+    final env = MediaPlayerLauncher.playerEnvironment();
+    for (final k in ['http_proxy', 'https_proxy', 'all_proxy', 'HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY']) {
+      expect(env[k], '', reason: '$k должен быть сброшен');
+    }
+    expect(env['no_proxy'], contains('127.0.0.1'));
+    expect(env['NO_PROXY'], contains('localhost'));
+  });
 }
