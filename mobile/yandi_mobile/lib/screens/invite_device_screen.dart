@@ -102,7 +102,7 @@ class _InviteDeviceScreenState extends State<InviteDeviceScreen> {
         remaining = inv.ttlSecs;
       });
     } catch (e) {
-      if (mounted) setState(() => error = e is StateError ? e.message : 'Не удалось получить код приглашения');
+      if (mounted) setState(() => error = e is StateError ? e.message : 'Не удалось получить код приглашения (${e.runtimeType})');
     } finally {
       if (mounted) setState(() => busy = false);
     }

@@ -9,7 +9,8 @@ abstract class InviteBackend {
 }
 
 class _SecureBackend implements InviteBackend {
-  static const _s = FlutterSecureStorage();
+  // те же настройки, что у остального защищённого хранилища приложения (storage_service.dart)
+  static const _s = FlutterSecureStorage(aOptions: AndroidOptions(encryptedSharedPreferences: true));
   @override
   Future<String?> read(String k) => _s.read(key: k);
   @override

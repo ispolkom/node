@@ -1119,7 +1119,11 @@ class AppState extends ChangeNotifier implements FilesHost {
     final inv = await api.createDeviceInvite();
     final expMs = DateTime.now().millisecondsSinceEpoch + inv.ttlSecs * 1000;
     final text = inviteText(host: node.host, port: node.port, code: inv.code, fingerprint: node.fingerprint, expiresAtSecs: expMs ~/ 1000);
-    await InviteStore.saveIssued(node: node.id, text: text, code: inv.code, pin: inv.pin, expMs: expMs);
+    try {
+      await InviteStore.saveIssued(node: node.id, text: text, code: inv.code, pin: inv.pin, expMs: expMs);
+    } catch (_) {
+      // запомнить на час не вышло (хранилище телефона): приглашение всё равно выдано и показано; после закрытия приложения оно не вернётся
+    }
     return (text: text, link: inviteLink(text), code: inv.code, pin: inv.pin, ttlSecs: inv.ttlSecs);
   }
 
