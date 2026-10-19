@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:yandi_desktop/dashboard.dart';
 import 'package:yandi_desktop/home_blocks.dart';
+import 'shell_m2_test.dart' as m2;
+import 'widget_test.dart' as m1;
 
 Widget host(Widget child) => MaterialApp(home: Scaffold(body: SingleChildScrollView(child: child)));
 
@@ -66,16 +67,31 @@ void main() {
     expect(find.byKey(const ValueKey('support-empty')), findsOneWidget);
   });
 
-  testWidgets('главная: закреплённый блок новостей вверху, ниже «Поддержать проект», затем управление', (t) async {
+  testWidgets('поддержка: адрес из подписанного манифеста заменяет вшитый; мусор игнорируется', (t) async {
+    const embedded = '{"wallets":[{"coin":"USDT","network":"Tron","address":"TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB"}]}';
+    const fresh = 'TNewAddressNewAddressNewAddress12345';
+    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const {'asset': 'USDT', 'network': 'Tron (TRC20)', 'address': fresh})));
+    await t.pump();
+    expect(find.text(fresh), findsOneWidget);
+    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsNothing);
+    await t.pumpWidget(host(SupportBlock(load: () async => embedded, signed: const {'asset': 'USDT', 'network': 'x', 'address': 'bad address!'})));
+    await t.pump();
+    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsOneWidget);
+  });
+
+  testWidgets('главная страница оболочки: сверху закреплённые новости и обновления, ниже «Поддержать проект» с адресом', (t) async {
     t.view.physicalSize = const Size(1400, 1800);
     t.view.devicePixelRatio = 1.0;
     addTearDown(t.view.reset);
-    await t.pumpWidget(host(const DashboardView(status: null, speed: null, nodes: [], controls: SizedBox(), update: {'current': '0.2.0', 'available': null})));
+    await m2.open(t, m2.FeatureApi(), 'Главная');
+    expect(find.byKey(const ValueKey('news-block')), findsOneWidget);
+    expect(find.byKey(const ValueKey('support-block')), findsOneWidget);
     await t.pumpAndSettle();
     final news = t.getTopLeft(find.byKey(const ValueKey('news-block'))).dy;
     final support = t.getTopLeft(find.byKey(const ValueKey('support-block'))).dy;
-    final control = t.getTopLeft(find.text('Управление')).dy;
     expect(news < support, isTrue, reason: 'новости выше поддержки');
-    expect(support < control, isTrue, reason: 'поддержка выше управления');
+    expect(find.text('TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB'), findsOneWidget, reason: 'адрес виден и его можно скопировать');
+    expect(find.byKey(const ValueKey('qr-USDT')), findsOneWidget);
+    await m1.stop(t);
   });
 }

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 import '../models/support_wallet.dart';
+import '../services/share_text.dart';
 import '../theme.dart';
 
 /// «Поддержать проект»: добровольное пожертвование на разработку. Кошелёк вшит в приложение.
@@ -51,11 +52,27 @@ class _SupportScreenState extends State<SupportScreen> {
             TextButton.icon(
               key: ValueKey('support-copy-${w.coin}'),
               onPressed: () async {
+                // адрес идёт в системный буфер обмена: его можно вставить в любое другое приложение (кошелёк, мессенджер)
                 await Clipboard.setData(ClipboardData(text: w.address));
-                if (mounted) setState(() => copied = w.coin);
+                if (!mounted) return;
+                setState(() => copied = w.coin);
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Адрес скопирован. Вставьте его в свой кошелёк.')));
               },
               icon: const Icon(Icons.copy, size: 18),
               label: Text(copied == w.coin ? 'Скопировано' : 'Скопировать адрес'),
+            ),
+            TextButton.icon(
+              key: ValueKey('support-share-${w.coin}'),
+              onPressed: () async {
+                final ok = await shareText(w.address);
+                if (!ok && mounted) {
+                  // системное окно «Поделиться» недоступно — адрес хотя бы в буфере
+                  await Clipboard.setData(ClipboardData(text: w.address));
+                  if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Переслать не удалось: адрес скопирован в буфер обмена.')));
+                }
+              },
+              icon: const Icon(Icons.share, size: 18),
+              label: const Text('Отправить адрес…'),
             ),
             const SizedBox(height: 16),
           ],

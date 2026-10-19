@@ -41,6 +41,9 @@ struct State {
     available: Option<Value>,
     #[serde(default)]
     errors: Vec<String>,
+    /// кошелёк проекта из последнего проверенного подписанного манифеста
+    #[serde(default)]
+    support: Option<Value>,
     /// порог отката утрачен (файл состояния и его копия есть, но не читаются): кандидаты не принимаются, пока владелец не удалит оба файла
     #[serde(skip)]
     refuse: bool,
@@ -151,6 +154,7 @@ pub fn status_json() -> Value {
         "last_check": st.last_check,
         "available": available,
         "errors": st.errors,
+        "support": st.support,
         "channels": if s.channels.is_empty() { default_channels() } else { s.channels },
     })
 }
@@ -181,6 +185,9 @@ pub async fn check_now() -> Value {
             Some(f) if f.manifest.seq < st.max_seq => {}
             Some(f) => {
                 st.max_seq = st.max_seq.max(f.manifest.seq);
+                if f.manifest.support.is_some() {
+                    st.support = f.manifest.support.as_ref().map(|w| json!(w));
+                }
                 st.available = if is_newer(&f.manifest.version, &own_version()) {
                     Some(json!({
                         "version": f.manifest.version,

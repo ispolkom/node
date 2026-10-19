@@ -104,7 +104,7 @@ def nofloat(x):
 
 # схема совпадает с src/release.rs: validate_manifest (deny_unknown_fields)
 ROOT_REQUIRED = {"format", "product", "version", "seq", "created", "key_id", "files"}
-ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes"}
+ROOT_ALLOWED = ROOT_REQUIRED | {"platform", "expires", "notes", "support"}
 try:
     raw = open(sys.argv[1], "rb").read()
     need(len(raw) <= 1 << 20, "манифест слишком велик")
@@ -125,6 +125,8 @@ try:
     need(m["key_id"] == sys.argv[2], "идентификатор ключа в манифесте не совпадает с закреплённым ключом")
     notes = m.get("notes", "")
     need(type(notes) is str and len(notes) <= 2000, "неверные заметки")
+    sw = m.get("support")
+    need(sw is None or (type(sw) is dict and set(sw) == {"asset", "network", "address"} and all(type(x) is str and 1 <= len(x) <= 64 for x in sw.values())), "неверный кошелёк поддержки")
     files = m["files"]
     need(type(files) is list and 1 <= len(files) <= 32, "неверный список файлов")
     names = set()

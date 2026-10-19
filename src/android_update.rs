@@ -12,6 +12,8 @@ const APK_NAME: &str = "yandi.apk";
 const PUBKEY_HEX: &str = include_str!("../release/yandi-release-pubkey.hex");
 
 static AVAILABLE: Mutex<Option<Value>> = Mutex::new(None);
+/// кошелёк проекта из подписанного манифеста Android
+static SUPPORT: Mutex<Option<Value>> = Mutex::new(None);
 
 fn channels() -> Vec<Channel> {
     vec![Channel { name: "yandi.su".into(), base: "https://yandi.su/update/android/".into() }]
@@ -55,6 +57,9 @@ pub async fn refresh() {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let (found, _errors) = check(&channels(), &vk, 0, now).await;
     if let Some(f) = found {
+        if let Some(w) = &f.manifest.support {
+            *SUPPORT.lock().unwrap_or_else(|e| e.into_inner()) = Some(json!(w));
+        }
         if let Some(v) = acceptable(&f.manifest) {
             let mut g = AVAILABLE.lock().unwrap_or_else(|e| e.into_inner());
             // откат на более старый подписанный выпуск не принимается
@@ -67,15 +72,16 @@ pub async fn refresh() {
 
 /// Ответ телефону: есть ли версия новее `own` (версия приложения вида `1.0.0-b3`).
 pub fn answer(own: &str) -> Value {
+    let support = SUPPORT.lock().unwrap_or_else(|e| e.into_inner()).clone();
     let Some(mine) = parse_app_version(own) else {
-        return json!({"available": null});
+        return json!({"available": null, "support": support});
     };
     let latest = AVAILABLE.lock().unwrap_or_else(|e| e.into_inner()).clone();
     match latest {
         Some(v) if v["version"].as_str().and_then(parse_app_version).is_some_and(|theirs| theirs > mine) => {
-            json!({"available": {"version": v["version"], "notes": v["notes"], "size": v["size"], "page": DOWNLOAD_PAGE}})
+            json!({"available": {"version": v["version"], "notes": v["notes"], "size": v["size"], "page": DOWNLOAD_PAGE}, "support": support})
         }
-        _ => json!({"available": null}),
+        _ => json!({"available": null, "support": support}),
     }
 }
 
@@ -105,6 +111,7 @@ mod tests {
             platform: platform.into(),
             expires: 0,
             notes: "n".into(),
+            support: None,
         }
     }
 

@@ -158,7 +158,7 @@ class SettingsScreen extends StatelessWidget {
             leading: const Icon(Icons.favorite_border, color: AppTheme.textSecondary),
             title: const Text('Поддержать проект', style: TextStyle(color: AppTheme.text)),
             subtitle: const Text('Добровольное пожертвование на серверы и разработку (кошелёк проекта, а не узла).', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
-            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const SupportScreen())),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SupportScreen(wallets: context.read<AppState>().wallets))),
           ),
           // Профиль
           _Section(title: 'Профиль'),

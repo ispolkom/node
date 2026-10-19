@@ -1,5 +1,6 @@
 import 'admin_panel.dart';
 import 'embedded_player.dart' show PlaybackGuard;
+import 'home_blocks.dart';
 import 'theme.dart';
 import 'dashboard.dart';
 import 'preferences.dart';
@@ -561,7 +562,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     ),
   );
   Widget dashboard() => DashboardView(
-    update: updateStatus,
     status: status,
     speed: speed,
     nodes: nodes,
@@ -818,10 +818,26 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             !vault!.hasError &&
             (!vault!.configured || !vault!.unlocked))
           // первый запуск: среда создаётся сразу; после блокировки на любой странице — только вход
-          vaultPanel()
+          // (адрес поддержки не секрет: его можно скопировать и пока среда заперта)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              vaultPanel(),
+              if (vault!.configured) ...[const SizedBox(height: 12), const SupportBlock()],
+            ],
+          )
         else if (page == 'Панель')
-          // «Главная» зарезервирована под ленту контактов; пока — только извещения администратора (если есть)
-          NoticesCard(items: notices, onOpen: openAdmin)
+          // «Главная»: закреплённый блок новостей и обновлений, ниже «Поддержать проект», затем извещения администратора (если есть)
+          Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              NewsBlock(update: updateStatus),
+              const SizedBox(height: 12),
+              SupportBlock(signed: updateStatus?['support']),
+              const SizedBox(height: 12),
+              NoticesCard(items: notices, onOpen: openAdmin),
+            ],
+          )
         else if (page == 'Статус узла')
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,

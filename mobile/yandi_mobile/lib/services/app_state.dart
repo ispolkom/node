@@ -1,3 +1,4 @@
+import '../models/support_wallet.dart';
 import 'prep_tracker.dart';
 import '../app_version.dart';
 import 'group_service.dart';
@@ -229,11 +230,22 @@ class AppState extends ChangeNotifier implements FilesHost {
   // ── Новая версия приложения ───────────────────────────────────────────────
   /// {version, notes, size, page} — есть версия новее этой; null — нет или человек отложил это сообщение.
   Map<String, dynamic>? appUpdate;
+
+  /// Кошелёк проекта из подписанного манифеста узла; заменяет вшитый (адрес меняется одной строкой манифеста).
+  SupportWallet? signedWallet;
+  List<SupportWallet> get wallets => signedWallet != null ? [signedWallet!] : supportWallets;
   String? _updateDismissed;
   async_lib.Timer? _updateTimer;
 
   Future<void> checkAppUpdate() async {
-    final a = await _api?.getAppUpdate(kAppVersion);
+    final ans = await _api?.getUpdateAnswer(kAppVersion);
+    final av = ans?['available'];
+    final a = av is Map<String, dynamic> ? av : null;
+    final w = SupportWallet.fromSigned(ans?['support']);
+    if (w != null && (signedWallet?.address != w.address)) {
+      signedWallet = w;
+      notifyListeners();
+    }
     final next = (a != null && a['version'] != _updateDismissed) ? a : null;
     if (next?['version'] != appUpdate?['version']) {
       appUpdate = next;

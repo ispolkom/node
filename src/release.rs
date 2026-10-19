@@ -48,6 +48,34 @@ pub struct Manifest {
     /// краткое описание изменений для уведомления об обновлении (до 2000 знаков)
     #[serde(default)]
     pub notes: String,
+    /// кошелёк поддержки проекта (не узла): подписан вместе с выпуском, меняется одной строкой манифеста
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub support: Option<SupportWallet>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SupportWallet {
+    pub asset: String,
+    pub network: String,
+    pub address: String,
+}
+
+impl SupportWallet {
+    /// Разбор `Монета|Сеть|Адрес` (так задаётся при выпуске).
+    pub fn parse(s: &str) -> Option<Self> {
+        let mut it = s.split('|');
+        let w = Self { asset: it.next()?.trim().into(), network: it.next()?.trim().into(), address: it.next()?.trim().into() };
+        (it.next().is_none() && w.valid()).then_some(w)
+    }
+    fn valid(&self) -> bool {
+        const B58: &str = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        (1..=16).contains(&self.asset.chars().count())
+            && (1..=32).contains(&self.network.chars().count())
+            && !self.asset.chars().chain(self.network.chars()).any(|c| c.is_control() || c == '|')
+            && (26..=64).contains(&self.address.len())
+            && self.address.chars().all(|c| B58.contains(c) || c.is_ascii_hexdigit() || c == 'x')
+    }
 }
 
 /// Release phrase normalization v1: NFC (ICU4X 2.2.0), then Unicode whitespace collapse.
@@ -293,6 +321,7 @@ pub fn build_manifest(
         platform: String::new(),
         expires: 0,
         notes: String::new(),
+        support: None,
     };
     validate_manifest(&m).map_err(|e| e.to_string())?;
     Ok(m)
@@ -392,6 +421,7 @@ pub fn validate_manifest(m: &Manifest) -> Result<(), VerifyError> {
         || m.platform.len() > 32
         || !m.platform.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         || m.notes.chars().count() > 2000
+        || m.support.as_ref().is_some_and(|w| !w.valid())
     {
         return Err(VerifyError::Malformed("неизвестный формат/состав".into()));
     }
@@ -711,6 +741,7 @@ mod tests {
             platform: String::new(),
             expires: 0,
             notes: String::new(),
+            support: None,
         };
         let eb = manifest_bytes(&evil);
         let es = hex::encode(k.sign(&[SIG_DOMAIN, &eb].concat()).to_bytes());
@@ -718,6 +749,23 @@ mod tests {
             verify_manifest(&eb, &es, &k.verifying_key(), 0),
             Err(VerifyError::Malformed(_))
         ));
+    }
+
+    #[test]
+    fn support_wallet_is_signed_optional_and_validated() {
+        let w = SupportWallet::parse("USDT|Tron (TRC20)|TLMwvkp87wpcE7HkWJ6NeSaK6uuSEq4EsB").expect("valid");
+        let mut m = parse_manifest(&{
+            let d = tmpdir();
+            release(d.path(), 1).0
+        })
+        .unwrap();
+        assert!(m.support.is_none() && !String::from_utf8(manifest_bytes(&m)).unwrap().contains("support"), "без кошелька поле не пишется");
+        m.support = Some(w.clone());
+        let back = parse_manifest(&manifest_bytes(&m)).unwrap();
+        assert_eq!(back.support, Some(w));
+        m.support = Some(SupportWallet { address: "x y".into(), ..m.support.clone().unwrap() });
+        assert!(validate_manifest(&m).is_err());
+        assert!(SupportWallet::parse("USDT|Tron").is_none() && SupportWallet::parse("a|b|c|d").is_none());
     }
 
     #[test]

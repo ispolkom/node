@@ -3,6 +3,14 @@
 class SupportWallet {
   final String coin, network, address;
   const SupportWallet(this.coin, this.network, this.address);
+
+  /// Из подписанного манифеста (`{asset, network, address}`); неверный вид — null, остаётся вшитый.
+  static SupportWallet? fromSigned(Object? m) {
+    if (m is! Map) return null;
+    final c = '${m['asset'] ?? ''}'.trim(), n = '${m['network'] ?? ''}'.trim(), a = '${m['address'] ?? ''}'.trim();
+    if (c.isEmpty || c.length > 16 || n.length > 32 || !RegExp(r'^[A-Za-z0-9]{26,64}$').hasMatch(a)) return null;
+    return SupportWallet(c, n, a);
+  }
 }
 
 const supportWallets = <SupportWallet>[

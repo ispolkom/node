@@ -46,8 +46,10 @@ class NewsBlock extends StatelessWidget {
             Text(current.isEmpty ? 'Установите выпуск пакетом .deb; узел сам ничего не ставит.' : 'Установлена версия $current. Установите выпуск пакетом .deb; узел сам ничего не ставит.', style: const TextStyle(fontSize: 12, color: Icq.dark)),
           ] else ...[
             Text(current.isEmpty ? 'Здесь будут появляться новости проекта и сообщения об обновлениях.' : 'Установлена версия $current. Новых обновлений нет.', key: const ValueKey('news-none'), style: const TextStyle(color: Icq.text)),
-            const SizedBox(height: 4),
-            const Text('Здесь появятся новости проекта и сообщения об обновлениях.', style: TextStyle(fontSize: 12, color: Icq.dark)),
+            if (current.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              const Text('Новости проекта и сообщения об обновлениях появятся здесь.', style: TextStyle(fontSize: 12, color: Icq.dark)),
+            ],
           ],
         ],
       ),
@@ -59,6 +61,14 @@ class NewsBlock extends StatelessWidget {
 class Wallet {
   final String coin, network, address;
   const Wallet(this.coin, this.network, this.address);
+
+  /// Кошелёк из подписанного манифеста выпуска (узел отдаёт его в `support`); неверный вид — null, остаётся вшитый.
+  static Wallet? fromSigned(Object? m) {
+    if (m is! Map) return null;
+    final coin = NewsBlock.clean(m['asset'], max: 24), net = NewsBlock.clean(m['network'], max: 32), addr = '${m['address'] ?? ''}'.trim();
+    if (coin.isEmpty || addr.length < 20 || addr.length > 128 || !RegExp(r'^[A-Za-z0-9:_\-\.]+$').hasMatch(addr)) return null;
+    return Wallet(coin, net, addr);
+  }
 
   /// Разбор вшитого файла: только непустые адреса из безопасного набора знаков и разумной длины.
   static List<Wallet> parse(String json) {
@@ -84,7 +94,9 @@ class Wallet {
 class SupportBlock extends StatefulWidget {
   /// Загрузчик файла адресов (в тестах подменяется).
   final Future<String> Function() load;
-  const SupportBlock({super.key, this.load = _defaultLoad});
+  /// Кошелёк из подписанного манифеста (`support` в ответе узла): заменяет вшитый, чтобы смена адреса шла одной строкой манифеста.
+  final Object? signed;
+  const SupportBlock({super.key, this.load = _defaultLoad, this.signed});
   static Future<String> _defaultLoad() => rootBundle.loadString('assets/support.json');
   @override
   State<SupportBlock> createState() => _SupportBlockState();
@@ -110,6 +122,7 @@ class _SupportBlockState extends State<SupportBlock> {
 
   @override
   Widget build(BuildContext context) {
+    final wallets = Wallet.fromSigned(widget.signed) != null ? [Wallet.fromSigned(widget.signed)!] : this.wallets;
     return Panel(
       key: const ValueKey('support-block'),
       title: 'Поддержать проект',

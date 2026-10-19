@@ -8,6 +8,7 @@ import '../services/vault_service.dart';
 import '../theme.dart';
 import '../widgets/password_hint.dart';
 import '../widgets/secure_keyboard.dart';
+import 'support_screen.dart';
 
 /// Экраны закрытой среды: создание (секретные слова → повтор → пароль), вход по паролю, восстановление по словам.
 /// На этих экранах окно закрыто от скриншотов и записи экрана, ввод — только нашей клавиатурой (системная не вызывается).
@@ -389,6 +390,7 @@ class _VaultUnlockScreenState extends _SecretFormState<VaultUnlockScreen> {
       errorText(waiting ? '${_error ?? 'Подождите'}: ещё $_waitLeft с' : _error),
       primary(_busy ? 'Проверяем…' : 'Войти', (_busy || waiting) ? null : submit),
       if (!widget.justCreated) link('Забыл пароль', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const VaultRecoverScreen()))),
+      link('Поддержать проект', () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => SupportScreen(wallets: context.read<AppState>().wallets)))), // адрес не секрет: доступен и без входа
       if (_corrupt) info('Если резервной копии нет, данные не вернуть: приложение можно только удалить в настройках телефона и поставить заново.'),
     ]);
   }
