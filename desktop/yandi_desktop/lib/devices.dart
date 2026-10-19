@@ -80,6 +80,10 @@ class _DevicesPanelState extends State<DevicesPanel> {
         (d) => !RegExp(r'^[a-f0-9]{64}$').hasMatch('${d['peer_id']}'),
       ))
         throw const ApiFailure('protocol');
+      // роль и пригласивший приходят от узла: из роли показывается только известное значение
+      for (final d in rows) {
+        if (d['role'] != null && !roleLabels.containsKey(d['role'])) d['role'] = 'unknown';
+      }
       setState(() {
         devices = rows;
         error = null;
@@ -122,6 +126,38 @@ class _DevicesPanelState extends State<DevicesPanel> {
       });
     });
   }
+
+  /// Повысить приглашённое устройство до пользователя или отозвать устройство вместе со всей его веткой приглашённых.
+  Future<void> inviteAction(Map<String, dynamic> d, String kind) async {
+    final promote = kind == 'promote';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => GroupConfirm(
+        title: promote ? 'Повысить до пользователя?' : 'Отозвать устройство и всех, кого оно пригласило?',
+        detail: promote
+            ? 'Устройство получит право приглашать другие устройства по своему коду.'
+            : 'Будут отозваны это устройство, его приглашённые и приглашённые ими. Это нельзя отменить.',
+      ),
+    );
+    if (!active || ok != true) return;
+    clear();
+    await widget.mutate(() async {
+      await widget.api.request(
+        '/api/mobile/devices/${d['peer_id']}/${promote ? 'promote' : 'revoke-branch'}',
+        body: const {},
+      );
+      if (active) await widget.onChanged?.call();
+    });
+    if (active) await refresh();
+  }
+
+  static const roleLabels = {
+    'owner': 'Владелец',
+    'user': 'Пользователь',
+    'invited': 'Приглашённый',
+    'guest': 'Гость',
+    'unknown': 'Неизвестная роль',
+  };
 
   Future<void> action(Map<String, dynamic> d, String action) async {
     final ok = await showDialog<bool>(
@@ -229,6 +265,11 @@ class _DevicesPanelState extends State<DevicesPanel> {
                 Text('${d['name']}'),
                 SelectableText('${d['peer_id']}'),
                 UiText(d['online'] == true ? 'В сети' : 'Не в сети'),
+                if (widget.paired && d['role'] is String)
+                  UiText(
+                    'Роль: ${roleLabels[d['role']] ?? roleLabels['unknown']}'
+                    '${d['invited_by_name'] is String ? ' · пригласил: ${d['invited_by_name']}' : d['invited_by'] is String ? ' · пригласивший удалён' : ''}',
+                  ),
                 if (widget.paired)
                   UiText(
                     'Соединений: ${d['connections']} · Последний контакт: ${d['last_seen_ms']}',
@@ -251,6 +292,18 @@ class _DevicesPanelState extends State<DevicesPanel> {
                               ? 'Отозвать устройство'
                               : actionLabels[a]!,
                         ),
+                      ),
+                    if (widget.paired && d['role'] == 'invited')
+                      TextButton(
+                        key: ValueKey('promote-${d['peer_id']}'),
+                        onPressed: widget.busy ? null : () => inviteAction(d, 'promote'),
+                        child: const UiText('Повысить до пользователя'),
+                      ),
+                    if (widget.paired && (d['role'] == 'invited' || devices.any((x) => x['invited_by'] == d['peer_id'])))
+                      TextButton(
+                        key: ValueKey('branch-${d['peer_id']}'),
+                        onPressed: widget.busy ? null : () => inviteAction(d, 'revoke-branch'),
+                        child: const UiText('Отозвать с приглашёнными'),
                       ),
                   ],
                 ),
