@@ -55,45 +55,73 @@ void main() {
     await expectLater(guestPair(GuestNode('Узел', 'h.example', 443, fp), client: broken, deviceName: 'x'), throwsA(predicate((e) => '$e'.contains('Не удалось связаться'))));
   });
 
-  testWidgets('экран гостя: пустой список — подсказка попросить код; список — вход по нажатию; ошибка видна', (t) async {
-    await t.pumpWidget(const MaterialApp(home: GuestScreen(nodes: [])));
+  testWidgets('вкладка гостя: предупреждение на месте, пустой список — подсказка; одна кнопка; ни адреса, ни региона на экране; ошибка видна', (t) async {
+    await t.pumpWidget(const MaterialApp(home: Scaffold(body: GuestPanel(nodes: []))));
     expect(find.byKey(const ValueKey('guest-intro')), findsOneWidget);
     expect(find.byKey(const ValueKey('guest-limits')), findsOneWidget);
     expect(find.byKey(const ValueKey('guest-empty')), findsOneWidget);
     var entered = 0;
     var fail = true;
     await t.pumpWidget(MaterialApp(
-      home: GuestScreen(
-        key: const ValueKey('with-nodes'),
-        nodes: [GuestNode('Узел 1', '203.0.113.7', 8444, fp)],
-        enter: (n) async {
-          entered++;
-          if (fail) throw const GuestPairError('На этом узле сейчас нет места для гостей. Попробуйте другой узел или позже.');
-          return TrustedNode(id: 'n', name: n.name, host: n.host, port: n.port, fingerprint: n.fingerprint, token: 't', addedAt: 1);
-        },
-        onEntered: (_) {},
+      home: Scaffold(
+        body: GuestPanel(
+          key: const ValueKey('with-nodes'),
+          nodes: [GuestNode('Узел 1', '203.0.113.7', 8444, fp)],
+          enter: (n) async {
+            entered++;
+            if (fail) throw const GuestPairError('На этом узле сейчас нет места для гостей. Попробуйте другой узел или позже.');
+            return TrustedNode(id: 'n', name: n.name, host: n.host, port: n.port, fingerprint: n.fingerprint, token: 't', addedAt: 1);
+          },
+          onEntered: (_) {},
+        ),
       ),
     ));
-    expect(find.text('Войти гостем на узел «Узел 1»'), findsOneWidget);
-    await t.tap(find.byKey(const ValueKey('guest-node-203.0.113.7:8444')));
+    // человеку не показывают ни адрес, ни имя узла
+    expect(find.textContaining('203.0.113.7'), findsNothing);
+    expect(find.textContaining('Узел 1'), findsNothing);
+    await t.tap(find.byKey(const ValueKey('guest-enter')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 10));
     expect(entered, 1);
     expect(find.byKey(const ValueKey('guest-error')), findsOneWidget);
     fail = false;
-    await t.tap(find.byKey(const ValueKey('guest-node-203.0.113.7:8444')));
+    await t.tap(find.byKey(const ValueKey('guest-enter')));
     await t.pump();
     await t.pump(const Duration(milliseconds: 10));
     expect(entered, 2);
     expect(find.byKey(const ValueKey('guest-error')), findsNothing);
   });
 
-  testWidgets('экран гостя по-английски: те же элементы, надписи на английском', (t) async {
+  testWidgets('вход гостем пробует узлы по очереди, пока один не примет', (t) async {
+    final tried = <String>[];
+    await t.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: GuestPanel(
+          nodes: [GuestNode('A', '203.0.113.7', 8444, fp), GuestNode('B', '203.0.113.8', 8444, fp), GuestNode('C', '203.0.113.9', 8444, fp)],
+          enter: (n) async {
+            tried.add(n.host);
+            if (n.host != '203.0.113.9') throw const GuestPairError('нет места');
+            return TrustedNode(id: 'n', name: n.name, host: n.host, port: n.port, fingerprint: n.fingerprint, token: 't', addedAt: 1);
+          },
+          onEntered: (_) {},
+        ),
+      ),
+    ));
+    await t.tap(find.byKey(const ValueKey('guest-enter')));
+    await t.pump();
+    await t.pump(const Duration(milliseconds: 10));
+    expect(tried.last, '203.0.113.9');
+    expect(tried.toSet().length, tried.length);   // каждый узел не больше одного раза
+    expect(find.byKey(const ValueKey('guest-error')), findsNothing);
+  });
+
+  testWidgets('вкладка гостя по-английски: те же элементы, надписи на английском', (t) async {
     Lang.forTests(AppLang.en);
     addTearDown(() => Lang.forTests(AppLang.ru));
-    await t.pumpWidget(MaterialApp(home: GuestScreen(nodes: [GuestNode('Node 1', '203.0.113.7', 8444, fp)])));
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: GuestPanel(nodes: [GuestNode('Node 1', '203.0.113.7', 8444, fp)]))));
     expect(find.text('Sign in as a guest'), findsOneWidget);
-    expect(find.textContaining('You are connecting to the private YANDI network'), findsOneWidget);
-    expect(find.text('Sign in as a guest on the node “Node 1”'), findsOneWidget);
+    expect(find.textContaining('If you have no code or link'), findsOneWidget);
+    expect(find.text('Attention'), findsOneWidget);
+    expect(find.textContaining('Node 1'), findsNothing);
   });
 }

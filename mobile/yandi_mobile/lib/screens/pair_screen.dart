@@ -56,15 +56,18 @@ class _PairScreenState extends State<PairScreen> {
   bool _processing = false;
   String? _error;
   final TextEditingController _manual = TextEditingController();
-  bool _scanMode = true;   // true — камера; false — ручной ввод текста (камера выключена)
+  int _tab = 0;   // 0 — гость (дом), 1 — QR (камера), 2 — код или ссылка (ключ); на старте открыта вкладка гостя
+  bool get _scanMode => _tab == 1;
 
-  void _setScanMode(bool on) {
-    if (_scanMode == on) return;
-    setState(() { _scanMode = on; _error = null; });
-    if (on) {
+  /// Камера работает ТОЛЬКО на вкладке QR: при уходе с неё гасится, при возвращении включается.
+  void _selectTab(int i) {
+    if (_tab == i) return;
+    final wasScan = _scanMode;
+    setState(() { _tab = i; _error = null; });
+    if (i == 1) {
       _resetScan(tr('Наведите камеру на QR: код должен целиком поместиться в рамку'));
-      _scanner.start();
-    } else {
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _scanMode) _scanner.start(); });
+    } else if (wasScan) {
       _scanner.stop();   // гасим камеру
     }
   }
@@ -84,6 +87,7 @@ class _PairScreenState extends State<PairScreen> {
     detectionSpeed: DetectionSpeed.normal,
     detectionTimeoutMs: 200,
     facing: CameraFacing.back,
+    autoStart: false,   // камера включается только на вкладке QR и гасится на остальных
   );
 
   static const int _needHits = 4;                       // подряд одинаковых кадров
@@ -389,33 +393,34 @@ class _PairScreenState extends State<PairScreen> {
         automaticallyImplyLeading: false,
         actions: const [LangToggle(), SizedBox(width: 8)],
       ),
+      bottomNavigationBar: NavigationBar(
+        key: const ValueKey('pair-tabs'),
+        backgroundColor: AppTheme.surface,
+        selectedIndex: _tab,
+        onDestinationSelected: _processing ? null : _selectTab,
+        destinations: [
+          NavigationDestination(key: const ValueKey('pair-tab-guest'), icon: const Icon(Icons.home_outlined), selectedIcon: const Icon(Icons.home), label: tr('Гость')),
+          NavigationDestination(key: const ValueKey('pair-tab-qr'), icon: const Icon(Icons.qr_code_scanner), label: 'QR'),
+          NavigationDestination(key: const ValueKey('pair-tab-code'), icon: const Icon(Icons.vpn_key_outlined), selectedIcon: const Icon(Icons.vpn_key), label: tr('Код')),
+        ],
+      ),
       body: Column(
         children: [
-          const SizedBox(height: 12),
-          // что это за экран и что делать: код или ссылка от администратора, либо вход гостем
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(tr('Вы подключаетесь к частной сети YANDI'), key: const ValueKey('pair-title'), style: const TextStyle(color: AppTheme.text, fontSize: 18, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 6),
-              Text(tr('Для входа нужен QR, код или ссылка от администратора узла либо от того, кто вас пригласил. Отсканируйте QR или вставьте код или ссылку. Если их нет, можно войти гостем.'),
-                  key: const ValueKey('pair-intro'), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.35)),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          // выбор способа: камера или текст
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(children: [
-              Expanded(child: _modeButton(tr('Сканировать QR'), Icons.qr_code_scanner, _scanMode, () => _setScanMode(true))),
-              const SizedBox(width: 8),
-              Expanded(child: _modeButton(tr('Код или ссылка'), Icons.keyboard, !_scanMode, () => _setScanMode(false))),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          if (_scanMode) ...[
+          if (_tab != 0)
             Padding(
-              padding: EdgeInsets.symmetric(horizontal: 24),
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(tr('Для входа нужен QR, код или ссылка от администратора узла либо от того, кто вас пригласил.'),
+                    key: const ValueKey('pair-intro'), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.35)),
+              ),
+            ),
+          const SizedBox(height: 8),
+          if (_tab == 0)
+            Expanded(child: GuestPanel(busyChanged: (b) { if (mounted) setState(() => _processing = b); }))
+          else if (_tab == 1) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Text(
                 tr('Откройте настройки узла → «Приложение на телефоне» → «Показать QR» и наведите камеру.'),
                 textAlign: TextAlign.center,
@@ -461,7 +466,7 @@ class _PairScreenState extends State<PairScreen> {
                 ),
               ),
             ),
-          ] else ...[
+          ] else
             // ручной ввод: камера выключена
             Expanded(
               child: SingleChildScrollView(
@@ -493,45 +498,12 @@ class _PairScreenState extends State<PairScreen> {
                 ),
               ),
             ),
-          ],
-          if (_error != null)
+          if (_error != null && _tab != 0)
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
             ),
-          // нет кода и ссылки — вход гостем с ограничениями
-          Padding(
-            padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-            child: OutlinedButton(
-              key: const ValueKey('pair-guest'),
-              onPressed: _processing ? null : () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GuestScreen())),
-              child: Text(tr('Войти как гость')),
-            ),
-          ),
-          const SizedBox(height: 16),
         ],
-      ),
-    );
-  }
-
-  Widget _modeButton(String label, IconData icon, bool active, VoidCallback onTap) {
-    return Material(
-      color: active ? AppTheme.accent : AppTheme.surface,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: active ? Colors.black : AppTheme.text),
-              const SizedBox(width: 8),
-              Text(label, style: TextStyle(color: active ? Colors.black : AppTheme.text, fontSize: 14, fontWeight: FontWeight.w600)),
-            ],
-          ),
-        ),
       ),
     );
   }

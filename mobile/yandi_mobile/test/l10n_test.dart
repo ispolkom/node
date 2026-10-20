@@ -108,7 +108,7 @@ void main() {
     await t.pump();
     await t.pump(const Duration(milliseconds: 10));
     expect(russian(), isEmpty, reason: 'экран приглашения');
-    await t.pumpWidget(MaterialApp(home: GuestScreen(key: const ValueKey('g'), nodes: [GuestNode('Node', '203.0.113.7', 8444, 'ab' * 32)])));
+    await t.pumpWidget(MaterialApp(home: Scaffold(body: GuestPanel(key: const ValueKey('g'), nodes: [GuestNode('Node', '203.0.113.7', 8444, 'ab' * 32)]))));
     await t.pump();
     expect(russian(), isEmpty, reason: 'экран гостя');
     expect(supportWallets, isNotEmpty);
