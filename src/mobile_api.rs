@@ -349,11 +349,22 @@ fn queue_for_pc(device: &str, blob: &[u8]) -> bool {
 /// Раз в десять минут: гости, молчавшие сутки, уходят вместе со своей почтой и квотами.
 fn spawn_guest_purge() {
     crate::supervisor::supervise("guest-purge", crate::supervisor::Policy::restart(), move || async move {
+        sweep_orphan_profiles(); // после перезапуска: профили гостей, которых в памяти уже нет
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
             purge_idle_guests();
+            sweep_orphan_profiles();
         }
     });
+}
+
+/// Ник и картинка тех, кого на узле больше нет (гость пропал при перезапуске, устройство удалено), не остаются на диске.
+fn sweep_orphan_profiles() {
+    let reg: std::collections::HashSet<String> = with_devices(|d| d.iter().map(|x| x.peer_id()).collect());
+    let n = crate::device_profile::retain_registered(&reg);
+    if n > 0 {
+        eprintln!("[mobile] убрано профилей пропавших устройств: {n}");
+    }
 }
 
 fn spawn_pc_inbox_drain() {

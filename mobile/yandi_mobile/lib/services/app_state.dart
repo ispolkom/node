@@ -590,7 +590,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (existing != null) {
       contacts[contacts.indexOf(existing)] = Contact(
         peerId: peerId, displayName: finalName, online: existing.online,
-        isManual: existing.isManual, saved: true, lastActivityMs: existing.lastActivityMs,
+        isManual: existing.isManual, saved: true, lastActivityMs: existing.lastActivityMs, role: existing.role,
       );
     } else {
       contacts.add(Contact(peerId: peerId, displayName: finalName, online: false, isManual: true));
@@ -637,6 +637,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   void _switchTo(TrustedNode next) {
     _deviceProfilePublished = false;   // профиль публикуется на каждом узле отдельно
     _lastUsers = const [];             // люди прежнего узла новому не принадлежат
+    _dataGen++;                        // и ответы, начатые у прежнего узла, не принимаются
     groups?.retire();
     _api?.switchNode(next);
     _ws?.switchNode(next);
@@ -658,9 +659,13 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   // ── Данные ────────────────────────────────────────────────────────────────
 
+  /// Поколение данных: растёт при смене узла и блокировке; ответ, начатый в прошлом поколении, в списки не кладётся.
+  int _dataGen = 0;
+
   Future<void> refreshContacts() async {
     try {
       final api = _api!;
+      final gen = _dataGen;
       // три источника читаются независимо: сбой одного (таймаут, чужой ответ) не прячет людей из остальных
       List<Contact>? fromNode;
       try { fromNode = await api.getContacts(); } catch (_) {}
@@ -674,10 +679,12 @@ class AppState extends ChangeNotifier implements FilesHost {
       // не владелец (гость, пользователь узла): список людей даёт каталог узла (все, в сети и не в сети, с ролью, ником, картинкой)
       if (myRole != 'owner') {
         final fresh = await api.getUsers();
+        if (gen != _dataGen) return;
         if (fresh != null) _lastUsers = fresh;   // узел не ответил — остаётся прежний снимок, люди не пропадают
       } else if (fromNode == null) {
         return;                                    // владельцу контакты не пришли: прежний список остаётся как есть
       }
+      if (gen != _dataGen) return;   // за время ответа узел сменился или приложение заблокировано
       contacts = mergeContacts(
         fromNode: fromNode ?? const [],
         catalog: myRole != 'owner' ? _lastUsers : const [],
@@ -1402,8 +1409,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   Future<void> refreshDirectory() async {
     final api = _api;
     if (api == null) return;
+    final gen = _dataGen;
     final users = await api.getUsers();
-    if (users == null || users.isEmpty) return;
+    if (gen != _dataGen || users == null || users.isEmpty) return;
     directory = users;
     notifyListeners();
     for (final u in users) {
@@ -1913,6 +1921,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     // всё, что приложение держит о людях и группах в памяти: справочник, картинки, логотипы, ник, скрытые, квитанции
     directory = const [];
     _lastUsers = const [];
+    _dataGen++;
     for (final b in _directoryAvatars.values) { b.fillRange(0, b.length, 0); }
     _directoryAvatars.clear();
     _directoryHashes.clear();

@@ -121,6 +121,29 @@ pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Optio
     })
 }
 
+/// Забыть профили (ник, картинку) тех, кого на узле больше нет: гость пропал при перезапуске узла, а его ник и картинка остались на диске.
+/// `registered` — номера устройств, которые на узле есть. Возвращает, сколько профилей убрано.
+pub fn retain_registered(registered: &std::collections::HashSet<String>) -> usize {
+    let gone: Vec<String> = with_store(|m| m.keys().filter(|k| !registered.contains(*k)).cloned().collect());
+    for p in &gone {
+        forget(p);
+    }
+    // картинки без записи в индексе (остались от прерванной очистки)
+    let mut files = 0;
+    if let Ok(rd) = std::fs::read_dir(dir()) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(peer) = name.strip_suffix(".png") {
+                if valid_peer(peer) && !registered.contains(peer) {
+                    let _ = std::fs::remove_file(e.path());
+                    files += 1;
+                }
+            }
+        }
+    }
+    gone.len() + files
+}
+
 /// Профиль для других: у скрытого — пусто.
 pub fn public(peer: &str) -> (String, String) {
     with_store(|m| match m.get(peer) {
@@ -196,5 +219,23 @@ mod tests {
         assert!(put("не-номер", Some("x"), None, None).is_err());
         let huge = base64::engine::general_purpose::STANDARD.encode(vec![0u8; MAX_AVATAR_IN + 1]);
         assert!(put(&peer, None, Some(&huge), None).is_err());
+    }
+}
+
+#[cfg(test)]
+mod orphan_tests {
+    use super::*;
+
+    #[test]
+    fn profiles_of_vanished_devices_are_swept_and_registered_ones_stay() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let (keep, gone) = ("a1".repeat(32), "b2".repeat(32));
+        put(&keep, Some("Остаётся"), None, None).unwrap();
+        put(&gone, Some("Пропал"), None, None).unwrap();
+        let reg: std::collections::HashSet<String> = [keep.clone()].into_iter().collect();
+        assert_eq!(retain_registered(&reg), 1);
+        assert_eq!(public(&keep).0, "Остаётся");
+        assert_eq!(public(&gone).0, "", "ник пропавшего не остался");
+        forget(&keep);
     }
 }

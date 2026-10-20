@@ -21,6 +21,7 @@ class _Api implements Api {
           {'peer_id': 'c' * 64, 'name': 'Гость Антон', 'online': true, 'role': 'guest', 'saved': false, 'status': 'ok'},
           {'peer_id': 'd' * 64, 'name': 'Гость Борис', 'online': false, 'role': 'guest', 'saved': false, 'status': 'ok'},
           {'peer_id': 'e' * 64, 'name': 'Гость Вера', 'online': false, 'role': 'invited', 'saved': false, 'status': 'ok'},
+          {'peer_id': 'f' * 64, 'name': 'Заблокированный', 'online': true, 'role': 'user', 'saved': false, 'status': 'blocked'},
         ],
       };
     }
@@ -78,6 +79,7 @@ void main() {
     expect(find.text('Телефон Ани'), findsOneWidget);
     expect(find.text('в контактах'), findsOneWidget, reason: 'сохранённый контакт остаётся в общем списке с отметкой');
     expect(find.text('Планшет'), findsOneWidget);
+    expect(find.text('Заблокированный'), findsNothing, reason: 'заблокированный в поиск не попадает');
     expect(find.text('Гость Вера'), findsOneWidget);
     expect(find.text('Онлайн'), findsOneWidget);
     expect(find.text('Не в сети'), findsNWidgets(2));

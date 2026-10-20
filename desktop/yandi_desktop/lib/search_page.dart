@@ -51,7 +51,8 @@ class _SearchFeatureState extends State<SearchFeature> {
     await Future.wait([
       () async {
         try {
-          people = listOf((await widget.api.request('/api/mobile/directory'))['devices']);
+          // заблокированные в поиск не попадают (их место — чёрный список)
+          people = [for (final d in listOf((await widget.api.request('/api/mobile/directory'))['devices'])) if (d['status'] != 'blocked') d];
         } catch (e) {
           err = e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
         }
@@ -300,7 +301,7 @@ class _SearchFeatureState extends State<SearchFeature> {
   Widget build(BuildContext context) {
     final guestCount = users.where(isGuestLevel).length;
     final userCount = users.where((u) => !isGuestLevel(u)).length;
-    final visibleGroups = groups.where((g) => !hiddenGroups.contains('${g['id']}')).length;
+    final visibleGroups = groups.length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
