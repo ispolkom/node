@@ -28,7 +28,7 @@ $rel = $downloadRelease !== null ? (YANDI_RELEASES[$downloadRelease] ?? null) : 
     <h3>Совместимость</h3><p><?= e($rel['compat']['ru']) ?></p></div>
     <?php endif; ?>
     <div class="download-steps"><h3>Установка</h3><ol><?php foreach ($downloadSteps as $step): ?><li><?= $step ?></li><?php endforeach; ?></ol></div>
-    <?php if (!empty($downloadCli)) { require_once __DIR__ . '/../../includes/cli_guide.php'; yandi_cli_guide('ru'); } ?>
+    <?php if (!empty($downloadCli)) { require_once __DIR__ . '/../../../includes/cli_guide.php'; yandi_cli_guide('ru'); } ?>
     <?php if (!empty($downloadNotes)): ?><div class="download-steps"><h3>Примечания</h3><ul><?php foreach ($downloadNotes as $n): ?><li><?= $n ?></li><?php endforeach; ?></ul></div><?php endif; ?>
     <p><a class="btn" href="/ru/network/report/">Сообщить об ошибке</a></p>
     <p><a href="/ru/network/">← Вернуться к загрузкам</a></p>
