@@ -61,7 +61,7 @@ yandi admin pairing owner --host YOUR_PUBLIC_ADDRESS     # pairing code + QR for
 
 **Write the recovery phrase (12 or 24 words) on paper** — it is shown once. Without it and the password the data cannot be restored.
 
-To run the node as a service, open ports (`8444/tcp` for the phone app, `9000/udp` and `10000/udp` for the node network) and enlarge the network buffers, follow the step-by-step guides, in English and Russian, on the download pages above (section *Server without the shell*) or [`DEPLOYMENT.md`](DEPLOYMENT.md).
+The package enables and starts the systemd service `yandi-node@YOUR_USER` by itself (it waits for `yandi setup`). To open ports (`8444/tcp` for the phone app, `9000/udp` and `10000/udp` for the node network) and enlarge the network buffers, follow the step-by-step guides, in English and Russian, on the download pages above (section *Server without the shell*) or [`DEPLOYMENT.md`](DEPLOYMENT.md).
 
 Want the window too? Also install `yandi-desktop_*.deb` — it adds the desktop shell (chats, admin panel, devices, support page). Install both packages of the same version together:
 

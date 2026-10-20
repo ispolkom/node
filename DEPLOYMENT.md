@@ -26,18 +26,16 @@ sudo sysctl -p /etc/sysctl.d/99-yandi.conf
 
 ## Автозапуск узла (systemd)
 
-Юнит лежит в [`deploy/yandi-node.service`](deploy/yandi-node.service): узел стартует вместе с системой, перезапускается при сбое и пишет в журнал.
+Пакет `yandi-node` кладёт шаблон службы `yandi-node@.service` (источник: [`deploy/yandi-node@.service`](deploy/yandi-node@.service)) и **при первой установке сам включает и запускает** службу для пользователя, поставившего пакет через `sudo` (иначе — для единственного обычного пользователя системы). Узел работает от имени этого пользователя; до `yandi setup` он ждёт первой настройки.
 
 ```bash
-pkill -x yandi                     # если узел запущен вручную: порты заняты
-sudo cp deploy/yandi-node.service /etc/systemd/system/yandi-node.service
-sudo systemctl daemon-reload
-sudo systemctl enable --now yandi-node
-systemctl status yandi-node
-journalctl -u yandi-node -f
+systemctl status yandi-node@$USER
+journalctl -u yandi-node@$USER -f
+sudo systemctl restart yandi-node@$USER      # после обновления пакета служба перезапускается сама
+sudo systemctl enable --now yandi-node@ИМЯ    # если служба не включилась сама (другой пользователь, нет sudo)
 ```
 
-После новой сборки (`cargo build --release`) достаточно `sudo systemctl restart yandi-node`. Пользователь и пути в юните (`iam`, `/home/iam/node`) под этот компьютер; на другом поправьте `User=`, `Group=`, `WorkingDirectory=`, `ExecStart=`.
+`YANDI_NO_SERVICE=1 sudo -E apt install …` пропускает включение. Если служба `yandi-node.service` создана вручную, пакет её не трогает и новую не включает (порты были бы заняты дважды). Старый вариант вручную: [`deploy/yandi-node.service`](deploy/yandi-node.service).
 
 Порты узла для телефонов и звонков (в `/etc/nftables.conf`): 8444/TCP (вход для приложения), 3478 TCP+UDP и 50000-50199 UDP (сервер звонков, ставится `sudo bash scripts/setup-turn.sh <внешний адрес>`).
 

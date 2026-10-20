@@ -5,6 +5,11 @@ case "$1" in
 remove|purge)
     systemctl stop yandi-node >/dev/null 2>&1 || true
     systemctl disable yandi-node >/dev/null 2>&1 || true
+    # экземпляры шаблона yandi-node@ИМЯ
+    for u in $(systemctl list-units --all --plain --no-legend 'yandi-node@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl stop "$u" >/dev/null 2>&1 || true
+        systemctl disable "$u" >/dev/null 2>&1 || true
+    done
     ;;
 esac
 exit 0

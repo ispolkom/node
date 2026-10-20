@@ -18,7 +18,9 @@ PKG="yandi-node_${VERSION//+/-}_${ARCH}"
 W=$(mktemp -d)
 trap 'rm -rf "$W"' EXIT
 R="$W/$PKG"
-install -d "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/doc/yandi-node"
+install -d "$R/DEBIAN" "$R/usr/bin" "$R/usr/share/doc/yandi-node" "$R/usr/lib/systemd/system"
+install -m 0644 deploy/yandi-node@.service "$R/usr/lib/systemd/system/yandi-node@.service"
+install -m 0755 deploy/yandi-node.postinst "$R/DEBIAN/postinst"
 install -m 0755 "$BIN/yandi" "$R/usr/bin/yandi"
 install -m 0755 "$BIN/yandi-keys" "$R/usr/bin/yandi-keys"
 install -m 0755 deploy/yandi-node.prerm "$R/DEBIAN/prerm"
@@ -39,7 +41,7 @@ Recommends: coturn, nftables
 Homepage: https://github.com/ispolkom/node
 Description: YANDI — узел сети личных соединений
  Узел P2P-сети: чаты, файлы, звонки, группы, выход в интернет для доверенных узлов.
- Пакет ставит только бинарники (/usr/bin/yandi, /usr/bin/yandi-keys). Служба systemd и правила брандмауэра
+ Пакет ставит только бинарники (/usr/bin/yandi, /usr/bin/yandi-keys) и шаблон службы yandi-node@.service (не включается сам: sudo systemctl enable --now yandi-node@ПОЛЬЗОВАТЕЛЬ). Правила брандмауэра
  настраиваются отдельно (см. /usr/share/doc/yandi-node/DEPLOYMENT.md). Данные узла лежат в каталоге пользователя
  (~/.local/share/yandi); обычное удаление их не трогает, а «dpkg --purge» затирает нулями и удаляет без следа.
 CTL

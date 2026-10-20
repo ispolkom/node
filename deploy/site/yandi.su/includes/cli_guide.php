@@ -2,39 +2,14 @@
 // Общий блок «Сервер без оболочки (консоль)» для страниц Debian и Ubuntu (русский и английский). Правится в одном месте.
 function yandi_cli_guide(string $lang): void {
     $ru = $lang === 'ru';
-    $unit = <<<'UNIT'
-sudo tee /etc/systemd/system/yandi-node.service >/dev/null <<EOF
-[Unit]
-Description=YANDI node
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-User=$USER
-Environment=YANDI_MOBILE_TLS_PORT=8444
-ExecStartPre=/usr/bin/mkdir -p -m 0700 $HOME/.local/share/yandi
-WorkingDirectory=$HOME/.local/share/yandi
-ExecStart=/usr/bin/yandi
-Restart=on-failure
-RestartSec=5
-LimitNOFILE=65536
-NoNewPrivileges=yes
-PrivateTmp=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-sudo systemctl daemon-reload
-sudo systemctl enable --now yandi-node
-systemctl status yandi-node
-UNIT;
+    $unit = "systemctl status yandi-node@\$USER\njournalctl -u yandi-node@\$USER -f\n\n# ".($ru ? 'если служба не включилась сама (например, пакет ставили не через sudo):' : 'if the service was not enabled automatically (for example, the package was not installed through sudo):')."\nsudo systemctl enable --now yandi-node@\$USER";
     $t = $ru ? [
         'h' => 'Сервер без оболочки (только консоль)',
         'lead' => 'Оболочка (окно) не обязательна: узел полностью настраивается и управляется из терминала. Так обычно ставят узел на сервер.',
         's1' => 'Установка только узла', 'p1' => 'Скачайте только <code>yandi-node_*.deb</code> (пакет оболочки <code>yandi-desktop</code> нужен лишь для окна управления) и установите:',
         's2' => 'Первая настройка', 'p2' => 'Запускайте от обычного пользователя (не от root): данные узла лежат в его домашней папке. Мастер спросит язык, задаст пароль владельца, покажет сид-фразу (12 слов; <code>--words 24</code> для 24) и создаст закрытую среду:',
         'w2' => '<strong>Запишите сид-фразу на бумагу и проверьте.</strong> Она показывается один раз и нужна для восстановления; без неё и пароля данные не вернуть. Без терминала: <code>yandi setup --seed-file seed.txt --password-stdin</code> (фраза пишется в новый файл с правами 0600).',
-        's3' => 'Служба и порты', 'p3' => 'Чтобы узел работал сам и поднимался после перезагрузки, создайте службу systemd для вашего пользователя:',
+        's3' => 'Служба и порты', 'p3' => 'Пакет сам включает и запускает службу systemd <code>yandi-node@ВАШ_ПОЛЬЗОВАТЕЛЬ</code> для пользователя, который ставил пакет через <code>sudo</code>: узел работает в фоне и поднимается после перезагрузки. До <code>yandi setup</code> он просто ждёт первой настройки. Проверить:',
         'p3b' => 'Откройте порты (пример для <code>ufw</code>; для <code>nftables</code> см. <code>/usr/share/doc/yandi-node/DEPLOYMENT.md</code>): 8444/TCP — вход для приложения на телефоне; 9000/UDP и 10000/UDP — сеть узлов. Рекомендуем также расширить сетевые буферы (иначе под нагрузкой ядро теряет UDP-пакеты; при старте узел предупреждает, если буфер приёма меньше 4 МБ): по 64 МБ на приём и отправку и более длинную очередь пакетов от сетевой карты. Последняя команда покажет действующие значения: 67108864, 67108864 и 5000.',
         'n3' => 'По желанию: кольцевой буфер самой сетевой карты задаётся командами <code>ethtool -g</code> (показать) и <code>ethtool -G eth0 rx 4096 tx 4096</code> (в пределах, которые сообщает карта); у многих карт, например Realtek <code>r8169</code>, его менять нельзя.',
         's4' => 'Управление из консоли', 'p4' => 'Команда <code>yandi admin</code> спрашивает пароль администратора (сеанс 15 минут). Без аргументов открывает меню; основные команды:',
@@ -49,7 +24,7 @@ UNIT;
         's1' => 'Install the node only', 'p1' => 'Download only <code>yandi-node_*.deb</code> (the <code>yandi-desktop</code> package is needed just for the management window) and install it:',
         's2' => 'First setup', 'p2' => 'Run it as a regular user (not root): the node data lives in that user\'s home directory. The wizard asks for the language, sets the owner password, shows the seed phrase (12 words; <code>--words 24</code> for 24) and creates the private environment:',
         'w2' => '<strong>Write the seed phrase on paper and check it.</strong> It is shown once and is needed for recovery; without it and the password the data cannot be restored. Without a terminal: <code>yandi setup --seed-file seed.txt --password-stdin</code> (the phrase goes to a new file with mode 0600).',
-        's3' => 'Service and ports', 'p3' => 'To keep the node running and bring it up after a reboot, create a systemd service for your user:',
+        's3' => 'Service and ports', 'p3' => 'The package itself enables and starts the systemd service <code>yandi-node@YOUR_USER</code> for the user who installed it through <code>sudo</code>: the node runs in the background and comes up after a reboot. Until <code>yandi setup</code> it just waits for the first setup. Check:',
         'p3b' => 'Open the ports (an example for <code>ufw</code>; for <code>nftables</code> see <code>/usr/share/doc/yandi-node/DEPLOYMENT.md</code>): 8444/TCP — entrance for the phone app; 9000/UDP and 10000/UDP — the node network. We also recommend bigger network buffers (otherwise the kernel drops UDP packets under load; the node warns at start if the receive buffer is under 4 MB): 64 MB for receiving and sending and a longer queue of packets from the network card. The last command shows the values in effect: 67108864, 67108864 and 5000.',
         'n3' => 'Optional: the ring buffer of the network card itself is set with <code>ethtool -g</code> (show) and <code>ethtool -G eth0 rx 4096 tx 4096</code> (set, within the limits the card reports); many cards, for example Realtek <code>r8169</code>, do not allow changing it.',
         's4' => 'Managing from the console', 'p4' => '<code>yandi admin</code> asks for the administrator password (a 15-minute session). Without arguments it opens a menu; the main commands:',

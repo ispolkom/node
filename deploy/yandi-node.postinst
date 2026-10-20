@@ -1,0 +1,42 @@
+#!/bin/sh
+# postinst пакета yandi-node. Шаблон службы yandi-node@.service уже лежит в /usr/lib/systemd/system/; здесь служба включается и запускается
+# для пользователя, который ставит пакет (sudo apt install → SUDO_USER; иначе — единственный обычный пользователь системы).
+#  • Только при ПЕРВОЙ установке; при обновлении служба лишь перезапускается (если запущена), выбор владельца не меняется.
+#  • Если рядом есть служба, созданная вручную (/etc/systemd/system/yandi-node.service), новая не включается: порты были бы заняты дважды.
+#  • Пропускается без systemd (контейнер) и при YANDI_NO_SERVICE=1.
+# Узел до `yandi setup` ждёт первой настройки, поэтому запуск до неё безопасен.
+set -e
+[ "$1" = configure ] || exit 0
+[ -d /run/systemd/system ] || exit 0
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+if [ -n "$2" ]; then      # обновление: подхватить новый бинарь
+    systemctl try-restart yandi-node >/dev/null 2>&1 || true
+    for u in $(systemctl list-units --plain --no-legend 'yandi-node@*.service' 2>/dev/null | awk '{print $1}'); do
+        systemctl try-restart "$u" >/dev/null 2>&1 || true
+    done
+    exit 0
+fi
+
+[ "$YANDI_NO_SERVICE" = 1 ] && exit 0
+if [ -e /etc/systemd/system/yandi-node.service ]; then
+    echo "yandi-node: найдена служба yandi-node.service, созданная вручную; новая не включена." >&2
+    exit 0
+fi
+U=""
+if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null 2>&1; then
+    U="$SUDO_USER"
+else
+    N=$(getent passwd | awk -F: '$3>=1000 && $3<65534 && $7 !~ /(nologin|false)$/ {print $1}')
+    [ "$(printf '%s\n' "$N" | grep -c .)" = 1 ] && U="$N"
+fi
+if [ -z "$U" ]; then
+    echo "yandi-node: пользователь не определён. Включите вручную: sudo systemctl enable --now yandi-node@ИМЯ_ПОЛЬЗОВАТЕЛЯ" >&2
+    exit 0
+fi
+if systemctl enable --now "yandi-node@$U" >/dev/null 2>&1; then
+    echo "yandi-node: служба включена для пользователя $U. Дальше, от этого пользователя: yandi setup" >&2
+else
+    echo "yandi-node: не удалось включить службу. Вручную: sudo systemctl enable --now yandi-node@$U" >&2
+fi
+exit 0

@@ -1,0 +1,48 @@
+# yandi-node@.service — шаблон службы узла YANDI: один экземпляр на пользователя, имя экземпляра = имя пользователя.
+# Пакет кладёт его в /usr/lib/systemd/system/, сам службу НЕ включает. Включение (один раз, после `yandi setup`):
+#   sudo systemctl enable --now yandi-node@$USER
+# Повседневное:
+#   systemctl status yandi-node@$USER      состояние
+#   journalctl -u yandi-node@$USER -f      журнал
+#   sudo systemctl restart yandi-node@$USER
+# Данные узла (ключи, сопряжённые устройства, настройки) лежат в ~/.local/share/yandi этого пользователя и от службы не зависят.
+# Узел работает от имени пользователя, не от root; рабочая папка — каталог данных узла (относительные файлы лежат вместе с ним).
+
+[Unit]
+Description=YANDI node (user %i)
+Documentation=file:///usr/share/doc/yandi-node/DEPLOYMENT.md
+After=network-online.target nftables.service
+Wants=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=%i
+# вход для телефонов по TLS (порт 8444 откройте в брандмауэре); без этой строки вход выключен
+Environment=YANDI_MOBILE_TLS_PORT=8444
+ExecStart=/bin/sh -c 'mkdir -p -m 0700 "$HOME/.local/share/yandi" && cd "$HOME/.local/share/yandi" && exec /usr/bin/yandi'
+StandardInput=null
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=yandi-node
+Restart=on-failure
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=30
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+
+[Install]
+WantedBy=multi-user.target
