@@ -28,6 +28,7 @@ $rel = $downloadRelease !== null ? (YANDI_RELEASES[$downloadRelease] ?? null) : 
     <h3>Compatibility</h3><p><?= e($rel['compat']['en']) ?></p></div>
     <?php endif; ?>
     <div class="download-steps"><h3>Installation</h3><ol><?php foreach ($downloadSteps as $step): ?><li><?= $step ?></li><?php endforeach; ?></ol></div>
+    <?php if (!empty($downloadCli)) { require_once __DIR__ . '/../../includes/cli_guide.php'; yandi_cli_guide('en'); } ?>
     <?php if (!empty($downloadNotes)): ?><div class="download-steps"><h3>Notes</h3><ul><?php foreach ($downloadNotes as $n): ?><li><?= $n ?></li><?php endforeach; ?></ul></div><?php endif; ?>
     <p><a class="btn" href="/network/report/">Report a bug</a></p>
     <p><a href="/network/">← Back to downloads</a></p>
