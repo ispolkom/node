@@ -21,7 +21,7 @@ void main() {
   test('список, подписанный узловым инструментом (Rust), проверяется приложением: подпись, срок, откат, чужой ключ', () async {
     final d = BootstrapDoc.parse(_repoList)!;
     expect(await d.verify(nowSecs: 1791500000), isNull, reason: 'настоящий подписанный список принимается');
-    expect(await d.verify(nowSecs: 1800000000), BootstrapProblem.expired);
+    expect(await d.verify(nowSecs: 1800300000), BootstrapProblem.expired);
     expect(await d.verify(nowSecs: 1791500000, knownSequence: d.sequence + 1), BootstrapProblem.rollback);
     expect(await d.verify(nowSecs: 1791500000, knownSequence: d.sequence), isNull);
     expect(await d.verify(nowSecs: 1791500000, signers: [_testSigner]), BootstrapProblem.unknownSigner);
