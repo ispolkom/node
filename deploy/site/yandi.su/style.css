@@ -1,0 +1,199 @@
+/* style.css — YANDI: оформление как в оболочке для компьютера (палитра ICQ, шрифт Liberation Sans, фаски, тёмно-зелёные кнопки) */
+@font-face { font-family: 'YandiSans'; src: url('/assets/fonts/LiberationSans-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'YandiSans'; src: url('/assets/fonts/LiberationSans-Italic.ttf') format('truetype'); font-weight: 400; font-style: italic; font-display: swap; }
+@font-face { font-family: 'YandiSans'; src: url('/assets/fonts/LiberationSans-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+
+:root {
+  --background: #e8f0e8;
+  --panel: #d4e0d4;
+  --header: #2a6b2a;
+  --header-light: #3a7b3a;
+  --border: #a0c0a0;
+  --dark: #608060;
+  --light: #f0fff0;
+  --text: #1a3a1a;
+  --online: #00aa00;
+  --danger: #aa0000;
+  --sent: #e0f0e0;
+  --active: #c0e0c0;
+  --peer: #ff4001;
+  --font: 'YandiSans', 'Liberation Sans', 'Segoe UI', 'DejaVu Sans', Arial, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  background: var(--background);
+  color: var(--text);
+  font-family: var(--font);
+  font-size: 15px;
+  line-height: 1.55;
+}
+
+.container { max-width: 1000px; margin: 0 auto; padding: 0 24px; }
+
+a { color: var(--header); }
+a:hover { color: var(--header-light); }
+
+/* ===== Шапка: зелёная полоса, как у оболочки ===== */
+.site-header {
+  background: var(--header);
+  border-bottom: 2px solid var(--dark);
+  box-shadow: inset 0 1px 0 var(--header-light);
+  padding: 10px 0;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+.site-header .container {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.logo {
+  display: inline-flex;
+  background: var(--header);
+  border-top: 1px solid #fff;
+  border-left: 1px solid #fff;
+  border-right: 1px solid var(--dark);
+  border-bottom: 1px solid var(--dark);
+  padding: 2px;
+}
+.logo img { display: block; height: 46px; width: 46px; }
+.site-header nav { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 2px; }
+.site-header nav a {
+  color: #fff;
+  text-decoration: none;
+  font-size: 14px;
+  padding: 6px 12px;
+  border: 1px solid transparent;
+}
+.site-header nav a:hover { background: var(--header-light); border-color: var(--light); }
+.site-header nav a[aria-current="page"] { font-weight: 700; border-color: var(--light); background: var(--header-light); }
+
+/* ===== Подвал ===== */
+.site-footer {
+  background: var(--panel);
+  border-top: 2px solid var(--dark);
+  padding: 22px 0;
+  margin-top: 40px;
+  text-align: center;
+  font-size: 13px;
+}
+.site-footer p { margin-bottom: 4px; color: var(--text); }
+
+/* ===== Секции ===== */
+section { padding: 32px 0; border-bottom: 1px solid var(--border); }
+main > section:last-of-type, section:last-of-type { border-bottom: none; }
+
+h1 { font-size: 2.4rem; font-weight: 700; color: var(--header); margin-bottom: 0.4rem; line-height: 1.15; }
+h2 { font-size: 1.5rem; font-weight: 700; color: var(--header); margin-bottom: 0.8rem; }
+h3 { font-size: 1.1rem; font-weight: 700; color: var(--text); margin-bottom: 0.3rem; }
+p { margin-bottom: 0.9rem; }
+ul, ol { padding-left: 1.5rem; margin: 0.8rem 0; }
+li { margin-bottom: 0.45rem; }
+strong { color: var(--text); }
+.lead { font-size: 1.15rem; max-width: 760px; }
+.muted { color: var(--dark); font-style: italic; }
+code, pre { font-family: 'DejaVu Sans Mono', 'Liberation Mono', Consolas, monospace; font-size: 13px; }
+code { background: var(--light); border: 1px solid var(--border); padding: 0 4px; }
+pre {
+  background: #fff;
+  border-top: 1px solid var(--border);
+  border-left: 1px solid var(--border);
+  border-right: 1px solid var(--dark);
+  border-bottom: 1px solid var(--dark);
+  padding: 10px 12px;
+  margin: 0.6rem 0 1rem;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ===== Карточки и боксы: панель с фаской ===== */
+.card, .download-steps, .notice, .file-box {
+  background: var(--panel);
+  border-top: 1px solid var(--light);
+  border-left: 1px solid var(--light);
+  border-right: 1px solid var(--dark);
+  border-bottom: 1px solid var(--dark);
+  padding: 18px 22px;
+  margin: 16px 0;
+}
+.card h3 { color: var(--header); }
+.card:hover { background: var(--active); }
+
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 18px; }
+.grid .card { margin: 0 0 18px; }
+
+/* ===== Кнопки: тёмно-зелёные, светлая рамка, без скруглений ===== */
+.btn, .card-link {
+  display: inline-block;
+  background: var(--header);
+  color: #fff;
+  border: 1px solid var(--light);
+  padding: 9px 18px;
+  min-height: 38px;
+  text-decoration: none;
+  font-family: var(--font);
+  font-size: 14px;
+  margin-top: 6px;
+  cursor: pointer;
+}
+.btn:hover, .card-link:hover, .btn:focus-visible, .card-link:focus-visible {
+  background: var(--header-light);
+  color: #fff;
+}
+.btn.big { font-size: 16px; font-weight: 700; padding: 11px 24px; }
+
+/* ===== Загрузки ===== */
+.download-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; }
+.download-card {
+  display: flex;
+  min-height: 150px;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  margin: 0;
+  padding: 16px;
+}
+.download-card.is-ready { background: var(--sent); border-top-color: var(--online); border-left-color: var(--online); }
+.download-status { margin: 0 0 8px; font-size: 13px; color: var(--dark); }
+.download-card .card-link { margin-top: auto; }
+.platform-icon-shell {
+  display: grid;
+  width: 36px; height: 36px;
+  place-items: center;
+  margin-bottom: 10px;
+  background: var(--header);
+  border-top: 1px solid var(--light);
+  border-left: 1px solid var(--light);
+  border-right: 1px solid var(--dark);
+  border-bottom: 1px solid var(--dark);
+}
+.platform-icon { display: block; width: 22px; height: 22px; object-fit: contain; filter: brightness(0) invert(1); }
+.download-detail { max-width: 780px; }
+.download-detail .platform-icon-shell { margin-bottom: 14px; }
+.download-steps h3 { color: var(--header); }
+
+.notice { background: var(--light); border-left: 4px solid var(--peer); }
+.notice strong { color: var(--peer); }
+
+.file-box { background: #fff; }
+.file-box dl { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; margin: 8px 0 12px; font-size: 13px; }
+.file-box dt { color: var(--dark); }
+.file-box dd { word-break: break-all; }
+
+@media (max-width: 760px) {
+  .download-grid, .grid { grid-template-columns: 1fr; }
+}
+@media (max-width: 640px) {
+  h1 { font-size: 1.9rem; }
+  .container { padding: 0 16px; }
+  .site-header .container { justify-content: center; }
+}
+
+.file-box h3:not(:first-child) { margin-top: 24px; padding-top: 16px; border-top: 1px solid var(--border); }
+.notice + .platform-icon-shell { margin-top: 18px; }

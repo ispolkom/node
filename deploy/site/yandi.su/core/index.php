@@ -1,0 +1,8 @@
+<?php
+$pageTitle = 'YANDI Core — Research Architecture'; $pageDescription = 'YANDI Core explores external memory, knowledge structures and specialized AI modules.'; $activeNav = 'core';
+require __DIR__ . '/../includes/header.php';
+?>
+<section class="hero"><div class="container"><h1>YANDI Core</h1><p class="lead">An experimental architecture exploring the boundaries of adaptive AI.</p><p>YANDI Core explores whether a relatively small AI core can form and modify external structures of memory, knowledge and specialized intellectual modules.</p></div></section>
+<section><div class="container"><h2>Research directions</h2><div class="grid"><article class="card"><h3>External memory and concepts</h3><p>Forming, storing and revising representations outside the model's main weights.</p></article><article class="card"><h3>Experience and verification</h3><p>Learning from experience, choosing tools and checking the system's own results.</p></article><article class="card"><h3>Specialized experts</h3><p>Connecting separate modules instead of putting every capability into one core.</p></article><article class="card"><h3>External storage</h3><p>Exploring SSD and other storage as a long-term part of the computational environment.</p></article></div></div></section>
+<section><div class="container"><h2>Status</h2><p>This is a research direction, not a finished AGI and not a promise of autonomous self-development. Implemented experiments must be distinguished from hypotheses and future ideas.</p><p class="muted">Status: research / prototype.</p></div></section>
+<?php require __DIR__ . '/../includes/footer.php'; ?>
