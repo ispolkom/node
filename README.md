@@ -25,8 +25,8 @@ Chats, files, groups and calls through a node you own — encrypted end-to-end b
 
 | Platform | Package | Version | Page with instructions |
 |---|---|---|---|
-| **Debian 12+ / Ubuntu 24.04+** (amd64) — node | [`yandi-node_0.2.0-g819_amd64.deb`](https://yandi.su/update/deb/yandi-node_0.2.0-g819_amd64.deb) | 0.2.0+g819 | [Debian](https://yandi.su/network/downloads/debian/) · [Ubuntu](https://yandi.su/network/downloads/ubuntu/) |
-| Debian / Ubuntu — desktop shell (window) | [`yandi-desktop_0.2.0-g819_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g819_amd64.deb) | 0.2.0+g819 | same pages |
+| **Debian 12+ / Ubuntu 24.04+** (amd64) — node | [`yandi-node_0.2.0-g829_amd64.deb`](https://yandi.su/update/deb/yandi-node_0.2.0-g829_amd64.deb) | 0.2.0+g829 | [Debian](https://yandi.su/network/downloads/debian/) · [Ubuntu](https://yandi.su/network/downloads/ubuntu/) |
+| Debian / Ubuntu — desktop shell (window) | [`yandi-desktop_0.2.0-g829_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g829_amd64.deb) | 0.2.0+g829 | same pages |
 | **Android** | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (build 1) | [Android](https://yandi.su/network/downloads/android/) |
 
 All downloads, checksums and release notes: **<https://yandi.su/network/>** (Russian: <https://yandi.su/ru/network/>). Second source with the same signed files: [GitHub Releases](https://github.com/ispolkom/node/releases/latest).
@@ -49,7 +49,7 @@ A server needs no window: the node is fully managed from the terminal.
 
 ```bash
 # 1. install the node (Debian 12+/Ubuntu 24.04+, amd64)
-sudo apt install ./yandi-node_0.2.0-g819_amd64.deb
+sudo apt install ./yandi-node_0.2.0-g829_amd64.deb
 
 # 2. first setup, as a regular user (not root): language, password, recovery phrase, private environment
 yandi setup

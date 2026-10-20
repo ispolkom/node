@@ -1,23 +1,23 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "0.2.0+g819",
-  "seq": 35,
-  "created": 1792492401,
+  "version": "0.2.0+g829",
+  "seq": 37,
+  "created": 1792499685,
   "key_id": "037e04346f99cc00",
   "files": [
     {
-      "name": "yandi-desktop_0.2.0-g819_amd64.deb",
-      "sha256": "c1c1c882c5e6ffe9e8e0749b8b964ebbfc2b39b7ebd3d3ca3299b29c2e438d94",
-      "size": 30306456
+      "name": "yandi-desktop_0.2.0-g829_amd64.deb",
+      "sha256": "179a581fa290d5127b05e3435e711780f6d8143a3110209a2155c9e3bac23005",
+      "size": 30305752
     },
     {
-      "name": "yandi-node_0.2.0-g819_amd64.deb",
-      "sha256": "59023f779ee69c250b52308d445788a92f9430a55d34cc27d38a3a3edbd22469",
-      "size": 7079896
+      "name": "yandi-node_0.2.0-g829_amd64.deb",
+      "sha256": "cc18a02e0f7a1a3f63a9391c8d16d7fbb5a3e943fdd0f6dcba21093b19fc6808",
+      "size": 7083588
     }
   ],
   "platform": "deb",
-  "expires": 1802860401,
+  "expires": 1802867685,
   "notes": ""
 }

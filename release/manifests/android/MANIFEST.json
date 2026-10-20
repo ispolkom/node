@@ -2,17 +2,17 @@
   "format": 1,
   "product": "yandi-node",
   "version": "1.0.0-b1",
-  "seq": 36,
-  "created": 1792492957,
+  "seq": 38,
+  "created": 1792499741,
   "key_id": "037e04346f99cc00",
   "files": [
     {
       "name": "yandi.apk",
-      "sha256": "c49d8c1aa94c9be9355f29e11db0f7072c9584be65e0814a7ca252bb05ea4ee9",
+      "sha256": "cef16d670e195b8ccd1e9d698de19d963e96025ec965c24fc35484e05221bd90",
       "size": 128773458
     }
   ],
   "platform": "android",
-  "expires": 1802860957,
+  "expires": 1802867741,
   "notes": ""
 }
