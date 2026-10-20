@@ -18,16 +18,16 @@
 
 | Платформа | Файл | Версия |
 |---|---|---|
-| Debian 12+ / Ubuntu 24.04+ (amd64), узел | [`yandi-node_0.2.0-g829_amd64.deb`](https://yandi.su/update/deb/yandi-node_0.2.0-g829_amd64.deb) | 0.2.0+g829 |
-| Debian / Ubuntu, оболочка (окно) | [`yandi-desktop_0.2.0-g829_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g829_amd64.deb) | 0.2.0+g829 |
-| Android | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (сборка 2) |
+| Debian 12+ / Ubuntu 24.04+ (amd64), узел | [`yandi-node_0.2.0-g_amd64.deb`](https://yandi.su/update/deb/yandi-node_0.2.0-g_amd64.deb) | 0.2.0+g |
+| Debian / Ubuntu, оболочка (окно) | [`yandi-desktop_0.2.0-g_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g_amd64.deb) | 0.2.0+g |
+| Android | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (сборка 3) |
 
 Все загрузки, контрольные суммы и инструкции: **<https://yandi.su/ru/network/>**. Каждый выпуск подписан (`MANIFEST.json` + `MANIFEST.json.sig`); открытые ключи указаны в [английском README](README.md#download).
 
 ## Установка узла из консоли
 
 ```bash
-sudo apt install ./yandi-node_0.2.0-g829_amd64.deb
+sudo apt install ./yandi-node_0.2.0-g_amd64.deb
 yandi setup                       # язык, пароль, сид-фраза (12/24 слова), закрытая среда — от обычного пользователя
 yandi admin pairing owner --host ВАШ_ВНЕШНИЙ_АДРЕС     # код и QR для телефона
 ```
