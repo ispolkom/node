@@ -29,7 +29,7 @@ Chats, files, groups and calls through a node you own — encrypted end-to-end b
 | Debian / Ubuntu — desktop shell (window) | [`yandi-desktop_0.2.0-g819_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g819_amd64.deb) | 0.2.0+g819 | same pages |
 | **Android** | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (build 1) | [Android](https://yandi.su/network/downloads/android/) |
 
-All downloads, checksums and release notes: **<https://yandi.su/network/>** (Russian: <https://yandi.su/ru/network/>).
+All downloads, checksums and release notes: **<https://yandi.su/network/>** (Russian: <https://yandi.su/ru/network/>). Second source with the same signed files: [GitHub Releases](https://github.com/ispolkom/node/releases/latest).
 
 **Every release is signed.** Each folder on the site has a `MANIFEST.json` and `MANIFEST.json.sig` (Ed25519, with a rollback counter and a size and SHA-256 for every file). Pinned public keys, so you can check them yourself:
 
