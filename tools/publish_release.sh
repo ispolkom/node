@@ -15,6 +15,7 @@
 #   YANDI_RELEASE_NOTES="что нового"  YANDI_RELEASE_EXPIRES_DAYS=120  — описание и срок действия (по умолчанию 120 дней)
 set -euo pipefail
 cd "$(dirname "$0")/.."
+command -v flutter >/dev/null 2>&1 || export PATH="$HOME/.local/flutter-sdk/bin:$PATH"
 BUILD=0; NODE_ONLY=0
 for a in "$@"; do case "$a" in --build) BUILD=1;; --node-only) NODE_ONLY=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 PUB=release/yandi-release-pubkey.hex
