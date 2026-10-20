@@ -605,8 +605,9 @@ mod tests {
         assert_eq!(store.len(), MAX_PENDING);
     }
 
-    /// Узел телефона в тесте: локальный TLS-сервер, который отвечает на /mobile/hello так же, как узел.
-    async fn fake_mobile_node(sk: SigningKey, lie_about_fingerprint: bool, wrong_key: bool) -> (String, tokio::task::JoinHandle<()>) {
+    /// Узел телефона в тесте: локальный TLS-сервер, который отвечает на ОДНО соединение /mobile/hello так же, как узел. Возвращает адрес и
+    /// будущее сервера (его выполняют рядом с пробой через `join!`, без отдельных задач).
+    async fn fake_mobile_node(sk: SigningKey, lie_about_fingerprint: bool, wrong_key: bool) -> (String, impl std::future::Future<Output = ()>) {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let dir = tempfile::tempdir().unwrap();
         let id = crate::netlayer::tls_cert::TlsIdentity::load_or_generate_in(dir.path(), "aabbccdd").unwrap();
@@ -620,50 +621,49 @@ mod tests {
         let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = l.local_addr().unwrap().to_string();
         let fp = id.fingerprint_hex.clone();
-        let h = tokio::spawn(async move {
+        let server = async move {
             let _keep = dir;
-            while let Ok((s, _)) = l.accept().await {
-                let (acceptor, sk, fp) = (acceptor.clone(), sk.clone(), fp.clone());
-                tokio::spawn(async move {
-                    let Ok(mut tls) = acceptor.accept(s).await else { return };
-                    let mut buf = vec![0u8; 2048];
-                    let n = tls.read(&mut buf).await.unwrap_or(0);
-                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
-                    let nonce = req.split("nonce=").nth(1).and_then(|r| r.split(' ').next()).unwrap_or("");
-                    let nonce = hex::decode(nonce).unwrap_or_default();
-                    let claimed = if lie_about_fingerprint { "cd".repeat(32) } else { fp.clone() };
-                    let sig = sk.sign(&crate::mobile_api::hello_message(&nonce, &claimed));
-                    let key = if wrong_key { "11".repeat(32) } else { hex::encode(sk.verifying_key().to_bytes()) };
-                    let body = serde_json::json!({"node_id": hex::encode(crate::util::types::derive_node_id(&sk.verifying_key().to_bytes())), "key": key, "tls_fingerprint": claimed, "signature": hex::encode(sig.to_bytes())}).to_string();
-                    let _ = tls.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
-                    let _ = tls.shutdown().await;
-                });
-            }
-        });
-        (addr, h)
+            let Ok((s, _)) = l.accept().await else { return };
+            let Ok(mut tls) = acceptor.accept(s).await else { return };
+            let mut buf = vec![0u8; 2048];
+            let n = tls.read(&mut buf).await.unwrap_or(0);
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let nonce = req.split("nonce=").nth(1).and_then(|r| r.split(' ').next()).unwrap_or("");
+            let nonce = hex::decode(nonce).unwrap_or_default();
+            let claimed = if lie_about_fingerprint { "cd".repeat(32) } else { fp.clone() };
+            let sig = sk.sign(&crate::mobile_api::hello_message(&nonce, &claimed));
+            let key = if wrong_key { "11".repeat(32) } else { hex::encode(sk.verifying_key().to_bytes()) };
+            let body = serde_json::json!({"node_id": hex::encode(crate::util::types::derive_node_id(&sk.verifying_key().to_bytes())), "key": key, "tls_fingerprint": claimed, "signature": hex::encode(sig.to_bytes())}).to_string();
+            let _ = tls.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await;
+            let _ = tls.shutdown().await;
+        };
+        (addr, server)
     }
 
     #[tokio::test]
     async fn the_phone_address_is_probed_by_the_nodes_own_introduction_and_fakes_do_not_pass() {
         let sk = key(7);
         let (key_hex, id_hex) = (hex::encode(sk.verifying_key().to_bytes()), hex::encode(node_id(&sk)));
-        let (addr, h) = fake_mobile_node(sk.clone(), false, false).await;
-        assert_eq!(probe_mobile(&addr, &key_hex, &id_hex, true).await, Ok(()), "настоящий узел представился");
-        // публичные проверки не стучатся в закрытые адреса (заявка не сканер домашней сети)
-        assert_eq!(probe_mobile(&addr, &key_hex, &id_hex, false).await, Err("skipped"));
+        let (addr, server) = fake_mobile_node(sk.clone(), false, false).await;
+        let (r, _) = tokio::join!(probe_mobile(&addr, &key_hex, &id_hex, true), server);
+        assert_eq!(r, Ok(()), "настоящий узел представился");
+        // публичные проверки не стучатся в закрытые адреса (заявка не сканер домашней сети): сервер даже не получает соединения
+        assert_eq!(probe_mobile("127.0.0.1:9", &key_hex, &id_hex, false).await, Err("skipped"));
         assert_eq!(probe_mobile("не адрес", &key_hex, &id_hex, true).await, Err("skipped"), "имена не разрешаются");
-        // ответил другой ключ / номер не тот
-        assert!(probe_mobile(&addr, &"22".repeat(32), &id_hex, true).await.is_err());
-        h.abort();
-        let (addr, h) = fake_mobile_node(sk.clone(), true, false).await;
-        assert_eq!(probe_mobile(&addr, &key_hex, &id_hex, true).await, Err("fingerprint"), "подписан не тот сертификат, по которому подключились");
-        h.abort();
-        let (addr, h) = fake_mobile_node(sk.clone(), false, true).await;
-        assert_eq!(probe_mobile(&addr, &key_hex, &id_hex, true).await, Err("identity"));
-        h.abort();
+        // ответил другой ключ, чем в заявке
+        let (addr, server) = fake_mobile_node(sk.clone(), false, false).await;
+        let other_key = "22".repeat(32);
+        let (r, _) = tokio::join!(probe_mobile(&addr, &other_key, &id_hex, true), server);
+        assert!(r.is_err());
+        let (addr, server) = fake_mobile_node(sk.clone(), true, false).await;
+        let (r, _) = tokio::join!(probe_mobile(&addr, &key_hex, &id_hex, true), server);
+        assert_eq!(r, Err("fingerprint"), "подписан не тот сертификат, по которому подключились");
+        let (addr, server) = fake_mobile_node(sk.clone(), false, true).await;
+        let (r, _) = tokio::join!(probe_mobile(&addr, &key_hex, &id_hex, true), server);
+        assert_eq!(r, Err("identity"));
         // подставной узел без ключа не сможет подписать: подпись другого ключа
-        let (addr, h) = fake_mobile_node(key(8), false, false).await;
-        assert!(probe_mobile(&addr, &key_hex, &id_hex, true).await.is_err());
-        h.abort();
+        let (addr, server) = fake_mobile_node(key(8), false, false).await;
+        let (r, _) = tokio::join!(probe_mobile(&addr, &key_hex, &id_hex, true), server);
+        assert!(r.is_err());
     }
 }
