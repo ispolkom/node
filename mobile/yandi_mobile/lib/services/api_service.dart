@@ -117,15 +117,15 @@ class ApiService {
     }
   }
 
-  /// Пользователи узла: [{peer_id, name, nick, avatar_hash, online, last_activity_ms, is_node?}].
-  Future<List<Map<String, dynamic>>> getUsers() async {
+  /// Люди узла: [{peer_id, name, nick, avatar_hash, role, online, last_activity_ms, is_node?}]. null — узел не ответил (это не «никого нет»).
+  Future<List<Map<String, dynamic>>?> getUsers() async {
     try {
       final res = await _client.get(_url('/mobile/users'), headers: _headers).timeout(const Duration(seconds: 12));
-      if (res.statusCode != 200) return const [];
+      if (res.statusCode != 200) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
       return [for (final u in (j['users'] as List? ?? const [])) (u as Map).cast<String, dynamic>()];
     } catch (_) {
-      return const [];
+      return null;
     }
   }
 
@@ -241,6 +241,7 @@ class ApiService {
         online:      m['online']       as bool?   ?? false,
         isManual:    m['is_manual']    as bool?   ?? false,
         lastActivityMs: (m['last_activity_ms'] as num?)?.toInt() ?? 0,
+        role:        m['role']         as String? ?? '',
       );
     }).toList();
   }

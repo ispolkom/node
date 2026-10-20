@@ -2185,7 +2185,7 @@ async fn users_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKe
     Json(json!({"users": users_for(&dev, &hex::encode(st.my_id.0))}))
 }
 
-/// Список пользователей для устройства `dev` (хэш токена); `node_hex` — номер самого узла («Компьютер»).
+/// Каталог людей узла для устройства `dev` (хэш токена): все, кроме него самого; `node_hex` — номер самого узла («Компьютер», не гостю).
 fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
     let me = device_peer_of(dev);
     let guest = is_guest_device(dev);
@@ -2196,11 +2196,9 @@ fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
             continue;
         }
         let (nick, hash) = crate::device_profile::public(&pid);
-        // гостю: только устройства, которые не скрыты (есть публичный ник); гости видны друг другу
-        if guest && nick.is_empty() {
-            continue;
-        }
-        out.push(json!({"peer_id": pid, "name": d.name, "nick": nick, "avatar_hash": hash, "online": live_count(&pid) > 0, "last_activity_ms": d.last_activity_ms()}));
+        // каталог узла: ВСЕ зарегистрированные устройства, в сети и не в сети, пока аккаунт не удалён администратором или самим человеком.
+        // Скрытый профиль скрывает только ник и картинку (остаётся имя устройства); роль нужна, чтобы разделить «гостей» и «пользователей».
+        out.push(json!({"peer_id": pid, "name": d.name, "nick": nick, "avatar_hash": hash, "role": d.role, "online": live_count(&pid) > 0, "last_activity_ms": d.last_activity_ms()}));
     }
     if !guest {
         out.push(json!({"peer_id": node_hex, "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
@@ -2294,7 +2292,7 @@ async fn contacts(
         // last_activity_ms — для приложения: устройство, не бывшее на связи и не в контактах дольше суток, уходит с главного экрана
         let (nick, hash) = crate::device_profile::public(&pid);
         let shown = if nick.is_empty() { d.name.clone() } else { nick.clone() };
-        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", shown), "online": live_count(&pid) > 0, "is_manual": false, "last_activity_ms": d.last_activity_ms(), "nick": nick, "avatar_hash": hash}));
+        out.push(json!({"peer_id": pid, "display_name": format!("📱 {}", shown), "role": d.role, "online": live_count(&pid) > 0, "is_manual": false, "last_activity_ms": d.last_activity_ms(), "nick": nick, "avatar_hash": hash}));
     }
     out.push(json!({"peer_id": hex::encode(st.my_id.0), "display_name": "💻 Компьютер", "online": true, "is_manual": false}));
     Json(json!({"contacts": out}))
@@ -3997,27 +3995,89 @@ mod guest_tests {
     }
 
     #[test]
-    fn the_user_list_for_a_guest_has_named_devices_guests_included_and_no_computer_entry() {
+    fn the_catalog_lists_everyone_with_roles_online_or_not_for_a_guest_too() {
         let _g = lock();
         crate::complaints::tests::fresh();
         wipe(&[]);
         let guest = add("guest", "ug");
         let guest2 = add("guest", "ug2");
         let user = add("user", "uu");
-        let hidden = add("user", "uh");
+        let silent = add("user", "uh");
+        let owner = add("owner", "uo");
         crate::device_profile::put(&device_peer_of(&user).unwrap(), Some("Мама"), None, None).unwrap();
         crate::device_profile::put(&device_peer_of(&guest2).unwrap(), Some("Другой гость"), None, None).unwrap();
-        let seen = json!({"users": users_for(&guest, &"ab".repeat(32))});
-        let nicks: Vec<String> = seen["users"].as_array().unwrap().iter().map(|u| u["nick"].as_str().unwrap_or("").to_string()).collect();
-        let mut nicks = nicks;
-        nicks.sort();
-        assert_eq!(nicks, vec!["Другой гость".to_string(), "Мама".to_string()], "гость видит именованных (и пользователей, и гостей); ни себя, ни безымянных, ни «Компьютер»: {seen}");
-        let _ = hidden;
-        let owner_view = json!({"users": users_for(&user, &"ab".repeat(32))});
-        assert!(owner_view["users"].as_array().unwrap().iter().any(|u| u["is_node"] == true), "пользователь узла, как раньше, видит «Компьютер»");
-        crate::device_profile::forget(&device_peer_of(&user).unwrap());
-        crate::device_profile::forget(&device_peer_of(&guest2).unwrap());
-        wipe(&["ug", "ug2", "uu", "uh"]);
+        // скрытый профиль: ник и картинка не раскрываются, но человек остаётся в каталоге по имени устройства
+        crate::device_profile::put(&device_peer_of(&silent).unwrap(), Some("Тайный"), None, Some(true)).unwrap();
+        let seen = users_for(&guest, &"ab".repeat(32));
+        let by_name = |n: &str| seen.iter().find(|u| u["name"] == n).cloned().unwrap_or_else(|| panic!("нет {n} в {seen:?}"));
+        assert_eq!(by_name("uu")["nick"], "Мама");
+        assert_eq!(by_name("uu")["role"], "user");
+        assert_eq!(by_name("ug2")["role"], "guest", "другой гость виден гостю, с ролью");
+        assert_eq!(by_name("uh")["nick"], "", "скрытый ник не раскрыт");
+        assert_eq!(by_name("uh")["role"], "user", "но человек в каталоге");
+        assert_eq!(by_name("uo")["role"], "owner");
+        assert!(seen.iter().all(|u| u["name"] != "ug"), "себя в каталоге нет");
+        assert!(seen.iter().all(|u| u["is_node"] != true), "«Компьютера» гость не видит");
+        for u in &seen {
+            assert!(u["online"].is_boolean(), "статус есть у каждого: {u}");
+        }
+        let owner_view = users_for(&user, &"ab".repeat(32));
+        assert!(owner_view.iter().any(|u| u["is_node"] == true), "пользователь узла, как раньше, видит «Компьютер»");
+        assert!(owner_view.iter().any(|u| u["name"] == "ug" && u["role"] == "guest"), "гость виден пользователям");
+        let _ = owner;
+        for t in ["uu", "ug2", "uh"] {
+            let th = match t { "uu" => &user, "ug2" => &guest2, _ => &silent };
+            crate::device_profile::forget(&device_peer_of(th).unwrap());
+        }
+        wipe(&["ug", "ug2", "uu", "uh", "uo"]);
+    }
+
+    #[test]
+    fn deleting_a_phone_contact_returns_the_person_to_the_catalog_instead_of_hiding_them() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        crate::mobile_self::init_phone_status();
+        let th = add("user", "dc");
+        let full = device_peer_of(&th).unwrap();
+        crate::mobile_self::phone_action(&full, "add").unwrap();
+        crate::mobile_self::phone_action(&full, "hide").unwrap();
+        assert!(crate::mobile_self::is_saved_phone(&full) && crate::mobile_self::is_hidden_phone(&full));
+        // короткий номер из «phone-<16>» разрешается в одно устройство
+        crate::mobile_self::delete_phone_contact(&full[..16]).unwrap();
+        assert!(!crate::mobile_self::is_saved_phone(&full), "вышел из контактов");
+        assert!(!crate::mobile_self::is_hidden_phone(&full), "и не скрыт");
+        assert!(!crate::mobile_self::is_blocked_phone(&full));
+        assert!(device_by_peer(&full).is_some(), "сопряжение не отозвано: человек остаётся в каталоге");
+        assert!(devices_overview().iter().any(|d| d["peer_id"] == full.as_str()));
+        assert!(crate::mobile_self::delete_phone_contact("zz").is_err());
+        assert!(crate::mobile_self::delete_phone_contact(&"0".repeat(16)).is_err(), "неизвестное устройство");
+        wipe(&["dc"]);
+    }
+
+    #[tokio::test]
+    async fn the_shell_delete_button_and_directory_work_through_the_real_handlers() {
+        use axum::response::IntoResponse;
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        crate::mobile_self::init_phone_status();
+        let th = add("guest", "sg");
+        let full = device_peer_of(&th).unwrap();
+        crate::mobile_self::phone_action(&full, "add").unwrap();
+        // удалить контакт кнопкой оболочки (DELETE /api/contacts, id=phone-<16>)
+        let r = crate::web::server::api_contacts_delete(Json(crate::web::server::DeleteContactRequest { id: format!("phone-{}", &full[..16]) })).await.into_response();
+        let b: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(r.into_body(), 1 << 20).await.unwrap()).unwrap();
+        assert_eq!(b["status"], "success");
+        // каталог оболочки: гость на месте, с ролью, не в контактах, не скрыт
+        let d = crate::web::server::mobile_directory_handler().await.into_response();
+        let v: serde_json::Value = serde_json::from_slice(&axum::body::to_bytes(d.into_body(), 1 << 20).await.unwrap()).unwrap();
+        let me = v["devices"].as_array().unwrap().iter().find(|x| x["peer_id"] == full.as_str()).cloned().expect("гость в каталоге");
+        assert_eq!(me["role"], "guest");
+        assert_eq!(me["saved"], false);
+        assert_eq!(me["status"], "ok");
+        assert!(me["online"].is_boolean());
+        wipe(&["sg"]);
     }
 
     #[tokio::test]

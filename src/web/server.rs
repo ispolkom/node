@@ -638,6 +638,7 @@ impl WebServer {
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/api/mobile/devices", get(mobile_devices_handler))
             .route("/api/mobile/other-devices", get(mobile_other_devices_handler))
+            .route("/api/mobile/directory", get(mobile_directory_handler))
             .route("/api/complaints", get(complaints_list_handler))
             .route("/api/complaints/:id", get(complaint_get_handler))
             .route("/api/complaints/:id/reply", post(complaint_reply_handler))
@@ -2507,6 +2508,39 @@ async fn mobile_other_devices_handler() -> impl IntoResponse {
     Json(serde_json::json!({"devices": list}))
 }
 
+/// Все люди узла для страницы «Поиск» оболочки: гости и пользователи, в сети и не в сети, с ролью, именем, картинкой и отметкой «в контактах».
+/// Остаются в списке, пока аккаунт не удалён администратором или самим человеком.
+pub(crate) async fn mobile_directory_handler() -> impl IntoResponse {
+    crate::mobile_self::init_phone_status();
+    let mut list: Vec<serde_json::Value> = crate::mobile_api::devices_overview()
+        .into_iter()
+        .filter_map(|d| {
+            let full = d["peer_id"].as_str()?.to_string();
+            let (nick, avatar_hash) = crate::device_profile::public(&full);
+            let local = crate::local_overrides::name(&full).unwrap_or_default();
+            let dev_name = d["name"].as_str().unwrap_or("Телефон").to_string();
+            let name = crate::local_overrides::display_name(&local, &nick, &dev_name);
+            let status = if crate::mobile_self::is_blocked_phone(&full) {
+                "blocked"
+            } else if crate::mobile_self::is_hidden_phone(&full) {
+                "hidden"
+            } else {
+                "ok"
+            };
+            Some(serde_json::json!({
+                "peer_id": full, "name": name, "device_name": dev_name, "nick": nick, "avatar_hash": avatar_hash,
+                "role": d["role"], "online": d["online"], "last_seen_ms": d["last_seen_ms"],
+                "saved": crate::mobile_self::is_saved_phone(&full), "status": status,
+            }))
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        let on = |x: &serde_json::Value| x["online"].as_bool().unwrap_or(false);
+        on(b).cmp(&on(a)).then_with(|| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()))
+    });
+    Json(serde_json::json!({"devices": list}))
+}
+
 #[derive(Deserialize)]
 struct PhoneActionReq {
     peer: String,
@@ -2687,20 +2721,23 @@ async fn api_contacts_local(axum::extract::Json(b): axum::extract::Json<LocalOve
 }
 
 #[derive(Deserialize)]
-struct DeleteContactRequest {
-    id: String,
+pub(crate) struct DeleteContactRequest {
+    pub(crate) id: String,
 }
 
-async fn api_contacts_delete(
+pub(crate) async fn api_contacts_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
     let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
     let contacts_path = contacts_path_owned.as_str();
 
-    // телефон владельца: он не в contacts.json (список строит узел из сопряжённых устройств) — прячем из чата
+    // телефон: он не в contacts.json (список строит узел из сопряжённых устройств). «Удалить» снимает его из контактов и возвращает в общий
+    // список людей узла на странице «Поиск»; скрытие — отдельное действие (phone-action hide)
     if let Some(prefix) = payload.id.strip_prefix("phone-") {
-        crate::mobile_self::hide_phone(prefix);
-        return Json(serde_json::json!({"status": "success", "message": "Contact deleted"}));
+        return match crate::mobile_self::delete_phone_contact(prefix) {
+            Ok(()) => Json(serde_json::json!({"status": "success", "message": "Contact deleted"})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
     }
 
     let _guard = CONTACTS_LOCK.lock().await;

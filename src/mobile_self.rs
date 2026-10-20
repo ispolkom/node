@@ -936,6 +936,28 @@ pub fn phone_action(peer: &str, action: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// «Удалить контакт» на ПК: телефон выходит из контактов и возвращается в общий список людей узла («Поиск»). Не скрывается и не блокируется,
+/// сопряжение не отзывается. Принимает полный номер (64) или короткий (16 и больше, ровно одно устройство).
+pub fn delete_phone_contact(id: &str) -> Result<(), String> {
+    if id.len() < 16 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("неверный номер устройства".into());
+    }
+    let full = if id.len() == 64 {
+        id.to_string()
+    } else {
+        let hits: Vec<String> = crate::mobile_api::devices_overview().iter().filter_map(|d| d["peer_id"].as_str().map(str::to_string)).filter(|p| p.starts_with(id)).collect();
+        match hits.as_slice() {
+            [one] => one.clone(),
+            [] => return Err("такого устройства нет".into()),
+            _ => return Err("номер неоднозначен".into()),
+        }
+    };
+    phone_action(&full, "remove")?;
+    unhide_phone(&full);
+    crate::local_overrides::forget(&full);
+    Ok(())
+}
+
 /// Спрятать телефон из списка чата (номер устройства полностью или его начало, не короче 16 знаков).
 pub fn hide_phone(id: &str) {
     if id.len() >= 16 {

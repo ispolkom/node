@@ -11,6 +11,12 @@ class Contact {
   /// Когда устройство (не контакт) в последний раз было на связи или сопрягалось, мс; 0 — узел не сообщил.
   final int    lastActivityMs;
 
+  /// Роль человека на узле: guest / invited / user / owner (пусто — узел не сообщил). По ней список делится на «Гости» и «Пользователи».
+  final String role;
+
+  /// Гость или приглашённый, ещё не подтверждённый администратором: ещё не авторизован.
+  bool get isGuestLevel => role == 'guest' || role == 'invited';
+
   Contact({
     required this.peerId,
     required this.displayName,
@@ -18,6 +24,7 @@ class Contact {
     required this.isManual,
     bool? saved,
     this.lastActivityMs = 0,
+    this.role = '',
   }) : saved = saved ?? isManual;
 
   /// Устройство, не бывшее в сети больше суток и не добавленное в контакты, с главного экрана уходит в «скрытые»
@@ -32,6 +39,7 @@ class Contact {
     isManual:    isManual,
     saved:       saved       ?? this.saved,
     lastActivityMs: lastActivityMs,
+    role: role,
   );
 
   @override

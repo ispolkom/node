@@ -1,5 +1,16 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'скрыт': 'hidden',
+  'Пользователи': 'Users',
+  'Гости': 'Guests',
+  'Вошли без кода: ники, статус': 'Signed in without a code: nicknames, status',
+  'Авторизованные на узле: ники, аватарки, статус': 'Authorised on the node: nicknames, avatars, status',
+  'в контактах': 'in contacts',
+  'Удалить из контактов': 'Remove from contacts',
+  'Гостей пока нет.': 'No guests yet.',
+  'Открытые группы': 'Open groups',
+  'Группы по приглашению': 'Invitation-only groups',
+  'Удалён из контактов: остаётся в списке пользователей.': 'Removed from contacts: stays in the users list.',
   'Пароль администратора': 'Administrator password',
   'Пароль администратора должен отличаться от пароля пользователя': 'The administrator password must differ from the user password',
   'Пароли администратора не совпадают': 'The administrator passwords do not match',
@@ -539,6 +550,13 @@ const moreEnglishLabels = <String, String>{
   ' · писать запрещено': ' · muted',
 };
 const englishTemplates = <String, String>{
+  'Гости ({0})': 'Guests ({0})',
+  'Пользователи ({0})': 'Users ({0})',
+  'Группы ({0})': 'Groups ({0})',
+  'Открытые группы ({0})': 'Open groups ({0})',
+  'Группы по приглашению ({0})': 'Invitation-only groups ({0})',
+  'Показать скрытых ({0})': 'Show hidden ({0})',
+  'Показать скрытые ({0})': 'Show hidden ({0})',
   "Открытый ключ подписи: {0}": "Public signing key: {0}",
   "Открытый ключ подписи: {0} (ещё не закреплён в программе)": "Public signing key: {0} (not pinned in the program yet)",
   "Страна: {0}": "Country: {0}",

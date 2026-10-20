@@ -5,7 +5,7 @@ import 'preferences.dart';
 import 'nick.dart';
 import 'transport/api.dart';
 
-/// Страница «Поиск»: две карточки — «Пользователи» и «Группы», в каждой количество.
+/// Страница «Поиск»: три карточки — «Гости», «Пользователи» (авторизованные) и «Группы», в каждой количество.
 /// Пользователи: сопряжённые с узлом устройства (не удалённые узлом за бездействие) со статусом «Онлайн» / «Не в сети».
 /// Группы: все группы узла — название, тематика, открытая или по приглашению, число участников.
 class SearchFeature extends StatefulWidget {
@@ -44,27 +44,33 @@ class _SearchFeatureState extends State<SearchFeature> {
 
   Future<void> refresh() async {
     if (!active) return;
+    // люди и группы грузятся независимо: сбой каталога групп не прячет людей, и наоборот
+    String? err;
+    List<Map<String, dynamic>>? people;
+    List<Map<String, dynamic>>? catalog;
     try {
-      final d = await widget.api.request('/api/mobile/other-devices');
-      final g = await widget.api.request('/api/groups');
-      if (!active) return;
-      setState(() {
-        users = listOf(d['devices']);
+      people = listOf((await widget.api.request('/api/mobile/directory'))['devices']);
+    } catch (e) {
+      err = e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
+    }
+    try {
+      catalog = listOf((await widget.api.request('/api/groups'))['catalog']);
+    } catch (e) {
+      err ??= e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
+    }
+    if (!active) return;
+    setState(() {
+      if (people != null) {
+        users = people;
         hiddenUsers
           ..clear()
-          ..addAll([for (final u in users) if (u['status'] == 'hidden') '${u['peer_id']}']);
+          ..addAll([for (final u in people) if (u['status'] == 'hidden') '${u['peer_id']}']);
         showHidden = true;
-        groups = listOf(g['catalog']);
-        loading = false;
-        error = null;
-      });
-    } catch (e) {
-      if (!active) return;
-      setState(() {
-        loading = false;
-        error = e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
-      });
-    }
+      }
+      if (catalog != null) groups = catalog;
+      loading = false;
+      error = err;
+    });
   }
 
   Future<String?> askName(String title) async {
@@ -93,12 +99,27 @@ class _SearchFeatureState extends State<SearchFeature> {
       builder: (ctx) => SimpleDialog(
         title: Text(name.isEmpty ? id.substring(0, 12) : name),
         children: [
-          SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'add'), child: const UiText('Добавить в контакты')),
+          if (u['saved'] == true)
+            SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'remove'), child: const UiText('Удалить из контактов'))
+          else
+            SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'add'), child: const UiText('Добавить в контакты')),
           SimpleDialogOption(onPressed: () => Navigator.pop(ctx, 'hide'), child: UiText(hidden ? 'Показать в чате' : 'Скрыть в чате')),
         ],
       ),
     );
     if (!active || pick == null) return;
+    if (pick == 'remove') {
+      // «Удалить контакт»: человек выходит из контактов и остаётся в общем списке людей узла (не скрывается)
+      try {
+        await widget.api.request('/api/mobile/phone-action', body: {'peer': id, 'action': 'remove'});
+        await widget.api.request('/api/mobile/phone-action', body: {'peer': id, 'action': 'unhide'});
+        if (active) setState(() => notice = 'Удалён из контактов: остаётся в списке пользователей.');
+        await refresh();
+      } catch (e) {
+        if (active) setState(() => notice = 'Не получилось: ${e is ApiFailure ? e.message : e}');
+      }
+      return;
+    }
     if (pick == 'hide') {
       try {
         await widget.api.request('/api/mobile/phone-action', body: {'peer': id, 'action': hidden ? 'unhide' : 'hide'});
@@ -117,6 +138,7 @@ class _SearchFeatureState extends State<SearchFeature> {
         await widget.api.request('/api/contacts', body: {'peer_id': id, 'name': given});
       }
       if (active) setState(() => notice = 'Добавлено в контакты.');
+      await refresh();
     } catch (e) {
       if (active) setState(() => notice = 'Не получилось добавить: ${e is ApiFailure ? e.message : e}');
     }
@@ -205,8 +227,10 @@ class _SearchFeatureState extends State<SearchFeature> {
     ],
   );
 
-  List<Widget> usersView() {
-    final all = users;
+  bool isGuestLevel(Map<String, dynamic> u) => u['role'] == 'guest' || u['role'] == 'invited';
+
+  List<Widget> usersView({required bool guests}) {
+    final all = [for (final u in users) if (isGuestLevel(u) == guests) u];
     final shown = [for (final u in all) if (showHidden || !hiddenUsers.contains('${u['peer_id']}')) u];
     return [
       for (final u in shown)
@@ -215,12 +239,12 @@ class _SearchFeatureState extends State<SearchFeature> {
             onTap: () => userMenu(u),
             leading: ContactAvatar(api: widget.api, avatarId: '${u['peer_id']}', name: '${u['name'] ?? ''}'),
             title: Text('${u['name'] ?? ''}'),
-            subtitle: statusBadge(u['online'] == true),
+            subtitle: Wrap(spacing: 12, children: [statusBadge(u['online'] == true), if (u['saved'] == true) const UiText('в контактах')]),
             trailing: hiddenUsers.contains('${u['peer_id']}') ? const UiText('скрыт') : const Icon(Icons.more_vert),
           ),
         ),
-      if (shown.isEmpty) const UiText('Пока никого нет.'),
-      if (hiddenUsers.isNotEmpty)
+      if (shown.isEmpty) UiText(guests ? 'Гостей пока нет.' : 'Пока никого нет.'),
+      if (all.any((u) => hiddenUsers.contains('${u['peer_id']}')))
         TextButton(
           onPressed: () => setState(() => showHidden = !showHidden),
           child: UiText(showHidden ? 'Не показывать скрытых' : 'Показать скрытых (${hiddenUsers.length})'),
@@ -230,9 +254,7 @@ class _SearchFeatureState extends State<SearchFeature> {
 
   List<Widget> groupsView() {
     final shown = [for (final g in groups) if (showHidden || !hiddenGroups.contains('${g['id']}')) g];
-    return [
-      for (final g in shown)
-        Card(
+    Widget tile(Map<String, dynamic> g) => Card(
           child: ListTile(
             onTap: () => groupMenu(g),
             title: Text('${g['name'] ?? ''}'),
@@ -247,7 +269,16 @@ class _SearchFeatureState extends State<SearchFeature> {
             ),
             trailing: const Icon(Icons.more_vert),
           ),
-        ),
+        );
+    Iterable<Widget> section(String title, Iterable<Map<String, dynamic>> items) => items.isEmpty
+        ? const []
+        : [
+            Padding(padding: const EdgeInsets.only(top: 12, bottom: 4), child: UiText('$title (${items.length})', style: const TextStyle(fontWeight: FontWeight.bold))),
+            for (final g in items) tile(g),
+          ];
+    return [
+      ...section('Открытые группы', shown.where((g) => g['kind'] == 'open')),
+      ...section('Группы по приглашению', shown.where((g) => g['kind'] != 'open')),
       if (shown.isEmpty) const UiText('Групп пока нет.'),
       if (hiddenGroups.isNotEmpty)
         TextButton(
@@ -259,7 +290,8 @@ class _SearchFeatureState extends State<SearchFeature> {
 
   @override
   Widget build(BuildContext context) {
-    final visibleUsers = users.where((u) => !hiddenUsers.contains('${u['peer_id']}')).length;
+    final guestCount = users.where((u) => isGuestLevel(u) && !hiddenUsers.contains('${u['peer_id']}')).length;
+    final userCount = users.where((u) => !isGuestLevel(u) && !hiddenUsers.contains('${u['peer_id']}')).length;
     final visibleGroups = groups.where((g) => !hiddenGroups.contains('${g['id']}')).length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -268,8 +300,9 @@ class _SearchFeatureState extends State<SearchFeature> {
         if (error != null) UiText(error!),
         if (notice != null) UiText(notice!),
         if (view == null) ...[
-          hubCard('Пользователи', 'Устройства узла, которых нет в контактах: ники, статус', visibleUsers, 'users'),
-          hubCard('Группы', 'Все группы узла: вступить или попросить приглашение', visibleGroups, 'groups'),
+          KeyedSubtree(key: const ValueKey('hub-guests'), child: hubCard('Гости', 'Вошли без кода: ники, статус', guestCount, 'guests')),
+          KeyedSubtree(key: const ValueKey('hub-users'), child: hubCard('Пользователи', 'Авторизованные на узле: ники, аватарки, статус', userCount, 'users')),
+          KeyedSubtree(key: const ValueKey('hub-groups'), child: hubCard('Группы', 'Все группы узла: вступить или попросить приглашение', visibleGroups, 'groups')),
         ] else ...[
           Row(
             children: [
@@ -282,12 +315,12 @@ class _SearchFeatureState extends State<SearchFeature> {
                 label: const UiText('Назад'),
               ),
               UiText(
-                view == 'users' ? 'Пользователи ($visibleUsers)' : 'Группы ($visibleGroups)',
+                view == 'guests' ? 'Гости ($guestCount)' : view == 'users' ? 'Пользователи ($userCount)' : 'Группы ($visibleGroups)',
                 style: const TextStyle(fontSize: 20),
               ),
             ],
           ),
-          ...(view == 'users' ? usersView() : groupsView()),
+          ...(view == 'groups' ? groupsView() : usersView(guests: view == 'guests')),
         ],
       ],
     );

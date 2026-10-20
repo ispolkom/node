@@ -10,14 +10,15 @@ import '../widgets/group_logo.dart';
 import '../widgets/complaint_sheet.dart';
 import 'home_screen.dart' show showSaveContactDialog;
 import '../widgets/locked_notice.dart';
+import 'chat_screen.dart' show ChatScreen;
 import '../l10n.dart';
 
-/// Видимые пользователи: сопряжённые с узлом и не удалённые им за бездействие (давно не бывшие в сети не показываются).
-List<Contact> visibleUsers(AppState state, {bool withHidden = false}) {
-  final now = DateTime.now().millisecondsSinceEpoch;
+/// Люди узла: ВСЕ, кто зарегистрирован, в сети и не в сети, пока аккаунт не удалён администратором или самим человеком (по времени не прячем).
+/// [guests]: true — только гости (и приглашённые, ещё не подтверждённые), false — только авторизованные, null — все.
+List<Contact> visibleUsers(AppState state, {bool withHidden = false, bool? guests}) {
   final list = [
     for (final c in state.contacts)
-      if (!c.isStale(now) && (withHidden || !state.hiddenUsers.contains(c.peerId))) c,
+      if ((withHidden || !state.hiddenUsers.contains(c.peerId)) && (guests == null || c.isGuestLevel == guests)) c,
   ];
   list.sort((a, b) {
     if (a.online != b.online) return a.online ? -1 : 1;
@@ -45,16 +46,27 @@ class _SearchHubState extends State<SearchHub> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final users = visibleUsers(state).length;
+    final guests = visibleUsers(state, guests: true).length;
+    final users = visibleUsers(state, guests: false).length;
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
         _HubCard(
+          key: const ValueKey('hub-guests'),
+          icon: Icons.person_outline,
+          title: tr('Гости'),
+          count: '$guests',
+          subtitle: tr('Вошли без кода: ники, аватарки, статус'),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const UsersScreen(guests: true))),
+        ),
+        const SizedBox(height: 10),
+        _HubCard(
+          key: const ValueKey('hub-users'),
           icon: Icons.people_alt_outlined,
           title: tr('Пользователи'),
           count: '$users',
-          subtitle: tr('Сопряжённые с узлом: ники, аватарки, статус'),
-          onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const UsersScreen())),
+          subtitle: tr('Авторизованные на узле: ники, аватарки, статус'),
+          onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const UsersScreen(guests: false))),
         ),
         const SizedBox(height: 10),
         FutureBuilder<List<DiscoverGroup>>(
@@ -81,7 +93,7 @@ class _HubCard extends StatelessWidget {
   final IconData icon;
   final String title, count, subtitle;
   final VoidCallback onTap;
-  const _HubCard({required this.icon, required this.title, required this.count, required this.subtitle, required this.onTap});
+  const _HubCard({super.key, required this.icon, required this.title, required this.count, required this.subtitle, required this.onTap});
 
   @override
   Widget build(BuildContext context) {
@@ -128,7 +140,9 @@ class StatusBadge extends StatelessWidget {
 }
 
 class UsersScreen extends StatefulWidget {
-  const UsersScreen({super.key});
+  /// true — гости, false — авторизованные пользователи.
+  final bool guests;
+  const UsersScreen({super.key, required this.guests});
   @override
   State<UsersScreen> createState() => _UsersScreenState();
 }
@@ -158,6 +172,15 @@ class _UsersScreenState extends State<UsersScreen> {
             leading: AvatarCircle(peerId: c.peerId, label: c.displayName),
             title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
             subtitle: StatusBadge(online: c.online),
+          ),
+          ListTile(
+            key: const ValueKey('user-open-chat'),
+            leading: const Icon(Icons.chat_bubble_outline, color: AppTheme.accent),
+            title: Text(tr('Открыть чат'), style: const TextStyle(color: AppTheme.text)),
+            onTap: () {
+              Navigator.pop(ctx);
+              Navigator.of(context).push(MaterialPageRoute(builder: (_) => ChatScreen(peerId: c.peerId, title: c.displayName)));
+            },
           ),
           if (!c.saved)
             ListTile(
@@ -192,7 +215,7 @@ class _UsersScreenState extends State<UsersScreen> {
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
-    final all = visibleUsers(state, withHidden: true);
+    final all = visibleUsers(state, withHidden: true, guests: widget.guests);
     final shown = _showHidden ? all : all.where((c) => !state.hiddenUsers.contains(c.peerId)).toList();
     final hiddenCount = all.length - all.where((c) => !state.hiddenUsers.contains(c.peerId)).length;
     return Scaffold(
@@ -200,13 +223,13 @@ class _UsersScreenState extends State<UsersScreen> {
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
         iconTheme: const IconThemeData(color: AppTheme.text),
-        title: Text(trf('Пользователи ({n})', {'n': all.length - hiddenCount}), style: const TextStyle(color: AppTheme.text)),
+        title: Text(widget.guests ? trf('Гости ({n})', {'n': all.length - hiddenCount}) : trf('Пользователи ({n})', {'n': all.length - hiddenCount}), style: const TextStyle(color: AppTheme.text)),
       ),
       body: ListView(children: [
         if (shown.isEmpty)
           Padding(
             padding: EdgeInsets.all(32),
-            child: Center(child: Text(tr('Пока никого нет'), style: TextStyle(color: AppTheme.textSecondary))),
+            child: Center(child: Text(widget.guests ? tr('Гостей пока нет') : tr('Пока никого нет'), style: TextStyle(color: AppTheme.textSecondary))),
           ),
         for (final c in shown)
           InkWell(
@@ -375,7 +398,16 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
           return ListView(children: [
             if (shown.isEmpty)
               Padding(padding: EdgeInsets.all(32), child: Center(child: Text(tr('Групп пока нет'), style: TextStyle(color: AppTheme.textSecondary)))),
-            for (final g in shown)
+            for (final entry in [
+              (tr('Открытые группы'), [for (final g in shown) if (g.isOpen) g]),
+              (tr('Группы по приглашению'), [for (final g in shown) if (!g.isOpen) g]),
+            ]) ...[
+              if (entry.$2.isNotEmpty)
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 14, 16, 6),
+                  child: Text('${entry.$1} (${entry.$2.length})', style: const TextStyle(color: AppTheme.accent, fontWeight: FontWeight.w700, fontSize: 13)),
+                ),
+              for (final g in entry.$2)
               InkWell(
                 onTap: () => _menu(g),
                 child: Container(
@@ -403,6 +435,7 @@ class _GroupsCatalogScreenState extends State<GroupsCatalogScreen> {
                   ]),
                 ),
               ),
+            ],
             if (hiddenCount > 0)
               TextButton(
                 onPressed: () => setState(() => _showHidden = !_showHidden),

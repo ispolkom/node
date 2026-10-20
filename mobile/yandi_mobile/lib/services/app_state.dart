@@ -680,12 +680,14 @@ class AppState extends ChangeNotifier implements FilesHost {
         merged.add(Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true));
       }
       // не владелец (гость, пользователь узла): список людей даёт каталог узла (ник, картинка, в сети); контактов владельца ему не отдают
-      if (myRole != null && myRole != 'owner') {
-        for (final u in await _api!.getUsers()) {
+      if (myRole != 'owner') {
+        final fresh = await _api!.getUsers();
+        if (fresh != null) _lastUsers = fresh;   // узел не ответил — остаётся прежний снимок, люди не пропадают
+        for (final u in _lastUsers) {
           final id = u['peer_id'] as String? ?? '';
           if (id.isEmpty || u['is_node'] == true || seen.contains(id) || merged.any((c) => c.peerId == id)) continue;
           final nick = (u['nick'] as String? ?? '').trim();
-          merged.add(Contact(peerId: id, displayName: nick.isNotEmpty ? nick : (u['name'] as String? ?? id.substring(0, 12)), online: u['online'] == true, isManual: false, lastActivityMs: (u['last_activity_ms'] as num?)?.toInt() ?? 0));
+          merged.add(Contact(peerId: id, displayName: nick.isNotEmpty ? nick : (u['name'] as String? ?? id.substring(0, 12)), online: u['online'] == true, isManual: false, lastActivityMs: (u['last_activity_ms'] as num?)?.toInt() ?? 0, role: u['role'] as String? ?? ''));
         }
       }
       contacts = merged.where((c) => !isBlocked(c.peerId)).toList();
@@ -1399,6 +1401,8 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Пользователи узла со своими никами и картинками (только в памяти, на диск не пишутся).
   List<Map<String, dynamic>> directory = const [];
+  /// Последний удачный ответ узла со списком людей (для не-владельца): при сбое сети список не пустеет.
+  List<Map<String, dynamic>> _lastUsers = const [];
   final Map<String, Uint8List> _directoryAvatars = {};
   final Map<String, String> _directoryHashes = {};
 
@@ -1406,7 +1410,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final api = _api;
     if (api == null) return;
     final users = await api.getUsers();
-    if (users.isEmpty) return;
+    if (users == null || users.isEmpty) return;
     directory = users;
     notifyListeners();
     for (final u in users) {
@@ -1915,6 +1919,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     activeChatPeerId = null;
     // всё, что приложение держит о людях и группах в памяти: справочник, картинки, логотипы, ник, скрытые, квитанции
     directory = const [];
+    _lastUsers = const [];
     for (final b in _directoryAvatars.values) { b.fillRange(0, b.length, 0); }
     _directoryAvatars.clear();
     _directoryHashes.clear();
