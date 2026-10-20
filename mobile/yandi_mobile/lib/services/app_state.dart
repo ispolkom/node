@@ -1426,7 +1426,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
       if (_directoryHashes[id] == hash && _directoryAvatars.containsKey(id)) continue;
       final png = await api.getUserAvatar(id);
-      if (gen != _dataGen) return;   // узел сменился или приложение заблокировано, пока шла картинка
+      if (gen != _dataGen) { unawaited(refreshDirectory()); return; }   // узел сменился, пока шла картинка: начать заново
       if (png != null && AvatarMsg.hashOf(png) == hash) {
         _directoryAvatars[id] = png;
         _directoryHashes[id] = hash;

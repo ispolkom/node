@@ -210,6 +210,7 @@ mod tests {
 
     #[test]
     fn nick_and_picture_are_saved_hidden_on_request_and_forgotten() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let peer = "ab".repeat(32);
         put(&peer, Some("  Аня  "), Some(&png()), None).unwrap();
         let (nick, hash) = public(&peer);
