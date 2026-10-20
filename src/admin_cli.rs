@@ -339,6 +339,50 @@ fn confirm_word(prompt: &str, word: &str) -> Result<bool, String> {
     Ok(typed.trim().to_lowercase() == word.to_lowercase())
 }
 
+/// Ключ подписи списка входных узлов хранится только в закрытой среде узла (файла нет): здесь он лишь просится подписать список.
+fn cmd_bootstrap(s: &mut Session, args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str).unwrap_or("pubkey") {
+        "pubkey" => {
+            let v = s.ok("GET", "/api/admin/bootstrap/pubkey", None)?;
+            match v["pubkey"].as_str() {
+                Some(k) => {
+                    println!("{k}");
+                    eprintln!("{}", if v["pinned"] == true { t!("Этот ключ закреплён в программе (bootstrap/signer.pub).", "This key is pinned in the program (bootstrap/signer.pub).") } else { t!("Ключ ещё не закреплён: запишите его в bootstrap/signer.pub и пересоберите узел и приложение.", "The key is not pinned yet: write it to bootstrap/signer.pub and rebuild the node and the app.") });
+                }
+                None => return Err(t!("закрытая среда заперта: откройте её паролем (yandi admin vault unlock)", "the closed environment is locked: unlock it with the password (yandi admin vault unlock)").into()),
+            }
+        }
+        "sign" => {
+            let file = args.get(1).ok_or(t!("bootstrap sign ФАЙЛ [--days N] [--network ИМЯ]", "bootstrap sign FILE [--days N] [--network NAME]"))?;
+            let mut days: Option<u64> = None;
+            let mut network: Option<String> = None;
+            let mut it = args[2..].iter();
+            while let Some(a) = it.next() {
+                match a.as_str() {
+                    "--days" => days = Some(it.next().and_then(|d| d.parse().ok()).ok_or(t!("--days N", "--days N"))?),
+                    "--network" => network = Some(it.next().ok_or(t!("--network ИМЯ", "--network NAME"))?.clone()),
+                    other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
+                }
+            }
+            let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
+            let list: Value = serde_json::from_str(&text).map_err(|_| t!("файл списка — не JSON", "the list file is not JSON").to_string())?;
+            s.ensure_admin()?;
+            let r = s.ok("POST", "/api/admin/bootstrap/sign", Some(&json!({ "list": list, "days": days, "network": network })))?;
+            let signed = serde_json::to_string_pretty(&r["list"]).map_err(|e| e.to_string())? + "\n";
+            // атомарно: сначала рядом, потом переименование — оборванная запись не испортит прежний список
+            let tmp = format!("{file}.new");
+            std::fs::write(&tmp, signed).map_err(|e| format!("{tmp}: {e}"))?;
+            std::fs::rename(&tmp, file).map_err(|e| format!("{file}: {e}"))?;
+            println!("{}", t!(format!("{file}: подписан, выпуск {}, ключ {}.", field(&r["list"], "sequence"), field(&r["list"], "signer")), format!("{file}: signed, release {}, key {}.", field(&r["list"], "sequence"), field(&r["list"], "signer"))));
+            if r["pinned"] != true {
+                eprintln!("{}", t!("ВНИМАНИЕ: этот ключ не закреплён в программе (bootstrap/signer.pub): узлы и приложения такой список не примут, пока ключ не вшит.", "WARNING: this key is not pinned in the program (bootstrap/signer.pub): nodes and apps will not accept such a list until the key is built in."));
+            }
+        }
+        other => return Err(t!(format!("bootstrap: неизвестное действие «{other}» (pubkey | sign)"), format!("bootstrap: unknown action “{other}” (pubkey | sign)"))),
+    }
+    Ok(())
+}
+
 fn cmd_proxies(s: &mut Session, args: &[String]) -> Result<(), String> {
     match args.first().map(String::as_str).unwrap_or("list") {
         "list" => {
@@ -628,6 +672,7 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             println!("{}", t!(format!("Отозвано устройств: {}.", field(&r, "removed")), format!("Devices revoked: {}.", field(&r, "removed"))));
         }
         "invites" => cmd_invites(s, rest)?,
+        "bootstrap" => cmd_bootstrap(s, rest)?,
         "phone-action" => {
             let peer = rest.first().ok_or(t!("phone-action ПИР ДЕЙСТВИЕ", "phone-action PEER ACTION"))?;
             let action = rest.get(1).ok_or(t!("phone-action ПИР ДЕЙСТВИЕ", "phone-action PEER ACTION"))?;
@@ -674,6 +719,7 @@ const HELP_RU: &str = "yandi admin — управление запущенным
   yandi admin device-promote ID    подтвердить приглашённое устройство: оно станет пользователем и сможет приглашать само
   yandi admin device-revoke-branch ID   отозвать устройство и всех, кого оно пригласило
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
+  yandi admin bootstrap pubkey | sign ФАЙЛ [--days N]   ключ подписи списка узлов — только в закрытой среде, файла нет
   yandi admin phone-action ПИР ДЕЙСТВИЕ
   yandi admin proxies list|add [вид]|remove ID|test [вид]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase
@@ -694,6 +740,7 @@ const HELP_EN: &str = "yandi admin — manage the running node from the console
   yandi admin device-promote ID    confirm an invited device: it becomes a user and can invite others itself
   yandi admin device-revoke-branch ID   revoke a device and everyone it invited
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
+  yandi admin bootstrap pubkey | sign FILE [--days N]   the node-list signing key lives only in the closed environment, no file
   yandi admin phone-action PEER ACTION
   yandi admin proxies list|add [kind]|remove ID|test [kind]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase

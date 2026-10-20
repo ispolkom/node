@@ -693,6 +693,7 @@ async fn main() -> anyhow::Result<()> {
         env.register(std::sync::Arc::new(yandi::closed_api::GroupsConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ProxyConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::BootstrapSignerConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ComplaintsConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::FilesConsumer));
         env.spawn_auto_lock();

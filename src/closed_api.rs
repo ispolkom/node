@@ -240,6 +240,24 @@ impl Consumer for FilesConsumer {
     }
 }
 
+/// Ключ подписи списка входных узлов: файла нет, ключ — подключ закрытой среды, в памяти только пока среда открыта.
+pub struct BootstrapSignerConsumer;
+
+impl Consumer for BootstrapSignerConsumer {
+    fn domain(&self) -> &'static str {
+        crate::closed_env::DOMAIN_BOOTSTRAP_SIGNER
+    }
+    fn migrate(&self, _old: Option<[u8; 32]>, _new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async move { Ok(0) }) // на диске ничего нет
+    }
+    fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::bootstrap::signer::unlock(key) })
+    }
+    fn lock(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async move { crate::bootstrap::signer::lock() })
+    }
+}
+
 /// Настройки внешних прокси (в них логины и пароли): закрытый уровень.
 pub struct ProxyConsumer;
 

@@ -44,6 +44,7 @@ yandi admin                       # меню
 yandi admin status | devices | alerts | update
 yandi admin pairing [owner|user] [--host АДРЕС]       # код и QR сопряжения телефона прямо в терминале
 yandi admin device-remove ID                          # отвязать устройство (слово подтверждения «ДА»)
+yandi admin bootstrap pubkey | sign ФАЙЛ [--days N]     # ключ подписи списка входных узлов — только в закрытой среде, файла нет
 yandi admin device-promote ID                         # приглашённое устройство → пользователь (может приглашать само)
 yandi admin device-revoke-branch ID                   # отозвать устройство и всех, кого оно пригласило (слово «ДА»)
 yandi admin invites show | set --enabled on|off --per-day N --max-live N   # политика приглашений

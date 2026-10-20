@@ -26,6 +26,8 @@ pub const DOMAIN_SELF: &str = "mobile_self";
 pub const DOMAIN_PROXY: &str = "upstream_proxy";
 pub const DOMAIN_COMPLAINTS: &str = "complaints";
 pub const DOMAIN_FILES: &str = "files";
+/// Ключ подписи списка входных узлов: только в памяти, пока среда открыта (`bootstrap/signer.rs`).
+pub const DOMAIN_BOOTSTRAP_SIGNER: &str = "bootstrap_signer";
 
 /// Автоблокировка по умолчанию при создании среды.
 pub const DEFAULT_AUTO_LOCK_SECS: u64 = 15 * 60;

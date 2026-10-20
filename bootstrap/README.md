@@ -21,35 +21,23 @@
 
 ## Как владельцу списка его менять
 
-Все команды — `yandi bootstrap …` (программа должна быть собрана: `cargo build --release`).
+Ключ подписи списка **нигде не хранится в файле**. Он живёт только в закрытой среде вашего узла: выводится из ключа среды, появляется в памяти, когда вы открыли среду паролем, и стирается при запирании. Сид-фраза восстанавливает среду, а с ней и тот же ключ, отдельной резервной копии не нужно. Секрет наружу не выходит: узел сам подписывает список, вы получаете только подписанный файл.
 
 ```bash
-# один раз: создать ключ подписи (секрет — в файл вне репозитория, права 0600; СДЕЛАЙТЕ КОПИЮ)
-yandi bootstrap keygen ~/yandi-release-keys/bootstrap_signer.key
-# открытый ключ записать в bootstrap/signer.pub и пересобрать программу (он вшивается при сборке)
-
-# добавить входной узел по его визитке (на странице узла или ~/.yandi/node_card.txt)
-yandi bootstrap from-card bootstrap/bootstrap.json "YANDI-NODE-1:…" --region NL --roles entry,relay,exit
+# править список (без ключа): добавить узел по визитке со страницы узла или из ~/.yandi/node_card.txt
+yandi bootstrap from-card bootstrap/bootstrap.json "$(cat ~/.yandi/node_card.txt)" --mobile ВНЕШНИЙ_IP:8444 --roles entry,relay,guest --region RU
 # или вручную
-yandi bootstrap add bootstrap/bootstrap.json --id <64 hex> --key <64 hex> --addr 203.0.113.10:9000 --region NL --roles entry,relay
-
+yandi bootstrap add bootstrap/bootstrap.json --key <64 hex> --addr 203.0.113.10:9000 --region NL --roles entry,relay
 # убрать узел
 yandi bootstrap remove bootstrap/bootstrap.json --id <начало номера>
 
-# подписать (выпуск +1, срок +90 дней) и проверить
-yandi bootstrap sign   bootstrap/bootstrap.json --key ~/yandi-release-keys/bootstrap_signer.key
+# один раз: узнать открытый ключ подписи (среда должна быть открыта: yandi admin vault unlock),
+# записать его в bootstrap/signer.pub и пересобрать узел и приложение (ключ вшивается при сборке)
+yandi admin bootstrap pubkey
+
+# подписать (выпуск +1, срок +90 дней; просит админ-пароль) и проверить
+yandi admin bootstrap sign bootstrap/bootstrap.json --days 90
 yandi bootstrap verify bootstrap/bootstrap.json
-git add bootstrap/bootstrap.json && git commit -m "bootstrap: выпуск N" && git push
 ```
 
-После любой правки (`add`, `remove`, `from-card`) подпись сбрасывается — без `sign` список никто не примет. **Срок действия 90 дней**: список нужно переподписывать до его истечения (даже без изменений: `sign` поднимает выпуск и срок), иначе новые узлы перестанут его принимать.
-
-Тест `bootstrap::tests::the_shipped_list_is_signed_by_the_pinned_key` проверяет подпись закоммиченного файла: список с неверной подписью не пройдёт `cargo test`.
-
-## Замена ключа подписи
-
-Ключей в программе может быть несколько (`SIGNER_KEYS`), чтобы ключ можно было заменить, не ломая старые версии: сначала выпустите версию программы, где закреплены и старый, и новый ключ; потом подписывайте список новым; позже старый ключ можно убрать.
-
-## Форк проекта
-
-Если вы делаете свою сеть: создайте свой ключ (`keygen`), положите его открытую часть в `bootstrap/signer.pub`, укажите свой адрес списка в `DEFAULT_URLS` (`src/bootstrap/mod.rs`), составьте свой список и подпишите. Список чужой сети ваши узлы не примут — у него другой ключ.
+Любая правка файла (`add`, `remove`, `from-card`) сбрасывает подпись; перед публикацией список нужно подписать заново. Подписанный файл публичный: его выкладывают на GitHub и сайт, а узлы и приложения проверяют подпись закреплённым открытым ключом.

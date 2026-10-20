@@ -117,8 +117,9 @@ pub fn clear_password() -> Result<(), String> {
 
 /// Маршруты, которым нужен сеанс администратора: управление узлом, а не личный аккаунт.
 pub fn is_admin_path(path: &str) -> bool {
-    const PREFIXES: [&str; 13] = [
+    const PREFIXES: [&str; 14] = [
         "/api/admin/password",
+        "/api/admin/bootstrap",
         "/api/complaints",
         "/api/pair-requests",
         "/api/guest-pairing",
@@ -272,6 +273,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d.join("admin_auth.json")
+    }
+
+    #[test]
+    fn signing_the_bootstrap_list_and_reading_its_key_need_an_administrator_session() {
+        use axum::http::Method;
+        assert!(is_admin_route(&Method::GET, "/api/admin/bootstrap/pubkey"));
+        assert!(is_admin_route(&Method::POST, "/api/admin/bootstrap/sign"));
     }
 
     #[test]

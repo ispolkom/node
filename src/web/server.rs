@@ -647,6 +647,9 @@ impl WebServer {
             .route("/api/mobile/devices/:id/promote", post(mobile_device_promote_handler))
             .route("/api/mobile/devices/:id/revoke-branch", post(mobile_device_revoke_branch_handler))
             .route("/api/mobile/invite-policy", get(mobile_invite_policy_get).post(mobile_invite_policy_post))
+            // подпись списка входных узлов ключом из закрытой среды (файла с ключом нет)
+            .route("/api/admin/bootstrap/pubkey", get(bootstrap_pubkey_handler))
+            .route("/api/admin/bootstrap/sign", post(bootstrap_sign_handler))
             .route(
                 "/api/mobile/devices/:id",
                 axum::routing::delete(mobile_device_remove_handler),
@@ -5807,6 +5810,38 @@ async fn mobile_device_revoke_branch_handler(
         return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
     }
     (StatusCode::OK, Json(serde_json::json!({"status": "ok", "removed": removed}))).into_response()
+}
+
+/// Открытый ключ подписи списка входных узлов; `unlocked: false` — закрытая среда заперта (ключа в памяти нет).
+async fn bootstrap_pubkey_handler() -> Response {
+    let pk = crate::bootstrap::signer::public_hex();
+    Json(serde_json::json!({
+        "unlocked": pk.is_some(),
+        "pubkey": pk,
+        "pinned": pk.as_deref().is_some_and(crate::bootstrap::signer::is_pinned),
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct BootstrapSignReq {
+    list: crate::bootstrap::Doc,
+    #[serde(default)]
+    days: Option<u64>,
+    #[serde(default)]
+    network: Option<String>,
+}
+
+/// Подписать список входных узлов ключом из закрытой среды: узел возвращает подписанный список, секрет наружу не выходит.
+async fn bootstrap_sign_handler(Json(req): Json<BootstrapSignReq>) -> Response {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    match crate::bootstrap::signer::sign_doc(req.list, req.days.unwrap_or(90), now, req.network) {
+        Ok(d) => {
+            let pinned = crate::bootstrap::signer::is_pinned(&d.signer);
+            Json(serde_json::json!({"status": "ok", "list": d, "pinned": pinned})).into_response()
+        }
+        Err(m) => (StatusCode::CONFLICT, Json(serde_json::json!({"status": "error", "message": m}))).into_response(),
+    }
 }
 
 async fn mobile_invite_policy_get() -> Response {
