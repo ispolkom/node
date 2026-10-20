@@ -6,9 +6,13 @@ import 'package:yandi_desktop/transport/api.dart';
 
 class _Api implements Api {
   final calls = <String>[];
+  final bodies = <Map<String, dynamic>?>[];
+  bool groupsFail = false;
   @override
   Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) async {
     calls.add(path);
+    bodies.add(body);
+    if (path == '/api/groups' && groupsFail) throw const ApiFailure('protocol');
     if (path == '/api/mobile/directory') {
       return {
         'devices': [
@@ -55,16 +59,17 @@ void main() {
     expect(find.text('Гости'), findsOneWidget);
     expect(find.text('Пользователи'), findsOneWidget);
     expect(find.text('Группы'), findsOneWidget);
-    expect(find.text('3'), findsOneWidget, reason: 'гостей трое (приглашённый, не подтверждённый, считается гостем)');
-    expect(find.text('2'), findsNWidgets(2), reason: 'пользователей и групп по два');
+    expect(find.text('2'), findsNWidgets(2), reason: 'гостей двое; групп две');
+    expect(find.text('3'), findsOneWidget, reason: 'пользователей трое: приглашённый по цепочке доверия — пользователь');
 
     await t.tap(find.text('Гости'));
     await t.pump();
     expect(find.text('Гость Антон'), findsOneWidget);
-    expect(find.text('Гость Вера'), findsOneWidget);
+    expect(find.text('Гость Борис'), findsOneWidget);
+    expect(find.text('Гость Вера'), findsNothing, reason: 'приглашённый — пользователь, не гость');
     expect(find.text('Телефон Ани'), findsNothing, reason: 'авторизованные — в своей карточке');
     expect(find.text('Онлайн'), findsOneWidget);
-    expect(find.text('Не в сети'), findsNWidgets(2));
+    expect(find.text('Не в сети'), findsOneWidget);
     await t.tap(find.text('Назад'));
     await t.pump();
 
@@ -73,8 +78,9 @@ void main() {
     expect(find.text('Телефон Ани'), findsOneWidget);
     expect(find.text('в контактах'), findsOneWidget, reason: 'сохранённый контакт остаётся в общем списке с отметкой');
     expect(find.text('Планшет'), findsOneWidget);
+    expect(find.text('Гость Вера'), findsOneWidget);
     expect(find.text('Онлайн'), findsOneWidget);
-    expect(find.text('Не в сети'), findsOneWidget);
+    expect(find.text('Не в сети'), findsNWidgets(2));
 
     await t.tap(find.text('Назад'));
     await t.pump();
@@ -89,6 +95,7 @@ void main() {
     await t.pumpWidget(const SizedBox());
   });
   englishTest();
+  extraTests();
 }
 
 void englishTest() {
@@ -103,6 +110,43 @@ void englishTest() {
     expect(find.text('Guests'), findsOneWidget);
     expect(find.text('Users'), findsOneWidget);
     expect(find.text('Groups'), findsOneWidget);
+    await t.pumpWidget(const SizedBox());
+  });
+}
+
+void extraTests() {
+  Future<void> open(WidgetTester t, _Api api) async {
+    await t.pumpWidget(PreferencesScope(
+      preferences: AppPreferences(),
+      child: MaterialApp(home: Scaffold(body: SingleChildScrollView(child: SearchFeature(api: api, isActive: () => true, onFailure: (_) {})))),
+    ));
+    await t.pump();
+    await t.pump();
+  }
+
+  testWidgets('сбой каталога групп не прячет людей', (t) async {
+    final api = _Api()..groupsFail = true;
+    await open(t, api);
+    expect(find.text('Гости'), findsOneWidget);
+    await t.tap(find.text('Гости'));
+    await t.pump();
+    expect(find.text('Гость Антон'), findsOneWidget, reason: 'люди загружены независимо от групп');
+    await t.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('«Удалить из контактов» шлёт remove и unhide, а не hide', (t) async {
+    final api = _Api();
+    await open(t, api);
+    await t.tap(find.text('Пользователи'));
+    await t.pump();
+    await t.tap(find.text('Телефон Ани'));
+    await t.pumpAndSettle();
+    expect(find.text('Удалить из контактов'), findsOneWidget, reason: 'сохранённый контакт: пункт удаления');
+    expect(find.text('Добавить в контакты'), findsNothing);
+    await t.tap(find.text('Удалить из контактов'));
+    await t.pumpAndSettle();
+    final actions = [for (var i = 0; i < api.calls.length; i++) if (api.calls[i] == '/api/mobile/phone-action') '${api.bodies[i]?['action']}'];
+    expect(actions, ['remove', 'unhide'], reason: 'не hide');
     await t.pumpWidget(const SizedBox());
   });
 }

@@ -2509,7 +2509,7 @@ async fn mobile_other_devices_handler() -> impl IntoResponse {
 }
 
 /// Все люди узла для страницы «Поиск» оболочки: гости и пользователи, в сети и не в сети, с ролью, именем, картинкой и отметкой «в контактах».
-/// Остаются в списке, пока аккаунт не удалён администратором или самим человеком.
+/// Остаются в списке, пока запись жива: удалена администратором или самим человеком (гость — ещё и после суток молчания или перезапуска узла).
 pub(crate) async fn mobile_directory_handler() -> impl IntoResponse {
     crate::mobile_self::init_phone_status();
     let mut list: Vec<serde_json::Value> = crate::mobile_api::devices_overview()

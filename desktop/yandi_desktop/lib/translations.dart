@@ -1,5 +1,11 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Не удалось получить данные узла.': 'Could not get data from the node.',
+  'Добавить в контакты': 'Add to contacts',
+  'Пока никого нет.': 'Nobody yet.',
+  'Не показывать скрытых': 'Do not show hidden',
+  'Не показывать скрытые': 'Do not show hidden',
+  'Все группы узла: вступить или попросить приглашение': 'All groups of the node: join or ask for an invitation',
   'скрыт': 'hidden',
   'Пользователи': 'Users',
   'Гости': 'Guests',
@@ -550,6 +556,7 @@ const moreEnglishLabels = <String, String>{
   ' · писать запрещено': ' · muted',
 };
 const englishTemplates = <String, String>{
+  '{0} уч.': '{0} members',
   'Гости ({0})': 'Guests ({0})',
   'Пользователи ({0})': 'Users ({0})',
   'Группы ({0})': 'Groups ({0})',

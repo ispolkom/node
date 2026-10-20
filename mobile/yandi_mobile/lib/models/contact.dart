@@ -14,8 +14,8 @@ class Contact {
   /// Роль человека на узле: guest / invited / user / owner (пусто — узел не сообщил). По ней список делится на «Гости» и «Пользователи».
   final String role;
 
-  /// Гость или приглашённый, ещё не подтверждённый администратором: ещё не авторизован.
-  bool get isGuestLevel => role == 'guest' || role == 'invited';
+  /// Гость (вошёл без кода). Приглашённый по цепочке доверия — уже пользователь с правами пользователя.
+  bool get isGuestLevel => role == 'guest';
 
   Contact({
     required this.peerId,

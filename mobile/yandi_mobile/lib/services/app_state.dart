@@ -17,6 +17,7 @@ import 'package:audioplayers/audioplayers.dart';
 import '../models/trusted_node.dart';
 import '../models/invite_payload.dart';
 import '../models/contact.dart';
+import '../models/contact_merge.dart';
 import '../models/group_invite.dart';
 import '../models/contact_card.dart';
 import '../models/message.dart';
@@ -635,6 +636,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// поэтому при смене он пересоздаётся: старый, оставшись с чужим списком, принял бы группы прежнего узла за удалённые и стёр ключи.
   void _switchTo(TrustedNode next) {
     _deviceProfilePublished = false;   // профиль публикуется на каждом узле отдельно
+    _lastUsers = const [];             // люди прежнего узла новому не принадлежат
     groups?.retire();
     _api?.switchNode(next);
     _ws?.switchNode(next);
@@ -658,39 +660,30 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   Future<void> refreshContacts() async {
     try {
-      final fromNode = await _api!.getContacts();
-      // то, что человек добавил в приложении, не должно пропадать при обновлении списка с узла
-      final saved = <String, String>{
-        for (final r in await StorageService.loadManualContacts())
-          r['peer_id'] as String: (r['name'] as String?) ?? '',
-      };
-      final merged = <Contact>[];
-      final seen = <String>{};
-      for (final c in fromNode) {
-        seen.add(c.peerId);
-        final name = saved[c.peerId];
-        // имя, которое человек задал в приложении (в том числе при переименовании), сильнее имени с узла
-        merged.add(name == null || name.isEmpty
-            ? c
-            : Contact(peerId: c.peerId, displayName: name, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs));
-      }
-      for (final e in saved.entries) {
-        if (seen.contains(e.key)) continue;
-        // знакомый только по Peer ID: «в сети», если узел видит его под тем же полным номером
-        merged.add(Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true));
-      }
-      // не владелец (гость, пользователь узла): список людей даёт каталог узла (ник, картинка, в сети); контактов владельца ему не отдают
+      final api = _api!;
+      // три источника читаются независимо: сбой одного (таймаут, чужой ответ) не прячет людей из остальных
+      List<Contact>? fromNode;
+      try { fromNode = await api.getContacts(); } catch (_) {}
+      Map<String, String> saved = const {};
+      try {
+        saved = {
+          for (final r in await StorageService.loadManualContacts())
+            r['peer_id'] as String: (r['name'] as String?) ?? '',
+        };
+      } catch (_) {}
+      // не владелец (гость, пользователь узла): список людей даёт каталог узла (все, в сети и не в сети, с ролью, ником, картинкой)
       if (myRole != 'owner') {
-        final fresh = await _api!.getUsers();
+        final fresh = await api.getUsers();
         if (fresh != null) _lastUsers = fresh;   // узел не ответил — остаётся прежний снимок, люди не пропадают
-        for (final u in _lastUsers) {
-          final id = u['peer_id'] as String? ?? '';
-          if (id.isEmpty || u['is_node'] == true || seen.contains(id) || merged.any((c) => c.peerId == id)) continue;
-          final nick = (u['nick'] as String? ?? '').trim();
-          merged.add(Contact(peerId: id, displayName: nick.isNotEmpty ? nick : (u['name'] as String? ?? id.substring(0, 12)), online: u['online'] == true, isManual: false, lastActivityMs: (u['last_activity_ms'] as num?)?.toInt() ?? 0, role: u['role'] as String? ?? ''));
-        }
+      } else if (fromNode == null) {
+        return;                                    // владельцу контакты не пришли: прежний список остаётся как есть
       }
-      contacts = merged.where((c) => !isBlocked(c.peerId)).toList();
+      contacts = mergeContacts(
+        fromNode: fromNode ?? const [],
+        catalog: myRole != 'owner' ? _lastUsers : const [],
+        savedNames: saved,
+        isBlocked: isBlocked,
+      );
       notifyListeners();
       announceReceiptSupport();
       _resyncAvatarsIfDue();

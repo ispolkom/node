@@ -48,26 +48,34 @@ class _SearchFeatureState extends State<SearchFeature> {
     String? err;
     List<Map<String, dynamic>>? people;
     List<Map<String, dynamic>>? catalog;
-    try {
-      people = listOf((await widget.api.request('/api/mobile/directory'))['devices']);
-    } catch (e) {
-      err = e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
-    }
-    try {
-      catalog = listOf((await widget.api.request('/api/groups'))['catalog']);
-    } catch (e) {
-      err ??= e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
-    }
+    await Future.wait([
+      () async {
+        try {
+          people = listOf((await widget.api.request('/api/mobile/directory'))['devices']);
+        } catch (e) {
+          err = e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
+        }
+      }(),
+      () async {
+        try {
+          catalog = listOf((await widget.api.request('/api/groups'))['catalog']);
+        } catch (e) {
+          err ??= e is ApiFailure ? e.message : 'Не удалось получить данные узла.';
+        }
+      }(),
+    ]);
     if (!active) return;
     setState(() {
-      if (people != null) {
-        users = people;
+      final p = people;
+      if (p != null) {
+        users = p;
         hiddenUsers
           ..clear()
-          ..addAll([for (final u in people) if (u['status'] == 'hidden') '${u['peer_id']}']);
+          ..addAll([for (final u in p) if (u['status'] == 'hidden') '${u['peer_id']}']);
         showHidden = true;
       }
-      if (catalog != null) groups = catalog;
+      final cg = catalog;
+      if (cg != null) groups = cg;
       loading = false;
       error = err;
     });
@@ -79,7 +87,7 @@ class _SearchFeatureState extends State<SearchFeature> {
       context: context,
       builder: (ctx) => AlertDialog(
         title: UiText(title),
-        content: TextField(controller: ctrl, autofocus: true, decoration: const InputDecoration(labelText: 'Имя')),
+        content: TextField(controller: ctrl, autofocus: true, decoration: InputDecoration(labelText: tr(context, 'Имя'))),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const UiText('Отмена')),
           TextButton(onPressed: () => Navigator.pop(ctx, ctrl.text.trim()), child: const UiText('Продолжить')),
@@ -227,7 +235,7 @@ class _SearchFeatureState extends State<SearchFeature> {
     ],
   );
 
-  bool isGuestLevel(Map<String, dynamic> u) => u['role'] == 'guest' || u['role'] == 'invited';
+  bool isGuestLevel(Map<String, dynamic> u) => u['role'] == 'guest'; // приглашённый по цепочке доверия — пользователь
 
   List<Widget> usersView({required bool guests}) {
     final all = [for (final u in users) if (isGuestLevel(u) == guests) u];
@@ -263,7 +271,7 @@ class _SearchFeatureState extends State<SearchFeature> {
               children: [
                 if ('${g['topic'] ?? ''}'.isNotEmpty) Text('${g['topic']}'),
                 UiText(g['kind'] == 'open' ? 'Открытая' : 'По приглашению'),
-                Text('${g['members'] ?? 0} уч.'),
+                UiText('${g['members'] ?? 0} уч.'),
                 if (g['owner_present'] == false) const UiText('владелец отсутствует'),
               ],
             ),
@@ -290,8 +298,8 @@ class _SearchFeatureState extends State<SearchFeature> {
 
   @override
   Widget build(BuildContext context) {
-    final guestCount = users.where((u) => isGuestLevel(u) && !hiddenUsers.contains('${u['peer_id']}')).length;
-    final userCount = users.where((u) => !isGuestLevel(u) && !hiddenUsers.contains('${u['peer_id']}')).length;
+    final guestCount = users.where(isGuestLevel).length;
+    final userCount = users.where((u) => !isGuestLevel(u)).length;
     final visibleGroups = groups.where((g) => !hiddenGroups.contains('${g['id']}')).length;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,

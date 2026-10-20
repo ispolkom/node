@@ -29,8 +29,8 @@ void main() {
       person('e', 'Ждёт подтверждения', 'invited'),
       person('f', 'Владелец', 'owner'),
     ]);
-    expect(visibleUsers(s, guests: true).map((c) => c.displayName), ['Гость онлайн', 'Гость давно', 'Ждёт подтверждения']);
-    expect(visibleUsers(s, guests: false).map((c) => c.displayName), ['Мама', 'Владелец', 'Папа давно']);
+    expect(visibleUsers(s, guests: true).map((c) => c.displayName), ['Гость онлайн', 'Гость давно']);
+    expect(visibleUsers(s, guests: false).map((c) => c.displayName), ['Мама', 'Владелец', 'Ждёт подтверждения', 'Папа давно']);
     expect(visibleUsers(s).length, 6, reason: 'в сети и не в сети — все');
   });
 

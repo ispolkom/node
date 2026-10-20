@@ -212,6 +212,8 @@ class CallService extends ChangeNotifier {
           ? tr('Лимит гостевых звонков на сегодня исчерпан (60 минут в сутки)')
           : tr('На узле сейчас много гостевых звонков. Попробуйте позже.');
     }
+    // гость звонит только через сервер звонков узла: без него прямое соединение обошло бы лимиты времени (15 минут, 60 в сутки)
+    if (audioOnly && t == null) refusal = tr('Звонки гостю недоступны: на узле не настроен сервер звонков');
     final lim = (t?['max_call_secs'] as num?)?.toInt();
     if (lim != null) { _limit = Duration(seconds: lim); _limitFrom = DateTime.now(); }
     if (t != null && refused == null) {
@@ -227,7 +229,11 @@ class CallService extends ChangeNotifier {
       }
     }
     turnMissing = servers.isEmpty;
-    return {'iceServers': servers, 'sdpSemantics': 'unified-plan', 'bundlePolicy': 'max-bundle'};
+    return {
+      'iceServers': servers, 'sdpSemantics': 'unified-plan', 'bundlePolicy': 'max-bundle',
+      // у гостя только relay: весь звук идёт через сервер звонков узла, и лимит действует
+      if (audioOnly) 'iceTransportPolicy': 'relay',
+    };
   }
 
   Future<void> _startMedia({required bool offerer}) async {

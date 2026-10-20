@@ -74,7 +74,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         child: StatefulBuilder(builder: (ctx, setS) {
           Future<void> save() async {
             final nick = ctrl.text.trim();
-            if (nick.isEmpty) { setS(() => error = tr('Введите ник: без него вас не увидят другие')); return; }
+            if (nick.isEmpty) { setS(() => error = tr('Введите ник: без него другие увидят вас только как устройство')); return; }
             final err = await state.setMyNick(nick);
             if (err != null) { setS(() => error = err); return; }
             if (ctx.mounted) Navigator.pop(ctx);
