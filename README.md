@@ -127,7 +127,7 @@ The console, the installer, `yandi --help`, the desktop shell and the phone app 
 - The packages are built on Debian 12; they have not been tested on Ubuntu yet. The phone app is young and has had far less testing than the node.
 - The network must not be called anonymous until the points above are closed.
 
-Plan and limits: [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md).
+Current security findings and their status: [`docs/SECURITY_STATUS.md`](docs/SECURITY_STATUS.md). Test results are those of [CI on GitHub Actions](https://github.com/ispolkom/node/actions); older audit reports live in [`docs/history/`](docs/history/) and describe the code of their date only. Plan and limits: [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md).
 
 ## Build from source
 
