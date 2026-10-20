@@ -536,6 +536,17 @@ const moreEnglishLabels = <String, String>{
   ' · писать запрещено': ' · muted',
 };
 const englishTemplates = <String, String>{
+  "Открытый ключ подписи: {0}": "Public signing key: {0}",
+  "Открытый ключ подписи: {0} (ещё не закреплён в программе)": "Public signing key: {0} (not pinned in the program yet)",
+  "Страна: {0}": "Country: {0}",
+  "Роли: {0}": "Roles: {0}",
+  "{0}: ещё не проверялся": "{0}: not probed yet",
+  "Узел {0}: отвечает": "Node {0}: answers",
+  "Узел {0}: не отвечает": "Node {0}: does not answer",
+  "Узел {0}: не проверялся": "Node {0}: not probed",
+  "Телефон {0}: отвечает": "Phone {0}: answers",
+  "Телефон {0}: не отвечает": "Phone {0}: does not answer",
+  "Телефон {0}: не проверялся": "Phone {0}: not probed",
   "{0} · {1} байт": "{0} · {1} bytes",
   "{0} · {1} участников": "{0} · {1} members",
   "{0} · {1} → {2}\n{3} · {4} Б · {5} пакетов · простой {6} с":

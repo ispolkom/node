@@ -180,6 +180,21 @@ class UiSelectableText extends StatelessWidget {
 }
 
 const englishLabels = <String, String>{
+  "Входной список узлов": "Entry node list",
+  "Ключ подписи списка хранится только в закрытой среде узла и никуда не передаётся; подписывает сам узел (yandi admin bootstrap sign).": "The list signing key is kept only in the node’s closed environment and is never transmitted; the node signs it itself (yandi admin bootstrap sign).",
+  "Закрытая среда заперта: ключ подписи недоступен.": "The closed environment is locked: the signing key is unavailable.",
+  "Скопировать открытый ключ": "Copy the public key",
+  "Заявки узлов": "Node applications",
+  "Узлы с белым IP сами присылают данные подключения тем, кто в списке. Заявка ничего не добавляет: решаете вы.": "Nodes with a public IP send their connection data to those in the list on their own. An application adds nothing: you decide.",
+  "Обновить заявки": "Refresh applications",
+  "Заявок нет.": "No applications.",
+  "Новая: адреса ещё прозваниваются": "New: the addresses are still being probed",
+  "Проверена: адрес ответил ключом узла": "Verified: an address answered with the node key",
+  "Не отвечает по заявленным адресам": "Does not answer at the declared addresses",
+  "Отклонена": "Declined",
+  "Уже в списке": "Already in the list",
+  "Неизвестный статус": "Unknown status",
+  "Скопировать команду для списка": "Copy the list command",
   'Скопировать код': 'Copy code',
   'Скопировано': 'Copied',
   ...moreEnglishLabels,

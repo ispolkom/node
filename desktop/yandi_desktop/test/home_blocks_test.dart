@@ -1,7 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_desktop/bootstrap_panel.dart';
 import 'package:yandi_desktop/home_blocks.dart';
+import 'package:yandi_desktop/preferences.dart';
+import 'package:yandi_desktop/transport/api.dart';
 import 'shell_m2_test.dart' as m2;
 import 'widget_test.dart' as m1;
 
@@ -104,4 +107,86 @@ void main() {
     expect(find.byKey(const ValueKey('qr-USDT|Tron (TRC-20)')), findsOneWidget);
     await m1.stop(t);
   });
+
+  testWidgets('панель входного списка: ключ подписи, заявки с результатом прозвона, копирование команды и отклонение; по-английски без русского', (t) async {
+    String clip = '';
+    t.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+      if (call.method == 'Clipboard.setData') clip = (call.arguments as Map)['text'] as String;
+      return null;
+    });
+    addTearDown(() => t.binding.defaultBinaryMessenger.setMockMethodCallHandler(SystemChannels.platform, null));
+    final api = _BootstrapApi();
+    Widget panel(bool en) => PreferencesScope(
+          preferences: AppPreferences()..english = en,
+          child: MaterialApp(
+            home: Scaffold(
+              body: SingleChildScrollView(child: BootstrapPanel(api: api, busy: false, isActive: () => true, mutate: (a) => a())),
+            ),
+          ),
+        );
+    t.view.physicalSize = const Size(1400, 2400);
+    t.view.devicePixelRatio = 1.0;
+    addTearDown(t.view.reset);
+    await t.pumpWidget(panel(false));
+    await t.pumpAndSettle();
+    expect(find.textContaining('Открытый ключ подписи: ${'b' * 64}'), findsOneWidget);
+    expect(find.text('Проверена: адрес ответил ключом узла'), findsOneWidget);
+    expect(find.text('Узел 203.0.113.5:9000: отвечает'), findsOneWidget);
+    expect(find.text('Телефон 203.0.113.5:8444: не отвечает'), findsOneWidget);
+    await t.tap(find.byKey(ValueKey('app-copy-${'a' * 64}')));
+    await t.pump();
+    expect(clip, 'yandi bootstrap from-card X', reason: 'в буфер уходит готовая команда для списка');
+    await t.tap(find.byKey(ValueKey('app-dismiss-${'a' * 64}')));
+    await t.pumpAndSettle();
+    expect(api.calls, contains('/api/admin/bootstrap/applications/dismiss'));
+    expect(api.dismissed, ['a' * 16]);
+    await t.pumpAndSettle(const Duration(seconds: 3));
+    // английский: ни одной русской надписи
+    await t.pumpWidget(panel(true));
+    await t.pumpAndSettle();
+    final cyr = RegExp(r'[А-Яа-яЁё]');
+    final texts = [
+      for (final w in find.byType(Text, skipOffstage: false).evaluate().map((e) => e.widget as Text)) if (w.data != null && cyr.hasMatch(w.data!)) w.data!,
+      for (final w in find.byType(SelectableText, skipOffstage: false).evaluate().map((e) => e.widget as SelectableText)) if (w.data != null && cyr.hasMatch(w.data!)) w.data!,
+    ];
+    expect(texts, isEmpty, reason: 'русский в английском режиме');
+    expect(find.text('Node 203.0.113.5:9000: answers'), findsOneWidget);
+  });
+}
+
+class _BootstrapApi extends m1.FakeApi {
+  final calls = <String>[];
+  final dismissed = <String>[];
+  @override
+  Future<Map<String, dynamic>> request(String path, {Map<String, dynamic>? body, String? method}) async {
+    calls.add(path);
+    if (path == '/api/admin/bootstrap/applications') {
+      return {
+        'applications': [
+          {
+            'id': 'a' * 64,
+            'key': 'b' * 64,
+            'addr': ['203.0.113.5:9000'],
+            'mobile': ['203.0.113.5:8444'],
+            'region': 'NL',
+            'roles': ['entry', 'guest'],
+            'received': 1,
+            'status': 'verified',
+            'probes': [
+              {'addr': '203.0.113.5:9000', 'kind': 'node', 'result': 'ok'},
+              {'addr': '203.0.113.5:8444', 'kind': 'mobile', 'result': 'fail'},
+            ],
+            'card': 'YANDI-NODE-1:x',
+            'command': 'yandi bootstrap from-card X',
+          },
+        ],
+      };
+    }
+    if (path == '/api/admin/bootstrap/pubkey') return {'unlocked': true, 'pubkey': 'b' * 64, 'pinned': true};
+    if (path == '/api/admin/bootstrap/applications/dismiss') {
+      dismissed.add('${body?['id']}');
+      return {'status': 'ok'};
+    }
+    return super.request(path, body: body, method: method);
+  }
 }

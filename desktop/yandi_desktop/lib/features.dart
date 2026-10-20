@@ -26,6 +26,7 @@ import 'voice.dart';
 import 'profile_panel.dart';
 import 'contact_tunnel.dart';
 import 'devices.dart';
+import 'bootstrap_panel.dart';
 import 'advanced_settings.dart';
 
 /// This subtree is disposed on lock, hide, disconnect and navigation.
@@ -1693,6 +1694,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
               DevicesPanel(
                 api: widget.api,
                 paired: true,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
+              BootstrapPanel(
+                api: widget.api,
                 busy: sending,
                 isActive: () => active,
                 mutate: (a) => mutate(a),
