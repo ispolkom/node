@@ -86,10 +86,8 @@ cat > "$OUT/ПАМЯТКА-${VSAFE}.txt" <<TXT
 Выпуск ${VERSION} (номер ${SEQ}), платформа deb.
 
 САЙТ (yandi.su):
-  0. Файлы уже лежат в site/update/deb/ (корень выпуска); архив ниже — для заливки через панель хостинга.
-  1. Распаковать ${ARCH}: получится папка update/ с подпапкой deb/.
-  2. Залить update/deb/ на сайт так, чтобы файлы лежали по адресу https://yandi.su/update/deb/
-     (MANIFEST.json, MANIFEST.json.sig, ${NAME}).
+  Файлы лежат в site/update/deb/ (корень выпуска). Архив всего сайта делает tools/pack_site.sh (в ~/Загрузки).
+  На сайте файлы должны лежать по адресу https://yandi.su/update/deb/ (MANIFEST.json, MANIFEST.json.sig, ${NAME}).
   Старые файлы в update/deb/ заменить целиком: манифест и пакет должны быть одной версии.
 
 GITHUB:
