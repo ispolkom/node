@@ -1,27 +1,27 @@
 {
-  "format": 1,
-  "network": "yandi",
-  "issued": 1792478916,
-  "expires": 1800254916,
-  "sequence": 4,
   "entries": [
     {
-      "id": "10dfe7117b3f88acfb5a3c8d931f173d8d03e3b6fbfdc86c52bd63f559423100",
-      "key": "81934d5ccb1d62d0cd560c2bfb533d5729b7b4f6e7d4d461bbaa387a48cb97af",
       "addr": [
         "185.77.205.3:9000"
+      ],
+      "id": "e96d01bcf6d85540f89bb5b988ac6465d36f2f7dbf1f3a106d0b222059423100",
+      "key": "cf6eb083dd21e440f9f557faf9d6ea1f1084c64a65a17db813ff36e15f216f88",
+      "mobile": [
+        "185.77.205.3:8444"
       ],
       "region": "RU",
       "roles": [
         "entry",
         "relay",
         "guest"
-      ],
-      "mobile": [
-        "185.77.205.3:8444"
       ]
     }
   ],
-  "signer": "b4116c06480fbd2c9ead9fa82cc5ce7cdeade6ec6f2139413497256251adfaf0",
-  "signature": "926efe48406eeb350863f29470f84682f66b12e2ea49bbb8bd156725d63abf7e0a35cadd7884b436f193271fe66e9ff8d5de5e769d45016f92af8d109c8f7a0a"
+  "expires": 1800261959,
+  "format": 1,
+  "issued": 1792485959,
+  "network": "yandi",
+  "sequence": 5,
+  "signature": "3ab9b0578042dc6f934e3d71c27b194ed823aa00bc68d1018ce6b53e0eaba74493bf927049a7c62ab650552c3b28892b4be9e29b8c4b300cac7aefef421c440c",
+  "signer": "fb708518ec5ff7798bf5adbf13fd530f1178f1b7660f615e134b68a60ebc7779"
 }
