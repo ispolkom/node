@@ -15,7 +15,7 @@
 # Нужны: bash, curl (для URL), openssl 3, sha256sum, sudo. Фраза восстановления и пароли вводятся только в `yandi setup`.
 set -euo pipefail
 
-PUBKEY_DEFAULT="427e076fe0d91d06157cc2cf342310a2df9ee0ca8a0112e384798e080251395f"
+PUBKEY_DEFAULT="23a55aa8e0762e6ca9447dfa92ca401be2ba274c3571b7c3fc67bcb3c7abf43b"
 FROM="https://yandi.su/update/deb/"
 MODE=""; VERIFY_ONLY=0; NO_SERVICE=0; YES=0; PUBKEY="$PUBKEY_DEFAULT"; LANG_ARG=""
 
