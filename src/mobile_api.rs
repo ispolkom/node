@@ -205,28 +205,24 @@ fn touch_guest(peer: &str) {
     });
 }
 
-/// Видит ли устройство `me` присутствие устройства `peer`: гость не видит ничьего (P10-4), а присутствие гостей не видят пользователи узла.
-fn presence_allowed(me: &str, peer: &str) -> bool {
-    !is_guest_peer(me) && !(is_guest_peer(peer) && is_user_role(me))
+/// Видит ли устройство `me` присутствие устройства `peer`: видят все друг друга (гости и пользователи пишут и звонят друг другу).
+/// Скрытый пользователь (без публичного ника) в списках не показывается, а IP никому не раскрывается (docs/GUEST.md).
+fn presence_allowed(_me: &str, _peer: &str) -> bool {
+    true
 }
 
-/// Живые сигналы (звонки) идут только негостевым устройствам и только от них (P10-5).
-fn live_allowed(me: &str) -> bool {
-    !is_guest_peer(me)
+/// Живые сигналы (звонки) идут между любыми устройствами, включая гостей. Видео гостю закрыто в приложении (сигнал зашифрован, узел его вид
+/// не различает); время и число звонков гостя держит узел (срок доступа к серверу звонков).
+fn live_allowed(_me: &str, _peer: &str) -> bool {
+    true
 }
 
-/// Что гостю закрыто сверх закрытого пользователю: группы, прокси-выход, TURN (звонки), каталог пользователей. Файлы открыты, но под лимитами.
+/// Что гостю закрыто сверх закрытого пользователю: группы и выход в интернет (прокси). Каталог пользователей. Файлы открыты, но под лимитами.
 fn guest_blocked(method: &axum::http::Method, path: &str) -> bool {
-    use axum::http::Method;
     owner_only_path(method, path)
-        // профиль и жалобы пишутся в постоянное хранилище: гостю закрыты, пока владелец не примет его (docs/GUEST.md, P10-2)
-        || (path == "/mobile/me/profile" && method != Method::GET)
-        || (path == "/mobile/complaints" && method == Method::POST)
+        // группы и выход в интернет гостю закрыты. Ник, жалобы, список пользователей и аудиозвонки (/mobile/turn с лимитом) открыты (docs/GUEST.md))
         || path.starts_with("/mobile/groups")
         || path.starts_with("/mobile/proxy")
-        || path == "/mobile/turn"
-        || path == "/mobile/users"
-        || path.starts_with("/mobile/users/")
 }
 
 /// Что недоступно роли `user`: личная переписка и контакты ПК, отправка от имени узла, профиль владельца.
@@ -1242,8 +1238,27 @@ struct PairRequest {
     token_hash: String,
     name: String,
     created_ms: u64,
+    /// что гость написал администратору («прошу авторизовать мой профиль…»); только в памяти, до 300 знаков
+    text: String,
     /// pending | accepted | rejected
     state: &'static str,
+}
+
+const MAX_REQUEST_TEXT: usize = 300;
+
+/// Текст обращения гостя: без управляющих знаков и ссылок, не длиннее `MAX_REQUEST_TEXT`.
+fn clean_request_text(raw: &str) -> Result<String, &'static str> {
+    let t: String = raw.chars().filter(|c| !c.is_control() || *c == '\n').collect::<String>().trim().chars().take(MAX_REQUEST_TEXT).collect();
+    if crate::content_policy::find_link(&t).is_some() {
+        return Err("ссылки в YANDI не передаются: в обращении не должно быть адреса сайта");
+    }
+    Ok(t)
+}
+
+#[derive(Deserialize, Default)]
+struct PairRequestBody {
+    #[serde(default)]
+    text: String,
 }
 
 /// Только в оперативной памяти: ни IP, ни текста, только метка устройства и решение; перезапуск узла очередь стирает.
@@ -1264,7 +1279,17 @@ fn short_mark(peer: &str) -> String {
 }
 
 /// Гость просит сопряжения. Один запрос на устройство в сутки (отклонённый тоже занимает слот).
-async fn pair_request_post(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+async fn pair_request_post(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, body: axum::body::Bytes) -> Response {
+    // тело необязательно (старые приложения шлют пустой запрос): {"text": "..."}
+    let text = if body.is_empty() || body.len() > 4096 {
+        String::new()
+    } else {
+        match serde_json::from_slice::<PairRequestBody>(&body).map(|b| clean_request_text(&b.text)) {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => return (StatusCode::BAD_REQUEST, Json(json!({"error": e}))).into_response(),
+            Err(_) => String::new(),
+        }
+    };
     let Some((name, role)) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| (x.name.clone(), x.role.clone()))) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
@@ -1282,7 +1307,7 @@ async fn pair_request_post(axum::Extension(DeviceKey(dev)): axum::Extension<Devi
         let mut b = [0u8; 8];
         rand::thread_rng().fill_bytes(&mut b);
         let id = hex::encode(b);
-        l.push(PairRequest { id: id.clone(), token_hash: dev.clone(), name, created_ms: now_ms(), state: "pending" });
+        l.push(PairRequest { id: id.clone(), token_hash: dev.clone(), name, created_ms: now_ms(), text: text.clone(), state: "pending" });
         Ok((id, "pending"))
     });
     match out {
@@ -1309,7 +1334,8 @@ pub(crate) fn pair_requests_pending() -> Vec<serde_json::Value> {
     v.into_iter()
         .map(|r| {
             let mark = with_devices(|d| d.iter().find(|x| x.token_hash == r.token_hash).map(|x| short_mark(&x.peer_id()))).unwrap_or_default();
-            json!({"id": r.id, "name": r.name, "mark": mark, "created_ms": r.created_ms, "expires_ms": r.created_ms + PAIR_REQUEST_TTL_MS})
+            let nick = with_devices(|d| d.iter().find(|x| x.token_hash == r.token_hash).map(|x| crate::device_profile::public(&x.peer_id()).0)).unwrap_or_default();
+            json!({"id": r.id, "name": r.name, "nick": nick, "mark": mark, "text": r.text, "created_ms": r.created_ms, "expires_ms": r.created_ms + PAIR_REQUEST_TTL_MS})
         })
         .collect()
 }
@@ -2156,7 +2182,13 @@ async fn device_profile_put(axum::Extension(DeviceKey(dev)): axum::Extension<Dev
 
 /// Пользователи узла: сопряжённые устройства со своими никами и картинками и статусом «в сети». Себя не включает.
 async fn users_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Json<serde_json::Value> {
-    let me = device_peer_of(&dev);
+    Json(json!({"users": users_for(&dev, &hex::encode(st.my_id.0))}))
+}
+
+/// Список пользователей для устройства `dev` (хэш токена); `node_hex` — номер самого узла («Компьютер»).
+fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
+    let me = device_peer_of(dev);
+    let guest = is_guest_device(dev);
     let mut out = Vec::new();
     for d in with_devices(|d| d.clone()) {
         let pid = d.peer_id();
@@ -2164,10 +2196,16 @@ async fn users_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKe
             continue;
         }
         let (nick, hash) = crate::device_profile::public(&pid);
+        // гостю: только устройства, которые не скрыты (есть публичный ник); гости видны друг другу
+        if guest && nick.is_empty() {
+            continue;
+        }
         out.push(json!({"peer_id": pid, "name": d.name, "nick": nick, "avatar_hash": hash, "online": live_count(&pid) > 0, "last_activity_ms": d.last_activity_ms()}));
     }
-    out.push(json!({"peer_id": hex::encode(st.my_id.0), "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
-    Json(json!({"users": out}))
+    if !guest {
+        out.push(json!({"peer_id": node_hex, "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
+    }
+    out
 }
 
 async fn user_avatar(axum::Extension(DeviceKey(_dev)): axum::Extension<DeviceKey>, Path(peer): Path<String>) -> Response {
@@ -2591,14 +2629,28 @@ async fn turn_credentials(axum::Extension(DeviceKey(dev)): axum::Extension<Devic
         )
             .into_response();
     };
-    const TTL: u64 = 6 * 3600;
-    let username = format!("{}:{}", now_ms() / 1000 + TTL, &dev[..dev.len().min(16)]);
+    // гостю доступ к серверу звонков выдаётся на 15 минут и не больше четырёх раз в сутки (60 минут); узел считает и общий потолок
+    let guest = is_guest_device(&dev);
+    let ttl: u64 = if guest {
+        match crate::guest::reserve_call(&dev, Instant::now()) {
+            Ok(secs) => secs,
+            Err(crate::guest::CallRefusal::DayLimit) => {
+                return (StatusCode::TOO_MANY_REQUESTS, Json(json!({"error": "гостю доступно 60 минут звонков в сутки: лимит исчерпан", "reason": "call_day_limit"}))).into_response();
+            }
+            Err(crate::guest::CallRefusal::Busy) => {
+                return (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error": "на узле сейчас идёт максимум гостевых звонков; попробуйте позже", "reason": "call_busy"}))).into_response();
+            }
+        }
+    } else {
+        6 * 3600
+    };
+    let username = format!("{}:{}", now_ms() / 1000 + ttl, &dev[..dev.len().min(16)]);
     let Ok(mut mac) = Hmac::<sha1::Sha1>::new_from_slice(c.secret.as_bytes()) else {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     };
     mac.update(username.as_bytes());
     let credential = base64::engine::general_purpose::STANDARD.encode(mac.finalize().into_bytes());
-    Json(json!({"host": c.host, "port": c.port, "username": username, "credential": credential, "ttl": TTL})).into_response()
+    Json(json!({"host": c.host, "port": c.port, "username": username, "credential": credential, "ttl": ttl, "max_call_secs": if guest { Some(ttl) } else { None }, "audio_only": guest})).into_response()
 }
 
 async fn ws(
@@ -2719,8 +2771,8 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                     }
                 }
                 Ok(Event::Live(m)) => {
-                    // гость звонков и живых сигналов не получает (docs/GUEST.md, P10-5)
-                    if m.to == me && live_allowed(&me) {
+                    // гость получает сигналы звонка только от негостевых устройств (docs/GUEST.md, P10-5)
+                    if m.to == me && live_allowed(&me, &m.from) {
                         if let (Some(from), Ok(p)) = (hex32(&m.from), base64::engine::general_purpose::STANDARD.decode(&m.payload_b64)) {
                             if sock.send(Message::Binary(frame(FT_LIVE_MSG, &from, m.ts, &p))).await.is_err() { break; }
                         }
@@ -2758,13 +2810,19 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                 let Message::Binary(d) = msg else { if matches!(msg, Message::Close(_)) { break } else { continue } };
                 match d.first().copied() {
                     Some(FT_PING) => { if sock.send(Message::Binary(vec![FT_PONG])).await.is_err() { break; } }
-                    Some(FT_SEND_LIVE) if d.len() >= 37 && !live_allowed(&me) => continue, // гость не звонит и не шлёт живых сигналов
                     Some(FT_SEND_LIVE) if d.len() >= 37 => {
                         let mut id = [0u8; 32];
                         id.copy_from_slice(&d[1..33]);
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
                         let to = hex::encode(id);
+                        // гость пока не звонит на компьютер владельца (звонков на ПК нет): сообщаем «не на связи», чтобы телефон не висел
+                        if is_guest_peer(&me) && HashId(id) == st.my_id {
+                            let mut f = vec![FT_PEER_OFFLINE];
+                            f.extend_from_slice(&id);
+                            if sock.send(Message::Binary(f)).await.is_err() { break; }
+                            continue;
+                        }
                         if HashId(id) == st.my_id {
                             if is_user_role(&me) || crate::mobile_self::is_blocked_phone(&me) {
                                 continue; // заблокированное устройство: и звонки, и сигналы компьютеру не доходят
@@ -3581,16 +3639,13 @@ mod guest_tests {
     }
 
     #[test]
-    fn a_guest_is_kept_out_of_groups_internet_calls_directories_and_the_owners_chats() {
+    fn a_guest_is_kept_out_of_groups_internet_and_the_owners_chats_but_has_users_calls_profile_and_complaints() {
         for (m, p) in [
             (Method::GET, "/mobile/groups"),
             (Method::POST, "/mobile/groups"),
             (Method::POST, "/mobile/groups/abc/join"),
             (Method::GET, "/mobile/groups/abc/files/1"),
             (Method::GET, "/mobile/proxy/info"),
-            (Method::GET, "/mobile/turn"),
-            (Method::GET, "/mobile/users"),
-            (Method::GET, "/mobile/users/abc/avatar"),
             (Method::GET, "/mobile/contacts"),
             (Method::POST, "/mobile/chat/abc"),
         ] {
@@ -3602,6 +3657,12 @@ mod guest_tests {
             (Method::GET, "/mobile/files"),
             (Method::POST, "/mobile/files"),
             (Method::GET, "/mobile/complaints"),
+            (Method::POST, "/mobile/complaints"),
+            (Method::PUT, "/mobile/me/profile"),
+            (Method::GET, "/mobile/users"),
+            (Method::GET, "/mobile/users/abc/avatar"),
+            (Method::GET, "/mobile/turn"),
+            (Method::POST, "/mobile/pair/request"),
             (Method::GET, "/mobile/info"),
             (Method::GET, "/mobile/pubkey/abc"),
         ] {
@@ -3641,7 +3702,7 @@ mod guest_tests {
         };
         // у гостя
         assert_eq!(call("/mobile/groups", guest.clone()).await, StatusCode::FORBIDDEN);
-        assert_eq!(call("/mobile/turn", guest.clone()).await, StatusCode::FORBIDDEN);
+        assert_eq!(call("/mobile/turn", guest.clone()).await, StatusCode::OK, "аудиозвонки гостю открыты (лимит выдаёт сама ручка)");
         assert_eq!(call("/mobile/proxy/info", guest.clone()).await, StatusCode::FORBIDDEN);
         assert_eq!(call("/mobile/inbox", guest.clone()).await, StatusCode::OK);
         // у владельца
@@ -3651,12 +3712,17 @@ mod guest_tests {
     }
 
     #[tokio::test]
-    async fn guest_pairing_is_off_by_default_and_a_guest_lives_only_in_memory() {
+    async fn guest_pairing_is_on_by_default_off_when_the_owner_says_so_and_a_guest_lives_only_in_memory() {
         let _g = lock();
         crate::complaints::tests::fresh();
         wipe(&[]);
         let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("guest_pairing.json"));
-        assert!(!crate::guest::enabled(), "по умолчанию узел чужих без QR не принимает");
+        assert!(crate::guest::enabled(), "по умолчанию узел гостей принимает, пока владелец не выключил");
+        crate::guest::set_enabled(false).unwrap();
+        assert!(!crate::guest::enabled());
+        let off = pair_guest(Json(GuestPairReq { device_name: "Гость".into() })).await;
+        assert_eq!(off.status(), StatusCode::FORBIDDEN, "выключено владельцем — гостей нет");
+        crate::guest::set_enabled(false).unwrap();
         let r = pair_guest(Json(GuestPairReq { device_name: "Гость".into() })).await;
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
 
@@ -3782,17 +3848,17 @@ mod guest_tests {
         let b = add("guest", "qb");
         let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
         // подал дважды — запрос один
-        let first = body_of(pair_request_post(ext(&a)).await).await;
-        let again = body_of(pair_request_post(ext(&a)).await).await;
+        let first = body_of(pair_request_post(ext(&a), axum::body::Bytes::new()).await).await;
+        let again = body_of(pair_request_post(ext(&a), axum::body::Bytes::new()).await).await;
         assert_eq!(first["id"], again["id"]);
         assert_eq!(first["state"], "pending");
-        body_of(pair_request_post(ext(&b)).await).await;
+        body_of(pair_request_post(ext(&b), axum::body::Bytes::new()).await).await;
         // владелец видит двоих, без адресов и без лишних полей
         let list = pair_requests_pending();
         assert_eq!(list.len(), 2);
         for r in &list {
             let keys: Vec<&String> = r.as_object().unwrap().keys().collect();
-            assert!(keys.iter().all(|k| ["id", "name", "mark", "created_ms", "expires_ms"].contains(&k.as_str())), "{keys:?}");
+            assert!(keys.iter().all(|k| ["id", "name", "nick", "mark", "text", "created_ms", "expires_ms"].contains(&k.as_str())), "{keys:?}");
         }
         // принять первого: роль user (не owner), на диск попадает как постоянное устройство
         let id_a = first["id"].as_str().unwrap();
@@ -3805,11 +3871,11 @@ mod guest_tests {
         decide_pair_request(&id_b, false).unwrap();
         assert_eq!(with_devices(|d| d.iter().find(|x| x.token_hash == b).map(|x| x.role.clone())).unwrap(), "guest");
         assert_eq!(body_of(pair_request_get(ext(&b)).await).await["state"], "rejected");
-        let retry = body_of(pair_request_post(ext(&b)).await).await;
+        let retry = body_of(pair_request_post(ext(&b), axum::body::Bytes::new()).await).await;
         assert_eq!(retry["state"], "rejected", "отклонённый не может завалить владельца новыми запросами");
         assert!(pair_requests_pending().is_empty());
         // уже сопряжённый просить не может
-        assert_eq!(pair_request_post(ext(&a)).await.status(), StatusCode::CONFLICT);
+        assert_eq!(pair_request_post(ext(&a), axum::body::Bytes::new()).await.status(), StatusCode::CONFLICT);
         requests_reset();
         wipe(&["qa", "qb"]);
     }
@@ -3823,9 +3889,9 @@ mod guest_tests {
         let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
         let ths: Vec<String> = (0..=MAX_PAIR_REQUESTS).map(|i| add("guest", &format!("c{i:02}"))).collect();
         for t in ths.iter().take(MAX_PAIR_REQUESTS) {
-            assert_eq!(pair_request_post(ext(t)).await.status(), StatusCode::OK);
+            assert_eq!(pair_request_post(ext(t), axum::body::Bytes::new()).await.status(), StatusCode::OK);
         }
-        assert_eq!(pair_request_post(ext(&ths[MAX_PAIR_REQUESTS])).await.status(), StatusCode::TOO_MANY_REQUESTS, "общий предел очереди");
+        assert_eq!(pair_request_post(ext(&ths[MAX_PAIR_REQUESTS]), axum::body::Bytes::new()).await.status(), StatusCode::TOO_MANY_REQUESTS, "общий предел очереди");
         // гость исчез — его запрос тоже
         with_devices(|d| d.retain(|x| x.token_hash != ths[0]));
         assert_eq!(pair_requests_pending().len(), MAX_PAIR_REQUESTS - 1);
@@ -3922,16 +3988,91 @@ mod guest_tests {
     }
 
     #[test]
-    fn a_guest_cannot_write_a_profile_or_a_complaint_but_can_read() {
+    fn a_guest_can_write_a_nick_and_a_complaint() {
         use axum::http::Method;
-        assert!(guest_blocked(&Method::PUT, "/mobile/me/profile"));
+        assert!(!guest_blocked(&Method::PUT, "/mobile/me/profile"));
         assert!(!guest_blocked(&Method::GET, "/mobile/me/profile"));
-        assert!(guest_blocked(&Method::POST, "/mobile/complaints"));
+        assert!(!guest_blocked(&Method::POST, "/mobile/complaints"));
         assert!(!guest_blocked(&Method::GET, "/mobile/complaints"));
     }
 
     #[test]
-    fn presence_and_live_signals_are_closed_to_guests() {
+    fn the_user_list_for_a_guest_has_named_devices_guests_included_and_no_computer_entry() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let guest = add("guest", "ug");
+        let guest2 = add("guest", "ug2");
+        let user = add("user", "uu");
+        let hidden = add("user", "uh");
+        crate::device_profile::put(&device_peer_of(&user).unwrap(), Some("Мама"), None, None).unwrap();
+        crate::device_profile::put(&device_peer_of(&guest2).unwrap(), Some("Другой гость"), None, None).unwrap();
+        let seen = json!({"users": users_for(&guest, &"ab".repeat(32))});
+        let nicks: Vec<String> = seen["users"].as_array().unwrap().iter().map(|u| u["nick"].as_str().unwrap_or("").to_string()).collect();
+        let mut nicks = nicks;
+        nicks.sort();
+        assert_eq!(nicks, vec!["Другой гость".to_string(), "Мама".to_string()], "гость видит именованных (и пользователей, и гостей); ни себя, ни безымянных, ни «Компьютер»: {seen}");
+        let _ = hidden;
+        let owner_view = json!({"users": users_for(&user, &"ab".repeat(32))});
+        assert!(owner_view["users"].as_array().unwrap().iter().any(|u| u["is_node"] == true), "пользователь узла, как раньше, видит «Компьютер»");
+        crate::device_profile::forget(&device_peer_of(&user).unwrap());
+        crate::device_profile::forget(&device_peer_of(&guest2).unwrap());
+        wipe(&["ug", "ug2", "uu", "uh"]);
+    }
+
+    #[tokio::test]
+    async fn a_pair_request_carries_the_guests_text_to_the_administrator() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        requests_reset();
+        let th = add("guest", "rt");
+        let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
+        let body = axum::body::Bytes::from(r#"{"text":"  Прошу авторизовать мой профиль, я знакомый Ивана  "}"#);
+        assert_eq!(pair_request_post(ext(&th), body).await.status(), StatusCode::OK);
+        let list = pair_requests_pending();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0]["text"], "Прошу авторизовать мой профиль, я знакомый Ивана");
+        // ссылка в обращении — отказ; слишком длинный текст обрезается
+        requests_reset();
+        let link = axum::body::Bytes::from(r#"{"text":"зайди на https://evil.example/x"}"#);
+        assert_eq!(pair_request_post(ext(&th), link).await.status(), StatusCode::BAD_REQUEST);
+        let long = axum::body::Bytes::from(format!(r#"{{"text":"{}"}}"#, "я".repeat(1000)));
+        assert_eq!(pair_request_post(ext(&th), long).await.status(), StatusCode::OK);
+        assert_eq!(pair_requests_pending()[0]["text"].as_str().unwrap().chars().count(), MAX_REQUEST_TEXT);
+        requests_reset();
+        wipe(&["rt"]);
+    }
+
+    #[tokio::test]
+    async fn guest_audio_access_to_the_call_server_is_limited_to_fifteen_minutes_and_four_a_day() {
+        let _g = lock();
+        crate::complaints::tests::fresh();
+        wipe(&[]);
+        let th = add("guest", "tg");
+        let owner = add("owner", "to");
+        std::fs::write(crate::util::data_dir::data_dir().join("turn.json"), r#"{"port":3478,"secret":"0123456789abcdef0123"}"#).unwrap();
+        crate::guest::forget(&th);
+        let ext = |t: &str| axum::Extension(DeviceKey(t.to_string()));
+        for _ in 0..crate::guest::CALLS_PER_DAY {
+            let b = body_of(turn_credentials(ext(&th)).await).await;
+            assert_eq!(b["ttl"], 15 * 60);
+            assert_eq!(b["audio_only"], true);
+        }
+        let r = turn_credentials(ext(&th)).await;
+        assert_eq!(r.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(body_of(r).await["reason"], "call_day_limit");
+        // владельцу — как прежде: шесть часов, без лимита
+        let b = body_of(turn_credentials(ext(&owner)).await).await;
+        assert_eq!(b["ttl"], 6 * 3600);
+        assert_eq!(b["audio_only"], false);
+        crate::guest::forget(&th);
+        let _ = std::fs::remove_file(crate::util::data_dir::data_dir().join("turn.json"));
+        wipe(&["tg", "to"]);
+    }
+
+    #[test]
+    fn guests_and_users_see_each_other_and_can_call_each_other() {
         let _g = lock();
         crate::complaints::tests::fresh();
         wipe(&[]);
@@ -3939,15 +4080,18 @@ mod guest_tests {
         let user = add("user", "pu");
         let owner = add("owner", "po");
         let (g, u, o) = (device_peer_of(&guest).unwrap(), device_peer_of(&user).unwrap(), device_peer_of(&owner).unwrap());
-        assert!(!presence_allowed(&g, &o), "гость не видит присутствие владельца");
-        assert!(!presence_allowed(&g, &u));
+        let g2 = device_peer_of(&add("guest", "pg2")).unwrap();
+        assert!(presence_allowed(&g, &o), "гость видит, на связи ли пользователь, чтобы написать и позвонить");
+        assert!(presence_allowed(&g, &u));
+        assert!(presence_allowed(&g, &g2), "гости видят друг друга");
         assert!(presence_allowed(&o, &g), "владелец видит гостей");
         assert!(presence_allowed(&o, &u));
-        assert!(!presence_allowed(&u, &g), "пользователи узла не видят присутствие гостей");
+        assert!(presence_allowed(&u, &g), "пользователи видят гостей");
         assert!(presence_allowed(&u, &o));
-        assert!(!live_allowed(&g));
-        assert!(live_allowed(&u) && live_allowed(&o));
-        wipe(&["pg", "pu", "po"]);
+        assert!(live_allowed(&g, &u) && live_allowed(&u, &g) && live_allowed(&g, &o), "гость звонит пользователям и принимает их звонки");
+        assert!(live_allowed(&g, &g2), "гость звонит гостю");
+        assert!(live_allowed(&u, &o));
+        wipe(&["pg", "pu", "po", "pg2"]);
     }
 
     #[test]
@@ -3959,7 +4103,7 @@ mod guest_tests {
         let th = add("guest", "dq");
         let (tx, rx) = (th.clone(), th.clone());
         let _ = (tx, rx);
-        with_pair_requests(|l| l.push(PairRequest { id: "r1".into(), token_hash: th.clone(), name: "dq".into(), created_ms: now_ms(), state: "pending" }));
+        with_pair_requests(|l| l.push(PairRequest { id: "r1".into(), token_hash: th.clone(), name: "dq".into(), created_ms: now_ms(), text: String::new(), state: "pending" }));
         let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
         let hs: Vec<_> = [true, false]
             .into_iter()

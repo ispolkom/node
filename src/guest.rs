@@ -1,6 +1,6 @@
 //! Гостевой уровень узла (docs/GUEST.md): устройство, сопряжённое без QR.
 //!
-//! * Опция узла «разрешить сопряжение без QR» — файл `guest_pairing.json`; по умолчанию выключена (узел принимает чужих только по воле оператора).
+//! * Опция узла «разрешить сопряжение без QR» — файл `guest_pairing.json`; по умолчанию ВКЛЮЧЕНА, пока владелец не выключит (владелец решает сам; файла нет — гости принимаются).
 //! * Общий бюджет гостей: сколько гостей помещается, как часто выдаются новые, через сколько бездействия гость исчезает.
 //! * Суточные квоты файлов гостя — только в оперативной памяти, на токен устройства; перезапуск и новый ключ их обнуляют (общий бюджет это компенсирует).
 //! * Адреса (IP) здесь не принимаются и не хранятся вовсе.
@@ -26,13 +26,14 @@ fn path() -> std::path::PathBuf {
     crate::util::data_dir::data_dir().join("guest_pairing.json")
 }
 
-/// Включено ли сопряжение без QR (нет файла или не читается — выключено).
+/// Включено ли сопряжение без QR. По умолчанию ВКЛЮЧЕНО: пока владелец сам не выключил, узел принимает гостей. Файл есть и в нём
+/// не `true` (или не читается) — выключено: ошибка чтения не должна молча открывать узел, раз владелец уже что-то решил.
 pub fn enabled() -> bool {
-    std::fs::read_to_string(path())
-        .ok()
-        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-        .map(|v| v["enabled"] == true)
-        .unwrap_or(false)
+    match std::fs::read_to_string(path()) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(_) => false,
+        Ok(s) => serde_json::from_str::<serde_json::Value>(&s).ok().map(|v| v["enabled"] == true).unwrap_or(false),
+    }
 }
 
 pub fn set_enabled(on: bool) -> Result<(), String> {
@@ -81,6 +82,46 @@ pub fn reserve_file(token_hash: &str, size: u64) -> Result<(), &'static str> {
 /// Забыть квоту гостя (гость удалён).
 pub fn forget(token_hash: &str) {
     quotas().lock().unwrap_or_else(|e| e.into_inner()).remove(token_hash);
+    calls().lock().unwrap_or_else(|e| e.into_inner()).remove(token_hash);
+}
+
+/// Звонки гостя: только аудио; доступ к серверу звонков выдаётся на `CALL_SECS`, звонков за скользящие сутки не больше `CALLS_PER_DAY`
+/// (= 60 минут в сутки), а одновременно на весь узел не больше `MAX_LIVE_CALLS` гостевых звонков.
+pub const CALL_SECS: u64 = 15 * 60;
+pub const CALLS_PER_DAY: usize = 4;
+pub const MAX_LIVE_CALLS: usize = 4;
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum CallRefusal {
+    /// гость исчерпал 60 минут в сутки
+    DayLimit,
+    /// на узле уже идёт максимум гостевых звонков
+    Busy,
+}
+
+fn calls() -> &'static Mutex<HashMap<String, VecDeque<Instant>>> {
+    static C: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Занять гостю один звонок (на `CALL_SECS`). Вызывается при выдаче доступа к серверу звонков.
+pub fn reserve_call(token_hash: &str, now: Instant) -> Result<u64, CallRefusal> {
+    let mut g = calls().lock().unwrap_or_else(|e| e.into_inner());
+    for q in g.values_mut() {
+        while matches!(q.front(), Some(t) if now.duration_since(*t) >= DAY) {
+            q.pop_front();
+        }
+    }
+    let live = g.values().flat_map(|q| q.iter()).filter(|t| now.duration_since(**t) < Duration::from_secs(CALL_SECS)).count();
+    let mine = g.entry(token_hash.to_string()).or_default();
+    if mine.len() >= CALLS_PER_DAY {
+        return Err(CallRefusal::DayLimit);
+    }
+    if live >= MAX_LIVE_CALLS {
+        return Err(CallRefusal::Busy);
+    }
+    mine.push_back(now);
+    Ok(CALL_SECS)
 }
 
 fn issued() -> &'static Mutex<VecDeque<Instant>> {
@@ -208,6 +249,47 @@ mod tests {
         }
         // резерв не возвращается ни при каких условиях: метода «вернуть» нет, окно двигается только временем
         assert!(q.reserve(t0 + DAY - Duration::from_secs(1), 1).is_err());
+    }
+
+    #[test]
+    fn a_guest_gets_four_fifteen_minute_calls_a_day_and_the_window_slides() {
+        for t in ["c1", "c2"] { forget(t); }
+        let t0 = Instant::now();
+        for _ in 0..CALLS_PER_DAY {
+            assert_eq!(reserve_call("c1", t0), Ok(15 * 60));
+        }
+        assert_eq!(reserve_call("c1", t0), Err(CallRefusal::DayLimit), "пятый звонок за сутки — отказ (60 минут)");
+        assert_eq!(CALL_SECS * CALLS_PER_DAY as u64, 60 * 60);
+        assert_eq!(reserve_call("c1", t0 + DAY), Ok(15 * 60), "через сутки окно сдвинулось");
+        forget("c1");
+    }
+
+    #[test]
+    fn the_node_caps_simultaneous_guest_calls_and_frees_the_slot_when_a_call_ends() {
+        let ids: Vec<String> = (0..=MAX_LIVE_CALLS).map(|i| format!("cc{i}")).collect();
+        for t in &ids { forget(t); }
+        let t0 = Instant::now();
+        for t in &ids[..MAX_LIVE_CALLS] {
+            assert!(reserve_call(t, t0).is_ok());
+        }
+        assert_eq!(reserve_call(&ids[MAX_LIVE_CALLS], t0), Err(CallRefusal::Busy), "звонков одновременно не больше четырёх");
+        // через 15 минут прежние звонки кончились (доступ к серверу звонков истёк): место свободно
+        assert!(reserve_call(&ids[MAX_LIVE_CALLS], t0 + Duration::from_secs(CALL_SECS)).is_ok());
+        for t in &ids { forget(t); }
+    }
+
+    #[test]
+    fn guests_are_accepted_by_default_and_only_an_explicit_off_closes_the_node() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = std::fs::remove_file(path());
+        assert!(enabled(), "файла нет — владелец ещё ничего не решал, гости принимаются");
+        set_enabled(false).unwrap();
+        assert!(!enabled());
+        set_enabled(true).unwrap();
+        assert!(enabled());
+        std::fs::write(path(), b"\xff not json").unwrap();
+        assert!(!enabled(), "испорченный файл не открывает узел молча");
+        let _ = std::fs::remove_file(path());
     }
 
     #[test]

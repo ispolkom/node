@@ -9,6 +9,7 @@ import 'support_screen.dart';
 import '../theme.dart';
 import '../widgets/secure_text_field.dart';
 import '../widgets/avatar_circle.dart';
+import '../widgets/locked_notice.dart';
 import '../l10n.dart';
 
 const _emojis = ['😀','😎','🤓','🥳','😇','🤠','😺','🐱','🐶','🦊','🐼','🦁','🐯','🐸','🐵','🦉','🐧','🐢','🦄','🐙',
@@ -133,6 +134,30 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: ListView(
         children: [
+          if (state.isGuest) ...[
+            _Section(title: tr('Статус')),
+            ListTile(
+              key: const ValueKey('status-request'),
+              leading: const Icon(Icons.how_to_reg_outlined, color: AppTheme.textSecondary),
+              title: Text(tr('Запросить статус пользователя'), style: TextStyle(color: AppTheme.text)),
+              subtitle: Text(
+                switch (state.statusRequest) {
+                  'pending' => tr('Запрос отправлен, администратор ещё не ответил'),
+                  'rejected' => tr('Администратор отклонил запрос'),
+                  _ => tr('Вы гость. Напишите администратору узла, чтобы получить полный доступ'),
+                },
+                style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+              ),
+              onTap: state.statusRequest == 'pending' ? null : () => showStatusRequestDialog(context),
+            ),
+            ListTile(
+              key: const ValueKey('invite-device-guest'),
+              leading: const Icon(Icons.lock_outline, color: Color(0xFFFFC107)),
+              title: Text(tr('Приглашать другие устройства'), style: TextStyle(color: AppTheme.text)),
+              subtitle: Text(tr('Доступно после полной авторизации'), style: const TextStyle(color: Color(0xFFFFC107), fontSize: 12)),
+              onTap: () => showLockedNotice(context, what: tr('Приглашать другие устройства')),
+            ),
+          ],
           if (state.canInvite || state.myRole == 'invited') ...[
             _Section(title: tr('Приглашения')),
             if (state.canInvite)
@@ -221,9 +246,11 @@ class SettingsScreen extends StatelessWidget {
             trailing: Switch(
               value: state.vpnRunning,
               activeColor: AppTheme.accent,
-              onChanged: state.proxyHost != null || !state.vpnRunning
-                  ? (_) => state.toggleVpn()
-                  : null,
+              onChanged: state.isGuest
+                  ? (_) => showLockedNotice(context, what: tr('Выход в интернет через узел (VPN)'))
+                  : state.proxyHost != null || !state.vpnRunning
+                      ? (_) => state.toggleVpn()
+                      : null,
             ),
           ),
 

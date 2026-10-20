@@ -30,6 +30,7 @@ import '../theme.dart';
 import '../content_policy.dart';
 import '../widgets/link_guard.dart';
 import 'home_screen.dart' show showSaveContactDialog;
+import '../widgets/locked_notice.dart';
 import '../l10n.dart';
 
 class ChatScreen extends StatefulWidget {
@@ -504,7 +505,9 @@ class _ChatScreenState extends State<ChatScreen> {
                 IconButton(
                   tooltip: tr('Видеозвонок'),
                   icon: const Icon(Icons.videocam, color: AppTheme.accent),
-                  onPressed: () => _call(video: true),
+                  onPressed: () => context.read<AppState>().isGuest
+                      ? showLockedNotice(context, what: tr('Видеозвонки'))
+                      : _call(video: true),
                 ),
                 if (!saved)
                   IconButton(

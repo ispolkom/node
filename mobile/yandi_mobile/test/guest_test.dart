@@ -8,6 +8,7 @@ import 'package:yandi_mobile/models/guest_node.dart';
 import 'package:yandi_mobile/models/trusted_node.dart';
 import 'package:yandi_mobile/screens/guest_screen.dart';
 import 'package:yandi_mobile/services/guest_pair.dart';
+import 'package:yandi_mobile/widgets/locked_notice.dart';
 
 final fp = 'ab' * 32;
 
@@ -123,5 +124,35 @@ void main() {
     expect(find.textContaining('If you have no code or link'), findsOneWidget);
     expect(find.text('Attention'), findsOneWidget);
     expect(find.textContaining('Node 1'), findsNothing);
+  });
+  lockedNoticeTests();
+}
+
+void lockedNoticeTests() {
+  testWidgets('закрытая гостю возможность: жёлтое окно с пояснением, по-русски и по-английски', (t) async {
+    Future<void> open(WidgetTester t) async {
+      await t.pumpWidget(MaterialApp(home: Builder(builder: (c) => Scaffold(body: Center(child: ElevatedButton(onPressed: () => showLockedNotice(c, what: tr('Видеозвонки')), child: const Text('go')))))));
+      await t.tap(find.text('go'));
+      await t.pumpAndSettle();
+    }
+    await open(t);
+    expect(find.text('Доступно после полной авторизации'), findsOneWidget);
+    expect(find.byKey(const ValueKey('locked-what')), findsOneWidget);
+    expect(find.byKey(const ValueKey('locked-request')), findsOneWidget, reason: 'можно сразу запросить статус');
+    Lang.forTests(AppLang.en);
+    addTearDown(() => Lang.forTests(AppLang.ru));
+    await t.pumpWidget(const SizedBox());
+    await open(t);
+    expect(find.text('Available after full authorisation'), findsOneWidget);
+    expect(find.text('Video calls'), findsOneWidget);
+    expect(find.text('Got it'), findsOneWidget);
+  });
+
+  testWidgets('закрытая вкладка целиком: жёлтая рамка вместо содержимого, нажатие открывает пояснение', (t) async {
+    await t.pumpWidget(const MaterialApp(home: Scaffold(body: LockedPanel(title: 'Группы'))));
+    expect(find.text('Доступно после полной авторизации'), findsOneWidget);
+    await t.tap(find.byKey(const ValueKey('locked-panel')));
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('locked-body')), findsOneWidget);
   });
 }

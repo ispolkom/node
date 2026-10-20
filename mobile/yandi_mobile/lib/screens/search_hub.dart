@@ -9,6 +9,7 @@ import '../widgets/secure_field.dart';
 import '../widgets/group_logo.dart';
 import '../widgets/complaint_sheet.dart';
 import 'home_screen.dart' show showSaveContactDialog;
+import '../widgets/locked_notice.dart';
 import '../l10n.dart';
 
 /// Видимые пользователи: сопряжённые с узлом и не удалённые им за бездействие (давно не бывшие в сети не показываются).
@@ -65,7 +66,9 @@ class _SearchHubState extends State<SearchHub> {
               title: tr('Группы'),
               count: snap.connectionState == ConnectionState.done ? '$n' : '…',
               subtitle: tr('Все группы этого узла: вступить или попросить приглашение'),
-              onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GroupsCatalogScreen())),
+              onTap: () => state.isGuest
+                  ? showLockedNotice(context, what: tr('Группы'))
+                  : Navigator.of(context).push(MaterialPageRoute(builder: (_) => const GroupsCatalogScreen())),
             );
           },
         ),

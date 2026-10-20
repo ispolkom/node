@@ -397,8 +397,10 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (role != myRole || can != canInvite) {
         myRole = role;
         canInvite = can;
+        _syncRoleFlags();
         notifyListeners();
       }
+      if (role == 'guest') await refreshStatusRequest();
     } catch (_) {}
   }
 
@@ -410,6 +412,8 @@ class AppState extends ChangeNotifier implements FilesHost {
       _nodePeerId = info['node_id'] as String?;   // сам компьютер — не «человек»: аватарки ему не шлём
       myRole = info['role'] as String?;
       canInvite = info['can_invite'] == true;
+      _syncRoleFlags();
+      if (isGuest) unawaited(refreshStatusRequest());
 
       // Регистрируем свои публичные ключи на ноде (для E2E входящих)
       if (identity != null) {
@@ -674,6 +678,15 @@ class AppState extends ChangeNotifier implements FilesHost {
         if (seen.contains(e.key)) continue;
         // знакомый только по Peer ID: «в сети», если узел видит его под тем же полным номером
         merged.add(Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true));
+      }
+      // не владелец (гость, пользователь узла): список людей даёт каталог узла (ник, картинка, в сети); контактов владельца ему не отдают
+      if (myRole != null && myRole != 'owner') {
+        for (final u in await _api!.getUsers()) {
+          final id = u['peer_id'] as String? ?? '';
+          if (id.isEmpty || u['is_node'] == true || seen.contains(id) || merged.any((c) => c.peerId == id)) continue;
+          final nick = (u['nick'] as String? ?? '').trim();
+          merged.add(Contact(peerId: id, displayName: nick.isNotEmpty ? nick : (u['name'] as String? ?? id.substring(0, 12)), online: u['online'] == true, isManual: false, lastActivityMs: (u['last_activity_ms'] as num?)?.toInt() ?? 0));
+        }
       }
       contacts = merged.where((c) => !isBlocked(c.peerId)).toList();
       notifyListeners();
@@ -1126,6 +1139,22 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Роль этого устройства на узле (`owner` | `user` | `invited` | `guest`) и право приглашать другие устройства — от узла.
   String? myRole;
   bool canInvite = false;
+  /// Гость: ограниченная роль (нет групп, прокси, видео, приглашений); закрытое показывается с пояснением.
+  bool get isGuest => myRole == 'guest';
+  /// Запрос статуса пользователя у администратора: none / pending / accepted / rejected.
+  String statusRequest = 'none';
+  void _syncRoleFlags() { calls.audioOnly = isGuest; }
+
+  Future<String?> requestUserStatus(String text) async {
+    final err = await _api?.requestUserStatus(text);
+    if (err == null) { statusRequest = 'pending'; notifyListeners(); }
+    return err;
+  }
+
+  Future<void> refreshStatusRequest() async {
+    final st = await _api?.getStatusRequest();
+    if (st != null && st != statusRequest) { statusRequest = st; notifyListeners(); }
+  }
 
   /// Приглашение для нового устройства: текст `YANDI-PAIR-1:…` (его же показывает QR), ссылка `yandi://invite?…`, 8-значный код, PIN из 4 цифр
   /// (его называют приглашённому другим каналом) и срок жизни. Живёт час и переживает закрытие приложения.

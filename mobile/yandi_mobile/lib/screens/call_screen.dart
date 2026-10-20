@@ -132,7 +132,7 @@ class _CallScreenState extends State<CallScreen> {
       case CallPhase.calling:    return c.video ? tr('Видеозвонок · вызываю…') : tr('Вызываю…');
       case CallPhase.ringing:    return c.video ? tr('Входящий видеозвонок') : tr('Входящий звонок');
       case CallPhase.connecting: return tr('Соединяю…');
-      case CallPhase.active:     return CallService.formatDuration(c.elapsed);
+      case CallPhase.active:     return c.limitWarning.isEmpty ? CallService.formatDuration(c.elapsed) : '${CallService.formatDuration(c.elapsed)} · ${c.limitWarning}';
       case CallPhase.ended:      return c.endReason;
       case CallPhase.idle:       return '';
     }

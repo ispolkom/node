@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'dart:convert';
+import '../l10n.dart';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:http/http.dart' as http;
@@ -184,10 +185,41 @@ class ApiService {
       final res = await _client
           .get(_url('/mobile/turn'), headers: _headers)
           .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 429 || res.statusCode == 503) {
+        // гостю: лимит звонков (call_day_limit) или на узле занято (call_busy)
+        final j = jsonDecode(res.body) as Map<String, dynamic>;
+        return {'_refused': j['reason'] ?? 'call_busy'};
+      }
       if (res.statusCode != 200) return null;
       return jsonDecode(res.body) as Map<String, dynamic>;
     } catch (_) {
       return null;
+    }
+  }
+
+  /// Гость просит администратора узла дать ему статус пользователя (с коротким текстом). null — отправлено, иначе готовая фраза.
+  Future<String?> requestUserStatus(String text) async {
+    try {
+      final res = await _client
+          .post(_url('/mobile/pair/request'), headers: _headers, body: jsonEncode({'text': text}))
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) return null;
+      if (res.statusCode == 400) return tr('В обращении не должно быть ссылок.');
+      if (res.statusCode == 429) return tr('У администратора сейчас слишком много запросов. Повторите позже.');
+      return tr('Не удалось отправить запрос. Попробуйте позже.');
+    } catch (_) {
+      return tr('Не удалось отправить запрос. Попробуйте позже.');
+    }
+  }
+
+  /// Что с запросом статуса: none / pending / accepted / rejected.
+  Future<String> getStatusRequest() async {
+    try {
+      final res = await _client.get(_url('/mobile/pair/request'), headers: _headers).timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return 'none';
+      return (jsonDecode(res.body) as Map<String, dynamic>)['state'] as String? ?? 'none';
+    } catch (_) {
+      return 'none';
     }
   }
 

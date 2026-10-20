@@ -47,6 +47,16 @@ class CallService extends ChangeNotifier {
   String endReason = '';
   bool muted = false, speaker = false, cameraOn = true, turnMissing = false;
   DateTime? startedAt;
+  /// Гость: только аудио (видео закрыто). Выставляет AppState по роли устройства.
+  bool audioOnly = false;
+  /// Лимит звонка гостя (узел выдаёт доступ к серверу звонков на 15 минут): отсчёт от выдачи доступа.
+  Duration? _limit;
+  DateTime? _limitFrom;
+  Timer? _limitTimer, _warnTimer;
+  /// Узел отказал в доступе к серверу звонков (лимит суток / занято): готовая фраза для экрана.
+  String? refusal;
+  /// Предупреждение «через минуту звонок завершится» (только у гостя).
+  String limitWarning = '';
 
   RTCVideoRenderer? localRenderer;
   RTCVideoRenderer? remoteRenderer;
@@ -73,9 +83,10 @@ class CallService extends ChangeNotifier {
   Future<String?> start(String toPeerId, {required bool withVideo}) async {
     if (busy) return tr('Вы уже разговариваете');
     _reset();
-    peerId = toPeerId; cid = _newCid(); video = withVideo; incoming = false;
+    final wantVideo = withVideo && !audioOnly;
+    peerId = toPeerId; cid = _newCid(); video = wantVideo; incoming = false;
     phase = CallPhase.calling; endReason = '';
-    speaker = withVideo; cameraOn = withVideo;
+    speaker = wantVideo; cameraOn = wantVideo;
     notifyListeners();
     showScreen();
     final ok = await sendSignal(toPeerId, CallSignal.now('invite', cid!, video: video).encode());
@@ -112,9 +123,9 @@ class CallService extends ChangeNotifier {
           return;
         }
         _reset();
-        peerId = from; cid = s.cid; video = s.video; incoming = true;
+        peerId = from; cid = s.cid; video = s.video && !audioOnly; incoming = true;
         phase = CallPhase.ringing; endReason = '';
-        speaker = s.video; cameraOn = s.video;
+        speaker = video; cameraOn = video;
         notifyListeners();
         onIncomingNotify(from, nameOf(from), video);
         _playRing('sounds/calling.mp3');
@@ -193,8 +204,17 @@ class CallService extends ChangeNotifier {
 
   Future<Map<String, dynamic>> _iceConfig() async {
     final servers = <Map<String, dynamic>>[];
+    refusal = null;
     final t = await fetchTurn();
-    if (t != null) {
+    final refused = t?['_refused'];
+    if (refused != null) {
+      refusal = refused == 'call_day_limit'
+          ? tr('Лимит гостевых звонков на сегодня исчерпан (60 минут в сутки)')
+          : tr('На узле сейчас много гостевых звонков. Попробуйте позже.');
+    }
+    final lim = (t?['max_call_secs'] as num?)?.toInt();
+    if (lim != null) { _limit = Duration(seconds: lim); _limitFrom = DateTime.now(); }
+    if (t != null && refused == null) {
       final host = (t['host'] as String?) ?? nodeHost() ?? '';
       final port = (t['port'] as num?)?.toInt() ?? 3478;
       if (host.isNotEmpty) {
@@ -217,7 +237,13 @@ class CallService extends ChangeNotifier {
     try {
       localRenderer = RTCVideoRenderer();  remoteRenderer = RTCVideoRenderer();
       await localRenderer!.initialize();   await remoteRenderer!.initialize();
-      final pc = await createPeerConnection(await _iceConfig());
+      final cfg = await _iceConfig();
+      if (refusal != null) {
+        await _signal('hangup');
+        _finish(refusal!, log: true);
+        return;
+      }
+      final pc = await createPeerConnection(cfg);
       if (cancelled()) { await pc.close(); return; }
       _pc = pc;
       _pc!.onIceCandidate = (c) {
@@ -318,12 +344,38 @@ class CallService extends ChangeNotifier {
     }
   }
 
+  /// Гость: звонок обрывается, когда истёк срок доступа к серверу звонков (15 минут от выдачи); за минуту — предупреждение.
+  void _armLimit() {
+    final lim = _limit, from = _limitFrom;
+    if (lim == null || from == null) return;
+    final left = lim - DateTime.now().difference(from);
+    _limitTimer?.cancel(); _warnTimer?.cancel();
+    if (left <= Duration.zero) {
+      unawaited(_signal('hangup'));
+      _finish(tr('Лимит гостевого звонка: 15 минут'), log: true);
+      return;
+    }
+    _limitTimer = Timer(left, () {
+      unawaited(_signal('hangup'));
+      _finish(tr('Лимит гостевого звонка: 15 минут'), log: true);
+    });
+    if (left > const Duration(seconds: 60)) {
+      _warnTimer = Timer(left - const Duration(seconds: 60), () {
+        limitWarning = tr('Через минуту звонок завершится: лимит гостевого звонка 15 минут');
+        notifyListeners();
+      });
+    } else {
+      limitWarning = tr('Через минуту звонок завершится: лимит гостевого звонка 15 минут');
+    }
+  }
+
   void _onConnState(RTCPeerConnectionState s) {
     if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _lostTimer?.cancel();
       if (phase != CallPhase.active) {
         _connectTimer?.cancel();
         phase = CallPhase.active; startedAt = DateTime.now();
+        _armLimit();
         notifyListeners();
       }
     } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
@@ -365,7 +417,7 @@ class CallService extends ChangeNotifier {
 
   void _finish(String reason, {required bool log}) {
     if (phase == CallPhase.idle || phase == CallPhase.ended) return;
-    _ringTimer?.cancel(); _lostTimer?.cancel(); _connectTimer?.cancel(); _stopRing(); onIncomingCancel();
+    _ringTimer?.cancel(); _lostTimer?.cancel(); _connectTimer?.cancel(); _limitTimer?.cancel(); _warnTimer?.cancel(); _stopRing(); onIncomingCancel();
     final wasActive = phase == CallPhase.active;
     final dur = elapsed;
     final p = peerId, out = !incoming, v = video;
@@ -397,6 +449,7 @@ class CallService extends ChangeNotifier {
 
   void _reset() {
     _endTimer?.cancel();
+    _limitTimer?.cancel(); _warnTimer?.cancel(); _limit = null; _limitFrom = null; limitWarning = ''; refusal = null;
     phase = CallPhase.idle; peerId = null; cid = null; incoming = false; video = false;
     muted = false; startedAt = null; _remoteSet = false; _pendingIce.clear(); turnMissing = false;
   }

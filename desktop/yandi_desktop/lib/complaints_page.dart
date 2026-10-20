@@ -277,9 +277,19 @@ class _ComplaintsFeatureState extends State<ComplaintsFeature> {
               child: Row(
                 children: [
                   Expanded(
-                    child: Text(
-                      '${r['name']} · метка ${r['mark']} · ${when(r['created_ms'])}',
-                      style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '${tr(context, 'Гость')} ${(r['nick'] is String && (r['nick'] as String).trim().isNotEmpty) ? r['nick'] : r['name']} · ${tr(context, 'метка')} ${r['mark']} · ${when(r['created_ms'])}',
+                          style: const TextStyle(fontSize: 14, fontStyle: FontStyle.italic),
+                        ),
+                        if (r['text'] is String && (r['text'] as String).trim().isNotEmpty)
+                          Padding(
+                            padding: const EdgeInsets.only(top: 4),
+                            child: SelectableText('${tr(context, 'Обращение гостя:')} ${r['text']}', style: const TextStyle(fontSize: 14)),
+                          ),
+                      ],
                     ),
                   ),
                   const SizedBox(width: 8),

@@ -23,6 +23,7 @@ import 'files_tab.dart';
 import 'groups_tab.dart';
 import '../widgets/yandi_icons.dart';
 import '../widgets/avatar_circle.dart';
+import '../widgets/locked_notice.dart';
 import '../l10n.dart';
 
 class HomeScreen extends StatefulWidget {
@@ -375,7 +376,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
         actions: [
           // VPN toggle
           GestureDetector(
-            onTap: () => state.toggleVpn(),
+            onTap: () => state.isGuest ? showLockedNotice(context, what: tr('Выход в интернет через узел (VPN)')) : state.toggleVpn(),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 12),
               child: Row(
@@ -447,7 +448,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
             children: [
               _contactsBody(context, state),
               _searchBody(context, state),
-              const GroupsTab(),
+              state.isGuest ? LockedPanel(title: tr('Группы')) : const GroupsTab(),
               FilesTab(key: _filesKey),
             ],
           ),
