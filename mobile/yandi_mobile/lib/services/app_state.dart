@@ -1411,7 +1411,8 @@ class AppState extends ChangeNotifier implements FilesHost {
     if (api == null) return;
     final gen = _dataGen;
     final users = await api.getUsers();
-    if (gen != _dataGen || users == null || users.isEmpty) return;
+    if (gen != _dataGen) { unawaited(refreshDirectory()); return; }   // поколение сменилось: начать заново уже у нового узла
+    if (users == null || users.isEmpty) return;
     directory = users;
     notifyListeners();
     for (final u in users) {
@@ -1425,6 +1426,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
       if (_directoryHashes[id] == hash && _directoryAvatars.containsKey(id)) continue;
       final png = await api.getUserAvatar(id);
+      if (gen != _dataGen) return;   // узел сменился или приложение заблокировано, пока шла картинка
       if (png != null && AvatarMsg.hashOf(png) == hash) {
         _directoryAvatars[id] = png;
         _directoryHashes[id] = hash;

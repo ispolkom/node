@@ -121,23 +121,38 @@ pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Optio
     })
 }
 
+/// Сколько профиль должен пролежать, прежде чем его можно считать осиротевшим: только что зарегистрированное устройство успевает задать ник
+/// раньше, чем очистка увидит его в списке (гонка регистрации и очистки не стирает свежий профиль).
+pub const ORPHAN_MIN_AGE_MS: u64 = 10 * 60 * 1000;
+
 /// Забыть профили (ник, картинку) тех, кого на узле больше нет: гость пропал при перезапуске узла, а его ник и картинка остались на диске.
-/// `registered` — номера устройств, которые на узле есть. Возвращает, сколько профилей убрано.
+/// `registered` — номера устройств, которые на узле есть. Профили моложе `ORPHAN_MIN_AGE_MS` не трогаются. Возвращает, сколько убрано.
 pub fn retain_registered(registered: &std::collections::HashSet<String>) -> usize {
-    let gone: Vec<String> = with_store(|m| m.keys().filter(|k| !registered.contains(*k)).cloned().collect());
+    retain_registered_aged(registered, ORPHAN_MIN_AGE_MS)
+}
+
+pub(crate) fn retain_registered_aged(registered: &std::collections::HashSet<String>, min_age_ms: u64) -> usize {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+    let gone: Vec<String> = with_store(|m| {
+        m.iter().filter(|(k, e)| !registered.contains(*k) && now.saturating_sub(e.updated_ms) >= min_age_ms).map(|(k, _)| k.clone()).collect()
+    });
     for p in &gone {
         forget(p);
     }
-    // картинки без записи в индексе (остались от прерванной очистки)
+    // картинки без записи в индексе (остались от прерванной очистки): только старые файлы
+    let known: std::collections::HashSet<String> = with_store(|m| m.keys().cloned().collect());
     let mut files = 0;
     if let Ok(rd) = std::fs::read_dir(dir()) {
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
-            if let Some(peer) = name.strip_suffix(".png") {
-                if valid_peer(peer) && !registered.contains(peer) {
-                    let _ = std::fs::remove_file(e.path());
-                    files += 1;
-                }
+            let Some(peer) = name.strip_suffix(".png") else { continue };
+            if !valid_peer(peer) || registered.contains(peer) || known.contains(peer) {
+                continue;
+            }
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|d| d.as_millis() as u64 >= min_age_ms).unwrap_or(false);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+                files += 1;
             }
         }
     }
@@ -227,13 +242,19 @@ mod orphan_tests {
     use super::*;
 
     #[test]
-    fn profiles_of_vanished_devices_are_swept_and_registered_ones_stay() {
+    fn profiles_of_vanished_devices_are_swept_only_when_old_and_registered_ones_stay() {
         let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
         let (keep, gone) = ("a1".repeat(32), "b2".repeat(32));
         put(&keep, Some("Остаётся"), None, None).unwrap();
         put(&gone, Some("Пропал"), None, None).unwrap();
-        let reg: std::collections::HashSet<String> = [keep.clone()].into_iter().collect();
-        assert_eq!(retain_registered(&reg), 1);
+        // чужие записи общего хранилища (другие тесты) считаем «зарегистрированными»: проверяем только свои
+        let mut reg: std::collections::HashSet<String> = with_store(|m| m.keys().cloned().collect());
+        reg.remove(&gone);
+        // свежий профиль не стирается, даже если устройства нет в снимке: регистрация могла отстать от очистки
+        assert_eq!(retain_registered(&reg), 0, "свежий профиль не тронут");
+        assert_eq!(public(&gone).0, "Пропал");
+        // старый (возраст не меньше нуля) осиротевший — стирается, зарегистрированный остаётся
+        assert_eq!(retain_registered_aged(&reg, 0), 1);
         assert_eq!(public(&keep).0, "Остаётся");
         assert_eq!(public(&gone).0, "", "ник пропавшего не остался");
         forget(&keep);
