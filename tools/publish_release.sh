@@ -3,9 +3,9 @@
 #
 # Что делает: собирает .deb (tools/build_deb.sh) → резервирует номер выпуска (release/SEQ) → манифест MANIFEST.json (версия, номер,
 # SHA-256, платформа, срок действия, описание) → подпись ключом из фразы выпусков → раскладывает:
-#   dist/site/update/deb/        — то, что заливается на сайт как есть (папка update/deb/ на yandi.su)
+#   site/update/deb/ (корень выпуска)       — то, что заливается на сайт как есть (папка update/deb/ на yandi.su)
 #   dist/github/                 — ассеты для релиза на GitHub, имена с префиксом «deb-» (deb-MANIFEST.json, deb-….deb)
-#   «~/Рабочий стол/Релизы/»     — архив для заливки на сайт, пакет, ассеты GitHub и памятка
+#   archive/release_<версия>/    — архив для заливки на сайт, пакеты и памятка (корень выпуска)
 #
 # Фраза выпусков — две одинаковые строки на stdin (скрытый ввод в терминале); она нигде не сохраняется. Ключ подписи выводится из
 # неё Argon2id (отдельная соль: это НЕ ключ APK). Открытый ключ закреплён в release/yandi-release-pubkey.hex.
@@ -15,12 +15,12 @@
 #   YANDI_RELEASE_NOTES="что нового"  YANDI_RELEASE_EXPIRES_DAYS=120  — описание и срок действия (по умолчанию 120 дней)
 set -euo pipefail
 cd "$(dirname "$0")/.."
-command -v flutter >/dev/null 2>&1 || export PATH="$HOME/.local/flutter-sdk/bin:$PATH"
+source tools/paths.sh
 BUILD=0; NODE_ONLY=0
 for a in "$@"; do case "$a" in --build) BUILD=1;; --node-only) NODE_ONLY=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 PUB=release/yandi-release-pubkey.hex
 [ -f "$PUB" ] || { echo "нет $PUB"; exit 1; }
-# один выпуск за раз (общий замок с node_release.sh): номер, dist/site и dist/github не делятся между параллельными запусками
+# один выпуск за раз (общий замок с node_release.sh): номер, site/ и github/ не делятся между параллельными запусками
 [ ! -L release/.lock ] || { echo 'Недопустимый lock'; exit 1; }
 exec 9>release/.lock
 flock -x 9
@@ -64,9 +64,9 @@ else
 fi
 SEQ=$(python3 -I tools/release_seq.py release)
 
-SITE=dist/site/update/deb
-GH=dist/github
-rm -rf dist/site dist/github
+SITE="$SITE_DIR/update/deb"
+GH="$GH_DIR"
+rm -rf "$SITE" "$GH"
 mkdir -p "$SITE" "$GH"
 cp "$DEB" "$SITE/$NAME"
 FILES=("$NAME")
@@ -81,29 +81,29 @@ unset PHRASE_IN
 for f in MANIFEST.json MANIFEST.json.sig "${FILES[@]}"; do cp "$SITE/$f" "$GH/deb-$f"; done
 (cd "$GH" && sha256sum deb-* > SHA256SUMS)
 
-OUT="$HOME/Рабочий стол/Релизы"
+OUT="$ARCHIVE_DIR/release_${VERSION//+/-}"
 mkdir -p "$OUT"
 VSAFE="${VERSION//+/-}"
 ARCH="yandi-update-site_${VSAFE}.tar.gz"
-tar -C dist/site --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT/$ARCH" update
+tar -C "$SITE_DIR" --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT/$ARCH" update/deb
 cp "$DEB" "$OUT/$NAME"
 [ -n "$DDEB" ] && cp "$DDEB" "$OUT/$DNAME"
 # плоский архив ровно для заливки в update/deb/: только файлы, без вложенных папок
-ZIP="$HOME/Рабочий стол/yandi-su_update-deb.zip"
+ZIP="$OUT/yandi-su_update-deb.zip"
 rm -f "$ZIP"
 (cd "$SITE" && zip -q -X "$ZIP" MANIFEST.json MANIFEST.json.sig "${FILES[@]}")
-rm -rf "$OUT/github-assets_${VSAFE}" && cp -r "$GH" "$OUT/github-assets_${VSAFE}"
 cat > "$OUT/ПАМЯТКА.txt" <<TXT
 Выпуск ${VERSION} (номер ${SEQ}), платформа deb.
 
 САЙТ (yandi.su):
+  0. Файлы уже лежат в site/update/deb/ (корень выпуска); архив ниже — для заливки через панель хостинга.
   1. Распаковать ${ARCH}: получится папка update/ с подпапкой deb/.
   2. Залить update/deb/ на сайт так, чтобы файлы лежали по адресу https://yandi.su/update/deb/
      (MANIFEST.json, MANIFEST.json.sig, ${NAME}).
   Старые файлы в update/deb/ заменить целиком: манифест и пакет должны быть одной версии.
 
 GITHUB:
-  Создать релиз (Releases → Draft a new release) и приложить файлы из папки github-assets_${VSAFE}/
+  Создать релиз (Releases → Draft a new release) и приложить файлы из папки github/ (корень выпуска)
   (deb-MANIFEST.json, deb-MANIFEST.json.sig, deb-${NAME}). Релиз должен быть «latest».
 
 УСТАНОВКА ВРУЧНУЮ:
@@ -111,4 +111,4 @@ GITHUB:
   Проверка файла перед установкой: yandi-release verify <папка с файлами> --pubkey $(cat "$PUB") --min-seq 0
 TXT
 echo "готово: версия ${VERSION}, номер ${SEQ}"
-ls -la "$OUT"
+ls -la "$OUT" "$SITE"

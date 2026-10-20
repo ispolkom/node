@@ -14,6 +14,7 @@
 # После выпуска закоммитить публичные файлы, которые скрипт назовёт (открытый ключ, сертификат APK, release/SEQ).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source tools/paths.sh
 NEW=0; PLAN=0
 for a in "$@"; do case "$a" in --new-keys) NEW=1;; --plan) PLAN=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 PUB=release/yandi-release-pubkey.hex
@@ -63,4 +64,5 @@ unset PHRASE_IN KEY
 
 echo
 echo "Готово. Закоммитить публичные файлы: release/SEQ, $PUB, tools/install.sh$( [ -f "$CERT" ] && echo ", $CERT" )."
-echo "Файлы для сайта и GitHub: ~/Рабочий стол/Релизы/, yandi-su_update-deb.zip, yandi-su_update-android.zip, yandi-release.apk."
+bash tools/pack_site.sh
+echo "Для сайта: $SITE_DIR/update/ и архив в $ARCHIVE_DIR/. Для GitHub: $GH_DIR/."
