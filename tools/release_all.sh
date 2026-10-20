@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+# Полный выпуск одной командой: узел + оболочка ПК (подписанные .deb и манифест) и подписанный APK, все ключи — из ОДНОЙ фразы разработчика.
+#
+# Фразу вводит сам разработчик (скрыто, дважды); она нигде не сохраняется и не печатается, живёт только в памяти этого скрипта и передаётся
+# дочерним скриптам через стандартный ввод. Ключи выводятся из неё (отдельные соли: ключ выпусков узла/APK-манифестов и ключ подписи APK —
+# разные ключи).
+#
+#   bash tools/release_all.sh --new-keys   ПЕРВЫЙ выпуск с НОВОЙ фразой: пишет новый открытый ключ выпусков (release/yandi-release-pubkey.hex),
+#                                          подставляет его в tools/install.sh, убирает прежний сертификат APK (создастся новый), затем строит всё.
+#   bash tools/release_all.sh              следующие выпуски: фраза обязана совпасть с закреплённым ключом.
+#   bash tools/release_all.sh --plan       только проверить фразу и показать, что будет сделано (ничего не меняет и не строит).
+#   YANDI_RELEASE_NOTES="что нового"  YANDI_RELEASE_EXPIRES_DAYS=120   — описание и срок манифестов (по умолчанию 120 дней).
+#
+# После выпуска закоммитить публичные файлы, которые скрипт назовёт (открытый ключ, сертификат APK, release/SEQ).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+NEW=0; PLAN=0
+for a in "$@"; do case "$a" in --new-keys) NEW=1;; --plan) PLAN=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
+PUB=release/yandi-release-pubkey.hex
+CERT=mobile/yandi_mobile/android/signing/yandi-release-cert.pem
+ENV_CLEAN=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY)
+
+REL=target/release/yandi-release
+"${ENV_CLEAN[@]}" cargo build --release --offline --bin yandi-release >/dev/null 2>&1 || { echo "не собрался инструмент подписи"; exit 1; }
+
+echo "Фраза разработчика: не меньше 12 слов и 60 символов, регистр важен. Ввод не отображается."
+read -rs -p "Фраза: " P1; echo
+read -rs -p "Ещё раз: " P2; echo
+[ "$P1" = "$P2" ] || { echo "Фразы не совпали."; exit 1; }
+PHRASE_IN=$(printf '%s\n%s\n' "$P1" "$P2")
+unset P1 P2
+feed() { printf '%s\n' "$PHRASE_IN"; printf '%s\n' "$PHRASE_IN"; }   # две строки на каждый дочерний скрипт (по одной на «Фраза» и «Ещё раз»)
+
+KEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута (слишком слабая или не совпала)"; exit 1; }
+if [ "$NEW" = 0 ]; then
+  [ -f "$PUB" ] && [ "$KEY" = "$(cat "$PUB")" ] || { echo "Фраза не та: ключ не совпадает с $PUB. Для НОВОЙ фразы запустите с --new-keys."; exit 1; }
+  echo "Фраза верна: ключ совпадает с закреплённым ${KEY:0:16}…"
+else
+  echo "Новый открытый ключ выпусков: ${KEY}"
+  OLD=$(cat "$PUB" 2>/dev/null || true)
+  if [ "$PLAN" = 1 ]; then
+    echo "[план] будут изменены: $PUB, tools/install.sh (PUBKEY_DEFAULT), удалён сертификат APK $CERT (создастся новый)."
+  else
+    printf '%s\n' "$KEY" > "$PUB"
+    if [ -n "$OLD" ]; then sed -i "s/$OLD/$KEY/" tools/install.sh; fi
+    grep -q "$KEY" tools/install.sh || { echo "в tools/install.sh не нашёлся прежний ключ ($OLD): обновите PUBKEY_DEFAULT вручную на $KEY"; }
+    rm -f "$CERT"
+    echo "Записано: $PUB, tools/install.sh; прежний сертификат APK убран."
+  fi
+fi
+if [ "$PLAN" = 1 ]; then
+  echo "[план] затем: узел и оболочка — tools/publish_release.sh --build (сборка, .deb, манифест, подпись); APK — tools/apk_release.sh и tools/publish_android.sh."
+  echo "Проверка фразы завершена, ничего не изменено."
+  exit 0
+fi
+
+echo "=== Узел и оболочка ПК ==="
+feed | bash tools/publish_release.sh --build
+echo "=== APK ==="
+feed | bash tools/apk_release.sh
+feed | bash tools/publish_android.sh
+unset PHRASE_IN KEY
+
+echo
+echo "Готово. Закоммитить публичные файлы: release/SEQ, $PUB, tools/install.sh$( [ -f "$CERT" ] && echo ", $CERT" )."
+echo "Файлы для сайта и GitHub: ~/Рабочий стол/Релизы/, yandi-su_update-deb.zip, yandi-su_update-android.zip, yandi-release.apk."
