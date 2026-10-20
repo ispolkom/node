@@ -32,13 +32,8 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u al
 
 ## Проверка с настоящим демоном
 
-Из корня репозитория:
+Изолированная лаборатория (скрипты на Python в каталоге `chaos/`) убрана из репозитория и хранится у разработчика. Проверка идёт в отдельных user/network/mount namespaces на одноразовых узлах; зонды `tool/*_probe.dart` остались в репозитории.
 
-```bash
-env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u all_proxy nice -n 15 python3 chaos/desktop_shell_m1.py /absolute/path/to/current/yandi
-```
-
-Нужны `unshare`, `mount`, `ip`, доступные user namespaces и текущий бинарь с исправлением Unix WebSocket из M3. Скрипт создаёт отдельные user/network/mount namespaces и tmpfs `/tmp`, поднимает только loopback, задаёт временные HOME/XDG через существующий лабораторный Node и запускает тот же Dart UnixApi. Проверяет setup, status/nodes/speed, vault setup/lock/unlock/change/recover/auto-lock, HTTP 501 и запертое состояние после рестарта. Дополнительно второй временный узел проверяет импорт карточек, CRUD контактов, чат в обе стороны и профиль через общий ShellRepository и UnixApi. Временные данные удаляются. Это RPC-интеграция; GTK-формы с настоящим демоном вручную отдельно.
 Не запускайте `tool/daemon_probe.dart`, `tool/chat_probe.dart`, `tool/network_probe.dart` и `tool/call_probe.dart` на сокете владельца: он меняет тестовые пароли и настройки.
 
 ## Память и границы
@@ -49,7 +44,6 @@ env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u al
 
 Клиент не повторяет POST/PUT/PATCH/DELETE и не выводит серверные тела в логи/ошибки (они могут содержать секрет). Отображаются безопасный русский контекст и HTTP-код. Ошибки 401/429/501 различаются. Лимит соединений — 6, общий deadline RPC — 15 с. Проверка server SO_PEERCRED со стороны Dart не реализована; клиент использует защищённый P1 путь без symlink конечного сокета и без TCP fallback.
 
-Подробности проверки и непроверенное: `docs/history/HANDOFF_desktop_shell_P2M1_2026-10-11.md` в корне репозитория.
 
 
 ## Контакты, чат и настройки M2
@@ -78,4 +72,3 @@ Enter добавляет новую строку, Ctrl/Meta+Enter отправл
 
 Демон должен включать исправление `src/web/ui_socket.rs`: прежний HTTP 101 содержал `Connection: close` вместо Upgrade. Лаборатория M3 проверяет gateway CRUD, HTTP/SOCKS metadata, Relay и voice/video accept/reject/end/SDP через настоящий Unix WebSocket двух временных узлов. Это проверка сигнализации, не аудио/видео.
 
-Результаты и полный остаток паритета для P3: [HANDOFF_shell_m3.md](HANDOFF_shell_m3.md).

@@ -144,7 +144,7 @@ A training network on one machine:
 ./target/release/yandi testnet up 3 && ./target/release/yandi testnet status && ./target/release/yandi testnet down
 ```
 
-Checks: `scripts/check.sh` (build and quick tests), `scripts/check.sh полностью` (adds network tests on real processes; those need a machine with a public address). [`docs/INVARIANTS.md`](docs/INVARIANTS.md) lists the project's promises, each guarded by a test. How releases are built and signed: [`docs/RELEASE_SIGNING.md`](docs/RELEASE_SIGNING.md).
+Checks: `scripts/check.sh` (build and quick tests), `scripts/check.sh полностью` (adds network tests on real processes; those need a machine with a public address). [`docs/INVARIANTS.md`](docs/INVARIANTS.md) lists the project's promises, each guarded by a test. The developer's isolated Python lab (`chaos/`) and the shell design hand-off notes are not published; the Rust tests in `tests/` and CI are. How releases are built and signed: [`docs/RELEASE_SIGNING.md`](docs/RELEASE_SIGNING.md).
 
 ## Repository layout
 

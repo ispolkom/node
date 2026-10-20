@@ -18,7 +18,7 @@ SCENES = {
 
 def capture(name, width, height):
     env = dict(os.environ, GSETTINGS_BACKEND='memory')
-    output = ROOT / 'HANDOFF' / 'screenshots'
+    output = ROOT / 'build' / 'design_screenshots'
     output.mkdir(parents=True, exist_ok=True)
     with open(output / 'native_preview.log', 'a') as log:
         process = subprocess.Popen(
