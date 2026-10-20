@@ -25,7 +25,7 @@ PUB=release/yandi-release-pubkey.hex
 exec 9>release/.lock
 flock -x 9
 if [ "$BUILD" = 1 ]; then
-  env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY cargo build --release --offline --bins
+  env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY cargo build --release --offline --workspace --bins
   if [ "$NODE_ONLY" = 0 ]; then
     (cd desktop/yandi_desktop && env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u all_proxy -u ALL_PROXY flutter build linux --release)
   fi
@@ -41,7 +41,7 @@ unset P1 P2
 KEY=$(printf '%s\n' "$PHRASE_IN" | "$REL" pubkey) || { echo "фраза отвергнута"; exit 1; }
 [ "$KEY" = "$(cat "$PUB")" ] || { echo "Фраза не та: ключ не совпадает с $PUB. Остановлено."; exit 1; }
 
-bash tools/build_deb.sh >/dev/null
+bash tools/build_deb.sh >/dev/null || { echo "не собрался пакет узла: запустите bash tools/build_deb.sh и смотрите ошибку"; exit 1; }
 DEB=$(ls -t dist/yandi-node_*_*.deb | head -1)
 NAME=$(basename "$DEB")
 VERSION=$(dpkg-deb --field "$DEB" Version)
@@ -57,7 +57,7 @@ else
   # бандл должен быть новее исходников оболочки: иначе под новой версией подписалась бы старая сборка
   STALE=$(find desktop/yandi_desktop/lib desktop/yandi_desktop/linux desktop/yandi_desktop/assets desktop/yandi_desktop/pubspec.yaml desktop/yandi_desktop/pubspec.lock -type f -newer "$BUNDLE_APP" 2>/dev/null | { grep -v '/ephemeral/' || true; } | head -3)
   [ -z "$STALE" ] || { echo "оболочка пересобрана не после правок исходников (например: $STALE): выполните --build"; exit 1; }
-  bash tools/build_desktop_deb.sh >/dev/null
+  bash tools/build_desktop_deb.sh >/dev/null || { echo "не собрался пакет оболочки: запустите bash tools/build_desktop_deb.sh"; exit 1; }
   DDEB="dist/yandi-desktop_${VERSION//+/-}_$(dpkg --print-architecture).deb"
   [ -f "$DDEB" ] || { echo "не собрался $DDEB"; exit 1; }
   DNAME=$(basename "$DDEB")

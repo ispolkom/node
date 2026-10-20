@@ -22,6 +22,8 @@ W=$(mktemp -d); trap 'rm -rf "$W"' EXIT
 R="$W/$PKG"
 install -d "$R/DEBIAN" "$R/opt/yandi" "$R/usr/bin" "$R/usr/share/applications" "$R/usr/share/doc/yandi-desktop"
 cp -a "$BUNDLE/." "$R/opt/yandi/"
+# libdartjni.so (нужна libjvm.so) тянется транзитивно от path_provider_android — на ПК она не используется, в пакет не кладём
+rm -f "$R/opt/yandi/lib/libdartjni.so"
 chmod -R u+rwX,go+rX,go-w "$R/opt/yandi"
 # в пакете не должно остаться путей сборочного дерева в RUNPATH плагинов
 python3 tools/fix_runpath.py "$R/opt/yandi"
