@@ -13,13 +13,19 @@ import '../widgets/locked_notice.dart';
 import 'chat_screen.dart' show ChatScreen;
 import '../l10n.dart';
 
-/// Люди узла: ВСЕ, кто зарегистрирован, в сети и не в сети; по времени не прячем. Запись исчезает, когда её удалил администратор или сам человек
-/// (гость — ещё и после суток молчания или перезапуска узла: docs/GUEST.md).
+/// Люди узла в списках приложения: в сети и не в сети, но не бывшие в сети больше суток (если не сохранены в контакты): такой человек возвращается сам,
+/// как только появится в сети. Гость видит только тех, кто сейчас в сети. Запись исчезает совсем, когда её удалил администратор или сам человек
+/// (гость — ещё и после суток молчания либо перезапуска узла: docs/GUEST.md).
 /// [guests]: true — только гости (вошли без кода), false — все остальные (пользователи, приглашённые, владелец), null — все.
 List<Contact> visibleUsers(AppState state, {bool withHidden = false, bool? guests}) {
+  final now = DateTime.now().millisecondsSinceEpoch;
   final list = [
     for (final c in state.contacts)
-      if ((withHidden || !state.hiddenUsers.contains(c.peerId)) && (guests == null || c.isGuestLevel == guests)) c,
+      if (!c.isStale(now) &&
+          (!state.isGuest || c.online) &&
+          (withHidden || !state.hiddenUsers.contains(c.peerId)) &&
+          (guests == null || c.isGuestLevel == guests))
+        c,
   ];
   list.sort((a, b) {
     if (a.online != b.online) return a.online ? -1 : 1;

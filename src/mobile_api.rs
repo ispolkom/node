@@ -2207,6 +2207,10 @@ fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
             continue;
         }
         let (nick, hash) = crate::device_profile::public(&pid);
+        // гость видит только тех, кто сейчас в сети; остальные роли — всех
+        if guest && live_count(&pid) == 0 {
+            continue;
+        }
         // каталог узла: ВСЕ зарегистрированные устройства, в сети и не в сети, пока запись жива (удалена администратором или самим человеком; гость — ещё и после
         // суток молчания либо перезапуска узла: он живёт только в памяти, docs/GUEST.md).
         // Скрытый профиль скрывает только ник и картинку (остаётся имя устройства); роль нужна, чтобы разделить «гостей» и «пользователей».
@@ -4007,7 +4011,7 @@ mod guest_tests {
     }
 
     #[test]
-    fn the_catalog_lists_everyone_with_roles_online_or_not_for_a_guest_too() {
+    fn users_and_owner_see_everyone_online_or_not_but_a_guest_sees_only_those_online() {
         let _g = lock();
         crate::complaints::tests::fresh();
         wipe(&[]);
@@ -4020,23 +4024,33 @@ mod guest_tests {
         crate::device_profile::put(&device_peer_of(&guest2).unwrap(), Some("Другой гость"), None, None).unwrap();
         // скрытый профиль: ник и картинка не раскрываются, но человек остаётся в каталоге по имени устройства
         crate::device_profile::put(&device_peer_of(&silent).unwrap(), Some("Тайный"), None, Some(true)).unwrap();
+        // в сети: пользователь «Мама», другой гость, владелец; не в сети: «uh»
+        let (pu, pg2, po) = (device_peer_of(&user).unwrap(), device_peer_of(&guest2).unwrap(), device_peer_of(&owner).unwrap());
+        for p in [&pu, &pg2, &po] {
+            set_live(p, true);
+        }
         let seen = users_for(&guest, &"ab".repeat(32));
         let by_name = |n: &str| seen.iter().find(|u| u["name"] == n).cloned().unwrap_or_else(|| panic!("нет {n} в {seen:?}"));
         assert_eq!(by_name("uu")["nick"], "Мама");
         assert_eq!(by_name("uu")["role"], "user");
         assert_eq!(by_name("ug2")["role"], "guest", "другой гость виден гостю, с ролью");
-        assert_eq!(by_name("uh")["nick"], "", "скрытый ник не раскрыт");
-        assert_eq!(by_name("uh")["role"], "user", "но человек в каталоге");
+        assert!(seen.iter().all(|u| u["name"] != "uh"), "гость видит только тех, кто сейчас в сети: «uh» не в сети");
         assert_eq!(by_name("uo")["role"], "owner");
         assert!(seen.iter().all(|u| u["name"] != "ug"), "себя в каталоге нет");
         assert!(seen.iter().all(|u| u["is_node"] != true), "«Компьютера» гость не видит");
         for u in &seen {
-            assert!(u["online"].is_boolean(), "статус есть у каждого: {u}");
+            assert_eq!(u["online"], true, "гостю — только онлайн: {u}");
         }
         let owner_view = users_for(&user, &"ab".repeat(32));
+        let offline = owner_view.iter().find(|u| u["name"] == "uh").expect("пользователю виден и тот, кто не в сети");
+        assert_eq!(offline["online"], false);
+        assert_eq!(offline["nick"], "", "скрытый ник не раскрыт");
+        assert_eq!(offline["role"], "user");
         assert!(owner_view.iter().any(|u| u["is_node"] == true), "пользователь узла, как раньше, видит «Компьютер»");
         assert!(owner_view.iter().any(|u| u["name"] == "ug" && u["role"] == "guest"), "гость виден пользователям");
-        let _ = owner;
+        for p in [&pu, &pg2, &po] {
+            set_live(p, false);
+        }
         for t in ["uu", "ug2", "uh"] {
             let th = match t { "uu" => &user, "ug2" => &guest2, _ => &silent };
             crate::device_profile::forget(&device_peer_of(th).unwrap());

@@ -29,9 +29,17 @@ void main() {
       person('e', 'Ждёт подтверждения', 'invited'),
       person('f', 'Владелец', 'owner'),
     ]);
-    expect(visibleUsers(s, guests: true).map((c) => c.displayName), ['Гость онлайн', 'Гость давно']);
-    expect(visibleUsers(s, guests: false).map((c) => c.displayName), ['Мама', 'Владелец', 'Ждёт подтверждения', 'Папа давно']);
-    expect(visibleUsers(s).length, 6, reason: 'в сети и не в сети — все');
+    expect(visibleUsers(s, guests: true).map((c) => c.displayName), ['Гость онлайн'], reason: 'не бывший в сети больше суток прячется до возвращения');
+    expect(visibleUsers(s, guests: false).map((c) => c.displayName), ['Мама', 'Владелец', 'Ждёт подтверждения'], reason: 'давно офлайн спрятан, недавно офлайн виден');
+    expect(visibleUsers(s).length, 4, reason: 'в сети и не в сети (не дольше суток)');
+  });
+
+  testWidgets('гость видит только тех, кто сейчас в сети', (t) async {
+    final s = stateWith([person('a', 'Онлайн', 'user', online: true), person('b', 'Оффлайн', 'user')]);
+    s.myRole = 'guest';
+    expect(visibleUsers(s).map((c) => c.displayName), ['Онлайн']);
+    s.myRole = 'user';
+    expect(visibleUsers(s).map((c) => c.displayName), ['Онлайн', 'Оффлайн']);
   });
 
   testWidgets('страница поиска: карточки «Гости», «Пользователи», «Группы» со счётчиками; список гостей со статусом', (t) async {
