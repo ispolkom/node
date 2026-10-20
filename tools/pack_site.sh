@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Собрать всё, что заливается на yandi.su/update/: список входных узлов + подписанные пакеты, и положить один архив в archive/.
+# Собрать ОДИН архив всего сайта yandi.su (со свежими update/deb, update/android, update/bootstrap.json) в ~/Загрузки.
 #   bash tools/pack_site.sh
 # Сначала проверяет подписанный список входных узлов (bootstrap/bootstrap.json), потом кладёт его в site/update/bootstrap.json.
 set -euo pipefail
@@ -15,6 +15,7 @@ mkdir -p "$PUBLIC_KEYS_DIR"
 ln -sf ../src/release/yandi-release-pubkey.hex "$PUBLIC_KEYS_DIR/yandi-release-pubkey.hex"
 ln -sf ../src/bootstrap/signer.pub "$PUBLIC_KEYS_DIR/bootstrap-signer.pub"
 [ -f mobile/yandi_mobile/android/signing/yandi-release-cert.pem ] && ln -sf ../src/mobile/yandi_mobile/android/signing/yandi-release-cert.pem "$PUBLIC_KEYS_DIR/yandi-release-cert.pem"
-Z="$ARCHIVE_DIR/yandi-su_update_$(date +%Y%m%d-%H%M).zip"
-(cd "$SITE_DIR" && zip -q -r -X "$Z" update)
+Z="${YANDI_SITE_ARCHIVE:-$HOME/Загрузки/yandi-site_$(date +%Y%m%d).zip}"
+rm -f "$Z"
+(cd "$SITE_DIR" && zip -q -r -X "$Z" .)   # ВЕСЬ сайт со свежими update/deb, update/android, update/bootstrap.json
 echo "готово: $Z"; unzip -l "$Z" | tail -12

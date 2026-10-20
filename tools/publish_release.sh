@@ -81,18 +81,8 @@ unset PHRASE_IN
 for f in MANIFEST.json MANIFEST.json.sig "${FILES[@]}"; do cp "$SITE/$f" "$GH/deb-$f"; done
 (cd "$GH" && sha256sum deb-* > SHA256SUMS)
 
-OUT="$ARCHIVE_DIR/release_${VERSION//+/-}"
-mkdir -p "$OUT"
-VSAFE="${VERSION//+/-}"
-ARCH="yandi-update-site_${VSAFE}.tar.gz"
-tar -C "$SITE_DIR" --sort=name --owner=0 --group=0 --numeric-owner -czf "$OUT/$ARCH" update/deb
-cp "$DEB" "$OUT/$NAME"
-[ -n "$DDEB" ] && cp "$DDEB" "$OUT/$DNAME"
-# плоский архив ровно для заливки в update/deb/: только файлы, без вложенных папок
-ZIP="$OUT/yandi-su_update-deb.zip"
-rm -f "$ZIP"
-(cd "$SITE" && zip -q -X "$ZIP" MANIFEST.json MANIFEST.json.sig "${FILES[@]}")
-cat > "$OUT/ПАМЯТКА.txt" <<TXT
+OUT="$ARCHIVE_DIR"; mkdir -p "$OUT"; VSAFE="${VERSION//+/-}"
+cat > "$OUT/ПАМЯТКА-${VSAFE}.txt" <<TXT
 Выпуск ${VERSION} (номер ${SEQ}), платформа deb.
 
 САЙТ (yandi.su):

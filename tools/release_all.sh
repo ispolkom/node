@@ -65,4 +65,4 @@ unset PHRASE_IN KEY
 echo
 echo "Готово. Закоммитить публичные файлы: release/SEQ, $PUB, tools/install.sh$( [ -f "$CERT" ] && echo ", $CERT" )."
 bash tools/pack_site.sh
-echo "Для сайта: $SITE_DIR/update/ и архив в $ARCHIVE_DIR/. Для GitHub: $GH_DIR/."
+echo "Архив всего сайта — в ~/Загрузки (yandi-site_*.zip); зеркало: $SITE_DIR. Для GitHub: $GH_DIR/."

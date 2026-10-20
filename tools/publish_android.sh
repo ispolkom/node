@@ -43,11 +43,6 @@ printf '%s\n' "$PHRASE_IN" | "$REL" sign "$SITE"
 unset PHRASE_IN
 "$REL" verify "$SITE" --pubkey "$KEY" --min-seq "$SEQ"
 
-OUT="$ARCHIVE_DIR/android_${VERSION}"
-mkdir -p "$OUT"
-ZIP="$OUT/yandi-su_update-android.zip"
-rm -f "$ZIP"
-(cd "$SITE" && zip -q -X "$ZIP" MANIFEST.json MANIFEST.json.sig yandi.apk)
 echo "готово: версия ${VERSION}, номер ${SEQ}"
-echo "Три файла уже лежат в site/update/android/; архив для заливки: $ZIP"
+echo "Три файла лежат в site/update/android/; один архив всего сайта делает tools/pack_site.sh"
 echo "Страница скачивания: ссылка на https://yandi.su/update/android/yandi.apk (тот же файл, второй копии нет)."
