@@ -116,13 +116,13 @@ hound = "3.5"
 
 
 # WebSocket-over-TLS для mobile↔anchor транспорта (Iter 2)
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = "0.24"
 tungstenite = "0.24"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 tokio-rustls = "0.26"
 rustls-pemfile = "2.2"
 rcgen = "0.13"
-webpki-roots = "0.26"
+webpki-roots = "1"
 time = "0.3"
 
 [target.'cfg(unix)'.dependencies]
