@@ -786,6 +786,7 @@ async fn main() -> anyhow::Result<()> {
                 let fmt = |port: u16| if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
                 yandi::web::peers::install_my_card(&node_id_for_card, &pubkey_for_card, vec![fmt(disc_port)], vec![fmt(p2p_port_for_card)]);
             });
+            yandi::bootstrap::apply::start(transport.clone(), identity.node_id().0, key.clone()); // заявка во входной список: только узлам из бутстрапа
             yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
             yandi::reciprocity::start();
         }

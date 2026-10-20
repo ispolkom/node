@@ -650,6 +650,8 @@ impl WebServer {
             // подпись списка входных узлов ключом из закрытой среды (файла с ключом нет)
             .route("/api/admin/bootstrap/pubkey", get(bootstrap_pubkey_handler))
             .route("/api/admin/bootstrap/sign", post(bootstrap_sign_handler))
+            .route("/api/admin/bootstrap/applications", get(bootstrap_applications_handler))
+            .route("/api/admin/bootstrap/applications/dismiss", post(bootstrap_dismiss_handler))
             .route(
                 "/api/mobile/devices/:id",
                 axum::routing::delete(mobile_device_remove_handler),
@@ -5841,6 +5843,33 @@ async fn bootstrap_sign_handler(Json(req): Json<BootstrapSignReq>) -> Response {
             Json(serde_json::json!({"status": "ok", "list": d, "pinned": pinned})).into_response()
         }
         Err(m) => (StatusCode::CONFLICT, Json(serde_json::json!({"status": "error", "message": m}))).into_response(),
+    }
+}
+
+/// Заявки узлов во входной список: данные подключения, результат прозвона каждого адреса и готовая команда `from-card`.
+async fn bootstrap_applications_handler() -> Response {
+    let list: Vec<serde_json::Value> = crate::bootstrap::apply::list()
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.app.node_id, "key": p.app.key, "addr": p.app.addr, "mobile": p.app.mobile, "region": p.app.region, "roles": p.app.roles,
+                "received": p.received, "status": p.status, "probes": p.probes, "card": p.app.card_text(), "command": p.app.command(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({"applications": list})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct BootstrapDismissReq {
+    id: String,
+}
+
+async fn bootstrap_dismiss_handler(Json(req): Json<BootstrapDismissReq>) -> Response {
+    if crate::bootstrap::apply::dismiss(&req.id) {
+        Json(serde_json::json!({"status": "ok"})).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такой заявки"}))).into_response()
     }
 }
 

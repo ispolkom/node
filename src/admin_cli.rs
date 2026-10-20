@@ -378,7 +378,26 @@ fn cmd_bootstrap(s: &mut Session, args: &[String]) -> Result<(), String> {
                 eprintln!("{}", t!("ВНИМАНИЕ: этот ключ не закреплён в программе (bootstrap/signer.pub): узлы и приложения такой список не примут, пока ключ не вшит.", "WARNING: this key is not pinned in the program (bootstrap/signer.pub): nodes and apps will not accept such a list until the key is built in."));
             }
         }
-        other => return Err(t!(format!("bootstrap: неизвестное действие «{other}» (pubkey | sign)"), format!("bootstrap: unknown action “{other}” (pubkey | sign)"))),
+        "applications" => {
+            let v = s.ok("GET", "/api/admin/bootstrap/applications", None)?;
+            let list = v["applications"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("{}", t!("Заявок узлов нет.", "No node applications."));
+            }
+            for a in &list {
+                let probes: Vec<String> = a["probes"].as_array().into_iter().flatten().map(|p| format!("{} {} {}", field(p, "kind"), field(p, "addr"), field(p, "result"))).collect();
+                println!("{}  {}  {}", field(a, "id").chars().take(16).collect::<String>(), field(a, "status"), field(a, "region"));
+                println!("    {}", if probes.is_empty() { t!("(адреса ещё не прозвонены)", "(addresses not probed yet)").to_string() } else { probes.join("; ") });
+                println!("    {}", field(a, "command"));
+            }
+        }
+        "dismiss" => {
+            let id = args.get(1).ok_or(t!("bootstrap dismiss ID (начало номера, от 8 знаков)", "bootstrap dismiss ID (id prefix, at least 8 characters)"))?;
+            s.ensure_admin()?;
+            s.ok("POST", "/api/admin/bootstrap/applications/dismiss", Some(&json!({ "id": id })))?;
+            println!("{}", t!("Заявка отклонена.", "Application dismissed."));
+        }
+        other => return Err(t!(format!("bootstrap: неизвестное действие «{other}» (pubkey | sign | applications | dismiss)"), format!("bootstrap: unknown action “{other}” (pubkey | sign | applications | dismiss)"))),
     }
     Ok(())
 }
@@ -720,6 +739,7 @@ const HELP_RU: &str = "yandi admin — управление запущенным
   yandi admin device-revoke-branch ID   отозвать устройство и всех, кого оно пригласило
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
   yandi admin bootstrap pubkey | sign ФАЙЛ [--days N]   ключ подписи списка узлов — только в закрытой среде, файла нет
+  yandi admin bootstrap applications | dismiss ID       заявки узлов во входной список (данные подключения, прозвон, готовая команда)
   yandi admin phone-action ПИР ДЕЙСТВИЕ
   yandi admin proxies list|add [вид]|remove ID|test [вид]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase
@@ -741,6 +761,7 @@ const HELP_EN: &str = "yandi admin — manage the running node from the console
   yandi admin device-revoke-branch ID   revoke a device and everyone it invited
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
   yandi admin bootstrap pubkey | sign FILE [--days N]   the node-list signing key lives only in the closed environment, no file
+  yandi admin bootstrap applications | dismiss ID       node applications to the entry list (connection data, probing, a ready command)
   yandi admin phone-action PEER ACTION
   yandi admin proxies list|add [kind]|remove ID|test [kind]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase

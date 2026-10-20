@@ -280,6 +280,8 @@ mod tests {
         use axum::http::Method;
         assert!(is_admin_route(&Method::GET, "/api/admin/bootstrap/pubkey"));
         assert!(is_admin_route(&Method::POST, "/api/admin/bootstrap/sign"));
+        assert!(is_admin_route(&Method::GET, "/api/admin/bootstrap/applications"));
+        assert!(is_admin_route(&Method::POST, "/api/admin/bootstrap/applications/dismiss"));
     }
 
     #[test]

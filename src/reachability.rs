@@ -104,11 +104,16 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
 
 /// Проверить один адрес карточки: соединиться и проверить подпись. `Ok(())` — адрес достижим и принадлежит этому ключу.
 pub async fn probe(card: &NodeOffer, addr: &str) -> Result<(), &'static str> {
+    probe_identity(&card.key, &card.node_id, addr).await
+}
+
+/// То же по номеру и ключу узла (hex): подключиться по адресу и проверить подпись ключом под свежей строкой.
+pub async fn probe_identity(key_hex: &str, node_id_hex: &str, addr: &str) -> Result<(), &'static str> {
     if !probe_allowed(addr) {
         return Err("address not allowed");
     }
-    let key = hex::decode(&card.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
-    let want_id = hex::decode(&card.node_id).map_err(|_| "id")?;
+    let key = hex::decode(key_hex).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
+    let want_id = hex::decode(node_id_hex).map_err(|_| "id")?;
     let work = async {
         let mut s = TcpStream::connect(addr).await.map_err(|_| "no connection")?;
         let mut nonce = [0u8; 16];

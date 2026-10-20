@@ -5451,6 +5451,12 @@ impl P2PTransport {
                 true
             }
             // Обмен карточками узлов (0xD8): списки сети по странам.
+            // Заявка узла во входной список (0xDE): принимает только узел из списка, остальные игнорируют.
+            crate::bootstrap::apply::PKT_APPLY => {
+                let _ = source;
+                crate::bootstrap::apply::on_packet(&sender.0, plaintext);
+                true
+            }
             crate::network_offers::PKT_OFFERS => {
                 let _ = source;
                 crate::network_offers::on_packet(&sender.0, plaintext);
