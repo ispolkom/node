@@ -1680,6 +1680,12 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                 isActive: () => active,
                 mutate: (a) => mutate(a),
               ),
+              AutonomyPanel(
+                api: widget.api,
+                busy: sending,
+                isActive: () => active,
+                mutate: (a) => mutate(a),
+              ),
               MailPolicyPanel(
                 api: widget.api,
                 busy: sending,

@@ -731,7 +731,7 @@ class _GuestPairingPanelState extends State<GuestPairingPanel> {
         const UiText('Сопряжение без QR', style: TextStyle(fontSize: 22)),
         if (error != null) UiText(error!),
         const UiText(
-          'Новые клиенты без QR получают гостевой доступ автоматически (по умолчанию это включено, вы можете выключить). Гость: без групп и без выхода в интернет через узел; личная переписка, голосовые сообщения и аудиозвонки доступны (звонок до 15 минут, до 60 минут в сутки), видеозвонков нет. Свой статус пользователя гость запрашивает у вас, с текстом, в разделе «Жалобы».',
+          'Новые клиенты без QR (телефоны, планшеты, ПК) получают гостевой доступ автоматически (по умолчанию это включено, вы можете выключить). Гость: без групп и без выхода в интернет через узел; переписка с участниками и с этим компьютером — до 10 сообщений в сутки, голосовые сообщения и аудиозвонки (звонок до 15 минут, до 60 минут в сутки), видеозвонков нет. Свой статус пользователя гость запрашивает у вас, с текстом, в разделе «Жалобы».',
         ),
         PanelCheck(
           value: on,
@@ -742,7 +742,7 @@ class _GuestPairingPanelState extends State<GuestPairingPanel> {
           UiText('Гостей сейчас: ${data!['guests']} из ${data!['max_guests']}'),
           UiText('Файлы гостя: не больше $mb МБ, не больше $perDay файлов и $volume МБ в сутки; хранение до 24 часов.'),
           const UiText(
-            'Адрес гостя узел не записывает и не показывает, но технически видит его при прямом соединении. Гость, молчавший сутки, удаляется.',
+            'Адрес гостя узел не записывает и не показывает, но технически видит его при прямом соединении. Гость живёт сутки от входа (или до суток молчания) и удаляется; три жалобы от разных людей за сутки удаляют его сразу. Все гостевые файлы на узле — не больше 2 ГБ в сутки.',
           ),
         ],
       ],
@@ -946,4 +946,89 @@ class AboutPanel extends StatelessWidget {
       ),
     ],
   );
+}
+
+/// Автономный узел (docs/ROADMAP_R9.md §4): полностью работает для своих, но без общей сети. Выбор есть только у узла с белым
+/// адресом и достаточной мощностью; смена режима стирает сетевые данные прежнего мира и требует перезапуска узла.
+class AutonomyPanel extends StatefulWidget {
+  final Api api;
+  final bool busy;
+  final bool Function() isActive;
+  final Future<void> Function(Future<void> Function()) mutate;
+  const AutonomyPanel({super.key, required this.api, required this.busy, required this.isActive, required this.mutate});
+  @override
+  State<AutonomyPanel> createState() => _AutonomyPanelState();
+}
+
+class _AutonomyPanelState extends State<AutonomyPanel> {
+  Map<String, dynamic>? data;
+  bool? wanted;
+  String? error, notice;
+
+  @override
+  void initState() {
+    super.initState();
+    load();
+  }
+
+  Future<void> load() async {
+    try {
+      final d = await widget.api.request('/api/node/autonomy');
+      if (mounted) setState(() { data = d; wanted = d['saved'] == true; error = null; });
+    } catch (e) {
+      if (mounted) setState(() => error = e is ApiFailure ? (e.status == 403 ? 'Нужен сеанс администратора: выйдите из админ-панели и войдите снова.' : e.message) : const ApiFailure('protocol').message);
+    }
+  }
+
+  Future<void> apply() async {
+    final on = wanted == true;
+    final v = await showDialog<List<String>>(
+      context: context,
+      builder: (_) => GroupForm(
+        title: on
+            ? 'Узел станет автономным: перестанет брать список входов, DHT, соседей, хопы и обновления, никто из общей сети его не увидит и не получит ответа. Свои клиенты, гости, звонки, файлы, группы и свои прокси работают как прежде. Связь — только с автономными узлами, которых вы внесёте сами. Список доверенных узлов и сетевые данные будут стёрты. Пароль администратора'
+            : 'Узел вернётся в общую сеть как новичок. Связи с автономными узлами (меш) будут стёрты. Пароль администратора',
+        labels: const ['Пароль администратора'],
+        secret: true,
+      ),
+    );
+    if (v == null || v.isEmpty) return;
+    await widget.mutate(() async {
+      try {
+        await widget.api.request('/api/node/autonomy', body: {'on': on, 'password': v[0]});
+        if (mounted) setState(() => notice = 'Режим сохранён. Перезапустите узел, чтобы он вступил в силу.');
+      } on ApiFailure catch (e) {
+        if (mounted) setState(() => notice = e.message);
+      }
+      if (widget.isActive()) await load();
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final d = data;
+    final canChoose = d?['can_choose'] == true;
+    final changed = d != null && wanted != (d['saved'] == true);
+    return PanelStack(
+      children: [
+        const UiText('Автономный узел', style: TextStyle(fontSize: 22)),
+        if (error != null) UiText(error!),
+        const UiText(
+          'Автономный узел обслуживает только своих: клиентов, гостей, звонки, файлы, группы и свои прокси. С общей сетью у него нет ничего: ни списка входов, ни DHT, ни соседей, ни хопов, ни обновлений (обновлять вручную). Соединяется он только с другими автономными узлами, которых вы внесёте сами. Или общая сеть, или автономность — вместе нельзя.',
+        ),
+        if (d != null && !canChoose)
+          const UiText('Этот узел без белого адреса или со слабым железом: он и так не нагружает сеть, выбор режима ему не нужен.'),
+        if (d != null && canChoose) ...[
+          PanelCheck(
+            value: wanted == true,
+            label: 'Автономный узел (без общей сети)',
+            onChanged: widget.busy ? null : (v) => setState(() => wanted = v),
+          ),
+          SolidButton('Применить', onPressed: widget.busy || !changed ? null : apply),
+        ],
+        if (d?['restart_needed'] == true) const UiText('Режим изменён: перезапустите узел.'),
+        if (notice != null) UiText(notice!),
+      ],
+    );
+  }
 }
