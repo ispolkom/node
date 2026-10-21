@@ -1110,7 +1110,7 @@ mod tests {
         assert_eq!(rest, vec!["status".to_string()], "ключ языка не доходит до команд");
         assert_eq!(i18n::get(), Lang::En);
         assert!(help().contains("manage the running node"));
-        assert!(setup_help().contains("first-time node setup"));
+        assert!(setup_help().contains("set the node up from the console"));
         assert_eq!(error_text(401, &Value::Null), "wrong password or access denied");
         assert_eq!(error_text(429, &Value::Null), "too many attempts: wait and try again");
         assert!(error_text(500, &json!({"error": "boom"})).starts_with("the node answered 500"));
