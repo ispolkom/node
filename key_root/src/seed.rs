@@ -1,14 +1,24 @@
 //! The seed phrase: what the owner writes down at the first start.
 //!
-//! 12 (default) or 24 English words of the BIP-39 list encode 128 or 256 random bits plus a checksum. The words are only how the
-//! secret is written: the key is made from the *bytes* (`secret()`), never from the text, so the display language can never change it.
-//! A phrase that fails its own check (wrong count, a word not on the list, a typo) is reported as a typo before any slow key
+//! 12, 18 or 24 English words of the BIP-39 list encode 128, 192 or 256 random bits plus a checksum (24 is the default the apps offer). The words
+//! are only how the secret is written: the key is made from the *bytes* (`secret()`), never from the text, so the display language can never
+//! change it. A phrase that fails its own check (wrong count, a word not on the list, a typo) is reported as a typo before any slow key
 //! derivation runs, and the caller must not count it as a guess.
+//!
+//! An optional **control word** (one word the owner invents and keeps apart from the paper) is mixed into the secret with Argon2id. Without
+//! it the same words give another node. It is carried inside the phrase string after [`CONTROL_SEP`] so that every place that takes "the
+//! phrase" takes the word too; the apps never show the separator.
 use crate::wrap::random_bytes;
 use sha2::{Digest, Sha256};
+use unicode_normalization::UnicodeNormalization;
 use zeroize::Zeroizing;
 
 const LIST: &str = include_str!("bip39_en.txt");
+
+/// Internal separator between the words and the control word inside one string (U+001F is not white space, so it never splits a word).
+pub const CONTROL_SEP: char = '\u{1f}';
+pub const CONTROL_WORD_MIN: usize = 8;
+pub const CONTROL_WORD_MAX: usize = 64;
 
 fn list() -> Vec<&'static str> {
     LIST.lines().map(str::trim).filter(|w| !w.is_empty()).collect()
@@ -16,60 +26,135 @@ fn list() -> Vec<&'static str> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SeedError {
-    /// Not 12 or 24 words.
+    /// Not 12, 18 or 24 words.
     WrongCount(usize),
     /// The word at this position (from 1) is not in the list.
     UnknownWord(usize),
     /// All words are on the list but the phrase does not pass its checksum (a typo or swapped words).
     Checksum,
+    /// The control word has spaces: it is ONE word.
+    ControlWordSpaces,
+    /// The control word is shorter than [`CONTROL_WORD_MIN`] characters.
+    ControlWordShort,
+    /// The control word is longer than [`CONTROL_WORD_MAX`] characters.
+    ControlWordLong,
 }
 
 impl std::fmt::Display for SeedError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SeedError::WrongCount(n) => write!(f, "Нужно 12 или 24 слова, введено {n}"),
+            SeedError::WrongCount(n) => write!(f, "Нужно 12, 18 или 24 слова, введено {n}"),
             SeedError::UnknownWord(i) => write!(f, "Слово №{i} не из списка"),
             SeedError::Checksum => write!(f, "Фраза не проходит проверку: опечатка или слова переставлены"),
+            SeedError::ControlWordSpaces => write!(f, "Контрольное слово — одно слово, без пробелов"),
+            SeedError::ControlWordShort => write!(f, "Контрольное слово не короче {CONTROL_WORD_MIN} знаков"),
+            SeedError::ControlWordLong => write!(f, "Контрольное слово не длиннее {CONTROL_WORD_MAX} знаков"),
         }
     }
 }
 
-/// The random secret behind the words (16 bytes for 12 words, 32 for 24).
-pub struct Seed(Zeroizing<Vec<u8>>);
+/// The random secret behind the words (16, 24 or 32 bytes for 12, 18 or 24 words) and the optional control word.
+pub struct Seed {
+    entropy: Zeroizing<Vec<u8>>,
+    control: Option<Zeroizing<String>>,
+}
 
 fn checksum_bits(entropy: &[u8]) -> u8 {
     Sha256::digest(entropy)[0]
 }
 
+/// The control word as it is used: trimmed, one word, Unicode-normalised (the same letters typed on another keyboard or system give the
+/// same key), and within the length limits.
+pub fn normalize_control_word(word: &str) -> Result<String, SeedError> {
+    let w = word.trim();
+    if w.chars().any(char::is_whitespace) || w.contains(CONTROL_SEP) {
+        return Err(SeedError::ControlWordSpaces);
+    }
+    let w: String = w.nfc().collect();
+    let n = w.chars().count();
+    if n < CONTROL_WORD_MIN {
+        return Err(SeedError::ControlWordShort);
+    }
+    if n > CONTROL_WORD_MAX {
+        return Err(SeedError::ControlWordLong);
+    }
+    Ok(w)
+}
+
+/// The words and the control word as ONE phrase string for every API that takes "the phrase". An empty word means none.
+pub fn join_phrase(words: &str, control_word: &str) -> String {
+    if control_word.trim().is_empty() {
+        words.to_owned()
+    } else {
+        format!("{words}{CONTROL_SEP}{control_word}")
+    }
+}
+
+/// Argon2id cost of mixing in the control word: about a second per guess, 128 MiB per guess for whoever stole the paper and is guessing.
+#[cfg(not(test))]
+const WORD_KDF: (u32, u32, u32) = (131072, 3, 1);
+#[cfg(test)]
+const WORD_KDF: (u32, u32, u32) = (64, 1, 1);
+
+fn word_key(entropy: &[u8], word: &str) -> Zeroizing<[u8; 32]> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let mut password = Zeroizing::new(Vec::with_capacity(2 + word.len() + entropy.len()));
+    password.extend_from_slice(&(word.len() as u16).to_be_bytes());
+    password.extend_from_slice(word.as_bytes());
+    password.extend_from_slice(entropy);
+    let salt = Sha256::digest(b"yandi/seed-word/v2");
+    let params = Params::new(WORD_KDF.0, WORD_KDF.1, WORD_KDF.2, Some(32)).expect("fixed valid parameters");
+    let mut out = Zeroizing::new([0u8; 32]);
+    Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
+        .hash_password_into(&password, &salt, out.as_mut_slice())
+        .expect("fixed valid parameters and a 32-byte salt");
+    out
+}
+
 impl Seed {
-    /// A new random seed of 12 or 24 words.
+    fn bare(entropy: Vec<u8>) -> Seed {
+        Seed { entropy: Zeroizing::new(entropy), control: None }
+    }
+
+    /// A new random seed of 12, 18 or 24 words.
     pub fn generate(words: usize) -> Option<Seed> {
         match words {
-            12 => Some(Seed(Zeroizing::new(random_bytes::<16>().to_vec()))),
-            24 => Some(Seed(Zeroizing::new(random_bytes::<32>().to_vec()))),
+            12 => Some(Seed::bare(random_bytes::<16>().to_vec())),
+            18 => Some(Seed::bare(random_bytes::<24>().to_vec())),
+            24 => Some(Seed::bare(random_bytes::<32>().to_vec())),
             _ => None,
         }
     }
 
     pub fn from_entropy(bytes: &[u8]) -> Option<Seed> {
-        matches!(bytes.len(), 16 | 32).then(|| Seed(Zeroizing::new(bytes.to_vec())))
+        matches!(bytes.len(), 16 | 24 | 32).then(|| Seed::bare(bytes.to_vec()))
+    }
+
+    /// The same seed with a control word (see [`normalize_control_word`]). An empty word leaves the seed as it is.
+    pub fn with_control_word(mut self, word: &str) -> Result<Seed, SeedError> {
+        self.control = if word.trim().is_empty() { None } else { Some(Zeroizing::new(normalize_control_word(word)?)) };
+        Ok(self)
+    }
+
+    pub fn has_control_word(&self) -> bool {
+        self.control.is_some()
     }
 
     pub fn word_count(&self) -> usize {
-        self.0.len() * 3 / 4
+        self.entropy.len() * 3 / 4
     }
 
-    /// The words, in order, as they are shown and written down.
+    /// The words, in order, as they are shown and written down. The control word is never part of them.
     pub fn words(&self) -> Vec<&'static str> {
         let words = list();
-        let cs_len = self.0.len() / 4; // checksum bits: 4 for 128, 8 for 256
-        let mut bits = Zeroizing::new(Vec::<bool>::with_capacity(self.0.len() * 8 + 8));
-        for b in self.0.iter() {
+        let cs_len = self.entropy.len() / 4; // checksum bits: 4 for 128, 6 for 192, 8 for 256
+        let mut bits = Zeroizing::new(Vec::<bool>::with_capacity(self.entropy.len() * 8 + 8));
+        for b in self.entropy.iter() {
             for i in (0..8).rev() {
                 bits.push((b >> i) & 1 == 1);
             }
         }
-        let cs = checksum_bits(&self.0);
+        let cs = checksum_bits(&self.entropy);
         for i in 0..cs_len {
             bits.push((cs >> (7 - i)) & 1 == 1);
         }
@@ -78,10 +163,15 @@ impl Seed {
             .collect()
     }
 
-    /// Parse what the person typed: words separated by any whitespace, any letter case.
+    /// Parse what the person typed: words separated by any whitespace, any letter case; optionally followed by [`CONTROL_SEP`] and the
+    /// control word.
     pub fn parse(input: &str) -> Result<Seed, SeedError> {
-        let typed: Vec<String> = input.split_whitespace().map(|w| w.to_lowercase()).collect();
-        if typed.len() != 12 && typed.len() != 24 {
+        let (words_part, control_part) = match input.split_once(CONTROL_SEP) {
+            Some((a, b)) => (a, Some(b)),
+            None => (input, None),
+        };
+        let typed: Vec<String> = words_part.split_whitespace().map(|w| w.to_lowercase()).collect();
+        if !matches!(typed.len(), 12 | 18 | 24) {
             return Err(SeedError::WrongCount(typed.len()));
         }
         let words = list();
@@ -92,7 +182,7 @@ impl Seed {
                 bits.push((idx >> k) & 1 == 1);
             }
         }
-        let ent_bits = typed.len() * 11 * 32 / 33; // 128 or 256
+        let ent_bits = typed.len() * 11 * 32 / 33; // 128, 192 or 256
         let mut entropy = Zeroizing::new(vec![0u8; ent_bits / 8]);
         for (i, b) in bits[..ent_bits].iter().enumerate() {
             if *b {
@@ -105,25 +195,51 @@ impl Seed {
         if !ok {
             return Err(SeedError::Checksum);
         }
-        Ok(Seed(entropy))
+        let seed = Seed { entropy, control: None };
+        match control_part {
+            None | Some("") => Ok(seed),
+            Some(w) => seed.with_control_word(w),
+        }
     }
 
-    /// What the keys are made from. Language-independent: only the bytes, with a version and a purpose in front.
+    /// What the keys are made from. Language-independent: only the bytes, with a version and a purpose in front. With a control word the
+    /// bytes are first stretched together with it (Argon2id), so the words alone no longer lead to the same keys.
     pub fn secret(&self) -> Zeroizing<String> {
-        let hex: String = self.0.iter().map(|b| format!("{b:02x}")).collect();
-        Zeroizing::new(format!("yandi-seed-v1:{hex}"))
+        match &self.control {
+            None => {
+                let hex: String = self.entropy.iter().map(|b| format!("{b:02x}")).collect();
+                Zeroizing::new(format!("yandi-seed-v1:{hex}"))
+            }
+            Some(word) => {
+                let key = word_key(&self.entropy, word);
+                Zeroizing::new(format!("yandi-seed-v2:{}", hex::encode(*key)))
+            }
+        }
+    }
+
+    /// The node's root key, derived from the secret: the same words (and control word) give the same root on any machine.
+    pub fn root(&self) -> Zeroizing<[u8; 32]> {
+        crate::wrap::root_from_seed_secret(&self.secret())
     }
 
     pub fn same_as(&self, other: &Seed) -> bool {
-        self.0.len() == other.0.len() && self.0.iter().zip(other.0.iter()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0
+        let eq = self.entropy.len() == other.entropy.len()
+            && self.entropy.iter().zip(other.entropy.iter()).fold(0u8, |a, (x, y)| a | (x ^ y)) == 0;
+        eq && self.control.as_deref().map(String::as_str) == other.control.as_deref().map(String::as_str)
     }
 }
 
-/// True if the text is made only of words from the list and has 12 or 24 of them (even with a typo in the checksum): so a mistake is
-/// reported as a mistake in a seed phrase, and not as a wrong password.
+/// True if the bytes are the secret of a seed phrase ("yandi-seed-v1:…" or "yandi-seed-v2:…"), as opposed to a typed password.
+pub fn looks_like_seed_secret(secret: &[u8]) -> bool {
+    secret.starts_with(b"yandi-seed-v1:") || secret.starts_with(b"yandi-seed-v2:")
+}
+
+/// True if the text is made only of words from the list and has 12, 18 or 24 of them (even with a typo in the checksum): so a mistake is
+/// reported as a mistake in a seed phrase, and not as a wrong password. A control word after the separator is not counted.
 pub fn looks_like_seed(input: &str) -> bool {
-    let n = input.split_whitespace().count();
-    (n == 12 || n == 24) && !matches!(Seed::parse(input), Err(SeedError::UnknownWord(_)))
+    let words_part = input.split_once(CONTROL_SEP).map_or(input, |(a, _)| a);
+    let n = words_part.split_whitespace().count();
+    matches!(n, 12 | 18 | 24) && !matches!(Seed::parse(words_part), Err(SeedError::UnknownWord(_)))
 }
 
 #[cfg(test)]
@@ -163,8 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn generated_seeds_round_trip_in_both_sizes() {
-        for n in [12usize, 24] {
+    fn generated_seeds_round_trip_in_all_three_sizes() {
+        for n in [12usize, 18, 24] {
             let s = Seed::generate(n).unwrap();
             assert_eq!(s.words().len(), n);
             assert_eq!(s.word_count(), n);
@@ -216,5 +332,94 @@ mod tests {
         assert_eq!(*crate::recovery_secret(&words.to_uppercase().replace(' ', "   ")), *s.secret());
         // a phrase with a typo is just typed text: it cannot open anything
         assert_eq!(*crate::recovery_secret("winner legal thank year wave sausage worth useful legal winner thank yellow"), "winner legal thank year wave sausage worth useful legal winner thank yellow");
+    }
+
+    const PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+    #[test]
+    fn eighteen_words_use_a_192_bit_seed_and_the_standard_checksum() {
+        let s = entropy(0x7f, 24);
+        assert_eq!(s.word_count(), 18);
+        let w = s.words();
+        assert_eq!(w.len(), 18);
+        assert!(s.same_as(&Seed::parse(&w.join(" ")).unwrap()));
+        // a typo in the 18-word checksum is a checksum error, not a count error
+        let mut bad = w.clone();
+        bad.swap(0, 1);
+        if bad != w {
+            assert!(matches!(Seed::parse(&bad.join(" ")), Err(SeedError::Checksum) | Ok(_)));
+        }
+        assert_eq!(Seed::parse(&w[..17].join(" ")).err(), Some(SeedError::WrongCount(17)));
+    }
+
+    #[test]
+    fn without_a_control_word_the_secret_is_the_old_one_and_the_root_is_fixed() {
+        let s = Seed::parse(PHRASE).unwrap();
+        assert!(!s.has_control_word());
+        assert_eq!(&*s.secret(), "yandi-seed-v1:7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f7f");
+        assert_eq!(*s.root(), *Seed::parse(PHRASE).unwrap().root(), "same words, same root");
+        assert_ne!(*s.root(), *Seed::parse(&entropy(0x00, 16).words().join(" ")).unwrap().root());
+    }
+
+    #[test]
+    fn the_control_word_changes_every_key_and_is_part_of_the_phrase_string() {
+        let plain = Seed::parse(PHRASE).unwrap();
+        let with = Seed::parse(&join_phrase(PHRASE, "Воробей-2026")).unwrap();
+        let other = Seed::parse(&join_phrase(PHRASE, "Воробей-2027")).unwrap();
+        let again = Seed::parse(&join_phrase(PHRASE, "Воробей-2026")).unwrap();
+        assert!(with.has_control_word());
+        assert!(with.secret().starts_with("yandi-seed-v2:"));
+        assert_eq!(*with.secret(), *again.secret(), "the same word gives the same keys");
+        assert_ne!(*with.secret(), *plain.secret(), "without the word it is another node");
+        assert_ne!(*with.secret(), *other.secret());
+        assert_ne!(*with.root(), *plain.root());
+        assert_ne!(*with.root(), *other.root());
+        assert!(with.same_as(&again) && !with.same_as(&plain) && !with.same_as(&other));
+        // the words themselves never show the control word
+        assert_eq!(with.words(), plain.words());
+        // the same word with another seed gives unrelated keys (the seed is part of the stretching)
+        let seed2 = entropy(0x11, 16).words().join(" ");
+        let other_seed = Seed::parse(&join_phrase(&seed2, "Воробей-2026")).unwrap();
+        assert_ne!(*with.secret(), *other_seed.secret());
+        // an empty word means none
+        assert!(!Seed::parse(&join_phrase(PHRASE, "   ")).unwrap().has_control_word());
+        assert_eq!(*Seed::parse(&format!("{PHRASE}{CONTROL_SEP}")).unwrap().secret(), *plain.secret());
+    }
+
+    #[test]
+    fn the_control_word_is_one_word_of_a_sensible_length_and_unicode_normalised() {
+        let base = || Seed::parse(PHRASE).unwrap();
+        assert_eq!(base().with_control_word("два слова вместе").err(), Some(SeedError::ControlWordSpaces));
+        assert_eq!(base().with_control_word("коротко").err(), Some(SeedError::ControlWordShort));
+        assert_eq!(base().with_control_word(&"я".repeat(65)).err(), Some(SeedError::ControlWordLong));
+        assert!(base().with_control_word(&"я".repeat(64)).is_ok());
+        // letters are case sensitive
+        let a = base().with_control_word("Воробей-2026").unwrap();
+        let b = base().with_control_word("воробей-2026").unwrap();
+        assert_ne!(*a.secret(), *b.secret());
+        // «й» typed as one letter or as «и» + a combining breve is the same word
+        let composed = "Мой\u{439}Ключик1";
+        let decomposed = "Мой\u{438}\u{306}Ключик1";
+        assert_ne!(composed, decomposed);
+        assert_eq!(*base().with_control_word(composed).unwrap().secret(), *base().with_control_word(decomposed).unwrap().secret());
+        // surrounding spaces are not part of the word
+        assert_eq!(*base().with_control_word("  Воробей-2026 ").unwrap().secret(), *a.secret());
+    }
+
+    #[test]
+    fn a_phrase_with_a_control_word_still_looks_like_a_seed_and_a_bad_word_is_reported_as_such() {
+        assert!(looks_like_seed(&join_phrase(PHRASE, "Воробей-2026")));
+        assert_eq!(Seed::parse(&join_phrase(PHRASE, "два слова")).err(), Some(SeedError::ControlWordSpaces));
+        assert_eq!(Seed::parse(&join_phrase(PHRASE, "коротко")).err(), Some(SeedError::ControlWordShort));
+        // a mistake in the words is still a mistake in the words
+        let swapped = "winner legal thank year wave sausage worth useful legal winner thank yellow";
+        assert_eq!(Seed::parse(&join_phrase(swapped, "Воробей-2026")).err(), Some(SeedError::Checksum));
+    }
+
+    #[test]
+    fn recovery_secret_carries_the_control_word_too() {
+        let joined = join_phrase(PHRASE, "Воробей-2026");
+        assert_eq!(*crate::recovery_secret(&joined), *Seed::parse(&joined).unwrap().secret());
+        assert_ne!(*crate::recovery_secret(&joined), *crate::recovery_secret(PHRASE));
     }
 }

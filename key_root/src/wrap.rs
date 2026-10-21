@@ -11,11 +11,23 @@ use zeroize::Zeroizing;
 pub const DOMAIN_IDENTITY: &str = "yandi/identity/v1";
 pub const DOMAIN_CORE: &str = "yandi/core/v1";
 pub const DOMAIN_ROOT_ID: &str = "yandi/root-id/v1";
+/// The node root made from a seed phrase (instead of a random one): the same phrase gives the same root everywhere.
+pub const DOMAIN_SEED_ROOT: &str = "yandi/node-root/v1";
 
 pub fn derive_domain(root: &[u8; 32], domain: &str) -> Zeroizing<[u8; 32]> {
     let mut out = Zeroizing::new([0u8; 32]);
     Hkdf::<Sha256>::new(None, root)
         .expand(domain.as_bytes(), out.as_mut_slice())
+        .expect("32 bytes is a valid HKDF-SHA256 output length");
+    out
+}
+
+/// The root key a seed secret ("yandi-seed-v1:…" / "yandi-seed-v2:…") stands for. The secret is already high-entropy (a random seed, or a
+/// seed stretched with the control word), so one HKDF step is enough.
+pub fn root_from_seed_secret(secret: &str) -> Zeroizing<[u8; 32]> {
+    let mut out = Zeroizing::new([0u8; 32]);
+    Hkdf::<Sha256>::new(None, secret.as_bytes())
+        .expand(DOMAIN_SEED_ROOT.as_bytes(), out.as_mut_slice())
         .expect("32 bytes is a valid HKDF-SHA256 output length");
     out
 }

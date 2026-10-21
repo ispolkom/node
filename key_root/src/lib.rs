@@ -35,7 +35,7 @@ pub use migrate::{
 };
 pub use recovery_code::{recovery_secret, RecoveryCode};
 pub use root::RootDocument;
-pub use seed::{looks_like_seed, Seed, SeedError};
+pub use seed::{join_phrase, looks_like_seed, looks_like_seed_secret, normalize_control_word, Seed, SeedError, CONTROL_SEP, CONTROL_WORD_MAX, CONTROL_WORD_MIN};
 pub use unlock::{status, unlock_root, KeyStoreStatus, RootSource};
-pub use wrap::{derive_domain, KdfParams, KdfPolicy, DOMAIN_CORE, DOMAIN_IDENTITY};
+pub use wrap::{derive_domain, root_from_seed_secret, KdfParams, KdfPolicy, DOMAIN_CORE, DOMAIN_IDENTITY};
 pub use zeroize::Zeroizing;

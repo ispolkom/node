@@ -90,7 +90,7 @@ pub fn check_setup_inputs_min(
         crate::seed::Seed::parse(master).map_err(|e| e.to_string())?;
     } else if master.chars().count() < 12 {
         return Err(
-            "Сид-фраза: нужно 12 или 24 слова из списка (или мастер-пароль: минимум 12 символов)".to_string(),
+            "Сид-фраза: нужно 12, 18 или 24 слова из списка (или мастер-пароль: минимум 12 символов)".to_string(),
         );
     }
     if master != master_repeat {
@@ -117,13 +117,15 @@ pub fn create_keys(
 ) -> Result<Zeroizing<[u8; 32]>, String> {
     // a seed phrase is keyed by its bytes (language and spacing never matter); anything else is used as typed
     let master_secret = recovery_secret(master_password);
+    // a seed phrase gives a DETERMINISTIC root: the same words (and control word) restore the same node on any machine
+    let seed_root = crate::seed::Seed::parse(master_password).ok().map(|s| s.root());
     let master_password: &str = &master_secret;
     let auth_path = dir.auth_file();
     ensure_no_existing_auth(&auth_path)?;
     if device.load().map(|k| k.is_some()).unwrap_or(true) {
         return Err("В каталоге ключей уже есть ключ устройства; настройка не выполнена, чтобы ничего не затереть".to_string());
     }
-    let root = Zeroizing::new(crate::wrap::random_bytes::<32>());
+    let root = seed_root.unwrap_or_else(|| Zeroizing::new(crate::wrap::random_bytes::<32>()));
     let login_hash = hash_login_password(login_password)?;
     let device_key = device
         .create()
