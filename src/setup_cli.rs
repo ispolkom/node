@@ -59,7 +59,7 @@ pub fn show_id(id: &str) -> String {
 }
 
 /// Текст ошибки фразы на языке консоли.
-pub fn seed_error_text(e: key_root::SeedError) -> String {
+pub fn phrase_error_text(e: key_root::SeedError) -> String {
     use key_root::SeedError::*;
     match e {
         WrongCount(n) => t!(format!("Нужно 12, 18 или 24 слова, введено {n}"), format!("12, 18 or 24 words are needed, {n} given")),
@@ -103,7 +103,7 @@ fn joined(phrase: &str, word: &str) -> String {
 
 /// Номер узла по фразе и слову (локально, без узла).
 pub fn node_number(phrase: &str, word: &str) -> Result<String, String> {
-    let seed = key_root::Seed::parse(&joined(phrase, word)).map_err(seed_error_text)?;
+    let seed = key_root::Seed::parse(&joined(phrase, word)).map_err(phrase_error_text)?;
     let id = crate::core::identity::NodeIdentity::node_id_for_root(&seed.root());
     Ok(hex::encode(&id.0[..8]))
 }
@@ -116,7 +116,7 @@ fn ask_new_control_word(o: &Opts) -> Result<String, String> {
         if w.trim().is_empty() {
             return Ok(String::new());
         }
-        key_root::normalize_control_word(&w).map_err(seed_error_text)?;
+        key_root::normalize_control_word(&w).map_err(phrase_error_text)?;
         return Ok(w);
     }
     if !tty() {
@@ -136,7 +136,7 @@ fn ask_new_control_word(o: &Opts) -> Result<String, String> {
             return Ok(String::new());
         }
         if let Err(e) = key_root::normalize_control_word(&w) {
-            eprintln!("{}", seed_error_text(e));
+            eprintln!("{}", phrase_error_text(e));
             continue;
         }
         if weak_control_word(&w) && !yn("Слово слабое: его легко угадать. Лучше 10 и больше случайных знаков. Оставить это слово?", "The word is weak: easy to guess. 10+ random characters are better. Keep this word?", false)? {
@@ -173,7 +173,7 @@ fn print_id_block(id: &str) {
 fn check_flow(o: &Opts) -> Result<(), String> {
     let secrets = Secrets { from_stdin: o.password_stdin, preset: None };
     let phrase = crate::admin_cli::normalize_phrase(&secrets.ask(t!("Сид-фраза: ", "Seed phrase: "))?);
-    key_root::Seed::parse(&phrase).map_err(seed_error_text)?;
+    key_root::Seed::parse(&phrase).map_err(phrase_error_text)?;
     let word = ask_restore_control_word(o)?;
     let id = node_number(&phrase, &word)?;
     print_id_block(&id);
@@ -342,8 +342,8 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
     // 1. фраза и слово
     let typed = secrets.ask(t!("Сид-фраза (12, 18 или 24 слова): ", "Seed phrase (12, 18 or 24 words): "))?;
     let phrase = crate::admin_cli::normalize_phrase(&typed);
-    let seed = key_root::Seed::parse(&phrase).map_err(seed_error_text)?;
-    eprintln!("{}", t!(format!("Принято слов: {}.", seed.word_count()), format!("Words accepted: {}.", seed.word_count())));
+    let parsed = key_root::Seed::parse(&phrase).map_err(phrase_error_text)?;
+    eprintln!("{}", t!(format!("Принято слов: {}.", parsed.word_count()), format!("Words accepted: {}.", parsed.word_count())));
     let word = ask_restore_control_word(o)?;
     // 2. номер узла до любой записи
     let id = node_number(&phrase, &word)?;
@@ -586,11 +586,11 @@ mod tests {
     fn ids_are_shown_in_groups_of_four_and_seed_errors_speak_both_languages() {
         assert_eq!(show_id("e96d01bcf6d85540"), "e96d 01bc f6d8 5540");
         crate::i18n::set(crate::i18n::Lang::En);
-        assert!(seed_error_text(key_root::SeedError::WrongCount(5)).contains("12, 18 or 24 words"));
-        assert!(seed_error_text(key_root::SeedError::ControlWordShort).contains("at least 8"));
+        assert!(phrase_error_text(key_root::SeedError::WrongCount(5)).contains("12, 18 or 24 words"));
+        assert!(phrase_error_text(key_root::SeedError::ControlWordShort).contains("at least 8"));
         crate::i18n::set(crate::i18n::Lang::Ru);
-        assert!(seed_error_text(key_root::SeedError::WrongCount(5)).contains("Нужно 12, 18 или 24"));
-        assert!(seed_error_text(key_root::SeedError::UnknownWord(3)).contains("№3"));
+        assert!(phrase_error_text(key_root::SeedError::WrongCount(5)).contains("Нужно 12, 18 или 24"));
+        assert!(phrase_error_text(key_root::SeedError::UnknownWord(3)).contains("№3"));
     }
 
     #[test]

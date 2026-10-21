@@ -400,7 +400,8 @@ mod tests {
         assert_eq!(check_place(&l, &l.data.join("backups").display().to_string()).unwrap_err().code, "inside_node");
         let flash = d.path().join("flash");
         let ok = check_place(&l, &flash.display().to_string()).unwrap().unwrap();
-        assert_eq!(ok.dir, flash.join("yandi-node").display().to_string(), "конечный путь …/yandi-node");
+        // на macOS /var — ссылка на /private/var: путь приводится к настоящему
+        assert_eq!(ok.dir, flash.canonicalize().unwrap().join("yandi-node").display().to_string(), "конечный путь …/yandi-node");
         assert!(flash.join("yandi-node").is_dir() && !flash.join("yandi-node/.yandi-write-test").exists(), "пробный файл стёрт");
         // указали уже готовую yandi-node — вторая не создаётся
         let again = check_place(&l, &flash.join("yandi-node").display().to_string()).unwrap().unwrap();
