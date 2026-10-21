@@ -37,7 +37,7 @@ All downloads, checksums and release notes: **<https://yandi.su/network/>** (Rus
 |---|---|
 | Release manifests (`.deb`, APK) | `23a55aa8e0762e6ca9447dfa92ca401be2ba274c3571b7c3fc67bcb3c7abf43b` ([`release/yandi-release-pubkey.hex`](release/yandi-release-pubkey.hex)) |
 | Android signing certificate (SHA-256) | `30:D6:65:E4:52:21:A6:47:9F:DD:9F:18:EF:0C:01:36:88:E4:E4:C4:E3:62:C1:FD:16:0F:1A:EF:2D:6B:27:1B` |
-| List of entry nodes ([`bootstrap/bootstrap.json`](bootstrap/bootstrap.json)) | `fb708518ec5ff7798bf5adbf13fd530f1178f1b7660f615e134b68a60ebc7779` ([`bootstrap/signer.pub`](bootstrap/signer.pub)) |
+| List of entry nodes ([`bootstrap/bootstrap.json`](bootstrap/bootstrap.json)) | `52ba508fca1ca54bfe010dbb3d511e51ea4ee06bd59ce0816ae240745fd4025a` ([`bootstrap/signer.pub`](bootstrap/signer.pub)) |
 
 The signing keys are derived from a developer passphrase that is never stored; the key for the entry-node list lives only inside the owner's private environment.
 

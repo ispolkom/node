@@ -4,7 +4,7 @@ import 'package:cryptography/cryptography.dart';
 import 'guest_node.dart';
 
 /// Закреплённые ключи подписи списка (hex): совпадают с `bootstrap/signer.pub` и `SIGNER_KEYS` узла (тест следит за совпадением).
-const bootstrapSigners = <String>['fb708518ec5ff7798bf5adbf13fd530f1178f1b7660f615e134b68a60ebc7779'];
+const bootstrapSigners = <String>['52ba508fca1ca54bfe010dbb3d511e51ea4ee06bd59ce0816ae240745fd4025a'];
 
 /// Почему список не принят.
 enum BootstrapProblem { parse, format, unknownSigner, badSignature, expired, rollback }
