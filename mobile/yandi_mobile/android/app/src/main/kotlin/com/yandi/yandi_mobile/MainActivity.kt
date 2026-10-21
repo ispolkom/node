@@ -24,7 +24,17 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun onCreate(savedInstanceState: android.os.Bundle?) {
+        // полная защита экрана (решение владельца 2026-10-21): до первого кадра — без снимков и записи экрана, демонстрация
+        // экрана и превью в списке приложений пустые
+        window.setFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE, android.view.WindowManager.LayoutParams.FLAG_SECURE)
         super.onCreate(savedInstanceState)
+        // касания сквозь чужое окно поверх (подмена нажатий) не принимаются
+        window.decorView.filterTouchesWhenObscured = true
+        // Android 14+: содержимое окна не отдаётся службам специальных возможностей, кроме настоящих средств доступности
+        // (экранный диктор), — сторонние «читалки экрана» текст переписки не получат
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            window.decorView.setAccessibilityDataSensitive(android.view.View.ACCESSIBILITY_DATA_SENSITIVE_YES)
+        }
         initialLink = inviteLink(intent)
     }
 
@@ -108,8 +118,9 @@ class MainActivity : FlutterActivity() {
                 "secure" -> {
                     val on = call.argument<Boolean>("on") ?: false
                     runOnUiThread {
-                        if (on) window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
-                        else window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        // защита включена всегда: прежний выключатель экранов пароля больше не снимает её
+                        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_SECURE)
+                        if (!on) { /* без снятия */ }
                     }
                     result.success(true)
                 }
