@@ -2065,7 +2065,7 @@ async fn info(
     let role = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &dev)).map(|x| x.role.clone()));
     let can_invite = me.as_deref().is_some_and(may_invite) && invite_policy().enabled;
     Json(
-        json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true, "role": role, "can_invite": can_invite}),
+        json!({"node_id": id, "name": format!("YANDI {}", &id[..8]), "version": crate::VERSION, "device_id": me, "online": true, "role": role, "can_invite": can_invite, "min_app": crate::bootstrap::min_versions().1}),
     )
 }
 

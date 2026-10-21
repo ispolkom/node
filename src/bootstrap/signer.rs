@@ -74,6 +74,8 @@ mod tests {
             expires: 2,
             sequence: 3,
             entries: vec![Entry { id, key: key_hex, addr: vec!["203.0.113.5:9000".into()], region: Some("NL".into()), roles: vec!["entry".into(), "guest".into()], mobile: vec!["203.0.113.5:8444".into()] }],
+            min_node: None,
+            min_app: None,
             signer: String::new(),
             signature: String::new(),
         }

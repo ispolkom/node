@@ -413,6 +413,11 @@ class AppState extends ChangeNotifier implements FilesHost {
       final info = await _api!.getInfo();
       nodeOnline = info['online'] as bool? ?? false;
       _nodePeerId = info['node_id'] as String?;   // сам компьютер — не «человек»: аватарки ему не шлём
+      // отзыв сборок (docs/ROADMAP_R9.md §5): эта версия приложения ниже минимальной по подписанному списку узлов
+      final minApp = info['min_app'] as String?;
+      if (minApp != null && versionOlder(kAppVersion, minApp)) {
+        nodeError = trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.', {'v': kAppVersion, 'm': minApp});
+      }
       myRole = info['role'] as String?;
       canInvite = info['can_invite'] == true;
       _syncRoleFlags();

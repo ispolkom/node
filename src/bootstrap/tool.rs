@@ -41,7 +41,7 @@ const DEFAULT_FILE: &str = "bootstrap/bootstrap.json";
 fn load(path: &str) -> Result<Doc, String> {
     match std::fs::read(path) {
         Ok(b) => parse(&b).map_err(|e| format!("{path}: {e}")),
-        Err(_) => Ok(Doc { format: 1, network: "yandi".into(), issued: 0, expires: 0, sequence: 0, entries: vec![], signer: String::new(), signature: String::new() }),
+        Err(_) => Ok(Doc { format: 1, network: "yandi".into(), issued: 0, expires: 0, sequence: 0, entries: vec![], min_node: None, min_app: None, signer: String::new(), signature: String::new() }),
     }
 }
 
@@ -119,6 +119,22 @@ pub fn run(args: Vec<String>) -> (i32, String) {
             save(&f, &d)?;
             Ok(format!("{f}: узлов {}. Подпись сброшена — выполните `yandi bootstrap sign`.", d.entries.len()))
         }
+        // отзыв сборок (docs/ROADMAP_R9.md §5): минимальные версии узла и приложения; пустое значение снимает требование
+        "min" => {
+            let f = file(0);
+            let mut d = load(&f)?;
+            let norm = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+            if let Some(v) = arg(rest, "--node") {
+                d.min_node = norm(Some(v));
+            }
+            if let Some(v) = arg(rest, "--app") {
+                d.min_app = norm(Some(v));
+            }
+            d.signature.clear();
+            save(&f, &d)?;
+            Ok(format!("{f}: минимальная версия узла {}, приложения {}. Подпись сброшена — выполните `yandi admin bootstrap sign`.",
+                d.min_node.as_deref().unwrap_or("—"), d.min_app.as_deref().unwrap_or("—")))
+        }
         _ => Err(usage()),
     })();
     match result {
@@ -128,7 +144,7 @@ pub fn run(args: Vec<String>) -> (i32, String) {
 }
 
 fn usage() -> String {
-    "Использование:\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] [--id H] --key H --addr A [--addr A] [--mobile АДРЕС:ПОРТ] [--region XX] [--roles entry,relay,exit,guest]\n  yandi bootstrap from-card [файл] <визитка> [--mobile АДРЕС:ПОРТ] [--region XX] [--roles ...,guest]\n  yandi bootstrap remove [файл] --id H\n  подпись: yandi admin bootstrap sign <файл> (ключ — в закрытой среде узла, файла нет)".to_string()
+    "Использование:\n  yandi bootstrap show|verify [файл]\n  yandi bootstrap add [файл] [--id H] --key H --addr A [--addr A] [--mobile АДРЕС:ПОРТ] [--region XX] [--roles entry,relay,exit,guest]\n  yandi bootstrap from-card [файл] <визитка> [--mobile АДРЕС:ПОРТ] [--region XX] [--roles ...,guest]\n  yandi bootstrap remove [файл] --id H\n  yandi bootstrap min [файл] [--node ВЕРСИЯ] [--app ВЕРСИЯ]   отозвать старые сборки (пусто — снять)\n  подпись: yandi admin bootstrap sign <файл> (ключ — в закрытой среде узла, файла нет)".to_string()
 }
 
 #[cfg(test)]
@@ -150,7 +166,7 @@ mod tool_tests {
         let key = hex::encode(signer.verifying_key().to_bytes());
         let id = hex::encode(crate::util::types::derive_node_id(&signer.verifying_key().to_bytes()));
         // пустой список нужно завести: без подписи (её даст среда), форму проверяет add/remove
-        let empty = Doc { format: 1, network: "yandi".into(), issued: 0, expires: 0, sequence: 0, entries: vec![], signer: String::new(), signature: String::new() };
+        let empty = Doc { format: 1, network: "yandi".into(), issued: 0, expires: 0, sequence: 0, entries: vec![], min_node: None, min_app: None, signer: String::new(), signature: String::new() };
         save(&list, &empty).unwrap();
         let (code, out) = run(s(&["add", &list, "--id", &id, "--key", &key, "--addr", "203.0.113.5:9000", "--mobile", "203.0.113.5:8444", "--region", "nl", "--roles", "entry,relay,guest"]));
         assert_eq!(code, 0, "{out}");

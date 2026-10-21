@@ -88,6 +88,12 @@ pub struct Doc {
     /// номер выпуска: растёт при каждой публикации
     pub sequence: u64,
     pub entries: Vec<Entry>,
+    /// отзыв сборок (docs/ROADMAP_R9.md §5): узел старше этой версии сам не входит в общую сеть и предупреждает владельца
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_node: Option<String>,
+    /// приложение старше этой версии узел просит обновиться (`/mobile/info` → `min_app`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_app: Option<String>,
     /// ключ, которым подписано (hex) — должен быть среди закреплённых
     pub signer: String,
     /// подпись Ed25519 (128 hex) всего остального
@@ -323,9 +329,27 @@ pub fn to_config(d: &Doc) -> crate::netlayer::bootstrap::BootstrapConfig {
 
 /// Настройка для запуска: подписанный список (скачанный или сохранённый) плюс **локальный** файл владельца `nodes/bootstrap.json`
 /// (его владелец правит сам, подписи не требует).
+/// Версии, ниже которых сборки отозваны, по последнему принятому подписанному списку: (узел, приложение).
+pub fn min_versions() -> (Option<String>, Option<String>) {
+    match load_cached(SIGNER_KEYS, now()) {
+        Some(d) => (d.min_node, d.min_app),
+        None => (None, None),
+    }
+}
+
+/// Отозвана ли сборка этого узла подписанным списком.
+pub fn own_build_revoked() -> bool {
+    min_versions().0.is_some_and(|m| crate::update_check::is_newer(&m, &crate::update_check::own_version()))
+}
+
 pub async fn effective_config(local: &Path) -> crate::netlayer::bootstrap::BootstrapConfig {
     // автономный узел: ни подписанного, ни локального списка входов — только внесённые владельцем автономные узлы
     if crate::autonomy::enabled() {
+        return crate::netlayer::bootstrap::BootstrapConfig::default();
+    }
+    // сборка отозвана подписанным списком: честный узел в общую сеть не входит, пока его не обновят
+    if own_build_revoked() {
+        eprintln!("⚠️  Эта сборка отозвана списком входных узлов: обновите узел. В общую сеть узел не входит.");
         return crate::netlayer::bootstrap::BootstrapConfig::default();
     }
     let mut cfg = crate::netlayer::bootstrap::BootstrapConfig::load_from_file(local).unwrap_or_default();
@@ -356,7 +380,7 @@ mod tests {
         Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()], mobile: vec![] }
     }
     fn doc(seq: u64) -> Doc {
-        Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], signer: String::new(), signature: String::new() }.sign(&key(99))
+        Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], min_node: None, min_app: None, signer: String::new(), signature: String::new() }.sign(&key(99))
     }
 
     #[test]

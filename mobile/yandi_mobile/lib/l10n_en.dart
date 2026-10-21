@@ -763,6 +763,7 @@ const Map<String, String> enTable = {
   'Узлы в сети: номер, регион, роль': 'Nodes online: number, region, role',
   'Узлы ({n})': 'Nodes ({n})',
   'Узлов в сети не видно': 'No nodes online',
+  'Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.': 'This app version ({v}) is revoked: update the app to {m} or newer.',
   'Узел не подтвердил, что он тот самый из списка: вход отменён.': 'The node did not confirm that it is the one from the list: sign-in cancelled.',
   'Не удалось проверить узел: вход гостем отменён.': 'Could not verify the node: the guest sign-in is cancelled.',
 };

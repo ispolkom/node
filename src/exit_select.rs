@@ -367,6 +367,7 @@ mod tests {
             can_exit: exit,
             relay: false,
             dynamic_ip: false, p2p: 0,
+            version: String::new(),
             issued: 0,
             expires: 0,
             sig: String::new(),
