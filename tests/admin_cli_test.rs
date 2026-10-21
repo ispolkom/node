@@ -207,3 +207,49 @@ fn the_seed_phrase_alone_brings_back_the_same_node_and_the_same_list_signing_key
     assert_eq!(rc, 0, "{out}");
     assert!(out.contains(&signer_a), "тот же ключ подписи списка узлов: {out} / {signer_a}");
 }
+
+#[test]
+#[ignore = "starts a real node process"]
+fn backups_go_to_a_yandi_node_folder_and_a_restore_can_take_them_from_that_folder() {
+    let _one = ONE_NODE.lock().unwrap_or_else(|e| e.into_inner());
+    let tmp_a = tempfile::tempdir().unwrap();
+    let flash = tempfile::tempdir().unwrap();
+    let a = start(tmp_a.path());
+    let sock = wait_sock(&a);
+    let seed = a.dir.join("seed.txt");
+    let place = flash.path().to_str().unwrap();
+    let (rc, out) = run(&["setup", "--password-stdin", "--yes", "--backup-dir", place, "--seed-file", seed.to_str().unwrap()], "testpass123\n", &sock);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("yandi-node"), "{out}");
+    assert!(flash.path().join("yandi-node").is_dir(), "создана подпапка yandi-node");
+    assert!(!flash.path().join("yandi-node/.yandi-write-test").exists(), "пробный файл стёрт");
+    let phrase = std::fs::read_to_string(&seed).unwrap().trim().to_string();
+    let id_a = node_id_of(&sock);
+    // «сохранить сейчас» кладёт копию в папку
+    let (rc, out) = run(&["admin", "backup", "now", "--admin-password-stdin"], "testpass123\n", &sock);
+    assert_eq!(rc, 0, "{out}");
+    let copies: Vec<String> = std::fs::read_dir(flash.path().join("yandi-node")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    assert!(copies.iter().any(|n| n.starts_with("yandi-manual-") && n.ends_with(".yandibak")), "{copies:?}");
+    let (rc, out) = run(&["admin", "backup", "status", "--admin-password-stdin"], "testpass123\n", &sock);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("yandi-node"), "{out}");
+    // повторная установка места на системный/чужой диск — понятный отказ без прав
+    let (rc, out) = run(&["admin", "backup", "set-dir", "относительный/путь", "--admin-password-stdin"], "testpass123\n", &sock);
+    assert_ne!(rc, 0);
+    assert!(out.contains("полным путём"), "{out}");
+    drop(a);
+
+    // чистая машина: сид + папка yandi-node (последняя копия берётся сама)
+    let tmp_b = tempfile::tempdir().unwrap();
+    let b = start(tmp_b.path());
+    let sock_b = wait_sock(&b);
+    let folder = flash.path().join("yandi-node");
+    let (rc, out) = run(&["setup", "--restore", "--yes", "--password-stdin", "--backup-file", folder.to_str().unwrap()], &format!("{phrase}\nnewpass456\n"), &sock_b);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("восстановлен из копии"), "{out}");
+    assert_eq!(node_id_of(&sock_b), id_a);
+    // продолжает писать в ту же папку: место предложено автоматически
+    let (rc, out) = run(&["admin", "backup", "status", "--admin-password-stdin"], "newpass456\n", &sock_b);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("yandi-node"), "{out}");
+}

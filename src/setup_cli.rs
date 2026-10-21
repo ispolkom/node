@@ -6,7 +6,7 @@
 //!
 //! Порядок секретов на стандартном вводе (`--password-stdin`): фраза (только `--restore`), контрольное слово (только `--control-word-stdin`),
 //! пароль входа. Всё остальное спрашивается в терминале или задаётся ключами.
-use crate::admin_cli::{check_password_pair, error_text, roundtrip, write_private_new, Secrets};
+use crate::admin_cli::{check_password_pair, error_text, roundtrip, write_private_new, Secrets, Session};
 use crate::t;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -308,7 +308,7 @@ fn new_flow(o: &Opts) -> Result<(), String> {
     } else {
         eprintln!("{}", t!("Контрольное слово: запомните или храните отдельно от сид-фразы. Без него узел не восстановить.", "Control word: remember it or keep it apart from the seed phrase. The node cannot be restored without it."));
     }
-    backup_step(o, None)?;
+    backup_step(o, None, if admin.is_empty() { &pw } else { &admin })?;
     finish_message();
     Ok(())
 }
@@ -386,7 +386,8 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
         for w in v["warnings"].as_array().into_iter().flatten().filter_map(|w| w.as_str()) {
             eprintln!("! {w}");
         }
-        eprintln!("{}", t!("Узел восстановлен из копии: сопряжённые телефоны, контакты и группы на месте.", "The node is restored from the backup: paired phones, contacts and groups are back."));
+        eprintln!("{}", t!("Узел восстановлен из копии: сопряжённые телефоны, контакты и группы на месте. Узел запускается…", "The node is restored from the backup: paired phones, contacts and groups are back. The node is starting…"));
+        wait_started(socket)?;
         // папка …/yandi-node: копии логично продолжать писать туда же
         let p = std::path::Path::new(&path);
         if p.is_dir() && p.file_name().is_some_and(|n| n == crate::node_backup::FOLDER_NAME) {
@@ -417,7 +418,7 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
         ));
     }
     print_id_block(&id);
-    backup_step(o, from_folder)?;
+    backup_step(o, from_folder, if admin.is_empty() { &pw } else { &admin })?;
     finish_message();
     Ok(())
 }
@@ -433,10 +434,10 @@ fn fmt_free(bytes: Option<u64>) -> String {
 }
 
 /// Один вызов «задать место копий»; `Ok(true)` — принято, `Ok(false)` — выбрать другое.
-pub(crate) fn apply_place(socket: &std::path::Path, dir: &str, auto_yes: bool) -> Result<bool, String> {
+pub(crate) fn apply_place(s: &mut Session, dir: &str, auto_yes: bool) -> Result<bool, String> {
     let mut confirm = false;
     loop {
-        let (code, v) = roundtrip(socket, "POST", "/api/backup/config", Some(&json!({ "dir": dir, "confirm_system": confirm })), None, Duration::from_secs(60))?;
+        let (code, v) = s.call("POST", "/api/backup/config", Some(&json!({ "dir": dir, "confirm_system": confirm })))?;
         if code == 200 {
             let shown = v["dir"].as_str().unwrap_or(dir);
             eprintln!("{}", t!(
@@ -483,14 +484,16 @@ fn remind_no_backup() {
 }
 
 /// Шаг мастера «где хранить копии»: после сида и пароля.
-pub fn backup_step(o: &Opts, suggest: Option<String>) -> Result<(), String> {
-    let socket = &o.socket;
+pub fn backup_step(o: &Opts, suggest: Option<String>, admin_password: &str) -> Result<(), String> {
+    // копии — админский раздел узла: сеанс администратора открывается паролем, который человек только что задал
+    let mut sess = Session::new(o.socket.clone(), false);
+    sess.secrets.preset = Some(admin_password.to_string());
     if o.no_backup_dir {
         remind_no_backup();
         return Ok(());
     }
     if let Some(dir) = o.backup_dir.clone().or(suggest) {
-        if apply_place(socket, &dir, o.yes)? {
+        if apply_place(&mut sess, &dir, o.yes)? {
             return Ok(());
         }
         if o.backup_dir.is_some() {
@@ -506,7 +509,7 @@ pub fn backup_step(o: &Opts, suggest: Option<String>) -> Result<(), String> {
         "Where to keep backups of the links (paired phones, contacts, groups)? The node creates a yandi-node folder in the chosen place, the final path: …/yandi-node.\nKeep backups off the system disk: a flash drive, another disk, a cloud folder."
     ));
     loop {
-        let (code, v) = roundtrip(socket, "GET", "/api/backup/places", None, None, Duration::from_secs(30))?;
+        let (code, v) = sess.call("GET", "/api/backup/places", None)?;
         let places: Vec<Value> = if code == 200 { v["places"].as_array().cloned().unwrap_or_default() } else { Vec::new() };
         for (i, p) in places.iter().enumerate() {
             let ok = if p["writable"] == true { "" } else { t!("  (нет прав на запись)", "  (not writable)") };
@@ -530,7 +533,7 @@ pub fn backup_step(o: &Opts, suggest: Option<String>) -> Result<(), String> {
         if dir.is_empty() {
             continue;
         }
-        if apply_place(socket, &dir, false)? {
+        if apply_place(&mut sess, &dir, false)? {
             return Ok(());
         }
     }

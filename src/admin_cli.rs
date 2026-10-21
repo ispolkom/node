@@ -631,7 +631,7 @@ fn cmd_backup(s: &mut Session, args: &[String]) -> Result<(), String> {
         "set-dir" => {
             let path = args.get(1).ok_or(t!("set-dir ПУТЬ", "set-dir PATH"))?;
             let yes = args.iter().any(|a| a == "--yes");
-            if !crate::setup_cli::apply_place(&s.socket, path, yes)? {
+            if !crate::setup_cli::apply_place(s, path, yes)? {
                 return Err(t!("место для копий не принято", "the backup place was not accepted").into());
             }
         }
