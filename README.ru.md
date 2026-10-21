@@ -20,7 +20,7 @@
 |---|---|---|
 | Debian 12+ / Ubuntu 24.04+ (amd64), узел | [`yandi-node_0.2.0-g_amd64.deb`](https://yandi.su/update/deb/yandi-node_0.2.0-g_amd64.deb) | 0.2.0+g |
 | Debian / Ubuntu, оболочка (окно) | [`yandi-desktop_0.2.0-g_amd64.deb`](https://yandi.su/update/deb/yandi-desktop_0.2.0-g_amd64.deb) | 0.2.0+g |
-| Android | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (сборка 3) |
+| Android | [`yandi.apk`](https://yandi.su/update/android/yandi.apk) | 1.0.0 (сборка 4) |
 
 Все загрузки, контрольные суммы и инструкции: **<https://yandi.su/ru/network/>**. Каждый выпуск подписан (`MANIFEST.json` + `MANIFEST.json.sig`); открытые ключи указаны в [английском README](README.md#download).
 
