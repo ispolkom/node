@@ -276,7 +276,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Один проход: неотправленные личные сообщения уходят снова тем же номером (получатель отбрасывает повтор по номеру).
   Future<void> retryUnsent() async {
     final ws = _ws;
-    if (_retrying || ws == null || !ws.connected) return;
+    if (_retrying || ws == null || !ws.connected || appRevoked) return;
     _retrying = true;
     try {
       final now = DateTime.now();
@@ -290,9 +290,11 @@ class AppState extends ChangeNotifier implements FilesHost {
         if (_ws != ws || !ws.connected) break;
         // состояние могло измениться, пока шёл предыдущий await: собеседника заблокировали, сообщение удалили или оно уже подтверждено
         if (isBlocked(m.peerId) || await StorageService.outgoingStatus(m.id) != MessageStatus.failed) continue;
+        if (!await _guestSendAllowed()) break;   // лимит гостя считает и повторы
         final payload = MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText);
         final ok = await ws.sendMessage(m.peerId, payload);
         if (!ok) {
+          await _guestSendRefund();
           _outbox.failedAgain(m.id, DateTime.now());
           continue;
         }
@@ -310,8 +312,9 @@ class AppState extends ChangeNotifier implements FilesHost {
       for (final m in _outbox.duePending(pending, now, capable: (m) => _receiptCapable.contains(m.peerId) && !isBlocked(m.peerId))) {
         if (_ws != ws || !ws.connected) break;
         if (isBlocked(m.peerId) || await StorageService.outgoingStatus(m.id) != MessageStatus.pending) continue;
+        if (!await _guestSendAllowed()) break;
         _outbox.pendingResent(m.id);
-        await ws.sendMessage(m.peerId, MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText));
+        if (!await ws.sendMessage(m.peerId, MsgChannel.wrapMessage(m.id, m.text, replyId: m.replyId, replyText: m.replyText))) await _guestSendRefund();
       }
     } catch (_) {
       // база или сеть недоступны: попробуем на следующем проходе
@@ -397,6 +400,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (info == null) return;
       final role = info['role'] as String?;
       final can = info['can_invite'] == true;
+      _noteMinApp(info['min_app']);
       if (role != myRole || can != canInvite) {
         myRole = role;
         canInvite = can;
@@ -407,6 +411,19 @@ class AppState extends ChangeNotifier implements FilesHost {
     } catch (_) {}
   }
 
+  /// Отзыв сборок: версия приложения ниже `min_app` узла (из подписанного списка) — жёсткая блокировка отправки и обязательный экран
+  /// обновления на главной. Снимается, только когда узел перестал требовать (или приложение обновили).
+  String? requiredApp;
+  bool get appRevoked => requiredApp != null;
+
+  void _noteMinApp(Object? v) {
+    final m = v is String && v.isNotEmpty && versionOlder(kAppVersion, v) ? v : null;
+    if (m == requiredApp) return;
+    requiredApp = m;
+    if (m != null) nodeError = trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.', {'v': kAppVersion, 'm': m});
+    notifyListeners();
+  }
+
   Future<void> _loadInitialData() async {
     unawaited(_initDownloadsDir());
     try {
@@ -414,10 +431,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       nodeOnline = info['online'] as bool? ?? false;
       _nodePeerId = info['node_id'] as String?;   // сам компьютер — не «человек»: аватарки ему не шлём
       // отзыв сборок (docs/ROADMAP_R9.md §5): эта версия приложения ниже минимальной по подписанному списку узлов
-      final minApp = info['min_app'] as String?;
-      if (minApp != null && versionOlder(kAppVersion, minApp)) {
-        nodeError = trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.', {'v': kAppVersion, 'm': minApp});
-      }
+      _noteMinApp(info['min_app']);
       myRole = info['role'] as String?;
       canInvite = info['can_invite'] == true;
       _syncRoleFlags();
@@ -974,6 +988,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   Future<String?> _sendFile(String peerId, String path, {String? name, void Function()? onPrepared}) async {
     if (_api == null || _ws == null) return tr('Нет связи с узлом');
+    if (appRevoked) return trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.', {'v': kAppVersion, 'm': requiredApp ?? ''});
     final svc = FileTransferService(_api!, vault: await VaultService.instance.files());
     late FileOffer offer;
     try {
@@ -1701,16 +1716,61 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// Сколько сообщений гость ещё может отправить за скользящие сутки (docs/ROADMAP_R9.md §2); не гость — без лимита (-1).
   /// Узел дополнительно держит свой потолок кадров (`guest::MAX_MSG_FRAMES_PER_DAY`).
   static const guestMessagesPerDay = 10;
+  static const _guestSendsKey = 'guest_sends_v1';
+  /// Времена отправок гостя (мс) за скользящие сутки: отдельное маленькое хранилище, не история чатов (очистка чата не обнуляет лимит).
+  List<int> _guestSends = [];
+  bool _guestSendsLoaded = false;
+
+  Future<void> _loadGuestSends() async {
+    if (_guestSendsLoaded) return;
+    _guestSendsLoaded = true;
+    try {
+      final raw = await StorageService.secureRead(_guestSendsKey);
+      final l = raw == null ? null : jsonDecode(raw);
+      if (l is List) _guestSends = [for (final x in l) if (x is int) x];
+    } catch (_) {}
+    _pruneGuestSends();
+  }
+
+  void _pruneGuestSends() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    // запись «из будущего» (часы переведены назад) тоже считается за последние сутки, но не дольше суток от сейчас
+    _guestSends = [for (final t in _guestSends) if (now - t < 86400000 && t <= now + 86400000) t];
+    if (_guestSends.length > guestMessagesPerDay * 4) _guestSends = _guestSends.sublist(_guestSends.length - guestMessagesPerDay * 4);
+  }
+
   int get guestMessagesLeft {
     if (!isGuest) return -1;
-    final since = DateTime.now().subtract(const Duration(hours: 24));
-    final used = _chats.values.expand((l) => l).where((m) => m.outgoing && m.timestamp.isAfter(since)).length;
-    return (guestMessagesPerDay - used).clamp(0, guestMessagesPerDay);
+    _pruneGuestSends();
+    return (guestMessagesPerDay - _guestSends.length).clamp(0, guestMessagesPerDay);
+  }
+
+  /// Попытка не дошла до сокета (нет связи или ключа): в лимит она не идёт, на узле её кадр не посчитан.
+  Future<void> _guestSendRefund() async {
+    if (!isGuest || _guestSends.isEmpty) return;
+    _guestSends.removeLast();
+    try {
+      await StorageService.secureWrite(_guestSendsKey, jsonEncode(_guestSends));
+    } catch (_) {}
+  }
+
+  /// Учесть попытку отправки гостя (в том числе повтор): false — лимит исчерпан, отправлять нельзя. Не гость — всегда true.
+  /// Запись делается до отправки и сразу сохраняется, чтобы перезапуск приложения лимит не сбрасывал.
+  Future<bool> _guestSendAllowed() async {
+    if (!isGuest) return true;
+    await _loadGuestSends();
+    if (guestMessagesLeft == 0) return false;
+    _guestSends.add(DateTime.now().millisecondsSinceEpoch);
+    try {
+      await StorageService.secureWrite(_guestSendsKey, jsonEncode(_guestSends));
+    } catch (_) {}
+    return true;
   }
 
   Future<void> sendMessage(String peerId, String text, {ChatMessage? replyTo}) async {
     if (isBlocked(peerId)) return;   // двусторонний блок: заблокированному не отправляем
-    if (guestMessagesLeft == 0) return; // гость исчерпал сообщения на сутки: экран чата показывает причину
+    if (appRevoked) return;   // сборка отозвана: до обновления ничего не отправляем
+    if (!await _guestSendAllowed()) return; // гость исчерпал сообщения на сутки: экран чата показывает причину
     final id = ChatMessage.generateId();
     // Всегда конверт с id: получатель по нему отвечает «доставлено/прочитано». Раньше обёртка зависела от того, успел ли собеседник ответить
     // на пинг поддержки в этом сеансе: после запуска приложения это знание пусто, и всё отправленное в это окно уходило без номера — без галочек.
@@ -1719,6 +1779,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final replyId = replyTo == null ? null : replyIdFor(replyTo);
     final payload = MsgChannel.wrapMessage(id, text, replyId: replyId, replyText: replyText);
     final sent = await (_ws?.sendMessage(peerId, payload) ?? Future<bool>.value(false));
+    if (!sent) await _guestSendRefund();
 
     final msg = ChatMessage(
       id:        id,

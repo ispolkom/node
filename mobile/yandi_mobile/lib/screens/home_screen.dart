@@ -3,6 +3,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import '../app_version.dart';
 import '../models/contact.dart';
 import '../services/app_state.dart';
 import '../services/notification_service.dart';
@@ -441,7 +442,8 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               child: const Icon(Icons.person_add),
             ),
       body: Column(children: [
-        if (state.appUpdate != null) _updateBanner(context, state),
+        if (state.appRevoked) _revokedBanner(context, state)
+        else if (state.appUpdate != null) _updateBanner(context, state),
         Expanded(
           child: TabBarView(
             controller: _tabs,
@@ -452,6 +454,30 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
               FilesTab(key: _filesKey),
             ],
           ),
+        ),
+      ]),
+    );
+  }
+
+  /// Обязательное обновление: сборка отозвана подписанным списком узлов, отправка остановлена; кнопки «Позже» нет.
+  Widget _revokedBanner(BuildContext context, AppState state) {
+    final page = '${state.appUpdate?['page'] ?? 'https://yandi.su/'}';
+    return Container(
+      key: const ValueKey('app-revoked-banner'),
+      width: double.infinity,
+      color: Colors.red.withValues(alpha: 0.18),
+      padding: const EdgeInsets.fromLTRB(16, 10, 8, 10),
+      child: Row(children: [
+        Expanded(child: Text(trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее. Отправка сообщений остановлена.', {'v': kAppVersion, 'm': state.requiredApp ?? ''}),
+            style: const TextStyle(color: AppTheme.text, fontSize: 13, fontWeight: FontWeight.bold))),
+        TextButton(
+          onPressed: () async {
+            await Clipboard.setData(ClipboardData(text: page));
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Ссылка скопирована'))));
+            }
+          },
+          child: Text(tr('Скопировать ссылку')),
         ),
       ]),
     );

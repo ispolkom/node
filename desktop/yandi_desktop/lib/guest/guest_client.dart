@@ -30,6 +30,23 @@ const int ftSendMsg = 0x30;
 /// Сколько сообщений гость отправляет за скользящие сутки (как `AppState.guestMessagesPerDay` на телефоне).
 const int guestMessagesPerDay = 10;
 
+/// Версия протокола гостя на ПК совпадает с версией телефона (`kAppVersion`) и поднимается вместе с ней: по ней узел отзывает сборки (`min_app`).
+const String kGuestAppVersion = '1.0.0-b4';
+
+/// Старше ли версия [a], чем [b] (числа по порядку: `1.0.0-b4` → 1,0,0,4); как `versionOlder` на телефоне.
+bool versionOlder(String a, String b) {
+  List<int> parts(String v) => [for (final m in RegExp(r'\d+').allMatches(v)) int.parse(m.group(0)!)];
+  final x = parts(a), y = parts(b);
+  for (var i = 0; i < x.length || i < y.length; i++) {
+    final p = i < x.length ? x[i] : 0, q = i < y.length ? y[i] : 0;
+    if (p != q) return p < q;
+  }
+  return false;
+}
+
+/// Предел памяти клиента: сообщений на чат, номеров в окне повторов, длина входящего текста (знаков) и блоба (байт).
+const int maxStoredPerChat = 500, maxReplayIds = 5000, maxIncomingChars = 8000, maxIncomingBlob = 64 * 1024;
+
 // ── Личность устройства ─────────────────────────────────────────────────────
 
 /// Ключи этого устройства: Ed25519 (подпись) и X25519 (общий секрет). Случайные на сеанс, нигде не сохраняются.
@@ -214,6 +231,12 @@ HttpClient pinnedHttpClient(String fingerprint) {
 /// Предел ответа узла (как `LimitedClient` на телефоне): неисправный узел не заставит копить гигабайты.
 const int maxResponseBytes = 8 * 1024 * 1024;
 
+/// Адрес из частей; [host] может быть в скобках (`[::1]`) — скобки снимаются, `Uri` ставит их сам.
+Uri _uri(String scheme, String host, int port, String path, [Map<String, String>? query]) {
+  final h = host.startsWith('[') && host.endsWith(']') ? host.substring(1, host.length - 1) : host;
+  return Uri(scheme: scheme, host: h, port: port, path: path, queryParameters: query);
+}
+
 /// Один запрос: код ответа и разобранный JSON (или null). Весь ответ — под одним сроком.
 Future<(int, dynamic)> pinnedJson(HttpClient c, String method, Uri url, {String? token, Object? body, Duration timeout = const Duration(seconds: 15)}) async {
   return (() async {
@@ -351,6 +374,20 @@ class GuestClient {
 
   bool get isGuest => role == 'guest';
 
+  /// Отзыв сборок: версия этого клиента ниже `min_app` (из `/mobile/info` или подписанного списка) — отправка запрещена, пока не обновят.
+  String? requiredApp;
+  bool get appRevoked => requiredApp != null;
+
+  /// Принять `min_app` (узла или списка): строка новее нашей версии включает блокировку; уже включённая не снимается списком, только узлом.
+  void noteMinApp(Object? v, {bool fromNode = true}) {
+    final m = v is String && v.isNotEmpty && versionOlder(kGuestAppVersion, v) ? v : null;
+    if (m != null) {
+      requiredApp = m;
+    } else if (fromNode) {
+      requiredApp = null;
+    }
+  }
+
   static String deviceLabel() {
     final r = Random.secure();
     return 'ПК ${List.generate(2, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join()}';
@@ -362,7 +399,7 @@ class GuestClient {
     if (fp.isEmpty) throw const GuestError('Не удалось проверить узел: вход гостем отменён.');
     final http = pinnedHttpClient(fp);
     try {
-      final (code, body) = await pinnedJson(http, 'POST', Uri.parse('https://${n.host}:${n.port}/mobile/pair/guest'), body: {'device_name': deviceLabel()}, timeout: const Duration(seconds: 10));
+      final (code, body) = await pinnedJson(http, 'POST', _uri('https', n.host, n.port, '/mobile/pair/guest'), body: {'device_name': deviceLabel()}, timeout: const Duration(seconds: 10));
       if (code == 503) throw const GuestError('На этом узле сейчас нет места для гостей. Попробуйте другой узел или позже.');
       if (code == 403 || code == 404) throw const GuestError('Этот узел не принимает гостей. Попросите код или ссылку у администратора.');
       if (code == 429) throw const GuestError('Слишком много попыток. Подождите и повторите.');
@@ -384,13 +421,13 @@ class GuestClient {
     final h = host ?? c.host, p = port ?? c.port;
     final http = pinnedHttpClient(c.fingerprint);
     try {
-      final (code, body) = await pinnedJson(http, 'POST', Uri.parse('https://${h.contains(':') && !h.startsWith('[') ? '[$h]' : h}:$p/mobile/pair'),
+      final (code, body) = await pinnedJson(http, 'POST', _uri('https', h, p, '/mobile/pair'),
           body: {'pairing_code': c.code, 'device_name': deviceLabel()}, timeout: const Duration(seconds: 10));
       if (code == 429) throw const GuestError('Слишком много попыток. Подождите и повторите.');
       if (code != 200 || body is! Map || body['token'] is! String || (body['token'] as String).isEmpty) {
         throw const GuestError('Код устарел или уже использован. Попросите у владельца узла новый.');
       }
-      return await _open(h, p, '', '$h:$p', body['token'] as String, c.fingerprint, http);
+      return await _open(h, p, '', h.contains(':') && !h.startsWith('[') ? '[$h]:$p' : '$h:$p', body['token'] as String, c.fingerprint, http);
     } on GuestError {
       http.close(force: true);
       rethrow;
@@ -407,10 +444,11 @@ class GuestClient {
     return cl;
   }
 
-  Uri _url(String path) => Uri.parse('https://${host.contains(':') && !host.startsWith('[') ? '[$host]' : host}:$port$path');
+  /// Адрес ручки узла собирается из частей: IPv6 получает скобки сам, строкой host не склеивается.
+  Uri _url(String path, [Map<String, String>? query]) => _uri('https', host, port, path, query);
 
-  Future<(int, dynamic)> _json(String method, String path, {Object? body, Duration timeout = const Duration(seconds: 15)}) =>
-      pinnedJson(_http, method, _url(path), token: _token, body: body, timeout: timeout);
+  Future<(int, dynamic)> _json(String method, String path, {Object? body, Duration timeout = const Duration(seconds: 15), Map<String, String>? query}) =>
+      pinnedJson(_http, method, _url(path, query), token: _token, body: body, timeout: timeout);
 
   // ── ручки узла ────────────────────────────────────────────────────────────
 
@@ -422,6 +460,7 @@ class GuestClient {
       deviceId = b['device_id'] as String?;
       nodePeerId = b['node_id'] as String?;
       role = b['role'] as String? ?? role;
+      noteMinApp(b['min_app']);
       final n = b['name'];
       if (n is String && n.isNotEmpty) nodeName = n;
       return b;
@@ -569,7 +608,52 @@ class GuestClient {
   Stream<String> get securityErrors => _securityCtrl.stream;
   Stream<bool> get connection => _connCtrl.stream;
 
-  final Set<String> _seenReplay = {};
+  /// Окно повторов: ограниченное (самые давние номера вытесняются), чтобы поток писем не раздувал память.
+  final Set<String> _seenReplay = <String>{};
+  bool _claimReplay(String id) {
+    if (_seenReplay.contains(id)) return false;
+    _seenReplay.add(id);
+    if (_seenReplay.length > maxReplayIds) _seenReplay.remove(_seenReplay.first);
+    return true;
+  }
+
+  /// Хранилище переписки живёт в клиенте, а не в экране: письма, пришедшие до появления экрана, не теряются (экран читает его при открытии).
+  final Map<String, List<GuestMessage>> _store = {};
+  final Set<String> _unread = {};
+  final Set<String> _readSent = {};
+
+  /// Сообщения чата с [peerId] (не более [maxStoredPerChat] последних), по времени получения.
+  List<GuestMessage> messagesFor(String peerId) => List.unmodifiable(_store[peerId] ?? const <GuestMessage>[]);
+  /// Собеседники с непрочитанным.
+  Set<String> get unread => Set.unmodifiable(_unread);
+
+  void _remember(GuestMessage m) {
+    final l = _store.putIfAbsent(m.peerId, () => []);
+    if (l.any((x) => x.id == m.id && x.outgoing == m.outgoing)) return;
+    l.add(m);
+    if (l.length > maxStoredPerChat) l.removeRange(0, l.length - maxStoredPerChat);
+  }
+
+  /// Чат открыт: непрочитанное снимается, собеседнику уходит «прочитано» по ещё не отмеченным входящим.
+  void markRead(String peer) {
+    _unread.remove(peer);
+    final ids = [for (final m in _store[peer] ?? const <GuestMessage>[]) if (!m.outgoing && _readSent.add(m.id)) m.id];
+    if (ids.length > 200) ids.removeRange(200, ids.length);
+    if (ids.isNotEmpty) unawaited(sendReceipt(peer, 'read', ids));
+  }
+
+  void _applyReceipt(String kind, List<String> ids) {
+    int rk(String s) => switch (s) { 'read' => 2, 'delivered' => 1, _ => 0 };
+    final rank = rk(kind);
+    final set = ids.length > 500 ? ids.sublist(0, 500).toSet() : ids.toSet();
+    for (final l in _store.values) {
+      for (final m in l) {
+        if (m.outgoing && set.contains(m.id) && rk(m.status) < rank) m.status = kind;
+      }
+    }
+  }
+
+  /// Времена отправок за скользящие сутки. Владеет ими клиент: лимит проверяется в самой отправке, а не только в экране.
   final List<DateTime> _sentAt = [];
 
   /// Сколько сообщений ещё можно отправить за скользящие сутки; не гость — без лимита (-1). Узел держит и свой потолок.
@@ -580,15 +664,24 @@ class GuestClient {
     return (guestMessagesPerDay - _sentAt.length).clamp(0, guestMessagesPerDay);
   }
 
-  /// Отправить текст зашифрованно. Возвращает сообщение (status pending) или null: нет сокета, ключа собеседника или лимит исчерпан.
-  /// Открытым текстом никогда не отправляет.
+  /// Отправить текст зашифрованно. Возвращает сообщение (status pending) или null: нет сокета, ключа собеседника, лимит исчерпан или сборка отозвана.
+  /// Открытым текстом никогда не отправляет. Место в лимите занимается ДО отправки (параллельные вызовы не обходят лимит) и возвращается,
+  /// если до сокета дело не дошло.
   Future<GuestMessage?> sendText(String peerId, String text) async {
-    if (messagesLeft == 0) return null;
-    final id = newMessageId();
-    if (!await _sendEncrypted(peerId, MsgChannel.wrapMessage(id, text))) return null;
+    if (appRevoked || _closed) return null;
+    if (text.isEmpty || text.length > 2000) return null;
+    final guest = isGuest;
+    if (guest && messagesLeft == 0) return null;
     final now = DateTime.now();
-    _sentAt.add(now);
-    return GuestMessage(id, peerId, text, true, now, 'pending');
+    if (guest) _sentAt.add(now);
+    final id = newMessageId();
+    if (!await _sendEncrypted(peerId, MsgChannel.wrapMessage(id, text))) {
+      if (guest) _sentAt.remove(now);
+      return null;
+    }
+    final msg = GuestMessage(id, peerId, text, true, now, 'pending');
+    _remember(msg);
+    return msg;
   }
 
   Future<bool> _sendEncrypted(String peerId, String payloadText) async {
@@ -623,20 +716,25 @@ class GuestClient {
     if (self == null || !E2e.isEncrypted(payload) || !RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(from)) return null;
     final bundle = await getPeerBundle(from);
     if (bundle == null) return null;
-    return E2e.decrypt(Uint8List.fromList(payload), identity.ecdh, from: from, to: self, kind: 1, senderEd: bundle.ed25519, claimReplay: _seenReplay.add, onDuplicate: onDuplicate);
+    return E2e.decrypt(Uint8List.fromList(payload), identity.ecdh, from: from, to: self, kind: 1, senderEd: bundle.ed25519, claimReplay: _claimReplay, onDuplicate: onDuplicate);
   }
 
   /// Разобрать расшифрованный текст: квитанция уходит в поток, служебное пропускается, конверт или обычный текст — сообщение.
   void _deliver(String from, DateTime ts, String text) {
     final rcpt = MsgChannel.parseReceipt(text);
     if (rcpt != null) {
+      _applyReceipt(rcpt.$1, rcpt.$2);
       _receiptCtrl.add(rcpt);
       return;
     }
     if (text.startsWith(MsgChannel.rcptMarker) || MsgChannel.isOtherService(text)) return;
     final env = MsgChannel.parseMessage(text);
     if (text.startsWith(MsgChannel.msgMarker) && env == null) return; // повреждённый конверт не показываем как текст
-    final msg = GuestMessage(env?.$1 ?? 'in_${ts.millisecondsSinceEpoch}_${from.substring(0, 8)}', from, env?.$2 ?? text, false, ts, 'delivered');
+    final shown = env?.$2 ?? text;
+    if (shown.length > maxIncomingChars) return; // слишком длинный текст не храним и не показываем
+    final msg = GuestMessage(env?.$1 ?? 'in_${ts.millisecondsSinceEpoch}_${from.substring(0, 8)}', from, shown, false, ts, 'delivered');
+    _remember(msg);
+    _unread.add(from);
     _msgCtrl.add(msg);
     if (env != null) unawaited(sendReceipt(from, 'delivered', [env.$1]));
   }
@@ -660,7 +758,7 @@ class GuestClient {
     if (_closed) return;
     try {
       final ws = await WebSocket.connect(
-        'wss://${host.contains(':') && !host.startsWith('[') ? '[$host]' : host}:$port/mobile/ws',
+        _uri('wss', host, port, '/mobile/ws').toString(),
         headers: {'Authorization': 'Bearer $_token'}, // токен в заголовке, не в адресе
         customClient: pinnedHttpClient(fingerprint),
       );
@@ -727,6 +825,7 @@ class GuestClient {
     final ts = ByteData.sublistView(d, 33, 41).getInt64(0, Endian.little);
     final len = ByteData.sublistView(d, 41, 45).getUint32(0, Endian.little);
     if (d.length < 45 + len || ts < 0 || ts > _maxDateMs) return;
+    if (len > maxIncomingBlob) return;
     final text = await _decryptIncoming(d.sublist(45, 45 + len), from);
     if (text != null) _deliver(from, DateTime.fromMillisecondsSinceEpoch(ts), text);
   }
@@ -735,32 +834,61 @@ class GuestClient {
 
   bool _syncing = false;
 
-  /// Забрать неподтверждённую почту, показать новое и подтвердить обработанное. Письма, которые не расшифровались, остаются на узле.
+  /// Забрать неподтверждённую почту страницами (`after` — номер последнего письма страницы, как на телефоне), показать новое и подтвердить
+  /// обработанное. Письма, которые не расшифровались из-за нехватки ключей или сети, остаются на узле и не загораживают очередь: следующая
+  /// страница берётся по курсору. Подтверждаются повторы и то, что не может стать сообщением никогда (не конверт E4, битое или слишком большое);
+  /// старый формат E2/E3 не подтверждается и не стирается (как на телефоне).
   Future<void> syncInbox() async {
     if (_syncing || _closed || deviceId == null) return;
     _syncing = true;
     try {
-      final (c, b) = await _json('GET', '/mobile/inbox?since=0&after=0&limit=200');
-      if (c != 200 || b is! Map) return;
-      final ack = <int>[];
-      for (final m in (b['messages'] as List? ?? const [])) {
-        if (m is! Map) continue;
-        final id = (m['id'] as num?)?.toInt();
-        final from = m['from_peer_id'] as String? ?? '', p64 = m['payload_b64'] as String? ?? '';
-        final ts = (m['ts_ms'] as num?)?.toInt() ?? 0;
-        if (id == null || from.isEmpty || p64.isEmpty) continue;
-        final bytes = base64.decode(p64);
-        if (bytes.isNotEmpty && (bytes[0] == 0xE2 || bytes[0] == 0xE3)) continue; // старый формат не подтверждаем и не стираем
-        var dup = false;
-        final text = await _decryptIncoming(bytes, from, onDuplicate: () => dup = true);
-        if (text == null) {
-          if (dup) ack.add(id); // повтор того, что уже получено вживую
-          continue;
+      const page = 200, maxPages = 20;
+      var after = 0;
+      for (var i = 0; i < maxPages && !_closed; i++) {
+        final (c, b) = await _json('GET', '/mobile/inbox', query: {'since': '0', 'after': '$after', 'limit': '$page'});
+        if (c != 200 || b is! Map) return;
+        final list = (b['messages'] as List? ?? const []).whereType<Map>().toList();
+        final ack = <int>[];
+        var last = after;
+        for (final m in list) {
+          final id = (m['id'] as num?)?.toInt();
+          if (id == null) continue;
+          if (id > last) last = id;
+          final from = m['from_peer_id'] as String? ?? '', p64 = m['payload_b64'] as String? ?? '';
+          final ts = (m['ts_ms'] as num?)?.toInt() ?? 0;
+          if (from.isEmpty || p64.isEmpty || ts < 0 || ts > _maxDateMs) {
+            ack.add(id); // письмо без отправителя, тела или с невозможным временем не станет сообщением никогда
+            continue;
+          }
+          if (p64.length > maxIncomingBlob * 2) {
+            ack.add(id); // заведомо больше любого письма: мусор, подтверждаем
+            continue;
+          }
+          Uint8List bytes;
+          try {
+            bytes = base64.decode(p64);
+          } catch (_) {
+            ack.add(id); // не base64: не станет письмом никогда
+            continue;
+          }
+          if (bytes.isNotEmpty && (bytes[0] == 0xE2 || bytes[0] == 0xE3)) continue; // старый формат не подтверждаем и не стираем
+          if (bytes.length > maxIncomingBlob || !E2e.isEncrypted(bytes)) {
+            ack.add(id); // не E4 и не старый формат: структурный мусор
+            continue;
+          }
+          var dup = false;
+          final text = await _decryptIncoming(bytes, from, onDuplicate: () => dup = true);
+          if (text == null) {
+            if (dup) ack.add(id); // повтор того, что уже получено вживую
+            continue; // нет ключа/сети/подпись не сошлась: остаётся на узле, но очередь идёт дальше по курсору
+          }
+          _deliver(from, DateTime.fromMillisecondsSinceEpoch(ts), text); // сначала в хранилище клиента, потом подтверждение
+          ack.add(id);
         }
-        _deliver(from, DateTime.fromMillisecondsSinceEpoch(ts), text);
-        ack.add(id);
+        if (ack.isNotEmpty) await _json('POST', '/mobile/inbox/ack', body: {'ids': ack}, timeout: const Duration(seconds: 10));
+        if (list.length < page || last <= after) break;
+        after = last;
       }
-      if (ack.isNotEmpty) await _json('POST', '/mobile/inbox/ack', body: {'ids': ack}, timeout: const Duration(seconds: 10));
     } catch (_) {
       // узел не ответил: повторим на следующем проходе
     } finally {

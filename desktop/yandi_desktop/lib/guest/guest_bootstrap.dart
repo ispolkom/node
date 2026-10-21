@@ -53,7 +53,9 @@ class BootstrapDoc {
   final int format, issued, expires, sequence;
   final String network, signer, signature;
   final List<BootstrapEntry> entries;
-  const BootstrapDoc(this.format, this.network, this.issued, this.expires, this.sequence, this.entries, this.signer, this.signature);
+  /// Отзыв сборок: версии узла и приложения не ниже этих (в подписи сразу после `entries`, пишутся только заданные).
+  final String? minNode, minApp;
+  const BootstrapDoc(this.format, this.network, this.issued, this.expires, this.sequence, this.entries, this.signer, this.signature, {this.minNode, this.minApp});
 
   static BootstrapDoc? parse(String text) {
     try {
@@ -63,6 +65,7 @@ class BootstrapDoc {
       final es = m['entries'];
       if (m['format'] is! int || m['network'] is! String || m['issued'] is! int || m['expires'] is! int || m['sequence'] is! int || es is! List || m['signer'] is! String || m['signature'] is! String) return null;
       if (es.length > 64) return null;
+      if ((m['min_node'] != null && m['min_node'] is! String) || (m['min_app'] != null && m['min_app'] is! String)) return null;
       final out = <BootstrapEntry>[];
       for (final e in es) {
         if (e is! Map || !_hex(e['id'], 64) || !_hex(e['key'], 64)) return null;
@@ -77,7 +80,7 @@ class BootstrapDoc {
         if (roles.contains('guest') && mobile.isEmpty) return null;
         out.add(BootstrapEntry((e['id'] as String).toLowerCase(), (e['key'] as String).toLowerCase(), addr, region as String?, roles, mobile));
       }
-      return BootstrapDoc(m['format'] as int, m['network'] as String, m['issued'] as int, m['expires'] as int, m['sequence'] as int, out, m['signer'] as String, m['signature'] as String);
+      return BootstrapDoc(m['format'] as int, m['network'] as String, m['issued'] as int, m['expires'] as int, m['sequence'] as int, out, m['signer'] as String, m['signature'] as String, minNode: m['min_node'] as String?, minApp: m['min_app'] as String?);
     } catch (_) {
       return null;
     }
@@ -95,6 +98,8 @@ class BootstrapDoc {
         for (final e in entries)
           <String, Object?>{'id': e.id, 'key': e.key, 'addr': e.addr, 'region': e.region, 'roles': e.roles, if (e.mobile.isNotEmpty) 'mobile': e.mobile},
       ],
+      if (minNode != null) 'min_node': minNode,
+      if (minApp != null) 'min_app': minApp,
       'signer': signer,
       'signature': '',
     };

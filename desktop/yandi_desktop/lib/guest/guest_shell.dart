@@ -10,6 +10,9 @@ import 'guest_client.dart';
 
 const _yellow = Color(0xFFFFC107);
 
+/// Текст обязательного обновления: сборка отозвана подписанным списком узлов, отправка остановлена.
+String revokedText(String? required) => 'Эта версия приложения ($kGuestAppVersion) отозвана: обновите приложение до ${required ?? ''} или новее. Отправка остановлена.';
+
 /// Обёртка для запуска с `--guest`: своё окно приложения с темой оболочки и переключателем языка.
 class GuestApp extends StatefulWidget {
   const GuestApp({super.key});
@@ -72,6 +75,7 @@ class _GuestShellState extends State<GuestShell> {
   GuestClient? client;
   List<GuestNode>? nodes; // null — список ещё грузится
   bool fromEmbedded = false, busy = false;
+  String? listMinApp; // min_app из проверенного подписанного списка
   String? error;
   final code = TextEditingController(), addr = TextEditingController();
 
@@ -95,12 +99,18 @@ class _GuestShellState extends State<GuestShell> {
     setState(() {
       nodes = r?.doc.guestNodes() ?? const [];
       fromEmbedded = r?.source == BootstrapSource.embedded;
+      final m = r?.doc.minApp;
+      listMinApp = m != null && versionOlder(kGuestAppVersion, m) ? m : null;
     });
   }
 
   /// Общий вход: клиент создаётся переданной функцией, затем регистрируются ключи и открывается сокет.
   Future<void> enter(Future<GuestClient> Function() make) async {
     if (busy) return;
+    if (listMinApp != null) {
+      setState(() => error = revokedText(listMinApp)); // подписанный список отозвал эту сборку: на узел не входим
+      return;
+    }
     setState(() {
       busy = true;
       error = null;
@@ -108,6 +118,7 @@ class _GuestShellState extends State<GuestShell> {
     GuestClient? c;
     try {
       c = await make();
+      c.noteMinApp(listMinApp, fromNode: false);
       await c.start();
       if (!mounted) {
         await c.close();
@@ -173,13 +184,21 @@ class _GuestShellState extends State<GuestShell> {
       body: SafeArea(
         child: Column(children: [
           PageHeader(
-            c == null ? 'YANDI · Вход гостем' : 'YANDI · Гость',
+            c == null ? 'YANDI · Вход гостем' : (c.isGuest ? 'YANDI · Гость' : 'YANDI · Клиент'),
             trailing: Row(mainAxisSize: MainAxisSize.min, children: [
               langToggle(),
               if (c != null) SolidButton('Выйти', tone: SolidTone.light, onPressed: leave),
               if (c == null && Navigator.of(context).canPop()) SolidButton('Назад', tone: SolidTone.light, onPressed: () => Navigator.of(context).pop()),
             ]),
           ),
+          if (listMinApp != null || (c?.appRevoked ?? false))
+            Container(
+              key: const ValueKey('app-revoked-banner'),
+              width: double.infinity,
+              color: Icq.danger.withValues(alpha: 0.15),
+              padding: const EdgeInsets.all(10),
+              child: UiText(revokedText(c?.requiredApp ?? listMinApp), style: const TextStyle(fontWeight: FontWeight.bold)),
+            ),
           Expanded(
             child: c == null
                 ? SingleChildScrollView(
@@ -228,9 +247,9 @@ class _GuestShellState extends State<GuestShell> {
         child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           const UiText('Код YANDI-PAIR-1:… даёт владелец узла. В нём есть отпечаток сертификата: без него вход не выполняется. Адрес можно не вводить, он есть в коде.'),
           const SizedBox(height: 8),
-          TextField(controller: code, enabled: !busy, decoration: const InputDecoration(labelText: 'Код сопряжения')),
+          TextField(controller: code, enabled: !busy, decoration: InputDecoration(labelText: tr(context, 'Код сопряжения'))),
           const SizedBox(height: 8),
-          TextField(controller: addr, enabled: !busy, decoration: const InputDecoration(labelText: 'Адрес host:port (необязательно)')),
+          TextField(controller: addr, enabled: !busy, decoration: InputDecoration(labelText: tr(context, 'Адрес host:port (необязательно)'))),
           const SizedBox(height: 8),
           Align(alignment: Alignment.centerLeft, child: SolidButton('Войти по коду', onPressed: busy ? null : enterManual)),
         ]),
@@ -257,9 +276,6 @@ class _GuestSessionState extends State<GuestSession> {
   bool connected = true;
   String statusState = 'none';
   String? notice;
-  final messages = <String, List<GuestMessage>>{};
-  final unread = <String>{};
-  final readSent = <String>{}; // входящие, на которые «прочитано» уже отправлено
   final subs = <StreamSubscription<dynamic>>[];
   Timer? poll;
   final input = TextEditingController(), nick = TextEditingController(), statusText = TextEditingController();
@@ -269,9 +285,11 @@ class _GuestSessionState extends State<GuestSession> {
   @override
   void initState() {
     super.initState();
+    // Переписка хранится в клиенте: письма, пришедшие до этого экрана, читаются из хранилища, а новые приходят по потокам, на которые подписка
+    // оформлена здесь же, до первого await, — потери между «подтверждено» и «показано» нет.
     subs.addAll([
       c.messages.listen(onMessage),
-      c.receipts.listen(onReceipt),
+      c.receipts.listen((_) => mounted ? setState(() {}) : null),
       c.connection.listen((v) => mounted ? setState(() => connected = v) : null),
       c.securityErrors.listen((e) => mounted ? setState(() => notice = e) : null),
     ]);
@@ -296,7 +314,7 @@ class _GuestSessionState extends State<GuestSession> {
     final u = await c.getUsers();
     final n = tab == 'Узлы' ? await c.getNodes() : null;
     final s = c.isGuest ? await c.getStatusRequest() : 'none';
-    if (s == 'accepted') await c.getInfo(); // роль на узле могла смениться: лимит гостя тогда снимается
+    await c.getInfo(); // роль на узле могла смениться (лимит гостя тогда снимается), узел мог отозвать эту сборку (min_app)
     if (!mounted) return;
     setState(() {
       users = u ?? users;
@@ -307,45 +325,26 @@ class _GuestSessionState extends State<GuestSession> {
 
   void onMessage(GuestMessage m) {
     if (!mounted) return;
-    setState(() {
-      messages.putIfAbsent(m.peerId, () => []).add(m);
-      if (chat?.peerId != m.peerId) unread.add(m.peerId);
-    });
-    if (chat?.peerId == m.peerId) markRead(m.peerId);
-  }
-
-  void onReceipt((String, List<String>) r) {
-    if (!mounted) return;
-    final rank = r.$1 == 'read' ? 2 : 1;
-    int rk(String s) => switch (s) { 'read' => 2, 'delivered' => 1, _ => 0 };
-    setState(() {
-      for (final l in messages.values) {
-        for (final m in l) {
-          if (m.outgoing && r.$2.contains(m.id) && rk(m.status) < rank) m.status = r.$1;
-        }
-      }
-    });
-  }
-
-  /// Сообщить собеседнику «прочитано» по ещё не отмеченным входящим этого чата.
-  void markRead(String peer) {
-    final ids = [for (final m in messages[peer] ?? const <GuestMessage>[]) if (!m.outgoing && readSent.add(m.id)) m.id];
-    if (ids.isNotEmpty) unawaited(c.sendReceipt(peer, 'read', ids));
+    setState(() {});
+    if (chat?.peerId == m.peerId) c.markRead(m.peerId);
   }
 
   void openChat(GuestUser u) {
     setState(() {
       chat = u;
-      unread.remove(u.peerId);
       notice = null;
     });
-    markRead(u.peerId);
+    c.markRead(u.peerId);
   }
 
   Future<void> send() async {
     final u = chat;
     final text = input.text.trim();
     if (u == null || text.isEmpty) return;
+    if (c.appRevoked) {
+      setState(() => notice = revokedText(c.requiredApp));
+      return;
+    }
     if (c.messagesLeft == 0) {
       setState(() => notice = limitText);
       return;
@@ -358,10 +357,11 @@ class _GuestSessionState extends State<GuestSession> {
       } else {
         notice = null;
         input.clear();
-        messages.putIfAbsent(u.peerId, () => []).add(m);
       }
     });
   }
+
+  static const basicOnlyText = 'Этот режим оболочки поддерживает только переписку и жалобы; полные возможности — в оболочке с собственным узлом.';
 
   static const limitText = 'Гостю доступно $guestMessagesPerDay сообщений в сутки. Лимит исчерпан — попробуйте позже или запросите статус пользователя.';
 
@@ -392,7 +392,7 @@ class _GuestSessionState extends State<GuestSession> {
                       UiText(e.value),
                     ]),
                   ),
-                TextField(controller: text, maxLength: 1000, maxLines: 3, decoration: const InputDecoration(labelText: 'Что случилось')),
+                TextField(controller: text, maxLength: 1000, maxLines: 3, decoration: InputDecoration(labelText: tr(ctx, 'Что случилось'))),
                 if (error != null) UiText(error!, style: const TextStyle(color: Icq.danger)),
                 if (sent) const UiText('Жалоба отправлена владельцу узла.'),
               ]),
@@ -476,7 +476,7 @@ class _GuestSessionState extends State<GuestSession> {
                           const SizedBox(width: 8),
                           Expanded(child: u.isNode ? Row(children: [const UiText('💻 Компьютер'), Text('  ${u.name}')]) : Text(u.name)),
                           if (!u.isNode && u.role == 'guest') const UiText('гость'),
-                          if (unread.contains(u.peerId)) const Padding(padding: EdgeInsets.only(left: 8), child: Icon(Icons.mark_chat_unread, size: 18, color: Icq.peer)),
+                          if (c.unread.contains(u.peerId)) const Padding(padding: EdgeInsets.only(left: 8), child: Icon(Icons.mark_chat_unread, size: 18, color: Icq.peer)),
                           const SizedBox(width: 8),
                           SolidButton('Написать', onPressed: () => openChat(u)),
                           if (!u.isNode) ...[const SizedBox(width: 6), SolidButton('Пожаловаться', tone: SolidTone.danger, onPressed: () => complain(u))],
@@ -487,7 +487,7 @@ class _GuestSessionState extends State<GuestSession> {
   }
 
   Widget chatView(GuestUser u) {
-    final list = messages[u.peerId] ?? const <GuestMessage>[];
+    final list = c.messagesFor(u.peerId);
     final left = c.messagesLeft;
     return Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
       Panel(
@@ -500,9 +500,13 @@ class _GuestSessionState extends State<GuestSession> {
             constraints: const BoxConstraints(minHeight: 120, maxHeight: 420),
             child: list.isEmpty
                 ? const Center(child: UiText('Сообщений пока нет.'))
-                : ListView(shrinkWrap: true, reverse: true, children: [
-                    for (final m in list.reversed)
-                      Align(
+                : ListView.builder(
+                    shrinkWrap: true,
+                    reverse: true,
+                    itemCount: list.length,
+                    itemBuilder: (_, i) {
+                      final m = list[list.length - 1 - i];
+                      return Align(
                         alignment: m.outgoing ? Alignment.centerRight : Alignment.centerLeft,
                         child: Container(
                           margin: const EdgeInsets.symmetric(vertical: 3),
@@ -515,17 +519,19 @@ class _GuestSessionState extends State<GuestSession> {
                                 style: const TextStyle(fontSize: 11, color: Icq.dark)),
                           ]),
                         ),
-                      ),
-                  ]),
+                      );
+                    }),
           ),
         ]),
       ),
       const SizedBox(height: 12),
       if (notice != null) NoticePanel(notice!, error: true),
-      if (left == 0)
+      if (c.appRevoked)
+        NoticePanel(revokedText(c.requiredApp), error: true)
+      else if (left == 0)
         const NoticePanel(limitText)
       else ...[
-        TextField(controller: input, maxLength: 2000, minLines: 1, maxLines: 4, decoration: const InputDecoration(labelText: 'Сообщение (только текст)'), onSubmitted: (_) => send()),
+        TextField(controller: input, maxLength: 2000, minLines: 1, maxLines: 4, decoration: InputDecoration(labelText: tr(context, 'Сообщение (только текст)')), onSubmitted: (_) => send()),
         Row(children: [
           SolidButton('Отправить', onPressed: send),
           const SizedBox(width: 12),
@@ -562,7 +568,7 @@ class _GuestSessionState extends State<GuestSession> {
           title: 'Ник',
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             const UiText('Ник увидят другие люди узла в списке.'),
-            TextField(controller: nick, maxLength: 32, decoration: const InputDecoration(labelText: 'Ник')),
+            TextField(controller: nick, maxLength: 32, decoration: InputDecoration(labelText: tr(context, 'Ник'))),
             Align(
               alignment: Alignment.centerLeft,
               child: SolidButton('Сохранить', onPressed: () async {
@@ -575,15 +581,15 @@ class _GuestSessionState extends State<GuestSession> {
             ),
           ]),
         ),
-        const SizedBox(height: 16),
-        Panel(
+        if (c.isGuest) const SizedBox(height: 16),
+        if (c.isGuest) Panel(
           title: 'Запрос статуса пользователя',
           child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
             const UiText('Администратор узла решает на своё усмотрение. В обращении не должно быть ссылок.'),
             if (statusState == 'pending') const UiText('Запрос отправлен и ждёт решения.'),
             if (statusState == 'accepted') const UiText('Администратор принял запрос: статус обновлён.'),
             if (statusState == 'rejected') const UiText('Администратор отклонил запрос.'),
-            TextField(controller: statusText, maxLength: 300, maxLines: 3, decoration: const InputDecoration(labelText: 'Текст запроса')),
+            TextField(controller: statusText, maxLength: 300, maxLines: 3, decoration: InputDecoration(labelText: tr(context, 'Текст запроса'))),
             Align(
               alignment: Alignment.centerLeft,
               child: SolidButton('Отправить запрос', onPressed: statusState == 'pending'
@@ -608,7 +614,10 @@ class _GuestSessionState extends State<GuestSession> {
     Widget row(String label, {String? body, String? title}) => Padding(
           padding: const EdgeInsets.symmetric(vertical: 4),
           child: InkWell(
-            onTap: () => showLockedNotice(context, what: label, body: body, title: title ?? 'Доступно после полной авторизации'),
+            onTap: () => c.isGuest
+                ? showLockedNotice(context, what: label, body: body, title: title ?? 'Доступно после полной авторизации')
+                // вошли по коду как пользователь/владелец: «после подтверждения» тут не работает, этот режим умеет только переписку
+                : showLockedNotice(context, what: label, body: basicOnlyText, title: 'Недоступно в этом режиме'),
             child: Padding(
               padding: const EdgeInsets.all(6),
               child: Row(children: [const Icon(Icons.lock_outline, size: 18, color: _yellow), const SizedBox(width: 8), Expanded(child: UiText(label))]),
@@ -618,7 +627,7 @@ class _GuestSessionState extends State<GuestSession> {
     return Panel(
       title: 'Возможности',
       child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-        const UiText('Эти возможности откроются после подтверждения профиля администратором узла.'),
+        UiText(c.isGuest ? 'Эти возможности откроются после подтверждения профиля администратором узла.' : basicOnlyText),
         const SizedBox(height: 8),
         row('Группы'),
         row('Выход в интернет через узел (VPN)'),

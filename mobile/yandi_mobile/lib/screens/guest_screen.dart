@@ -1,4 +1,5 @@
 import 'dart:math';
+import '../app_version.dart';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../l10n.dart';
@@ -29,6 +30,7 @@ class _GuestPanelState extends State<GuestPanel> {
   List<GuestNode>? _nodes;
   String? _error;
   bool _busy = false;
+  String? _minApp;
 
   @override
   void initState() {
@@ -38,6 +40,8 @@ class _GuestPanelState extends State<GuestPanel> {
     } else {
       // подписанный список входных узлов: сеть, копия на телефоне, вшитая копия (проверка подписи в BootstrapLoader)
       (widget.loader ?? BootstrapLoader()).load().then((r) {
+        final min = r?.doc.minApp;
+        if (min != null && versionOlder(kAppVersion, min)) _minApp = min;   // подписанный список отзывает эту сборку
         if (mounted) setState(() => _nodes = r?.doc.guestNodes() ?? const []);
       }).catchError((_) {
         if (mounted) setState(() => _nodes = const []);
@@ -53,6 +57,10 @@ class _GuestPanelState extends State<GuestPanel> {
   Future<void> _enter() async {
     final all = _nodes;
     if (_busy || all == null || all.isEmpty) return;
+    if (_minApp != null) {
+      setState(() => _error = trf('Эта версия приложения ({v}) отозвана: обновите приложение до {m} или новее.', {'v': kAppVersion, 'm': _minApp ?? ''}));
+      return;
+    }
     _setBusy(true);
     setState(() => _error = null);
     final order = List<GuestNode>.of(all)..shuffle(Random.secure());
