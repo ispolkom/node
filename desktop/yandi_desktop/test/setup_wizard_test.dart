@@ -319,7 +319,7 @@ void main() {
     await t.enterText(fields.at(0), 'one two three');
     await click(t, 'Проверить номер узла');
     expect(find.text('Введите 12, 18 или 24 слова сид-фразы'), findsOneWidget);
-    await t.enterText(fields.at(0), 'bad ${seed12.split(' ').skip(1).join(' ')} legal');
+    await t.enterText(fields.at(0), 'bad ${seed12.split(' ').skip(1).join(' ')}');
     await click(t, 'Проверить номер узла');
     expect(find.textContaining('Фраза или контрольное слово не прошли проверку'), findsOneWidget);
     await t.enterText(fields.at(0), seed12);
