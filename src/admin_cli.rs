@@ -5,11 +5,11 @@
 //! (проверка uid у сокета), админские маршруты по-прежнему требуют сеанс администратора (пароль, 15 минут, токен только в памяти
 //! процесса).
 //!
-//!   yandi setup [--words 12|24] [--seed-file ФАЙЛ] [--password-stdin]   первая настройка (пароль, фраза восстановления, закрытая среда)
+//!   yandi setup [--words 12|18|24] [--seed-file ФАЙЛ] [--password-stdin] [--restore] [--check]   настройка или восстановление по сид-фразе (см. setup_cli)
 //!   yandi admin                                                           меню
 //!   yandi admin status | pairing [owner|user] [--host H] | devices | device-remove ID | phone-action ПИР ДЕЙСТВИЕ
 //!                proxies [list|add|remove ID|test|settings] | vault status|lock|unlock|change-password|panic-erase
-//!                node stop|start | alerts | update | raw МЕТОД ПУТЬ [json]
+//!                backup status|places|set-dir ПУТЬ|off|now | node stop|start | alerts | update | raw МЕТОД ПУТЬ [json]
 //!
 //! Общие параметры: `--socket ПУТЬ`, `--admin-password-stdin` (пароль администратора первой строкой стандартного ввода).
 //! Секреты вводятся без эха и нигде не печатаются; фраза восстановления показывается только в терминале (иначе нужен `--seed-file`).
@@ -587,6 +587,67 @@ fn cmd_vault(s: &mut Session, args: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+fn when_ms(ms: u64) -> String {
+    if ms == 0 {
+        return "—".into();
+    }
+    let (y, mo, d, h, mi) = crate::node_backup::civil_utc(ms / 1000);
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02} UTC")
+}
+
+/// `yandi admin backup status | places | set-dir ПУТЬ [--yes] | off | now`
+fn cmd_backup(s: &mut Session, args: &[String]) -> Result<(), String> {
+    match args.first().map(String::as_str).unwrap_or("status") {
+        "status" => {
+            let v = s.ok("GET", "/api/backup/status", None)?;
+            match v["dir"].as_str().filter(|d| !d.trim().is_empty()) {
+                Some(d) => {
+                    println!("{}", t!(format!("Папка копий: {d}"), format!("Backup folder: {d}")));
+                    println!("{}", t!(format!("Последняя копия: {} (№{})", when_ms(v["last_saved_ms"].as_u64().unwrap_or(0)), field(&v, "counter")), format!("Last backup: {} (#{})", when_ms(v["last_saved_ms"].as_u64().unwrap_or(0)), field(&v, "counter"))));
+                    println!("{}", t!(
+                        format!("Хранится автокопий: {}, «сохранить сейчас»: {}; проверка изменений каждые 10 минут.", field(&v, "keep"), field(&v, "keep_manual")),
+                        format!("Kept: {} automatic, {} \"save now\"; changes are checked every 10 minutes.", field(&v, "keep"), field(&v, "keep_manual"))
+                    ));
+                    if let Some(e) = v["last_error"].as_str() {
+                        println!("{}", t!(format!("! Последняя ошибка: {e}"), format!("! Last error: {e}")));
+                    }
+                }
+                None => println!("{}", t!(
+                    "Копии связей НЕ настроены: при потере диска пропадут сопряжённые телефоны, контакты и группы. Настроить: yandi admin backup set-dir ПУТЬ",
+                    "Backups of the links are NOT set up: if the disk is lost, paired phones, contacts and groups are lost. Set up: yandi admin backup set-dir PATH"
+                )),
+            }
+        }
+        "places" => {
+            let v = s.ok("GET", "/api/backup/places", None)?;
+            let list = v["places"].as_array().cloned().unwrap_or_default();
+            if list.is_empty() {
+                println!("{}", t!("Подходящих внешних дисков не найдено: укажите путь вручную.", "No suitable external disks found: give a path by hand."));
+            }
+            for p in list {
+                println!("  {}  [{}]{}", field(&p, "path"), field(&p, "fs"), if p["writable"] == true { "" } else { t!("  (нет прав на запись)", "  (not writable)") });
+            }
+        }
+        "set-dir" => {
+            let path = args.get(1).ok_or(t!("set-dir ПУТЬ", "set-dir PATH"))?;
+            let yes = args.iter().any(|a| a == "--yes");
+            if !crate::setup_cli::apply_place(&s.socket, path, yes)? {
+                return Err(t!("место для копий не принято", "the backup place was not accepted").into());
+            }
+        }
+        "off" => {
+            s.ok("POST", "/api/backup/config", Some(&json!({ "dir": "" })))?;
+            println!("{}", t!("Автокопии выключены. Включить снова: yandi admin backup set-dir ПУТЬ", "Automatic backups are off. Turn on again: yandi admin backup set-dir PATH"));
+        }
+        "now" => {
+            let v = s.ok("POST", "/api/backup/export?quiet=1", Some(&json!({})))?;
+            println!("{}", t!(format!("Копия сохранена: {}", field(&v, "saved")), format!("Backup saved: {}", field(&v, "saved"))));
+        }
+        other => return Err(t!(format!("backup: неизвестная команда {other} (status | places | set-dir ПУТЬ | off | now)"), format!("backup: unknown command {other} (status | places | set-dir PATH | off | now)"))),
+    }
+    Ok(())
+}
+
 /// Выполнить одну команду admin. `Ok(())` — успех; текст ошибки печатает вызывающий.
 pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
     let cmd = args.first().map(String::as_str).ok_or(t!("нужна команда", "a command is needed"))?;
@@ -691,6 +752,7 @@ pub fn dispatch(s: &mut Session, args: &[String]) -> Result<(), String> {
             println!("{}", t!(format!("Отозвано устройств: {}.", field(&r, "removed")), format!("Devices revoked: {}.", field(&r, "removed"))));
         }
         "invites" => cmd_invites(s, rest)?,
+        "backup" => cmd_backup(s, rest)?,
         "bootstrap" => cmd_bootstrap(s, rest)?,
         "phone-action" => {
             let peer = rest.first().ok_or(t!("phone-action ПИР ДЕЙСТВИЕ", "phone-action PEER ACTION"))?;
@@ -743,6 +805,7 @@ const HELP_RU: &str = "yandi admin — управление запущенным
   yandi admin phone-action ПИР ДЕЙСТВИЕ
   yandi admin proxies list|add [вид]|remove ID|test [вид]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase
+  yandi admin backup status|places|set-dir ПУТЬ|off|now        копии связей (место, статус, сохранить сейчас)
   yandi admin node stop|start
   yandi admin alerts | update
   yandi admin raw МЕТОД /api/путь [json]
@@ -765,6 +828,7 @@ const HELP_EN: &str = "yandi admin — manage the running node from the console
   yandi admin phone-action PEER ACTION
   yandi admin proxies list|add [kind]|remove ID|test [kind]|settings --enabled on|off --strict on|off --max-clients N
   yandi admin vault status|lock|unlock|change-password|panic-erase
+  yandi admin backup status|places|set-dir PATH|off|now     backups of the links (place, status, save now)
   yandi admin node stop|start
   yandi admin alerts | update
   yandi admin raw METHOD /api/path [json]
@@ -920,7 +984,7 @@ pub fn run_admin(argv: Vec<String>) -> i32 {
 // ───────────────────────── первая настройка ─────────────────────────
 
 /// Пароль не короче порога, который называет сам узел.
-fn check_password_pair(a: &str, b: &str, min: usize) -> Result<(), String> {
+pub(crate) fn check_password_pair(a: &str, b: &str, min: usize) -> Result<(), String> {
     if a.chars().count() < min {
         return Err(t!(format!("пароль — не короче {min} знаков"), format!("the password must be at least {min} characters")));
     }
@@ -935,31 +999,49 @@ pub fn normalize_phrase(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn write_private_new(path: &Path, content: &str) -> Result<(), String> {
+pub(crate) fn write_private_new(path: &Path, content: &str) -> Result<(), String> {
     use std::os::unix::fs::OpenOptionsExt;
     let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
     f.sync_all().map_err(|e| e.to_string())
 }
 
-const SETUP_HELP_RU: &str = "yandi setup — первая настройка узла из консоли
+const SETUP_HELP_RU: &str = "yandi setup — настройка узла из консоли: новая или восстановление по сид-фразе
 
-  yandi setup [--words 12|24] [--seed-file ФАЙЛ] [--password-stdin] [--socket ПУТЬ] [--lang ru|en]
+  yandi setup [--words 12|18|24] [--seed-file ФАЙЛ] [--password-stdin] [--control-word-stdin]
+              [--backup-dir ПУТЬ | --no-backup-dir] [--socket ПУТЬ] [--lang ru|en]
+  yandi setup --restore [--backup-file ФАЙЛ_ИЛИ_ПАПКА] [--yes] [параметры выше]
+  yandi setup --check
 
-Узел должен быть уже запущен (служба yandi-node) и ещё не настроен. Мастер спрашивает пароль, создаёт ключи и закрытую среду, показывает
-фразу восстановления (12 или 24 слова). Запишите её на бумаге: по ней и по файлу копии личность восстанавливается на новой машине.
-Фраза показывается только в терминале; без терминала нужен --seed-file (новый файл с правами 0600 — удалите его после переписывания).
---password-stdin: пароль входа первой строкой стандартного ввода (для скриптов).
+Узел должен быть уже запущен (служба yandi-node) и ещё не настроен. Новая настройка: мастер спрашивает пароль, создаёт ключи и закрытую среду,
+показывает сид-фразу (по умолчанию 24 слова; 12 или 18 — по желанию). Запишите её на бумаге. Необязательно можно задать КОНТРОЛЬНОЕ СЛОВО (одно слово
+от 8 знаков, регистр важен): без него сид-фраза не восстановит узел; храните его отдельно от фразы. Дальше мастер спрашивает, где хранить копии связей
+(итоговый путь …/yandi-node).
+Сид-фраза полностью определяет узел: на другой машине тот же сид (и слово) возвращает ту же личность, доверие к узлу и ключ подписи списка узлов.
+Файл копии .yandibak необязателен: из него возвращаются сопряжённые телефоны, контакты и группы.
+--restore: восстановление (сид-фраза, слово, новый пароль; перед записью показывается номер узла). --check: проверить фразу и слово, показав номер узла,
+ничего не делая (узел не нужен). Фраза показывается только в терминале; без терминала нужен --seed-file (новый файл 0600 — удалите после переписывания).
+--password-stdin: секреты строками стандартного ввода (порядок: фраза [только --restore], слово [только --control-word-stdin], пароль входа).
+--backup-dir ПУТЬ: папка для копий (без вопросов); --no-backup-dir: копии не настраивать; --yes: не спрашивать подтверждений (сценарии).
 --lang ru|en: язык консоли (без ключа спрашивается в начале; выбор запоминается).";
 
-const SETUP_HELP_EN: &str = "yandi setup — first-time node setup from the console
+const SETUP_HELP_EN: &str = "yandi setup — set the node up from the console: new, or restore with a seed phrase
 
-  yandi setup [--words 12|24] [--seed-file FILE] [--password-stdin] [--socket PATH] [--lang ru|en]
+  yandi setup [--words 12|18|24] [--seed-file FILE] [--password-stdin] [--control-word-stdin]
+              [--backup-dir PATH | --no-backup-dir] [--socket PATH] [--lang ru|en]
+  yandi setup --restore [--backup-file FILE_OR_FOLDER] [--yes] [options above]
+  yandi setup --check
 
-The node must already be running (the yandi-node service) and not set up yet. The wizard asks for a password, creates the keys and the closed environment,
-and shows the recovery phrase (12 or 24 words). Write it down on paper: with it and the backup file the identity is restored on a new machine.
-The phrase is shown only in a terminal; without a terminal use --seed-file (a new file with mode 0600 — delete it after copying).
---password-stdin: the login password as the first line of standard input (for scripts).
+The node must already be running (the yandi-node service) and not set up yet. New setup: the wizard asks for a password, creates the keys and the closed
+environment and shows the seed phrase (24 words by default; 12 or 18 on request). Write it on paper. You may add a CONTROL WORD (one word, 8+ characters,
+case matters): without it the seed phrase will not restore the node; keep it apart from the phrase. Then the wizard asks where to keep backups of the links
+(the final path …/yandi-node).
+The seed phrase fully defines the node: on another machine the same seed (and word) brings back the same identity, the trust in the node and the
+entry-list signing key. The .yandibak backup file is optional: it brings back paired phones, contacts and groups.
+--restore: restore (seed phrase, word, a new password; the node number is shown before anything is written). --check: check the phrase and word, show the
+node number and do nothing else (no node needed). The phrase is shown only in a terminal; without a terminal use --seed-file (a new 0600 file — delete it after copying).
+--password-stdin: secrets as lines of standard input (order: phrase [only --restore], word [only --control-word-stdin], login password).
+--backup-dir PATH: backup folder (no questions); --no-backup-dir: do not set backups up; --yes: no confirmations (scripts).
 --lang ru|en: console language (asked at the start if not given; the choice is remembered).";
 
 fn setup_help() -> &'static str {
@@ -978,18 +1060,22 @@ pub fn run_setup(argv: Vec<String>) -> i32 {
         println!("{}", setup_help());
         return 0;
     }
-    let mut socket = default_socket();
-    let mut words: u32 = 12;
-    let mut seed_file: Option<PathBuf> = None;
-    let mut password_stdin = false;
+    let mut o = crate::setup_cli::Opts::default();
     let mut it = argv.into_iter();
     while let Some(a) = it.next() {
         let r: Result<(), String> = (|| {
             match a.as_str() {
-                "--socket" => socket = it.next().ok_or(t!("после --socket нужен путь", "--socket needs a path"))?.into(),
-                "--words" => words = it.next().and_then(|n| n.parse().ok()).filter(|n| *n == 12 || *n == 24).ok_or(t!("--words 12 или 24", "--words 12 or 24"))?,
-                "--seed-file" => seed_file = Some(it.next().ok_or(t!("после --seed-file нужен путь", "--seed-file needs a path"))?.into()),
-                "--password-stdin" => password_stdin = true,
+                "--socket" => o.socket = it.next().ok_or(t!("после --socket нужен путь", "--socket needs a path"))?.into(),
+                "--words" => o.words = Some(it.next().and_then(|n| n.parse().ok()).filter(|n| matches!(*n, 12 | 18 | 24)).ok_or(t!("--words 12, 18 или 24", "--words 12, 18 or 24"))?),
+                "--seed-file" => o.seed_file = Some(it.next().ok_or(t!("после --seed-file нужен путь", "--seed-file needs a path"))?.into()),
+                "--password-stdin" => o.password_stdin = true,
+                "--control-word-stdin" => o.control_word_stdin = true,
+                "--restore" => o.restore = true,
+                "--check" => o.check = true,
+                "--yes" => o.yes = true,
+                "--no-backup-dir" => o.no_backup_dir = true,
+                "--backup-dir" => o.backup_dir = Some(it.next().ok_or(t!("после --backup-dir нужен путь", "--backup-dir needs a path"))?),
+                "--backup-file" => o.backup_file = Some(it.next().ok_or(t!("после --backup-file нужен путь", "--backup-file needs a path"))?),
                 other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
             }
             Ok(())
@@ -999,105 +1085,17 @@ pub fn run_setup(argv: Vec<String>) -> i32 {
             return 2;
         }
     }
-    match setup(&socket, words, seed_file.as_deref(), password_stdin) {
+    if o.backup_dir.is_some() && o.no_backup_dir {
+        eprintln!("yandi setup: {}", t!("--backup-dir и --no-backup-dir вместе нельзя", "--backup-dir and --no-backup-dir cannot be used together"));
+        return 2;
+    }
+    match crate::setup_cli::run(o) {
         Ok(()) => 0,
         Err(e) => {
             eprintln!("yandi setup: {e}");
             1
         }
     }
-}
-
-fn setup(socket: &Path, words: u32, seed_file: Option<&Path>, password_stdin: bool) -> Result<(), String> {
-    let t = Duration::from_secs(120);
-    let (code, st) = roundtrip(socket, "GET", "/api/auth/state", None, None, t)?;
-    if code != 200 {
-        return Err(error_text(code, &st));
-    }
-    if st["setup_required"] != true {
-        return Err(t!("узел уже настроен (для восстановления из копии: yandi backup restore, затем запуск службы)", "the node is already set up (to restore from a backup: yandi backup restore, then start the service)").into());
-    }
-    let tty = unsafe { libc::isatty(0) == 1 && libc::isatty(2) == 1 };
-    if !tty && seed_file.is_none() {
-        return Err(t!("нет терминала: фразу восстановления некуда безопасно показать; запустите в терминале или добавьте --seed-file ФАЙЛ", "no terminal: there is nowhere to show the recovery phrase safely; run in a terminal or add --seed-file FILE").into());
-    }
-    let secrets = Secrets { from_stdin: password_stdin, preset: None };
-    // 1. фраза от узла
-    let (code, seed) = roundtrip(socket, "POST", "/api/auth/seed/new", Some(&json!({ "words": words })), None, t)?;
-    if code != 200 {
-        return Err(error_text(code, &seed));
-    }
-    let list: Vec<String> = seed["words"].as_array().ok_or(t!("узел не вернул слова", "the node did not return the words"))?.iter().filter_map(|w| w.as_str().map(String::from)).collect();
-    if list.len() as u32 != words {
-        return Err(t!("узел вернул неверное число слов", "the node returned a wrong number of words").into());
-    }
-    let min = seed["min_password"].as_u64().unwrap_or(8) as usize;
-    let phrase = list.join(" ");
-    // 2. пароли
-    let pw = secrets.ask(&t!(format!("Пароль владельца (не короче {min} знаков): "), format!("Owner password (at least {min} characters): ")))?;
-    let again = if password_stdin { pw.clone() } else { secrets.ask(t!("Пароль ещё раз: ", "Password again: "))? };
-    check_password_pair(&pw, &again, min)?;
-    let admin = if password_stdin {
-        String::new()
-    } else {
-        let a = Secrets::ask_visible(t!("Отдельный пароль администратора? (пусто — тот же, иначе введите следом): ", "A separate administrator password? (empty — the same, otherwise type it now): ")).unwrap_or_default();
-        if a.trim().is_empty() {
-            String::new()
-        } else {
-            let p1 = secrets.ask(t!("Пароль администратора: ", "Administrator password: "))?;
-            let p2 = secrets.ask(t!("Ещё раз: ", "Again: "))?;
-            check_password_pair(&p1, &p2, min)?;
-            p1
-        }
-    };
-    // 3. показать фразу и убедиться, что её записали
-    if let Some(path) = seed_file {
-        write_private_new(path, &format!("{phrase}\n"))?;
-        eprintln!("{}", t!(format!("Фраза записана в {} (права 0600). Перепишите её и удалите файл.", path.display()), format!("The phrase is written to {} (mode 0600). Copy it down and delete the file.", path.display())));
-    } else {
-        eprintln!("{}", t!(format!("\nФраза восстановления ({words} слов). Запишите её на бумаге, порядок важен:\n"), format!("\nRecovery phrase ({words} words). Write it down on paper, the order matters:\n")));
-        for (i, w) in list.iter().enumerate() {
-            eprintln!("  {:>2}. {w}", i + 1);
-        }
-        eprintln!();
-        let typed = Secrets::ask_visible(t!("Для проверки введите фразу целиком: ", "To verify, type the whole phrase: "))?;
-        if normalize_phrase(&typed) != phrase {
-            return Err(t!("фраза введена неверно: ничего не создано, запустите мастер снова", "the phrase was typed wrongly: nothing was created, run the wizard again").into());
-        }
-    }
-    // 4. создание ключей, ожидание запуска узла, закрытая среда
-    let mut body = json!({
-        "login_password": pw, "login_password_repeat": pw,
-        "master_password": phrase, "master_password_repeat": phrase,
-    });
-    if !admin.is_empty() {
-        body["admin_password"] = json!(admin);
-        body["admin_password_repeat"] = json!(admin);
-    }
-    let (code, v) = roundtrip(socket, "POST", "/api/auth/setup", Some(&body), None, Duration::from_secs(300))?;
-    if code != 200 {
-        return Err(error_text(code, &v));
-    }
-    eprintln!("{}", t!("Ключи созданы. Узел запускается…", "Keys created. The node is starting…"));
-    let deadline = std::time::Instant::now() + Duration::from_secs(120);
-    loop {
-        std::thread::sleep(Duration::from_secs(1));
-        if let Ok((200, st)) = roundtrip(socket, "GET", "/api/auth/state", None, None, Duration::from_secs(10)) {
-            if st["setup_required"] == false {
-                break;
-            }
-        }
-        if std::time::Instant::now() > deadline {
-            return Err(t!("узел не запустился за 120 секунд: проверьте журнал службы (journalctl -u yandi-node)", "the node did not start within 120 seconds: check the service log (journalctl -u yandi-node)").into());
-        }
-    }
-    let (code, v) = roundtrip(socket, "POST", "/api/vault/setup", Some(&json!({ "password": pw, "phrase": phrase })), None, Duration::from_secs(300))?;
-    if code != 200 {
-        return Err(t!(format!("ключи созданы, но закрытая среда не создана: {}", error_text(code, &v)), format!("the keys are created, but the closed environment is not: {}", error_text(code, &v))));
-    }
-    eprintln!("{}", t!("Закрытая среда создана. Готово.", "The closed environment is created. Done."));
-    eprintln!("{}", t!("Дальше: yandi admin pairing — код сопряжения телефона; yandi admin — меню управления.", "Next: yandi admin pairing — phone pairing code; yandi admin — the management menu."));
-    Ok(())
 }
 
 #[cfg(test)]

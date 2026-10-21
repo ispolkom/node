@@ -74,8 +74,10 @@ async fn status() -> Response {
     Json(status_json(&r.layout)).into_response()
 }
 
-async fn export() -> Response {
+async fn export(axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>) -> Response {
     let r = match rt() { Ok(r) => r, Err(e) => return e };
+    // ?quiet=1 — консоль: копия кладётся в настроенную папку, а в ответе только сведения о ней (без самого файла)
+    let quiet = q.get("quiet").is_some_and(|v| v == "1");
     let Some(root) = (r.root)() else {
         return (StatusCode::CONFLICT, Json(json!({"error": "ключи узла сейчас недоступны"}))).into_response();
     };
@@ -86,6 +88,12 @@ async fn export() -> Response {
     })
     .await;
     match out {
+        Ok(Ok(o)) if quiet => {
+            if o.saved.is_none() {
+                return (StatusCode::CONFLICT, Json(json!({"error": "папка для копий не настроена", "code": "no_folder"}))).into_response();
+            }
+            Json(json!({"name": o.name, "saved": o.saved.map(|p| p.display().to_string()), "counter": o.counter})).into_response()
+        }
         Ok(Ok(o)) => (
             StatusCode::OK,
             [

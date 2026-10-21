@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+/// Узлы тестов делят порты: по одному за раз.
+static ONE_NODE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 struct Node {
     child: Child,
     dir: PathBuf,
@@ -74,6 +77,7 @@ fn run(args: &[&str], stdin: &str, sock: &Path) -> (i32, String) {
 #[test]
 #[ignore = "starts a real node process"]
 fn first_setup_and_admin_work_from_the_console() {
+    let _one = ONE_NODE.lock().unwrap_or_else(|e| e.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     let node = start(tmp.path());
     let sock = node.dir.join("home/.local/share/yandi/run/yandi-ui.sock");
@@ -96,7 +100,7 @@ fn first_setup_and_admin_work_from_the_console() {
     let (rc, out) = run(&["setup", "--password-stdin", "--seed-file", seed_s], "testpass123\n", &sock);
     assert_eq!(rc, 0, "{out}");
     let phrase = std::fs::read_to_string(&seed).unwrap();
-    assert_eq!(phrase.split_whitespace().count(), 12);
+    assert_eq!(phrase.split_whitespace().count(), 24, "по умолчанию 24 слова");
     assert!(!out.contains(phrase.trim()), "фраза попала в вывод");
     assert_eq!(std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&seed).unwrap().permissions()) & 0o777, 0o600);
     // повторная настройка отказывает
@@ -136,4 +140,70 @@ fn first_setup_and_admin_work_from_the_console() {
     assert_eq!(rc, 0, "{out}");
     let (_, out) = run(&["admin", "vault", "status"], "", &sock);
     assert!(out.contains("\"configured\": false"), "{out}");
+}
+
+fn wait_sock(node: &Node) -> PathBuf {
+    let sock = node.dir.join("home/.local/share/yandi/run/yandi-ui.sock");
+    let t = Instant::now();
+    while !sock.exists() {
+        assert!(t.elapsed() < Duration::from_secs(60), "узел не поднял сокет");
+        std::thread::sleep(Duration::from_millis(300));
+    }
+    sock
+}
+
+/// Номер узла из ответа состояния (`yandi admin status`).
+fn node_id_of(sock: &Path) -> String {
+    let (rc, out) = run(&["admin", "raw", "GET", "/api/status"], "", sock);
+    assert_eq!(rc, 0, "{out}");
+    let json = out.split_once('\n').map(|x| x.1).unwrap_or(&out);
+    let v: serde_json::Value = serde_json::from_str(json.trim()).unwrap_or_else(|_| panic!("не JSON: {out}"));
+    v["node_id"].as_str().or_else(|| v["id"].as_str()).unwrap_or_else(|| panic!("нет номера узла: {out}")).to_string()
+}
+
+fn signer_of(sock: &Path) -> String {
+    let (rc, out) = run(&["admin", "bootstrap", "pubkey", "--admin-password-stdin"], "testpass123\n", sock);
+    assert_eq!(rc, 0, "{out}");
+    out.split_whitespace().find(|w| w.len() == 64 && w.chars().all(|c| c.is_ascii_hexdigit())).unwrap_or_else(|| panic!("нет ключа: {out}")).to_string()
+}
+
+#[test]
+#[ignore = "starts a real node process"]
+fn the_seed_phrase_alone_brings_back_the_same_node_and_the_same_list_signing_key() {
+    let _one = ONE_NODE.lock().unwrap_or_else(|e| e.into_inner());
+    let word = "Воробей-2026";
+    // узел A: новая настройка с контрольным словом
+    let tmp_a = tempfile::tempdir().unwrap();
+    let a = start(tmp_a.path());
+    let sock = wait_sock(&a);
+    let seed = a.dir.join("seed.txt");
+    let (rc, out) = run(&["setup", "--password-stdin", "--control-word-stdin", "--no-backup-dir", "--words", "18", "--seed-file", seed.to_str().unwrap()], &format!("testpass123\n{word}\n"), &sock);
+    assert_eq!(rc, 0, "{out}");
+    let phrase = std::fs::read_to_string(&seed).unwrap().trim().to_string();
+    assert_eq!(phrase.split_whitespace().count(), 18);
+    assert!(!out.contains(&phrase) && !out.contains(word), "ни фраза, ни слово не попали в вывод");
+    let id_a = node_id_of(&sock);
+    let signer_a = signer_of(&sock);
+    // номер узла из --check совпадает с настоящим (узел для этого не нужен)
+    let (rc, check) = run(&["setup", "--check", "--password-stdin", "--control-word-stdin"], &format!("{phrase}\n{word}\n"), &sock);
+    assert_eq!(rc, 0, "{check}");
+    let spaced = check.lines().find(|l| l.contains("Номер узла")).unwrap().split(':').nth(1).unwrap().trim().replace(' ', "");
+    assert!(id_a.starts_with(&spaced), "{id_a} vs {spaced}");
+    drop(a);
+
+    // узел B: чистая машина, только сид и слово
+    let tmp_b = tempfile::tempdir().unwrap();
+    let b = start(tmp_b.path());
+    let sock_b = wait_sock(&b);
+    // без слова получается ДРУГОЙ узел: --check это показывает, ничего не записывая
+    let (rc, no_word) = run(&["setup", "--check", "--password-stdin"], &format!("{phrase}\n"), &sock_b);
+    assert_eq!(rc, 0, "{no_word}");
+    assert!(!no_word.replace(' ', "").contains(&id_a[..16]), "без слова тот же узел получиться не должен");
+    let (rc, out) = run(&["setup", "--restore", "--yes", "--no-backup-dir", "--password-stdin", "--control-word-stdin"], &format!("{phrase}\n{word}\nnewpass456\n"), &sock_b);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains("Личность узла"), "{out}");
+    assert_eq!(node_id_of(&sock_b), id_a, "тот же номер узла");
+    let (rc, out) = run(&["admin", "bootstrap", "pubkey", "--admin-password-stdin"], "newpass456\n", &sock_b);
+    assert_eq!(rc, 0, "{out}");
+    assert!(out.contains(&signer_a), "тот же ключ подписи списка узлов: {out} / {signer_a}");
 }
