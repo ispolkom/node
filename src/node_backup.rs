@@ -1345,6 +1345,9 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Номера в именах чужих файлов выше этого предела не учитываются (не наши): счётчик не должен прыгать и застревать из-за подброшенного имени.
+const MAX_FOLDER_COUNTER: u64 = 999_999_999;
+
 /// Наибольший номер копии этого узла, уже лежащей в папке: после восстановления на новой машине счётчик продолжается с него, а не с нуля
 /// (иначе ротация сочла бы свежую копию самой младшей).
 pub fn max_counter_in(dir: &Path, node_id: &str) -> u64 {
@@ -1356,7 +1359,7 @@ pub fn max_counter_in(dir: &Path, node_id: &str) -> u64 {
         .iter()
         .flat_map(|prefix| {
             let suffix = suffix.clone();
-            names.iter().filter(move |n| n.starts_with(prefix.as_str()) && n.ends_with(&suffix)).filter_map(move |n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok())).collect::<Vec<_>>()
+            names.iter().filter(move |n| n.starts_with(prefix.as_str()) && n.ends_with(&suffix)).filter_map(move |n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok())).filter(|c| *c <= MAX_FOLDER_COUNTER).collect::<Vec<_>>()
         })
         .max()
         .unwrap_or(0)
@@ -1477,7 +1480,7 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
         // номер — после наибольшего из известных: из состояния и из копий этого узла, уже лежащих в папке
         // имя файла в папке не вправе переполнить счётчик (чужое имя с огромным номером)
-        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)).min(999_999_999).saturating_add(1);
+        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)).saturating_add(1);
         let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
         let name = if mode == Mode::Now { file_name_manual(node_id, counter, now) } else { file_name(node_id, counter, now) };
         let saved = match &dir {
@@ -2671,6 +2674,10 @@ mod tests {
         }
         assert_eq!(max_counter_in(&out, "nodeid00"), 36);
         assert_eq!(max_counter_in(&out, "other"), 0, "чужие копии не считаются");
+        // подброшенное имя с огромным номером не учитывается: счётчик не прыгает и не застревает
+        std::fs::write(out.join(format!("yandi-nodeid00-{}-x.{FILE_EXT}", u64::MAX)), b"x").unwrap();
+        std::fs::write(out.join(format!("yandi-nodeid00-1000000001-x.{FILE_EXT}")), b"x").unwrap();
+        assert_eq!(max_counter_in(&out, "nodeid00"), 36);
         // новая машина: состояние пустое, папка выбрана снова
         let mut st = load_state(&l);
         st.dir = Some(out.display().to_string());

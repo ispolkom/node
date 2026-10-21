@@ -42,7 +42,7 @@ class WizardApi extends FakeApi {
     if (path == '/api/auth/restore/inspect') {
       calls.add(path);
       bodies.add(Map.of(body!));
-      return {'counter': 3, 'node_id': inspectNodeId, 'created_ms': 1792227900000, 'file': '/home/iam/копия.yandibak', 'text': 'x'};
+      return {'counter': 3, 'node_id': inspectNodeId, 'created_ms': 1792227900000, 'file': '/home/iam/копия.yandibak', 'digest': 'dd11', 'text': 'x'};
     }
     if (path == '/api/auth/seed/preview') {
       calls.add(path);
@@ -404,7 +404,7 @@ void main() {
     await t.pump(const Duration(seconds: 2));
     await t.pumpAndSettle();
     expect(api.bodies.firstWhere((b) => b.containsKey('path') && b.containsKey('phrase')),
-        {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password'});
+        {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password', 'digest': 'dd11'});
     expect(api.calls.indexOf('/api/auth/restore') < api.calls.indexOf('/api/vault/unlock'), true);
     await click(t, 'Пропустить (напомню позже)');
     await stop(t);
@@ -463,6 +463,36 @@ void main() {
     await stop(t);
   });
 
+  testWidgets('a copy of ANOTHER node opened BEFORE the node number is checked is still refused, and a failed re-open drops the old copy', (t) async {
+    final api = WizardApi()..inspectNodeId = 'ffffffffffffffff';
+    await start(t, api);
+    await click(t, 'Восстановить по сид-фразе');
+    await t.enterText(find.byType(TextField).at(0), seed12);
+    await t.tap(find.byKey(const ValueKey('has-file')));
+    await t.pumpAndSettle();
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/копия.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    await click(t, 'Проверить номер узла');
+    expect(find.textContaining('Копия принадлежит другому узлу'), findsOneWidget, reason: 'номер узла пришёл позже файла — сверка всё равно выполнена');
+    await t.tap(find.byKey(const ValueKey('id-matches')));
+    await t.pump();
+    await t.enterText(find.widgetWithText(TextField, 'Новый пароль'), 'long password');
+    await t.enterText(find.widgetWithText(TextField, 'Повтор нового пароля'), 'long password');
+    await click(t, 'Восстановить');
+    expect(api.calls.contains('/api/auth/restore'), false, reason: 'чужая копия, открытая до проверки номера, не уходит на узел');
+    // открыли подходящую, затем повторное открытие другого пути не удалось: старая копия не разрешена
+    api.inspectNodeId = '0123456789abcdef';
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/копия.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    expect(find.textContaining('Копия №3'), findsOneWidget);
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/другая.yandibak');
+    await click(t, 'Восстановить');
+    expect(api.calls.contains('/api/auth/restore'), false, reason: 'путь изменён и не открыт: прежний файл не отправляется');
+    await stop(t);
+  });
+
   Future<void> restoreWithFile(WidgetTester t, WizardApi api) async {
     await start(t, api);
     await click(t, 'Восстановить по сид-фразе');
@@ -512,7 +542,7 @@ void main() {
               preferences: AppPreferences(),
               busy: false,
               finish: (_, __, ___) async {},
-              restore: (_, __, ___) async {},
+              restore: (_, __, ___, ____) async {},
               printer: (text) async {
                 sent.add(text);
                 return ok;

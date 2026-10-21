@@ -166,11 +166,13 @@ async fn seed_preview(Json(b): Json<PreviewBody>) -> Response {
             BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "Слишком много проверок сразу: повторите через секунду"}))).into_response();
         }
-        let _slot = Slot;
+        let slot = Slot;
         if b.phrase.len() > 1024 {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Фраза слишком длинная"}))).into_response();
         }
+        // слот держится до конца вычисления в рабочем потоке: обрыв соединения его не освобождает, пока Argon2id считается
         let r = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let _slot = slot;
             let seed = key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
             let root = seed.root();
             let id = crate::core::identity::NodeIdentity::node_id_for_root(&root);
@@ -227,6 +229,12 @@ fn read_backup_file_resolved(path: &str) -> Result<(String, Vec<u8>), String> {
     Ok((p.display().to_string(), bytes))
 }
 
+/// Отпечаток содержимого копии (SHA-256, hex).
+fn backup_digest(bytes: &[u8]) -> String {
+    use sha2::Digest;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
 #[derive(Deserialize)]
 struct InspectBody {
     path: String,
@@ -237,6 +245,9 @@ struct RestoreBody {
     path: String,
     phrase: String,
     password: String,
+    /// Отпечаток копии из inspect: если указан, файл обязан совпасть (подмена между проверкой и восстановлением не пройдёт).
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 static RESTORE_FAILURES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -253,6 +264,8 @@ async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
                 "counter": h.counter, "node_id": h.node_id, "created_ms": h.created_ms,
                 // какой именно файл показан: клиент восстанавливает ЕГО, а не «самую свежую копию папки» ещё раз
                 "file": file,
+                // содержимое показанной копии: восстановление принимает только файл с этим отпечатком
+                "digest": backup_digest(&bytes),
                 "text": format!("Копия №{} от {y:04}-{mo:02}-{d:02} {hh:02}:{mi:02} UTC; узел {}", h.counter, h.node_id),
             }))
         })
@@ -309,7 +322,20 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<Vec<String>, RestoreF
     key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
     // файл читается и его открытый заголовок проверяется ДО занятия попытки: ошибка пути или повреждённый файл сид не проверяли
     let bytes = read_backup_file(&b.path)?;
-    crate::node_backup::read_header(&bytes)?;
+    let header = crate::node_backup::read_header(&bytes)?;
+    if let Some(d) = &b.digest {
+        if !d.eq_ignore_ascii_case(&backup_digest(&bytes)) {
+            return Err("Файл копии изменился после проверки: откройте его заново".into());
+        }
+    }
+    // копия обязана принадлежать узлу, который получается из этой фразы (и слова): старая копия со случайным корнем сюда не подходит
+    {
+        let seed = key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
+        let want = hex::encode(&crate::core::identity::NodeIdentity::node_id_for_root(&seed.root()).0[..8]);
+        if !header.node_id.eq_ignore_ascii_case(&want) {
+            return Err("Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово".into());
+        }
+    }
     // попытка занимается ДО дорогой проверки; успех другой копии бюджет не сбрасывает: сброс только после полного завершения
     if RESTORE_FAILURES.fetch_add(1, Ordering::SeqCst) >= RESTORE_FAILURE_LIMIT {
         RESTORE_FAILURES.fetch_sub(1, Ordering::SeqCst);
@@ -614,7 +640,7 @@ mod tests {
         let auth = AuthState::default();
         RESTORE_FAILURES.store(0, Ordering::SeqCst);
         let seed = key_root::Seed::generate(12).unwrap().words().join(" ");
-        let b = |phrase: &str, password: &str| RestoreBody { path: "/nonexistent/copy.yandibak".into(), phrase: phrase.into(), password: password.into() };
+        let b = |phrase: &str, password: &str| RestoreBody { path: "/nonexistent/copy.yandibak".into(), phrase: phrase.into(), password: password.into(), digest: None };
         // слишком длинный пароль — до любой записи и до счёта
         assert!(do_restore(&auth, &b(&seed, &"x".repeat(1025))).unwrap_err().error.contains("1024"));
         // короткий — тоже
@@ -632,12 +658,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let junk = dir.path().join("junk.yandibak");
         std::fs::write(&junk, b"not a backup").unwrap();
-        let bj = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into() };
+        let bj = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into(), digest: None };
         assert!(do_restore(&auth, &bj).is_err());
         assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "повреждённый заголовок не расходует попытку");
         // лимит держится: при исчерпанном бюджете отказ раньше проверки сида и счётчик не растёт
         RESTORE_FAILURES.store(RESTORE_FAILURE_LIMIT, Ordering::SeqCst);
-        let bad_real = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into() };
+        let bad_real = RestoreBody { path: junk.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into(), digest: None };
         let _ = do_restore(&auth, &bad_real);
         assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), RESTORE_FAILURE_LIMIT, "отказ не наращивает счётчик сверх лимита");
         // узел уже настроен — восстановление не выполняется
@@ -646,5 +672,25 @@ mod tests {
         assert!(do_restore(&auth, &b(&seed, "12345678")).unwrap_err().error.contains("уже настроен"));
         assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0);
     }
-}
 
+    #[test]
+    fn restore_takes_only_the_shown_content_and_only_a_copy_of_this_seeds_node() {
+        use std::sync::atomic::Ordering;
+        let auth = AuthState::default();
+        RESTORE_FAILURES.store(0, Ordering::SeqCst);
+        let seed = key_root::Seed::generate(12).unwrap().words().join(" ");
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("c.yandibak");
+        let root = [7u8; 32];
+        // копия узла со СЛУЧАЙНЫМ корнем (не из этой фразы): номер не совпадает
+        let other = crate::node_backup::seal(&[], &crate::node_backup::SealParams { root: &root, auth_json: b"{}", node_id: "ffffffffffffffff", counter: 1, now_ms: 1 }).unwrap();
+        std::fs::write(&file, &other).unwrap();
+        let mk = |digest: Option<String>| RestoreBody { path: file.to_string_lossy().into(), phrase: seed.clone(), password: "12345678".into(), digest };
+        let e = do_restore(&auth, &mk(None)).unwrap_err().error;
+        assert!(e.contains("другому узлу"), "{e}");
+        // содержимое изменилось после проверки
+        let e = do_restore(&auth, &mk(Some(backup_digest(b"was another file")))).unwrap_err().error;
+        assert!(e.contains("изменился"), "{e}");
+        assert_eq!(RESTORE_FAILURES.load(Ordering::SeqCst), 0, "отказ до проверки сида попытку не тратит");
+    }
+}

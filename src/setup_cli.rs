@@ -390,9 +390,9 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
                 "the backup belongs to another node: check the phrase words and the control word; nothing was written"
             ).into());
         }
-        // восстанавливается ИМЕННО та копия, что показана выше (если указана папка — узел назвал выбранный файл): подмена между запросами не пройдёт
+        // восстанавливается ИМЕННО та копия, что показана выше (если указана папка — узел назвал выбранный файл): узел сверит отпечаток содержимого до записи
         let exact = v["file"].as_str().unwrap_or(&path).to_string();
-        let (code, v) = roundtrip(socket, "POST", "/api/auth/restore", Some(&json!({ "path": exact, "phrase": master, "password": pw })), None, Duration::from_secs(600))?;
+        let (code, v) = roundtrip(socket, "POST", "/api/auth/restore", Some(&json!({ "path": exact, "phrase": master, "password": pw, "digest": v["digest"] })), None, Duration::from_secs(600))?;
         if code != 200 {
             return Err(error_text(code, &v));
         }

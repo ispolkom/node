@@ -25,7 +25,7 @@ class SetupWizard extends StatefulWidget {
   final Future<void> Function(String password, String phrase, String admin) finish;
 
   /// Восстановление из файла копии: путь, сид-фраза, новый пароль этой установки.
-  final Future<void> Function(String path, String phrase, String password) restore;
+  final Future<void> Function(String path, String phrase, String password, String digest) restore;
 
   /// Печать листа с сид-фразой прямо из памяти (по умолчанию команда `lp`, файл не создаётся); в тестах подменяется.
   final Future<bool> Function(String text)? printer;
@@ -86,6 +86,10 @@ class _SetupWizardState extends State<SetupWizard> {
   String? previewFor;
   /// Файл копии, который показан и будет восстановлен (если указана папка — выбранный в ней).
   String? resolvedFile;
+  String? backupFor;
+  String? resolvedDigest;
+  String? resolvedNode;
+  int _inspectSeq = 0;
 
   @override
   void initState() {
@@ -330,32 +334,43 @@ class _SetupWizardState extends State<SetupWizard> {
   }
 
   Future<void> inspect() async {
+    // каждая проверка начинается с нуля: прежняя копия больше не разрешена, пока не открыта новая; запоздалые ответы отбрасываются
+    final seq = ++_inspectSeq;
     setState(() {
       backupInfo = null;
+      backupFor = null;
+      resolvedFile = null;
+      resolvedDigest = null;
+      resolvedNode = null;
       error = null;
     });
     try {
       final r = await widget.api.request('/api/auth/restore/inspect', body: {'path': path.text.trim()});
-      if (!mounted) return;
-      // копия принадлежит узлу, который получился из фразы и слова? Иначе слово или фраза введены неверно
+      if (!mounted || seq != _inspectSeq) return;
       final id = '${r['node_id'] ?? ''}';
-      if (previewId != null && id.isNotEmpty && id != previewId) {
-        setState(() {
-          error = 'Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово.';
-          resolvedFile = null;
-        });
-        return;
-      }
       final ms = (r['created_ms'] is num) ? (r['created_ms'] as num).toInt() : 0;
       final t = DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
       String two(int n) => n.toString().padLeft(2, '0');
       final when = '${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)} UTC';
       setState(() {
         resolvedFile = r['file'] is String ? r['file'] as String : path.text.trim();
+        resolvedDigest = '${r['digest'] ?? ''}';
+        resolvedNode = id;
+        backupFor = path.text.trim();
         backupInfo = 'Копия №${r['counter']} от $when; узел $id';
+        _checkBackupOwner();
       });
     } catch (e) {
-      if (mounted) setState(() => error = e is ApiFailure ? e.message : 'Файл копии не открылся.');
+      if (mounted && seq == _inspectSeq) setState(() => error = e is ApiFailure ? e.message : 'Файл копии не открылся.');
+    }
+  }
+
+  /// Копия обязана принадлежать узлу из фразы и слова — в любом порядке действий (файл до номера или номер до файла).
+  void _checkBackupOwner() {
+    if (previewId != null && resolvedNode != null && resolvedNode!.isNotEmpty && resolvedNode != previewId) {
+      error = 'Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово.';
+      resolvedFile = null;
+      resolvedDigest = null;
     }
   }
 
@@ -382,6 +397,7 @@ class _SetupWizardState extends State<SetupWizard> {
       setState(() {
         previewId = '${r['node_id']}';
         previewFor = snapshot;
+        _checkBackupOwner();
       });
     } catch (e) {
       // отказ узла по фразе: слово не из списка, опечатка, слабое или составное контрольное слово
@@ -402,7 +418,7 @@ class _SetupWizardState extends State<SetupWizard> {
       setState(() => error = 'Сначала проверьте номер узла и подтвердите, что он совпадает с вашей записью');
       return;
     }
-    if (hasFile && (path.text.trim().isEmpty || resolvedFile == null)) {
+    if (hasFile && (path.text.trim().isEmpty || resolvedFile == null || resolvedDigest == null || backupFor != path.text.trim() || resolvedNode != previewId)) {
       setState(() => error = 'Выберите файл копии и откройте его (Enter в поле пути) или снимите отметку');
       return;
     }
@@ -418,14 +434,14 @@ class _SetupWizardState extends State<SetupWizard> {
       sending = true;
       error = null;
     });
-    final p = newPassword.text, f = _restorePhrase, file = resolvedFile ?? path.text.trim(), withFile = hasFile;
+    final p = newPassword.text, f = _restorePhrase, file = resolvedFile ?? path.text.trim(), digest = resolvedDigest ?? '', withFile = hasFile;
     phrase.clear();
     restoreWord.clear();
     newPassword.clear();
     newRepeat.clear();
     try {
       if (withFile) {
-        await widget.restore(file, f, p);
+        await widget.restore(file, f, p, digest);
       } else {
         // без файла: те же ключи из сида (личность, ключ подписи списка узлов); телефоны сопрягаются заново
         await widget.finish(p, f, '');
@@ -458,6 +474,7 @@ class _SetupWizardState extends State<SetupWizard> {
             previewFor = null;
             idMatches = false;
             resolvedFile = null;
+            resolvedDigest = null;
             backupInfo = null;
           }),
           decoration: InputDecoration(labelText: tr(context, label), border: const OutlineInputBorder()),
@@ -513,7 +530,7 @@ class _SetupWizardState extends State<SetupWizard> {
           _button('Прикрепить файл', pick, filled: false),
         ],
       ),
-      if (backupInfo != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(backupInfo!)),
+      if (backupInfo != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(tr(context, backupInfo!))),
     ],
     for (final (controller, label) in [
       (newPassword, 'Новый пароль'),

@@ -327,10 +327,11 @@ void main() {
     await start(t, api);
     final inputs = [
       'test master phrase',
+      '',
       'new login password',
       'new login password',
     ];
-    for (var i = 0; i < 3; i++) {
+    for (var i = 0; i < 4; i++) {
       await t.enterText(find.byType(TextField).at(i), inputs[i]);
     }
     await click(t, 'Восстановить доступ');

@@ -757,11 +757,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     String file,
     String phrase,
     String password,
+    String digest,
   ) async {
     await act('/api/auth/restore', {
       'path': file,
       'phrase': phrase,
       'password': password,
+      if (digest.isNotEmpty) 'digest': digest,
     });
     if (!mounted || error != null || auth == AuthStage.setup) return;
     setState(() => entered = true);
@@ -828,15 +830,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             title: 'Восстановить доступ',
             labels: const [
               'Сид-фраза, мастер-пароль или код восстановления',
+              'Контрольное слово (если было)',
               'Новый пароль входа',
               'Повтор нового пароля',
             ],
             busy: busy,
             submit: (v) {
-              validateNew(v[1], v[2]);
+              validateNew(v[2], v[3]);
+              // ошибка в слове или его пропуск — неверная попытка (после 20 таких данные закрытой среды стираются)
               return act('/api/auth/recover', {
-                'recovery_code': v[0],
-                'new_login_password': v[1],
+                'recovery_code': v[1].isEmpty ? v[0] : joinSeedPhrase(v[0].trim().split(RegExp(r'\s+')).join(' '), v[1]),
+                'new_login_password': v[2],
                 'remember_me': false,
               });
             },
