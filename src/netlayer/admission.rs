@@ -46,6 +46,8 @@ pub enum Reject {
     GlobalNew,
     /// таблица пиров полна и вытеснять некого
     TableFull,
+    /// автономный узел: этот узел не внесён владельцем в меш
+    NotInMesh,
 }
 
 impl Reject {
@@ -55,6 +57,7 @@ impl Reject {
             Reject::PerSourceNew => "per-source-new",
             Reject::GlobalNew => "global-new",
             Reject::TableFull => "table-full",
+            Reject::NotInMesh => "not-in-mesh",
         }
     }
 }

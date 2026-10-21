@@ -1071,6 +1071,10 @@ impl P2PTransport {
                                 eprintln!("[P2P] ⚠️ Hello from {} rejected — stale timestamp", crate::util::logsafe::a(&from));
                                 continue;
                             }
+                            // автономный узел молчит перед всеми, кого владелец не внёс в меш
+                            if !crate::autonomy::admits(&hello.node_id) {
+                                continue;
+                            }
 
                             // Допуск: подписанное приветствие от неизвестной личности ничего не доказывает (личность создаётся бесплатно).
                             {

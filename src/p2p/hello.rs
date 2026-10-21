@@ -80,7 +80,9 @@ impl P2PHelloPacket {
     /// Deterministic byte representation of all fields except signature.
     /// This is what gets signed and verified.
     pub fn canonical_bytes(&self) -> Vec<u8> {
-        let mut buf = Vec::with_capacity(130);
+        let mut buf = Vec::with_capacity(144);
+        // метка мира (см. crate::autonomy::world_tag): у общей сети пусто, байты прежние
+        buf.extend_from_slice(crate::autonomy::world_tag());
         buf.push(self.hello_type as u8);
         buf.push(self.version);
         buf.extend_from_slice(&self.node_id.0);

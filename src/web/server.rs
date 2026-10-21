@@ -479,6 +479,7 @@ impl WebServer {
             // кто может выходить в интернет через этот узел (выбор владельца)
             .merge(crate::exit_policy::router())
             .merge(crate::guest::router())
+            .merge(crate::autonomy::router())
             .merge(crate::mail_policy::router())
             // закрытая среда узла: пароль владельца, блокировка, смена пароля
             .merge(vault_router())

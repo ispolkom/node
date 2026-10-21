@@ -71,6 +71,12 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("Failed to init config: {}", e))?;
 
     let config = get_config();
+    // автономный узел: меш (внесённые владельцем узлы) известен до запуска связи — иначе первые приветствия меша отсекались бы
+    if yandi::autonomy::enabled() {
+        let dir = yandi::web::peers::PeerDirectory::load_or_default(&yandi::web::peers::default_peer_directory_path());
+        yandi::exit_policy::set_trusted(dir.decoded().into_iter().map(|(id, _, _)| id.0));
+        println!("🔒 Автономный узел: общая сеть выключена, меш — {} узл.", dir.peers.len());
+    }
 
     // Initialize logging
     init_logging(LogLevel::Info)
@@ -608,7 +614,8 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("Failed to enable mDNS browser: {}", e))?;
 
     // копия из тренировочной сети не объявляет себя в домашней сети (имя yandi.local — у настоящего узла)
-    if !yandi::testnet::active() {
+    // автономный узел не объявляет себя и в локальной сети (docs/ROADMAP_R9.md §4)
+    if !yandi::testnet::active() && !yandi::autonomy::enabled() {
         mdns_service.start().await
             .map_err(|e| anyhow!("Failed to start mDNS service: {}", e))?;
     }
@@ -686,7 +693,10 @@ async fn main() -> anyhow::Result<()> {
     yandi::mobile_api::init(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
     yandi::profile_sync::spawn(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
     // уведомление об обновлениях (подписанные манифесты на сайте и GitHub; сам узел ничего не устанавливает)
-    yandi::updates::spawn();
+    // автономный узел обновления не проверяет и извещений не получает: владелец обновляет вручную (docs/ROADMAP_R9.md §4)
+    if !yandi::autonomy::enabled() {
+        yandi::updates::spawn();
+    }
     #[cfg(unix)]
     if let Some(env) = closed_env.as_ref() {
         env.register(std::sync::Arc::new(yandi::closed_api::ChatConsumer(chat_manager.clone())));
@@ -766,6 +776,8 @@ async fn main() -> anyhow::Result<()> {
                 _ => (None, "unknown"),
             };
             let power = match sys_info.power { yandi::util::NodePower::Low => "low", yandi::util::NodePower::Medium => "medium", yandi::util::NodePower::High => "high" };
+            // выбор режима (общая сеть / автономный) есть только у узла с белым адресом и не слабым железом
+            yandi::autonomy::set_capable(introspection.capabilities.has_public_ip && power != "low");
             let a = yandi::network_offers::SelfAssessment {
                 country,
                 country_source: source,
@@ -786,8 +798,13 @@ async fn main() -> anyhow::Result<()> {
                 let fmt = |port: u16| if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
                 yandi::web::peers::install_my_card(&node_id_for_card, &pubkey_for_card, vec![fmt(disc_port)], vec![fmt(p2p_port_for_card)]);
             });
-            yandi::bootstrap::apply::start(transport.clone(), identity.node_id().0, key.clone()); // заявка во входной список: только узлам из бутстрапа
-            yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
+            if !yandi::autonomy::enabled() { yandi::bootstrap::apply::start(transport.clone(), identity.node_id().0, key.clone()); } // заявка во входной список: только узлам из бутстрапа
+            // автономный узел карточку в сеть не публикует и пробы не принимает
+            if !yandi::autonomy::enabled() {
+                yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
+            } else {
+                let _ = (key, a, watch_ip, on_change);
+            }
             yandi::reciprocity::start();
         }
         // вход для телефона по TLS (если владелец включил): байты — в локальный SOCKS5-прокси узла
@@ -803,8 +820,10 @@ async fn main() -> anyhow::Result<()> {
             }
     });
         }
+        if !yandi::autonomy::enabled() {
         yandi::relay_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key), std::env::var("YANDI_CLIENT_ONLY").map(|v| v == "1").unwrap_or(false));
         yandi::hops_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key));
+        }
     }
 
     // Запустить CLI

@@ -912,6 +912,8 @@ impl HelloPacket {
         }
         let mut d = Vec::with_capacity(256);
         d.extend_from_slice(b"yandi-hello-v2\0");
+        // метка мира: общая сеть — пусто (байты прежние), автономный меш — своя; узлы разных миров не примут друг друга
+        d.extend_from_slice(crate::autonomy::world_tag());
         d.push(self.hello_type as u8);
         d.push(self.version);
         d.extend_from_slice(&self.node_id.0);

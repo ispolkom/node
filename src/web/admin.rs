@@ -151,7 +151,7 @@ pub fn is_admin_route(method: &axum::http::Method, path: &str) -> bool {
     match p {
         // настройки узла (адрес привязки, порты, журнал), ретрансляция, запуск и остановка, копии
         "/api/settings" => !reads,
-        "/api/network/relay" | "/api/node/start" | "/api/node/stop" | "/api/backup/export" | "/api/backup/config" => !reads,
+        "/api/network/relay" | "/api/node/start" | "/api/node/stop" | "/api/backup/export" | "/api/backup/config" | "/api/node/autonomy" => !reads,
         // общий секрет сопряжения и QR для сопряжения выдаются только администратору
         "/api/devices/pairing" | "/pair/qr" => true,
         _ => false,

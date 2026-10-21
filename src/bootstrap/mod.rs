@@ -218,6 +218,9 @@ fn now() -> u64 {
 
 /// Сохранённая копия (если подпись сходится и список не устарел).
 pub fn load_cached(signers: &[&str], now: u64) -> Option<Doc> {
+    if crate::autonomy::enabled() {
+        return None;
+    }
     let bytes = std::fs::read(cache_path()).ok()?;
     let d = parse(&bytes).ok()?;
     d.verify(signers, now, None).ok()?;
@@ -246,6 +249,10 @@ fn urls() -> Vec<String> {
 /// Скачать список из первого ответившего источника, проверить и сохранить. Возвращает действующий список: свежий или, если
 /// скачать не удалось, сохранённый на диске.
 pub async fn fetch(signers: &[&str]) -> Option<Doc> {
+    // автономный узел общий список не берёт вовсе (docs/ROADMAP_R9.md §4)
+    if crate::autonomy::enabled() {
+        return None;
+    }
     let t = now();
     let known = load_cached(signers, 0).map(|d| d.sequence);
     let client = reqwest::Client::builder().timeout(Duration::from_secs(FETCH_TIMEOUT_SECS)).build().ok()?;
@@ -317,6 +324,10 @@ pub fn to_config(d: &Doc) -> crate::netlayer::bootstrap::BootstrapConfig {
 /// Настройка для запуска: подписанный список (скачанный или сохранённый) плюс **локальный** файл владельца `nodes/bootstrap.json`
 /// (его владелец правит сам, подписи не требует).
 pub async fn effective_config(local: &Path) -> crate::netlayer::bootstrap::BootstrapConfig {
+    // автономный узел: ни подписанного, ни локального списка входов — только внесённые владельцем автономные узлы
+    if crate::autonomy::enabled() {
+        return crate::netlayer::bootstrap::BootstrapConfig::default();
+    }
     let mut cfg = crate::netlayer::bootstrap::BootstrapConfig::load_from_file(local).unwrap_or_default();
     if let Some(d) = fetch(SIGNER_KEYS).await {
         let signed = to_config(&d);

@@ -2305,6 +2305,10 @@ impl P2PTransport {
                                     continue;
                                 }
                             }
+                            // автономный узел молчит перед всеми, кого владелец не внёс в меш
+                            if !crate::autonomy::admits(&hello_packet.node_id) {
+                                continue;
+                            }
 
                             // 🚧 Допуск: подписанное приветствие от неизвестной личности ничего не доказывает (личность создаётся бесплатно),
                             // поэтому новых узлов принимаем с ограничениями, а таблица пиров не растёт выше потолка.
@@ -6028,6 +6032,9 @@ impl P2PTransport {
         ip: std::net::IpAddr,
         node_id: HashId,
     ) -> Result<(), crate::netlayer::admission::Reject> {
+        if !crate::autonomy::admits(&node_id) {
+            return Err(crate::netlayer::admission::Reject::NotInMesh);
+        }
         let (known, table_len) = {
             let p = peers.lock().await;
             (p.contains_key(&node_id), p.len())
