@@ -220,6 +220,10 @@ pub fn compute() -> Vec<Notice> {
             out.push(notice("proxies", "Внешних прокси не отвечает", (1..=(added - working)).map(|i| i.to_string()).collect()));
         }
     }
+    // сборка узла отозвана подписанным списком (docs/ROADMAP_R9.md §5): в общую сеть узел не входит, пока его не обновят
+    if crate::bootstrap::own_build_revoked() {
+        out.push(notice("revoked", "Сборка узла отозвана: обновите узел", vec![crate::update_check::own_version()]));
+    }
     // копии связей не настроены: телефоны, контакты и группы пропадут вместе с диском (напоминание, пока не выбрано место)
     #[cfg(unix)]
     if crate::backup_api::folder_missing() {
