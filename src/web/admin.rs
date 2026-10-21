@@ -220,6 +220,10 @@ pub fn compute() -> Vec<Notice> {
             out.push(notice("proxies", "Внешних прокси не отвечает", (1..=(added - working)).map(|i| i.to_string()).collect()));
         }
     }
+    // копии связей не настроены: телефоны, контакты и группы пропадут вместе с диском (напоминание, пока не выбрано место)
+    if crate::backup_api::folder_missing() {
+        out.push(notice("backup", "Копии связей не настроены", vec!["no-folder".to_string()]));
+    }
     out
 }
 

@@ -459,8 +459,14 @@ pub(crate) fn apply_place(s: &mut Session, dir: &str, auto_yes: bool) -> Result<
                 return Ok(false);
             }
             Some("no_write") => {
-                let detail = v["detail"].as_str().unwrap_or("");
-                eprintln!("{}", t!(format!("У меня нет прав для записи в это место: {detail}"), format!("I have no permission to write to this place: {detail}")));
+                let why = match v["reason"].as_str() {
+                    Some("permission") => t!("доступ запрещён (диск или папка принадлежат другому пользователю)", "access denied (the disk or folder belongs to another user)").to_string(),
+                    Some("read_only") => t!("диск только для чтения", "the disk is read-only").to_string(),
+                    Some("not_found") => t!("такого места нет или это не папка", "no such place, or it is not a folder").to_string(),
+                    Some("no_space") => t!("на диске нет свободного места", "no free space on the disk").to_string(),
+                    _ => v["detail"].as_str().unwrap_or("").to_string(),
+                };
+                eprintln!("{}", t!(format!("У меня нет прав для записи в это место: {why}"), format!("I have no permission to write to this place: {why}")));
                 return Ok(false);
             }
             Some("inside_node") => {

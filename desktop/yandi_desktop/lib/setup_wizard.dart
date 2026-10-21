@@ -46,14 +46,17 @@ class SetupWizard extends StatefulWidget {
   State<SetupWizard> createState() => _SetupWizardState();
 }
 
-enum _Step { show, order, type, password, restore }
+/// Слова и контрольное слово одной строкой для узла (внутренний разделитель U+001F; слово после него; пусто — без слова).
+String joinSeedPhrase(String words, String word) => word.trim().isEmpty ? words : '$words\u001f${word.trim()}';
+
+enum _Step { show, order, type, word, password, restore }
 
 class _SetupWizardState extends State<SetupWizard> {
   /// Минимум длины пароля задаёт узел (8; 6 только на тестовом узле): мастер берёт его из ответа `/api/auth/seed/new`, до ответа — 8.
   int _minimum = 8;
   late final Random _random = widget.random ?? Random.secure();
   _Step step = _Step.show;
-  int count = 12;
+  int count = 24;
   List<String> words = [];
   bool loading = true, sending = false;
   String? error;
@@ -65,13 +68,20 @@ class _SetupWizardState extends State<SetupWizard> {
   List<int> asked = [];
   final typed = List.generate(3, (_) => TextEditingController());
   final password = TextEditingController(), repeat = TextEditingController();
+  // контрольное слово (необязательно): одно слово, которое админ придумывает и помнит сам
+  final controlWord = TextEditingController(), controlRepeat = TextEditingController();
+  String _word = '';
   final adminPassword = TextEditingController(), adminRepeat = TextEditingController();
   // восстановление из копии
   final path = TextEditingController(),
       phrase = TextEditingController(),
       newPassword = TextEditingController(),
-      newRepeat = TextEditingController();
+      newRepeat = TextEditingController(),
+      restoreWord = TextEditingController();
   String? backupInfo;
+  // восстановление: есть ли файл связей, номер узла из фразы и подтверждение, что он совпал с записью
+  bool hasFile = false, idMatches = false;
+  String? previewId;
 
   @override
   void initState() {
@@ -118,12 +128,15 @@ class _SetupWizardState extends State<SetupWizard> {
     for (final c in typed) {
       c.clear();
     }
+    controlWord.clear();
+    controlRepeat.clear();
+    _word = '';
   }
 
   @override
   void dispose() {
     words.fillRange(0, words.length, '');
-    for (final c in [...typed, password, repeat, adminPassword, adminRepeat, path, phrase, newPassword, newRepeat]) {
+    for (final c in [...typed, password, repeat, adminPassword, adminRepeat, path, phrase, newPassword, newRepeat, controlWord, controlRepeat, restoreWord]) {
       c.clear();
       c.dispose();
     }
@@ -176,9 +189,59 @@ class _SetupWizardState extends State<SetupWizard> {
     }
     setState(() {
       error = null;
+      step = _Step.word;
+    });
+  }
+
+  /// Слово, которое легко угадать (предупреждение, не запрет).
+  static bool weakWord(String w) {
+    final lower = w.toLowerCase();
+    const common = {
+      'password', 'passw0rd', 'qwertyuiop', 'qwerty123', '12345678', '123456789', '1234567890', 'iloveyou', 'admin1234', 'letmein12', 'welcome1',
+      'abc12345', '1q2w3e4r', '1qaz2wsx', 'qazwsxedc', 'football', 'baseball', 'sunshine', 'princess', 'trustno1', 'пароль12', 'пароль123',
+      'парольпароль', 'йцукенгшщз', 'йцукен123', 'привет123', 'секретное', 'контрольное', 'контрольноеслово', 'controlword',
+    };
+    return common.contains(lower) || lower.runes.toSet().length <= 3 || RegExp(r'^[0-9]+$').hasMatch(lower);
+  }
+
+  /// Шаг контрольного слова: пусто — без слова; иначе одно слово 8–64 знака, дважды.
+  void acceptWord({required bool skip}) {
+    if (skip || controlWord.text.trim().isEmpty) {
+      setState(() {
+        _word = '';
+        controlWord.clear();
+        controlRepeat.clear();
+        error = null;
+        step = _Step.password;
+      });
+      return;
+    }
+    final w = controlWord.text.trim();
+    if (RegExp(r'\s').hasMatch(w)) {
+      setState(() => error = 'Контрольное слово — одно слово, без пробелов');
+      return;
+    }
+    if (w.runes.length < 8) {
+      setState(() => error = 'Контрольное слово не короче 8 знаков');
+      return;
+    }
+    if (w.runes.length > 64) {
+      setState(() => error = 'Контрольное слово не длиннее 64 знаков');
+      return;
+    }
+    if (w != controlRepeat.text.trim()) {
+      setState(() => error = 'Слова не совпали');
+      return;
+    }
+    setState(() {
+      _word = w;
+      error = null;
       step = _Step.password;
     });
   }
+
+  /// Слова и контрольное слово одной строкой для узла (внутренний разделитель U+001F; слово после него).
+  static String joinPhrase(String words, String word) => joinSeedPhrase(words, word);
 
   Future<void> create() async {
     if (sending || widget.busy) return;
@@ -210,7 +273,7 @@ class _SetupWizardState extends State<SetupWizard> {
       sending = true;
       error = null;
     });
-    final phrase = words.join(' ');
+    final phrase = joinPhrase(words.join(' '), _word);
     password.clear();
     repeat.clear();
     adminPassword.clear();
@@ -222,15 +285,12 @@ class _SetupWizardState extends State<SetupWizard> {
     }
   }
 
-  /// Лист для печати: слова по номерам и памятка. Передаётся принтеру через стандартный ввод, на диск оболочка ничего не пишет.
+  /// Лист для печати: ТОЛЬКО слова по номерам, больше ничего. Передаётся принтеру через стандартный ввод, на диск не пишется.
   String _sheet() {
-    final b = StringBuffer('YANDI\n\n');
+    final b = StringBuffer();
     for (var i = 0; i < words.length; i++) {
       b.writeln('${(i + 1).toString().padLeft(2)}. ${words[i]}');
     }
-    b.writeln();
-    b.writeln('Seed phrase of the node. Keep it on paper, away from the computer.');
-    b.writeln('Anyone who has these words can restore the node. Do not photograph it.');
     return b.toString();
   }
 
@@ -272,21 +332,57 @@ class _SetupWizardState extends State<SetupWizard> {
     });
     try {
       final r = await widget.api.request('/api/auth/restore/inspect', body: {'path': path.text.trim()});
-      if (mounted) setState(() => backupInfo = '${r['text']}');
+      if (!mounted) return;
+      // копия принадлежит узлу, который получился из фразы и слова? Иначе слово или фраза введены неверно
+      final id = '${r['node_id'] ?? ''}';
+      if (previewId != null && id.isNotEmpty && id != previewId) {
+        setState(() => error = 'Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово.');
+        return;
+      }
+      setState(() => backupInfo = '${r['text']}');
     } catch (e) {
       if (mounted) setState(() => error = e is ApiFailure ? e.message : 'Файл копии не открылся.');
     }
   }
 
+  String get _restorePhrase => joinPhrase(phrase.text.trim().split(RegExp(r'\s+')).join(' '), restoreWord.text);
+
+  /// Показать номер узла, который получится из фразы и слова, — до любой записи (опечатка не создаст молча чужой узел).
+  Future<void> showId() async {
+    final words = phrase.text.trim().split(RegExp(r'\s+'));
+    if (words.length != 12 && words.length != 18 && words.length != 24) {
+      setState(() => error = 'Введите 12, 18 или 24 слова сид-фразы');
+      return;
+    }
+    setState(() {
+      error = null;
+      previewId = null;
+      idMatches = false;
+    });
+    try {
+      final r = await widget.api.request('/api/auth/seed/preview', body: {'phrase': _restorePhrase});
+      if (mounted) setState(() => previewId = '${r['node_id']}');
+    } catch (e) {
+      // отказ узла по фразе: слово не из списка, опечатка, слабое или составное контрольное слово
+      if (mounted) setState(() => error = e is ApiFailure && e.status == 400 ? 'Фраза или контрольное слово не прошли проверку: проверьте слова (порядок, опечатки) и контрольное слово (одно слово, 8–64 знака).' : (e is ApiFailure ? e.message : 'Не удалось проверить фразу.'));
+    }
+  }
+
+  static String groupId(String id) => [for (var i = 0; i < id.length; i += 4) id.substring(i, i + 4 > id.length ? id.length : i + 4)].join(' ');
+
   Future<void> runRestore() async {
     if (sending || widget.busy) return;
     final words = phrase.text.trim().split(RegExp(r'\s+'));
-    if (path.text.trim().isEmpty) {
-      setState(() => error = 'Выберите файл копии');
+    if (words.length != 12 && words.length != 18 && words.length != 24) {
+      setState(() => error = 'Введите 12, 18 или 24 слова сид-фразы');
       return;
     }
-    if (words.length != 12 && words.length != 24) {
-      setState(() => error = 'Введите 12 или 24 слова сид-фразы');
+    if (previewId == null || !idMatches) {
+      setState(() => error = 'Сначала проверьте номер узла и подтвердите, что он совпадает с вашей записью');
+      return;
+    }
+    if (hasFile && path.text.trim().isEmpty) {
+      setState(() => error = 'Выберите файл копии или снимите отметку');
       return;
     }
     if (newPassword.text.runes.length < _minimum) {
@@ -301,12 +397,18 @@ class _SetupWizardState extends State<SetupWizard> {
       sending = true;
       error = null;
     });
-    final p = newPassword.text, f = phrase.text.trim(), file = path.text.trim();
+    final p = newPassword.text, f = _restorePhrase, file = path.text.trim(), withFile = hasFile;
     phrase.clear();
+    restoreWord.clear();
     newPassword.clear();
     newRepeat.clear();
     try {
-      await widget.restore(file, f, p);
+      if (withFile) {
+        await widget.restore(file, f, p);
+      } else {
+        // без файла: те же ключи из сида (личность, ключ подписи списка узлов); телефоны сопрягаются заново
+        await widget.finish(p, f, '');
+      }
     } finally {
       if (mounted) setState(() => sending = false);
     }
@@ -314,29 +416,81 @@ class _SetupWizardState extends State<SetupWizard> {
 
   List<Widget> _restore() => [
     const UiText(
-      'Восстановление из копии. Нужны файл копии (.yandibak) и сид-фраза. Пароль прежней установки не переносится: задайте новый пароль для этого компьютера.',
+      'Восстановление по сид-фразе. Нужны сид-фраза и, если оно было, контрольное слово. Файл связей (.yandibak) необязателен: из него вернутся сопряжённые телефоны, контакты и группы. Пароль прежней установки не переносится: задайте новый.',
     ),
     const SizedBox(height: 12),
-    Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: path,
-            enableSuggestions: false,
-            autocorrect: false,
-            decoration: InputDecoration(
-              labelText: tr(context, 'Путь к файлу копии'),
-              border: const OutlineInputBorder(),
-            ),
-            onSubmitted: (_) => inspect(),
-          ),
+    for (final (controller, label, hint) in [
+      (phrase, 'Сид-фраза (12, 18 или 24 слова)', true),
+      (restoreWord, 'Контрольное слово (если было)', true),
+    ])
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: TextField(
+          controller: controller,
+          obscureText: hint,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          enabled: !sending && !widget.busy,
+          onChanged: (_) => setState(() {
+            previewId = null;
+            idMatches = false;
+          }),
+          decoration: InputDecoration(labelText: tr(context, label), border: const OutlineInputBorder()),
         ),
-        _button('Выбрать файл', pick, filled: false),
-      ],
+      ),
+    Wrap(
+      children: [_button('Проверить номер узла', sending || widget.busy ? null : showId, filled: false)],
     ),
-    if (backupInfo != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(backupInfo!)),
+    if (previewId != null) ...[
+      Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Text('${tr(context, 'Номер узла')}: ${groupId(previewId!)}', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+      ),
+      CheckboxListTile(
+        key: const ValueKey('id-matches'),
+        value: idMatches,
+        onChanged: (v) => setState(() => idMatches = v == true),
+        controlAffinity: ListTileControlAffinity.leading,
+        contentPadding: EdgeInsets.zero,
+        title: const UiText('Номер совпадает с моей записью'),
+      ),
+    ],
+    CheckboxListTile(
+      key: const ValueKey('has-file'),
+      value: hasFile,
+      onChanged: (v) => setState(() {
+        hasFile = v == true;
+        if (!hasFile) {
+          path.clear();
+          backupInfo = null;
+        }
+      }),
+      controlAffinity: ListTileControlAffinity.leading,
+      contentPadding: EdgeInsets.zero,
+      title: const UiText('У меня есть файл связей (.yandibak) или папка yandi-node'),
+    ),
+    if (hasFile) ...[
+      Row(
+        children: [
+          Expanded(
+            child: TextField(
+              controller: path,
+              enableSuggestions: false,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: tr(context, 'Путь к файлу копии'),
+                border: const OutlineInputBorder(),
+              ),
+              onSubmitted: (_) => inspect(),
+            ),
+          ),
+          _button('Прикрепить файл', pick, filled: false),
+        ],
+      ),
+      if (backupInfo != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(backupInfo!)),
+    ],
     for (final (controller, label) in [
-      (phrase, 'Сид-фраза (12 или 24 слова)'),
       (newPassword, 'Новый пароль'),
       (newRepeat, 'Повтор нового пароля'),
     ])
@@ -449,10 +603,10 @@ class _SetupWizardState extends State<SetupWizard> {
   );
 
   List<Widget> _show() => [
-    const UiText('Шаг 1 из 4'),
+    const UiText('Шаг 1 из 5'),
     const SizedBox(height: 8),
     const UiText(
-      'Запишите слова на бумаге в том же порядке, в каком они показаны на экране. Без них нельзя восстановить пароль и перенести узел на новый компьютер: контакты и связи будут потеряны. Никому не показывайте эти слова и не фотографируйте экран.',
+      'Запишите слова на бумаге в том же порядке, в каком они показаны на экране. По ним (и по контрольному слову, если зададите) узел восстанавливается на новом компьютере: та же личность, то же доверие к узлу. Никому не показывайте эти слова и не фотографируйте экран.',
     ),
     const SizedBox(height: 12),
     Align(
@@ -465,11 +619,13 @@ class _SetupWizardState extends State<SetupWizard> {
     const SizedBox(height: 4),
     Row(
       children: [
-        DropdownButton<int>(
+        Expanded(child: DropdownButton<int>(
+          isExpanded: true,
           value: count,
           items: const [
-            DropdownMenuItem(value: 12, child: UiText('12 слов (обычная)')),
-            DropdownMenuItem(value: 24, child: UiText('24 слова (повышенная)')),
+            DropdownMenuItem(value: 12, child: UiText('12 слов (128 бит)')),
+            DropdownMenuItem(value: 18, child: UiText('18 слов (192 бита)')),
+            DropdownMenuItem(value: 24, child: UiText('24 слова (256 бит, рекомендуется)')),
           ],
           onChanged: loading
               ? null
@@ -478,7 +634,7 @@ class _SetupWizardState extends State<SetupWizard> {
                   count = v;
                   load();
                 },
-        ),
+        )),
       ],
     ),
     const SizedBox(height: 12),
@@ -489,7 +645,7 @@ class _SetupWizardState extends State<SetupWizard> {
         _button('Сохранил слова', loading || words.isEmpty ? null : toOrder),
         _button('Распечатать', loading || words.isEmpty ? null : printSheet, filled: false),
         _button(
-          'Восстановить из копии',
+          'Восстановить по сид-фразе',
           () => setState(() {
             error = null;
             step = _Step.restore;
@@ -501,7 +657,7 @@ class _SetupWizardState extends State<SetupWizard> {
   ];
 
   List<Widget> _order() => [
-    const UiText('Шаг 2 из 4'),
+    const UiText('Шаг 2 из 5'),
     const SizedBox(height: 8),
     const UiText(
       'Проверка записи. Нажимайте на слова в том порядке, в каком они были показаны.',
@@ -561,7 +717,7 @@ class _SetupWizardState extends State<SetupWizard> {
   ];
 
   List<Widget> _type() => [
-    const UiText('Шаг 3 из 4'),
+    const UiText('Шаг 3 из 5'),
     const SizedBox(height: 8),
     const UiText(
       'Введите слова по номерам из своей записи. Сейчас слова на экране скрыты.',
@@ -596,8 +752,50 @@ class _SetupWizardState extends State<SetupWizard> {
     ),
   ];
 
+  List<Widget> _wordStep() => [
+    const UiText('Шаг 4 из 5'),
+    const SizedBox(height: 8),
+    const UiText(
+      'Контрольное слово (необязательно). Это ОДНО слово, которое вы придумаете и запомните сами. Без него сид-фраза не восстановит узел, даже если листок найдут. Храните слово отдельно от сид-фразы: забыли слово, значит узел потерян безвозвратно. Слово не печатается и нигде не сохраняется.',
+    ),
+    for (final (controller, label) in [
+      (controlWord, 'Контрольное слово (не короче 8 знаков, регистр важен)'),
+      (controlRepeat, 'Повтор контрольного слова'),
+    ])
+      Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: TextField(
+          controller: controller,
+          obscureText: true,
+          enableSuggestions: false,
+          autocorrect: false,
+          enableIMEPersonalizedLearning: false,
+          onChanged: (_) => setState(() {}),
+          decoration: InputDecoration(labelText: tr(context, label), border: const OutlineInputBorder()),
+          onSubmitted: (_) => acceptWord(skip: false),
+        ),
+      ),
+    if (controlWord.text.trim().isNotEmpty && weakWord(controlWord.text.trim()))
+      const UiText('Слово слабое: его легко угадать. Лучше 10 и больше случайных знаков.'),
+    Wrap(
+      children: [
+        _button('Далее', () => acceptWord(skip: false)),
+        _button('Без контрольного слова', () => acceptWord(skip: true), filled: false),
+        _button(
+          'Показать слова снова',
+          () => setState(() {
+            error = null;
+            step = _Step.show;
+          }),
+          filled: false,
+        ),
+      ],
+    ),
+    const UiText('Без слова любой, кто увидит листок с сид-фразой, получит ваш узел.'),
+  ];
+
   List<Widget> _password() => [
-    const UiText('Шаг 4 из 4'),
+    const UiText('Шаг 5 из 5'),
     const SizedBox(height: 8),
     const UiText(
       'Пароль даёт вход в вашу переписку без сид-фразы. Если забудете пароль, восстановите его по записанной сид-фразе. Пять неверных паролей подряд закроют вход по паролю; двадцать неверных сид-фраз сотрут узел на этом компьютере.',
@@ -658,6 +856,7 @@ class _SetupWizardState extends State<SetupWizard> {
       _Step.show => _show(),
       _Step.order => _order(),
       _Step.type => _type(),
+      _Step.word => _wordStep(),
       _Step.password => _password(),
       _Step.restore => _restore(),
     };

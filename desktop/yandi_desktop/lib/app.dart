@@ -5,6 +5,7 @@ import 'theme.dart';
 import 'dashboard.dart';
 import 'preferences.dart';
 import 'setup_wizard.dart';
+import 'backup_panel.dart';
 import 'nick.dart';
 import 'member_badge.dart';
 import 'voice.dart' show wipeOpenedCopies;
@@ -344,7 +345,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     const byPage = {
       'Жалобы': ['complaints', 'pair_requests'],
       'Статус узла': ['update'],
-      'Настройки узла': ['proxies'],
+      'Настройки узла': ['proxies', 'backup'],
     };
     final kinds = byPage[page];
     if (kinds == null) return;
@@ -615,7 +616,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             labels: const [
               'Пароль владельца',
               'Повтор пароля',
-              'Сид-фраза (12 или 24 слова)',
+              'Сид-фраза (12, 18 или 24 слова)',
+              'Контрольное слово (если было)',
             ],
             busy: busy,
             submit: (values) async {
@@ -625,13 +627,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 throw const FormatException('Пароль — не короче 6 символов');
               final phrase = values[2].trim();
               final n = phrase.split(RegExp(r'\s+')).length;
-              if (n != 12 && n != 24)
+              if (n != 12 && n != 18 && n != 24)
                 throw const FormatException(
-                  'Введите 12 или 24 слова сид-фразы',
+                  'Введите 12, 18 или 24 слова сид-фразы',
                 );
               final payload = <String, dynamic>{
                 'password': values[0],
-                'phrase': phrase,
+                'phrase': joinSeedPhrase(phrase.split(RegExp(r'\s+')).join(' '), values[3]),
               };
               await act('/api/vault/setup', payload);
             },
@@ -649,16 +651,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             key: ValueKey('recover-$formVersion'),
             title: 'Восстановить словами',
             labels: const [
-              'Сид-фраза (12 или 24 слова)',
+              'Сид-фраза (12, 18 или 24 слова)',
+              'Контрольное слово (если было)',
               'Новый пароль',
               'Повтор нового пароля',
             ],
             busy: busy,
             submit: (values) {
-              validateNew(values[1], values[2], minimum: 6);
+              validateNew(values[2], values[3], minimum: 6);
               return act('/api/vault/recover', {
-                'phrase': values[0],
-                'new_password': values[1],
+                'phrase': joinSeedPhrase(values[0].trim().split(RegExp(r'\s+')).join(' '), values[1]),
+                'new_password': values[2],
               });
             },
           ),
@@ -711,6 +714,38 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     if (!mounted || error != null || auth == AuthStage.setup) return;
     setState(() => entered = true);
     await act('/api/vault/setup', {'password': password, 'phrase': phrase});
+    // после сида и пароля — где хранить копии связей (можно пропустить; напоминание остаётся)
+    if (mounted && error == null) await offerBackupPlace(admin.isNotEmpty ? admin : password);
+  }
+
+  /// Первая настройка закончена: предложить место для копий связей. Сеанс администратора открывается только на это окно паролем, который человек
+  /// только что задал, и закрывается сразу после.
+  Future<void> offerBackupPlace(String adminPassword) async {
+    try {
+      final r = await widget.api.request('/api/admin/session', body: {'password': adminPassword});
+      AdminToken.value = r['token'] is String ? r['token'] as String : null;
+    } catch (_) {
+      return;
+    }
+    final ctx = navigator.currentContext;
+    if (!mounted || ctx == null) return;
+    await showDialog<void>(
+      context: ctx,
+      barrierDismissible: false,
+      builder: (c) => Dialog(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 680),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(16),
+            child: BackupPanel(api: widget.api, isActive: () => true, firstRun: true, onDone: () => Navigator.pop(c)),
+          ),
+        ),
+      ),
+    );
+    try {
+      await widget.api.request('/api/admin/session', method: 'DELETE');
+    } catch (_) {}
+    AdminToken.value = null;
   }
 
   /// Восстановление на новой машине: файл копии + сид-фраза + новый пароль; затем закрытая среда открывается этим паролем.
@@ -727,6 +762,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     if (!mounted || error != null || auth == AuthStage.setup) return;
     setState(() => entered = true);
     await act('/api/vault/unlock', {'password': password});
+    if (mounted && error == null) await offerBackupPlace(password);
   }
 
   static void validateNew(String a, String b, {int minimum = 8}) {

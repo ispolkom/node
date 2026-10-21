@@ -11,7 +11,9 @@ class ApiFailure implements Exception {
   final List<String> warnings;
   /// Только для восстановления из копии: остались ли на диске изменённые файлы.
   final bool filesWritten;
-  const ApiFailure(this.kind, [this.status, this.warnings = const [], this.filesWritten = false]);
+  /// Только для места копий связей: машинный код отказа (из закрытого списка), причина записи и короткое пояснение узла.
+  final String code, reason, detail;
+  const ApiFailure(this.kind, [this.status, this.warnings = const [], this.filesWritten = false, this.code = '', this.reason = '', this.detail = '']);
   String get message => switch (kind) {
     'sealed_required' =>
       'Создайте и откройте закрытую среду перед изменением пула прокси.',
@@ -27,6 +29,19 @@ class ApiFailure implements Exception {
     'exists' => 'Файл уже существует. Выберите новое имя.',
     'cancelled' => 'Операция прервана.',
     'busy' => 'Подождите завершения текущих запросов.',
+    'backup' => switch (code) {
+      'system_disk' => 'Храните копии вне системного диска: при его потере пропадут и копии.',
+      'inside_node' => 'Копия внутри каталогов самого узла не защищает от потери диска: выберите другое место.',
+      'not_absolute' => 'Место задаётся полным путём без «..».',
+      'no_write' => switch (reason) {
+        'permission' => 'У меня нет прав для записи в это место: доступ запрещён (диск или папка принадлежат другому пользователю)',
+        'read_only' => 'У меня нет прав для записи в это место: диск только для чтения',
+        'not_found' => 'У меня нет прав для записи в это место: такого места нет или это не папка',
+        'no_space' => 'У меня нет прав для записи в это место: на диске нет свободного места',
+        _ => 'У меня нет прав для записи в это место.',
+      },
+      _ => 'Не удалось задать место для копий.',
+    },
     'http' || 'business' => switch (status) {
       401 => 'Неверный секрет или доступ запрещён.',
       429 => 'Слишком много попыток. Подождите перед повтором.',
@@ -51,6 +66,22 @@ ApiFailure restoreFailureFrom(int status, Map<String, dynamic> value) {
         if (x is String) x.length > 500 ? x.substring(0, 500) : x,
   ];
   return ApiFailure('http', status, list, value['files_written'] == true);
+}
+
+/// Отказ при выборе места для копий связей: только код, причина (из закрытых списков) и короткое пояснение без управляющих знаков.
+ApiFailure backupFailureFrom(int status, Map<String, dynamic> value) {
+  String pick(Object? v, Set<String> allowed) => v is String && allowed.contains(v) ? v : '';
+  final d = value['detail'];
+  final detail = d is String ? d.replaceAll(RegExp(r'[\x00-\x1f\x7f]'), ' ').trim() : '';
+  return ApiFailure(
+    'backup',
+    status,
+    const [],
+    false,
+    pick(value['code'], const {'system_disk', 'inside_node', 'not_absolute', 'no_write', 'state'}),
+    pick(value['reason'], const {'permission', 'read_only', 'not_found', 'no_space', 'other'}),
+    detail.length > 200 ? detail.substring(0, 200) : detail,
+  );
 }
 
 String fileErrorKind(dynamic message) => switch (message) {
@@ -145,6 +176,7 @@ bool validApiPath(String path) {
     }
   }
   if (RegExp(r'^/api/[a-zA-Z0-9_/-]+$').hasMatch(path)) return true;
+  if (path == '/api/backup/export?quiet=1') return true;
   if (RegExp(r'^/api/mobile/call/events\?after=[0-9]{1,20}$').hasMatch(path))
     return true;
   // код сопряжения для постороннего пользователя узла (роль — из закрытого списка)
@@ -359,6 +391,7 @@ class UnixApi implements Api, BinaryApi, GroupFileApi {
             // единственное исключение из правила «тело ответа в ошибку не попадает»: ограниченный контракт восстановления из копии,
             // иначе владелец не узнал бы путь неочищенного остатка (P19-3); тип, число и длина проверяются
             if (path == '/api/auth/restore') throw restoreFailureFrom(response.statusCode, value);
+            if (path == '/api/backup/config') throw backupFailureFrom(response.statusCode, value);
             throw ApiFailure('http', response.statusCode);
           }
           if (value['ok'] == false ||

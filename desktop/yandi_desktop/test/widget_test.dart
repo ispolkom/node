@@ -171,7 +171,11 @@ void main() {
     expect(api.calls.length, greaterThan(count));
     await stop(t);
   });
-  testWidgets('vault setup requires a 12 or 24 word seed phrase', (t) async {
+  testWidgets('vault setup requires a 12, 18 or 24 word seed phrase, with an optional control word', (t) async {
+    t.view.physicalSize = const Size(1000, 1500);
+    t.view.devicePixelRatio = 1;
+    addTearDown(t.view.resetPhysicalSize);
+    addTearDown(t.view.resetDevicePixelRatio);
     final api = m2.FeatureApi()..configured = false..unlocked = false;
     await start(t, api);
     await vaultPage(t);
@@ -184,7 +188,7 @@ void main() {
     await t.enterText(find.byType(TextField).at(1), 'owner password');
     await t.enterText(find.byType(TextField).at(2), 'alpha1 bravo2 charlie3 delta4');
     await click(t, 'Создать закрытую среду');
-    expect(find.text('Введите 12 или 24 слова сид-фразы'), findsOneWidget);
+    expect(find.text('Введите 12, 18 или 24 слова сид-фразы'), findsOneWidget);
     expect(api.calls.contains('/api/vault/setup'), false);
     const seed = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
     await t.enterText(find.byType(TextField).at(0), 'owner password');
@@ -236,10 +240,10 @@ void main() {
     expect(api.secs, 3600); // 60 минут
     await click(t, 'Запереть');
     expect(find.textContaining('Закрытая среда заперта'), findsOneWidget);
-    for (var i = 1; i <= 3; i++) {
+    for (var i = 1; i <= 4; i++) {
       await t.enterText(
         find.byType(TextField).at(i),
-        i == 1 ? 'alpha1 bravo2 charlie3 delta4' : 'recovered password',
+        i == 1 ? 'alpha1 bravo2 charlie3 delta4' : (i == 2 ? '' : 'recovered password'),
       );
     }
     await click(t, 'Восстановить словами');

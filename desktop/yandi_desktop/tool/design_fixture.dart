@@ -23,12 +23,16 @@ class DesignApi implements Api {
       return {'ok': true, 'active': adminActive};
     }
     if (path == '/api/notices') return {'items': const [], 'unread': 0, 'admin_active': adminActive};
-    if (path == '/api/auth/seed/new')
+    if (path == '/api/auth/seed/new') {
+      final n = (body?['words'] ?? 24) as int;
       return {
-        'count': 12,
+        'count': n,
         'min_password': 6,
-        'words': 'legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' '),
+        'words': n == 12
+            ? 'legal winner thank year wave sausage worth useful legal winner thank yellow'.split(' ')
+            : [...List.filled(n - 1, 'abandon'), n == 18 ? 'agent' : 'art'],
       };
+    }
     if (path == '/api/auth/state')
       return {'setup_required': scene == 'setup', 'recovery_required': false};
     if (path == '/api/vault/status')

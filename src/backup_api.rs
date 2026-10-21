@@ -40,6 +40,11 @@ pub fn notify_critical() {
     crate::backup_signal::notify_critical();
 }
 
+/// Узел работает, а место для копий связей не выбрано: оболочка и консоль напоминают об этом.
+pub fn folder_missing() -> bool {
+    RUNTIME.get().is_some_and(|r| node_backup::load_state(&r.layout).dir.as_ref().is_none_or(|d| d.trim().is_empty()))
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
 }
@@ -124,11 +129,17 @@ pub struct Place {
 pub struct PlaceError {
     pub code: &'static str,
     pub detail: String,
+    /// машинная причина отказа записи (для клиентов на любом языке): permission | read_only | not_found | no_space | other
+    pub reason: &'static str,
 }
 
 impl PlaceError {
     fn new(code: &'static str, detail: impl Into<String>) -> Self {
-        PlaceError { code, detail: detail.into() }
+        PlaceError { code, detail: detail.into(), reason: "" }
+    }
+    fn write(e: &std::io::Error) -> Self {
+        let (reason, text) = reason_of(e);
+        PlaceError { code: "no_write", detail: text, reason }
     }
     /// Фраза для владельца (клиенты с другим языком показывают свою по `code`).
     pub fn message(&self) -> String {
@@ -165,9 +176,9 @@ pub fn check_place(l: &Layout, place: &str) -> Result<Option<Place>, PlaceError>
             return Err(PlaceError::new("inside_node", ""));
         }
     }
-    std::fs::create_dir_all(&target).map_err(|e| PlaceError::new("no_write", reason_of(&e)))?;
+    std::fs::create_dir_all(&target).map_err(|e| PlaceError::write(&e))?;
     let probe = target.join(".yandi-write-test");
-    std::fs::write(&probe, b"x").map_err(|e| PlaceError::new("no_write", reason_of(&e)))?;
+    std::fs::write(&probe, b"x").map_err(|e| PlaceError::write(&e))?;
     let _ = std::fs::remove_file(&probe);
     let system_disk = match (dev_of(&target), dev_of(std::path::Path::new("/"))) {
         (Some(a), Some(b)) => a == b,
@@ -176,15 +187,16 @@ pub fn check_place(l: &Layout, place: &str) -> Result<Option<Place>, PlaceError>
     Ok(Some(Place { dir: target.display().to_string(), system_disk }))
 }
 
-fn reason_of(e: &std::io::Error) -> String {
+fn reason_of(e: &std::io::Error) -> (&'static str, String) {
     use std::io::ErrorKind::*;
     match e.kind() {
-        PermissionDenied => "доступ запрещён (диск или папка принадлежат другому пользователю)".to_string(),
-        ReadOnlyFilesystem => "диск только для чтения".to_string(),
-        NotFound => "такого места нет".to_string(),
-        _ if e.raw_os_error() == Some(28) => "на диске нет свободного места".to_string(),
-        _ if e.raw_os_error() == Some(30) => "диск только для чтения".to_string(),
-        _ => e.to_string(),
+        PermissionDenied => ("permission", "доступ запрещён (диск или папка принадлежат другому пользователю)".to_string()),
+        ReadOnlyFilesystem => ("read_only", "диск только для чтения".to_string()),
+        NotFound => ("not_found", "такого места нет".to_string()),
+        _ if e.raw_os_error() == Some(28) => ("no_space", "на диске нет свободного места".to_string()),
+        _ if e.raw_os_error() == Some(30) => ("read_only", "диск только для чтения".to_string()),
+        _ if e.raw_os_error() == Some(20) => ("not_found", "это не папка".to_string()),
+        _ => ("other", e.to_string()),
     }
 }
 
@@ -259,7 +271,7 @@ async fn config(Json(b): Json<ConfigBody>) -> Response {
         Ok(Err(e)) => {
             let status = if e.code == "system_disk" { StatusCode::CONFLICT } else { StatusCode::BAD_REQUEST };
             let message = if e.code == "system_disk" { "Храните копии вне системного диска: при его потере пропадут и копии.".to_string() } else { e.message() };
-            (status, Json(json!({"error": message, "code": e.code, "detail": e.detail}))).into_response()
+            (status, Json(json!({"error": message, "code": e.code, "reason": e.reason, "detail": e.detail}))).into_response()
         }
         Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"error": "сбой"}))).into_response(),
     }
