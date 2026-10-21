@@ -4176,7 +4176,7 @@ mod guest_tests {
         assert!(seen.iter().all(|u| u["name"] != "uh"), "гость видит только тех, кто сейчас в сети: «uh» не в сети");
         assert_eq!(by_name("uo")["role"], "owner");
         assert!(seen.iter().all(|u| u["name"] != "ug"), "себя в каталоге нет");
-        assert!(seen.iter().all(|u| u["is_node"] != true), "«Компьютера» гость не видит");
+        assert!(seen.iter().any(|u| u["is_node"] == true), "строку узла «Компьютер» гость видит (R9)");
         for u in &seen {
             assert_eq!(u["online"], true, "гостю — только онлайн: {u}");
         }
@@ -4360,7 +4360,8 @@ mod guest_tests {
         with_devices(|d| {
             for x in d.iter_mut() {
                 if x.token_hash == a || x.token_hash == b {
-                    x.created_ms = 1;
+                    // срок жизни гостя — сутки от создания (R9): активный A создан недавно, молчавший B давно
+                    x.created_ms = if x.token_hash == a { now_ms() - day / 2 } else { 1 };
                     x.last_seen_ms = now_ms() - day - 1000;
                 }
             }
