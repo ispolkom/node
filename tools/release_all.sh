@@ -21,6 +21,20 @@ PUB=release/yandi-release-pubkey.hex
 CERT=mobile/yandi_mobile/android/signing/yandi-release-cert.pem
 ENV_CLEAN=(env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY)
 
+# До сборки: список входных узлов подписан тем ключом, который вшивается в узел и приложение, и вшитая копия в приложении та же.
+python3 - <<'PY' || { echo "Выпуск остановлен: подпись списка не готова (см. выше). Подпишите: yandi admin bootstrap sign bootstrap/bootstrap.json"; exit 1; }
+import json,re,sys
+L=json.load(open("bootstrap/bootstrap.json")); pub=open("bootstrap/signer.pub").read().strip().lower()
+dart=open("mobile/yandi_mobile/lib/models/bootstrap_list.dart",encoding="utf-8").read()
+bad=[]
+if not L.get("signature"): bad.append("в bootstrap/bootstrap.json нет подписи")
+if L.get("signer","").lower()!=pub: bad.append("signer списка %s… не равен bootstrap/signer.pub %s…"%(L.get("signer","")[:8],pub[:8]))
+if pub not in dart.lower(): bad.append("ключ из signer.pub не закреплён в bootstrap_list.dart")
+if open("mobile/yandi_mobile/assets/bootstrap.json",encoding="utf-8").read()!=open("bootstrap/bootstrap.json",encoding="utf-8").read(): bad.append("mobile/yandi_mobile/assets/bootstrap.json не совпадает с bootstrap/bootstrap.json")
+for b in bad: print("ОШИБКА:",b)
+sys.exit(1 if bad else 0)
+PY
+
 REL=target/release/yandi-release
 "${ENV_CLEAN[@]}" cargo build --release --offline --bin yandi-release >/dev/null 2>&1 || { echo "не собрался инструмент подписи"; exit 1; }
 
