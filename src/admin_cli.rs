@@ -361,13 +361,11 @@ fn cmd_bootstrap(s: &mut Session, args: &[String]) -> Result<(), String> {
             }
         }
         "sign" => {
-            let file = args.get(1).ok_or(t!("bootstrap sign ФАЙЛ [--days N] [--network ИМЯ]", "bootstrap sign FILE [--days N] [--network NAME]"))?;
-            let mut days: Option<u64> = None;
+            let file = args.get(1).ok_or(t!("bootstrap sign ФАЙЛ [--network ИМЯ]", "bootstrap sign FILE [--network NAME]"))?;
             let mut network: Option<String> = None;
             let mut it = args[2..].iter();
             while let Some(a) = it.next() {
                 match a.as_str() {
-                    "--days" => days = Some(it.next().and_then(|d| d.parse().ok()).ok_or(t!("--days N", "--days N"))?),
                     "--network" => network = Some(it.next().ok_or(t!("--network ИМЯ", "--network NAME"))?.clone()),
                     other => return Err(t!(format!("неизвестный параметр {other}"), format!("unknown option {other}"))),
                 }
@@ -375,7 +373,7 @@ fn cmd_bootstrap(s: &mut Session, args: &[String]) -> Result<(), String> {
             let text = std::fs::read_to_string(file).map_err(|e| format!("{file}: {e}"))?;
             let list: Value = serde_json::from_str(&text).map_err(|_| t!("файл списка — не JSON", "the list file is not JSON").to_string())?;
             s.ensure_admin()?;
-            let r = s.ok("POST", "/api/admin/bootstrap/sign", Some(&json!({ "list": list, "days": days, "network": network })))?;
+            let r = s.ok("POST", "/api/admin/bootstrap/sign", Some(&json!({ "list": list, "network": network })))?;
             let signed = serde_json::to_string_pretty(&r["list"]).map_err(|e| e.to_string())? + "\n";
             // атомарно: сначала рядом, потом переименование — оборванная запись не испортит прежний список
             let tmp = format!("{file}.new");
@@ -808,7 +806,7 @@ const HELP_RU: &str = "yandi admin — управление запущенным
   yandi admin device-promote ID    подтвердить приглашённое устройство: оно станет пользователем и сможет приглашать само
   yandi admin device-revoke-branch ID   отозвать устройство и всех, кого оно пригласило
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
-  yandi admin bootstrap pubkey | sign ФАЙЛ [--days N]   ключ подписи списка узлов — только в закрытой среде, файла нет
+  yandi admin bootstrap pubkey | sign ФАЙЛ   ключ подписи списка узлов — только в закрытой среде, файла нет
   yandi admin bootstrap applications | dismiss ID       заявки узлов во входной список (данные подключения, прозвон, готовая команда)
   yandi admin phone-action ПИР ДЕЙСТВИЕ
   yandi admin proxies list|add [вид]|remove ID|test [вид]|settings --enabled on|off --strict on|off --max-clients N
@@ -831,7 +829,7 @@ const HELP_EN: &str = "yandi admin — manage the running node from the console
   yandi admin device-promote ID    confirm an invited device: it becomes a user and can invite others itself
   yandi admin device-revoke-branch ID   revoke a device and everyone it invited
   yandi admin invites show | set --enabled on|off --per-day N --max-live N
-  yandi admin bootstrap pubkey | sign FILE [--days N]   the node-list signing key lives only in the closed environment, no file
+  yandi admin bootstrap pubkey | sign FILE   the node-list signing key lives only in the closed environment, no file
   yandi admin bootstrap applications | dismiss ID       node applications to the entry list (connection data, probing, a ready command)
   yandi admin phone-action PEER ACTION
   yandi admin proxies list|add [kind]|remove ID|test [kind]|settings --enabled on|off --strict on|off --max-clients N

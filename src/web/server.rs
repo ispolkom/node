@@ -5866,15 +5866,13 @@ async fn bootstrap_pubkey_handler() -> Response {
 struct BootstrapSignReq {
     list: crate::bootstrap::Doc,
     #[serde(default)]
-    days: Option<u64>,
-    #[serde(default)]
     network: Option<String>,
 }
 
 /// Подписать список входных узлов ключом из закрытой среды: узел возвращает подписанный список, секрет наружу не выходит.
 async fn bootstrap_sign_handler(Json(req): Json<BootstrapSignReq>) -> Response {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    match crate::bootstrap::signer::sign_doc(req.list, req.days.unwrap_or(90), now, req.network) {
+    match crate::bootstrap::signer::sign_doc(req.list, now, req.network) {
         Ok(d) => {
             let pinned = crate::bootstrap::signer::is_pinned(&d.signer);
             Json(serde_json::json!({"status": "ok", "list": d, "pinned": pinned})).into_response()

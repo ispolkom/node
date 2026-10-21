@@ -20,18 +20,19 @@ void main() {
 
   test('список, подписанный узловым инструментом (Rust), проверяется приложением: подпись, срок, откат, чужой ключ', () async {
     final d = BootstrapDoc.parse(_repoList)!;
-    expect(await d.verify(nowSecs: 1791500000), isNull, reason: 'настоящий подписанный список принимается');
-    expect(await d.verify(nowSecs: 1800300000), BootstrapProblem.expired);
-    expect(await d.verify(nowSecs: 1791500000, knownSequence: d.sequence + 1), BootstrapProblem.rollback);
-    expect(await d.verify(nowSecs: 1791500000, knownSequence: d.sequence), isNull);
-    expect(await d.verify(nowSecs: 1791500000, signers: [_testSigner]), BootstrapProblem.unknownSigner);
+    final now = d.issued + 1000;
+    expect(await d.verify(nowSecs: now), isNull, reason: 'настоящий подписанный список принимается');
+    expect(await d.verify(nowSecs: d.expires + 1), BootstrapProblem.expired);
+    expect(await d.verify(nowSecs: now, knownSequence: d.sequence + 1), BootstrapProblem.rollback);
+    expect(await d.verify(nowSecs: now, knownSequence: d.sequence), isNull);
+    expect(await d.verify(nowSecs: now, signers: [_testSigner]), BootstrapProblem.unknownSigner);
     // подмена адреса или роли в подписанном списке ломает подпись
     final tampered = jsonDecode(_repoList) as Map<String, dynamic>;
     (tampered['entries'][0]['addr'] as List)[0] = '203.0.113.99:9000';
-    expect(await BootstrapDoc.parse(jsonEncode(tampered))!.verify(nowSecs: 1791500000), BootstrapProblem.badSignature);
+    expect(await BootstrapDoc.parse(jsonEncode(tampered))!.verify(nowSecs: now), BootstrapProblem.badSignature);
     final t2 = jsonDecode(_repoList) as Map<String, dynamic>;
     t2['sequence'] = 99;
-    expect(await BootstrapDoc.parse(jsonEncode(t2))!.verify(nowSecs: 1791500000), BootstrapProblem.badSignature);
+    expect(await BootstrapDoc.parse(jsonEncode(t2))!.verify(nowSecs: now), BootstrapProblem.badSignature);
   });
 
   test('запись с адресом для телефона и ролью guest (поле mobile, region = null): подпись Rust сходится, узлы для гостей отбираются', () async {

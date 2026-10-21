@@ -39,17 +39,18 @@ pub fn is_pinned(public_hex: &str) -> bool {
     SIGNER_KEYS.iter().any(|k| k.trim().eq_ignore_ascii_case(public_hex))
 }
 
-/// Подписать список: номер выпуска +1, выпущен сейчас, срок — `days` дней. Среда заперта или список неверен — ошибка, ничего не меняется.
-pub fn sign_doc(mut doc: Doc, days: u64, now_secs: u64, network: Option<String>) -> Result<Doc, String> {
+/// Срок действия подписанного списка: фактически бессрочно (ключ постоянный, переподписывать по календарю не нужно).
+/// От отката на старый список защищает номер выпуска, а не срок.
+const LIST_LIFETIME_DAYS: u64 = 36_500;
+
+/// Подписать список: номер выпуска +1, выпущен сейчас. Среда заперта или список неверен — ошибка, ничего не меняется.
+pub fn sign_doc(mut doc: Doc, now_secs: u64, network: Option<String>) -> Result<Doc, String> {
     let key = key().ok_or("закрытая среда заперта: откройте её паролем")?;
-    if !(1..=366).contains(&days) {
-        return Err("срок действия списка: от 1 до 366 дней".into());
-    }
     if let Some(n) = network {
         doc.network = n;
     }
     doc.issued = now_secs;
-    doc.expires = now_secs + days * 86_400;
+    doc.expires = now_secs + LIST_LIFETIME_DAYS * 86_400;
     doc.sequence = doc.sequence.checked_add(1).ok_or("номер выпуска переполнен")?;
     doc.check_shape().map_err(|e: BootstrapError| e.to_string())?;
     let signed = doc.sign(&key);
@@ -84,13 +85,13 @@ mod tests {
         lock();
         assert!(!is_unlocked());
         assert_eq!(public_hex(), None);
-        assert!(sign_doc(doc(), 90, 1_000_000, None).unwrap_err().contains("заперта"), "заперто — подписи нет");
+        assert!(sign_doc(doc(), 1_000_000, None).unwrap_err().contains("заперта"), "заперто — подписи нет");
 
         unlock([9u8; 32]);
         let pubkey = public_hex().expect("открыто — открытый ключ есть");
         assert_eq!(pubkey, public_hex().unwrap(), "один и тот же ключ среды — один и тот же открытый ключ (сид-фраза возвращает его)");
-        let signed = sign_doc(doc(), 90, 1_000_000, None).expect("подписано");
-        assert_eq!((signed.sequence, signed.issued, signed.expires), (4, 1_000_000, 1_000_000 + 90 * 86_400));
+        let signed = sign_doc(doc(), 1_000_000, None).expect("подписано");
+        assert_eq!((signed.sequence, signed.issued, signed.expires), (4, 1_000_000, 1_000_000 + 36_500 * 86_400));
         assert_eq!(signed.signer, pubkey);
         // подпись настоящая: проверяется тем же правилом, что у узлов и приложения, с закреплением этого ключа
         assert!(signed.verify(&[pubkey.as_str()], 1_000_001, Some(4)).is_ok());
@@ -98,8 +99,7 @@ mod tests {
         assert!(signed.verify(&["00".repeat(32).as_str()], 1_000_001, None).is_err(), "чужой закреплённый ключ");
         let mut bad = doc();
         bad.entries[0].roles = vec!["boss".into()];
-        assert!(sign_doc(bad, 90, 1, None).is_err(), "неверный список не подписывается");
-        assert!(sign_doc(doc(), 0, 1, None).is_err() && sign_doc(doc(), 400, 1, None).is_err());
+        assert!(sign_doc(bad, 1, None).is_err(), "неверный список не подписывается");
         // другой ключ среды — другой открытый ключ
         unlock([10u8; 32]);
         assert_ne!(public_hex().unwrap(), pubkey);

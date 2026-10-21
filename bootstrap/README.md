@@ -35,8 +35,8 @@ yandi bootstrap remove bootstrap/bootstrap.json --id <начало номера>
 # записать его в bootstrap/signer.pub и пересобрать узел и приложение (ключ вшивается при сборке)
 yandi admin bootstrap pubkey
 
-# подписать (выпуск +1, срок +90 дней; просит админ-пароль) и проверить
-yandi admin bootstrap sign bootstrap/bootstrap.json --days 90
+# подписать (выпуск +1, список бессрочный; просит админ-пароль) и проверить
+yandi admin bootstrap sign bootstrap/bootstrap.json
 yandi bootstrap verify bootstrap/bootstrap.json
 ```
 
