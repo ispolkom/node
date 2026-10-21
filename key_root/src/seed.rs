@@ -91,19 +91,26 @@ pub fn join_phrase(words: &str, control_word: &str) -> String {
 }
 
 /// Argon2id cost of mixing in the control word: about a second per guess, 128 MiB per guess for whoever stole the paper and is guessing.
+/// (memory KiB, passes, lanes). Changing it changes every node that has a control word: never edit it, only add a new version.
+const PRODUCTION_WORD_KDF: (u32, u32, u32) = (131072, 3, 1);
 #[cfg(not(test))]
-const WORD_KDF: (u32, u32, u32) = (131072, 3, 1);
+const WORD_KDF: (u32, u32, u32) = PRODUCTION_WORD_KDF;
+/// The unit tests of everything else use a cheap cost (the real one is pinned by its own test with a known answer).
 #[cfg(test)]
 const WORD_KDF: (u32, u32, u32) = (64, 1, 1);
 
 fn word_key(entropy: &[u8], word: &str) -> Zeroizing<[u8; 32]> {
+    word_key_with(entropy, word, WORD_KDF)
+}
+
+fn word_key_with(entropy: &[u8], word: &str, cost: (u32, u32, u32)) -> Zeroizing<[u8; 32]> {
     use argon2::{Algorithm, Argon2, Params, Version};
     let mut password = Zeroizing::new(Vec::with_capacity(2 + word.len() + entropy.len()));
     password.extend_from_slice(&(word.len() as u16).to_be_bytes());
     password.extend_from_slice(word.as_bytes());
     password.extend_from_slice(entropy);
     let salt = Sha256::digest(b"yandi/seed-word/v2");
-    let params = Params::new(WORD_KDF.0, WORD_KDF.1, WORD_KDF.2, Some(32)).expect("fixed valid parameters");
+    let params = Params::new(cost.0, cost.1, cost.2, Some(32)).expect("fixed valid parameters");
     let mut out = Zeroizing::new([0u8; 32]);
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
         .hash_password_into(&password, &salt, out.as_mut_slice())
@@ -421,5 +428,13 @@ mod tests {
         let joined = join_phrase(PHRASE, "Воробей-2026");
         assert_eq!(*crate::recovery_secret(&joined), *Seed::parse(&joined).unwrap().secret());
         assert_ne!(*crate::recovery_secret(&joined), *crate::recovery_secret(PHRASE));
+    }
+
+    /// The REAL cost with a known answer: a node made today must still be restored by every later build. If this fails, the key derivation changed.
+    #[test]
+    fn the_production_cost_gives_the_pinned_answer() {
+        assert_eq!(PRODUCTION_WORD_KDF, (131072, 3, 1));
+        let key = word_key_with(&[0x7f; 16], "Воробей-2026", PRODUCTION_WORD_KDF);
+        assert_eq!(hex::encode(*key), "2fb07e5d04361e255db58a378d854df017f0758d7ea778f1327db7e90a0573e2", "проверено независимо (Python argon2-cffi)");
     }
 }

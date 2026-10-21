@@ -505,6 +505,20 @@ mod derived_identity_tests {
         assert_eq!(PublicKey::from(&secret).as_bytes(), &a.public_key);
     }
 
+    /// (корни сверены независимо: HKDF и Argon2id на Python). Известный ответ полной цепочки с настоящей стоимостью Argon2id: сид (+слово) → корень → личность. Узел, настроенный сегодня, обязан восстанавливаться
+    /// любой будущей сборкой; если этот тест красный, вывод ключей изменился.
+    #[test]
+    fn the_whole_chain_from_a_seed_has_pinned_answers() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let plain = key_root::Seed::parse(words).unwrap().root();
+        let with_word = key_root::Seed::parse(&key_root::join_phrase(words, "Воробей-2026")).unwrap().root();
+        let id = |r: &[u8; 32]| hex::encode(NodeIdentity::node_id_for_root(r).0);
+        assert_eq!(hex::encode(*plain), "a377128bf3a090f3a7318eb3f09785c6b3d97337f7fdc53caa2359f078e8b015");
+        assert_eq!(id(&plain), "11ae58db6b9486a23691fea3af83e5fcbe264463868e494b4138fa6259423100");
+        assert_eq!(hex::encode(*with_word), "11cce37704f0b5e6644c4ecaac6b75d6759996fc6cc3f5b3fed03f02565c2bce");
+        assert_eq!(id(&with_word), "6b6ffa669b75f5e9e958f2178379e2e0dacf3f611996679e2c6f3c6d59423100");
+    }
+
     #[test]
     fn a_seed_phrase_leads_to_the_same_node_on_two_machines() {
         let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
