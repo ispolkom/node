@@ -480,6 +480,7 @@ impl WebServer {
             .merge(crate::exit_policy::router())
             .merge(crate::guest::router())
             .merge(crate::autonomy::router())
+            .route("/api/nodes/directory", get(api_nodes_directory))
             .merge(crate::mail_policy::router())
             // закрытая среда узла: пароль владельца, блокировка, смена пароля
             .merge(vault_router())
@@ -1284,6 +1285,13 @@ async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::P
         return resp;
     }
     crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
+}
+
+/// Каталог «Узлы» для страницы поиска оболочки: онлайн-узлы без адресов (docs/ROADMAP_R9.md §3).
+async fn api_nodes_directory() -> Json<serde_json::Value> {
+    let (online, me) = crate::mobile_api::online_node_ids().await;
+    let nodes = crate::node_directory::rows(&online, &me, false);
+    Json(serde_json::json!({ "nodes": nodes, "total": nodes.len() }))
 }
 
 async fn login_page_handler() -> Html<&'static str> {

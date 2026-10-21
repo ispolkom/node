@@ -18,9 +18,9 @@ class SearchFeature extends StatefulWidget {
 }
 
 class _SearchFeatureState extends State<SearchFeature> {
-  List<Map<String, dynamic>> users = [], groups = [];
+  List<Map<String, dynamic>> users = [], groups = [], nodes = [];
   final Set<String> hiddenUsers = {}, hiddenGroups = {};
-  String? view; // null — карточки, 'users', 'groups'
+  String? view; // null — карточки, 'users', 'groups', 'nodes'
   bool showHidden = false, loading = true;
   String? error, notice;
   Timer? timer;
@@ -49,6 +49,13 @@ class _SearchFeatureState extends State<SearchFeature> {
     List<Map<String, dynamic>>? people;
     List<Map<String, dynamic>>? catalog;
     await Future.wait([
+      () async {
+        // каталог «Узлы»: только онлайн, без адресов (docs/ROADMAP_R9.md §3); сбой не мешает людям и группам
+        try {
+          final n = listOf((await widget.api.request('/api/nodes/directory'))['nodes']);
+          if (active) setState(() => nodes = n);
+        } catch (_) {}
+      }(),
       () async {
         try {
           // заблокированные в поиск не попадают (их место — чёрный список)
@@ -238,6 +245,19 @@ class _SearchFeatureState extends State<SearchFeature> {
 
   bool isGuestLevel(Map<String, dynamic> u) => u['role'] == 'guest'; // приглашённый по цепочке доверия — пользователь
 
+  List<Widget> nodesView() => nodes.isEmpty
+      ? [const UiText('Узлов в сети не видно')]
+      : [
+          for (final n in nodes)
+            Card(
+              child: ListTile(
+                leading: const Icon(Icons.circle, size: 10, color: Colors.green),
+                title: Text('${n['short_id'] ?? ''}', style: const TextStyle(fontFamily: 'monospace')),
+                subtitle: Text('${(n['region'] ?? '').toString().isEmpty ? '—' : n['region']} · ${n['role'] ?? ''}'),
+              ),
+            ),
+        ];
+
   List<Widget> usersView({required bool guests}) {
     final all = [for (final u in users) if (isGuestLevel(u) == guests) u];
     final shown = [for (final u in all) if (showHidden || !hiddenUsers.contains('${u['peer_id']}')) u];
@@ -312,6 +332,7 @@ class _SearchFeatureState extends State<SearchFeature> {
           KeyedSubtree(key: const ValueKey('hub-guests'), child: hubCard('Гости', 'Вошли без кода: ники, статус', guestCount, 'guests')),
           KeyedSubtree(key: const ValueKey('hub-users'), child: hubCard('Пользователи', 'Авторизованные на узле: ники, аватарки, статус', userCount, 'users')),
           KeyedSubtree(key: const ValueKey('hub-groups'), child: hubCard('Группы', 'Все группы узла: вступить или попросить приглашение', visibleGroups, 'groups')),
+          KeyedSubtree(key: const ValueKey('hub-nodes'), child: hubCard('Узлы', 'Узлы в сети: номер, регион, роль', nodes.length, 'nodes')),
         ] else ...[
           Row(
             children: [
@@ -324,12 +345,12 @@ class _SearchFeatureState extends State<SearchFeature> {
                 label: const UiText('Назад'),
               ),
               UiText(
-                view == 'guests' ? 'Гости ($guestCount)' : view == 'users' ? 'Пользователи ($userCount)' : 'Группы ($visibleGroups)',
+                view == 'guests' ? 'Гости ($guestCount)' : view == 'users' ? 'Пользователи ($userCount)' : view == 'nodes' ? 'Узлы (${nodes.length})' : 'Группы ($visibleGroups)',
                 style: const TextStyle(fontSize: 20),
               ),
             ],
           ),
-          ...(view == 'groups' ? groupsView() : usersView(guests: view == 'guests')),
+          ...(view == 'groups' ? groupsView() : view == 'nodes' ? nodesView() : usersView(guests: view == 'guests')),
         ],
       ],
     );

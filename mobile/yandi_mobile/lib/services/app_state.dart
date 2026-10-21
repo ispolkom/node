@@ -95,6 +95,8 @@ class AppState extends ChangeNotifier implements FilesHost {
   bool         get isPaired    => nodeManager.rankedNodes.isNotEmpty;
   String?      get myPeerId    => identity?.peerId;
   api_svc.ApiService   get apiService  => _api!;
+  /// Каталог «Узлы» страницы поиска; null — нет связи с узлом.
+  Future<List<Map<String, dynamic>>?> nodeDirectory() => _api?.getNodes() ?? Future.value(null);
 
   // Геттеры для экранов
   List<TrustedNode> get nodes      => nodeManager.nodes;

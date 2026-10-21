@@ -1,5 +1,8 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Узлы': 'Nodes',
+  'Узлы в сети: номер, регион, роль': 'Nodes online: number, region, role',
+  'Узлов в сети не видно': 'No nodes online',
   'Новые клиенты без QR (телефоны, планшеты, ПК) получают гостевой доступ автоматически (по умолчанию это включено, вы можете выключить). Гость: без групп и без выхода в интернет через узел; переписка с участниками и с этим компьютером — до 10 сообщений в сутки, голосовые сообщения и аудиозвонки (звонок до 15 минут, до 60 минут в сутки), видеозвонков нет. Свой статус пользователя гость запрашивает у вас, с текстом, в разделе «Жалобы».': 'New clients without QR (phones, tablets, PCs) get guest access automatically (on by default, you can turn it off). A guest: no groups and no internet exit through the node; chat with members and with this computer — up to 10 messages a day, voice messages and audio calls (a call up to 15 minutes, up to 60 minutes a day), no video calls. A guest requests user status from you, with a text, in “Complaints”.',
   'Адрес гостя узел не записывает и не показывает, но технически видит его при прямом соединении. Гость живёт сутки от входа (или до суток молчания) и удаляется; три жалобы от разных людей за сутки удаляют его сразу. Все гостевые файлы на узле — не больше 2 ГБ в сутки.': 'The node does not record or show the guest\'s address, but technically sees it on a direct connection. A guest lives one day from joining (or until a day of silence) and is removed; three complaints from different people within a day remove them at once. All guest files on the node — no more than 2 GB a day.',
   'Автономный узел': 'Autonomous node',

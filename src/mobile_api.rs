@@ -2235,6 +2235,21 @@ fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
     out
 }
 
+/// Каталог «Узлы» (docs/ROADMAP_R9.md §3): онлайн-узлы без адресов; гостю — только гостевые из подписанного списка.
+async fn nodes_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
+    let online: Vec<[u8; 32]> = st.p2p.list_peers().await.into_iter().map(|p| p.id.0).collect();
+    let nodes = crate::node_directory::rows(&online, &st.my_id.0, is_guest_device(&dev));
+    Json(json!({ "nodes": nodes, "total": nodes.len() })).into_response()
+}
+
+/// Онлайн-узлы, которые видит связь переписки (для каталога «Узлы» оболочки).
+pub async fn online_node_ids() -> (Vec<[u8; 32]>, [u8; 32]) {
+    match STATE.get() {
+        Some(st) => (st.p2p.list_peers().await.into_iter().map(|p| p.id.0).collect(), st.my_id.0),
+        None => (Vec::new(), [0u8; 32]),
+    }
+}
+
 async fn user_avatar(axum::Extension(DeviceKey(_dev)): axum::Extension<DeviceKey>, Path(peer): Path<String>) -> Response {
     match crate::device_profile::avatar(&peer) {
         Some(b) => ([(header::CONTENT_TYPE, "image/png")], b).into_response(),
@@ -2935,6 +2950,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/me/profile", get(device_profile_get).put(device_profile_put))
         .route("/mobile/me", axum::routing::delete(device_forget_self))
         .route("/mobile/users", get(users_list))
+        .route("/mobile/nodes", get(nodes_list))
         .route("/mobile/complaints", get(complaints_mine).post(complaint_submit))
         .route("/mobile/users/:peer/avatar", get(user_avatar))
         .route("/mobile/profile/avatar", get(profile_avatar))

@@ -42,11 +42,15 @@ class SearchHub extends StatefulWidget {
 }
 
 class _SearchHubState extends State<SearchHub> {
+  Future<List<Map<String, dynamic>>?>? _nodes;
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (mounted) context.read<AppState>().refreshDirectory();
+      if (!mounted) return;
+      final state = context.read<AppState>();
+      state.refreshDirectory();
+      setState(() => _nodes = state.nodeDirectory());
     });
   }
 
@@ -91,9 +95,51 @@ class _SearchHubState extends State<SearchHub> {
             );
           },
         ),
+        const SizedBox(height: 10),
+        FutureBuilder<List<Map<String, dynamic>>?>(
+          future: _nodes,
+          builder: (_, snap) => _HubCard(
+            key: const ValueKey('hub-nodes'),
+            icon: Icons.hub_outlined,
+            title: tr('Узлы'),
+            count: snap.connectionState == ConnectionState.done ? '${snap.data?.length ?? 0}' : '…',
+            subtitle: tr('Узлы в сети: номер, регион, роль'),
+            onTap: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => NodeDirectoryScreen(nodes: snap.data ?? const []))),
+          ),
+        ),
       ],
     );
   }
+}
+
+/// Список узлов в сети (только онлайн, без адресов и ключей) с прокруткой.
+class NodeDirectoryScreen extends StatelessWidget {
+  final List<Map<String, dynamic>> nodes;
+  const NodeDirectoryScreen({super.key, required this.nodes});
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        backgroundColor: AppTheme.bg,
+        appBar: AppBar(
+          backgroundColor: AppTheme.surface,
+          title: Text(trf('Узлы ({n})', {'n': nodes.length}), style: const TextStyle(color: AppTheme.text)),
+          iconTheme: const IconThemeData(color: AppTheme.textSecondary),
+        ),
+        body: nodes.isEmpty
+            ? Center(child: Text(tr('Узлов в сети не видно'), style: TextStyle(color: AppTheme.textSecondary)))
+            : ListView.separated(
+                itemCount: nodes.length,
+                separatorBuilder: (_, __) => const Divider(height: 1),
+                itemBuilder: (_, i) {
+                  final n = nodes[i];
+                  final region = (n['region'] as String? ?? '').isEmpty ? '—' : n['region'] as String;
+                  return ListTile(
+                    leading: const Icon(Icons.circle, size: 10, color: Colors.green),
+                    title: Text(n['short_id'] as String? ?? '', style: const TextStyle(color: AppTheme.text, fontFamily: 'monospace')),
+                    subtitle: Text('$region · ${n['role'] ?? ''}', style: TextStyle(color: AppTheme.textSecondary)),
+                  );
+                },
+              ),
+      );
 }
 
 class _HubCard extends StatelessWidget {

@@ -129,6 +129,18 @@ class ApiService {
     }
   }
 
+  /// Каталог «Узлы» (docs/ROADMAP_R9.md §3): онлайн-узлы без адресов [{short_id, region, role, online}]. null — узел не ответил.
+  Future<List<Map<String, dynamic>>?> getNodes() async {
+    try {
+      final res = await _client.get(_url('/mobile/nodes'), headers: _headers).timeout(const Duration(seconds: 12));
+      if (res.statusCode != 200) return null;
+      final j = jsonDecode(res.body) as Map<String, dynamic>;
+      return [for (final n in (j['nodes'] as List? ?? const [])) (n as Map).cast<String, dynamic>()];
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Пожаловаться на пользователя (`user`, номер устройства) или группу (`group`). Возвращает null при успехе, иначе текст причины.
   Future<String?> submitComplaint({required String kind, required String targetId, required String reason, required String text, List<String> evidence = const []}) async {
     try {

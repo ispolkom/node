@@ -759,6 +759,10 @@ const Map<String, String> enTable = {
   'Фраза: {n} разных слова, в каждом не меньше {m} знаков': 'Phrase: {n} different words, each at least {m} characters',
   'Хранилище ключей повреждено: {why}': 'The key storage is damaged: {why}',
   'Гостю доступно {n} сообщений в сутки. Лимит исчерпан — попробуйте позже или запросите статус пользователя.': 'A guest can send {n} messages a day. The limit is used up — try later or request user status.',
+  'Узлы': 'Nodes',
+  'Узлы в сети: номер, регион, роль': 'Nodes online: number, region, role',
+  'Узлы ({n})': 'Nodes ({n})',
+  'Узлов в сети не видно': 'No nodes online',
   'Узел не подтвердил, что он тот самый из списка: вход отменён.': 'The node did not confirm that it is the one from the list: sign-in cancelled.',
   'Не удалось проверить узел: вход гостем отменён.': 'Could not verify the node: the guest sign-in is cancelled.',
 };
