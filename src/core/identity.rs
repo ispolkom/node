@@ -403,6 +403,30 @@ impl NodeIdentity {
 
 #[cfg(unix)]
 impl NodeIdentity {
+    /// The identity a root key stands for: the same root (and so the same seed phrase and control word) always gives the same keys and the
+    /// same node id, on any machine. The node id is the hash of the signing key, as for every identity.
+    pub fn derived_from_root(root: &[u8; 32]) -> Self {
+        let x = key_root::derive_domain(root, "yandi/identity-x25519/v1");
+        let e = key_root::derive_domain(root, "yandi/identity-ed25519/v1");
+        let x_secret = x25519_dalek::StaticSecret::from(*x);
+        let x_public = PublicKey::from(&x_secret);
+        let signing = ed25519_dalek::SigningKey::from_bytes(&e);
+        let verifying = signing.verifying_key();
+        Self {
+            address: HashId(crate::util::types::derive_node_id(verifying.as_bytes())),
+            public_key: *x_public.as_bytes(),
+            private_key: *x,
+            signing_public_key: *verifying.as_bytes(),
+            signing_private_key: signing.to_bytes(),
+            _private_guard: (),
+        }
+    }
+
+    /// The node id a root key leads to, without creating or storing anything (for showing it before a restore).
+    pub fn node_id_for_root(root: &[u8; 32]) -> HashId {
+        Self::derived_from_root(root).address
+    }
+
     fn to_material(&self) -> key_root::IdentityMaterial {
         use key_root::Zeroizing;
         key_root::IdentityMaterial {
@@ -445,7 +469,10 @@ impl NodeIdentity {
         root: Option<&[u8; 32]>,
     ) -> Result<Self, key_root::KeyRootError> {
         let ctx = key_root::OpenContext { root };
-        let loaded = key_root::load_or_initialize(dir, port, &ctx, || Self::new().to_material())?;
+        let loaded = key_root::load_or_initialize(dir, port, &ctx, || match root {
+            Some(r) => Self::derived_from_root(r).to_material(),
+            None => Self::new().to_material(),
+        })?;
         let id = hex::encode(&loaded.identity.address[..8]);
         if loaded.created {
             println!("[identity] New identity created for port {} (node_id: {}) — this is a first run", port, id);
@@ -453,6 +480,40 @@ impl NodeIdentity {
             println!("[identity] Identity loaded (node_id: {}, decrypted)", id);
         }
         Ok(Self::from_material(loaded.identity))
+    }
+}
+
+#[cfg(all(test, unix))]
+mod derived_identity_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_root_gives_the_same_node_and_another_root_another_node() {
+        let (a, b, c) = (NodeIdentity::derived_from_root(&[1u8; 32]), NodeIdentity::derived_from_root(&[1u8; 32]), NodeIdentity::derived_from_root(&[2u8; 32]));
+        assert_eq!(a.address.0, b.address.0);
+        assert_eq!(a.signing_public_key, b.signing_public_key);
+        assert_eq!(a.public_key, b.public_key);
+        assert_eq!(a.private_key, b.private_key);
+        assert_ne!(a.address.0, c.address.0);
+        // the id is bound to the signing key and the signing key signs
+        assert_eq!(a.address.0, crate::util::types::derive_node_id(&a.signing_public_key));
+        assert_eq!(NodeIdentity::node_id_for_root(&[1u8; 32]).0, a.address.0);
+        let sig: [u8; 64] = a.sign(b"hello").unwrap().try_into().unwrap();
+        assert!(NodeIdentity::verify_raw(&a.signing_public_key, &sig, b"hello"));
+        // the X25519 pair is a real pair
+        let secret = x25519_dalek::StaticSecret::from(a.private_key);
+        assert_eq!(PublicKey::from(&secret).as_bytes(), &a.public_key);
+    }
+
+    #[test]
+    fn a_seed_phrase_leads_to_the_same_node_on_two_machines() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let root1 = key_root::Seed::parse(words).unwrap().root();
+        let root2 = key_root::Seed::parse(&words.to_uppercase()).unwrap().root();
+        let with_word = key_root::Seed::parse(&key_root::join_phrase(words, "Воробей-2026")).unwrap().root();
+        let id = |r: &[u8; 32]| NodeIdentity::node_id_for_root(r).0;
+        assert_eq!(id(&root1), id(&root2));
+        assert_ne!(id(&root1), id(&with_word), "the control word makes another node");
     }
 }
 

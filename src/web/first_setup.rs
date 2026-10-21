@@ -127,10 +127,10 @@ fn min_password_for_wizard() -> usize {
 #[cfg(unix)]
 static FIRST_RUN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-/// A new seed phrase for the first-start wizard: 12 words by default, 24 on request. Nothing is stored: the phrase exists only in this
+/// A new seed phrase for the first-start wizard: 24 words by default, 12 or 18 on request. Nothing is stored: the phrase exists only in this
 /// answer and in the wizard's memory until the person has written it down and chosen a password.
 async fn new_seed(Json(b): Json<SeedBody>) -> Response {
-    let n = if b.words == 0 { 12 } else { b.words };
+    let n = if b.words == 0 { 24 } else { b.words };
     match key_root::Seed::generate(n) {
         Some(seed) => (
             StatusCode::OK,
@@ -138,7 +138,45 @@ async fn new_seed(Json(b): Json<SeedBody>) -> Response {
             Json(serde_json::json!({"words": seed.words(), "count": n, "min_password": min_password_for_wizard()})),
         )
             .into_response(),
-        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Нужно 12 или 24 слова"}))).into_response(),
+        None => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Нужно 12, 18 или 24 слова"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PreviewBody {
+    phrase: String,
+}
+
+/// Какой узел получится из этой сид-фразы (и контрольного слова), НИЧЕГО не записывая: номер узла показывается до восстановления, чтобы опечатка
+/// в слове или фразе не создала молча чужой узел. Фраза с контрольным словом — одной строкой (слово после внутреннего разделителя).
+/// Нечего сравнивать с каким-либо узлом: ответ зависит только от присланного, поэтому это не способ подобрать чужой секрет.
+async fn seed_preview(Json(b): Json<PreviewBody>) -> Response {
+    #[cfg(unix)]
+    {
+        if b.phrase.len() > 1024 {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Фраза слишком длинная"}))).into_response();
+        }
+        let r = tokio::task::spawn_blocking(move || -> Result<serde_json::Value, String> {
+            let seed = key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
+            let root = seed.root();
+            let id = crate::core::identity::NodeIdentity::node_id_for_root(&root);
+            Ok(serde_json::json!({
+                "node_id": hex::encode(&id.0[..8]),
+                "words": seed.word_count(),
+                "control_word": seed.has_control_word(),
+            }))
+        })
+        .await
+        .unwrap_or_else(|_| Err("Внутренняя ошибка".into()));
+        return match r {
+            Ok(v) => (StatusCode::OK, [(header::CACHE_CONTROL, "no-store")], Json(v)).into_response(),
+            Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response(),
+        };
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = b;
+        (StatusCode::NOT_IMPLEMENTED, Json(serde_json::json!({"error": "Только Linux и macOS"}))).into_response()
     }
 }
 
@@ -146,10 +184,18 @@ async fn new_seed(Json(b): Json<SeedBody>) -> Response {
 /// Пароль прежней установки не переносится. Показывается номер копии, её время и узел (заголовок открытый, фраза не нужна).
 #[cfg(unix)]
 fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
-    let p = std::path::Path::new(path);
-    if !p.is_absolute() {
+    let given = std::path::Path::new(path);
+    if !given.is_absolute() {
         return Err("Нужен полный путь к файлу копии".into());
     }
+    // указана папка (например …/yandi-node): берётся самая свежая копия из неё
+    let found;
+    let p: &std::path::Path = if std::fs::metadata(given).map(|m| m.is_dir()).unwrap_or(false) {
+        found = crate::node_backup::latest_in_folder(given)?;
+        &found
+    } else {
+        given
+    };
     let meta = std::fs::symlink_metadata(p).map_err(|_| "Файл копии не найден".to_string())?;
     if !meta.is_file() {
         return Err("Это не файл копии".into());
@@ -235,7 +281,7 @@ fn do_restore(auth: &AuthState, b: &RestoreBody) -> Result<Vec<String>, RestoreF
     crate::web::auth::check_new_password(&b.password)?;
     // сид разбирается всегда: опечатка, неверное число слов или слово не из списка — это не попытка (без счёта и без дорогого KDF)
     if b.phrase.trim().is_empty() {
-        return Err("Введите сид-фразу (12 или 24 слова)".into());
+        return Err("Введите сид-фразу (12, 18 или 24 слова)".into());
     }
     key_root::Seed::parse(&b.phrase).map_err(|e| e.to_string())?;
     // файл читается и его открытый заголовок проверяется ДО занятия попытки: ошибка пути или повреждённый файл сид не проверяли
@@ -316,6 +362,7 @@ fn router(sh: Shared) -> Router {
         .route("/setup", get(page))
         .route("/api/auth/setup", post(setup))
         .route("/api/auth/seed/new", post(new_seed))
+        .route("/api/auth/seed/preview", post(seed_preview))
         .route("/api/auth/restore/inspect", post(restore_inspect))
         .route("/api/auth/restore", post(restore))
         .route("/api/auth/state", get(|State(sh): State<Shared>| async move {
@@ -458,10 +505,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn the_wizard_gets_a_new_seed_of_twelve_or_twenty_four_words_and_nothing_is_stored() {
+    async fn the_wizard_gets_a_new_seed_of_twelve_eighteen_or_twenty_four_words_24_by_default_and_nothing_is_stored() {
         let (port, handle) = start(Arc::new(|_, _| Ok(()))).await;
         let url = format!("http://127.0.0.1:{port}/api/auth/seed/new");
-        for (ask, count) in [(serde_json::json!({}), 12usize), (serde_json::json!({"words": 12}), 12), (serde_json::json!({"words": 24}), 24)] {
+        for (ask, count) in [(serde_json::json!({}), 24usize), (serde_json::json!({"words": 12}), 12), (serde_json::json!({"words": 18}), 18), (serde_json::json!({"words": 24}), 24)] {
             let r = client().post(&url).json(&ask).send().await.unwrap();
             assert_eq!(r.status(), 200);
             assert_eq!(r.headers().get("cache-control").unwrap(), "no-store");
@@ -475,6 +522,33 @@ mod tests {
         assert_ne!(a["words"], b["words"], "каждый раз новая");
         assert_eq!(client().post(&url).json(&serde_json::json!({"words": 15})).send().await.unwrap().status(), 400);
         assert!(!handle.is_finished(), "сид сам по себе настройку не завершает");
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn the_preview_shows_the_node_a_phrase_leads_to_and_writes_nothing() {
+        let (port, handle) = start(Arc::new(|_, _| Ok(()))).await;
+        let url = format!("http://127.0.0.1:{port}/api/auth/seed/preview");
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let ask = |phrase: String| {
+            let url = url.clone();
+            async move { client().post(&url).json(&serde_json::json!({ "phrase": phrase })).send().await.unwrap() }
+        };
+        let a: serde_json::Value = ask(words.to_string()).await.json().await.unwrap();
+        let again: serde_json::Value = ask(words.to_uppercase()).await.json().await.unwrap();
+        let with_word: serde_json::Value = ask(key_root::join_phrase(words, "Воробей-2026")).await.json().await.unwrap();
+        assert_eq!(a["node_id"].as_str().unwrap().len(), 16);
+        assert_eq!(a["node_id"], again["node_id"], "регистр и пробелы не важны");
+        assert_ne!(a["node_id"], with_word["node_id"], "контрольное слово даёт другой узел");
+        assert_eq!(a["control_word"], false);
+        assert_eq!(with_word["control_word"], true);
+        assert_eq!(a["words"], 12);
+        // опечатка — понятная ошибка, не чужой узел
+        let bad = ask("winner legal thank year wave sausage worth useful legal winner thank yellow".into()).await;
+        assert_eq!(bad.status(), 400);
+        let weak = ask(key_root::join_phrase(words, "коротко")).await;
+        assert_eq!(weak.status(), 400);
+        assert!(!handle.is_finished(), "предпросмотр настройку не завершает");
         handle.abort();
     }
 

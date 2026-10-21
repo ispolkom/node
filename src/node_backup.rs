@@ -32,6 +32,10 @@ const MAX_FILE: u64 = 4 * 1024 * 1024;
 const MAX_TOTAL: usize = 64 * 1024 * 1024;
 /// Сколько последних автокопий хранится в папке.
 pub const KEEP_AUTO: usize = 7;
+/// Сколько копий «Сохранить сейчас» хранится в папке отдельно от автокопий.
+pub const KEEP_MANUAL: usize = 5;
+/// Подпапка, которую узел создаёт в выбранном владельцем месте.
+pub const FOLDER_NAME: &str = "yandi-node";
 
 /// Что НЕ входит в копию (показывается владельцу в заметке).
 pub const EXCLUDED: [&str; 6] = ["переписка", "файлы всех видов (в том числе голосовые)", "итоги и история звонков", "статусы доставки и прочтения", "журналы групп", "recovery-фраза и машинная печать"];
@@ -1264,6 +1268,13 @@ pub fn file_name(node_id: &str, counter: u64, now_ms: u64) -> String {
     format!("yandi-{node_id}-{counter:06}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}.{FILE_EXT}")
 }
 
+/// Имя копии «Сохранить сейчас»: хранится отдельно от автокопий и не вытесняется ими.
+pub fn file_name_manual(node_id: &str, counter: u64, now_ms: u64) -> String {
+    let secs = now_ms / 1000;
+    let (y, mo, d, h, mi) = civil(secs);
+    format!("yandi-manual-{node_id}-{counter:06}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}.{FILE_EXT}")
+}
+
 /// Дата и время по UTC из секунд эпохи (без внешних зависимостей).
 pub fn civil_utc(secs: u64) -> (u64, u64, u64, u64, u64) {
     civil(secs)
@@ -1311,7 +1322,11 @@ pub fn write_to_dir(dir: &Path, name: &str, bytes: &[u8], root: &[u8; 32], node_
     std::fs::rename(&tmp, &target).map_err(|e| format!("запись копии: {e}"))?;
     // имя файла живёт в каталоге: без его fsync после отключения питания запись об успехе могла бы пережить сам файл
     sync_dir(dir).map_err(|e| format!("закрепление записи в папке: {e}"))?;
-    prune_dir(dir, node_id, name);
+    if name.starts_with("yandi-manual-") {
+        prune_manual(dir, node_id, name);
+    } else {
+        prune_dir(dir, node_id, name);
+    }
     let _ = sync_dir(dir);
     // успех — только если новая копия реально осталась в папке (ротация её не удалила)
     if !target.is_file() {
@@ -1333,15 +1348,47 @@ fn sync_dir(_dir: &Path) -> std::io::Result<()> {
 /// Наибольший номер копии этого узла, уже лежащей в папке: после восстановления на новой машине счётчик продолжается с него, а не с нуля
 /// (иначе ротация сочла бы свежую копию самой младшей).
 pub fn max_counter_in(dir: &Path, node_id: &str) -> u64 {
-    let prefix = format!("yandi-{node_id}-");
     let suffix = format!(".{FILE_EXT}");
     let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
-    rd.flatten()
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix))
-        .filter_map(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()))
+    let names: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    // автокопии и «сохранить сейчас» нумеруются одним счётчиком
+    [format!("yandi-{node_id}-"), format!("yandi-manual-{node_id}-")]
+        .iter()
+        .flat_map(|prefix| {
+            let suffix = suffix.clone();
+            names.iter().filter(move |n| n.starts_with(prefix.as_str()) && n.ends_with(&suffix)).filter_map(move |n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok())).collect::<Vec<_>>()
+        })
         .max()
         .unwrap_or(0)
+}
+
+fn prune_manual(dir: &Path, node_id: &str, keep: &str) {
+    let prefix = format!("yandi-manual-{node_id}-");
+    let suffix = format!(".{FILE_EXT}");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut ours: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix)).collect();
+    ours.sort_by_key(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0));
+    while ours.len() > KEEP_MANUAL {
+        let old = ours.remove(0);
+        if old != keep {
+            let _ = std::fs::remove_file(dir.join(old));
+        }
+    }
+}
+
+/// Самая свежая копия в папке (автокопии и «сохранить сейчас» вместе), по времени изменения файла. Чужие файлы и недописанные `.part` не берутся.
+pub fn latest_in_folder(dir: &Path) -> Result<PathBuf, String> {
+    let suffix = format!(".{FILE_EXT}");
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("папка недоступна: {e}"))?;
+    rd.flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("yandi-") && n.ends_with(&suffix) && !n.starts_with('.') && e.file_type().map(|t| t.is_file()).unwrap_or(false)
+        })
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok().map(|t| (t, e.path())))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+        .ok_or_else(|| "в папке нет копий связей (файлов .yandibak)".to_string())
 }
 
 fn prune_dir(dir: &Path, node_id: &str, keep: &str) {
@@ -1431,7 +1478,7 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         // номер — после наибольшего из известных: из состояния и из копий этого узла, уже лежащих в папке
         let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)) + 1;
         let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
-        let name = file_name(node_id, counter, now);
+        let name = if mode == Mode::Now { file_name_manual(node_id, counter, now) } else { file_name(node_id, counter, now) };
         let saved = match &dir {
             Some(d) => Some(write_to_dir(d, &name, &bytes, root, node_id)?),
             None => None,
@@ -1661,6 +1708,47 @@ mod tests {
         assert_eq!(decide(&st, &base, true), Decision::Make);
         assert_eq!(decide(&st, "other", false), Decision::Make);
         assert_eq!(decide(&BackupState::default(), &base, false), Decision::Make, "первой копии нет — делаем");
+    }
+
+    #[test]
+    fn save_now_copies_live_apart_from_auto_ones_and_neither_evicts_the_other() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let out = d.path().join("flash");
+        let t0 = 1_700_000_000_000u64;
+        let mk = |n: u64, manual: bool| {
+            let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "nodeid00", counter: n, now_ms: t0 + n * 86_400_000 }).unwrap();
+            let name = if manual { file_name_manual("nodeid00", n, t0 + n * 86_400_000) } else { file_name("nodeid00", n, t0 + n * 86_400_000) };
+            write_to_dir(&out, &name, &bytes, &root, "nodeid00").unwrap();
+        };
+        for n in 1..=9u64 {
+            mk(n, false);
+        }
+        for n in 10..=18u64 {
+            mk(n, true);
+        }
+        for n in 19..=22u64 {
+            mk(n, false);
+        }
+        let names: Vec<String> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        let auto = names.iter().filter(|n| n.starts_with("yandi-nodeid00-")).count();
+        let manual = names.iter().filter(|n| n.starts_with("yandi-manual-nodeid00-")).count();
+        assert_eq!(auto, KEEP_AUTO, "автокопий не больше семи");
+        assert_eq!(manual, KEEP_MANUAL, "«сохранить сейчас» — последние пять, их не вытесняют автокопии");
+        // один счётчик на оба вида: после ручных копий следующая автокопия получает больший номер
+        assert_eq!(max_counter_in(&out, "nodeid00"), 22);
+        // свежайшая копия папки находится для восстановления «по папке»
+        std::fs::write(out.join("photo.jpg"), b"x").unwrap();
+        std::fs::write(out.join(".yandi-nodeid00-000099.yandibak.part"), b"x").unwrap();
+        let newest = latest_in_folder(&out).unwrap();
+        assert!(newest.file_name().unwrap().to_string_lossy().ends_with(".yandibak"), "{newest:?}");
+        assert!(!newest.file_name().unwrap().to_string_lossy().starts_with('.'));
+        assert!(latest_in_folder(d.path().join("empty-nothing").as_path()).is_err());
+        let empty = d.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(latest_in_folder(&empty).unwrap_err().contains("нет копий"));
     }
 
     #[test]

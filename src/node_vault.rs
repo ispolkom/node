@@ -224,8 +224,19 @@ impl VaultEnvelope {
     pub fn create_unlocked(password: &str, recovery: Option<&str>) -> Result<(Self, NodeVault)> {
         password_ok(password)?;
         let phrase = recovery.map(phrase_secret).transpose()?;
-        let id = random();
-        let key = Zeroizing::new(random());
+        // с сид-фразой (и контрольным словом) номер и ключ среды выводятся из неё: та же фраза на новой машине даёт ту же среду, а значит и тот же
+        // ключ подписи списка узлов. Без фразы (старый путь) они случайны.
+        let (id, key): ([u8; 16], Zeroizing<[u8; 32]>) = match &phrase {
+            Some(secret) if key_root::looks_like_seed_secret(secret) => {
+                let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"YANDI-NODE-CLOSED-SEED-V1\0"), secret.as_slice());
+                let mut id = [0u8; 16];
+                let mut key = Zeroizing::new([0u8; 32]);
+                hk.expand(b"vault-id", &mut id).map_err(|_| anyhow!("HKDF"))?;
+                hk.expand(b"vault-key", key.as_mut()).map_err(|_| anyhow!("HKDF"))?;
+                (id, key)
+            }
+            _ => (random(), Zeroizing::new(random())),
+        };
         let mut envelope = Self {
             version: FORMAT,
             id,
@@ -555,5 +566,25 @@ mod tests {
         let long = format!("{}art", "abandon ".repeat(23));
         assert!(VaultEnvelope::create("owner password", Some(&long)).is_ok());
         assert!(VaultEnvelope::create("owner password", Some(&long.to_uppercase())).is_ok());
+    }
+
+    #[test]
+    fn the_same_seed_phrase_makes_the_same_environment_keys_on_any_machine_and_the_control_word_makes_others() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let joined = key_root::join_phrase(words, "Воробей-2026");
+        let vault_of = |phrase: Option<&str>, password: &str| VaultEnvelope::create_unlocked(password, phrase).unwrap().1;
+        let a = vault_of(Some(words), "password-one-1");
+        // другая машина, другой пароль — те же ключи области
+        let b = vault_of(Some(words), "another-pass-2");
+        assert_eq!(*a.subkey("bootstrap_signer").unwrap(), *b.subkey("bootstrap_signer").unwrap());
+        assert_eq!(*a.subkey("chat").unwrap(), *b.subkey("chat").unwrap());
+        // область данных по-прежнему отдельная
+        assert_ne!(*a.subkey("bootstrap_signer").unwrap(), *a.subkey("chat").unwrap());
+        // с контрольным словом — другая среда
+        let c = vault_of(Some(&joined), "password-one-1");
+        assert_ne!(*a.subkey("bootstrap_signer").unwrap(), *c.subkey("bootstrap_signer").unwrap());
+        // без фразы — случайная среда, как раньше
+        let d = vault_of(None, "password-one-1");
+        assert_ne!(*a.subkey("chat").unwrap(), *d.subkey("chat").unwrap());
     }
 }

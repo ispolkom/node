@@ -18,6 +18,8 @@ if [ ! -x "$SHIM/clang" ]; then
   ln -sf /usr/bin/ld "$SHIM/ld"; ln -sf /usr/bin/ld "$SHIM/ld.lld"; ln -sf /usr/bin/ar "$SHIM/ar"
 fi
 export PATH="$SHIM:$PATH"
+# временные файлы сборок и тестов — на диске выпуска, а не на системном. Путь КОРОТКИЙ: пути unix-сокетов в тестах ограничены ~108 знаками
+YT="$(dirname "$RH")/.yt"; mkdir -p "$YT" && export TMPDIR="$YT"
 unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY all_proxy ALL_PROXY   # прокси оболочки ломает cargo/flutter/gradle
 # куда складываются результаты (всё внутри $RH):
 SITE_DIR="$RH/site"             # зеркало сайта yandi.su; update/{deb,android,bootstrap.json} заливаются на сервер как есть
