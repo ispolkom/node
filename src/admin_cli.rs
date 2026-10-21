@@ -274,6 +274,14 @@ impl Session {
         self.login_admin()
     }
 
+    /// Закрыть сеанс администратора на узле (если он был открыт этой командой): токен не должен жить до срока.
+    pub fn logout(&mut self) {
+        if self.token.is_some() {
+            let _ = self.raw("DELETE", "/api/admin/session", None);
+            self.token = None;
+        }
+    }
+
     fn login_admin(&mut self) -> Result<(), String> {
         let pw = self.secrets.ask(t!("Пароль администратора: ", "Administrator password: "))?;
         let (code, v) = self.raw("POST", "/api/admin/session", Some(&json!({ "password": pw })))?;

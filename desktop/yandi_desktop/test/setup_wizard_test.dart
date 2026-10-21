@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import '../tool/design_fixture.dart';
 import 'package:yandi_desktop/app.dart';
@@ -18,6 +20,8 @@ class WizardApi extends FakeApi {
   ApiFailure? restoreFails;
   int? minPassword = 6;
   String inspectNodeId = '0123456789abcdef';
+  /// Если задан — ответ предпросмотра ждёт этого сигнала (запоздалый ответ).
+  Completer<void>? previewGate;
   WizardApi() {
     setup = true;
     configured = false;
@@ -38,12 +42,14 @@ class WizardApi extends FakeApi {
     if (path == '/api/auth/restore/inspect') {
       calls.add(path);
       bodies.add(Map.of(body!));
-      return {'counter': 3, 'node_id': inspectNodeId, 'text': 'Копия №3 от 2026-10-17 09:05 UTC; узел abc'};
+      return {'counter': 3, 'node_id': inspectNodeId, 'created_ms': 1792227900000, 'file': '/home/iam/копия.yandibak', 'text': 'x'};
     }
     if (path == '/api/auth/seed/preview') {
       calls.add(path);
       bodies.add(Map.of(body!));
       if ((body['phrase'] as String).startsWith('bad ')) throw const ApiFailure('http', 400);
+      final gate = previewGate;
+      if (gate != null) await gate.future;
       return {'node_id': '0123456789abcdef', 'words': 12, 'control_word': (body['phrase'] as String).contains('\u001f')};
     }
     if (path == '/api/auth/restore' && restoreFails != null) {
@@ -400,6 +406,59 @@ void main() {
     expect(api.bodies.firstWhere((b) => b.containsKey('path') && b.containsKey('phrase')),
         {'path': '/home/iam/копия.yandibak', 'phrase': seed12, 'password': 'long password'});
     expect(api.calls.indexOf('/api/auth/restore') < api.calls.indexOf('/api/vault/unlock'), true);
+    await click(t, 'Пропустить (напомню позже)');
+    await stop(t);
+  });
+
+  testWidgets('a late node-number answer for an OLD input is dropped: it can never be confirmed for a different phrase or word', (t) async {
+    final api = WizardApi()..previewGate = Completer<void>();
+    await start(t, api);
+    await click(t, 'Восстановить по сид-фразе');
+    final fields = find.byType(TextField);
+    await t.enterText(fields.at(0), seed12);
+    await t.enterText(fields.at(1), 'Воробей-2026');
+    await t.tap(find.text('Проверить номер узла'));
+    await t.pump();
+    // пока ответ в пути, слово меняют
+    await t.enterText(fields.at(1), 'Воробей-2027');
+    await t.pump();
+    api.previewGate!.complete();
+    await t.pumpAndSettle();
+    expect(find.byKey(const ValueKey('id-matches')), findsNothing, reason: 'ответ про прежнее слово не показан');
+    expect(find.textContaining('0123 4567'), findsNothing);
+    // новая проверка для нового ввода работает
+    api.previewGate = null;
+    await click(t, 'Проверить номер узла');
+    expect(find.byKey(const ValueKey('id-matches')), findsOneWidget);
+    await stop(t);
+  });
+
+  testWidgets('a file is restored only after it has been opened (inspect) and belongs to this node; the shown copy is the one restored', (t) async {
+    final api = WizardApi();
+    await start(t, api);
+    await click(t, 'Восстановить по сид-фразе');
+    final fields = find.byType(TextField);
+    await t.enterText(fields.at(0), seed12);
+    await click(t, 'Проверить номер узла');
+    await t.tap(find.byKey(const ValueKey('id-matches')));
+    await t.pump();
+    await t.tap(find.byKey(const ValueKey('has-file')));
+    await t.pumpAndSettle();
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/yandi-node');
+    await t.enterText(find.widgetWithText(TextField, 'Новый пароль'), 'long password');
+    await t.enterText(find.widgetWithText(TextField, 'Повтор нового пароля'), 'long password');
+    await click(t, 'Восстановить');
+    expect(find.textContaining('откройте его'), findsOneWidget, reason: 'без успешного inspect восстановление не идёт');
+    expect(api.calls.contains('/api/auth/restore'), false);
+    // открыли папку: показана конкретная копия, восстанавливается именно она
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/yandi-node');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pumpAndSettle();
+    expect(find.textContaining('Копия №3 от 2026-10-'), findsOneWidget);
+    await click(t, 'Восстановить');
+    await t.pump(const Duration(seconds: 2));
+    await t.pumpAndSettle();
+    expect(api.bodies.firstWhere((b) => b.containsKey('path') && b.containsKey('phrase'))['path'], '/home/iam/копия.yandibak', reason: 'узел назвал выбранный файл папки');
     await click(t, 'Пропустить (напомню позже)');
     await stop(t);
   });

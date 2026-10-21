@@ -177,9 +177,34 @@ pub fn check_place(l: &Layout, place: &str) -> Result<Option<Place>, PlaceError>
         }
     }
     std::fs::create_dir_all(&target).map_err(|e| PlaceError::write(&e))?;
-    let probe = target.join(".yandi-write-test");
-    std::fs::write(&probe, b"x").map_err(|e| PlaceError::write(&e))?;
-    let _ = std::fs::remove_file(&probe);
+    // настоящий путь (после ссылок): папка-ссылка не должна привести внутрь каталогов самого узла
+    let real = std::fs::canonicalize(&target).map_err(|e| PlaceError::write(&e))?;
+    for own in [&l.keys, &l.data, &l.home] {
+        let own_real = std::fs::canonicalize(own).unwrap_or_else(|_| own.clone());
+        if real.starts_with(&own_real) {
+            return Err(PlaceError::new("inside_node", ""));
+        }
+    }
+    // пробный файл: новый, со случайным именем, права 0600, без перехода по ссылкам (чужой файл не затирается, ссылка не разыменовывается)
+    {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut rnd = [0u8; 6];
+        rand::RngCore::fill_bytes(&mut rand::rngs::OsRng, &mut rnd);
+        let probe = real.join(format!(".yandi-write-test-{}", hex::encode(rnd)));
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(&probe)
+            .map_err(|e| PlaceError::write(&e))?;
+        let wrote = f.write_all(b"x").and_then(|_| f.sync_all());
+        drop(f);
+        let _ = std::fs::remove_file(&probe);
+        wrote.map_err(|e| PlaceError::write(&e))?;
+    }
+    let target = real;
     let system_disk = match (dev_of(&target), dev_of(std::path::Path::new("/"))) {
         (Some(a), Some(b)) => a == b,
         _ => false,
@@ -200,6 +225,24 @@ fn reason_of(e: &std::io::Error) -> (&'static str, String) {
     }
 }
 
+/// Путь из `/proc/mounts`: пробел, табуляция, перевод строки и обратная косая записаны восьмеричными кодами (`\040`, `\011`, `\012`, `\134`).
+fn unescape_mount(raw: &str) -> String {
+    let b = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'\\' && i + 3 < b.len() + 0 && b[i + 1..i + 4].iter().all(|c| (b'0'..=b'7').contains(c)) {
+            let v = (b[i + 1] - b'0') as u32 * 64 + (b[i + 2] - b'0') as u32 * 8 + (b[i + 3] - b'0') as u32;
+            out.push(v as u8);
+            i += 4;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 /// Куда можно предложить положить копии: подключённые диски и флешки (не корень системы), с отметкой «можно писать» и свободным местом.
 pub fn candidate_places() -> Vec<serde_json::Value> {
     use std::os::unix::ffi::OsStrExt;
@@ -210,7 +253,7 @@ pub fn candidate_places() -> Vec<serde_json::Value> {
     for line in mounts.lines() {
         let mut it = line.split_whitespace();
         let (Some(_dev), Some(mp), Some(fs), Some(opts)) = (it.next(), it.next(), it.next(), it.next()) else { continue };
-        let mp = mp.replace("\\040", " ");
+        let mp = unescape_mount(mp);
         if pseudo.contains(&fs) || mp == "/" || mp.starts_with("/boot") || mp.starts_with("/proc") || mp.starts_with("/sys") || mp.starts_with("/dev") || mp.starts_with("/run/user") || mp.starts_with("/snap") {
             continue;
         }
@@ -385,6 +428,36 @@ mod tests {
         let file = d.path().join("afile");
         std::fs::write(&file, b"x").unwrap();
         assert_eq!(check_place(&l, &file.display().to_string()).unwrap_err().code, "no_write");
+    }
+
+    #[test]
+    fn the_probe_never_touches_an_existing_file_or_follows_a_link_and_a_link_into_the_node_is_refused() {
+        let d = tempfile::tempdir().unwrap();
+        let l = layout(d.path());
+        std::fs::create_dir_all(&l.keys).unwrap();
+        // чужой файл рядом с прежним именем пробы: остаётся нетронутым
+        let flash = d.path().join("flash");
+        std::fs::create_dir_all(flash.join("yandi-node")).unwrap();
+        let victim = d.path().join("victim.txt");
+        std::fs::write(&victim, b"IMPORTANT").unwrap();
+        std::os::unix::fs::symlink(&victim, flash.join("yandi-node/.yandi-write-test")).unwrap();
+        let ok = check_place(&l, &flash.display().to_string()).unwrap().unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"IMPORTANT", "ссылка с прежним именем пробы не разыменована");
+        assert!(ok.dir.ends_with("yandi-node"));
+        let leftovers: Vec<_> = std::fs::read_dir(flash.join("yandi-node")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert_eq!(leftovers, vec![".yandi-write-test".to_string()], "своих пробных файлов не осталось");
+        // место-ссылка на каталог ключей узла: отказ (проверка по настоящему пути)
+        let sneaky = d.path().join("sneaky");
+        std::os::unix::fs::symlink(&l.keys, &sneaky).unwrap();
+        assert_eq!(check_place(&l, &sneaky.display().to_string()).unwrap_err().code, "inside_node");
+        assert!(std::fs::read_dir(&l.keys).unwrap().next().is_none() || !l.keys.join("yandi-node").join("x").exists());
+    }
+
+    #[test]
+    fn mount_paths_are_unescaped_the_way_the_kernel_writes_them() {
+        assert_eq!(unescape_mount("/media/iam/MY\\040FLASH"), "/media/iam/MY FLASH");
+        assert_eq!(unescape_mount("/mnt/a\\011b\\134c"), "/mnt/a\tb\\c");
+        assert_eq!(unescape_mount("/plain"), "/plain");
     }
 
     #[test]

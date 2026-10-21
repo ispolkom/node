@@ -194,7 +194,7 @@ class _BackupPanelState extends State<BackupPanel> {
               SolidButton('Пропустить (напомню позже)', onPressed: busy ? null : widget.onDone, tone: SolidTone.light),
           ],
         ),
-        if (note != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(note!)),
+        if (note != null) Padding(padding: const EdgeInsets.only(top: 8), child: Text(tr(context, note!))),
         if (error != null) Padding(padding: const EdgeInsets.only(top: 8), child: NoticePanel(tr(context, error!), error: true)),
       ],
     );

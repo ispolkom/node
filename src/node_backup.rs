@@ -1476,7 +1476,8 @@ pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u
         }
         let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
         // номер — после наибольшего из известных: из состояния и из копий этого узла, уже лежащих в папке
-        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)) + 1;
+        // имя файла в папке не вправе переполнить счётчик (чужое имя с огромным номером)
+        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)).min(999_999_999).saturating_add(1);
         let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
         let name = if mode == Mode::Now { file_name_manual(node_id, counter, now) } else { file_name(node_id, counter, now) };
         let saved = match &dir {

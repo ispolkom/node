@@ -82,6 +82,10 @@ class _SetupWizardState extends State<SetupWizard> {
   // восстановление: есть ли файл связей, номер узла из фразы и подтверждение, что он совпал с записью
   bool hasFile = false, idMatches = false;
   String? previewId;
+  /// Ровно та строка (слова и слово), для которой показан номер: подтверждение действует только для неё.
+  String? previewFor;
+  /// Файл копии, который показан и будет восстановлен (если указана папка — выбранный в ней).
+  String? resolvedFile;
 
   @override
   void initState() {
@@ -336,10 +340,20 @@ class _SetupWizardState extends State<SetupWizard> {
       // копия принадлежит узлу, который получился из фразы и слова? Иначе слово или фраза введены неверно
       final id = '${r['node_id'] ?? ''}';
       if (previewId != null && id.isNotEmpty && id != previewId) {
-        setState(() => error = 'Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово.');
+        setState(() {
+          error = 'Копия принадлежит другому узлу: проверьте слова фразы и контрольное слово.';
+          resolvedFile = null;
+        });
         return;
       }
-      setState(() => backupInfo = '${r['text']}');
+      final ms = (r['created_ms'] is num) ? (r['created_ms'] as num).toInt() : 0;
+      final t = DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
+      String two(int n) => n.toString().padLeft(2, '0');
+      final when = '${t.year}-${two(t.month)}-${two(t.day)} ${two(t.hour)}:${two(t.minute)} UTC';
+      setState(() {
+        resolvedFile = r['file'] is String ? r['file'] as String : path.text.trim();
+        backupInfo = 'Копия №${r['counter']} от $when; узел $id';
+      });
     } catch (e) {
       if (mounted) setState(() => error = e is ApiFailure ? e.message : 'Файл копии не открылся.');
     }
@@ -354,14 +368,21 @@ class _SetupWizardState extends State<SetupWizard> {
       setState(() => error = 'Введите 12, 18 или 24 слова сид-фразы');
       return;
     }
+    final snapshot = _restorePhrase;
     setState(() {
       error = null;
       previewId = null;
+      previewFor = null;
       idMatches = false;
     });
     try {
-      final r = await widget.api.request('/api/auth/seed/preview', body: {'phrase': _restorePhrase});
-      if (mounted) setState(() => previewId = '${r['node_id']}');
+      final r = await widget.api.request('/api/auth/seed/preview', body: {'phrase': snapshot});
+      // слово или фраза изменились, пока шёл запрос: номер относится к прежнему вводу, его не показываем и не подтверждаем
+      if (!mounted || snapshot != _restorePhrase) return;
+      setState(() {
+        previewId = '${r['node_id']}';
+        previewFor = snapshot;
+      });
     } catch (e) {
       // отказ узла по фразе: слово не из списка, опечатка, слабое или составное контрольное слово
       if (mounted) setState(() => error = e is ApiFailure && e.status == 400 ? 'Фраза или контрольное слово не прошли проверку: проверьте слова (порядок, опечатки) и контрольное слово (одно слово, 8–64 знака).' : (e is ApiFailure ? e.message : 'Не удалось проверить фразу.'));
@@ -377,12 +398,12 @@ class _SetupWizardState extends State<SetupWizard> {
       setState(() => error = 'Введите 12, 18 или 24 слова сид-фразы');
       return;
     }
-    if (previewId == null || !idMatches) {
+    if (previewId == null || !idMatches || previewFor != _restorePhrase) {
       setState(() => error = 'Сначала проверьте номер узла и подтвердите, что он совпадает с вашей записью');
       return;
     }
-    if (hasFile && path.text.trim().isEmpty) {
-      setState(() => error = 'Выберите файл копии или снимите отметку');
+    if (hasFile && (path.text.trim().isEmpty || resolvedFile == null)) {
+      setState(() => error = 'Выберите файл копии и откройте его (Enter в поле пути) или снимите отметку');
       return;
     }
     if (newPassword.text.runes.length < _minimum) {
@@ -397,7 +418,7 @@ class _SetupWizardState extends State<SetupWizard> {
       sending = true;
       error = null;
     });
-    final p = newPassword.text, f = _restorePhrase, file = path.text.trim(), withFile = hasFile;
+    final p = newPassword.text, f = _restorePhrase, file = resolvedFile ?? path.text.trim(), withFile = hasFile;
     phrase.clear();
     restoreWord.clear();
     newPassword.clear();
@@ -434,7 +455,10 @@ class _SetupWizardState extends State<SetupWizard> {
           enabled: !sending && !widget.busy,
           onChanged: (_) => setState(() {
             previewId = null;
+            previewFor = null;
             idMatches = false;
+            resolvedFile = null;
+            backupInfo = null;
           }),
           decoration: InputDecoration(labelText: tr(context, label), border: const OutlineInputBorder()),
         ),
@@ -464,6 +488,7 @@ class _SetupWizardState extends State<SetupWizard> {
         if (!hasFile) {
           path.clear();
           backupInfo = null;
+          resolvedFile = null;
         }
       }),
       controlAffinity: ListTileControlAffinity.leading,

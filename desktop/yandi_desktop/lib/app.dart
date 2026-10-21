@@ -727,25 +727,29 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     } catch (_) {
       return;
     }
-    final ctx = navigator.currentContext;
-    if (!mounted || ctx == null) return;
-    await showDialog<void>(
-      context: ctx,
-      barrierDismissible: false,
-      builder: (c) => Dialog(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 680),
-          child: SingleChildScrollView(
-            padding: const EdgeInsets.all(16),
-            child: BackupPanel(api: widget.api, isActive: () => true, firstRun: true, onDone: () => Navigator.pop(c)),
+    try {
+      final ctx = navigator.currentContext;
+      if (!mounted || ctx == null) return;
+      await showDialog<void>(
+        context: ctx,
+        barrierDismissible: false,
+        builder: (c) => Dialog(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 680),
+            child: SingleChildScrollView(
+              padding: const EdgeInsets.all(16),
+              child: BackupPanel(api: widget.api, isActive: () => true, firstRun: true, onDone: () => Navigator.pop(c)),
+            ),
           ),
         ),
-      ),
-    );
-    try {
-      await widget.api.request('/api/admin/session', method: 'DELETE');
-    } catch (_) {}
-    AdminToken.value = null;
+      );
+    } finally {
+      // сеанс администратора живёт только пока открыто окно — и при любом выходе из него
+      try {
+        await widget.api.request('/api/admin/session', method: 'DELETE');
+      } catch (_) {}
+      AdminToken.value = null;
+    }
   }
 
   /// Восстановление на новой машине: файл копии + сид-фраза + новый пароль; затем закрытая среда открывается этим паролем.

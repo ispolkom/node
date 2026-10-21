@@ -177,7 +177,7 @@ fn the_seed_phrase_alone_brings_back_the_same_node_and_the_same_list_signing_key
     let a = start(tmp_a.path());
     let sock = wait_sock(&a);
     let seed = a.dir.join("seed.txt");
-    let (rc, out) = run(&["setup", "--password-stdin", "--control-word-stdin", "--no-backup-dir", "--words", "18", "--seed-file", seed.to_str().unwrap()], &format!("testpass123\n{word}\n"), &sock);
+    let (rc, out) = run(&["setup", "--password-stdin", "--control-word-stdin", "--no-backup-dir", "--words", "18", "--seed-file", seed.to_str().unwrap()], &format!("{word}\ntestpass123\n"), &sock);
     assert_eq!(rc, 0, "{out}");
     let phrase = std::fs::read_to_string(&seed).unwrap().trim().to_string();
     assert_eq!(phrase.split_whitespace().count(), 18);
@@ -226,7 +226,15 @@ fn backups_go_to_a_yandi_node_folder_and_a_restore_can_take_them_from_that_folde
     let phrase = std::fs::read_to_string(&seed).unwrap().trim().to_string();
     let id_a = node_id_of(&sock);
     // «сохранить сейчас» кладёт копию в папку
-    let (rc, out) = run(&["admin", "backup", "now", "--admin-password-stdin"], "testpass123\n", &sock);
+    // узел только что запущен и занят первой копией: до трёх попыток
+    let (mut rc, mut out) = (1, String::new());
+    for _ in 0..3 {
+        (rc, out) = run(&["admin", "backup", "now", "--admin-password-stdin"], "testpass123\n", &sock);
+        if rc == 0 {
+            break;
+        }
+        std::thread::sleep(Duration::from_secs(3));
+    }
     assert_eq!(rc, 0, "{out}");
     let copies: Vec<String> = std::fs::read_dir(flash.path().join("yandi-node")).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     assert!(copies.iter().any(|n| n.starts_with("yandi-manual-") && n.ends_with(".yandibak")), "{copies:?}");

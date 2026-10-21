@@ -22,6 +22,7 @@ struct Args {
     force: bool,
     yes: bool,
     code_stdin: bool,
+    word_stdin: bool,
     layout: Layout,
     machine_id: Option<String>,
 }
@@ -30,7 +31,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
     let mut it = argv.into_iter();
     let cmd = it.next().ok_or("нужна команда: inspect | verify | restore")?;
     let mut file: Option<PathBuf> = None;
-    let (mut force, mut yes, mut code_stdin) = (false, false, false);
+    let (mut force, mut yes, mut code_stdin, mut word_stdin) = (false, false, false, false);
     let mut port: u16 = 9000;
     let (mut keys, mut data, mut home): (Option<PathBuf>, Option<PathBuf>, Option<PathBuf>) = (None, None, None);
     let mut machine_id = None;
@@ -40,6 +41,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
             "--force" => force = true,
             "--yes" => yes = true,
             "--code-stdin" => code_stdin = true,
+            "--control-word-stdin" => word_stdin = true,
             "--port" => port = val("--port")?.parse().map_err(|_| "порт — число".to_string())?,
             "--keys-dir" => keys = Some(val("--keys-dir")?.into()),
             "--data-dir" => data = Some(val("--data-dir")?.into()),
@@ -56,6 +58,7 @@ fn parse(argv: Vec<String>) -> Result<Args, String> {
         force,
         yes,
         code_stdin,
+        word_stdin,
         layout: Layout { keys: keys.unwrap_or(live.keys), data: data.unwrap_or(live.data), home: home.unwrap_or(live.home), port },
         machine_id,
     })
@@ -132,12 +135,23 @@ pub fn run(argv: Vec<String>) -> i32 {
         eprintln!("yandi backup: неизвестная команда {}", a.cmd);
         return 2;
     }
-    let code = match ask_secret("Сид-фраза (12 или 24 слова), код восстановления или мастер-пароль: ", a.code_stdin) {
+    let code = match ask_secret("Сид-фраза (12, 18 или 24 слова), код восстановления или мастер-пароль: ", a.code_stdin) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("yandi backup: {e}");
             return 2;
         }
+    };
+    // сид-фраза может быть с контрольным словом: оно часть ключа, без него копия не откроется
+    let code = if key_root::looks_like_seed(&code) {
+        let word = if a.word_stdin || a.code_stdin {
+            if a.word_stdin { ask_secret("", true).unwrap_or_default() } else { String::new() }
+        } else {
+            ask_secret("Контрольное слово (если было; Enter — нет): ", false).unwrap_or_default()
+        };
+        key_root::join_phrase(&code, &word)
+    } else {
+        code
     };
     let opened = match node_backup::open_with_code(&bytes, &code) {
         Ok(o) => o,

@@ -258,9 +258,9 @@ fn new_flow(o: &Opts) -> Result<(), String> {
     }
     let min = seed["min_password"].as_u64().unwrap_or(8) as usize;
     let phrase = list.join(" ");
-    // 3. пароли и контрольное слово
-    let (pw, admin) = ask_passwords(o, &secrets, min, true)?;
+    // 3. контрольное слово, затем пароли (порядок строк на стандартном вводе: слово [--control-word-stdin], пароль)
     let word = ask_new_control_word(o)?;
+    let (pw, admin) = ask_passwords(o, &secrets, min, true)?;
     // 4. показать фразу и убедиться, что её записали
     if let Some(path) = &o.seed_file {
         write_private_new(path, &format!("{phrase}\n"))?;
@@ -348,6 +348,12 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
     // 2. номер узла до любой записи
     let id = node_number(&phrase, &word)?;
     print_id_block(&id);
+    if !o.yes && !tty() {
+        return Err(t!(
+            "без терминала номер узла подтвердить некому: добавьте --yes (номер выведен выше; ничего не записано)",
+            "without a terminal there is nobody to confirm the node number: add --yes (the number is printed above; nothing was written)"
+        ).into());
+    }
     if !o.yes && tty() {
         eprintln!("{}", t!("Сверьте номер с записанным при настройке (он есть и в панели узла).", "Compare the number with the one noted at setup (it is also in the node panel)."));
         if !yn("Номер совпадает?", "Does the number match?", false)? {
@@ -372,14 +378,21 @@ fn restore_flow(o: &Opts) -> Result<(), String> {
         if code != 200 {
             return Err(error_text(code, &v));
         }
-        eprintln!("{}", v["text"].as_str().unwrap_or(""));
+        // что за копия: номер, время, узел (текст строится здесь, на языке консоли)
+        let counter = v["counter"].as_u64().unwrap_or(0);
+        let (y, mo, d, hh, mi) = crate::node_backup::civil_utc(v["created_ms"].as_u64().unwrap_or(0) / 1000);
+        let when = format!("{y:04}-{mo:02}-{d:02} {hh:02}:{mi:02} UTC");
+        let nid = v["node_id"].as_str().unwrap_or("");
+        eprintln!("{}", t!(format!("Копия №{counter} от {when}; узел {nid}"), format!("Backup #{counter} from {when}; node {nid}")));
         if v["node_id"].as_str().is_some_and(|n| n != id) {
             return Err(t!(
                 "копия принадлежит другому узлу: проверьте слова фразы и контрольное слово; ничего не записано",
                 "the backup belongs to another node: check the phrase words and the control word; nothing was written"
             ).into());
         }
-        let (code, v) = roundtrip(socket, "POST", "/api/auth/restore", Some(&json!({ "path": path, "phrase": master, "password": pw })), None, Duration::from_secs(600))?;
+        // восстанавливается ИМЕННО та копия, что показана выше (если указана папка — узел назвал выбранный файл): подмена между запросами не пройдёт
+        let exact = v["file"].as_str().unwrap_or(&path).to_string();
+        let (code, v) = roundtrip(socket, "POST", "/api/auth/restore", Some(&json!({ "path": exact, "phrase": master, "password": pw })), None, Duration::from_secs(600))?;
         if code != 200 {
             return Err(error_text(code, &v));
         }
@@ -491,15 +504,21 @@ fn remind_no_backup() {
 
 /// Шаг мастера «где хранить копии»: после сида и пароля.
 pub fn backup_step(o: &Opts, suggest: Option<String>, admin_password: &str) -> Result<(), String> {
-    // копии — админский раздел узла: сеанс администратора открывается паролем, который человек только что задал
+    // копии — админский раздел узла: сеанс администратора открывается паролем, который человек только что задал, и закрывается сразу после шага
     let mut sess = Session::new(o.socket.clone(), false);
     sess.secrets.preset = Some(admin_password.to_string());
+    let r = backup_step_inner(o, suggest, &mut sess);
+    sess.logout();
+    r
+}
+
+fn backup_step_inner(o: &Opts, suggest: Option<String>, sess: &mut Session) -> Result<(), String> {
     if o.no_backup_dir {
         remind_no_backup();
         return Ok(());
     }
     if let Some(dir) = o.backup_dir.clone().or(suggest) {
-        if apply_place(&mut sess, &dir, o.yes)? {
+        if apply_place(sess, &dir, o.yes)? {
             return Ok(());
         }
         if o.backup_dir.is_some() {
@@ -539,7 +558,7 @@ pub fn backup_step(o: &Opts, suggest: Option<String>, admin_password: &str) -> R
         if dir.is_empty() {
             continue;
         }
-        if apply_place(&mut sess, &dir, false)? {
+        if apply_place(sess, &dir, false)? {
             return Ok(());
         }
     }

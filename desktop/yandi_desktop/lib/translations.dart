@@ -1,5 +1,6 @@
 // Local catalog. No network or persistence.
 const moreEnglishLabels = <String, String>{
+  'Выберите файл копии и откройте его (Enter в поле пути) или снимите отметку': 'Choose the backup file and open it (Enter in the path field) or clear the checkbox',
   'Фраза или контрольное слово не прошли проверку: проверьте слова (порядок, опечатки) и контрольное слово (одно слово, 8–64 знака).': 'The phrase or the control word failed the check: check the words (order, typos) and the control word (one word, 8–64 characters).',
   'Восстановить по сид-фразе': 'Restore with a seed phrase',
   '12 слов (128 бит)': '12 words (128 bits)',
@@ -614,6 +615,7 @@ const moreEnglishLabels = <String, String>{
   ' · писать запрещено': ' · muted',
 };
 const englishTemplates = <String, String>{
+  'Копия №{0} от {1}; узел {2}': 'Backup #{0} from {1}; node {2}',
   'Хранится автокопий: {0}, «сохранить сейчас»: {1}; изменения проверяются каждые 10 минут.': 'Kept: {0} automatic, {1} "save now"; changes are checked every 10 minutes.',
   'Копии связей будут сохраняться в {0}': 'Backups of the links will be saved to {0}',
   'Копия сохранена: {0}': 'Backup saved: {0}',

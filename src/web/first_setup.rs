@@ -149,10 +149,24 @@ struct PreviewBody {
 
 /// Какой узел получится из этой сид-фразы (и контрольного слова), НИЧЕГО не записывая: номер узла показывается до восстановления, чтобы опечатка
 /// в слове или фразе не создала молча чужой узел. Фраза с контрольным словом — одной строкой (слово после внутреннего разделителя).
-/// Нечего сравнивать с каким-либо узлом: ответ зависит только от присланного, поэтому это не способ подобрать чужой секрет.
+/// Ответ зависит только от присланного: вычислительный оракул для того, кто уже знает НОМЕР чужого узла (сравнивать догадки с номером он
+/// может и сам, без узла), Argon2id тяжёлый, поэтому одновременно считаются не больше двух запросов (остальным 429). Работает только до настройки.
 async fn seed_preview(Json(b): Json<PreviewBody>) -> Response {
     #[cfg(unix)]
     {
+        // не больше двух вычислений одновременно (каждое — 128 МиБ Argon2id)
+        static BUSY: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        struct Slot;
+        impl Drop for Slot {
+            fn drop(&mut self) {
+                BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            }
+        }
+        if BUSY.fetch_add(1, std::sync::atomic::Ordering::SeqCst) >= 2 {
+            BUSY.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            return (StatusCode::TOO_MANY_REQUESTS, Json(serde_json::json!({"error": "Слишком много проверок сразу: повторите через секунду"}))).into_response();
+        }
+        let _slot = Slot;
         if b.phrase.len() > 1024 {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "Фраза слишком длинная"}))).into_response();
         }
@@ -184,6 +198,12 @@ async fn seed_preview(Json(b): Json<PreviewBody>) -> Response {
 /// Пароль прежней установки не переносится. Показывается номер копии, её время и узел (заголовок открытый, фраза не нужна).
 #[cfg(unix)]
 fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
+    read_backup_file_resolved(path).map(|(_, b)| b)
+}
+
+/// То же, но говорит, какой файл прочитан (если указана папка — выбранный в ней).
+#[cfg(unix)]
+fn read_backup_file_resolved(path: &str) -> Result<(String, Vec<u8>), String> {
     let given = std::path::Path::new(path);
     if !given.is_absolute() {
         return Err("Нужен полный путь к файлу копии".into());
@@ -203,7 +223,8 @@ fn read_backup_file(path: &str) -> Result<Vec<u8>, String> {
     if meta.len() > 64 * 1024 * 1024 {
         return Err("Файл слишком большой для копии связей".into());
     }
-    std::fs::read(p).map_err(|_| "Файл копии не читается".to_string())
+    let bytes = std::fs::read(p).map_err(|_| "Файл копии не читается".to_string())?;
+    Ok((p.display().to_string(), bytes))
 }
 
 #[derive(Deserialize)]
@@ -225,11 +246,13 @@ async fn restore_inspect(Json(b): Json<InspectBody>) -> Response {
     #[cfg(unix)]
     {
         let r = tokio::task::spawn_blocking(move || {
-            let bytes = read_backup_file(&b.path)?;
+            let (file, bytes) = read_backup_file_resolved(&b.path)?;
             let h = crate::node_backup::read_header(&bytes)?;
             let (y, mo, d, hh, mi) = crate::node_backup::civil_utc(h.created_ms / 1000);
             Ok::<_, String>(serde_json::json!({
-                "counter": h.counter, "node_id": h.node_id,
+                "counter": h.counter, "node_id": h.node_id, "created_ms": h.created_ms,
+                // какой именно файл показан: клиент восстанавливает ЕГО, а не «самую свежую копию папки» ещё раз
+                "file": file,
                 "text": format!("Копия №{} от {y:04}-{mo:02}-{d:02} {hh:02}:{mi:02} UTC; узел {}", h.counter, h.node_id),
             }))
         })
