@@ -221,6 +221,7 @@ pub fn compute() -> Vec<Notice> {
         }
     }
     // копии связей не настроены: телефоны, контакты и группы пропадут вместе с диском (напоминание, пока не выбрано место)
+    #[cfg(unix)]
     if crate::backup_api::folder_missing() {
         out.push(notice("backup", "Копии связей не настроены", vec!["no-folder".to_string()]));
     }
