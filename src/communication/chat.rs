@@ -197,6 +197,10 @@ impl ChatManager {
             loop {
                 interval.tick().await;
                 self.sweep_expired_acks().await;
+                // заглушки удалённых пользователей, отложенные при запертой среде
+                if !self.storage.is_locked() {
+                    self.apply_pending_tombstones();
+                }
                 // история одного чата — максимум год: раз в сутки (и при старте) удаляем более старое
                 if last_prune.elapsed() >= Duration::from_secs(24 * 3600) && !self.storage.is_locked() {
                     last_prune = Instant::now();
@@ -842,6 +846,31 @@ impl ChatManager {
         self.storage.load_history(peer_id, limit)
     }
 
+    /// Удалённый пользователь: его сообщения в чате с ПК становятся заглушкой. Среда заперта — номер ждёт в отложенном
+    /// списке (без секретов) и применяется, как только среда откроется (см. `spawn_delivery_timeout_task`).
+    pub async fn tombstone_peer(&self, peer_id: &HashId) {
+        self.cancel_pending(Some(peer_id), None).await;
+        crate::chat_reactions::forget_peer(&hex::encode(&peer_id.0[..8]));
+        match self.storage.tombstone_author(peer_id) {
+            Ok(_) => {}
+            Err(_) => pending_tombstones_add(peer_id),
+        }
+    }
+
+    fn apply_pending_tombstones(&self) {
+        let pending = pending_tombstones();
+        if pending.is_empty() {
+            return;
+        }
+        let mut left = Vec::new();
+        for p in pending {
+            if self.storage.tombstone_author(&p).is_err() {
+                left.push(p);
+            }
+        }
+        pending_tombstones_save(&left);
+    }
+
     /// Очистить историю чата
     pub async fn clear_history(&self, peer_id: &HashId) -> Result<()> {
         self.cancel_pending(Some(peer_id), None).await; // неподтверждённые исходящие тоже снимаются с очереди повторов
@@ -1419,4 +1448,37 @@ mod tests {
         assert!(g.allow(HashId([6u8; 32]), t0), "другой собеседник не должен страдать");
         assert!(g.allow(peer, t0 + std::time::Duration::from_secs(1)), "бюджет восстанавливается");
     }
+}
+
+/// Отложенные заглушки: номера удалённых устройств (не секрет), ждущие открытия закрытой среды.
+fn pending_tombstones_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("tombstones_pending.json")
+}
+
+fn pending_tombstones() -> Vec<HashId> {
+    std::fs::read_to_string(pending_tombstones_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| hex::decode(h).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()).map(HashId))
+        .collect()
+}
+
+fn pending_tombstones_save(l: &[HashId]) {
+    let p = pending_tombstones_path();
+    if l.is_empty() {
+        let _ = std::fs::remove_file(p);
+        return;
+    }
+    let v: Vec<String> = l.iter().map(|h| hex::encode(h.0)).collect();
+    let _ = crate::util::private_file::write_private(&p, serde_json::to_string(&v).unwrap_or_default().as_bytes());
+}
+
+fn pending_tombstones_add(peer: &HashId) {
+    let mut l = pending_tombstones();
+    if !l.contains(peer) {
+        l.push(*peer);
+    }
+    pending_tombstones_save(&l);
 }

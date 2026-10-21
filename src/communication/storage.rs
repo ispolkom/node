@@ -1,6 +1,7 @@
 // src/communication/storage.rs
 //! Local storage for chat history (encrypted JSON Lines format)
 
+use crate::communication::types::TOMBSTONE;
 use crate::communication::ChatMessage;
 use crate::util::HashId;
 use std::path::PathBuf;
@@ -866,8 +867,43 @@ impl ChatStorage {
         self.rewrite_all_messages(peer_id, &filtered)
     }
 
-    /// Срок хранения истории чата: год (с запасом на високосный). Старше этого сообщения с узла удаляются.
-    pub const RETENTION_MS: u64 = 366 * 24 * 60 * 60 * 1000;
+    /// Заменить все сообщения собеседника `peer_id` в его чате заглушкой (текст, вложение, цитата, правка стираются; номер,
+    /// время и порядок остаются — повтор того же письма запись не воскресит). Цитаты этих сообщений тоже становятся
+    /// заглушкой. Возвращает, сколько сообщений заглушено.
+    pub fn tombstone_author(&self, peer_id: &HashId) -> Result<usize> {
+        let _g = self.locked();
+        let mut messages = match self.load_history_strict(peer_id) {
+            Ok(m) => m,
+            Err(e) if self.is_locked() => return Err(e),
+            Err(_) => return Ok(0),
+        };
+        let gone: std::collections::HashSet<String> =
+            messages.iter().filter(|m| m.from == *peer_id).map(|m| hex::encode(m.msg_id.0)).collect();
+        let mut n = 0usize;
+        for m in messages.iter_mut() {
+            if m.from == *peer_id {
+                if m.text != TOMBSTONE || m.attachment.is_some() || m.reply_to.is_some() {
+                    n += 1;
+                }
+                m.text = TOMBSTONE.to_string();
+                m.attachment = None;
+                m.reply_to = None;
+                m.edited = false;
+                m.edit_timestamp = None;
+            } else if let Some(r) = m.reply_to.as_mut() {
+                if gone.contains(&r.msg_id.to_ascii_lowercase()) {
+                    r.text = TOMBSTONE.to_string();
+                }
+            }
+        }
+        if n > 0 {
+            self.rewrite_all_messages(peer_id, &messages)?;
+        }
+        Ok(n)
+    }
+
+    /// Срок хранения истории чата: год, без исключений (решение владельца 2026-10-21).
+    pub const RETENTION_MS: u64 = 365 * 24 * 60 * 60 * 1000;
 
     /// Удаляет из всех чатов сообщения старше срока хранения; возвращает, сколько удалено.
     /// Чат с записью, которая не открывается этим ключом, не трогается (как и при других перезаписях).

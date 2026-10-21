@@ -363,6 +363,7 @@ async fn main() -> anyhow::Result<()> {
             yandi::mobile_group_files::cleanup_all().await;
             yandi::mobile_files::cleanup_expired().await; // и личных передач между устройствами
             yandi::mobile_groups::cleanup_requests(); // просьбы о вступлении старше недели стираются с диска
+            yandi::mobile_groups::cleanup_old_messages(); // записи групп старше года (раз в сутки)
             yandi::mobile_groups::cleanup_inactive(); // автоочистка групп: рядовые без единой записи за срок группы исключаются
             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
         }

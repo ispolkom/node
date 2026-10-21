@@ -184,6 +184,9 @@ struct Group {
     /// журнал стираний: (номер события, номер записи). Участник, пропустивший намёк (был не в сети), догоняет стирания по курсору
     #[serde(default)]
     deletions: Vec<(u64, u64)>,
+    /// записи удалённых с узла авторов `(номер события, seq)`; общий счётчик с `deletions`
+    #[serde(default)]
+    gone: Vec<(u64, u64)>,
     #[serde(default)]
     next_deletion: u64,
     /// кто-то покинул группу после последней смены ключа: владельцу стоит сменить ключ
@@ -339,6 +342,9 @@ struct JournalLine {
     p: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deleted: bool,
+    /// автор удалён с узла: клиенты показывают заглушку «удалено вместе с пользователем» (решение владельца 2026-10-21)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    gone: bool,
 }
 
 /// Намёк «в группе что-то изменилось» для подключённых телефонов-участников.
@@ -689,6 +695,7 @@ impl Store {
             key_boxes: BTreeMap::new(),
             epoch_owner: BTreeMap::new(),
             deletions: Vec::new(),
+            gone: Vec::new(),
             next_deletion: 0,
             rekey_needed: false,
             first_seq: 1,
@@ -1131,6 +1138,7 @@ impl Store {
             epoch,
             p: payload_b64.to_string(),
             deleted: false,
+            gone: false,
         };
         let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
         bytes.push(b'\n');
@@ -1167,6 +1175,31 @@ impl Store {
     }
 
     /// Журнал вырос сверх предела: оставляем последние записи на три четверти предела.
+    /// Записи старше года — с узла долой, без исключений (решение владельца 2026-10-21). Возвращает, сколько удалено.
+    pub fn sweep_old(&mut self, now: u64) -> usize {
+        let cutoff = now.saturating_sub(MESSAGE_LIFETIME_MS);
+        let gids: Vec<String> = self.groups.keys().cloned().collect();
+        let mut removed = 0usize;
+        for gid in gids {
+            let lines = self.read_lines(&gid);
+            let keep = lines.iter().position(|l| l.ts >= cutoff).unwrap_or(lines.len());
+            if keep == 0 {
+                continue;
+            }
+            let rest = &lines[keep..];
+            if self.rewrite(&gid, rest).is_ok() {
+                if let Ok(g) = self.get_mut(&gid) {
+                    g.first_seq = rest.first().map(|l| l.seq).unwrap_or(g.next_seq);
+                }
+                removed += keep;
+            }
+        }
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
+    }
+
     fn trim(&mut self, gid: &str) {
         let lines = self.read_lines(gid);
         let mut keep = 0usize;
@@ -1227,7 +1260,7 @@ impl Store {
                             }
                             bytes += l.len();
                             if let Ok(e) = serde_json::from_str::<JournalLine>(&l) {
-                                out.push(json!({"seq": e.seq, "ts": e.ts, "from": e.from, "epoch": e.epoch, "payload_b64": e.p, "deleted": e.deleted}));
+                                out.push(json!({"seq": e.seq, "ts": e.ts, "from": e.from, "epoch": e.epoch, "payload_b64": e.p, "deleted": e.deleted, "gone": e.gone}));
                             }
                         }
                     }
@@ -1625,7 +1658,9 @@ impl Store {
         let (g, _) = self.me(gid, device)?;
         let oldest = g.deletions.first().map(|(n, _)| *n).unwrap_or(g.next_deletion + 1);
         let list: Vec<u64> = g.deletions.iter().filter(|(n, _)| *n > after).map(|(_, s)| *s).collect();
-        Ok(json!({"deleted": list, "cursor": g.next_deletion, "resync": after + 1 < oldest && after < g.next_deletion}))
+        let gone: Vec<u64> = g.gone.iter().filter(|(n, _)| *n > after).map(|(_, s)| *s).collect();
+        let oldest = oldest.min(g.gone.first().map(|(n, _)| *n).unwrap_or(oldest));
+        Ok(json!({"deleted": list, "gone": gone, "cursor": g.next_deletion, "resync": after + 1 < oldest && after < g.next_deletion}))
     }
 
     pub fn modlog(&self, gid: &str, device: Option<&str>) -> R<Value> {
@@ -1659,7 +1694,45 @@ impl Store {
     }
 
     /// Устройство забыто узлом: убираем его из всех групп (хэш у каждой группы свой, поэтому пересчитываем).
+    /// Записи автора `alias` в журнале группы — заглушка: шифртекст стирается, `gone`, номер уходит клиентам по курсору стираний.
+    fn tombstone_alias(&mut self, gid: &str, alias: &str) {
+        let mut lines = self.read_lines(gid);
+        let mut seqs = Vec::new();
+        for l in lines.iter_mut().filter(|l| l.from == alias && !l.gone) {
+            l.p.clear();
+            l.gone = true;
+            seqs.push(l.seq);
+        }
+        if seqs.is_empty() || self.rewrite(gid, &lines).is_err() {
+            return;
+        }
+        if let Ok(g) = self.get_mut(gid) {
+            for seq in seqs {
+                g.next_deletion += 1;
+                let n = g.next_deletion;
+                g.gone.push((n, seq));
+            }
+            if g.gone.len() > MAX_DELETION_EVENTS {
+                let drop = g.gone.len() - MAX_DELETION_EVENTS;
+                g.gone.drain(..drop);
+            }
+        }
+    }
+
     pub fn forget_device(&mut self, device: &str) {
+        // сначала заглушить записи удалённого во всех группах, где он участник (кроме его собственных: те удаляются целиком)
+        let authored: Vec<(String, String)> = self
+            .groups
+            .values()
+            .filter_map(|g| {
+                let k = member_key(&g.id, device);
+                let owner = g.owner().is_some_and(|o| o.key == k);
+                g.members.iter().find(|m| m.key == k).filter(|_| !owner).map(|m| (g.id.clone(), m.alias.clone()))
+            })
+            .collect();
+        for (gid, alias) in &authored {
+            self.tombstone_alias(gid, alias);
+        }
         let mut changed = Vec::new();
         let mut dead: Vec<String> = Vec::new();
         let mut had_request = false;
@@ -1688,7 +1761,11 @@ impl Store {
         if !changed.is_empty() {
             if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
             for (gid, to) in changed {
-                hint(&gid, HINT_CHANGED, 0, to);
+                hint(&gid, HINT_CHANGED, 0, to.clone());
+                // заглушки разошлются как стирания: телефоны перечитают курсор стираний
+                if authored.iter().any(|(g, _)| *g == gid) {
+                    hint(&gid, HINT_LOG, 0, to);
+                }
             }
         }
     }
@@ -1754,6 +1831,27 @@ pub fn cleanup_requests() {
 }
 
 /// Автоочистка по таймеру (из main): рядовые, молчавшие дольше срока группы, исключаются.
+/// Срок жизни записи группы: год (365 суток).
+pub const MESSAGE_LIFETIME_MS: u64 = 365 * 24 * 3600 * 1000;
+
+/// Раз в сутки: записи групп старше года удаляются на узле и в ленте ПК-участника.
+pub fn cleanup_old_messages() {
+    static LAST: Mutex<u64> = Mutex::new(0);
+    let now = now_ms();
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if now.saturating_sub(*last) < 24 * 3600 * 1000 {
+            return;
+        }
+        *last = now;
+    }
+    let n = with_store(|s| Ok::<usize, Fail>(s.sweep_old(now))).unwrap_or(0);
+    if n > 0 {
+        eprintln!("[groups] удалено записей старше года: {n}");
+    }
+    crate::group_client::prune_old(now);
+}
+
 pub fn cleanup_inactive() {
     match with_store(|s| s.clean_inactive(now_ms())) {
         Ok(n) if n > 0 => eprintln!("[groups] автоочистка: исключено неактивных — {n}"),

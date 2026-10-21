@@ -33,6 +33,10 @@ pub struct ChatMessage {
     pub reply_to: Option<ReplyRef>,
 }
 
+/// Заглушка сообщения удалённого пользователя (решение владельца 2026-10-21): клиенты показывают вместо неё
+/// «Сообщение удалено вместе с пользователем» на своём языке — и в самом сообщении, и в цитатах.
+pub const TOMBSTONE: &str = "[[yandi:deleted-with-user]]";
+
 /// Ссылка на сообщение, на которое отвечают. `msg_id` — полный HashId в hex (якорь), `text` — выдержка для показа.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ReplyRef {

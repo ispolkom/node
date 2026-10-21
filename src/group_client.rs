@@ -777,14 +777,36 @@ fn sync_deletions(c: &mut Client, dev: &str, gid: &str) -> Result<bool, String> 
     if r["resync"].as_bool().unwrap_or(false) {
         seqs.extend(deleted_in_log(|after| with_store(|st| st.pull(gid, dev, after, 500)).map_err(fail))?);
     }
+    let gone: Vec<u64> = r["gone"].as_array().map(|l| l.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
     let mut changed = false;
     {
         let log = c.load_log(gid);
         for e in log.iter_mut() {
-            if seqs.contains(&e.seq) && !e.deleted {
+            if gone.contains(&e.seq) {
+                // запись удалённого с узла автора — заглушка; его реакции исчезают
+                if e.kind == KIND_REACTION {
+                    if !e.deleted {
+                        e.deleted = true;
+                        e.body = json!({});
+                        changed = true;
+                    }
+                } else if e.body.get("t").and_then(|t| t.as_str()) != Some(crate::communication::TOMBSTONE) || e.deleted {
+                    e.kind = KIND_TEXT;
+                    e.body = json!({"t": crate::communication::TOMBSTONE});
+                    e.deleted = false;
+                    changed = true;
+                }
+            } else if seqs.contains(&e.seq) && !e.deleted {
                 e.deleted = true;
                 e.body = json!({});
                 changed = true;
+            }
+            // цитата заглушённой записи — тоже заглушка
+            if let Some(s) = e.body.get("r").and_then(|r| r.get("s")).and_then(|s| s.as_u64()) {
+                if gone.contains(&s) && e.body["r"].get("t").and_then(|t| t.as_str()) != Some(crate::communication::TOMBSTONE) {
+                    e.body["r"]["t"] = json!(crate::communication::TOMBSTONE);
+                    changed = true;
+                }
             }
         }
     }
@@ -816,7 +838,10 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
         for e in &entries {
             let (seq, ts, epoch, from) = (u(e, "seq"), u(e, "ts"), u(e, "epoch") as u32, s(e, "from"));
             let payload = e["payload_b64"].as_str().unwrap_or("");
-            if e["deleted"].as_bool().unwrap_or(false) || payload.is_empty() {
+            if e["gone"].as_bool().unwrap_or(false) {
+                // автор удалён с узла: заглушка вместо записи (решение владельца 2026-10-21)
+                batch.push(Entry { seq, ts, epoch, kind: KIND_TEXT, from, body: json!({"t": crate::communication::TOMBSTONE}), deleted: false });
+            } else if e["deleted"].as_bool().unwrap_or(false) || payload.is_empty() {
                 batch.push(Entry { seq, ts, epoch, kind: KIND_SYSTEM, from, body: json!({}), deleted: true });
             } else {
                 let Some(key) = c.group_key(gid, epoch) else {
@@ -1773,4 +1798,22 @@ mod tests {
         assert_eq!(rekey_dir(dir.path(), Some(old), new).unwrap(), 1);
         assert_eq!(std::fs::read_to_string(dir.path().join("g1.log")).unwrap(), moved);
     }
+}
+
+/// Лента ПК-участника: записи старше года удаляются (как на узле, `mobile_groups::MESSAGE_LIFETIME_MS`).
+pub fn prune_old(now: u64) {
+    let cutoff = now.saturating_sub(crate::mobile_groups::MESSAGE_LIFETIME_MS);
+    let _ = with_client(|c| {
+        let gids: Vec<String> = c.state.groups.keys().cloned().collect();
+        for gid in gids {
+            let before = c.load_log(&gid).len();
+            c.load_log(&gid).retain(|e| e.ts >= cutoff);
+            if c.load_log(&gid).len() != before {
+                let snapshot = c.load_log(&gid).clone();
+                let text: String = snapshot.iter().filter_map(|e| serde_json::to_vec(e).ok()).map(|j| c.vault.seal(&gid, &j) + "\n").collect();
+                c.vault.write_private(&Client::log_name(&gid), text.as_bytes()).map_err(|e| format!("лента не сохранена: {e}"))?;
+            }
+        }
+        Ok(())
+    });
 }

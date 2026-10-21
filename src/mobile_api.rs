@@ -58,6 +58,8 @@ const FT_LIVE_MSG: u8 = 0x13;
 /// Ответ отправителю: адресата нет на связи (кадр: тип и 32 байта номера).
 const FT_PEER_OFFLINE: u8 = 0x14;
 const FT_PROFILE: u8 = 0x16;
+/// Подсказка «есть новые удалённые устройства»: `[0x17][8 байт номера, LE]` — клиент читает `/mobile/forgotten`.
+const FT_FORGOTTEN: u8 = 0x17;
 /// Сигнал звонка небольшой (описание сеанса и кандидаты): больше не принимаем.
 const MAX_LIVE: usize = 32 * 1024;
 
@@ -96,6 +98,8 @@ enum Event {
     Revoked(String),
     /// профиль владельца изменился: телефоны подтянут его сами
     Profile,
+    /// устройство удалено с узла: клиенты заглушают его сообщения у себя (номер записи журнала `forgotten`)
+    Forgotten(u64),
 }
 
 /// Сообщить всем открытым сокетам телефонов, что ник или картинка профиля изменились.
@@ -977,6 +981,54 @@ pub fn remove_device(id: &str) -> bool {
     true
 }
 
+/// Журнал удалённых устройств для клиентов: `{n, peer, ts}`, хранится год (дольше сообщения не живут).
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct Forgotten {
+    n: u64,
+    peer: String,
+    ts: u64,
+}
+
+static FORGOTTEN: Mutex<Option<Vec<Forgotten>>> = Mutex::new(None);
+const FORGOTTEN_KEEP_MS: u64 = 366 * 24 * 3600 * 1000;
+
+fn forgotten_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("forgotten_devices.json")
+}
+
+fn with_forgotten<R>(f: impl FnOnce(&mut Vec<Forgotten>) -> R) -> R {
+    let mut g = FORGOTTEN.lock().unwrap_or_else(|e| e.into_inner());
+    let l = g.get_or_insert_with(|| std::fs::read_to_string(forgotten_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
+    let now = now_ms();
+    l.retain(|x| now.saturating_sub(x.ts) < FORGOTTEN_KEEP_MS);
+    let r = f(l);
+    let _ = crate::util::private_file::write_private(&forgotten_path(), serde_json::to_string(&*l).unwrap_or_default().as_bytes());
+    r
+}
+
+fn forgotten_add(peer: &str) -> u64 {
+    with_forgotten(|l| {
+        let n = l.last().map(|x| x.n + 1).unwrap_or_else(|| now_ms());
+        l.push(Forgotten { n, peer: peer.to_string(), ts: now_ms() });
+        n
+    })
+}
+
+#[derive(serde::Deserialize)]
+struct ForgottenQ {
+    #[serde(default)]
+    after: u64,
+}
+
+/// Удалённые устройства после курсора: клиенты заглушают их сообщения у себя (`docs/CLIENT_WIRE.md`).
+async fn forgotten_list(axum::extract::Query(q): axum::extract::Query<ForgottenQ>) -> Response {
+    let (items, cursor) = with_forgotten(|l| {
+        let items: Vec<serde_json::Value> = l.iter().filter(|x| x.n > q.after).map(|x| json!({"n": x.n, "peer": x.peer, "ts": x.ts})).collect();
+        (items, l.last().map(|x| x.n).unwrap_or(q.after))
+    });
+    Json(json!({"items": items, "cursor": cursor})).into_response()
+}
+
 /// Удалить устройство, только если оно ВСЁ ЕЩЁ гость: проверка роли и удаление под одним замком реестра (аудит R9 №5 —
 /// между жалобой и удалением владелец мог принять гостя в пользователи).
 fn remove_guest_device(peer: &str) -> bool {
@@ -1003,6 +1055,13 @@ fn remove_guest_device(peer: &str) -> bool {
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
     crate::guest::forget_peer(&peer);
+    // все сообщения удалённого — заглушка: в чате ПК (узел), у клиентов (журнал `forgotten` + подсказка по WS), в группах
+    // (`mobile_groups::forget_device` ниже). Решение владельца 2026-10-21.
+    let n = forgotten_add(&peer);
+    let _ = bus().send(Event::Forgotten(n));
+    if let (Some(st), Ok(h), Some(id)) = (STATE.get().cloned(), tokio::runtime::Handle::try_current(), hex::decode(&peer).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok())) {
+        h.spawn(async move { st.chat.tombstone_peer(&HashId(id)).await });
+    }
     // отметка «последний раз на связи» удалённого устройства не остаётся в памяти
     if let Some(m) = LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         m.remove(&peer);
@@ -2833,6 +2892,11 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                 Ok(Event::Profile) => {
                     if sock.send(Message::Binary(vec![FT_PROFILE])).await.is_err() { break; }
                 }
+                Ok(Event::Forgotten(n)) => {
+                    let mut f = vec![FT_FORGOTTEN];
+                    f.extend_from_slice(&n.to_le_bytes());
+                    if sock.send(Message::Binary(f)).await.is_err() { break; }
+                }
                 Ok(Event::Node(m)) => {
                     // личная переписка ПК — только владельцу; пользователю узла она по WebSocket не уходит
                     if is_user_role(&me) { continue; }
@@ -2998,6 +3062,7 @@ fn router(st: Arc<MobileState>) -> Router {
         .route("/mobile/me", axum::routing::delete(device_forget_self))
         .route("/mobile/users", get(users_list))
         .route("/mobile/nodes", get(nodes_list))
+        .route("/mobile/forgotten", get(forgotten_list))
         .route("/mobile/complaints", get(complaints_mine).post(complaint_submit))
         .route("/mobile/users/:peer/avatar", get(user_avatar))
         .route("/mobile/profile/avatar", get(profile_avatar))
