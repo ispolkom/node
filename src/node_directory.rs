@@ -15,7 +15,8 @@ pub fn rows(online: &[[u8; 32]], me: &[u8; 32], guest_view: bool) -> Vec<Value> 
         let hex_id = hex::encode(id);
         let entry = doc.as_ref().and_then(|d| d.entries.iter().find(|e| e.id.eq_ignore_ascii_case(&hex_id)));
         let roles: Vec<String> = entry.map(|e| e.roles.clone()).unwrap_or_default();
-        if guest_view && !roles.iter().any(|r| r == "guest") {
+        // в общей сети гостю — только гостевые узлы подписанного списка; у автономного узла все видят его меш (аудит R9 №22)
+        if guest_view && !crate::autonomy::enabled() && !roles.iter().any(|r| r == "guest") {
             continue;
         }
         let region = crate::network_offers::offer_of(&hex_id)

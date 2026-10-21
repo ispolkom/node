@@ -276,6 +276,14 @@ async fn apply_live(dir: &PeerDirectory, removed: Option<[u8; 32]>) {
     transport.set_pinned_identities(pins).await;
 }
 
+/// Узлы, которые основная связь считает сейчас в сети (свежий признак жизни), — для каталога «Узлы» (аудит R9 №19).
+pub async fn online_node_ids() -> Vec<[u8; 32]> {
+    match transport_cell().get() {
+        Some(t) => t.get_peers().await.into_iter().map(|p| p.id.0).collect(),
+        None => Vec::new(),
+    }
+}
+
 /// Постучаться к доверенным пирам, которых сейчас нет в сети (по адресам из их визиток) — и по основной связи узлов, и по каналу
 /// переписки, файлов и звонков.
 pub async fn knock_offline() {

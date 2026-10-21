@@ -10,7 +10,7 @@ const moreEnglishLabels = <String, String>{
   'Автономный узел (без общей сети)': 'Autonomous node (no common network)',
   'Применить': 'Apply',
   'Режим изменён: перезапустите узел.': 'The mode has changed: restart the node.',
-  'Режим сохранён. Перезапустите узел, чтобы он вступил в силу.': 'The mode is saved. Restart the node for it to take effect.',
+  'Режим сохранён, узел перезапускается. Если он не поднялся сам, запустите его снова.': 'The mode is saved, the node is restarting. If it does not come back by itself, start it again.',
   'Узел станет автономным: перестанет брать список входов, DHT, соседей, хопы и обновления, никто из общей сети его не увидит и не получит ответа. Свои клиенты, гости, звонки, файлы, группы и свои прокси работают как прежде. Связь — только с автономными узлами, которых вы внесёте сами. Список доверенных узлов и сетевые данные будут стёрты. Пароль администратора': 'The node will become autonomous: it stops taking the entry list, DHT, neighbours, hops and updates; nobody from the common network will see it or get an answer. Your clients, guests, calls, files, groups and your proxies work as before. Links only with autonomous nodes you add yourself. The trusted node list and network data will be erased. Administrator password',
   'Узел вернётся в общую сеть как новичок. Связи с автономными узлами (меш) будут стёрты. Пароль администратора': 'The node will return to the common network as a newcomer. Links with autonomous nodes (mesh) will be erased. Administrator password',
   'Выберите файл копии и откройте его (Enter в поле пути) или снимите отметку': 'Choose the backup file and open it (Enter in the path field) or clear the checkbox',

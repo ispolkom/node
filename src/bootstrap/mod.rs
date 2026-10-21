@@ -342,18 +342,34 @@ pub fn own_build_revoked() -> bool {
     min_versions().0.is_some_and(|m| crate::update_check::is_newer(&m, &crate::update_check::own_version()))
 }
 
+static REVOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Запомнить решение об отзыве по последнему принятому списку (вызывается при каждой загрузке списка).
+pub fn note_revocation() {
+    REVOKED.store(own_build_revoked(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Сборка отозвана (дешёвая проверка для горячих путей: допуск узлов). Отозванный узел, как честный, не общается с узлами
+/// общей сети ни на входе, ни на выходе, пока его не обновят; свои клиенты работают.
+pub fn is_revoked() -> bool {
+    REVOKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub async fn effective_config(local: &Path) -> crate::netlayer::bootstrap::BootstrapConfig {
     // автономный узел: ни подписанного, ни локального списка входов — только внесённые владельцем автономные узлы
     if crate::autonomy::enabled() {
         return crate::netlayer::bootstrap::BootstrapConfig::default();
     }
-    // сборка отозвана подписанным списком: честный узел в общую сеть не входит, пока его не обновят
-    if own_build_revoked() {
+    // сначала свежий список: в нём отзыв могли и наложить, и снять (аудит R9 №8 — решение по старому кэшу до загрузки
+    // то не видело новый отзыв, то не давало получить его отмену)
+    let fetched = fetch(SIGNER_KEYS).await;
+    note_revocation();
+    if is_revoked() {
         eprintln!("⚠️  Эта сборка отозвана списком входных узлов: обновите узел. В общую сеть узел не входит.");
         return crate::netlayer::bootstrap::BootstrapConfig::default();
     }
     let mut cfg = crate::netlayer::bootstrap::BootstrapConfig::load_from_file(local).unwrap_or_default();
-    if let Some(d) = fetch(SIGNER_KEYS).await {
+    if let Some(d) = fetched {
         let signed = to_config(&d);
         for n in signed.nodes {
             // не дублируем адрес, который владелец уже указал сам

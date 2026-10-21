@@ -23,6 +23,10 @@ pub fn world_tag() -> &'static [u8] {
 
 /// Принять ли узел `peer` на входе. В общей сети — да (дальше обычный допуск); в автономном — только внесённых владельцем.
 pub fn admits(peer: &HashId) -> bool {
+    // отозванная сборка общей сети не принимает никого из узлов (аудит R9 №8); автономный узел — только свой меш
+    if crate::bootstrap::is_revoked() && !enabled() {
+        return false;
+    }
     !enabled() || crate::exit_policy::is_trusted(peer)
 }
 
@@ -38,22 +42,25 @@ fn world_files() -> Vec<std::path::PathBuf> {
     ]
 }
 
-/// Сменить режим: записать в конфиг и стереть сетевые данные прежнего мира. Вступает в силу после перезапуска узла.
+/// Сменить режим: сначала стереть сетевые данные прежнего мира, потом записать режим (сбой стирания — режим не меняется,
+/// повтор дочищает). Вступает в силу только после перезапуска: работающие задачи старого мира иначе записали бы данные
+/// обратно, поэтому ручка сама перезапускает узел (аудит R9 №12).
 pub fn set(on: bool) -> Result<bool, String> {
     let mut cfg = crate::core::config::try_get_config().ok_or("конфигурация узла не загружена")?;
+    // режим тот же — ничего не стираем (иначе повторное «включить» стёрло бы меш)
     if cfg.network.autonomous == on {
         return Ok(false);
     }
-    cfg.network.autonomous = on;
-    crate::core::config::update_config(cfg).map_err(|e| format!("не удалось сохранить режим: {e}"))?;
+    crate::exit_policy::set_trusted(std::iter::empty());
     for f in world_files() {
         match std::fs::remove_file(&f) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(format!("режим сохранён, но не стёрт {}: {e}", f.display())),
+            Err(e) => return Err(format!("не удалось стереть {}: {e}; режим не изменён", f.display())),
         }
     }
-    crate::exit_policy::set_trusted(std::iter::empty());
+    cfg.network.autonomous = on;
+    crate::core::config::update_config(cfg).map_err(|e| format!("не удалось сохранить режим: {e}"))?;
     Ok(true)
 }
 
@@ -94,7 +101,16 @@ async fn post_mode(Json(b): Json<Body>) -> Response {
         return (StatusCode::CONFLICT, Json(serde_json::json!({"error": "Автономный режим выбирает только узел с белым адресом и достаточной мощностью; этот узел и так не нагружает сеть."}))).into_response();
     }
     match set(b.on) {
-        Ok(changed) => Json(serde_json::json!({"ok": true, "changed": changed, "restart_needed": true})).into_response(),
+        Ok(false) => Json(serde_json::json!({"ok": true, "changed": false})).into_response(),
+        Ok(changed) => {
+            // перезапуск через systemd (Restart=on-failure): выход с ошибкой через 2 с, чтобы ответ успел уйти
+            tokio::spawn(async {
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                eprintln!("[autonomy] режим узла изменён — перезапуск");
+                std::process::exit(75);
+            });
+            Json(serde_json::json!({"ok": true, "changed": changed, "restarting": true})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
     }
 }

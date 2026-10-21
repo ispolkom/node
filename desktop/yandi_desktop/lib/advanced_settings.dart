@@ -996,7 +996,7 @@ class _AutonomyPanelState extends State<AutonomyPanel> {
     await widget.mutate(() async {
       try {
         await widget.api.request('/api/node/autonomy', body: {'on': on, 'password': v[0]});
-        if (mounted) setState(() => notice = 'Режим сохранён. Перезапустите узел, чтобы он вступил в силу.');
+        if (mounted) setState(() => notice = 'Режим сохранён, узел перезапускается. Если он не поднялся сам, запустите его снова.');
       } on ApiFailure catch (e) {
         if (mounted) setState(() => notice = e.message);
       }

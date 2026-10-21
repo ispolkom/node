@@ -2277,7 +2277,8 @@ fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
 
 /// Каталог «Узлы» (docs/ROADMAP_R9.md §3): онлайн-узлы без адресов; гостю — только гостевые из подписанного списка.
 async fn nodes_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>) -> Response {
-    let online: Vec<[u8; 32]> = st.p2p.list_peers().await.into_iter().map(|p| p.id.0).collect();
+    // «в сети» — по свежему признаку жизни основной связи, а не по таблице связи переписки (там записи без времени)
+    let online = crate::web::peers::online_node_ids().await;
     let nodes = crate::node_directory::rows(&online, &st.my_id.0, is_guest_device(&dev));
     Json(json!({ "nodes": nodes, "total": nodes.len() })).into_response()
 }
@@ -2285,7 +2286,7 @@ async fn nodes_list(State(st): State<Arc<MobileState>>, axum::Extension(DeviceKe
 /// Онлайн-узлы, которые видит связь переписки (для каталога «Узлы» оболочки).
 pub async fn online_node_ids() -> (Vec<[u8; 32]>, [u8; 32]) {
     match STATE.get() {
-        Some(st) => (st.p2p.list_peers().await.into_iter().map(|p| p.id.0).collect(), st.my_id.0),
+        Some(st) => (crate::web::peers::online_node_ids().await, st.my_id.0),
         None => (Vec::new(), [0u8; 32]),
     }
 }
@@ -2904,7 +2905,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                             let blob = &d[37..37 + len];
                             let text = device_ed25519(&me).ok().and_then(|ed| crate::mobile_self::open(blob, &me, &to, 2, &ed));
                             match text {
-                                Some(t) if t.starts_with(crate::mobile_self::CALL_MARKER) && crate::mobile_self::call_page_alive() => {
+                                // гость на ПК не звонит: страница звонков ПК не держит гостевые пределы (только аудио, 15 минут) —
+                                // до их поддержки звонок гостя получает «не на связи» (аудит R9 №6)
+                                Some(t) if t.starts_with(crate::mobile_self::CALL_MARKER) && crate::mobile_self::call_page_alive() && !is_guest_peer(&me) => {
                                     // сигнал звонка: страница чата открыта — отдаём ей (она и отвечает)
                                     crate::mobile_self::push_call(&me, &t);
                                 }
