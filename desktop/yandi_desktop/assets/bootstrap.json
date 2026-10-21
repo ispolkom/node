@@ -1,0 +1,27 @@
+{
+  "entries": [
+    {
+      "addr": [
+        "185.77.205.3:9000"
+      ],
+      "id": "6aa1a6eefc274d0c7ad94c8dc178695bc6a35addbb7ac4955495d6e759423100",
+      "key": "982058a885825904e7f41f8e950ce4a04d40aeffd0877c803bc676a9302114b7",
+      "mobile": [
+        "185.77.205.3:8444"
+      ],
+      "region": "RU",
+      "roles": [
+        "entry",
+        "relay",
+        "guest"
+      ]
+    }
+  ],
+  "expires": 4946187857,
+  "format": 1,
+  "issued": 1792587857,
+  "network": "yandi",
+  "sequence": 8,
+  "signature": "53b5963dacd8a5889098e6f5ec8f8b50e6429cec85cc04151a7a0562d5a19fb573094d4ace88ec49fb4fa9ae5d53dfed14f25b96b5d5aaa973114e4c7872e902",
+  "signer": "52ba508fca1ca54bfe010dbb3d511e51ea4ee06bd59ce0816ae240745fd4025a"
+}

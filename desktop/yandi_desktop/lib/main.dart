@@ -5,10 +5,16 @@ import 'theme.dart';
 import 'transport/api.dart';
 
 import 'embedded_player.dart';
+import 'guest/guest_shell.dart';
 import 'voice.dart' show sweepTempFiles;
 
 void main(List<String> args) {
   WidgetsFlutterBinding.ensureInitialized();
+  // --guest: без локального узла, сразу вход гостем на чужой узел (lib/guest)
+  if (args.contains('--guest')) {
+    runApp(const GuestApp());
+    return;
+  }
   try {
     sweepTempFiles();
     EmbeddedPlayer.init(); // встроенный проигрыватель, если на машине есть libmpv

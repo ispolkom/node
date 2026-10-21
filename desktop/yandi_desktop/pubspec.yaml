@@ -11,10 +11,12 @@ dependencies:
   media_kit_video: ^1.3.1
   media_kit_libs_linux: ^1.2.1
   qr_flutter: ^4.1.0
+  # Гостевой клиент (lib/guest): E2E и подпись списка узлов, чистый Dart (без cryptography_flutter), версии как у телефона
+  cryptography: ^2.7.0
+  crypto: ^3.0.3
   flutter:
     sdk: flutter
 dev_dependencies:
-  crypto: ^3.0.3
   flutter_test:
     sdk: flutter
 flutter:
@@ -22,6 +24,7 @@ flutter:
   assets:
     - assets/logo.png
     - assets/support.json
+    - assets/bootstrap.json
     - assets/fonts/NotoColorEmoji-LICENSE.txt
     - assets/fonts/LiberationSans-LICENSE.txt
   fonts:

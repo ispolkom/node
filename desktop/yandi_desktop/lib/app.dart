@@ -17,6 +17,7 @@ import 'transport/api.dart';
 import 'calls.dart';
 import 'features.dart';
 import 'platform_files.dart';
+import 'guest/guest_shell.dart';
 
 class DesktopApp extends StatefulWidget {
   final Api api;
@@ -1279,6 +1280,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                                   button(
                                     'Повторить подключение',
                                     () => checkAuth(),
+                                  ),
+                                  button(
+                                    'Войти гостем на чужой узел',
+                                    () => navigator.currentState?.push(
+                                      MaterialPageRoute<void>(
+                                        builder: (_) => const GuestShell(),
+                                      ),
+                                    ),
                                   ),
                                 ],
                               ),
