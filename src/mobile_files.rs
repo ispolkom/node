@@ -29,6 +29,8 @@ const MAX_PENDING_PER_SENDER: usize = 20;
 /// Готовый файл лежит, пока его не заберут, но не дольше недели; недокачанный — сутки.
 const TTL_DONE_MS: u64 = 7 * 24 * 3600 * 1000;
 const TTL_PARTIAL_MS: u64 = 24 * 3600 * 1000;
+/// Нижняя граница среднего куска при проверке числа кусков (клиенты режут по 256 КБ и 1 МБ, запас вчетверо).
+const MIN_CHUNK_PLAIN: u64 = 64 * 1024;
 /// Накладные расходы шифрования одного куска (случайное число 12 байт и метка 16 байт).
 const CHUNK_OVERHEAD: u64 = 28;
 
@@ -121,6 +123,9 @@ fn guest_exp(from: &str, to: &str) -> u64 {
 
 /// Гостя удалили: его файлы (отправленные и ожидающие его) удаляются сразу, а не по сроку «обычного» файла.
 pub async fn drop_peer_files(peer: String) {
+    // под замком начала передачи: начатая параллельно передача удалённого устройства либо уже лежит (и будет удалена), либо
+    // её `start` после замка увидит, что устройства нет
+    let _g = BEGIN.lock().await;
     for m in all_meta().await {
         if m.from == peer || m.to == peer {
             let _ = tokio::fs::remove_dir_all(dir_of(&m.id)).await;
@@ -242,6 +247,11 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой");
     }
+    // число кусков соответствует размеру: клиенты режут по 256 КБ / 1 МБ, поэтому кусков не больше чем по 64 КБ на кусок —
+    // крошечные куски не съедают диск и индексные узлы (аудит R9 №2)
+    if u64::from(req.total_chunks) > req.file_size.div_ceil(MIN_CHUNK_PLAIN) {
+        return err(StatusCode::BAD_REQUEST, "слишком много кусков для такого размера файла");
+    }
     // пользователь узла и гость (не владелец): файлы только другим гостям и пользователям узла, не владельцу и не компьютеру;
     // у гостя, кроме того, не больше 30 МБ, 20 файлов и 300 МБ в сутки
     if crate::mobile_api::is_restricted_device(&dev) {
@@ -277,6 +287,14 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
         hex::encode(b)
     };
     let label: String = req.file_name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(64).collect();
+    // пока запрос ждал замка, отправителя или получателя могли удалить (самовыход, жалобы, уборка): осиротевшая передача
+    // осталась бы на диске (аудит R9 №21)
+    if device_peer_of(&dev).as_deref() != Some(me.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if crate::mobile_api::is_restricted_device(&dev) && !crate::mobile_api::is_restricted_peer(&req.to_peer_id) && !crate::mobile_api::is_device_peer(&req.to_peer_id) {
+        return err(StatusCode::FORBIDDEN, "получатель уже не на этом узле");
+    }
     let exp_ms = guest_exp(&me, &req.to_peer_id);
     let meta = Meta { id: id.clone(), from: me, to: req.to_peer_id, file_name: label, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false, exp_ms };
     if tokio::fs::create_dir_all(dir_of(&id)).await.is_err() || save_meta(&meta).await.is_err() {

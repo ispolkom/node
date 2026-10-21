@@ -155,18 +155,20 @@ fn owner_role() -> String {
     "owner".to_string()
 }
 
+/// Отправитель — НЕ подтверждённый владелец. Проверка отказоустойчивая: устройство, которого уже нет в реестре (удалено
+/// параллельно — самовыход, жалобы, уборка), считается ограниченным, а не владельцем (аудит R9 №1).
 fn is_user_role(peer: &str) -> bool {
-    with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.restricted_role()))
+    !with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.role == "owner"))
 }
 
-/// Отправитель — пользователь узла или гость (не владелец).
+/// Отправитель по токену — НЕ подтверждённый владелец (отказоустойчиво, как `is_user_role`).
 pub(crate) fn is_restricted_device(dev: &str) -> bool {
-    with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.restricted_role()))
+    !with_devices(|d| d.iter().any(|x| same(&x.token_hash, dev) && x.role == "owner"))
 }
 
-/// Устройство с таким номером — гость или пользователь узла (не владелец).
+/// Получатель — существующее устройство узла с ролью гостя или пользователя (положительная проверка: неизвестный — нет).
 pub(crate) fn is_restricted_peer(peer: &str) -> bool {
-    is_user_role(peer)
+    with_devices(|d| d.iter().any(|x| x.peer_id() == peer && x.restricted_role()))
 }
 
 /// Сколько гостей сейчас на узле.
@@ -183,6 +185,13 @@ pub(crate) fn test_add_device_with_role(role: &str, tag: &str) -> String {
         d.push(Device { token_hash: th.clone(), name: tag.into(), created_ms: now_ms(), acked_ts: 0, x25519_pub: None, ed25519_pub: None, key_sig: None, last_seen_ms: now_ms(), role: role.into(), invited_by: None });
     });
     th
+}
+
+/// Гость с этим номером пережил свой срок (сутки от создания).
+fn guest_expired(peer: &str) -> bool {
+    let life = crate::guest::LIFETIME.as_millis() as u64;
+    let now = now_ms();
+    with_devices(|d| d.iter().any(|x| x.role == "guest" && x.peer_id() == peer && now.saturating_sub(x.created_ms) > life))
 }
 
 /// Устройство с таким номером — гость.
@@ -960,12 +969,40 @@ pub fn remove_device(id: &str) -> bool {
         devices_apply(|d| *d = before);
         return false;
     }
+    // квоты гостя по токену не остаются в памяти после самовыхода или отзыва (аудит R9 №3)
+    for x in before.iter().filter(|x| x.peer_id() == peer) {
+        crate::guest::forget(&x.token_hash);
+    }
     after_forget(peer);
+    true
+}
+
+/// Удалить устройство, только если оно ВСЁ ЕЩЁ гость: проверка роли и удаление под одним замком реестра (аудит R9 №5 —
+/// между жалобой и удалением владелец мог принять гостя в пользователи).
+fn remove_guest_device(peer: &str) -> bool {
+    let before = with_devices(|d| d.clone());
+    let (removed, saved) = devices_apply(|d| {
+        let n = d.len();
+        d.retain(|x| !(x.peer_id() == peer && x.role == "guest"));
+        d.len() != n
+    });
+    if !removed {
+        return false;
+    }
+    if !saved {
+        devices_apply(|d| *d = before);
+        return false;
+    }
+    for x in before.iter().filter(|x| x.peer_id() == peer) {
+        crate::guest::forget(&x.token_hash);
+    }
+    after_forget(peer.to_string());
     true
 }
 
 /// Всё, что следует за удалением устройства из списка: его почта, группы и открытые сокеты (вызывается вне замка списка устройств).
 fn after_forget(peer: String) {
+    crate::guest::forget_peer(&peer);
     // отметка «последний раз на связи» удалённого устройства не остаётся в памяти
     if let Some(m) = LAST_SEEN.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
         m.remove(&peer);
@@ -2004,9 +2041,14 @@ async fn auth(mut req: Request, next: Next) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     };
     let h = token_hash(&token);
-    let Some(role) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &h)).map(|x| x.role.clone())) else {
+    let Some((role, created_ms, peer)) = with_devices(|d| d.iter().find(|x| same(&x.token_hash, &h)).map(|x| (x.role.clone(), x.created_ms, x.peer_id()))) else {
         return StatusCode::UNAUTHORIZED.into_response();
     };
+    // срок гостя (сутки от создания) соблюдается на каждом обращении, а не только таймером уборки (аудит R9 №20)
+    if role == "guest" && now_ms().saturating_sub(created_ms) > crate::guest::LIFETIME.as_millis() as u64 {
+        remove_guest_device(&peer);
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
     if role == "guest" {
         if guest_blocked(req.method(), req.uri().path()) {
             return (StatusCode::FORBIDDEN, Json(json!({"error": "гостю это недоступно: группы, выход в интернет, звонки и каталоги закрыты (сопряжение без QR)"}))).into_response();
@@ -2118,9 +2160,7 @@ async fn complaint_submit(axum::Extension(DeviceKey(dev)): axum::Extension<Devic
         Ok(id) => {
             // гость, на которого за сутки пожаловались три разных устройства, удаляется сразу (docs/ROADMAP_R9.md §2)
             if req.target_kind == "user" && is_guest_peer(&req.target_id) && crate::guest::note_complaint(&req.target_id, &me) {
-                if remove_device(&req.target_id) {
-                    crate::guest::forget_peer(&req.target_id);
-                }
+                remove_guest_device(&req.target_id);
             }
             Json(json!({"ok": true, "id": id})).into_response()
         }
@@ -2901,6 +2941,10 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         // пользователь и гость пишут ПК и устройствам узла, но не шлют P2P-сообщения от имени владельца во внешнюю сеть
                         if is_user_role(&me) && HashId(id) != st.my_id && device_by_peer(&hex::encode(id)).is_none() { continue; }
                         // гость: суточный потолок кадров переписки (сами сообщения считает приложение: 10 в сутки; кадры с квитанциями — узел)
+                        if guest_expired(&me) {
+                            remove_guest_device(&me);
+                            break;
+                        }
                         if is_guest_peer(&me) && !crate::guest::take_msg_frame(&me) {
                             let mut f = vec![FT_PEER_OFFLINE];
                             f.extend_from_slice(&id);

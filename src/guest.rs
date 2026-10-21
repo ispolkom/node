@@ -84,15 +84,32 @@ fn quotas() -> &'static Mutex<HashMap<String, Quota>> {
     Q.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Общий учёт гостевых файлов узла — отдельно от квот гостей: удаление, уход по сроку или повышение гостя не возвращает
+/// узлу уже израсходованный суточный объём (аудит R9 №4).
+fn node_ledger() -> &'static Mutex<VecDeque<(Instant, u64)>> {
+    static L: OnceLock<Mutex<VecDeque<(Instant, u64)>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
 /// Квота гостя по хэшу токена устройства; сверху — общий потолок гостевых файлов узла.
 pub fn reserve_file(token_hash: &str, size: u64) -> Result<(), &'static str> {
-    let now = Instant::now();
-    let mut g = quotas().lock().unwrap_or_else(|e| e.into_inner());
-    let total: u64 = g.values().flat_map(|q| q.sent.iter()).filter(|(t, _)| now.duration_since(*t) < DAY).map(|(_, s)| *s).sum();
+    reserve_file_at(token_hash, size, Instant::now())
+}
+
+fn reserve_file_at(token_hash: &str, size: u64, now: Instant) -> Result<(), &'static str> {
+    // порядок замков всегда: учёт узла, потом квоты гостей
+    let mut ledger = node_ledger().lock().unwrap_or_else(|e| e.into_inner());
+    while matches!(ledger.front(), Some((t, _)) if now.duration_since(*t) >= DAY) {
+        ledger.pop_front();
+    }
+    let total: u64 = ledger.iter().map(|(_, s)| *s).sum();
     if total.saturating_add(size) > MAX_GUEST_BYTES_TOTAL {
         return Err("узел занят: гостевые файлы за сутки исчерпаны, попробуйте позже");
     }
-    g.entry(token_hash.to_string()).or_default().reserve(now, size)
+    let mut g = quotas().lock().unwrap_or_else(|e| e.into_inner());
+    g.entry(token_hash.to_string()).or_default().reserve(now, size)?;
+    ledger.push_back((now, size));
+    Ok(())
 }
 
 fn msg_frames() -> &'static Mutex<HashMap<String, VecDeque<Instant>>> {
