@@ -218,14 +218,22 @@ fn read_backup_file_resolved(path: &str) -> Result<(String, Vec<u8>), String> {
     } else {
         given
     };
-    let meta = std::fs::symlink_metadata(p).map_err(|_| "Файл копии не найден".to_string())?;
+    // один дескриптор: тип и размер проверяются на открытом файле (ссылка, FIFO или подмена между проверкой и чтением не проходят), чтение ограничено
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new().read(true).custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK).open(p).map_err(|_| "Файл копии не найден".to_string())?;
+    let meta = f.metadata().map_err(|_| "Файл копии не читается".to_string())?;
     if !meta.is_file() {
         return Err("Это не файл копии".into());
     }
     if meta.len() > 64 * 1024 * 1024 {
         return Err("Файл слишком большой для копии связей".into());
     }
-    let bytes = std::fs::read(p).map_err(|_| "Файл копии не читается".to_string())?;
+    let mut bytes = Vec::new();
+    f.take(64 * 1024 * 1024 + 1).read_to_end(&mut bytes).map_err(|_| "Файл копии не читается".to_string())?;
+    if bytes.len() as u64 > 64 * 1024 * 1024 {
+        return Err("Файл слишком большой для копии связей".into());
+    }
     Ok((p.display().to_string(), bytes))
 }
 

@@ -20,6 +20,7 @@ class WizardApi extends FakeApi {
   ApiFailure? restoreFails;
   int? minPassword = 6;
   String inspectNodeId = '0123456789abcdef';
+  Completer<void>? inspectGate;
   /// Если задан — ответ предпросмотра ждёт этого сигнала (запоздалый ответ).
   Completer<void>? previewGate;
   WizardApi() {
@@ -42,6 +43,8 @@ class WizardApi extends FakeApi {
     if (path == '/api/auth/restore/inspect') {
       calls.add(path);
       bodies.add(Map.of(body!));
+      final gate = inspectGate;
+      if (gate != null) await gate.future;
       return {'counter': 3, 'node_id': inspectNodeId, 'created_ms': 1792227900000, 'file': '/home/iam/копия.yandibak', 'digest': 'dd11', 'text': 'x'};
     }
     if (path == '/api/auth/seed/preview') {
@@ -490,6 +493,29 @@ void main() {
     await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/home/iam/другая.yandibak');
     await click(t, 'Восстановить');
     expect(api.calls.contains('/api/auth/restore'), false, reason: 'путь изменён и не открыт: прежний файл не отправляется');
+    await stop(t);
+  });
+
+  testWidgets('a late answer for path A never allows path B typed meanwhile', (t) async {
+    final api = WizardApi()..inspectGate = Completer<void>();
+    await start(t, api);
+    await click(t, 'Восстановить по сид-фразе');
+    await t.enterText(find.byType(TextField).at(0), seed12);
+    await click(t, 'Проверить номер узла');
+    await t.tap(find.byKey(const ValueKey('id-matches')));
+    await t.pump();
+    await t.tap(find.byKey(const ValueKey('has-file')));
+    await t.pumpAndSettle();
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/tmp/A.yandibak');
+    await t.testTextInput.receiveAction(TextInputAction.done);
+    await t.pump();
+    await t.enterText(find.widgetWithText(TextField, 'Путь к файлу копии'), '/tmp/B.yandibak');
+    api.inspectGate!.complete();
+    await t.pumpAndSettle();
+    await t.enterText(find.widgetWithText(TextField, 'Новый пароль'), 'long password');
+    await t.enterText(find.widgetWithText(TextField, 'Повтор нового пароля'), 'long password');
+    await click(t, 'Восстановить');
+    expect(api.calls.contains('/api/auth/restore'), false, reason: 'ответ про A не даёт права восстанавливать B');
     await stop(t);
   });
 

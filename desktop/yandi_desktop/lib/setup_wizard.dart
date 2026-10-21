@@ -336,6 +336,7 @@ class _SetupWizardState extends State<SetupWizard> {
   Future<void> inspect() async {
     // каждая проверка начинается с нуля: прежняя копия больше не разрешена, пока не открыта новая; запоздалые ответы отбрасываются
     final seq = ++_inspectSeq;
+    final askedPath = path.text.trim();
     setState(() {
       backupInfo = null;
       backupFor = null;
@@ -345,8 +346,9 @@ class _SetupWizardState extends State<SetupWizard> {
       error = null;
     });
     try {
-      final r = await widget.api.request('/api/auth/restore/inspect', body: {'path': path.text.trim()});
-      if (!mounted || seq != _inspectSeq) return;
+      final r = await widget.api.request('/api/auth/restore/inspect', body: {'path': askedPath});
+      // путь в поле изменили, пока шёл запрос: ответ относится к другому пути и разрешения не даёт
+      if (!mounted || seq != _inspectSeq || askedPath != path.text.trim()) return;
       final id = '${r['node_id'] ?? ''}';
       final ms = (r['created_ms'] is num) ? (r['created_ms'] as num).toInt() : 0;
       final t = DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true);
@@ -356,7 +358,7 @@ class _SetupWizardState extends State<SetupWizard> {
         resolvedFile = r['file'] is String ? r['file'] as String : path.text.trim();
         resolvedDigest = '${r['digest'] ?? ''}';
         resolvedNode = id;
-        backupFor = path.text.trim();
+        backupFor = askedPath;
         backupInfo = 'Копия №${r['counter']} от $when; узел $id';
         _checkBackupOwner();
       });
