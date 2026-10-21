@@ -30,6 +30,7 @@ bad=[]
 if not L.get("signature"): bad.append("в bootstrap/bootstrap.json нет подписи")
 if L.get("signer","").lower()!=pub: bad.append("signer списка %s… не равен bootstrap/signer.pub %s…"%(L.get("signer","")[:8],pub[:8]))
 if pub not in dart.lower(): bad.append("ключ из signer.pub не закреплён в bootstrap_list.dart")
+if pub not in open("desktop/yandi_desktop/lib/guest/guest_bootstrap.dart",encoding="utf-8").read().lower(): bad.append("ключ из signer.pub не закреплён в desktop/yandi_desktop/lib/guest/guest_bootstrap.dart")
 if open("mobile/yandi_mobile/assets/bootstrap.json",encoding="utf-8").read()!=open("bootstrap/bootstrap.json",encoding="utf-8").read(): bad.append("mobile/yandi_mobile/assets/bootstrap.json не совпадает с bootstrap/bootstrap.json")
 if open("desktop/yandi_desktop/assets/bootstrap.json",encoding="utf-8").read()!=open("bootstrap/bootstrap.json",encoding="utf-8").read(): bad.append("desktop/yandi_desktop/assets/bootstrap.json не совпадает с bootstrap/bootstrap.json")
 for b in bad: print("ОШИБКА:",b)
