@@ -1691,8 +1691,19 @@ class AppState extends ChangeNotifier implements FilesHost {
     return null;
   }
 
+  /// Сколько сообщений гость ещё может отправить за скользящие сутки (docs/ROADMAP_R9.md §2); не гость — без лимита (-1).
+  /// Узел дополнительно держит свой потолок кадров (`guest::MAX_MSG_FRAMES_PER_DAY`).
+  static const guestMessagesPerDay = 10;
+  int get guestMessagesLeft {
+    if (!isGuest) return -1;
+    final since = DateTime.now().subtract(const Duration(hours: 24));
+    final used = _chats.values.expand((l) => l).where((m) => m.outgoing && m.timestamp.isAfter(since)).length;
+    return (guestMessagesPerDay - used).clamp(0, guestMessagesPerDay);
+  }
+
   Future<void> sendMessage(String peerId, String text, {ChatMessage? replyTo}) async {
     if (isBlocked(peerId)) return;   // двусторонний блок: заблокированному не отправляем
+    if (guestMessagesLeft == 0) return; // гость исчерпал сообщения на сутки: экран чата показывает причину
     final id = ChatMessage.generateId();
     // Всегда конверт с id: получатель по нему отвечает «доставлено/прочитано». Раньше обёртка зависела от того, успел ли собеседник ответить
     // на пинг поддержки в этом сеансе: после запуска приложения это знание пусто, и всё отправленное в это окно уходило без номера — без галочек.

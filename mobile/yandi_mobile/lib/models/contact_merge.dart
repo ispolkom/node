@@ -14,9 +14,12 @@ List<Contact> mergeContacts({
   }
   for (final u in catalog) {
     final id = u['peer_id'] as String? ?? '';
-    if (id.isEmpty || u['is_node'] == true) continue;
+    if (id.isEmpty) continue;
+    // ПК узла — участник (docs/ROADMAP_R9.md §1): у владельца он уже пришёл из контактов, у пользователя и гостя — из каталога
+    final isNode = u['is_node'] == true;
+    if (isNode && byId.containsKey(id)) continue;
     final nick = (u['nick'] as String? ?? '').trim();
-    final name = nick.isNotEmpty ? nick : (u['name'] as String? ?? (id.length >= 12 ? id.substring(0, 12) : id));
+    final name = isNode ? '💻 Компьютер' : nick.isNotEmpty ? nick : (u['name'] as String? ?? (id.length >= 12 ? id.substring(0, 12) : id));
     final fresh = Contact(
       peerId: id,
       displayName: name,

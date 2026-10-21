@@ -9,7 +9,7 @@
 //! файле устройств), поэтому они переживают перезапуск узла.
 //!
 //! Между телефоном и узлом шифрует TLS; между узлами — обычное сквозное шифрование чата. Своего слоя шифрования от телефона до
-//! собеседника здесь пока нет: ключей `/mobile/pubkey` узел не выдаёт, приложение шлёт обычный текст внутри TLS.
+//! собеседника — E2E устройств: ключ компьютера как собеседника отдаёт `/mobile/pubkey/<номер узла>` любой роли (R9).
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -1418,15 +1418,20 @@ fn sweep_mail() {
 /// Дешёвая часть (без почты и диска): её можно вызывать с публичной ручки; полную уборку делает таймер.
 pub(crate) fn purge_idle_guests_cheap() -> usize {
     let limit = crate::guest::IDLE.as_millis() as u64;
+    let life = crate::guest::LIFETIME.as_millis() as u64;
     let now = now_ms();
     let mut gone: Vec<Device> = Vec::new();
     with_devices(|d| {
-        let (stale, keep): (Vec<Device>, Vec<Device>) = std::mem::take(d).into_iter().partition(|x| x.role == "guest" && now.saturating_sub(x.last_activity_ms()) > limit);
+        // гость уходит после суток молчания ИЛИ через сутки от создания, даже активный (docs/ROADMAP_R9.md §2)
+        let (stale, keep): (Vec<Device>, Vec<Device>) = std::mem::take(d)
+            .into_iter()
+            .partition(|x| x.role == "guest" && (now.saturating_sub(x.last_activity_ms()) > limit || now.saturating_sub(x.created_ms) > life));
         *d = keep;
         gone = stale;
     });
     for g in &gone {
         crate::guest::forget(&g.token_hash);
+        crate::guest::forget_peer(&g.peer_id());
         crate::invite::registry().lock().unwrap_or_else(|e| e.into_inner()).revoke(&g.peer_id(), None);
         let peer = g.peer_id();
         after_forget(peer);
@@ -2110,7 +2115,15 @@ async fn complaint_submit(axum::Extension(DeviceKey(dev)): axum::Extension<Devic
         String::new()
     };
     match crate::complaints::submit(&me, &req.target_kind, &req.target_id, &name, &req.reason, &req.text, &req.evidence) {
-        Ok(id) => Json(json!({"ok": true, "id": id})).into_response(),
+        Ok(id) => {
+            // гость, на которого за сутки пожаловались три разных устройства, удаляется сразу (docs/ROADMAP_R9.md §2)
+            if req.target_kind == "user" && is_guest_peer(&req.target_id) && crate::guest::note_complaint(&req.target_id, &me) {
+                if remove_device(&req.target_id) {
+                    crate::guest::forget_peer(&req.target_id);
+                }
+            }
+            Json(json!({"ok": true, "id": id})).into_response()
+        }
         Err((c, m)) => (c, Json(json!({"error": m}))).into_response(),
     }
 }
@@ -2216,9 +2229,9 @@ fn users_for(dev: &str, node_hex: &str) -> Vec<serde_json::Value> {
         // Скрытый профиль скрывает только ник и картинку (остаётся имя устройства); роль нужна, чтобы разделить «гостей» и «пользователей».
         out.push(json!({"peer_id": pid, "name": d.name, "nick": nick, "avatar_hash": hash, "role": d.role, "online": live_count(&pid) > 0, "last_activity_ms": d.last_activity_ms()}));
     }
-    if !guest {
-        out.push(json!({"peer_id": node_hex, "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
-    }
+    // ПК — участник узла: его видят все роли, включая гостей (docs/ROADMAP_R9.md §1)
+    let _ = guest;
+    out.push(json!({"peer_id": node_hex, "name": "Компьютер", "nick": "", "avatar_hash": "", "online": true, "is_node": true}));
     out
 }
 
@@ -2521,12 +2534,9 @@ async fn pubkey(
     Path(peer): Path<String>,
 ) -> Response {
     if peer == hex::encode(st.my_id.0) {
-        // собеседником «сам компьютер» бывает только владелец: пользователю узла переписка с ПК закрыта
-        let user = with_devices(|d| d.iter().any(|x| same(&x.token_hash, &dev) && x.restricted_role()));
-        if user {
-            return StatusCode::NOT_FOUND.into_response();
-        }
-        // сам компьютер как собеседник телефона (переписка с веб-чатом узла)
+        // сам компьютер как собеседник телефона (переписка с веб-чатом узла): ПК — участник, ему пишут владелец, пользователи
+        // и гости (docs/ROADMAP_R9.md §1); связка публичная. Чужую переписку владельца это не открывает: /mobile/chat/* закрыт.
+        let _ = &dev;
         return Json(crate::mobile_self::bundle_json()).into_response();
     }
     match device_by_peer(&peer).and_then(|d| match (d.x25519_pub, d.ed25519_pub, d.key_sig) {
@@ -2830,15 +2840,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
                         let to = hex::encode(id);
-                        // гость пока не звонит на компьютер владельца (звонков на ПК нет): сообщаем «не на связи», чтобы телефон не висел
-                        if is_guest_peer(&me) && HashId(id) == st.my_id {
-                            let mut f = vec![FT_PEER_OFFLINE];
-                            f.extend_from_slice(&id);
-                            if sock.send(Message::Binary(f)).await.is_err() { break; }
-                            continue;
-                        }
                         if HashId(id) == st.my_id {
-                            if is_user_role(&me) || crate::mobile_self::is_blocked_phone(&me) {
+                            // ПК — участник: сигналы ему шлют все роли (звонок гостя — только аудио, срок держит доступ к серверу звонков)
+                            if crate::mobile_self::is_blocked_phone(&me) {
                                 continue; // заблокированное устройство: и звонки, и сигналы компьютеру не доходят
                             }
                             // самому компьютеру: пинг поддержки квитанций — ответить; звонков на компьютер пока нет — «не на связи»
@@ -2879,8 +2883,15 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         id.copy_from_slice(&d[1..33]);
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_TEXT + 256 || d.len() < 37 + len { continue; }
-                        // посторонний пользователь узла не пишет от имени ПК и не шлёт P2P-сообщения владельца
-                        if is_user_role(&me) && (HashId(id) == st.my_id || device_by_peer(&hex::encode(id)).is_none()) { continue; }
+                        // пользователь и гость пишут ПК и устройствам узла, но не шлют P2P-сообщения от имени владельца во внешнюю сеть
+                        if is_user_role(&me) && HashId(id) != st.my_id && device_by_peer(&hex::encode(id)).is_none() { continue; }
+                        // гость: суточный потолок кадров переписки (сами сообщения считает приложение: 10 в сутки; кадры с квитанциями — узел)
+                        if is_guest_peer(&me) && !crate::guest::take_msg_frame(&me) {
+                            let mut f = vec![FT_PEER_OFFLINE];
+                            f.extend_from_slice(&id);
+                            if sock.send(Message::Binary(f)).await.is_err() { break; }
+                            continue;
+                        }
                         if HashId(id) == st.my_id {
                             // закрытая среда заперта (после перезапуска): сообщение не принимаем и не теряем молча, телефон видит «не доставлено»
                             #[cfg(unix)]

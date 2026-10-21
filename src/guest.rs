@@ -21,6 +21,17 @@ pub const MAX_GUESTS: usize = 64;
 pub const MAX_ISSUE_PER_MIN: usize = 12;
 /// Гость, молчащий дольше, удаляется.
 pub const IDLE: Duration = DAY;
+/// Аккаунт гостя живёт столько от создания, затем удаляется, даже если активен (docs/ROADMAP_R9.md §2).
+pub const LIFETIME: Duration = DAY;
+/// Сообщений гостя в сутки: считает приложение (текст зашифрован, узел не отличает сообщение от квитанции).
+pub const MAX_MESSAGES_PER_DAY: usize = 10;
+/// Потолок, который держит узел: кадров переписки гостя за скользящие сутки (сообщения + квитанции + правки).
+/// Модифицированное приложение обойдёт счёт сообщений, но не этот потолок.
+pub const MAX_MSG_FRAMES_PER_DAY: usize = 60;
+/// Сумма гостевых файлов на весь узел за скользящие сутки: сверх — «узел занят», чтобы гости не забили диск.
+pub const MAX_GUEST_BYTES_TOTAL: u64 = 2 << 30;
+/// Жалоб от разных устройств за сутки, после которых гость удаляется.
+pub const COMPLAINTS_TO_REMOVE: usize = 3;
 
 fn path() -> std::path::PathBuf {
     crate::util::data_dir::data_dir().join("guest_pairing.json")
@@ -73,10 +84,68 @@ fn quotas() -> &'static Mutex<HashMap<String, Quota>> {
     Q.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-/// Квота гостя по хэшу токена устройства.
+/// Квота гостя по хэшу токена устройства; сверху — общий потолок гостевых файлов узла.
 pub fn reserve_file(token_hash: &str, size: u64) -> Result<(), &'static str> {
+    let now = Instant::now();
     let mut g = quotas().lock().unwrap_or_else(|e| e.into_inner());
-    g.entry(token_hash.to_string()).or_default().reserve(Instant::now(), size)
+    let total: u64 = g.values().flat_map(|q| q.sent.iter()).filter(|(t, _)| now.duration_since(*t) < DAY).map(|(_, s)| *s).sum();
+    if total.saturating_add(size) > MAX_GUEST_BYTES_TOTAL {
+        return Err("узел занят: гостевые файлы за сутки исчерпаны, попробуйте позже");
+    }
+    g.entry(token_hash.to_string()).or_default().reserve(now, size)
+}
+
+fn msg_frames() -> &'static Mutex<HashMap<String, VecDeque<Instant>>> {
+    static M: OnceLock<Mutex<HashMap<String, VecDeque<Instant>>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Занять гостю один кадр переписки (по номеру устройства). false — суточный потолок исчерпан.
+pub fn take_msg_frame(peer: &str) -> bool {
+    take_msg_frame_at(peer, Instant::now())
+}
+
+fn take_msg_frame_at(peer: &str, now: Instant) -> bool {
+    let mut g = msg_frames().lock().unwrap_or_else(|e| e.into_inner());
+    let q = g.entry(peer.to_string()).or_default();
+    while matches!(q.front(), Some(t) if now.duration_since(*t) >= DAY) {
+        q.pop_front();
+    }
+    if q.len() >= MAX_MSG_FRAMES_PER_DAY {
+        return false;
+    }
+    q.push_back(now);
+    true
+}
+
+fn complaints() -> &'static Mutex<HashMap<String, Vec<(Instant, String)>>> {
+    static C: OnceLock<Mutex<HashMap<String, Vec<(Instant, String)>>>> = OnceLock::new();
+    C.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Учесть жалобу `reporter` на гостя `target` (номера устройств). true — набралось `COMPLAINTS_TO_REMOVE` жалоб от разных
+/// устройств за сутки: гостя пора удалить. Повторная жалоба того же устройства не считается.
+pub fn note_complaint(target: &str, reporter: &str) -> bool {
+    note_complaint_at(target, reporter, Instant::now())
+}
+
+fn note_complaint_at(target: &str, reporter: &str, now: Instant) -> bool {
+    if target == reporter {
+        return false;
+    }
+    let mut g = complaints().lock().unwrap_or_else(|e| e.into_inner());
+    let l = g.entry(target.to_string()).or_default();
+    l.retain(|(t, _)| now.duration_since(*t) < DAY);
+    if !l.iter().any(|(_, r)| r == reporter) {
+        l.push((now, reporter.to_string()));
+    }
+    l.len() >= COMPLAINTS_TO_REMOVE
+}
+
+/// Забыть счётчики гостя по номеру устройства (кадры переписки, жалобы на него).
+pub fn forget_peer(peer: &str) {
+    msg_frames().lock().unwrap_or_else(|e| e.into_inner()).remove(peer);
+    complaints().lock().unwrap_or_else(|e| e.into_inner()).remove(peer);
 }
 
 /// Забыть квоту гостя (гость удалён).

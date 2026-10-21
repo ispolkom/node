@@ -301,6 +301,10 @@ class _ChatScreenState extends State<ChatScreen> {
     }
     final quote = _replyTo;
     setState(() => _replyTo = null);
+    if (context.read<AppState>().guestMessagesLeft == 0) {
+      _snack(trf('Гостю доступно {n} сообщений в сутки. Лимит исчерпан — попробуйте позже или запросите статус пользователя.', {'n': '${AppState.guestMessagesPerDay}'}));
+      return;
+    }
     context.read<AppState>().sendMessage(widget.peerId, text, replyTo: quote);
     WidgetsBinding.instance.addPostFrameCallback((_) => _scrollToBottom());
   }
