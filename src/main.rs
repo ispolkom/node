@@ -108,7 +108,15 @@ async fn main() -> anyhow::Result<()> {
     let ip_service = ExternalIpService::new();
     // страна по внешнему адресу — для карточки узла в сети (город и провайдер никуда не публикуются)
     let mut ip_country: Option<String> = None;
-    let external_ip = match ip_service.get_external_ip().await {
+    // автономный узел не спрашивает внешние сервисы (ipify/ipinfo видели бы его IP и время работы): адрес — только из
+    // настроек `network.public_ip` (аудит R9 №14)
+    let autonomous_ip = if yandi::autonomy::enabled() { Some(config.network.public_ip.clone()) } else { None };
+    let lookup = match autonomous_ip.clone() {
+        Some(ip) => ip.ok_or(anyhow!("адрес не задан в настройках")),
+        None => ip_service.get_external_ip().await.map_err(|e| anyhow!("{e}")),
+    };
+    let external_ip = match lookup {
+        Ok(ip) if autonomous_ip.is_some() => Some(ip),
         Ok(ip) => {
             yandi::ip_history::observe(&ip);
             match ip_service.get_detailed_ip_info().await {
@@ -129,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 3a. Detect external IPv6 (if available)
-    let external_ipv6 = match ip_service.get_external_ipv6().await {
+    let external_ipv6 = match if autonomous_ip.is_some() { Err(anyhow!("автономный узел")) } else { ip_service.get_external_ipv6().await.map_err(|e| anyhow!("{e}")) } {
         Ok(ip) => {
             Some(ip)
         }
@@ -803,7 +811,9 @@ async fn main() -> anyhow::Result<()> {
             if !yandi::autonomy::enabled() {
                 yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
             } else {
-                let _ = (key, a, watch_ip, on_change);
+                // меш: только слушатель запасного пути по TCP/TLS (пробы чужим он не подтверждает)
+                yandi::network_offers::start_listener(&a, identity.node_id().0, &key);
+                let _ = (watch_ip, on_change);
             }
             yandi::reciprocity::start();
         }

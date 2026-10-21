@@ -259,8 +259,18 @@ fn edit_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// Применить список к работающему узлу: закреплённые ключи на уровне связи и список для политики выхода.
-async fn apply_live(dir: &PeerDirectory, _removed: Option<[u8; 32]>) {
+async fn apply_live(dir: &PeerDirectory, removed: Option<[u8; 32]>) {
     crate::exit_policy::set_trusted(dir.decoded().into_iter().map(|(id, _, _)| id.0));
+    // автономный узел: убранный из меша узел теряет и уже открытые сеансы, не только будущие приветствия
+    if let (Some(raw), true) = (removed, crate::autonomy::enabled()) {
+        let id = HashId(raw);
+        if let Some(t) = transport_cell().get() {
+            t.forget_peer(&id).await;
+        }
+        if let Some(p) = p2p_cell().get() {
+            p.forget_peer(&id).await;
+        }
+    }
     let Some(transport) = transport_cell().get() else { return };
     let pins: std::collections::HashMap<_, _> = dir.decoded().into_iter().map(|(id, pubkey, _)| (id, pubkey)).collect();
     transport.set_pinned_identities(pins).await;

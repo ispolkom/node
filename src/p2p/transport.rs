@@ -545,6 +545,11 @@ impl P2PTransport {
     }
 
     /// Snapshot of known P2P peers.
+    /// Забыть пира: без записи его пакеты данных не сопоставляются отправителю и отбрасываются (аудит R9 №11).
+    pub async fn forget_peer(&self, id: &HashId) {
+        self.peers.lock().await.remove(id);
+    }
+
     pub async fn list_peers(&self) -> Vec<P2PPeer> {
         let peers = self.peers.lock().await;
         peers.values().cloned().collect()

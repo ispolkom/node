@@ -75,6 +75,10 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
                     return;
                 }
             }
+            // автономный узел пробы чужих не подтверждает (молчит), запасной путь меша по TLS выше работает (аудит R9 №13)
+            if crate::autonomy::enabled() {
+                return;
+            }
             let work = async {
                 let mut req = [0u8; 20];
                 s.read_exact(&mut req).await.ok()?;

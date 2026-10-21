@@ -1376,6 +1376,10 @@ impl P2PTransport {
             interval.tick().await; // skip первый tick (только что определили на старте)
             loop {
                 interval.tick().await;
+                // автономный узел внешние сервисы IP не спрашивает (аудит R9 №14)
+                if crate::autonomy::enabled() {
+                    continue;
+                }
                 match svc.get_external_ip().await {
                     Ok(new_ip) => {
                         crate::ip_history::observe(&new_ip);
@@ -5396,6 +5400,11 @@ impl P2PTransport {
         self.admission.lock().await.allowed_total()
     }
 
+    /// Забыть пира: снять из таблицы, его пакеты больше не обрабатываются (отзыв доверия в меше, аудит R9 №11).
+    pub async fn forget_peer(&self, id: &HashId) {
+        self.peers.lock().await.remove(id);
+    }
+
     pub async fn get_peers(&self) -> Vec<PeerInfo> {
         let peers = self.peers.lock().await;
         let now = std::time::SystemTime::now()
@@ -5434,6 +5443,10 @@ impl P2PTransport {
         plaintext: &[u8],
         source: WagonSource,
     ) -> bool {
+        // автономный узел: трафик уже установленного сеанса узла, которого владелец убрал из меша, не обрабатывается
+        if !crate::autonomy::admits(&sender) {
+            return false;
+        }
         if plaintext.is_empty() {
             return false;
         }

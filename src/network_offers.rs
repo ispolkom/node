@@ -407,6 +407,10 @@ fn rate_ok(sender: &[u8; 32], now: u64) -> bool {
 
 /// Принять пакет обмена от соседа (из общей раздачи пакетов основной связи).
 pub fn on_packet(sender: &[u8; 32], plaintext: &[u8]) -> usize {
+    // автономный узел карточек не принимает: иначе участник меша вывел бы его на пробы к узлам общей сети (аудит R9 №10)
+    if crate::autonomy::enabled() {
+        return 0;
+    }
     let now = now_secs();
     if !rate_ok(sender, now) {
         return 0;
@@ -528,6 +532,14 @@ pub fn start(
         println!("[offers] карточка узла: страна {} ({}), публичный адрес {}, мощность {}, выход {}",
             o.country.as_deref().unwrap_or("неизвестна"), o.country_source, if o.public_ip { "есть" } else { "нет" }, o.power, if o.exit { "да" } else { "нет" });
     }
+    start_listener(&a, node_id, &key);
+    let a = std::sync::Arc::new(Mutex::new(a));
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    run_loops(transport, node_id, key, a, wake, watch_ip, on_address_change);
+}
+
+/// Слушатель на TCP-порту основной связи: пробы (только в общей сети) и запасной путь по TCP/TLS (в обоих мирах — меш тоже).
+pub fn start_listener(a: &SelfAssessment, node_id: [u8; 32], key: &SigningKey) {
     // слушатель проб: на TCP-порту основной связи (порты TCP и UDP независимы)
     // порт TCP — номер порта обнаружения (по нему же слушает запасной путь по TCP, даже если внешний адрес ещё не известен)
     let port = a.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port()).or_else(|| Some(crate::core::get_config().ports.discovery));
@@ -535,8 +547,18 @@ pub fn start(
         let key = key.clone();
         crate::supervisor::supervise("reachability_listener", crate::supervisor::Policy::restart(), move || crate::reachability::serve(port, node_id, key.clone(), None));
     }
-    let a = std::sync::Arc::new(Mutex::new(a));
-    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+}
+
+/// Циклы карточки: слежение за адресом, переподпись, раздача и пробы — только узлу общей сети.
+fn run_loops(
+    transport: std::sync::Arc<crate::netlayer::transport::P2PTransport>,
+    node_id: [u8; 32],
+    key: SigningKey,
+    a: std::sync::Arc<Mutex<SelfAssessment>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    watch_ip: bool,
+    on_address_change: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+) {
     if watch_ip {
         let (a, wake) = (a.clone(), wake.clone());
         crate::supervisor::supervise("ip_watch", crate::supervisor::Policy::restart(), move || {
