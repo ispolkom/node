@@ -258,6 +258,20 @@ class ApiService {
     }).toList();
   }
 
+  /// Устройства, убранные с узла: `{items:[{n, peer, ts}], cursor}` по возрастанию n после `after`; null — запрос не удался.
+  Future<Map<String, dynamic>?> getForgotten(int after) async {
+    try {
+      final res = await _client
+          .get(_url('/mobile/forgotten?after=$after'), headers: _headers)
+          .timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final j = jsonDecode(res.body);
+      return j is Map<String, dynamic> ? j : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
   Future<List<ChatMessage>> getHistory(String peerId, String myPeerId,
       {int limit = 50}) async {
     try {

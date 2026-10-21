@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../models/contact.dart';
+import '../models/tombstone.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
 import 'avatar_circle.dart';
@@ -28,7 +29,7 @@ class IntroRequests extends StatelessWidget {
 
   Widget _card(BuildContext context, AppState state, Contact c) {
     final msgs = state.messagesFor(c.peerId).where((m) => !m.outgoing).toList();
-    final preview = msgs.isEmpty ? '' : msgs.last.text.replaceAll(RegExp(r'\s+'), ' ');
+    final preview = msgs.isEmpty ? '' : Tombstone.shown(msgs.last.text).replaceAll(RegExp(r'\s+'), ' ');
     return Card(
       color: AppTheme.bg,
       margin: const EdgeInsets.only(bottom: 8),

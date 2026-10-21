@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'platform_files.dart';
 import 'translations.dart';
+import 'tombstone.dart';
 
 /// Session-only preferences and bounded message baseline. No localStorage/files.
 class AppPreferences extends ChangeNotifier {
@@ -57,6 +58,7 @@ class AppPreferences extends ChangeNotifier {
         messages.any(
           (m) =>
               m['from'] != own &&
+              !isTombstone(m['text']) &&
               m['timestamp'] is num &&
               (m['timestamp'] as num) >= cutoff &&
               m['msg_id'] is String &&

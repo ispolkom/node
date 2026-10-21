@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/trusted_node.dart';
 import '../models/message.dart';
+import '../models/tombstone.dart';
 import '../crypto/replay_ledger.dart';
 
 /// Единое хранилище приложения.
@@ -661,7 +662,7 @@ class StorageService {
 
   /// Правка входящего сообщения собеседником прямо в базе (история чата может быть не загружена): возвращает локальный id или null.
   static Future<String?> applyIncomingEdit(String peerId, String remoteId, String text) async {
-    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ?', whereArgs: [peerId, remoteId], limit: 1);
+    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ? AND text != ?', whereArgs: [peerId, remoteId, Tombstone.marker], limit: 1);   // надгробие правкой не оживает
     if (rows.isEmpty) return null;
     final id = '${rows.first['id']}';
     await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
@@ -696,6 +697,38 @@ class StorageService {
     if (ids.isEmpty) return;
     final q = List.filled(ids.length, '?').join(',');
     await db.delete('messages', where: 'id IN ($q)', whereArgs: ids);
+  }
+
+  /// Устройство собеседника убрано с узла: все его входящие сообщения становятся надгробием (время и remote_id остаются: уникальный индекс
+  /// ux_msg_in не даёт сообщению вернуться повторной доставкой), а цитаты их в наших ответах — меткой. Возвращает локальные номера
+  /// входящих (для чистки смайлов и пометок «изменено») и номера наших исходящих в этом чате (на них стёрт смайл собеседника).
+  static Future<({List<String> incoming, List<String> outgoing})> tombstonePeer(String peerId) async {
+    return await db.transaction((txn) async {
+      final inc = await txn.query('messages', columns: ['id', 'remote_id', 'text'], where: 'peer_id = ? AND outgoing = 0', whereArgs: [peerId]);
+      final out = await txn.query('messages', columns: ['id', 'reply_id', 'reply_text'], where: 'peer_id = ? AND outgoing = 1', whereArgs: [peerId]);
+      final remoteIds = {for (final r in inc) if (r['remote_id'] != null) '${r['remote_id']}'};
+      // цитата без номера (узел называет сообщения телефона своими номерами): сверяем по выдержке текста, как findReplyTarget
+      final texts = [for (final r in inc) if (r['text'] != Tombstone.marker) '${r['text']}'];
+      for (final r in out) {
+        final rt = r['reply_text'] as String?;
+        if (rt == null || rt == Tombstone.marker) continue;
+        final rid = (r['reply_id'] as String?) ?? '';
+        final quoted = rid.isNotEmpty ? remoteIds.contains(rid) : texts.any((t) => t.startsWith(rt));
+        if (quoted) await txn.update('messages', {'reply_text': Tombstone.marker}, where: 'id = ?', whereArgs: [r['id']]);
+      }
+      await txn.update('messages', {'text': Tombstone.marker, 'reply_id': null, 'reply_text': null}, where: 'peer_id = ? AND outgoing = 0', whereArgs: [peerId]);
+      return (incoming: [for (final r in inc) '${r['id']}'], outgoing: [for (final r in out) '${r['id']}']);
+    });
+  }
+
+  /// Срок жизни сообщения — 365 суток с отправки (чаты и группы). Удаляет из базы всё, что отправлено раньше `cutoffMs`, и возвращает
+  /// локальные номера удалённых личных сообщений: смайлы и пометки «изменено» в памяти приложения чистит вызывающий (иначе его следующая
+  /// запись перезатрёт чистку). Файлы (хранилище, файлы групп) и их сроки не трогаются.
+  static Future<List<String>> pruneOlderThan(int cutoffMs) async {
+    final ids = [for (final r in await db.query('messages', columns: ['id'], where: 'timestamp < ?', whereArgs: [cutoffMs])) '${r['id']}'];
+    await db.delete('messages', where: 'timestamp < ?', whereArgs: [cutoffMs]);
+    await db.delete('group_entries', where: 'ts < ?', whereArgs: [cutoffMs]);
+    return ids;
   }
 
   /// Очистить всю переписку с собеседником (локально).

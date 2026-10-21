@@ -5,6 +5,7 @@ import 'dart:math';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:cryptography/cryptography.dart';
+import '../tombstone.dart';
 import 'guest_bootstrap.dart';
 
 // Самостоятельный гостевой клиент оболочки ПК: тот же обмен с узлом, что у телефона (mobile/yandi_mobile), без узла на этом ПК.
@@ -25,6 +26,8 @@ const int ftPong = 0x02;
 const int ftChatMsg = 0x10;
 const int ftPeerStatus = 0x12;
 const int ftPeerOffline = 0x14;
+/// Намёк «устройства убраны с узла»: `[0x17][8 номер LE]`; сам список — `GET /mobile/forgotten` (как на телефоне).
+const int ftForgotten = 0x17;
 const int ftSendMsg = 0x30;
 
 /// Сколько сообщений гость отправляет за скользящие сутки (как `AppState.guestMessagesPerDay` на телефоне).
@@ -333,7 +336,9 @@ class PairCode {
 
 /// Одно сообщение чата: входящее или исходящее. [status]: failed, pending, delivered, read.
 class GuestMessage {
-  final String id, peerId, text;
+  final String id, peerId;
+  /// Меняется один раз: сообщение собеседника, чьё устройство убрано с узла, становится надгробием ([tombstoneMarker]).
+  String text;
   final bool outgoing;
   final DateTime time;
   String status;
@@ -597,6 +602,7 @@ class GuestClient {
   final _offlineCtrl = StreamController<String>.broadcast();
   final _securityCtrl = StreamController<String>.broadcast();
   final _connCtrl = StreamController<bool>.broadcast();
+  final _forgottenCtrl = StreamController<void>.broadcast();
 
   /// Входящие сообщения (уже расшифрованные, без служебных конвертов).
   Stream<GuestMessage> get messages => _msgCtrl.stream;
@@ -605,6 +611,8 @@ class GuestClient {
   Stream<(String, bool)> get peerStatus => _statusCtrl.stream;
   /// Номер устройства, которому не доставлено: его нет на связи.
   Stream<String> get peerOffline => _offlineCtrl.stream;
+  /// Сообщения собеседников, убранных с узла, стали надгробиями: экрану перерисоваться.
+  Stream<void> get forgotten => _forgottenCtrl.stream;
   Stream<String> get securityErrors => _securityCtrl.stream;
   Stream<bool> get connection => _connCtrl.stream;
 
@@ -640,6 +648,54 @@ class GuestClient {
     final ids = [for (final m in _store[peer] ?? const <GuestMessage>[]) if (!m.outgoing && _readSent.add(m.id)) m.id];
     if (ids.length > 200) ids.removeRange(200, ids.length);
     if (ids.isNotEmpty) unawaited(sendReceipt(peer, 'read', ids));
+  }
+
+  // ── устройства, убранные с узла: их сообщения — надгробия (только в памяти, как и вся переписка гостя) ──
+
+  int _forgottenCursor = 0;
+  bool _forgottenBusy = false, _forgottenAgain = false;
+
+  /// Забрать `GET /mobile/forgotten?after=курсор` и превратить входящие от этих устройств в надгробия. Зовётся при открытии сокета и по кадру 0x17;
+  /// параллельные вызовы сливаются в повторный проход.
+  Future<void> syncForgotten() async {
+    if (_closed) return;
+    if (_forgottenBusy) { _forgottenAgain = true; return; }
+    _forgottenBusy = true;
+    try {
+      do {
+        _forgottenAgain = false;
+        for (var page = 0; page < 50 && !_closed; page++) {
+          final (c, b) = await _json('GET', '/mobile/forgotten', query: {'after': '$_forgottenCursor'}, timeout: const Duration(seconds: 10));
+          if (c != 200 || b is! Map) break;
+          final items = b['items'] is List ? (b['items'] as List) : const [];
+          var next = _forgottenCursor;
+          for (final it in items) {
+            if (it is! Map) continue;
+            final n = it['n'], peer = it['peer'];
+            if (n is! num) continue;
+            if (peer is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(peer)) _forgetPeer(peer);
+            if (n.toInt() > next) next = n.toInt();
+          }
+          final cur = b['cursor'];
+          if (cur is num && cur.toInt() > next) next = cur.toInt();
+          if (next <= _forgottenCursor) break;
+          _forgottenCursor = next;
+          if (items.isEmpty) break;
+        }
+      } while (_forgottenAgain && !_closed);
+    } catch (_) {
+      // курсор не сдвинут: следующий проход повторит
+    } finally {
+      _forgottenBusy = false;
+    }
+  }
+
+  void _forgetPeer(String peer) {
+    for (final m in _store[peer] ?? const <GuestMessage>[]) {
+      if (!m.outgoing) m.text = tombstoneMarker;
+    }
+    _unread.remove(peer);
+    if (!_forgottenCtrl.isClosed) _forgottenCtrl.add(null);
   }
 
   void _applyReceipt(String kind, List<String> ids) {
@@ -773,6 +829,7 @@ class GuestClient {
       _ping = Timer.periodic(const Duration(seconds: 30), (_) => _rawSend(Uint8List.fromList([ftPing])));
       ws.listen(_onData, onError: (_) => _lost(ws), onDone: () => _lost(ws), cancelOnError: true);
       unawaited(syncInbox());
+      unawaited(syncForgotten());
     } catch (_) {
       _scheduleReconnect();
     }
@@ -813,6 +870,8 @@ class GuestClient {
         if (d.length >= 34) _statusCtrl.add((toHex(d.sublist(1, 33)), d[33] != 0));
       case ftPeerOffline:
         if (d.length >= 33) _offlineCtrl.add(toHex(d.sublist(1, 33)));
+      case ftForgotten:
+        if (d.length >= 9) unawaited(syncForgotten());   // только намёк: список забирается запросом с курсором
     }
   }
 
@@ -909,7 +968,7 @@ class GuestClient {
     } catch (_) {}
     _ws = null;
     _http.close(force: true);
-    for (final c in [_msgCtrl, _receiptCtrl, _statusCtrl, _offlineCtrl, _securityCtrl, _connCtrl]) {
+    for (final c in [_msgCtrl, _receiptCtrl, _statusCtrl, _offlineCtrl, _securityCtrl, _connCtrl, _forgottenCtrl]) {
       unawaited(c.close());
     }
   }

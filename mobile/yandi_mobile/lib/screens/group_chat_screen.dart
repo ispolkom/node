@@ -6,10 +6,12 @@ import 'package:provider/provider.dart';
 import '../crypto/file_vault.dart';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
+import '../models/tombstone.dart';
 import '../models/group_invite.dart';
 import '../services/app_state.dart';
 import '../services/group_files.dart';
 import '../services/group_service.dart';
+import '../services/group_store.dart' show isTombstoneEntry;
 import '../services/vault_service.dart';
 import 'file_viewer_screen.dart';
 import '../theme.dart';
@@ -307,19 +309,20 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
   /// удаления может «Скрыть сообщения этого пользователя»; удаляют владелец, админ и модератор — по матрице ролей.
   Future<void> _entryCommands(GroupInfo g, GroupEntry e, Offset at) async {
     final mine = e.from == g.myAlias;
-    final hasText = e.body['t'] is String;
+    final gone = isTombstoneEntry(e);   // надгробие: только выбрать/удалить; не отвечать, не копировать, не пересылать, без голосов
+    final hasText = e.body['t'] is String && !gone;
     final isFile = e.body['f'] is String;
     final role = _authorRole(g, e);
     final choice = await showMessageMenu(context, at, [
-      cmdReply,
-      if (e.body['r'] is Map) cmdThread,
+      if (!gone) cmdReply,
+      if (e.body['r'] is Map && !gone) cmdThread,
       if (hasText) cmdCopy,
       if (hasText || isFile) cmdShare,
       cmdSelect,
       if (!mine) cmdHideAuthor,
       if (_canDelete(g, e)) cmdDelete,
       if (!mine && role != null && g.canActOnRole(role) && g.canModerate) cmdMute,
-    ], reactions: mine || e.kind == GroupKind.system || !_svc!.rules(g.id).allows(GroupKind.reaction) ? const [] : [
+    ], reactions: gone || mine || e.kind == GroupKind.system || !_svc!.rules(g.id).allows(GroupKind.reaction) ? const [] : [
       MenuReaction('1', '😊', coin: true, active: _svc!.myVote(g.id, e.seq) == 1),
       MenuReaction('-1', '😢', coin: true, active: _svc!.myVote(g.id, e.seq) == -1),
     ]);
@@ -383,6 +386,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
 
   /// Переслать записи (текст и файлы, что уже лежат у меня) до 5 контактам за раз; в группу-источник не пересылаем.
   Future<void> _forwardEntries(GroupInfo g, List<GroupEntry> list) async {
+    list = [for (final e in list) if (!isTombstoneEntry(e)) e];   // надгробия не пересылаются
     if (list.isEmpty) return;
     final state = context.read<AppState>();
     final to = await pickRecipients(context,
@@ -483,7 +487,7 @@ class _GroupChatScreenState extends State<GroupChatScreen> {
                     child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                       Text('${chain[i].author}${chain[i].known ? '' : tr(' · сообщение недоступно')}',
                           style: const TextStyle(color: AppTheme.accent, fontSize: 12, fontWeight: FontWeight.bold)),
-                      Text(chain[i].text, maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
+                      Text(Tombstone.shown(chain[i].text), maxLines: 4, overflow: TextOverflow.ellipsis, style: const TextStyle(color: AppTheme.text)),
                     ]),
                   ),
                 ),
@@ -889,6 +893,8 @@ class _GroupBubble extends StatelessWidget {
                   ])),
                 ]),
               )
+            else if (isTombstoneEntry(entry))
+              Text(Tombstone.label, style: TextStyle(color: AppTheme.textSecondary, fontSize: 14, fontStyle: FontStyle.italic))
             else
               Text(text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             Row(mainAxisSize: MainAxisSize.min, mainAxisAlignment: MainAxisAlignment.end, children: [

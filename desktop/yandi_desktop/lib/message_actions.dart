@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'domain/shell_repository.dart';
 import 'preferences.dart';
 import 'theme.dart';
+import 'tombstone.dart';
 
 /// Message commands are plain words in a menu, not buttons.
 const commandEdit = 'Изменить',
@@ -100,6 +101,20 @@ class IconAction extends StatelessWidget {
   );
 }
 
+/// Подпись надгробия (курсивом, приглушённо) вместо метки удалённого вместе с пользователем сообщения.
+class TombstoneText extends StatelessWidget {
+  final double fontSize;
+  final int? maxLines;
+  const TombstoneText({super.key, this.fontSize = 14, this.maxLines});
+  @override
+  Widget build(BuildContext context) => Text(
+    tr(context, tombstoneLabel),
+    maxLines: maxLines,
+    overflow: maxLines == null ? null : TextOverflow.ellipsis,
+    style: TextStyle(fontSize: fontSize, fontStyle: FontStyle.italic, color: Icq.dark),
+  );
+}
+
 /// The quoted message above a reply, or above the composer while replying.
 class QuoteCard extends StatelessWidget {
   final String? author;
@@ -138,12 +153,15 @@ class QuoteCard extends StatelessWidget {
                       color: Icq.header,
                     ),
                   ),
-                Text(
-                  text,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(fontSize: 12, color: Icq.text),
-                ),
+                if (isTombstone(text))
+                  const TombstoneText(fontSize: 12, maxLines: 2)
+                else
+                  Text(
+                    text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 12, color: Icq.text),
+                  ),
               ],
             ),
           ),

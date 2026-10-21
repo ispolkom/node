@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../theme.dart';
 import '../l10n.dart';
+import '../models/tombstone.dart';
 
 /// Команды сообщения — слова в меню, а не кнопки.
 const cmdEdit = 'Изменить',
@@ -148,10 +149,12 @@ class QuoteBox extends StatelessWidget {
                     ),
                   ),
                 Text(
-                  text,
+                  Tombstone.shown(text),
                   maxLines: 2,
                   overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(color: AppTheme.text, fontSize: 13),
+                  style: Tombstone.isMarker(text)
+                      ? TextStyle(color: AppTheme.textSecondary, fontSize: 13, fontStyle: FontStyle.italic)
+                      : const TextStyle(color: AppTheme.text, fontSize: 13),
                 ),
               ],
             ),

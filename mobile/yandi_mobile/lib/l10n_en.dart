@@ -560,6 +560,7 @@ const Map<String, String> enTable = {
   'Создайте свою группу кнопкой «Группа» или вступите по приглашению либо в открытую группу узла.': 'Create your own group with the “Group” button or join by invitation or into an open group of the node.',
   'Создать': 'Create',
   'Создать группу': 'Create a group',
+  'Сообщение удалено вместе с пользователем': 'Message deleted with the user',
   'Сообщение исчезнет у всех участников группы.': 'The message will disappear for all group members.',
   'Сообщение...': 'Message...',
   'Сообщение…': 'Message…',

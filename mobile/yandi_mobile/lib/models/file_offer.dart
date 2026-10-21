@@ -1,5 +1,6 @@
 import 'dart:convert';
 import '../l10n_core.dart';
+import 'tombstone.dart';
 
 /// Предложение файла внутри чата. Едет обычным сообщением, которое телефон шифрует для получателя (E2E): в нём имя файла,
 /// размер, номер передачи на узле, ключ шифрования кусков и контрольная сумма. Узел видит только зашифрованные куски.
@@ -55,6 +56,7 @@ class FileOffer {
 
   /// Короткая подпись для уведомлений и списков.
   static String preview(String text) {
+    if (text == Tombstone.marker) return Tombstone.label;
     final o = tryParse(text);
     return o == null ? text : '📎 ${o.name}';
   }

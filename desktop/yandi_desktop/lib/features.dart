@@ -1,5 +1,6 @@
 import 'dart:convert' show base64;
 import 'message_actions.dart';
+import 'tombstone.dart';
 import 'contact_avatar.dart';
 import 'nick.dart';
 import 'theme.dart';
@@ -640,6 +641,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   }
 
   void editMessage(Map<String, dynamic> message) {
+    if (isTombstone(message['text'])) return;
     // Правка в строке ввода с плашкой «Редактирование сообщения», как в телефоне.
     setState(() {
       editingId = '${message['msg_id']}';
@@ -653,6 +655,7 @@ class _ShellFeaturesState extends State<ShellFeatures> {
 
   /// Переслать сообщения или файлы выбранным контактам (до 5 за раз, до 20 на сообщение за сеанс).
   Future<void> forward(List<Map<String, dynamic>> items) async {
+    items = [for (final m in items) if (!isTombstone(m['text'])) m];   // надгробия не пересылаются
     if (items.isEmpty || sending || selected == null) return;
     final here = peer(selected!);
     final to = await pickRecipients(
@@ -1078,13 +1081,15 @@ class _ShellFeaturesState extends State<ShellFeatures> {
   Future<void> messageMenu(Map<String, dynamic> m, Offset at) async {
     if (sending || selected == null) return;
     final own = m['from'] == ownId;
+    final gone = isTombstone(m['text']);   // надгробие: только выбрать/удалить (не править, не отвечать, не копировать, не пересылать)
     final commands = [
-      if (own && m['attachment'] == null) commandEdit,
-      commandReply,
-      commandReact,
+      if (own && m['attachment'] == null && !gone) commandEdit,
+      if (!gone) commandReply,
+      if (!gone) commandReact,
       if (!own && ContactCardMessage.tryParse('${m['text'] ?? ''}') != null) commandSaveContact,
-      if ('${m['text'] ?? ''}'.isNotEmpty && ContactCardMessage.tryParse('${m['text'] ?? ''}') == null) commandCopy,
-      if (('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map) &&
+      if (!gone && '${m['text'] ?? ''}'.isNotEmpty && ContactCardMessage.tryParse('${m['text'] ?? ''}') == null) commandCopy,
+      if (!gone &&
+          ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map) &&
           ContactCardMessage.tryParse('${m['text'] ?? ''}') == null)
         commandShare,
       commandSelect,
@@ -1250,6 +1255,8 @@ class _ShellFeaturesState extends State<ShellFeatures> {
                     known: contacts.any((c) => '${c['short_id']}' == card.shortId),
                     onSave: () => saveSharedContact(card),
                   )
+                else if (isTombstone(m['text']))
+                  const TombstoneText()
                 else
                   Text(stripLinks('${m['text'] ?? ''}')),
                 if (m['attachment'] is Map)

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'transport/api.dart';
+import 'tombstone.dart';
 import 'preferences.dart';
 import 'domain/states.dart';
 import 'domain/shell_repository.dart';
@@ -107,6 +108,7 @@ class BackgroundAlerts {
           if (ts is! num || m['msg_id'] is! String) continue;
           if (previous != null &&
               m['from'] == peer &&
+              !isTombstone(m['text']) &&
               ts >= previous.latest &&
               !previous.ids.contains(m['msg_id']) &&
               peer != openPeer) {
@@ -144,6 +146,7 @@ class BackgroundAlerts {
           final ts = m['ts'] as num;
           if (previous != null &&
               m['mine'] == false &&
+              !isTombstone(m['text']) &&
               ts >= previous.latest &&
               !previous.ids.contains('${m['seq']}') &&
               peer != openPeer) {

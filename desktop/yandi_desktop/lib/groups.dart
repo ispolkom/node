@@ -1,4 +1,5 @@
 import 'message_actions.dart';
+import 'tombstone.dart';
 import 'admin_panel.dart';
 import 'member_badge.dart';
 import 'theme.dart';
@@ -756,7 +757,9 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                                 color: Icq.peer,
                               ),
                             ),
-                            Text(chain[i].text),
+                            isTombstone(chain[i].text)
+                                ? const TombstoneText()
+                                : Text(chain[i].text),
                           ],
                         ),
                       ),
@@ -779,6 +782,7 @@ class _GroupsFeatureState extends State<GroupsFeature> {
 
   /// Переслать записи группы выбранным контактам (до 5 за раз, до 20 на запись за сеанс); файл пересылается как файл.
   Future<void> forward(List<Map<String, dynamic>> items) async {
+    items = [for (final m in items) if (!isTombstone(m['text'])) m];   // надгробия не пересылаются
     if (items.isEmpty || busy || selected == null) return;
     final id = selected!;
     final shell = ShellRepository(widget.api);
@@ -885,13 +889,14 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         .where((x) => x['alias'] == m['from'])
         .map((x) => '${x['role']}')
         .firstOrNull;
+    final gone = isTombstone(m['text']);   // надгробие: только выбрать/удалить
     final commands = [
-      commandReply,
-      if (!own && m['seq'] != null) commandApprove,
-      if (!own && m['seq'] != null) commandDisapprove,
-      if (m['reply'] is Map) commandThread,
-      if ('${m['text'] ?? ''}'.isNotEmpty) commandCopy,
-      if ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map)
+      if (!gone) commandReply,
+      if (!gone && !own && m['seq'] != null) commandApprove,
+      if (!gone && !own && m['seq'] != null) commandDisapprove,
+      if (!gone && m['reply'] is Map) commandThread,
+      if (!gone && '${m['text'] ?? ''}'.isNotEmpty) commandCopy,
+      if (!gone && ('${m['text'] ?? ''}'.isNotEmpty || m['attachment'] is Map))
         commandShare,
       commandSelect,
       if (!own) commandHideAuthor,
@@ -1032,6 +1037,8 @@ class _GroupsFeatureState extends State<GroupsFeature> {
                     mutate: (a) => mutate(a),
                     busy: busy,
                   )
+                else if (isTombstone(m['text']))
+                  const TombstoneText()
                 else
                   Text(
                     m['text'] == null

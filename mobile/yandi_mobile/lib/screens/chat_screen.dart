@@ -23,6 +23,7 @@ import '../services/app_state.dart';
 import '../services/file_transfer_service.dart' show maxFileSize;
 import '../widgets/vault_image.dart';
 import '../widgets/message_menu.dart';
+import '../models/tombstone.dart';
 import '../models/receipt.dart';
 import 'package:flutter/services.dart';
 import '../services/outbox.dart';
@@ -97,7 +98,8 @@ class _ChatScreenState extends State<ChatScreen> {
         return;
       }
     }
-    final ordered = [...msgs]..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final ordered = [...msgs.where((m) => !Tombstone.isMarker(m.text))]..sort((a, b) => a.timestamp.compareTo(b.timestamp));   // надгробия не пересылаются
+    if (ordered.isEmpty) return;
     var skipped = 0;
     for (final m in ordered) {
       final offer = FileOffer.tryParse(m.text);
@@ -155,17 +157,18 @@ class _ChatScreenState extends State<ChatScreen> {
   /// Меню слов по нажатию на сообщение: Изменить, Ответить, Копировать, Удалить.
   Future<void> _messageMenu(ChatMessage m, Offset at) async {
     final card = ContactCardMsg.tryParse(m.text);
-    final plain = FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null && card == null;
+    final gone = Tombstone.isMarker(m.text);   // надгробие: только удалить/выбрать (не копировать, не пересылать, не править, не отвечать)
+    final plain = !gone && FileOffer.tryParse(m.text) == null && GroupInviteMsg.tryParse(m.text) == null && card == null;
     final isFile = FileOffer.tryParse(m.text) != null;
     final choice = await showMessageMenu(context, at, [
-      cmdReply,                              // «Ответить» — самое верхнее
+      if (!gone) cmdReply,                   // «Ответить» — самое верхнее
       if (card != null && !m.outgoing && card.fullId.isNotEmpty) cmdSaveContact,
       if (m.outgoing && plain) cmdEdit,
       if (plain) cmdCopy,
       if (plain || isFile) cmdShare,         // «Переслать»
       cmdSelect,
       cmdDelete,
-    ], reactions: [
+    ], reactions: gone ? const [] : [
       for (final e in MsgChannel.reactionSet)
         MenuReaction(e, e, active: context.read<AppState>().reactionsOf(m.id).$1 == e),
     ]);
@@ -245,7 +248,7 @@ class _ChatScreenState extends State<ChatScreen> {
     final id = _selected.first;
     final msgs = context.read<AppState>().messagesFor(widget.peerId);
     final m = msgs.where((x) => x.id == id);
-    return m.isNotEmpty && m.first.outgoing && FileOffer.tryParse(m.first.text) == null;
+    return m.isNotEmpty && m.first.outgoing && FileOffer.tryParse(m.first.text) == null && !Tombstone.isMarker(m.first.text);
   }
 
   static String _plural(int n) {
@@ -542,7 +545,7 @@ class _ChatScreenState extends State<ChatScreen> {
                   offers: offers,
                   links: [
                     for (final m in state.messagesFor(widget.peerId))
-                      if (FileOffer.tryParse(m.text) == null) ...FileLink.inText(stripLinks(m.text), m.timestamp),
+                      if (FileOffer.tryParse(m.text) == null && !Tombstone.isMarker(m.text)) ...FileLink.inText(stripLinks(m.text), m.timestamp),
                   ],
                 ),
               ));
@@ -743,6 +746,8 @@ class _MessageBubble extends StatelessWidget {
               _InviteCard(invite: inv, outgoing: isOut)
             else if (ContactCardMsg.tryParse(msg.text) case final card?)
               _ContactCardView(card: card, outgoing: isOut)
+            else if (Tombstone.isMarker(msg.text))
+              Text(Tombstone.label, style: TextStyle(color: AppTheme.textSecondary, fontSize: 14, fontStyle: FontStyle.italic))
             else
               Text(msg.text, style: const TextStyle(color: AppTheme.text, fontSize: 15)),
             const SizedBox(height: 2),

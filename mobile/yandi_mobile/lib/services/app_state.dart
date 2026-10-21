@@ -21,6 +21,7 @@ import '../models/contact_merge.dart';
 import '../models/group_invite.dart';
 import '../models/contact_card.dart';
 import '../models/message.dart';
+import '../models/tombstone.dart';
 import '../models/file_offer.dart';
 import '../models/file_state.dart';
 import '../models/receipt.dart';
@@ -118,6 +119,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     await _loadHidden();
     await _loadProfileMeta();
     await _loadRx();
+    await _loadForgotten();
 
     // аватарки: изолированная папка приложения + соответствие «контакт → хэш» в защищённом хранилище
     final docs = await pp.getApplicationDocumentsDirectory();
@@ -197,6 +199,8 @@ class AppState extends ChangeNotifier implements FilesHost {
         unawaited(retryUnsent());   // связь вернулась: неотправленное уходит сразу
         announceReceiptSupport();
         unawaited(syncGroups());
+        unawaited(syncForgotten());   // за время обрыва могли убрать устройства
+        unawaited(pruneExpired());    // сроки хранения: база уже открыта
       },
       getPeerBundle: (peerId) => _api!.getPeerBundle(peerId),
       ownPeerId: () => _api!.devicePeerId(),
@@ -209,6 +213,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws!.offlineStream.listen(calls.onPeerOffline);
     _ws!.groupStream.listen(_onGroupHint);
     _ws!.profileStream.listen((_) => unawaited(syncProfile()));   // узел сообщил, что профиль изменился
+    _ws!.forgottenStream.listen((_) => unawaited(syncForgotten()));   // убраны устройства: их сообщения становятся надгробиями
 
     chatBg.start(node);
 
@@ -228,10 +233,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     _updateTimer?.cancel();
     _updateTimer = async_lib.Timer.periodic(const Duration(hours: 6), (_) => unawaited(checkAppUpdate()));
 
+    // срок жизни сообщений — 365 суток: чистка раз в сутки, пока приложение работает (и при каждом открытии сокета)
+    _pruneTimer?.cancel();
+    _pruneTimer = async_lib.Timer.periodic(const Duration(days: 1), (_) => unawaited(pruneExpired()));
+
     unawaited(_loadInitialData());
   }
 
   async_lib.Timer? _presenceTimer;
+  async_lib.Timer? _pruneTimer;
 
   // ── Новая версия приложения ───────────────────────────────────────────────
   /// {version, notes, size, page} — есть версия новее этой; null — нет или человек отложил это сообщение.
@@ -738,7 +748,11 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (_api != null && myPeerId != null) {
         final remote = await _api!.getHistory(peerId, myPeerId!);
         if (epoch != _lockEpoch) return;
+        final cutoff = DateTime.now().subtract(messageLifetime);
         for (final msg in remote) {
+          if (msg.timestamp.isBefore(cutoff)) continue;   // старше срока хранения (365 суток): обратно не кладём
+          // устройство убрано с узла: его сообщения из истории узла не оживают и не дублируют надгробия (они уже в базе)
+          if (!msg.outgoing && _forgottenPeers.contains(peerId)) continue;
           await StorageService.saveMessage(msg);
         }
         final merged = await _backfillRids(await StorageService.loadMessages(peerId));
@@ -1146,6 +1160,127 @@ class AppState extends ChangeNotifier implements FilesHost {
     notifyListeners();
   }
 
+  // ── Сообщения, удалённые вместе с пользователем, и срок жизни сообщений ────────────────────────────────────────
+
+  static const _forgottenCursorKey = 'forgotten_cursor_v1';
+  static const _forgottenPeersKey = 'forgotten_peers_v1';
+  /// Срок жизни сообщения (чаты и группы): 365 суток с отправки, без исключений. Файлы живут по своим срокам.
+  static const messageLifetime = Duration(days: 365);
+
+  /// Номер последней обработанной записи списка «убраны с узла» (сохраняется: после перезапуска список не перечитывается заново).
+  int _forgottenCursor = 0;
+  /// Собеседники, устройства которых убраны с узла: их сообщения из истории узла в базу заново не кладутся.
+  final Set<String> _forgottenPeers = {};
+  bool _forgottenLoaded = false;
+  bool _forgottenBusy = false;
+  bool _forgottenAgain = false;
+
+  Future<void> _loadForgotten() async {
+    if (_forgottenLoaded) return;
+    _forgottenLoaded = true;
+    try {
+      _forgottenCursor = int.tryParse(await StorageService.secureRead(_forgottenCursorKey) ?? '') ?? 0;
+      final raw = await StorageService.secureRead(_forgottenPeersKey);
+      if (raw != null && raw.isNotEmpty) _forgottenPeers.addAll((jsonDecode(raw) as List).map((e) => '$e'));
+    } catch (_) {}
+  }
+
+  /// Забрать с узла список убранных устройств после сохранённого курсора и превратить их сообщения в надгробия.
+  /// Вызывается при каждом открытии сокета и по намёку 0x17; параллельные вызовы сливаются (один идёт, второй повторит проход).
+  Future<void> syncForgotten() async {
+    if (_forgottenBusy) { _forgottenAgain = true; return; }
+    _forgottenBusy = true;
+    final epoch = _lockEpoch;
+    try {
+      await _loadForgotten();
+      do {
+        _forgottenAgain = false;
+        for (var page = 0; page < 50; page++) {
+          final api = _api;
+          if (api == null || epoch != _lockEpoch) return;
+          final r = await api.getForgotten(_forgottenCursor);
+          if (r == null || epoch != _lockEpoch) break;
+          final items = r['items'] is List ? r['items'] as List : const [];
+          var next = _forgottenCursor;
+          for (final it in items) {
+            if (it is! Map) continue;
+            final n = it['n'], peer = it['peer'];
+            if (n is! num) continue;
+            if (peer is String && RegExp(r'^[0-9a-f]{64}$').hasMatch(peer)) await _forgetPeer(peer);
+            if (n.toInt() > next) next = n.toInt();
+          }
+          final c = r['cursor'];
+          if (c is num && c.toInt() > next) next = c.toInt();
+          if (next > _forgottenCursor) {
+            _forgottenCursor = next;
+            await StorageService.secureWrite(_forgottenCursorKey, '$next');
+          } else {
+            break;
+          }
+          if (items.isEmpty) break;
+        }
+      } while (_forgottenAgain && epoch == _lockEpoch);
+    } catch (_) {
+      // курсор не сдвинут: следующий проход повторит (обработка устройства идемпотентна)
+    } finally {
+      _forgottenBusy = false;
+    }
+  }
+
+  /// Устройство собеседника убрано с узла: его сообщения в личном чате — надгробия, цитаты их в моих ответах — тоже, смайлы стёрты.
+  Future<void> _forgetPeer(String peer) async {
+    final ids = await StorageService.tombstonePeer(peer);
+    _forgottenPeers.add(peer);
+    await StorageService.secureWrite(_forgottenPeersKey, jsonEncode(_forgottenPeers.toList()));
+    await _loadRx();
+    var rxChanged = false;
+    for (final id in ids.incoming) {
+      rxChanged = _rx.remove(id) != null || rxChanged;
+      rxChanged = _rids.remove(id) != null || rxChanged;
+    }
+    for (final id in ids.outgoing) {
+      final m = _rx[id];
+      if (m != null && m.remove('peer') != null) {   // смайл этого собеседника под моим сообщением
+        if (m.isEmpty) _rx.remove(id);
+        rxChanged = true;
+      }
+    }
+    if (rxChanged) _saveRx();
+    final editedBefore = _editedIds.length;
+    _editedIds.removeAll(ids.incoming);
+    if (_editedIds.length != editedBefore) await StorageService.saveEditedIds(_editedIds);
+    _clearUnread(peer);
+    if (_chats.containsKey(peer)) {
+      final epoch = _lockEpoch;
+      final fresh = await _backfillRids(await StorageService.loadMessages(peer));
+      if (epoch != _lockEpoch) return;
+      _chats[peer] = fresh;
+    }
+    notifyListeners();
+  }
+
+  /// Удалить сообщения старше срока жизни (чаты и группы) вместе со смайлами и пометками «изменено». Файлы не трогаются.
+  Future<void> pruneExpired() async {
+    if (!StorageService.dbOpen) return;
+    try {
+      final cutoff = DateTime.now().subtract(messageLifetime).millisecondsSinceEpoch;
+      final ids = (await StorageService.pruneOlderThan(cutoff)).toSet();
+      if (ids.isEmpty) return;
+      for (final l in _chats.values) { l.removeWhere((m) => ids.contains(m.id)); }
+      await _loadRx();
+      var rxChanged = false;
+      for (final id in ids) {
+        rxChanged = _rx.remove(id) != null || rxChanged;
+        rxChanged = _rids.remove(id) != null || rxChanged;
+      }
+      if (rxChanged) _saveRx();
+      final before = _editedIds.length;
+      _editedIds.removeAll(ids);
+      if (_editedIds.length != before) await StorageService.saveEditedIds(_editedIds);
+      notifyListeners();
+    } catch (_) {}
+  }
+
   Future<void> setSecureKeyboard(bool on) async {
     secureKeyboard = on;
     await StorageService.secureWrite('pref_secure_keyboard', on ? '1' : '0');
@@ -1392,7 +1527,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     final evidence = <String>[];
     if (attachRecent && kind == 'user') {
       final inc = messagesFor(targetId).where((m) => !m.outgoing).toList();
-      for (final m in inc.reversed.take(5).toList().reversed) {
+      for (final m in inc.where((m) => !Tombstone.isMarker(m.text)).toList().reversed.take(5).toList().reversed) {
         evidence.add(m.text);
       }
     }
@@ -1970,6 +2105,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _lockEpoch++;
     _presenceTimer?.cancel();
     _updateTimer?.cancel();
+    _pruneTimer?.cancel();
     appUpdate = null;
     _retryTimer?.cancel();
     _ws?.dispose();
@@ -2013,6 +2149,9 @@ class AppState extends ChangeNotifier implements FilesHost {
     hiddenGroups.clear();
     _rx.clear();
     _rids.clear();
+    _forgottenPeers.clear();
+    _forgottenCursor = 0;
+    _forgottenLoaded = false;
     notifyListeners();
   }
 

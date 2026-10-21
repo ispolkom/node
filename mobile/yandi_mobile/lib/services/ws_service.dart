@@ -24,6 +24,8 @@ const int ftSendLive    = 0x31;
 // намёк «в группе что-то изменилось» (без содержимого): [0x15][16 номер группы][1 что][8 seq LE]
 const int ftGroupHint   = 0x15;
 const int ftProfile     = 0x16;
+/// намёк «устройства убраны с узла, их сообщения стали надгробиями»: [0x17][8 номер LE]; сам список — GET /mobile/forgotten
+const int ftForgotten   = 0x17;
 
 class GroupHintEvent {
   final String gid;
@@ -104,6 +106,7 @@ class WsService {
   final _offlineCtrl   = StreamController<String>.broadcast();
   final _groupCtrl     = StreamController<GroupHintEvent>.broadcast();
   final _profileCtrl   = StreamController<void>.broadcast();
+  final _forgottenCtrl = StreamController<void>.broadcast();
 
   Stream<IncomingChatEvent> get chatStream      => _chatCtrl.stream;
   Stream<PeerStatusEvent>   get statusStream    => _statusCtrl.stream;
@@ -114,6 +117,7 @@ class WsService {
   Stream<GroupHintEvent>    get groupStream     => _groupCtrl.stream;
   /// Узел сообщил: профиль владельца (ник или картинка) изменился — подтянуть его.
   Stream<void>              get profileStream   => _profileCtrl.stream;
+  Stream<void>              get forgottenStream => _forgottenCtrl.stream;
   bool get connected => _channel != null;
 
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
@@ -257,6 +261,9 @@ class WsService {
 
       case ftProfile:
         _profileCtrl.add(null);
+
+      case ftForgotten:
+        if (data.length >= 9) _forgottenCtrl.add(null);   // только намёк: список забирается запросом с сохранённым курсором
 
       case ftPeerOffline:
         if (data.length >= 33) _offlineCtrl.add(_bytesToHex(data.sublist(1, 33)));
@@ -454,6 +461,7 @@ class WsService {
     _offlineCtrl.close();
     _groupCtrl.close();
     _profileCtrl.close();
+    _forgottenCtrl.close();
   }
 
   // ── TLS pinning ────────────────────────────────────────────────────────────

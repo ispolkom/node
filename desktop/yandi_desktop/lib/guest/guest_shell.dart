@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 import '../preferences.dart';
 import '../theme.dart';
 import 'guest_bootstrap.dart';
+import '../message_actions.dart' show TombstoneText;
+import '../tombstone.dart';
 import 'guest_client.dart';
 
 // Урезанная оболочка гостя: ПК без своего узла входит гостем на ЧУЖОЙ узел (как телефон). Закрытые возможности показываются,
@@ -290,6 +292,7 @@ class _GuestSessionState extends State<GuestSession> {
     subs.addAll([
       c.messages.listen(onMessage),
       c.receipts.listen((_) => mounted ? setState(() {}) : null),
+      c.forgotten.listen((_) => mounted ? setState(() {}) : null),
       c.connection.listen((v) => mounted ? setState(() => connected = v) : null),
       c.securityErrors.listen((e) => mounted ? setState(() => notice = e) : null),
     ]);
@@ -514,7 +517,7 @@ class _GuestSessionState extends State<GuestSession> {
                           constraints: const BoxConstraints(maxWidth: 560),
                           color: m.outgoing ? Icq.sent : Icq.light,
                           child: Column(crossAxisAlignment: CrossAxisAlignment.end, children: [
-                            SelectableText(m.text),
+                            isTombstone(m.text) ? const TombstoneText() : SelectableText(m.text),
                             Text('${m.time.hour.toString().padLeft(2, '0')}:${m.time.minute.toString().padLeft(2, '0')}${m.outgoing ? '  ${m.status == 'read' ? '✓✓' : m.status == 'delivered' ? '✓' : '…'}' : ''}',
                                 style: const TextStyle(fontSize: 11, color: Icq.dark)),
                           ]),

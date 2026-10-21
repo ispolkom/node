@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import '../crypto/group_crypto.dart';
 import '../models/group.dart';
+import '../models/tombstone.dart';
 import '../crypto/identity.dart';
 import 'group_api.dart';
 import 'group_store.dart';
@@ -331,6 +332,8 @@ class GroupService {
       await store.markDeleted(g.id, s as int);
       changed = true;
     }
+    // записи удалённых вместе с пользователем: после стираний (надгробие сильнее «стёрто»), тот же курсор
+    final forgotten = <int>{for (final s in (r['gone'] as List? ?? const [])) if (s is int) s};
     if (r['resync'] == true) {
       // журнал стираний на узле короче моего пропуска: перечитываю пометки по всей ленте
       var after = g.firstSeq > 0 ? g.firstSeq - 1 : 0;
@@ -339,12 +342,14 @@ class GroupService {
         final list = [for (final x in (p['entries'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
         if (list.isEmpty) break;
         for (final e in list) {
-          if (e['deleted'] == true) { await store.markDeleted(g.id, e['seq'] as int); changed = true; }
+          if (e['gone'] == true && e['seq'] is int) { forgotten.add(e['seq'] as int); changed = true; }
+          else if (e['deleted'] == true) { await store.markDeleted(g.id, e['seq'] as int); changed = true; }
           after = e['seq'] as int;
         }
         if (list.length < 500) break;
       }
     }
+    if (forgotten.isNotEmpty) { await tombstoneEntries(store, g.id, forgotten); changed = true; }
     await store.write('grp_delc_${g.id}', '${r['cursor'] ?? cur}');
     return changed;
   }
@@ -379,6 +384,20 @@ class GroupService {
     }
   }
 
+  /// Новая запись цитирует ту, что уже надгробие (или станет им в этой же пачке): выдержка заменяется меткой, исходный текст не хранится.
+  Future<GroupEntry> _quoteOfForgotten(GroupEntry e, List<GroupEntry> batch, Set<int> forgotten) async {
+    final r = e.body['r'];
+    if (e.deleted || r is! Map || r['s'] is! int || r['t'] == Tombstone.marker) return e;
+    final s = r['s'] as int;
+    var gone = forgotten.contains(s) || batch.any((x) => x.seq == s && isTombstoneEntry(x));
+    if (!gone) {
+      final row = await store.entries(e.gid, beforeSeq: s + 1, limit: 1);
+      gone = row.isNotEmpty && row.last.seq == s && isTombstoneEntry(row.last);
+    }
+    if (!gone) return e;
+    return GroupEntry(gid: e.gid, seq: e.seq, ts: e.ts, epoch: e.epoch, kind: e.kind, from: e.from, body: {...e.body, 'r': {...r, 't': Tombstone.marker}});
+  }
+
   /// Забирает новые записи. Останавливается на записи, для которой ещё нет ключа (придёт позже), чтобы ничего не потерять.
   Future<int> _pull(GroupInfo g) async {
     var got = 0;
@@ -389,13 +408,15 @@ class GroupService {
       final list = [for (final x in (p['entries'] as List? ?? const [])) (x as Map).cast<String, dynamic>()];
       if (list.isEmpty) break;
       final batch = <GroupEntry>[];
+      final forgotten = <int>{};   // записи с пометкой «удалено вместе с пользователем» (тело пустое): станут надгробиями
       var blocked = false;
       int? firstEpoch;
       for (final e in list) {
         if (e['seq'] is! int) { blocked = true; break; }   // без номера курсор не сдвинуть: остаток этой группы — при следующем sync
         final badEpoch = e['epoch'] != null && e['epoch'] is! int;
         final epoch = badEpoch ? 0 : (e['epoch'] ?? 0) as int;
-        final isDeleted = badEpoch || e['deleted'] == true || (e['payload_b64'] ?? '') == '';
+        if (e['gone'] == true) forgotten.add(e['seq'] as int);
+        final isDeleted = badEpoch || e['deleted'] == true || e['gone'] == true || (e['payload_b64'] ?? '') == '';
         final key = isDeleted ? null : await _groupKey(g.id, epoch);
         if (!isDeleted && key == null) {
           // поколение старше всех, что хранит узел, — его конверт вытеснен навсегда: запись помечаем недоступной и читаем дальше
@@ -414,10 +435,12 @@ class GroupService {
           // повтор уже полученной записи (тот же шифртекст под новым номером) — не показываем и не обрабатываем
           entry = GroupEntry(gid: g.id, seq: entry.seq, ts: entry.ts, epoch: entry.epoch, kind: GroupKind.system, from: entry.from, body: const {'op': 'dup'});
         }
+        entry = await _quoteOfForgotten(entry, batch, forgotten);
         batch.add(entry);
         after = e['seq'] as int;
       }
       await store.putEntries(batch);
+      if (forgotten.isNotEmpty) await tombstoneEntries(store, g.id, forgotten);
       got += batch.length;
       if (blocked || list.length < 200) break;
     }
@@ -498,7 +521,7 @@ class GroupService {
           final n = await _pull(g);
           var del = false;
           try { del = await _syncDeletions(g); } catch (_) {}
-          if (n > 0 || !_rules.containsKey(g.id)) await _rebuildMeta(g);
+          if (n > 0 || del || !_rules.containsKey(g.id)) await _rebuildMeta(g);
           if (n > 0 || del) onChanged?.call(g.id);
         } on GroupApiError {
           // одна группа недоступна (например, меня выгнали) — остальные продолжают
@@ -588,7 +611,10 @@ class GroupService {
     for (final x in (p['entries'] as List? ?? const [])) {
       final e = (x as Map).cast<String, dynamic>();
       if (e['seq'] != seq) continue;
-      if (e['deleted'] == true || (e['payload_b64'] ?? '') == '') {
+      if (e['gone'] == true) {
+        await tombstoneEntries(store, gid, {seq});
+        onChanged?.call(gid);
+      } else if (e['deleted'] == true || (e['payload_b64'] ?? '') == '') {
         await store.markDeleted(gid, seq);
         onChanged?.call(gid);
       }
@@ -807,7 +833,7 @@ class GroupService {
     final all = await store.entries(g.id, limit: 20000);
     final author = <int, String>{};
     for (final e in all) {
-      if (e.kind != GroupKind.reaction) author[e.seq] = e.from;
+      if (e.kind != GroupKind.reaction && !isTombstoneEntry(e)) author[e.seq] = e.from;   // за надгробие не голосуют
     }
     final latest = <int, Map<String, int>>{};   // запись → голосующий → голос
     for (final e in all) {
