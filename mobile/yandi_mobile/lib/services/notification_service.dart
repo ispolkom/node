@@ -23,7 +23,7 @@ class NotificationService {
 
   static Future<void> init() async {
     const androidSettings =
-        AndroidInitializationSettings('@drawable/ic_notification');
+        AndroidInitializationSettings('ic_notification');
     const settings = InitializationSettings(android: androidSettings);
 
     await _plugin.initialize(
@@ -73,7 +73,7 @@ class NotificationService {
         channelDescription: tr('Входящие сообщения YANDI'),
         importance:   Importance.high,
         priority:     Priority.high,
-        icon:         '@drawable/ic_notification',
+        icon:         'ic_notification',
         color:        const Color(0xFF00E5FF),
         playSound:    false,  // звук воспроизводит AppState через audioplayers
         enableVibration: true,
@@ -108,7 +108,7 @@ class NotificationService {
         importance: Importance.high,
         priority:   Priority.high,
         playSound: false, // The same bundled icq.mp3 is played by AppState.
-        icon:       '@drawable/ic_notification',
+        icon:       'ic_notification',
         color:      Color(0xFF00E5FF),
       ),
     );
@@ -133,7 +133,7 @@ class NotificationService {
         channelDescription: tr('Входящие звонки и видеозвонки YANDI'),
         importance: Importance.max,
         priority:   Priority.max,
-        icon:       '@drawable/ic_notification',
+        icon:       'ic_notification',
         color:      const Color(0xFF00E5FF),
         category:   AndroidNotificationCategory.call,
         fullScreenIntent: true,
