@@ -1,18 +1,18 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "1.0.0-b5",
-  "seq": 53,
-  "created": 1793118630,
+  "version": "1.0.0-b6",
+  "seq": 55,
+  "created": 1793123129,
   "key_id": "037e04346f99cc00",
   "files": [
     {
       "name": "yandi.apk",
-      "sha256": "52e2b43394a16474a5a2fb332d4331a331c4988d87f87d965b7a2cb9c941e391",
-      "size": 129134170
+      "sha256": "3d17818cafcfa94fb3a59c393fdddb235d5a5a570d286e82020be0b4b5a1c61a",
+      "size": 129232474
     }
   ],
   "platform": "android",
-  "expires": 1803486630,
-  "notes": "Сборка актуальной main / Build of current main: ba2fbe3d7041f2c731ac363ef9fb9ca6ff891c9d"
+  "expires": 1803491129,
+  "notes": "Звуки YANDI включены по умолчанию: личные сообщения, группы, аудио/видеозвонки, дозвон; исправлены звук видео и права ярлыка. Default-on YANDI tones, video audio and launcher permissions fixed. Source: a93748c9623cc56364c270ccb066a579c3d44a5d"
 }

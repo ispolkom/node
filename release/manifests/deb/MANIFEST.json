@@ -1,23 +1,23 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "0.2.0+g886",
-  "seq": 52,
-  "created": 1793118589,
+  "version": "0.2.0+g889",
+  "seq": 54,
+  "created": 1793123004,
   "key_id": "037e04346f99cc00",
   "files": [
     {
-      "name": "yandi-desktop_0.2.0-g886_amd64.deb",
-      "sha256": "d3b1f544faa151404f8a5f7f63da5955f4f40820b017b89d29c297f452cdef43",
-      "size": 30451140
+      "name": "yandi-desktop_0.2.0-g889_amd64.deb",
+      "sha256": "35424ecbbefa59d3a8fff97dccf54da5e681c580789f23b6778cdaf79b843a29",
+      "size": 32232036
     },
     {
-      "name": "yandi-node_0.2.0-g886_amd64.deb",
-      "sha256": "9aefe134d85ab97700712903b180ebc96f53033bcad920a132505b551fc347ed",
-      "size": 7296532
+      "name": "yandi-node_0.2.0-g889_amd64.deb",
+      "sha256": "19ba976bc2ba7d167c14966a01cb2745949f1401906b2837165bee739ebd4e20",
+      "size": 7297332
     }
   ],
   "platform": "deb",
-  "expires": 1803486589,
-  "notes": "Сборка актуальной main / Build of current main: ba2fbe3d7041f2c731ac363ef9fb9ca6ff891c9d"
+  "expires": 1803491004,
+  "notes": "Звуки YANDI включены по умолчанию: личные сообщения, группы, аудио/видеозвонки, дозвон; исправлены звук видео и права ярлыка. Default-on YANDI tones, video audio and launcher permissions fixed. Source: a93748c9623cc56364c270ccb066a579c3d44a5d"
 }
