@@ -20,6 +20,9 @@ jobs:
       - name: spawn discipline
         if: runner.os == 'Linux'
         run: scripts/check_spawn.sh
+      - name: bundled web audio contracts
+        if: runner.os == 'Linux'
+        run: node scripts/check_web_audio.cjs
       - run: cargo build --all-targets
       # проверки считают общие счётчики (KDF и др.): тесты библиотеки идут по одному
       - run: cargo test --no-fail-fast -- --test-threads=1

@@ -107,6 +107,7 @@ class NotificationService {
         channelDescription: tr('Входящие файлы YANDI'),
         importance: Importance.high,
         priority:   Priority.high,
+        playSound: false, // The same bundled icq.mp3 is played by AppState.
         icon:       '@drawable/ic_notification',
         color:      Color(0xFF00E5FF),
       ),

@@ -68,6 +68,9 @@ class _PlayerDialogState extends State<_PlayerDialog> {
   );
   String? error;
   StreamSubscription<String>? errors;
+  StreamSubscription<dynamic>? _audioReady;
+  Timer? _audioOutputTimer;
+  bool _audioOutputPrepared = false, _audioOutputBusy = false;
 
   @override
   void initState() {
@@ -93,6 +96,33 @@ class _PlayerDialogState extends State<_PlayerDialog> {
         // Собственное имя звукового клиента: звуковой сервер хранит громкость потока по имени программы, и у общего имени «mpv» могла
         // остаться нулевая громкость (видео без звука при исправном воспроизведении); у нового имени громкость начинается со 100%.
         await native.setProperty('audio-client-name', 'YANDI');
+        // Only PulseAudio offers per-stream ao-volume; ALSA may change the
+        // hardware mixer, so never fall back to it for this operation.
+        await native.setProperty('ao', 'pulse,pipewire,alsa');
+        _audioReady = player.stream.audioParams.listen((_) {
+          if (_audioOutputPrepared || _audioOutputTimer != null) return;
+          var attempts = 0;
+          _audioOutputTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+            if (!mounted || _audioOutputPrepared || ++attempts > 30) {
+              timer.cancel();
+              return;
+            }
+            if (_audioOutputBusy) return;
+            _audioOutputBusy = true;
+            try {
+              if (await native.getProperty('current-ao') == 'pulse') {
+                await native.setProperty('ao-volume', '100');
+                await native.setProperty('ao-mute', 'no');
+                _audioOutputPrepared = true;
+                timer.cancel();
+              }
+            } catch (_) {
+              // Audio output is not ready yet; retry without touching other streams.
+            } finally {
+              _audioOutputBusy = false;
+            }
+          });
+        });
       }
       await player.setVolume(100);
       await player.open(Media(widget.url.toString()), play: true);
@@ -123,6 +153,8 @@ class _PlayerDialogState extends State<_PlayerDialog> {
 
   @override
   void dispose() {
+    _audioOutputTimer?.cancel();
+    _audioReady?.cancel();
     EmbeddedPlayer.closeAll.removeListener(_closeRequested);
     errors?.cancel();
     player.dispose();

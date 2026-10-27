@@ -39,6 +39,7 @@ class GroupsFeature extends StatefulWidget {
 }
 
 class _GroupsFeatureState extends State<GroupsFeature> {
+  final Map<String, Set<String>> _soundBaseline = {};
   late final repo = GroupRepository(widget.api);
   final composer = TextEditingController();
   final drafts = <String, String>{};
@@ -115,6 +116,12 @@ class _GroupsFeatureState extends State<GroupsFeature> {
         if (!active || rev != revision) return;
         nextInfo = await repo.info(id);
         if (!active || rev != revision) return;
+        final messages = ShellRepository.list(nextFeed, 'messages');
+        final previous = _soundBaseline[id];
+        if (previous != null && messages.any((m) => m['mine'] == false && m['deleted'] != true && !isTombstone(m['text']) && !previous.contains('${m['seq']}'))) {
+          unawaited(PreferencesScope.of(context)?.alert(group: true) ?? Future<void>.value());
+        }
+        _soundBaseline[id] = messages.map((m) => '${m['seq']}').toSet();
       }
       List<Map<String, dynamic>> nodeGroups = admin;
       if (tab == 'Управление узла') {

@@ -6,6 +6,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/call_signal.dart';
 import '../l10n_core.dart';
+import 'app_sounds.dart';
 
 enum CallPhase { idle, calling, ringing, connecting, active, ended }
 
@@ -27,6 +28,7 @@ class CallService extends ChangeNotifier {
   final void Function(String peerId, String name, bool video) onIncomingNotify;
   final void Function() onIncomingCancel;
   final void Function(String peerId, bool outgoing, String text) onLog;
+  final bool Function(String kind)? soundEnabled;
 
   CallService({
     required this.sendSignal,
@@ -37,7 +39,9 @@ class CallService extends ChangeNotifier {
     required this.onIncomingNotify,
     required this.onIncomingCancel,
     required this.onLog,
-  });
+    this.soundEnabled,
+    AudioPlayer? ringPlayer,
+  }) : _ring = ringPlayer ?? AudioPlayer();
 
   CallPhase phase = CallPhase.idle;
   String? peerId;
@@ -66,8 +70,10 @@ class CallService extends ChangeNotifier {
   final List<RTCIceCandidate> _pendingIce = [];
   bool _remoteSet = false;
   Timer? _ringTimer, _lostTimer, _endTimer, _connectTimer;
-  final AudioPlayer _ring = AudioPlayer();
+  final AudioPlayer _ring;
   bool _ringing = false;
+  int _soundGeneration = 0;
+  Future<void> _soundWork = Future<void>.value();
 
   bool get busy => phase != CallPhase.idle;
   String get peerName => peerId == null ? '' : nameOf(peerId!);
@@ -94,7 +100,7 @@ class CallService extends ChangeNotifier {
       _finish(tr('Нет связи с узлом или это не ваше устройство'), log: false);
       return null;
     }
-    _playRing('sounds/call_out.mp3');
+    _playRing('dialing');
     _ringTimer = Timer(const Duration(seconds: 45), () {
       _signal('hangup');
       _finish(tr('Нет ответа'), log: true);
@@ -128,7 +134,7 @@ class CallService extends ChangeNotifier {
         speaker = video; cameraOn = video;
         notifyListeners();
         onIncomingNotify(from, nameOf(from), video);
-        _playRing('sounds/calling.mp3');
+        _playRing(video ? 'videoCalls' : 'calls');
         _ringTimer = Timer(const Duration(seconds: 45), () => _finish(tr('Пропущенный звонок'), log: true));
         showScreen();
       case 'accept':
@@ -460,18 +466,37 @@ class CallService extends ChangeNotifier {
     muted = false; startedAt = null; _remoteSet = false; _pendingIce.clear(); turnMissing = false;
   }
 
-  Future<void> _playRing(String asset) async {
-    try {
-      _ringing = true;
+  Future<void> _playRing(String kind) {
+    if (soundEnabled?.call(kind) == false) return Future<void>.value();
+    final generation = ++_soundGeneration;
+    _ringing = true;
+    return _soundWork = _soundWork.catchError((Object _) {}).then((_) async {
+      if (generation != _soundGeneration) return;
       await _ring.setReleaseMode(ReleaseMode.loop);
-      await _ring.play(AssetSource(asset));
-    } catch (_) {}
+      if (generation != _soundGeneration) return;
+      await _ring.setAudioContext(AppSounds.context(kind));
+      if (generation != _soundGeneration) return;
+      await _ring.play(AssetSource('sounds/${AppSounds.assets[kind]}'));
+    }).catchError((Object _) {
+      if (generation == _soundGeneration) _ringing = false;
+      debugPrint('YANDI: call sound unavailable');
+    });
+  }
+
+  void refreshRingtone() {
+    final kind = phase == CallPhase.calling ? 'dialing'
+        : phase == CallPhase.ringing ? (video ? 'videoCalls' : 'calls') : null;
+    if (kind == null || soundEnabled?.call(kind) == false) {
+      _stopRing();
+    } else if (!_ringing) {
+      unawaited(_playRing(kind));
+    }
   }
 
   void _stopRing() {
-    if (!_ringing) return;
+    ++_soundGeneration;
     _ringing = false;
-    unawaited(_ring.stop());
+    _soundWork = _soundWork.catchError((Object _) {}).then((_) => _ring.stop());
   }
 
   static String _fmt(Duration d) {
@@ -484,7 +509,14 @@ class CallService extends ChangeNotifier {
 
   @override
   void dispose() {
-    _ring.dispose();
+    _ringTimer?.cancel();
+    _lostTimer?.cancel();
+    _endTimer?.cancel();
+    _connectTimer?.cancel();
+    _limitTimer?.cancel();
+    _warnTimer?.cancel();
+    _stopRing();
+    unawaited(_soundWork.then((_) => _ring.dispose()));
     super.dispose();
   }
 }

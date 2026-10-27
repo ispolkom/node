@@ -1,6 +1,12 @@
 /// Английские надписи интерфейса: ключ — русский текст из `tr('…')`/`trf('…')`. Тест `l10n_test.dart` требует перевод для каждого ключа в коде
 /// и совпадения подстановок `{имя}` в обоих текстах.
 const Map<String, String> enTable = {
+  'Звуки YANDI': 'YANDI sounds',
+  'Личные сообщения': 'Private messages',
+  'События в группах': 'Group events',
+  'Аудиозвонки': 'Audio calls',
+  'Видеозвонки': 'Video calls',
+  'Гудки при дозвоне': 'Outgoing call tones',
   'PIN введён неверно слишком много раз: приглашение погашено. Попросите новое.': 'The PIN was entered wrongly too many times: the invitation is cancelled. Ask for a new one.',
   'QR без отпечатка сертификата: сопряжение отклонено': 'The QR has no certificate fingerprint: pairing refused',
   'YANDI делают энтузиасты, без рекламы и без слежки. Деньги идут на серверы, подписки на инструменты разработки и поддержку проекта: это кошелёк проекта, а не владельца вашего узла. Пожертвование добровольное, ни к чему не обязывает и не даёт особых прав.':
@@ -158,7 +164,6 @@ const Map<String, String> enTable = {
   'Администратор отклонил запрос': 'The administrator rejected the request',
   'Запрос отправлен, администратор ещё не ответил': 'Request sent, the administrator has not answered yet',
   'Запросить статус пользователя': 'Request user status',
-  'Видеозвонки': 'Video calls',
   'Выход в интернет через узел (VPN)': 'Internet exit through the node (VPN)',
   'Нажмите, чтобы узнать подробнее': 'Tap to learn more',
   'Прошу авторизовать мой профиль…': 'Please authorise my profile…',

@@ -1,6 +1,7 @@
 #include "my_application.h"
 
 #include <flutter_linux/flutter_linux.h>
+#include <mpv/client.h>
 #ifdef GDK_WINDOWING_X11
 #include <gdk/gdkx.h>
 #endif
@@ -11,9 +12,81 @@ struct _MyApplication {
   GtkApplication parent_instance;
   char** dart_entrypoint_arguments;
   GtkWidget* chooser;
+  mpv_handle* message_audio;
+  mpv_handle* ring_audio;
+  guint sound_tick;
+  bool message_ao_ready;
+  bool ring_ao_ready;
+  unsigned sound_attempts;
 };
 
 G_DEFINE_TYPE(MyApplication, my_application, GTK_TYPE_APPLICATION)
+
+static gboolean prepare_alert_outputs(gpointer data) {
+  MyApplication* self = MY_APPLICATION(data);
+  if (++self->sound_attempts > 50) {
+    self->sound_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+  mpv_handle* players[] = {self->message_audio, self->ring_audio};
+  bool* ready[] = {&self->message_ao_ready, &self->ring_ao_ready};
+  for (int i = 0; i < 2; ++i) {
+    if (!players[i] || *ready[i]) continue;
+    char* output = mpv_get_property_string(players[i], "current-ao");
+    // PulseAudio's ao-volume affects this stream only, never the global mixer.
+    if (output && g_strcmp0(output, "pulse") == 0) {
+      *ready[i] = mpv_set_property_string(players[i], "ao-volume", "100") >= 0;
+      mpv_set_property_string(players[i], "ao-mute", "no");
+    } else if (output && *output) {
+      *ready[i] = true; // No hardware/global mixer writes on fallback outputs.
+    }
+    mpv_free(output);
+  }
+  if ((!self->message_audio || self->message_ao_ready) && (!self->ring_audio || self->ring_ao_ready)) {
+    self->sound_tick = 0;
+    return G_SOURCE_REMOVE;
+  }
+  return G_SOURCE_CONTINUE;
+}
+
+static void prepare_alert_output(MyApplication* self) {
+  self->sound_attempts = 0;
+  if (!self->sound_tick) self->sound_tick = g_timeout_add(100, prepare_alert_outputs, self);
+}
+
+// Only bundled, public alert files are accepted. No shell or temporary files.
+static bool play_alert(mpv_handle** slot, const char* filename, bool loop) {
+  if (!*slot) {
+    *slot = mpv_create();
+    if (!*slot) return false;
+    mpv_set_option_string(*slot, "config", "no");
+    mpv_set_option_string(*slot, "idle", "yes");
+    mpv_set_option_string(*slot, "terminal", "no");
+    mpv_set_option_string(*slot, "video", "no");
+    mpv_set_option_string(*slot, "ao", "pulse,pipewire,alsa");
+    mpv_set_option_string(*slot, "audio-client-name", "YANDI alerts");
+    mpv_set_option_string(*slot, "volume", "70");
+    if (mpv_initialize(*slot) < 0) {
+      mpv_terminate_destroy(*slot);
+      *slot = nullptr;
+      return false;
+    }
+  }
+  g_autofree gchar* exe = g_file_read_link("/proc/self/exe", nullptr);
+  if (!exe) return false;
+  g_autofree gchar* directory = g_path_get_dirname(exe);
+  g_autofree gchar* path = g_build_filename(directory, "data", "flutter_assets", "assets", "sounds", filename, nullptr);
+  if (!g_file_test(path, G_FILE_TEST_IS_REGULAR)) return false;
+  mpv_set_property_string(*slot, "loop-file", loop ? "inf" : "no");
+  const char* command[] = {"loadfile", path, "replace", nullptr};
+  return mpv_command(*slot, command) >= 0;
+}
+
+static void stop_alert(mpv_handle* player) {
+  if (!player) return;
+  const char* command[] = {"stop", nullptr};
+  mpv_command(player, command);
+}
 
 // Called when first Flutter frame received.
 static void first_frame_cb(MyApplication* self, FlView* view) {
@@ -65,12 +138,38 @@ static void local_method(FlMethodChannel*, FlMethodCall* call, gpointer data) {
     FlValue* sound = fl_value_lookup_string(args, "sound");
     FlValue* notify = fl_value_lookup_string(args, "notify");
     FlValue* english = fl_value_lookup_string(args, "english");
-    if (sound && fl_value_get_bool(sound)) gdk_display_beep(gdk_display_get_default());
+    FlValue* group = fl_value_lookup_string(args, "group");
+    const char* sound_asset = group && fl_value_get_bool(group) ? "icq-online.mp3" : "icq.mp3";
+    if (sound && fl_value_get_bool(sound) && !play_alert(&self->message_audio, sound_asset, false)) {
+      fl_method_call_respond_error(call, "audio", "Cannot play bundled message sound", nullptr, nullptr);
+      return;
+    }
+    if (sound && fl_value_get_bool(sound)) {
+      self->message_ao_ready = false;
+      prepare_alert_output(self);
+    }
     if (notify && fl_value_get_bool(notify)) {
       g_autoptr(GNotification) notification = g_notification_new("YANDI");
       g_notification_set_body(notification, english && fl_value_get_bool(english)
           ? "New message" : "Новое сообщение");
       g_application_send_notification(G_APPLICATION(self), "yandi-message", notification);
+    }
+    fl_method_call_respond_success(call, nullptr, nullptr);
+  } else if (g_strcmp0(method, "ringtone") == 0) {
+    FlValue* kind = fl_value_lookup_string(fl_method_call_get_args(call), "kind");
+    const char* value = kind ? fl_value_get_string(kind) : "none";
+    stop_alert(self->ring_audio);
+    self->ring_ao_ready = true;
+    const char* asset = g_strcmp0(value, "video") == 0 ? "sqype.mp3"
+        : g_strcmp0(value, "incoming") == 0 ? "calling.mp3"
+        : g_strcmp0(value, "outgoing") == 0 ? "call_out.mp3" : nullptr;
+    if (asset && !play_alert(&self->ring_audio, asset, true)) {
+      fl_method_call_respond_error(call, "audio", "Cannot play bundled ringtone", nullptr, nullptr);
+      return;
+    }
+    if (asset) {
+      self->ring_ao_ready = false;
+      prepare_alert_output(self);
     }
     fl_method_call_respond_success(call, nullptr, nullptr);
   } else if (g_strcmp0(method, "open") == 0) {
@@ -202,6 +301,11 @@ static void my_application_shutdown(GApplication* application) {
 // Implements GObject::dispose.
 static void my_application_dispose(GObject* object) {
   MyApplication* self = MY_APPLICATION(object);
+  if (self->sound_tick) g_source_remove(self->sound_tick);
+  self->sound_tick = 0;
+  if (self->message_audio) mpv_terminate_destroy(self->message_audio);
+  if (self->ring_audio) mpv_terminate_destroy(self->ring_audio);
+  self->message_audio = self->ring_audio = nullptr;
   g_clear_pointer(&self->dart_entrypoint_arguments, g_strfreev);
   G_OBJECT_CLASS(my_application_parent_class)->dispose(object);
 }

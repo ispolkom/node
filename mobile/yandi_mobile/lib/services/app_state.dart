@@ -14,6 +14,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart' as pp;
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
+import 'app_sounds.dart';
 import '../models/trusted_node.dart';
 import '../models/invite_payload.dart';
 import '../models/contact.dart';
@@ -87,6 +88,25 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   String? activeChatPeerId;
   final _player = AudioPlayer();
+  final soundSettings = <String, bool>{for (final key in AppSounds.assets.keys) key: true};
+  bool soundEnabled(String kind) => soundSettings[kind] ?? true;
+
+  Future<void> setSoundEnabled(String kind, bool enabled) async {
+    if (!AppSounds.assets.containsKey(kind)) return;
+    soundSettings[kind] = enabled;
+    _calls?.refreshRingtone();
+    notifyListeners();
+    await StorageService.secureWrite('pref_sound_$kind', enabled ? '1' : '0');
+  }
+
+  Future<void> playAppSound(String kind) async {
+    if (!soundEnabled(kind) || _calls?.busy == true) return;
+    try {
+      await _player.play(AssetSource('sounds/${AppSounds.assets[kind]}'), ctx: AppSounds.context(kind));
+    } catch (_) {
+      debugPrint('YANDI: notification sound unavailable');
+    }
+  }
 
   /// Входящие предложения файлов (для отображения в UI)
   final List<FileOfferEvent> pendingFileOffers = [];
@@ -116,6 +136,9 @@ class AppState extends ChangeNotifier implements FilesHost {
     _blocked.addAll(await StorageService.loadBlacklist());
     _editedIds.addAll(await StorageService.loadEditedIds());
     secureKeyboard = (await StorageService.secureRead('pref_secure_keyboard')) != '0';
+    for (final kind in AppSounds.assets.keys) {
+      soundSettings[kind] = (await StorageService.secureRead('pref_sound_$kind')) != '0';
+    }
     await _loadHidden();
     await _loadProfileMeta();
     await _loadRx();
@@ -187,7 +210,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       return;
     }
     nodeError = null;
-    groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), nodeKey: node.id);
+    groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), onActivity: (_) => unawaited(playAppSound('groups')), nodeKey: node.id);
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
@@ -673,7 +696,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _api?.switchNode(next);
     _ws?.switchNode(next);
     if (_api != null) {
-      groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), nodeKey: next.id);
+      groups = GroupService(HttpGroupApi(_api!), SqliteGroupStore(), onChanged: (_) => notifyListeners(), onActivity: (_) => unawaited(playAppSound('groups')), nodeKey: next.id);
     }
     chatBg.start(next);
   }
@@ -781,7 +804,9 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   // ── Звонки ─────────────────────────────────────────────────────────────────
 
-  late final CallService calls = CallService(
+  CallService? _calls;
+  CallService get calls => _calls ??= CallService(
+    soundEnabled: soundEnabled,
     sendSignal: (peerId, text) async => await (_ws?.sendLive(peerId, text) ?? Future.value(false)),
     fetchTurn:  () async => await _api?.getTurn(),
     nodeHost:   () => nodeManager.activeNode?.host,
@@ -2053,7 +2078,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     }
 
     if (activeChatPeerId != e.fromPeerId) {
-      _player.play(AssetSource('sounds/icq.mp3'));
+      unawaited(playAppSound('messages'));
       // Уведомление когда чат не открыт
       final name = _contactName(e.fromPeerId);
       unawaited(NotificationService.showMessage(
@@ -2083,7 +2108,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     // тип файла, который в сети не передаётся (старый или чужой клиент), не принимается: ни предложения, ни уведомления
     if (attachmentProblem(e.fileName) != null) return;
     pendingFileOffers.add(e);
-    _player.play(AssetSource('sounds/icq.mp3'));
+    unawaited(playAppSound('messages'));
     final name = _contactName(e.fromPeerId);
     unawaited(NotificationService.showFileOffer(
       fromPeerId:  e.fromPeerId,
@@ -2167,6 +2192,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   @override
   void dispose() {
+    _calls?.dispose();
     _ws?.dispose();
     _api?.dispose();
     _player.dispose();

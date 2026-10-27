@@ -309,7 +309,7 @@
             if (contactsInitialized) {
                 contacts.forEach(function(c) {
                     if (c.online && !onlineContacts.has(c.short_id)) {
-                        if (window.playOnlineSound) window.playOnlineSound();
+                        // Group activity has its own icq-online.mp3 alert.
                     }
                 });
             }

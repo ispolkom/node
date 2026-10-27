@@ -1,5 +1,6 @@
 import 'theme.dart';
 import 'preferences.dart';
+import 'platform_files.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
@@ -51,6 +52,32 @@ class _CallsFeatureState extends State<CallsFeature> {
   String resolvedPeer = '', resolvedName = '';
   final nameNotifier = ValueNotifier<String>('');
   Route<void>? overlay;
+  AppPreferences? _preferences;
+  String _ringKind = 'none';
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final next = PreferencesScope.of(context);
+    if (_preferences != next) {
+      _preferences?.removeListener(syncRingtone);
+      _preferences = next;
+      _preferences?.addListener(syncRingtone);
+    }
+    syncRingtone();
+  }
+
+  void syncRingtone() {
+    final enabled = _preferences?.sound == true && _preferences?.dnd != true;
+    final kind = !enabled ? 'none' : switch (coordinator.phase) {
+      CallPhase.incomingRinging => coordinator.call?.video == true ? 'video' : 'incoming',
+      CallPhase.outgoingRinging => 'outgoing',
+      _ => 'none',
+    };
+    if (kind == _ringKind) return;
+    _ringKind = kind;
+    unawaited(PlatformFiles.channel.invokeMethod<void>('ringtone', {'kind': kind}).catchError((Object _) {}));
+  }
 
   static String cleanName(String name) => name
       .replaceFirst(RegExp('^[\\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '')
@@ -107,6 +134,7 @@ class _CallsFeatureState extends State<CallsFeature> {
   }
 
   void update() {
+    syncRingtone();
     final c = coordinator.call;
     if (c != null && resolvedPeer != c.peer) {
       resolvedPeer = c.peer;
@@ -143,6 +171,10 @@ class _CallsFeatureState extends State<CallsFeature> {
 
   @override
   void dispose() {
+    _preferences?.removeListener(syncRingtone);
+    if (_ringKind != 'none') {
+      unawaited(PlatformFiles.channel.invokeMethod<void>('ringtone', {'kind': 'none'}).catchError((Object _) {}));
+    }
     widget.controller?._start = null;
     closeOverlay();
     nameNotifier.dispose();

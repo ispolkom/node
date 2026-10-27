@@ -254,6 +254,8 @@
                 var can = !g.muted && (d.has_key || g.role === 'owner');
                 $('mgText').disabled = !can; $('mgSend').disabled = !can; $('mgEmojiBtn').disabled = !can; $('mgAttach').disabled = !can || upBusy;
                 $('mgText').placeholder = g.muted ? 'Вы заглушены в этой группе' : 'Сообщение… (Ctrl+Enter — отправить)';
+                var newGroupEvent = !reset && (d.messages || []).some(function (m) { return !m.mine && m.seq > lastSeq && !m.deleted; });
+                if (newGroupEvent && window.playGroupSound) window.playGroupSound();
                 var feed = $('mgFeed'), atEnd = feed.scrollTop + feed.clientHeight >= feed.scrollHeight - 30;
                 if (reset) feed.innerHTML = '';
                 (d.messages || []).forEach(function (m) {

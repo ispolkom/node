@@ -34,7 +34,7 @@ const int ftSendMsg = 0x30;
 const int guestMessagesPerDay = 10;
 
 /// Версия протокола гостя на ПК совпадает с версией телефона (`kAppVersion`) и поднимается вместе с ней: по ней узел отзывает сборки (`min_app`).
-const String kGuestAppVersion = '1.0.0-b4';
+const String kGuestAppVersion = '1.0.0-b6';
 
 /// Старше ли версия [a], чем [b] (числа по порядку: `1.0.0-b4` → 1,0,0,4); как `versionOlder` на телефоне.
 bool versionOlder(String a, String b) {

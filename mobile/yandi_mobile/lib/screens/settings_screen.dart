@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:file_picker/file_picker.dart';
 import '../services/app_state.dart';
+import '../services/app_sounds.dart';
 import '../services/vault_lock.dart';
 import 'vault_screens.dart';
 import 'invite_device_screen.dart';
@@ -134,6 +135,14 @@ class SettingsScreen extends StatelessWidget {
       ),
       body: ListView(
         children: [
+          _Section(title: tr('Звуки YANDI')),
+          for (final entry in AppSounds.labels.entries)
+            SwitchListTile(
+              key: ValueKey('sound-${entry.key}'),
+              title: Text(tr(entry.value), style: TextStyle(color: AppTheme.text)),
+              value: state.soundEnabled(entry.key),
+              onChanged: (enabled) => state.setSoundEnabled(entry.key, enabled),
+            ),
           if (state.isGuest) ...[
             _Section(title: tr('Статус')),
             ListTile(

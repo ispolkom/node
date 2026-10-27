@@ -206,6 +206,27 @@ void main() {
     await bob.syncAndAnnounce();        // Боб забирает ключ, пишет имя
   }
 
+  test('group activity sound ignores archive and own entries, signals fresh messages and events once', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.send(node.gid, GroupKind.text, {'t': 'archive'});
+    final events = <String>[];
+    final observed = GroupService(node.as('bob'), bobStore, onActivity: events.add);
+    await observed.sync();
+    expect(events, isEmpty, reason: 'first synchronization is an archive baseline');
+    await owner.send(node.gid, GroupKind.text, {'t': 'new'});
+    await observed.sync();
+    expect(events, [node.gid]);
+    await observed.sync();
+    expect(events, [node.gid], reason: 'repeated polling is silent');
+    await observed.send(node.gid, GroupKind.text, {'t': 'own'});
+    await observed.sync();
+    expect(events, [node.gid], reason: 'own entries are silent');
+    await owner.setRules(node.gid, const GroupRules({GroupKind.image}));
+    await observed.sync();
+    expect(events, [node.gid, node.gid], reason: 'remote group events have a group sound');
+  });
+
   test('кривые данные узла и подлинные записи с неверными типами не ломают ленту', () async {
     await owner.sync();
     await bobJoins();

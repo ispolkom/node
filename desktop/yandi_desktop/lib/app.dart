@@ -285,7 +285,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       if (alertCalls > 0) '${preferences.english ? 'Missed calls' : 'Пропущенных звонков'}: $alertCalls',
       if (alertNotices > 0) '${preferences.english ? 'Admin notices' : 'Извещений админ-панели'}: $alertNotices',
     ];
-    final base = preferences.english ? 'OS notifications' : 'Уведомления ОС';
+    final base = preferences.english
+        ? 'YANDI sounds: ${preferences.sound && !preferences.dnd ? 'on' : 'off'}'
+        : 'Звуки YANDI: ${preferences.sound && !preferences.dnd ? 'включены' : 'выключены'}';
     if (parts.isEmpty) return base;
     return '$base\n${parts.join(' · ')}${preferences.english ? '\nContent is hidden while the vault is locked' : '\nСодержимое скрыто, пока закрытая среда заперта'}';
   }
@@ -926,7 +928,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 ),
                 CheckboxListTile(
                   controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Системный звук'),
+                  title: const UiText('Звуки YANDI'),
                   value: preferences.sound,
                   onChanged: (value) {
                     preferences.sound = value!;
@@ -1068,27 +1070,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   },
                   child: const Text('EN / RU'),
                 ),
-                IconButton(
-                  color: Icq.panel,
-                  padding: EdgeInsets.zero,
-                  constraints: const BoxConstraints.tightFor(
-                    width: 30,
-                    height: 30,
-                  ),
-                  tooltip: preferences.english
-                      ? 'System sound'
-                      : 'Системный звук',
-                  icon: Icon(
-                    preferences.sound
-                        ? Icons.volume_up_outlined
-                        : Icons.volume_off_outlined,
-                    size: 18,
-                  ),
-                  onPressed: () {
-                    preferences.sound = !preferences.sound;
-                    preferences.changed();
-                  },
-                ),
                 Stack(
                   clipBehavior: Clip.none,
                   children: [
@@ -1101,13 +1082,14 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                       ),
                       tooltip: alertHint,
                       icon: Icon(
-                        preferences.notifications
+                        preferences.sound && !preferences.dnd
                             ? Icons.notifications_active_outlined
-                            : Icons.notifications_none,
+                            : Icons.notifications_off_outlined,
                         size: 18,
                       ),
                       onPressed: () {
-                        preferences.notifications = !preferences.notifications;
+                        preferences.sound = !preferences.sound || preferences.dnd;
+                        if (preferences.sound) preferences.dnd = false;
                         preferences.changed();
                       },
                     ),

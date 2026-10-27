@@ -17,6 +17,14 @@ class VideoCallManager {
         this.callingAudio = null;
         this.callOutAudio = null;
 
+        window.addEventListener('yandi-sound-changed', () => {
+            if (!this._soundEnabled()) {
+                const intent = this._ringIntent;
+                this._stopRingtones();
+                this._ringIntent = intent;
+            } else if (this._ringIntent) this._playRingtone(this._ringIntent);
+        });
+
         this.configuration = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -33,8 +41,9 @@ class VideoCallManager {
 
     _playRingtone(type) {
         this._stopRingtones();
+        this._ringIntent = type;
         if (!this._soundEnabled()) return;
-        const src = type === 'calling' ? '/media/calling.mp3' : '/media/call_out.mp3';
+        const src = type === 'calling' ? '/media/sqype.mp3' : '/media/call_out.mp3';
         const audio = new Audio(src);
         audio.loop = true;
         audio.volume = 0.7;
@@ -44,6 +53,7 @@ class VideoCallManager {
     }
 
     _stopRingtones() {
+        this._ringIntent = null;
         if (this.callingAudio) { this.callingAudio.pause(); this.callingAudio.src = ''; this.callingAudio = null; }
         if (this.callOutAudio) { this.callOutAudio.pause(); this.callOutAudio.src = ''; this.callOutAudio = null; }
     }

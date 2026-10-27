@@ -95,7 +95,7 @@ class BackgroundAlerts {
       unread.removeWhere(
         (peer) => !peer.startsWith('group:') && !peers.contains(peer),
       );
-      bool fresh = false;
+      bool fresh = false, freshGroup = false;
       for (final peer in peers) {
         if (!active()) return;
         final messages = await ShellRepository(api).history(peer);
@@ -151,7 +151,7 @@ class BackgroundAlerts {
               !previous.ids.contains('${m['seq']}') &&
               peer != openPeer) {
             unread.add(peer);
-            fresh = true;
+            freshGroup = true;
           }
           if (ts > latest) latest = ts;
         }
@@ -177,6 +177,7 @@ class BackgroundAlerts {
         return;
       }
       if (fresh && active()) await preferences.alert();
+      if (freshGroup && active()) await preferences.alert(group: true);
       if (active()) preferences.update();
     } catch (_) {
       // Do not keep stale baselines across unavailable/invalid daemon state.

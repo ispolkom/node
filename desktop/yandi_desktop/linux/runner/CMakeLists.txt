@@ -22,5 +22,7 @@ add_definitions(-DAPPLICATION_ID="${APPLICATION_ID}")
 # Add dependency libraries. Add any application-specific dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter)
 target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::GTK)
+pkg_check_modules(MPV REQUIRED IMPORTED_TARGET mpv)
+target_link_libraries(${BINARY_NAME} PRIVATE PkgConfig::MPV)
 
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")

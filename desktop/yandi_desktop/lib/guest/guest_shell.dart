@@ -328,6 +328,7 @@ class _GuestSessionState extends State<GuestSession> {
 
   void onMessage(GuestMessage m) {
     if (!mounted) return;
+    if (!m.outgoing) unawaited(PreferencesScope.of(context)?.alert() ?? Future<void>.value());
     setState(() {});
     if (chat?.peerId == m.peerId) c.markRead(m.peerId);
   }

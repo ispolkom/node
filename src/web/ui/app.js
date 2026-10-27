@@ -1981,6 +1981,7 @@ function playOnlineSound() {
 
 function toggleSound() {
     soundEnabled = !soundEnabled;
+    window.dispatchEvent(new Event('yandi-sound-changed'));
     localStorage.setItem('soundEnabled', soundEnabled);
     const btns = document.querySelectorAll('#soundToggle');
     btns.forEach(btn => {
@@ -2011,6 +2012,7 @@ if (document.readyState === 'loading') {
 // Экспортируем для использования в других скриптах
 window.playMessageSound = playMessageSound;
 window.playOnlineSound = playOnlineSound;
+window.playGroupSound = playOnlineSound;
 window.toggleSound = toggleSound;
 window.isSoundEnabled = function() { return soundEnabled; };
 

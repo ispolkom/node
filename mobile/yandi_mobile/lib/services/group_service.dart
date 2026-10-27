@@ -25,12 +25,14 @@ class GroupService {
 
   /// Вызывается, когда в группе появилось что-то новое (запись, состав, правила).
   final void Function(String gid)? onChanged;
+  final void Function(String gid)? onActivity;
+  final Set<String> _soundBaseline = {};
 
   /// Номер узла, с которым работает сервис: список «известных групп» ведётся отдельно для каждого узла. Иначе переключение на
   /// другой узел (его список групп не содержит групп прежнего) выглядело бы как удаление групп и стирало их ключи и историю.
   final String nodeKey;
 
-  GroupService(this.api, this.store, {this.onChanged, this.nodeKey = ''});
+  GroupService(this.api, this.store, {this.onChanged, this.onActivity, this.nodeKey = ''});
 
   bool _retired = false;
 
@@ -401,6 +403,7 @@ class GroupService {
   /// Забирает новые записи. Останавливается на записи, для которой ещё нет ключа (придёт позже), чтобы ничего не потерять.
   Future<int> _pull(GroupInfo g) async {
     var got = 0;
+    var incomingActivity = false;
     var after = await store.lastSeq(g.id);
     if (g.firstSeq > after + 1) after = g.firstSeq - 1;   // старое на узле уже стёрто
     while (true) {
@@ -440,10 +443,14 @@ class GroupService {
         after = e['seq'] as int;
       }
       await store.putEntries(batch);
+      if (batch.any((e) => e.from != g.myAlias && !e.deleted && !isPlaceholder(e) &&
+          e.body['op'] != 'dup' && !isTombstoneEntry(e))) incomingActivity = true;
       if (forgotten.isNotEmpty) await tombstoneEntries(store, g.id, forgotten);
       got += batch.length;
       if (blocked || list.length < 200) break;
     }
+    if (!_retired && _soundBaseline.contains(g.id) && incomingActivity) onActivity?.call(g.id);
+    _soundBaseline.add(g.id);
     return got;
   }
 

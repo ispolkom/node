@@ -65,24 +65,37 @@ void main() {
           .setMockMethodCallHandler(PlatformFiles.channel, null);
     },
   );
-  testWidgets('RU/EN settings and opt-in sound, OS notifications and DND', (
+  testWidgets('header bell toggles the same master switch as YANDI sound settings', (t) async {
+    await m2.open(t, m2.FeatureApi(), 'Настройки');
+    final checkbox = find.widgetWithText(CheckboxListTile, 'Звуки YANDI');
+    expect(t.widget<CheckboxListTile>(checkbox).value, isTrue);
+    await t.tap(find.byIcon(Icons.notifications_active_outlined));
+    await t.pumpAndSettle();
+    expect(t.widget<CheckboxListTile>(checkbox).value, isFalse);
+    await t.tap(find.byIcon(Icons.notifications_off_outlined));
+    await t.pumpAndSettle();
+    expect(t.widget<CheckboxListTile>(checkbox).value, isTrue);
+    await m1.stop(t);
+  });
+
+  testWidgets('RU/EN settings and default-on sound, opt-in OS notifications and DND', (
     t,
   ) async {
     final api = m2.FeatureApi();
     await m2.open(t, api, 'Настройки');
-    final sound = find.widgetWithText(CheckboxListTile, 'Системный звук');
-    expect(t.widget<CheckboxListTile>(sound).value, false);
+    final sound = find.widgetWithText(CheckboxListTile, 'Звуки YANDI');
+    expect(t.widget<CheckboxListTile>(sound).value, true);
     await t.ensureVisible(sound);
     await t.tap(sound);
     await t.pumpAndSettle();
-    expect(t.widget<CheckboxListTile>(sound).value, true);
+    expect(t.widget<CheckboxListTile>(sound).value, false);
     final language = find.widgetWithText(CheckboxListTile, 'Язык / Language');
     await t.ensureVisible(language);
     await t.tap(language);
     await t.pumpAndSettle();
     expect(find.text('Contacts'), findsNothing, reason: 'вкладки «Контакты» нет');
     expect(find.text('Chat'), findsOneWidget);
-    expect(find.text('System sound'), findsOneWidget);
+    expect(find.text('YANDI sounds'), findsOneWidget);
     expect(
       find.textContaining('Language applies to all shell forms and states'),
       findsOneWidget,

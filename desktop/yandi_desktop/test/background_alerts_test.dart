@@ -72,7 +72,7 @@ void main() {
       });
       await alerts.poll();
       expect(calls.single.arguments, {
-        'sound': false,
+        'sound': true,
         'notify': true,
         'english': false,
       });

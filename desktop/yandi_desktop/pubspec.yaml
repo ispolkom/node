@@ -22,6 +22,7 @@ dev_dependencies:
 flutter:
   uses-material-design: true
   assets:
+    - assets/sounds/
     - assets/logo.png
     - assets/support.json
     - assets/bootstrap.json

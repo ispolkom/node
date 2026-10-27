@@ -6,10 +6,10 @@ import 'tombstone.dart';
 /// Session-only preferences and bounded message baseline. No localStorage/files.
 class AppPreferences extends ChangeNotifier {
   bool english = false,
-      sound = false,
+      sound = true,
       notifications = false,
       dnd = false,
-      background = false;
+      background = true;
   String? failure;
   String? _peer;
   Set<String>? _seen;
@@ -75,7 +75,7 @@ class AppPreferences extends ChangeNotifier {
     await alert();
   }
 
-  Future<void> alert() async {
+  Future<void> alert({bool group = false}) async {
     final ownGeneration = generation;
     if (disposed || dnd || !sound && !notifications) return;
     try {
@@ -83,6 +83,7 @@ class AppPreferences extends ChangeNotifier {
         'sound': sound,
         'notify': notifications,
         'english': english,
+        if (group) 'group': true,
       });
     } catch (_) {
       if (disposed || generation != ownGeneration) return;
@@ -352,7 +353,7 @@ const englishLabels = <String, String>{
   'Телефон': 'Phone',
   'Видео': 'Video',
   'Язык / Language': 'Language / Язык',
-  'Системный звук': 'System sound',
+  'Звуки YANDI': 'YANDI sounds',
   'Уведомления ОС': 'OS notifications',
   'Не беспокоить': 'Do not disturb',
   'Оповещения только о новых сообщениях открытого чата. Содержимое и имя в ОС не передаются. Настройки действуют до закрытия оболочки.':

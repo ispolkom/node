@@ -27,22 +27,24 @@
         return send(call.peer, m);
     }
 
-    // ── звонок (без файлов: простой сигнал WebAudio) ──
-    var ringCtx = null, ringTimer = null;
+    // Bundled YANDI tones, shared with the desktop and mobile clients.
+    var ringAudio = null;
     function ringStart(outgoing) {
         ringStop();
-        try {
-            ringCtx = new (window.AudioContext || window.webkitAudioContext)();
-            var beep = function () {
-                if (!ringCtx) return;
-                var o = ringCtx.createOscillator(), g = ringCtx.createGain();
-                o.frequency.value = outgoing ? 425 : 660; g.gain.value = 0.08;
-                o.connect(g); g.connect(ringCtx.destination); o.start(); o.stop(ringCtx.currentTime + (outgoing ? 1.0 : 0.4));
-            };
-            beep(); ringTimer = setInterval(beep, outgoing ? 4000 : 1200);
-        } catch (e) {}
+        if (window.isSoundEnabled && !window.isSoundEnabled()) return;
+        var asset = outgoing ? 'call_out.mp3' : call && call.video ? 'sqype.mp3' : 'calling.mp3';
+        ringAudio = new Audio('/media/' + asset);
+        ringAudio.loop = true;
+        ringAudio.volume = 0.7;
+        ringAudio.play().catch(function () {});
     }
-    function ringStop() { if (ringTimer) clearInterval(ringTimer); ringTimer = null; if (ringCtx) { try { ringCtx.close(); } catch (e) {} } ringCtx = null; }
+    function ringStop() {
+        if (ringAudio) { ringAudio.pause(); ringAudio.src = ''; ringAudio = null; }
+    }
+    window.addEventListener('yandi-sound-changed', function () {
+        if (call && (call.phase === 'ringing' || call.phase === 'calling')) ringStart(call.phase === 'calling');
+        else ringStop();
+    });
 
     // ── окно звонка ──
     function overlay() {
