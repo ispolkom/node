@@ -1,23 +1,23 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "0.2.0+g843",
-  "seq": 44,
-  "created": 1792564088,
+  "version": "0.2.0+g886",
+  "seq": 52,
+  "created": 1793118589,
   "key_id": "037e04346f99cc00",
   "files": [
     {
-      "name": "yandi-desktop_0.2.0-g843_amd64.deb",
-      "sha256": "9f2c5c6e5744b742f6e1b1bac10a96a2fb9f1716f50a09178ffa82d727a1aa11",
-      "size": 30309828
+      "name": "yandi-desktop_0.2.0-g886_amd64.deb",
+      "sha256": "d3b1f544faa151404f8a5f7f63da5955f4f40820b017b89d29c297f452cdef43",
+      "size": 30451140
     },
     {
-      "name": "yandi-node_0.2.0-g843_amd64.deb",
-      "sha256": "ec97a6e525ff47b3407db8334fa0b6790aea83f416bd7aeb0ba90413e819cd0e",
-      "size": 7089272
+      "name": "yandi-node_0.2.0-g886_amd64.deb",
+      "sha256": "9aefe134d85ab97700712903b180ebc96f53033bcad920a132505b551fc347ed",
+      "size": 7296532
     }
   ],
   "platform": "deb",
-  "expires": 1802932088,
-  "notes": ""
+  "expires": 1803486589,
+  "notes": "Сборка актуальной main / Build of current main: ba2fbe3d7041f2c731ac363ef9fb9ca6ff891c9d"
 }

@@ -1,11 +1,13 @@
 [
   {
-    "relation": ["delegate_permission/common.handle_all_urls"],
+    "relation": [
+      "delegate_permission/common.handle_all_urls"
+    ],
     "target": {
       "namespace": "android_app",
       "package_name": "com.yandi.yandi_mobile",
       "sha256_cert_fingerprints": [
-        "DA:8E:68:13:1B:3F:56:A2:B1:86:B1:77:79:D3:81:1F:DF:CA:24:01:5A:69:BD:82:B1:DE:2C:9E:14:63:CE:CB"
+        "69:BE:6A:97:04:02:C2:C8:33:54:83:77:6F:AB:7D:6B:9A:29:85:A0:A2:45:37:53:46:6B:F7:28:EE:64:7E:E0"
       ]
     }
   }
