@@ -6,6 +6,7 @@ import 'package:yandi_desktop/domain/call_signaling.dart';
 import 'package:yandi_desktop/platform_files.dart';
 import 'package:yandi_desktop/preferences.dart';
 import 'calls_test.dart' as fixture;
+import 'widget_test.dart' as shell;
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -32,6 +33,38 @@ void main() {
     await prefs.alert(group: true);
     expect(calls.length, before);
     prefs.dispose();
+  });
+
+  testWidgets('phone ringing survives focus loss; privacy wipe resumes after hangup', (t) async {
+    final api = fixture.PhoneApi();
+    await shell.start(t, api);
+    await shell.click(t, 'Войти');
+    await t.pump(const Duration(seconds: 1));
+    await t.pumpAndSettle();
+    api.events = [fixture.phoneEvent(1, 'invite')];
+    api.last = 1;
+    await t.pump(const Duration(seconds: 1));
+    await t.pumpAndSettle();
+    expect(find.text('Входящий звонок'), findsOneWidget);
+    final beforeCancel = api.cancels;
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    await t.pumpAndSettle();
+    await t.pump(const Duration(seconds: 8));
+    await t.pumpAndSettle();
+    expect(api.cancels, beforeCancel);
+    expect(api.texts.where((s) => s.contains('"t":"reject"') || s.contains('"t":"hangup"')), isEmpty);
+    expect(find.text('Входящий звонок'), findsOneWidget);
+    expect(calls.where((c) => c.method == 'ringtone').last.arguments, {'kind': 'incoming'});
+
+    api.events = [fixture.phoneEvent(2, 'hangup')];
+    api.last = 2;
+    await t.pump(const Duration(seconds: 1));
+    await t.pumpAndSettle();
+    expect(api.cancels, greaterThan(beforeCancel));
+    expect(find.text('Входящий звонок'), findsNothing);
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pumpAndSettle();
+    await shell.stop(t);
   });
 
   for (final video in [false, true]) {

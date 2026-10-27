@@ -47,14 +47,15 @@ void main() {
     expect(r.map((c) => c.online), [true, false, false]);
   });
 
-  test('«Компьютер» из каталога человеком не считается; заблокированные локально не попадают в список', () {
+  test('компьютер узла доступен для общения; заблокированные локально не попадают в список', () {
     final r = mergeContacts(
       fromNode: const [],
       catalog: [{'peer_id': id('f'), 'name': 'Компьютер', 'is_node': true, 'online': true}, u('g', 'Телефон g', 'user')],
       savedNames: const {},
       isBlocked: (p) => p == id('g'),
     );
-    expect(r, isEmpty);
+    expect(r.single.peerId, id('f'));
+    expect(r.single.displayName, '💻 Компьютер');
   });
 
   test('знакомый только по номеру остаётся в списке (не в сети), если узел его не знает', () {

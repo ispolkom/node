@@ -15,6 +15,7 @@ import 'package:path_provider/path_provider.dart' as pp;
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:audioplayers/audioplayers.dart';
 import 'app_sounds.dart';
+import 'contact_cache.dart';
 import '../models/trusted_node.dart';
 import '../models/invite_payload.dart';
 import '../models/contact.dart';
@@ -49,7 +50,7 @@ import 'file_transfer_service.dart';
 import 'call_service.dart';
 import '../models/call_signal.dart';
 import '../screens/call_screen.dart';
-import 'package:flutter/material.dart' show MaterialPageRoute;
+import 'package:flutter/material.dart' show MaterialPageRoute, WidgetsBinding, AppLifecycleState;
 import 'package:flutter/painting.dart' show PaintingBinding;
 import '../l10n_core.dart';
 
@@ -97,6 +98,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _calls?.refreshRingtone();
     notifyListeners();
     await StorageService.secureWrite('pref_sound_$kind', enabled ? '1' : '0');
+    if (kind == 'messages') await chatBg.setMessageSoundEnabled(enabled);
   }
 
   Future<void> playAppSound(String kind) async {
@@ -139,6 +141,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     for (final kind in AppSounds.assets.keys) {
       soundSettings[kind] = (await StorageService.secureRead('pref_sound_$kind')) != '0';
     }
+    await chatBg.setMessageSoundEnabled(soundEnabled('messages'));
     await _loadHidden();
     await _loadProfileMeta();
     await _loadRx();
@@ -178,6 +181,8 @@ class AppState extends ChangeNotifier implements FilesHost {
 
     // 3. Список нод
     await nodeManager.load();
+    // Restore people before any network request, including an offline unlock.
+    await _restoreContacts(nodeManager.activeNode?.id ?? 'local');
 
     // 4. Узлов нет — пробуем bootstrap. Есть — подключаемся сразу к выбранному по сохранённым метрикам, а опрос всех узлов идёт
     // в фоне: раньше он шёл дважды подряд до первого экрана (около 2 с, а с недоступным узлом — до 20 с).
@@ -626,6 +631,7 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Добавить в контакты: новый человек по Peer ID или уже видимое устройство.
   Future<void> addManualContact(String peerId, String name) async {
+    _contactsRevision++;
     final existing = contactFor(peerId);
     final clean = cleanPersonName(name);
     final shown = clean.isNotEmpty
@@ -651,10 +657,12 @@ class AppState extends ChangeNotifier implements FilesHost {
     }
     notifyListeners();
     _announceAvatar(only: [peerId]);   // добавили в контакты — сообщаем свою картинку
+    await _contactCache.save(_api?.nodeId ?? activeNode?.id ?? 'local', contacts);
   }
 
   /// Убрать из контактов. Контакты, заведённые на самом узле, остаются (их удаляют там).
   Future<void> removeManualContact(String peerId) async {
+    _contactsRevision++;
     await StorageService.deleteManualContact(peerId);
     unawaited(avatars?.forgetPeer(peerId) ?? Future<void>.value());   // не в контактах — картинку не показываем и не храним
     _avatarAnnounced.remove(peerId);
@@ -664,6 +672,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       contacts[contacts.indexOf(c)] = c.copyWith(saved: false);
     }
     notifyListeners();
+    await _contactCache.save(_api?.nodeId ?? activeNode?.id ?? 'local', contacts);
   }
 
   Future<void> unpairNode(String nodeId) async {
@@ -692,6 +701,8 @@ class AppState extends ChangeNotifier implements FilesHost {
     _deviceProfilePublished = false;   // профиль публикуется на каждом узле отдельно
     _lastUsers = const [];             // люди прежнего узла новому не принадлежат
     _dataGen++;                        // и ответы, начатые у прежнего узла, не принимаются
+    contacts = [];
+    unawaited(_restoreContacts(next.id));
     groups?.retire();
     _api?.switchNode(next);
     _ws?.switchNode(next);
@@ -715,11 +726,26 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   /// Поколение данных: растёт при смене узла и блокировке; ответ, начатый в прошлом поколении, в списки не кладётся.
   int _dataGen = 0;
+  int _contactsRevision = 0;
+
+  final _contactCache = ContactCache(read: StorageService.secureRead, write: StorageService.secureWrite);
+
+  Future<void> _restoreContacts(String nodeId) async {
+    final gen = _dataGen;
+    final revision = _contactsRevision;
+    final saved = {for (final r in await StorageService.loadManualContacts())
+      r['peer_id'] as String: (r['name'] as String?) ?? ''};
+    final local = await _contactCache.load(nodeId, saved, isBlocked);
+    if (gen != _dataGen || revision != _contactsRevision) return;
+    contacts = local;
+    notifyListeners();
+  }
 
   Future<void> refreshContacts() async {
     try {
       final api = _api!;
       final gen = _dataGen;
+      final nodeId = api.nodeId;
       // три источника читаются независимо: сбой одного (таймаут, чужой ответ) не прячет людей из остальных
       List<Contact>? fromNode;
       try { fromNode = await api.getContacts(); } catch (_) {}
@@ -734,18 +760,19 @@ class AppState extends ChangeNotifier implements FilesHost {
       if (myRole != 'owner') {
         final fresh = await api.getUsers();
         if (gen != _dataGen) return;
-        if (fresh != null) _lastUsers = fresh;   // узел не ответил — остаётся прежний снимок, люди не пропадают
-      } else if (fromNode == null) {
-        return;                                    // владельцу контакты не пришли: прежний список остаётся как есть
+        _lastUsers = fresh ?? [for (final u in _lastUsers) {...u, 'online': false}];
       }
       if (gen != _dataGen) return;   // за время ответа узел сменился или приложение заблокировано
+      _contactsRevision++;
       contacts = mergeContacts(
-        fromNode: fromNode ?? const [],
+        fromNode: fromNode ?? [for (final c in contacts) c.copyWith(online: false)],
         catalog: myRole != 'owner' ? _lastUsers : const [],
         savedNames: saved,
         isBlocked: isBlocked,
       );
       notifyListeners();
+      await _contactCache.save(nodeId, contacts);
+      if (gen != _dataGen) return;
       announceReceiptSupport();
       _resyncAvatarsIfDue();
       _announceAvatar();
@@ -2077,8 +2104,11 @@ class AppState extends ChangeNotifier implements FilesHost {
       }
     }
 
-    if (activeChatPeerId != e.fromPeerId) {
+    // An open chat changes read receipts, not the user's sound preference.
+    if (WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
       unawaited(playAppSound('messages'));
+    }
+    if (activeChatPeerId != e.fromPeerId) {
       // Уведомление когда чат не открыт
       final name = _contactName(e.fromPeerId);
       unawaited(NotificationService.showMessage(

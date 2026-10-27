@@ -14,6 +14,8 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
+import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
 import android.util.Base64
@@ -46,7 +48,9 @@ class YandiChatService : Service() {
         const val ACTION_START   = "com.yandi.chat.START"
         const val ACTION_STOP    = "com.yandi.chat.STOP"
         const val CHANNEL_STATUS = "yandi_status"
-        const val CHANNEL_MSG    = "yandi_messages"
+        // New ID: Android keeps the sound of an existing channel unchanged.
+        const val CHANNEL_MSG    = "yandi_messages_icq_v1"
+        const val CHANNEL_MSG_SILENT = "yandi_messages_silent"
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
 
@@ -294,6 +298,16 @@ class YandiChatService : Service() {
             NotificationChannel(CHANNEL_MSG, "YANDI сообщения",
                 NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Входящие сообщения"
+                setSound(Uri.parse("android.resource://$packageName/raw/icq"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_MSG_SILENT, "YANDI сообщения без звука",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null)
             }
         )
     }
@@ -333,7 +347,10 @@ class YandiChatService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
+        val soundEnabled = getSharedPreferences("yandi_alerts", MODE_PRIVATE)
+            .getBoolean("messages", true)
+        val notif = NotificationCompat.Builder(this, if (soundEnabled) CHANNEL_MSG else CHANNEL_MSG_SILENT)
+            .setSound(if (soundEnabled) Uri.parse("android.resource://$packageName/raw/icq") else null)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle("YANDI")
             .setContentText("🔒 Новое сообщение — откройте YANDI")

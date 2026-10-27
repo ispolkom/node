@@ -162,13 +162,14 @@ void main() {
     );
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
     await t.pumpAndSettle();
-    final count = api.calls.length;
+    final count = api.calls.where((p) => p == '/api/speed').length;
     await t.pump(const Duration(seconds: 20));
-    expect(api.calls.length, count);
+    expect(api.calls.where((p) => p == '/api/speed').length, count);
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pump(const Duration(seconds: 1));
     await t.pumpAndSettle();
-    expect(api.calls.length, greaterThan(count));
+    expect(api.calls.where((p) => p == '/api/speed').length, greaterThan(count));
     await stop(t);
   });
   testWidgets('vault setup requires a 12, 18 or 24 word seed phrase, with an optional control word', (t) async {

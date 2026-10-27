@@ -39,9 +39,9 @@ List<Contact> mergeContacts({
     if (c == null) {
       // знакомый только по номеру: «в сети», если узел видит его под тем же полным номером (вне каталога — не в сети)
       byId[e.key] = Contact(peerId: e.key, displayName: e.value.isEmpty ? e.key.substring(0, 12) : e.value, online: false, isManual: true);
-    } else if (e.value.isNotEmpty) {
+    } else {
       // имя, которое человек задал сам, сильнее имени с узла; остальное (роль, присутствие) остаётся от узла
-      byId[e.key] = Contact(peerId: c.peerId, displayName: e.value, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs, role: c.role);
+      byId[e.key] = Contact(peerId: c.peerId, displayName: e.value.isEmpty ? c.displayName : e.value, online: c.online, isManual: c.isManual, saved: true, lastActivityMs: c.lastActivityMs, role: c.role);
     }
   }
   return [for (final c in byId.values) if (!isBlocked(c.peerId)) c];

@@ -123,7 +123,7 @@ class ApiService {
       final res = await _client.get(_url('/mobile/users'), headers: _headers).timeout(const Duration(seconds: 12));
       if (res.statusCode != 200) return null;
       final j = jsonDecode(res.body) as Map<String, dynamic>;
-      return [for (final u in (j['users'] as List? ?? const [])) (u as Map).cast<String, dynamic>()];
+      return [for (final u in (j['users'] as List)) (u as Map).cast<String, dynamic>()];
     } catch (_) {
       return null;
     }
@@ -239,8 +239,9 @@ class ApiService {
     final res = await _client
         .get(_url('/mobile/contacts'), headers: _headers)
         .timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) throw StateError('Contacts unavailable');
     final data = jsonDecode(res.body) as Map<String, dynamic>;
-    final list = data['contacts'] as List<dynamic>? ?? [];
+    final list = data['contacts'] as List<dynamic>;
     return list.map((e) {
       final m = e as Map<String, dynamic>;
       // своё имя контакта сильнее его ника; ник подставляется, только когда имя не задано (пусто или обрезок номера)

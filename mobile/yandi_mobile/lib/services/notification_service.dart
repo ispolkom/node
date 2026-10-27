@@ -68,7 +68,7 @@ class NotificationService {
   }) async {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
-        'yandi_messages',
+        'yandi_messages_silent',
         tr('Сообщения'),
         channelDescription: tr('Входящие сообщения YANDI'),
         importance:   Importance.high,

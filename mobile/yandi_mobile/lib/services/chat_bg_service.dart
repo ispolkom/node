@@ -7,6 +7,13 @@ import '../models/trusted_node.dart';
 class ChatBgService {
   static const _channel = MethodChannel('com.yandi/chat');
 
+  Future<void> setMessageSoundEnabled(bool enabled) async {
+    try {
+      await _channel.invokeMethod<void>('messageSound', {'enabled': enabled});
+    } on PlatformException catch (_) {
+    } on MissingPluginException catch (_) {}
+  }
+
   Future<void> start(TrustedNode node) async {
     try {
       await _channel.invokeMethod('start', {

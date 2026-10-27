@@ -69,6 +69,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    callsController.onStopped = () {
+      final state = WidgetsBinding.instance.lifecycleState;
+      if (mounted && blurIgnored && !callsController.running &&
+          state != null && state != AppLifecycleState.resumed) {
+        didChangeAppLifecycleState(state);
+      }
+    };
     // После закрытия диалога фокус возвращается не мгновенно: если окно так и
     // не стало активным (ушли в другое приложение), содержимое стираем.
     PlatformFiles.onClosed = () {
@@ -137,6 +144,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // A ringing/ongoing call survives focus changes just like the media player.
+    // Explicit vault locking and disconnects still dispose it immediately.
+    if (callsController.running) {
+      blurIgnored = state != AppLifecycleState.resumed;
+      return;
+    }
     // Окно проигрывателя (встроенное или внешнее) забирает фокус: пока оно открыто, чат не стирается. Когда воспроизведение кончилось,
     // обычное правило действует снова (следующая потеря фокуса стирает содержимое).
     if (PlaybackGuard.active) {
@@ -181,6 +194,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     preferences.dispose();
     WidgetsBinding.instance.removeObserver(this);
     PlatformFiles.onClosed = null;
+    callsController.onStopped = null;
     widget.api.cancel();
     super.dispose();
   }

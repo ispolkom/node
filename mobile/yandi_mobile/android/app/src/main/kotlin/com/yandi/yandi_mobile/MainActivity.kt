@@ -130,6 +130,11 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(messenger, "com.yandi/chat").setMethodCallHandler { call, result ->
             when (call.method) {
+                "messageSound" -> {
+                    getSharedPreferences("yandi_alerts", MODE_PRIVATE).edit()
+                        .putBoolean("messages", call.argument<Boolean>("enabled") ?: true).apply()
+                    result.success(null)
+                }
                 "start" -> {
                     val i = Intent(this, YandiChatService::class.java).setAction(YandiChatService.ACTION_START)
                         .putExtra("host", call.argument<String>("host"))

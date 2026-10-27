@@ -6,7 +6,7 @@ import 'domain/states.dart';
 import 'domain/shell_repository.dart';
 import 'domain/group_repository.dart';
 
-/// Bounded session observations, not daemon read receipts. Never polls phones.
+/// Bounded session observations, not daemon read receipts.
 class BackgroundAlerts {
   final Api api;
   final AppPreferences preferences;
@@ -62,11 +62,6 @@ class BackgroundAlerts {
           own is! String ||
           !RegExp(r'^[a-f0-9]{64}$').hasMatch(own))
         return;
-      final phones = ShellRepository.list(
-        await api.request('/api/mobile/devices'),
-        'devices',
-      ).map((d) => d['peer_id']).toSet();
-      if (!active()) return;
       final contacts = await ShellRepository(api).contacts();
       if (!active()) return;
       final trusted = ShellRepository.list(
@@ -76,8 +71,13 @@ class BackgroundAlerts {
       if (!active()) return;
       final peers = <String>{};
       for (final c in contacts) {
-        if (c['is_phone'] == true) continue;
         final short = c['short_id'];
+        if (c['is_phone'] == true && short is String &&
+            RegExp(r'^(?:[a-f0-9]{16}|[a-f0-9]{64})$').hasMatch(short)) {
+          peers.add(short);
+          if (peers.length == 32) break;
+          continue;
+        }
         if (short is! String || !RegExp(r'^[a-f0-9]{16}$').hasMatch(short))
           continue;
         final ids = trusted.where(
@@ -85,7 +85,7 @@ class BackgroundAlerts {
         );
         if (ids.length != 1) continue;
         final id = ids.single['id'] as String;
-        if (RegExp(r'^[a-f0-9]{64}$').hasMatch(id) && !phones.contains(id))
+        if (RegExp(r'^[a-f0-9]{64}$').hasMatch(id))
           peers.add(id);
         if (peers.length == 32) break;
       }
@@ -107,7 +107,9 @@ class BackgroundAlerts {
           final ts = m['timestamp'];
           if (ts is! num || m['msg_id'] is! String) continue;
           if (previous != null &&
-              m['from'] == peer &&
+              m['from'] is String &&
+              m['from'] != own &&
+              (m['from'] as String).startsWith(peer) &&
               !isTombstone(m['text']) &&
               ts >= previous.latest &&
               !previous.ids.contains(m['msg_id']) &&
@@ -180,10 +182,10 @@ class BackgroundAlerts {
       if (freshGroup && active()) await preferences.alert(group: true);
       if (active()) preferences.update();
     } catch (_) {
-      // Do not keep stale baselines across unavailable/invalid daemon state.
+      // An unrelated background request must not erase the open chat's baseline.
+      // Confirmed vault locks reset both baselines explicitly above.
       if (active()) {
         reset();
-        preferences.reset();
       }
     } finally {
       busy = false;

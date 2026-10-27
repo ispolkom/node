@@ -13,7 +13,10 @@ import 'transport/api.dart';
 /// Lets the chat start a call through the app-wide call panel.
 class CallsController {
   Future<void> Function(String peer, bool video, bool phone)? _start;
+  bool Function()? _isRunning;
+  VoidCallback? onStopped;
   bool get ready => _start != null;
+  bool get running => _isRunning?.call() ?? false;
   Future<void> start(String peer, {bool video = false, bool phone = false}) =>
       _start?.call(peer, video, phone) ?? Future.value();
 }
@@ -54,6 +57,7 @@ class _CallsFeatureState extends State<CallsFeature> {
   Route<void>? overlay;
   AppPreferences? _preferences;
   String _ringKind = 'none';
+  bool _wasRunning = false;
 
   @override
   void didChangeDependencies() {
@@ -123,6 +127,7 @@ class _CallsFeatureState extends State<CallsFeature> {
       },
     );
     coordinator.addListener(update);
+    widget.controller?._isRunning = () => coordinator.running;
     widget.controller?._start = (peer, video, phone) async {
       if (coordinator.phase != CallPhase.idle || coordinator.busy) return;
       await coordinator.start(peer, video: video, phone: phone);
@@ -134,6 +139,13 @@ class _CallsFeatureState extends State<CallsFeature> {
   }
 
   void update() {
+    final stopped = _wasRunning && !coordinator.running;
+    _wasRunning = coordinator.running;
+    if (stopped) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && !coordinator.running) widget.controller?.onStopped?.call();
+      });
+    }
     syncRingtone();
     final c = coordinator.call;
     if (c != null && resolvedPeer != c.peer) {
@@ -149,6 +161,10 @@ class _CallsFeatureState extends State<CallsFeature> {
   /// Идёт звонок — экран звонка поверх всего окна (как в Skype); закончился — закрывается сам.
   void syncOverlay() {
     if (!widget.embedded || !mounted) return;
+    if (!widget.isActive()) {
+      closeOverlay();
+      return;
+    }
     final inCall = coordinator.phase != CallPhase.idle;
     if (inCall && overlay == null) {
       final route = RawDialogRoute<void>(
@@ -176,6 +192,7 @@ class _CallsFeatureState extends State<CallsFeature> {
       unawaited(PlatformFiles.channel.invokeMethod<void>('ringtone', {'kind': 'none'}).catchError((Object _) {}));
     }
     widget.controller?._start = null;
+    widget.controller?._isRunning = null;
     closeOverlay();
     nameNotifier.dispose();
     timer?.cancel();
@@ -217,7 +234,9 @@ class _CallsFeatureState extends State<CallsFeature> {
   );
 
   /// Экран звонка: имя, состояние, видео, значки «принять/отклонить/микрофон/камера/завершить».
-  Widget callCard(BuildContext ctx) => ListenableBuilder(
+  Widget callCard(BuildContext ctx) => !mounted || coordinator.disposed
+      ? const SizedBox.shrink()
+      : ListenableBuilder(
     listenable: Listenable.merge([coordinator, nameNotifier]),
     builder: (_, _) {
       final c = coordinator.call;

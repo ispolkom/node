@@ -1,5 +1,12 @@
 # Правила сжатия кода (R8) для release-сборки YANDI.
 
+# flutter_local_notifications 17.x uses Gson reflection for its notification cache.
+# R8 full mode otherwise removes TypeToken's generic argument (runtime crash on cancel).
+-keepattributes Signature,InnerClasses,EnclosingMethod
+-keep class com.google.gson.reflect.TypeToken { *; }
+-keep class * extends com.google.gson.reflect.TypeToken { *; }
+-keep class com.dexterous.flutterlocalnotifications.models.** { *; }
+
 # Нативная часть VPN (hev-socks5-tunnel): JNI ищет методы по имени класса и метода — не переименовывать.
 -keep class hev.htproxy.** { *; }
 -keepclasseswithmembernames class * { native <methods>; }
