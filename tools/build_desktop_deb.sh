@@ -9,6 +9,7 @@
 #   (cd desktop/yandi_desktop && flutter build linux --release)  и  cargo build --release --offline
 #   bash tools/build_desktop_deb.sh
 set -euo pipefail
+umask 022
 cd "$(dirname "$0")/.."
 BUNDLE=desktop/yandi_desktop/build/linux/x64/release/bundle
 ICON=desktop/yandi_desktop/linux/packaging/icon_logo.png
@@ -47,6 +48,7 @@ Terminal=false
 Categories=Network;InstantMessaging;
 StartupWMClass=org.yandi.desktop
 DESK
+chmod 0644 "$R/usr/share/applications/org.yandi.desktop.desktop"
 # зависимости: системные библиотеки, которые нужны ВСЕМ ELF бандла (прямые NEEDED, кроме лежащих в самом бандле)
 BUNDLED=$(cd "$R/opt/yandi" && find . -name '*.so*' -printf '%f\n' | sort -u)
 NEEDED=$(find "$R/opt/yandi" -type f \( -name '*.so*' -o -name yandi_desktop \) -exec env LC_ALL=C readelf -d {} + 2>/dev/null | sed -n 's/.*(NEEDED).*\[\(.*\)\]/\1/p' | sort -u)
@@ -94,6 +96,10 @@ case "$1" in remove|purge|upgrade|disappear)
 exit 0
 POST
 chmod 0755 "$R/DEBIAN/postinst" "$R/DEBIAN/postrm"
+UNREADABLE=$(find "$R/usr" "$R/opt" -type f ! -perm -0004 -print -quit)
+[ -z "$UNREADABLE" ] || { echo "ОШИБКА: файл пакета недоступен обычному пользователю: $UNREADABLE"; exit 1; }
+UNSEARCHABLE=$(find "$R/usr" "$R/opt" -type d ! -perm -0001 -print -quit)
+[ -z "$UNSEARCHABLE" ] || { echo "ОШИБКА: каталог пакета недоступен обычному пользователю: $UNSEARCHABLE"; exit 1; }
 mkdir -p dist
 fakeroot dpkg-deb --build --root-owner-group -Zxz "$R" "dist/${PKG}.deb" >/dev/null
 echo "готово: dist/${PKG}.deb"

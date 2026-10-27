@@ -14,6 +14,7 @@
 #   bash tools/publish_release.sh --build            перед этим выполнить cargo build --release --offline
 #   YANDI_RELEASE_NOTES="что нового"  YANDI_RELEASE_EXPIRES_DAYS=120  — описание и срок действия (по умолчанию 120 дней)
 set -euo pipefail
+umask 022
 cd "$(dirname "$0")/.."
 source tools/paths.sh
 BUILD=0; NODE_ONLY=0

@@ -6,6 +6,7 @@
 # Результат: dist/yandi-node_<версия>_amd64.deb и dist/SHA256SUMS. Подпись релиза — отдельным шагом (tools/sign_release.sh, когда он
 # появится): сам пакет не подписывается, подписывается список контрольных сумм.
 set -euo pipefail
+umask 022
 cd "$(dirname "$0")/.."
 BIN=target/release
 for f in yandi yandi-keys; do [ -x "$BIN/$f" ] || { echo "нет $BIN/$f: сначала cargo build --release --offline"; exit 1; }; done

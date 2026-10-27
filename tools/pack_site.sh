@@ -3,6 +3,7 @@
 #   bash tools/pack_site.sh
 # Сначала проверяет подписанный список входных узлов (bootstrap/bootstrap.json), потом кладёт его в site/update/bootstrap.json.
 set -euo pipefail
+umask 022
 cd "$(dirname "$0")/.."
 source tools/paths.sh
 BIN=target/release/yandi
@@ -10,6 +11,10 @@ BIN=target/release/yandi
 "$BIN" bootstrap verify bootstrap/bootstrap.json
 mkdir -p "$SITE_DIR/update" "$ARCHIVE_DIR"
 cp bootstrap/bootstrap.json "$SITE_DIR/update/bootstrap.json"
+# Public site files must remain readable after extraction by a hosting account.
+# A caller's private umask must not make downloads or PHP pages inaccessible.
+find "$SITE_DIR" -type d -exec chmod 0755 {} +
+find "$SITE_DIR" -type f -exec chmod 0644 {} +
 # открытые ключи и сертификаты — в одну папку-витрину (ссылки на файлы репозитория, второй копии нет)
 mkdir -p "$PUBLIC_KEYS_DIR"
 ln -sf ../src/release/yandi-release-pubkey.hex "$PUBLIC_KEYS_DIR/yandi-release-pubkey.hex"

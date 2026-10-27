@@ -9,6 +9,7 @@
 # Фраза выпусков — две одинаковые строки на stdin (скрытый ввод); нигде не сохраняется.
 #   YANDI_RELEASE_NOTES="что нового"  YANDI_RELEASE_EXPIRES_DAYS=120
 set -euo pipefail
+umask 022
 cd "$(dirname "$0")/.."
 source tools/paths.sh
 APK=${1:-mobile/yandi_mobile/build/app/outputs/flutter-apk/app-release.apk}
