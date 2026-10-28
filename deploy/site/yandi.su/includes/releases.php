@@ -3,18 +3,20 @@ declare(strict_types=1);
 // Download metadata verified against signed release manifests.
 const YANDI_RELEASES = [
     'android' => [
-        'version' => '1.0.0 (build 7)',
+        'version' => '1.0.0 (build 8)',
         'date' => '2026-10-27',
         'changes' => [
             'ru' => [
                 'Исправлен звук личных сообщений в открытом чате и фоновый звук icq.mp3 без зависимости от системной мелодии.',
                 'Сохранённые контакты доступны без интернета после разблокировки; история и файлы читаются из локального хранилища.',
-                'Исправлена ошибка Gson/R8 при снятии уведомлений.'
+                'Исправлена ошибка Gson/R8 при снятии уведомлений.',
+                'Значок уведомлений сохранён после R8; устранена ошибка invalid_icon.'
             ],
             'en' => [
                 'Fixed message sounds in the open chat and bundled icq.mp3 background alerts independent of the system notification tone.',
                 'Saved contacts are restored offline after unlocking; history and files use local storage.',
-                'Fixed the Gson/R8 notification cancellation error.'
+                'Fixed the Gson/R8 notification cancellation error.',
+                'Notification icon preserved through R8; fixed invalid_icon.'
             ]
         ],
         'compat' => [
@@ -26,7 +28,7 @@ const YANDI_RELEASES = [
                 'href' => '/update/android/yandi.apk',
                 'name' => 'yandi.apk',
                 'size' => '123.3',
-                'sha256' => '2186827ffebe1aa4e4044089477bc4e6c27753e638c5f9c01335de8264645e91'
+                'sha256' => '2372b68b152efb61624c851ee710f39e5bd237da4ad989e2ad6e29e813440a1d'
             ]
         ]
     ],
@@ -46,8 +48,8 @@ const YANDI_RELEASES = [
             ]
         ],
         'compat' => [
-            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0 (сборка 7).',
-            'en' => 'Install both packages of the same version together. Android: 1.0.0 (build 7).'
+            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0 (сборка 8).',
+            'en' => 'Install both packages of the same version together. Android: 1.0.0 (build 8).'
         ],
         'files' => [
             [
