@@ -1751,7 +1751,7 @@ fn phone_to_node(st: &MobileState, from_device: &str, blob: &[u8]) -> bool {
             return crate::mobile_self::commit_replay(blob);
         }
         crate::mobile_self::Envelope::CapPing => {
-            node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
+            let _ = node_live_to_device(st, from_device, &crate::mobile_self::cap_ping());
             return true;
         }
         crate::mobile_self::Envelope::Ignored => return true,
@@ -1916,16 +1916,18 @@ fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
 }
 
 /// «Живой» сигнал телефону от узла (не хранится): ответ на пинг поддержки квитанций.
-fn node_live_to_device(st: &MobileState, device: &str, text: &str) {
+fn node_live_to_device(st: &MobileState, device: &str, text: &str) -> Result<(), String> {
     if crate::mobile_self::is_blocked_phone(device) {
-        return;
+        return Err("устройство заблокировано".into());
     }
-    if let Ok(x) = device_x25519(device) {
-        let node = hex::encode(st.my_id.0);
-        let Ok(blob) = crate::mobile_self::seal(text, &x, &node, device, 2) else { return };
-        let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob), exp: 0 };
-        let _ = bus().send(Event::Live(Arc::new(m)));
-    }
+    let x = device_x25519(device)?;
+    let node = hex::encode(st.my_id.0);
+    let blob = crate::mobile_self::seal(text, &x, &node, device, 2)
+        .map_err(|_| "не удалось зашифровать сигнал звонка".to_string())?;
+    let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob), exp: 0 };
+    bus().send(Event::Live(Arc::new(m)))
+        .map_err(|_| "нет получателя живого сигнала".to_string())?;
+    Ok(())
 }
 
 /// Итог звонка в историю чата на странице узла (как в приложении: «📞 Звонок · 01:23», «📞 Видеозвонок: Нет ответа»). Пишет страница, когда звонок
@@ -1960,8 +1962,7 @@ pub fn pc_call_signal(peer: &str, text: &str) -> Result<(), String> {
     if live_count(peer) == 0 {
         return Err("телефон не в сети".into());
     }
-    node_live_to_device(&st, peer, text);
-    Ok(())
+    node_live_to_device(&st, peer, text)
 }
 
 /// Учётные данные сервера звонков (TURN) для страницы узла: та же схема, что у телефонов; адрес для браузера — этот же компьютер.
@@ -2976,7 +2977,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                                     crate::mobile_self::push_call(&me, &t);
                                 }
                                 Some(t) if matches!(crate::mobile_self::classify(t.clone()), crate::mobile_self::Envelope::CapPing) => {
-                                    node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
+                                    let _ = node_live_to_device(&st, &me, &crate::mobile_self::cap_ping());
                                 }
                                 other => {
                                     // страница не открыта (или не сигнал) — «не на связи», чтобы телефон не висел в вызове

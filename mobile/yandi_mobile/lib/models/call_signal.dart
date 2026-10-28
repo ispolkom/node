@@ -5,7 +5,7 @@ import 'dart:convert';
 class CallSignal {
   static const String marker = '\u0001yandi-call:';
 
-  /// invite — позвонить, accept — принять, reject — отклонить, busy — занят, hangup — завершить,
+  /// invite — позвонить, ringing — получатель получил приглашение, accept — принять, reject — отклонить, busy — занят, hangup — завершить,
   /// offer / answer — описание сеанса WebRTC, ice — сетевой кандидат.
   final String type;
   final String cid;

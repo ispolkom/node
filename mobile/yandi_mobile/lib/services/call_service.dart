@@ -69,7 +69,53 @@ class CallService extends ChangeNotifier {
   MediaStream? _local;
   final List<RTCIceCandidate> _pendingIce = [];
   bool _remoteSet = false;
-  Timer? _ringTimer, _lostTimer, _endTimer, _connectTimer;
+  Timer? _ringTimer, _lostTimer, _endTimer, _connectTimer, _inviteRetry;
+  bool _disposed = false;
+  bool _inviteAcknowledged = false;
+  final _closedCalls = <String, DateTime>{};
+  void _rememberClosed(String peer, String id) {
+    _closedCalls.removeWhere((_, until) => until.isBefore(DateTime.now()));
+    if (_closedCalls.length >= 256)
+      _closedCalls.remove(_closedCalls.keys.first);
+    _closedCalls['$peer/$id'] = DateTime.now().add(const Duration(seconds: 90));
+  }
+
+  bool _wasClosed(String peer, String id) =>
+      _closedCalls['$peer/$id']?.isAfter(DateTime.now()) ?? false;
+
+  void _retryInvite(String peer, String id, bool withVideo) {
+    var attempts = 0;
+    bool sending = false;
+    _inviteRetry = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (_disposed ||
+          cid != id ||
+          phase != CallPhase.calling ||
+          attempts >= 10) {
+        timer.cancel();
+        return;
+      }
+      if (sending) return;
+      sending = true;
+      attempts++;
+      try {
+        await sendSignal(
+            peer, CallSignal.now('invite', id, video: withVideo).encode());
+      } catch (_) {
+        // Retry transient transport failures until the existing ring deadline.
+      } finally {
+        sending = false;
+      }
+    });
+  }
+
+  Future<void> _acknowledge(String peer, CallSignal invite) async {
+    try {
+      await sendSignal(peer,
+          CallSignal.now('ringing', invite.cid, video: invite.video).encode());
+    } catch (_) {
+      // A repeated invite receives a fresh acknowledgement.
+    }
+  }
   final AudioPlayer _ring;
   bool _ringing = false;
   int _soundGeneration = 0;
@@ -87,6 +133,7 @@ class CallService extends ChangeNotifier {
   // ── Исходящий ──────────────────────────────────────────────────────────────
 
   Future<String?> start(String toPeerId, {required bool withVideo}) async {
+    if (_disposed) return null;
     if (busy) return tr('Вы уже разговариваете');
     _reset();
     final wantVideo = withVideo && !audioOnly;
@@ -95,11 +142,14 @@ class CallService extends ChangeNotifier {
     speaker = wantVideo; cameraOn = wantVideo;
     notifyListeners();
     showScreen();
-    final ok = await sendSignal(toPeerId, CallSignal.now('invite', cid!, video: video).encode());
+    final ownCid = cid!;
+    final ok = await sendSignal(toPeerId, CallSignal.now('invite', ownCid, video: video).encode());
+    if (_disposed || cid != ownCid || phase != CallPhase.calling) return null;
     if (!ok) {
       _finish(tr('Нет связи с узлом или это не ваше устройство'), log: false);
       return null;
     }
+    if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video);
     _playRing('dialing');
     _ringTimer = Timer(const Duration(seconds: 45), () {
       _signal('hangup');
@@ -112,19 +162,26 @@ class CallService extends ChangeNotifier {
 
   /// Сигнал от другого телефона (уже расшифрованный).
   Future<void> onSignal(String from, CallSignal s) async {
-    if (!s.fresh) return;
+    if (_disposed || !s.fresh) return;
+    if (const ['hangup', 'reject', 'busy'].contains(s.type)) {
+      _rememberClosed(from, s.cid);
+    }
     switch (s.type) {
       case 'invite':
+        if (_wasClosed(from, s.cid)) return;
         if (busy) {
           // встречные звонки друг другу: побеждает звонок с меньшим номером, второй уступает и принимается автоматически
           if (phase == CallPhase.calling && from == peerId && s.cid.compareTo(cid!) < 0) {
+            _inviteRetry?.cancel();
             _stopRing(); _ringTimer?.cancel();
             // режим (аудио/видео) остаётся тем, на который согласился пользователь: чужое поле video не включает камеру
             cid = s.cid; incoming = true; phase = CallPhase.ringing;
             notifyListeners();
             await accept();
           } else if (!(from == peerId && s.cid == cid)) {
-            await sendSignal(from, CallSignal.now('busy', s.cid).encode());
+            await sendSignal(from, CallSignal.now('busy', s.cid, video: s.video).encode());
+          } else if (incoming) {
+            await _acknowledge(from, s);
           }
           return;
         }
@@ -137,8 +194,15 @@ class CallService extends ChangeNotifier {
         _playRing(video ? 'videoCalls' : 'calls');
         _ringTimer = Timer(const Duration(seconds: 45), () => _finish(tr('Пропущенный звонок'), log: true));
         showScreen();
+        await _acknowledge(from, s);
+      case 'ringing':
+        if (_mine(from, s) && !incoming) {
+          _inviteAcknowledged = true;
+          _inviteRetry?.cancel();
+        }
       case 'accept':
         if (_mine(from, s) && !incoming && phase == CallPhase.calling) {
+          _inviteRetry?.cancel();
           _stopRing(); _ringTimer?.cancel();
           phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
           await _startMedia(offerer: true);
@@ -197,8 +261,9 @@ class CallService extends ChangeNotifier {
 
   Future<void> hangup() async {
     if (!busy || phase == CallPhase.ended) return;
-    await _signal('hangup');
+    final sent = _signal('hangup');
     _finish(phase == CallPhase.calling ? tr('Звонок отменён') : tr('Звонок завершён'), log: true);
+    await sent;
   }
 
   Future<bool> _signal(String type, {String? sdp, Map<String, dynamic>? cand}) {
@@ -429,6 +494,8 @@ class CallService extends ChangeNotifier {
 
   void _finish(String reason, {required bool log}) {
     if (phase == CallPhase.idle || phase == CallPhase.ended) return;
+    _inviteRetry?.cancel();
+    if (peerId != null && cid != null) _rememberClosed(peerId!, cid!);
     _ringTimer?.cancel(); _lostTimer?.cancel(); _connectTimer?.cancel(); _limitTimer?.cancel(); _warnTimer?.cancel(); _stopRing(); onIncomingCancel();
     final wasActive = phase == CallPhase.active;
     final dur = elapsed;
@@ -460,6 +527,8 @@ class CallService extends ChangeNotifier {
   }
 
   void _reset() {
+    _inviteAcknowledged = false;
+    _inviteRetry?.cancel();
     _endTimer?.cancel();
     _limitTimer?.cancel(); _warnTimer?.cancel(); _limit = null; _limitFrom = null; limitWarning = ''; refusal = null;
     phase = CallPhase.idle; peerId = null; cid = null; incoming = false; video = false;
@@ -509,6 +578,8 @@ class CallService extends ChangeNotifier {
 
   @override
   void dispose() {
+    _disposed = true;
+    _inviteRetry?.cancel();
     _ringTimer?.cancel();
     _lostTimer?.cancel();
     _endTimer?.cancel();

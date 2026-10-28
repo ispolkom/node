@@ -171,6 +171,7 @@ class DaemonCallSignaling implements CallSignaling {
     final events =
         (result['events'] as List).whereType<Map<String, dynamic>>().toList()
           ..sort((a, b) => (a['seq'] as int).compareTo(b['seq'] as int));
+    final cancelled = <String>{};
     for (final event in events) {
       final seq = event['seq'];
       if (seq is! int || seq <= after) continue;
@@ -190,6 +191,9 @@ class DaemonCallSignaling implements CallSignaling {
           continue;
         final sender = peer(event['from'] as String, phone: true);
         id(data['cid'] as String, phone: true);
+        if (const ['hangup', 'reject', 'busy'].contains(data['t'])) {
+          cancelled.add('$sender/${data['cid']}');
+        }
         if (data['t'] == 'invite')
           refs.add(
             CallRef(
@@ -208,6 +212,7 @@ class DaemonCallSignaling implements CallSignaling {
       }
     }
     if (last > after) after = last;
+    refs.removeWhere((c) => cancelled.contains('${c.peer}/${c.id}'));
     return refs;
   }
 

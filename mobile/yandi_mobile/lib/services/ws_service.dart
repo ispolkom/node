@@ -413,7 +413,7 @@ class WsService {
       Uint8List.fromList(payload),
       (theirPub) => _identity.ecdh(theirPub),
       from: fromPeerId, to: self, kind: kind, senderEd: bundle.ed25519,
-      claimReplay: claimOverride ?? ledger.claim,
+      claimReplay: claimOverride ?? (id, expiresMs) => ledger.claim(id, expiresMs, urgent: kind == 2),
       onDuplicate: onDuplicate,
     );
     } catch (_) { return null; }

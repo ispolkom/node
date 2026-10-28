@@ -1,7 +1,7 @@
 // Звонки и видеозвонки телефон ↔ эта страница (компьютер владельца как собеседник телефона).
 //
 // Сигналы — тот же протокол, что у приложения (call_signal.dart): '\u0001yandi-call:' + {v, t, cid, video, ts, sdp?, cand?};
-// t = invite | accept | reject | busy | hangup | offer | answer | ice. Узел шифрует их для телефона и отдаёт нам расшифрованные
+// t = invite | ringing | accept | reject | busy | hangup | offer | answer | ice. Узел шифрует их для телефона и отдаёт нам расшифрованные
 // (страница опрашивает /api/mobile/call/events раз в секунду; пока опрашивает — узел не отвечает телефону «не на связи»).
 // Звук и видео идут напрямую браузер ↔ телефон (WebRTC, DTLS-SRTP), узел их не видит. Кто звонит, тот после «accept» шлёт offer.
 // Нет микрофона или камеры — звонок всё равно принимается: тогда только слышим/видим собеседника.
@@ -9,6 +9,25 @@
     var MARK = '\u0001yandi-call:';
     var after = null;   // номер последнего события очереди; null — ещё не знаем (старые события при загрузке страницы не проигрываем)
     var call = null;    // {peer, name, cid, video, incoming, phase, pc, local, pendingIce, remoteSet, timers}
+
+    var closedCalls = new Map();
+    function rememberClosed(peer, cid) {
+        closedCalls.forEach(function (until, key) { if (until < Date.now()) closedCalls.delete(key); });
+        if (closedCalls.size >= 256) closedCalls.delete(closedCalls.keys().next().value);
+        closedCalls.set(peer + '/' + cid, Date.now() + 90000);
+    }
+    function acknowledge(peer, s) {
+        send(peer, { v: 1, t: 'ringing', cid: s.cid, video: !!s.video, ts: Date.now() }).catch(function () {});
+    }
+    function retryInvite(c) {
+        var attempts = 0, sending = false;
+        c.retry = setInterval(function () {
+            if (call !== c || c.phase !== 'calling' || attempts >= 10) { clearInterval(c.retry); return; }
+            if (sending) return;
+            sending = true; attempts++;
+            sig('invite').catch(function () {}).then(function () { sending = false; });
+        }, 2000);
+    }
 
     function el(id) { return document.getElementById(id); }
     function esc(t) { return String(t == null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;'); }
@@ -190,6 +209,8 @@
     function finish(reason) {
         var c = call;
         if (!c || c.phase === 'ended') return;
+        rememberClosed(c.peer, c.cid);
+        clearInterval(c.retry);
         logCall(c, reason, c.phase === 'active');
         ringStop(); clearTimeout(c.ringTimeout); clearTimeout(c.lost);
         try { if (c.local) c.local.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
@@ -202,7 +223,9 @@
         if (call) { alert('Вы уже разговариваете'); return; }
         call = { peer: peer, name: name || 'Телефон', cid: newCid(), video: !!video, incoming: false, phase: 'calling', pendingIce: [] };
         render(); ringStart(true);
-        sig('invite').catch(function (e) { finish('Не дозвониться: ' + e.message); });
+        var c = call;
+        retryInvite(c);
+        sig('invite').catch(function (e) { if (call === c && c.phase === 'calling') finish('Не дозвониться: ' + e.message); });
         call.ringTimeout = setTimeout(function () { if (call && call.phase === 'calling') { sig('hangup').catch(function () {}); finish('Нет ответа'); } }, 45000);
     }
 
@@ -216,16 +239,24 @@
         if (!Number.isInteger(s.ts) || Math.abs(Date.now() - s.ts) > 90000) return;
         if (s.video !== undefined && typeof s.video !== 'boolean') return;
         if (typeof e.name !== 'string') e.name = 'Телефон';
+        if (['hangup', 'reject', 'busy'].indexOf(s.t) >= 0) rememberClosed(e.from, s.cid);
         var mine = call && call.peer === e.from && call.cid === s.cid && call.phase !== 'ended';
         switch (s.t) {
             case 'invite':
-                if (call) { if (!mine) send(e.from, { v: 1, t: 'busy', cid: s.cid, video: !!s.video, ts: Date.now() }).catch(function () {}); return; }
+                if ((closedCalls.get(e.from + '/' + s.cid) || 0) > Date.now()) return;
+                if (call) {
+                    if (mine && call.incoming) acknowledge(e.from, s);
+                    else if (!mine) send(e.from, { v: 1, t: 'busy', cid: s.cid, video: !!s.video, ts: Date.now() }).catch(function () {});
+                    return;
+                }
                 call = { peer: e.from, name: e.name, cid: s.cid, video: !!s.video, incoming: true, phase: 'ringing', pendingIce: [] };
                 render(); ringStart(false);
+                acknowledge(e.from, s);
                 if (window.Notification && Notification.permission === 'granted' && document.hidden) new Notification((s.video ? 'Видеозвонок' : 'Звонок') + ': ' + e.name);
                 call.ringTimeout = setTimeout(function () { if (call && call.phase === 'ringing') finish('Пропущенный звонок'); }, 45000);
                 break;
-            case 'accept': if (mine && !call.incoming && call.phase === 'calling') { ringStop(); clearTimeout(call.ringTimeout); call.phase = 'connecting'; render(); startMedia(true); } break;
+            case 'ringing': if (mine && !call.incoming) clearInterval(call.retry); break;
+            case 'accept': if (mine && !call.incoming && call.phase === 'calling') { clearInterval(call.retry); ringStop(); clearTimeout(call.ringTimeout); call.phase = 'connecting'; render(); startMedia(true); } break;
             case 'offer': if (mine && call.incoming && s.sdp) onOffer(s.sdp); break;
             case 'answer': if (mine && !call.incoming && s.sdp && call.pc) call.pc.setRemoteDescription({ type: 'answer', sdp: s.sdp }).then(remoteReady).catch(function () {}); break;
             case 'ice': if (mine && s.cand) onIce(s.cand); break;

@@ -22,7 +22,9 @@ jobs:
         run: scripts/check_spawn.sh
       - name: bundled web audio contracts
         if: runner.os == 'Linux'
-        run: node scripts/check_web_audio.cjs
+        run: |
+          node scripts/check_web_audio.cjs
+          node scripts/check_phone_call_delivery.cjs
       - run: cargo build --all-targets
       # проверки считают общие счётчики (KDF и др.): тесты библиотеки идут по одному
       - run: cargo test --no-fail-fast -- --test-threads=1
@@ -87,7 +89,7 @@ jobs:
         run: flutter pub get
       - name: desktop audio and notification tests
         working-directory: desktop/yandi_desktop
-        run: flutter test --no-pub test/audio_alerts_test.dart test/preferences_test.dart test/background_alerts_test.dart test/calls_test.dart test/calls_api_test.dart test/groups_test.dart test/media_player_test.dart
+        run: flutter test --no-pub test/audio_alerts_test.dart test/preferences_test.dart test/background_alerts_test.dart test/calls_test.dart test/call_delivery_test.dart test/calls_api_test.dart test/groups_test.dart test/media_player_test.dart
       - name: native desktop release build
         working-directory: desktop/yandi_desktop
         run: flutter build linux --release --no-pub
@@ -96,4 +98,4 @@ jobs:
         run: flutter pub get
       - name: mobile audio and group event tests
         working-directory: mobile/yandi_mobile
-        run: flutter test --no-pub test/app_sounds_test.dart test/call_collision_test.dart test/group_service_test.dart
+        run: flutter test --no-pub test/app_sounds_test.dart test/call_collision_test.dart test/call_delivery_test.dart test/call_wire_delivery_test.dart test/replay_priority_test.dart test/bug_r13_ledger_notification_test.dart test/ws_live_flood_test.dart test/e2e_security_test.dart test/group_service_test.dart

@@ -72,7 +72,40 @@ class CallCoordinator extends ChangeNotifier {
   CallMedia? media;
   final ice = <Map<String, dynamic>>[];
   final pending = <Map<String, dynamic>>[];
-  Timer? deadline, grace, duration, reset;
+  Timer? deadline, grace, duration, reset, inviteRetry;
+  bool inviteAcknowledged = false;
+  final _closedCalls = <String, DateTime>{};
+  void rememberClosed(String peer, String id) {
+    _closedCalls.removeWhere((_, until) => until.isBefore(DateTime.now()));
+    if (_closedCalls.length >= 256)
+      _closedCalls.remove(_closedCalls.keys.first);
+    _closedCalls['$peer/$id'] = DateTime.now().add(const Duration(seconds: 90));
+  }
+
+  bool wasClosed(CallRef c) =>
+      (_closedCalls['${c.peer}/${c.id}']?.isAfter(DateTime.now()) ?? false);
+
+  void retryInvite(CallRef c, int own) {
+    var attempts = 0;
+    bool sending = false;
+    inviteRetry = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (!valid(own) || phase != CallPhase.outgoingRinging || attempts >= 10) {
+        timer.cancel();
+        return;
+      }
+      if (sending) return;
+      sending = true;
+      attempts++;
+      try {
+        await signaling.control(c, 'invite');
+      } catch (_) {
+        // A transient failure is retried within the existing ringing deadline.
+      } finally {
+        sending = false;
+      }
+    });
+  }
+
   StreamSubscription<CallSignal>? signalSubscription;
   StreamSubscription<MediaEvent>? mediaSubscription;
   Future<void> serial = Future.value();
@@ -86,6 +119,11 @@ class CallCoordinator extends ChangeNotifier {
     this.endedDelay = const Duration(seconds: 2),
   }) : mediaFactory = mediaFactory ?? UnavailableMedia.new {
     signalSubscription = signaling.signals.listen((s) {
+      if (s.data['v'] == 1 &&
+          const ['hangup', 'reject', 'busy'].contains(s.data['t']) &&
+          s.data['cid'] is String) {
+        rememberClosed(s.peer, s.data['cid'] as String);
+      }
       final own = epoch;
       serial = serial
           .then((_) async {
@@ -117,9 +155,12 @@ class CallCoordinator extends ChangeNotifier {
       if (!valid(own)) return;
       for (final c in incoming) {
         if (disposed) return;
+        if (c.phone && wasClosed(c)) continue;
         if (running) {
           if (call?.id != c.id || call?.peer != c.peer)
             await signaling.control(c, 'busy');
+          else if (c.phone && phase == CallPhase.incomingRinging)
+            await acknowledge(c);
         } else if (phase == CallPhase.idle) {
           await receiveCall(c);
         }
@@ -150,6 +191,7 @@ class CallCoordinator extends ChangeNotifier {
   }) async {
     if (disposed || busy || phase != CallPhase.idle) return;
     final own = ++epoch;
+    inviteAcknowledged = false;
     busy = true;
     phase = CallPhase.outgoingRinging;
     error = null;
@@ -170,6 +212,11 @@ class CallCoordinator extends ChangeNotifier {
       ringing();
       changed();
       await signaling.watch(c);
+      if (c.phone &&
+          valid(own) &&
+          phase == CallPhase.outgoingRinging &&
+          !inviteAcknowledged)
+        retryInvite(c, own);
     } catch (e) {
       if (valid(own)) finish(e);
     } finally {
@@ -181,7 +228,8 @@ class CallCoordinator extends ChangeNotifier {
   }
 
   Future<void> receiveCall(CallRef c) async {
-    if (disposed || phase != CallPhase.idle) return;
+    if (disposed || phase != CallPhase.idle || (c.phone && wasClosed(c)))
+      return;
     final own = ++epoch;
     call = c;
     phase = CallPhase.incomingRinging;
@@ -191,8 +239,17 @@ class CallCoordinator extends ChangeNotifier {
     changed();
     try {
       await signaling.watch(c);
+      if (c.phone && valid(own)) await acknowledge(c);
     } catch (e) {
       if (valid(own)) finish(e);
+    }
+  }
+
+  Future<void> acknowledge(CallRef c) async {
+    try {
+      await signaling.control(c, 'ringing');
+    } catch (_) {
+      // The sender will repeat the invite if this receipt is lost.
     }
   }
 
@@ -318,7 +375,11 @@ class CallCoordinator extends ChangeNotifier {
               .contains(type);
     if (id != c.id && !(id == null && mediaType && !c.phone)) return;
     if (c.phone && (data['video'] != c.video || data['v'] != 1)) return;
-    if (type == 'call-accept' || type == 'accept') {
+    if (type == 'ringing' && c.phone) {
+      inviteAcknowledged = true;
+      inviteRetry?.cancel();
+    } else if (type == 'call-accept' || type == 'accept') {
+      inviteRetry?.cancel();
       if (phase == CallPhase.outgoingRinging) {
         final own = epoch;
         if (!await authorize()) {
@@ -455,6 +516,7 @@ class CallCoordinator extends ChangeNotifier {
       ? e.message
       : 'Ошибка сигнального или медиа-слоя.';
   void cleanup() {
+    inviteRetry?.cancel();
     deadline?.cancel();
     grace?.cancel();
     duration?.cancel();
@@ -471,6 +533,7 @@ class CallCoordinator extends ChangeNotifier {
   void finish(Object? e, {bool notifyPeer = true}) {
     if (disposed) return;
     final c = call;
+    if (c != null && c.phone) rememberClosed(c.peer, c.id);
     if (notifyPeer && running && c != null)
       unawaited(
         signaling
