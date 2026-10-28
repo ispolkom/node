@@ -1,18 +1,18 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "1.0.0-b8",
-  "seq": 60,
-  "created": 1793163021,
+  "version": "1.0.0-b9",
+  "seq": 62,
+  "created": 1793166175,
   "key_id": "037e04346f99cc00",
   "files": [
     {
       "name": "yandi.apk",
-      "sha256": "b079c4c6675bbc4f9c4139feb4cb32650a37fc44eb331243c7a8059f23939784",
-      "size": 129266918
+      "sha256": "3e94b4a1244bfeed3bc79c21ea13f19e1760545853a87c1fb30d07e622ca857b",
+      "size": 129283302
     }
   ],
   "platform": "android",
-  "expires": 1803531021,
-  "notes": "Закреплена панель чата; исправлены исходящие звонки. Source: 72b8a880cb931c5b5dd5cfd85515cdc27c2cbb77"
+  "expires": 1803534175,
+  "notes": "Исправление доставки звонков после переписки. Source: 12b71abb87e3108145b21b632ed52d999e2ebf1f"
 }
