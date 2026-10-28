@@ -2,17 +2,17 @@
   "format": 1,
   "product": "yandi-node",
   "version": "1.0.0-b8",
-  "seq": 58,
-  "created": 1793131472,
+  "seq": 60,
+  "created": 1793163021,
   "key_id": "037e04346f99cc00",
   "files": [
     {
       "name": "yandi.apk",
-      "sha256": "2372b68b152efb61624c851ee710f39e5bd237da4ad989e2ad6e29e813440a1d",
+      "sha256": "b079c4c6675bbc4f9c4139feb4cb32650a37fc44eb331243c7a8059f23939784",
       "size": 129266918
     }
   ],
   "platform": "android",
-  "expires": 1803499472,
-  "notes": "Android build 8: исправлены звуки, локальные контакты, Gson/R8 и сохранение значка уведомлений. Notification tones, offline contacts, Gson/R8 and notification icon retention fixed. Source: 632899e73f9a2f239b9ebaf8779b6a2e26c70439"
+  "expires": 1803531021,
+  "notes": "Закреплена панель чата; исправлены исходящие звонки. Source: 72b8a880cb931c5b5dd5cfd85515cdc27c2cbb77"
 }

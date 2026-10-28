@@ -1,23 +1,23 @@
 {
   "format": 1,
   "product": "yandi-node",
-  "version": "0.2.0+g891",
-  "seq": 56,
-  "created": 1793130271,
+  "version": "0.2.0+g895",
+  "seq": 59,
+  "created": 1793162860,
   "key_id": "037e04346f99cc00",
   "files": [
     {
-      "name": "yandi-desktop_0.2.0-g891_amd64.deb",
-      "sha256": "edd16d1ac442b22ebb992dae1d7ff13f309ad19fff71738b2a467d5da74722ba",
-      "size": 32229888
+      "name": "yandi-desktop_0.2.0-g895_amd64.deb",
+      "sha256": "3267f78350e732a2ee987a927adb1eb6478e9f0b30e803095f66db33f6f27422",
+      "size": 32226656
     },
     {
-      "name": "yandi-node_0.2.0-g891_amd64.deb",
-      "sha256": "d33e990326a269eecf4b8f159801805e4659b5c81f754d9354645d55f49d52a9",
-      "size": 7297612
+      "name": "yandi-node_0.2.0-g895_amd64.deb",
+      "sha256": "886355b32ba87b7ef1e41e3f07e8e5538e1ce0560667adae131d97a017b73a07",
+      "size": 7297552
     }
   ],
   "platform": "deb",
-  "expires": 1803498271,
-  "notes": "Source: 644664408d7064201382a6924b3bbe12ac995c27"
+  "expires": 1803530860,
+  "notes": "Закреплена панель чата; исправлены исходящие звонки. Source: 72b8a880cb931c5b5dd5cfd85515cdc27c2cbb77"
 }

@@ -4,65 +4,61 @@ declare(strict_types=1);
 const YANDI_RELEASES = [
     'android' => [
         'version' => '1.0.0 (build 8)',
-        'date' => '2026-10-27',
+        'date' => '2026-10-28',
         'changes' => [
             'ru' => [
-                'Исправлен звук личных сообщений в открытом чате и фоновый звук icq.mp3 без зависимости от системной мелодии.',
-                'Сохранённые контакты доступны без интернета после разблокировки; история и файлы читаются из локального хранилища.',
-                'Исправлена ошибка Gson/R8 при снятии уведомлений.',
-                'Значок уведомлений сохранён после R8; устранена ошибка invalid_icon.'
+                'Звуки личных сообщений и фоновые оповещения icq.mp3; значок уведомлений сохранён после R8.',
+                'Контакты и локальная история доступны без сети после разблокировки.'
             ],
             'en' => [
-                'Fixed message sounds in the open chat and bundled icq.mp3 background alerts independent of the system notification tone.',
-                'Saved contacts are restored offline after unlocking; history and files use local storage.',
-                'Fixed the Gson/R8 notification cancellation error.',
-                'Notification icon preserved through R8; fixed invalid_icon.'
+                'Private message sounds and bundled icq.mp3 background alerts; notification icon retained through R8.',
+                'Contacts and local history remain available offline after unlocking.'
             ]
         ],
         'compat' => [
-            'ru' => 'Собрано вместе с узлом 0.2.0+g891. Используйте пакеты этого выпуска.',
-            'en' => 'Built with node 0.2.0+g891. Use matching release packages.'
+            'ru' => 'Собрано вместе с узлом 0.2.0+g895.',
+            'en' => 'Built together with node 0.2.0+g895.'
         ],
         'files' => [
             [
                 'href' => '/update/android/yandi.apk',
                 'name' => 'yandi.apk',
                 'size' => '123.3',
-                'sha256' => '2372b68b152efb61624c851ee710f39e5bd237da4ad989e2ad6e29e813440a1d'
+                'sha256' => 'b079c4c6675bbc4f9c4139feb4cb32650a37fc44eb331243c7a8059f23939784'
             ]
         ]
     ],
     'debian' => [
-        'version' => '0.2.0+g891',
-        'date' => '2026-10-27',
+        'version' => '0.2.0+g895',
+        'date' => '2026-10-28',
         'changes' => [
             'ru' => [
-                'Исправлены оповещения сообщений от телефонов без входа в админку; фоновая проверка больше не сбрасывает состояние открытого чата.',
-                'Звонок сохраняется при потере фокуса окна. Исправлено закрытие окна звонка после завершения.',
-                'Узел и оболочка собраны из одного коммита; контрольные суммы приведены для каждого пакета.'
+                'Панель аудиозвонка, видеозвонка, файлов и очистки закреплена над историей; переписка прокручивается отдельно в широком и узком окне.',
+                'Исправлена потеря обработчиков исходящего звонка при переходе в чат. Очистка переписки для звонка не требуется.',
+                'Звонящие и текущие вызовы сохраняются при потере фокуса окна.'
             ],
             'en' => [
-                'Fixed phone message alerts without an admin session; background polling no longer resets open-chat sound state.',
-                'Calls survive focus changes. Fixed call window cleanup after hangup.',
-                'Node and desktop share one source commit; SHA-256 is listed for each package.'
+                'The audio/video call, files and clear-chat toolbar stays above the independently scrolling history in wide and narrow windows.',
+                'Fixed outgoing call handlers being detached during chat navigation; clearing history is unnecessary.',
+                'Ringing and ongoing calls survive focus changes.'
             ]
         ],
         'compat' => [
-            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0 (сборка 8).',
-            'en' => 'Install both packages of the same version together. Android: 1.0.0 (build 8).'
+            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0, сборка 8.',
+            'en' => 'Install both packages of the same version together. Android: 1.0.0 build 8.'
         ],
         'files' => [
             [
-                'href' => '/update/deb/yandi-desktop_0.2.0-g891_amd64.deb',
-                'name' => 'yandi-desktop_0.2.0-g891_amd64.deb',
+                'href' => '/update/deb/yandi-desktop_0.2.0-g895_amd64.deb',
+                'name' => 'yandi-desktop_0.2.0-g895_amd64.deb',
                 'size' => '30.7',
-                'sha256' => 'edd16d1ac442b22ebb992dae1d7ff13f309ad19fff71738b2a467d5da74722ba'
+                'sha256' => '3267f78350e732a2ee987a927adb1eb6478e9f0b30e803095f66db33f6f27422'
             ],
             [
-                'href' => '/update/deb/yandi-node_0.2.0-g891_amd64.deb',
-                'name' => 'yandi-node_0.2.0-g891_amd64.deb',
+                'href' => '/update/deb/yandi-node_0.2.0-g895_amd64.deb',
+                'name' => 'yandi-node_0.2.0-g895_amd64.deb',
                 'size' => '7.0',
-                'sha256' => 'd33e990326a269eecf4b8f159801805e4659b5c81f754d9354645d55f49d52a9'
+                'sha256' => '886355b32ba87b7ef1e41e3f07e8e5538e1ce0560667adae131d97a017b73a07'
             ]
         ]
     ]
