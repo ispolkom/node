@@ -12,6 +12,7 @@ import 'transport/api.dart';
 
 /// Lets the chat start a call through the app-wide call panel.
 class CallsController {
+  Object? _owner;
   Future<void> Function(String peer, bool video, bool phone)? _start;
   bool Function()? _isRunning;
   VoidCallback? onStopped;
@@ -127,6 +128,7 @@ class _CallsFeatureState extends State<CallsFeature> {
       },
     );
     coordinator.addListener(update);
+    widget.controller?._owner = this;
     widget.controller?._isRunning = () => coordinator.running;
     widget.controller?._start = (peer, video, phone) async {
       if (coordinator.phase != CallPhase.idle || coordinator.busy) return;
@@ -191,8 +193,14 @@ class _CallsFeatureState extends State<CallsFeature> {
     if (_ringKind != 'none') {
       unawaited(PlatformFiles.channel.invokeMethod<void>('ringtone', {'kind': 'none'}).catchError((Object _) {}));
     }
-    widget.controller?._start = null;
-    widget.controller?._isRunning = null;
+    // A replacement panel may already be attached in this frame. Retiring the
+    // previous panel must not disconnect the replacement's outgoing buttons.
+    final controller = widget.controller;
+    if (controller != null && identical(controller._owner, this)) {
+      controller._owner = null;
+      controller._start = null;
+      controller._isRunning = null;
+    }
     closeOverlay();
     nameNotifier.dispose();
     timer?.cancel();

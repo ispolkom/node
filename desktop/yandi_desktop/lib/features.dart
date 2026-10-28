@@ -10,7 +10,6 @@ import 'admin_panel.dart';
 import 'content_policy.dart';
 import 'preferences.dart';
 import 'dart:io';
-import 'dart:typed_data';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -1394,51 +1393,51 @@ class _ShellFeaturesState extends State<ShellFeatures> {
           ),
         ),
       );
+    final toolbar = Row(
+      children: [
+        if (widget.calls != null) ...[
+          IconAction(
+            icon: Icons.call,
+            tip: 'Позвонить',
+            onTap: () => widget.calls!.start(
+              peer(selected!),
+              phone: selected!['is_phone'] == true,
+            ),
+          ),
+          IconAction(
+            icon: Icons.videocam,
+            tip: 'Видеозвонок',
+            onTap: () => widget.calls!.start(
+              peer(selected!),
+              video: true,
+              phone: selected!['is_phone'] == true,
+            ),
+          ),
+        ],
+        IconAction(
+          icon: filesView ? Icons.chat_bubble_outline : Icons.folder_outlined,
+          tip: filesView ? 'Назад к сообщениям' : 'Файлы чата',
+          active: filesView,
+          onTap: () => setState(() {
+            filesView = !filesView;
+            fileTab = 0;
+          }),
+        ),
+        IconAction(
+          icon: Icons.delete_sweep_outlined,
+          tip: 'Очистить историю',
+          color: Icq.danger,
+          onTap: sending ? null : clearHistory,
+        ),
+        const IconAction(
+          icon: Icons.info_outline,
+          tip: 'Показаны последние 100 сообщений не старше года.',
+        ),
+      ],
+    );
     final history = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Row(
-          children: [
-            if (widget.calls != null) ...[
-              IconAction(
-                icon: Icons.call,
-                tip: 'Позвонить',
-                onTap: () => widget.calls!.start(
-                  peer(selected!),
-                  phone: selected!['is_phone'] == true,
-                ),
-              ),
-              IconAction(
-                icon: Icons.videocam,
-                tip: 'Видеозвонок',
-                onTap: () => widget.calls!.start(
-                  peer(selected!),
-                  video: true,
-                  phone: selected!['is_phone'] == true,
-                ),
-              ),
-            ],
-            IconAction(
-              icon: filesView ? Icons.chat_bubble_outline : Icons.folder_outlined,
-              tip: filesView ? 'Назад к сообщениям' : 'Файлы чата',
-              active: filesView,
-              onTap: () => setState(() {
-                filesView = !filesView;
-                fileTab = 0;
-              }),
-            ),
-            IconAction(
-              icon: Icons.delete_sweep_outlined,
-              tip: 'Очистить историю',
-              color: Icq.danger,
-              onTap: sending ? null : clearHistory,
-            ),
-            const IconAction(
-              icon: Icons.info_outline,
-              tip: 'Показаны последние 100 сообщений не старше года.',
-            ),
-          ],
-        ),
         if (picked.isNotEmpty)
           Wrap(
             spacing: 14,
@@ -1604,20 +1603,21 @@ class _ShellFeaturesState extends State<ShellFeatures> {
         ],
       ],
     );
-    if (!wide)
-      return Panel(
-        color: Colors.white,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [history, input, peerPanel()],
-        ),
-      );
-    return Container(
+    final panel = Container(
       decoration: const BoxDecoration(color: Colors.white, border: Icq.frame),
       child: Column(
         children: [
+          Container(
+            key: const ValueKey('chat-toolbar'),
+            decoration: const BoxDecoration(
+              border: Border(bottom: BorderSide(color: Icq.border)),
+            ),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: toolbar,
+          ),
           Expanded(
             child: SingleChildScrollView(
+              key: const ValueKey('chat-history-scroll'),
               padding: const EdgeInsets.all(12),
               child: history,
             ),
@@ -1630,6 +1630,20 @@ class _ShellFeaturesState extends State<ShellFeatures> {
             padding: const EdgeInsets.all(10),
             child: input,
           ),
+        ],
+      ),
+    );
+    if (wide) return panel;
+    return Panel(
+      color: Colors.white,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          SizedBox(
+            height: (MediaQuery.sizeOf(context).height - 185).clamp(380.0, 900.0),
+            child: panel,
+          ),
+          peerPanel(),
         ],
       ),
     );
