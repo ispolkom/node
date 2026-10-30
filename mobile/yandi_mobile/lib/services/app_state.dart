@@ -219,6 +219,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
+      onSignalLoss: () => calls.onSignalingLost(),
       onOpen: () {
         // сокет открылся (первый раз или после обрыва): статусы за время обрыва не приходили, берём заново, и забираем накопленную почту
         unawaited(refreshContacts());

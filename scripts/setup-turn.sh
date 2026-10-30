@@ -98,14 +98,10 @@ NFT_FILE=/etc/yandi-turn.nft
 if command -v nft >/dev/null; then
   NFT_BIN=$(command -v nft)
   cat > "$NFT_FILE" <<NFT
-table inet yandi_turn
+add table inet yandi_turn
 flush table inet yandi_turn
-table inet yandi_turn {
-  chain output {
-    type filter hook output priority 0; policy accept;
-    $OUT_RULE
-  }
-}
+add chain inet yandi_turn output { type filter hook output priority 0; policy accept; }
+add rule inet yandi_turn output $OUT_RULE
 NFT
   chmod 644 "$NFT_FILE"
   if ! "$NFT_BIN" -f "$NFT_FILE" || ! "$NFT_BIN" list chain inet yandi_turn output | grep -q "udp sport $RELAY_MIN-$RELAY_MAX"; then

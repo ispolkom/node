@@ -2,17 +2,17 @@
   "format": 1,
   "product": "yandi-node",
   "version": "1.0.0-b9",
-  "seq": 62,
-  "created": 1793166175,
+  "seq": 66,
+  "created": 1793378377,
   "key_id": "037e04346f99cc00",
   "files": [
     {
       "name": "yandi.apk",
-      "sha256": "3e94b4a1244bfeed3bc79c21ea13f19e1760545853a87c1fb30d07e622ca857b",
+      "sha256": "34b491b0907e1e61c81a376572fb86690e871acb4fb00aee6f9d8ec1daee6e26",
       "size": 129283302
     }
   ],
   "platform": "android",
-  "expires": 1803534175,
-  "notes": "Исправление доставки звонков после переписки. Source: 12b71abb87e3108145b21b632ed52d999e2ebf1f"
+  "expires": 1803746377,
+  "notes": ""
 }

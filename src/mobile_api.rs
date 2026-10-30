@@ -2934,7 +2934,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         }
                     }
                 }
-                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // A dropped live SDP/ICE frame cannot be recovered from history.
+                // Reconnect instead of leaving the client on a broken signaling session.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => break,
                 Err(_) => break,
             },
             h = groups_rx.recv() => match h {

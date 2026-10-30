@@ -113,24 +113,22 @@ void main() {
     ws.dispose();
   });
 
-  test('bounded live verification recovers on retransmission after saturation',
+  test('a burst of encrypted call signals is queued and delivered in order',
       () async {
     final gate = Completer<PeerKeyBundle?>();
     final ws = service((_) => gate.future);
     final events = <LiveSignalEvent>[];
     ws.liveStream.listen(events.add);
-    for (var i = 0; i < 8; i++) {
-      unawaited(ws.debugFeed(await frame('\u0001yandi-cap:$i')));
+    final signals = List.generate(24, (i) => 'call-signal-$i');
+    for (final text in signals) {
+      unawaited(ws.debugFeed(await frame(text)));
     }
-    await until(() => ws.debugLiveInFlight == 8);
-    expect(ws.debugLiveInFlight, 8);
-    final wire = await frame(invite);
-    unawaited(ws.debugFeed(wire));
+    await until(() => ws.debugLiveInFlight == 1);
+    expect(events, isEmpty);
     gate.complete(bundle());
+    await until(() => events.length == signals.length);
+    expect(events.map((e) => e.text).toList(), signals);
     await until(() => ws.debugLiveInFlight == 0);
-    expect(events.where((e) => e.text == invite), isEmpty);
-    await ws.debugFeed(wire);
-    await until(() => events.any((e) => e.text == invite));
     ws.dispose();
   });
 

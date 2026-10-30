@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:collection';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
@@ -82,6 +83,7 @@ class WsService {
   /// Вызывается когда переподключение к текущей ноде не удалось
   /// (задержка достигла максимума). AppState использует это для failover.
   final Future<void> Function()? onPermanentLoss;
+  final void Function()? onSignalLoss;
 
   TrustedNode?        _node;
   WebSocketChannel?   _channel;
@@ -123,7 +125,7 @@ class WsService {
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
   final void Function()? onOpen;
 
-  WsService(this._identity, {this.onPermanentLoss, this.onOpen,
+  WsService(this._identity, {this.onPermanentLoss, this.onOpen, this.onSignalLoss,
     Future<PeerKeyBundle?> Function(String)? getPeerBundle,
     Future<String?> Function()? ownPeerId})
       : _getPeerBundle = getPeerBundle, _ownPeerId = ownPeerId;
@@ -141,6 +143,9 @@ class WsService {
 
   /// Переключиться на другую ноду (failover).
   void switchNode(TrustedNode node) {
+    _liveGeneration++;
+    _liveQueue.clear();
+    onSignalLoss?.call();
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
     _channel?.sink.close();
@@ -174,7 +179,7 @@ class WsService {
       }).catchError((_) {});
       // обратные вызовы старого сокета (после переключения узла) не трогают новое соединение
       ch.stream.listen(
-        _onData,
+        (data) { if (identical(_channel, ch)) _onData(data); },
         onError: (_) { if (identical(_channel, ch)) _scheduleReconnect(); },
         onDone:  ()  { if (identical(_channel, ch)) _scheduleReconnect(); },
       );
@@ -185,6 +190,10 @@ class WsService {
   }
 
   void _scheduleReconnect() {
+    if (_disposed) return;
+    _liveGeneration++;
+    _liveQueue.clear();
+    onSignalLoss?.call();
     _pingTimer?.cancel();
     _channel = null;
     _reconnectTimer?.cancel();
@@ -218,8 +227,27 @@ class WsService {
 
   // ── Входящие данные ────────────────────────────────────────────────────────
 
-  static const _maxLiveInFlight = 8;
+  static const _maxLiveQueued = 256;
   int _liveInFlight = 0;
+  final _liveQueue = Queue<Uint8List>();
+  bool _disposed = false;
+  int _liveGeneration = 0;
+
+  Future<void> _drainLive() async {
+    if (_liveInFlight != 0) return;
+    _liveInFlight = 1;
+    try {
+      while (!_disposed && _liveQueue.isNotEmpty) {
+        try {
+          await _handleLiveMsg(_liveQueue.removeFirst(), _liveGeneration);
+        } catch (_) {
+          // Invalid envelopes must not stop delivery of subsequent signals.
+        }
+      }
+    } finally {
+      _liveInFlight = 0;
+    }
+  }
 
   /// Только для тестов: подать кадр сокета так, как будто он пришёл с узла.
   @visibleForTesting
@@ -244,14 +272,17 @@ class WsService {
         _handlePeerStatus(data);
 
       case ftLiveMsg:
-        // живые сигналы эфемерны, а проверка каждого стоит запроса связки ключей и подписи: больше _maxLiveInFlight сразу не берём
-        if (_liveInFlight >= _maxLiveInFlight) return;
-        _liveInFlight++;
-        try {
-          await _handleLiveMsg(data);
-        } finally {
-          _liveInFlight--;
+        if (_disposed || data.length > 45 + 32 * 1024) return;
+        if (_liveQueue.length >= _maxLiveQueued) {
+          // Bound hostile traffic without silently keeping a broken socket alive.
+          _liveQueue.clear();
+          _liveGeneration++;
+          onSignalLoss?.call();
+          unawaited(_channel?.sink.close());
+          return;
         }
+        _liveQueue.addLast(data);
+        unawaited(_drainLive());
 
       case ftGroupHint:
         if (data.length >= 26) {
@@ -296,7 +327,7 @@ class WsService {
         return true;
       },
     );
-    if (text == null) return;
+    if (text == null || _disposed) return;
 
     _chatCtrl.add(IncomingChatEvent(
       fromPeerId: from,
@@ -322,7 +353,7 @@ class WsService {
   static const _maxDateMs = 8640000000000000;
 
   /// [1B 0x13][32B от кого][8B время][4B длина][зашифрованный сигнал]. Открытый текст не принимаем: сигналы звонка только E2E.
-  Future<void> _handleLiveMsg(Uint8List data) async {
+  Future<void> _handleLiveMsg(Uint8List data, int generation) async {
     if (data.length < 45) return;
     final from = _bytesToHex(data.sublist(1, 33));
     final tsMs = ByteData.sublistView(data, 33, 41).getInt64(0, Endian.little);
@@ -331,7 +362,7 @@ class WsService {
     final payload = data.sublist(45, 45 + pLen);
     if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
     final text = await decryptIncoming(payload, fromPeerId: from, kind: 2);
-    if (text == null) return;
+    if (text == null || _disposed || generation != _liveGeneration) return;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
   }
 
@@ -447,6 +478,8 @@ class WsService {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   void disconnect() {
+    _liveGeneration++;
+    _liveQueue.clear();
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
     _channel?.sink.close();
@@ -454,6 +487,8 @@ class WsService {
   }
 
   void dispose() {
+    _disposed = true;
+    _liveQueue.clear();
     disconnect();
     _chatCtrl.close();
     _statusCtrl.close();
