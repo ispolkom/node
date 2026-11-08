@@ -1,5 +1,6 @@
 import 'package:flutter/services.dart';
 import '../models/trusted_node.dart';
+import 'dart:typed_data';
 
 /// Управляет фоновым Android-сервисом для WebSocket-соединения с нодой.
 /// Сервис держит соединение живым когда приложение свёрнуто и показывает
@@ -42,6 +43,21 @@ class ChatBgService {
       return await _channel.invokeMethod<bool>('isRunning') ?? false;
     } on PlatformException {
       return false;
+    }
+  }
+
+  Future<List<Uint8List>> drainPendingLive() async {
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>('drainPendingLive');
+      return (raw ?? const <dynamic>[]).map<Uint8List?>((item) {
+        if (item is Uint8List) return item;
+        if (item is List) return Uint8List.fromList(item.whereType<int>().toList());
+        return null;
+      }).whereType<Uint8List>().toList();
+    } on PlatformException catch (_) {
+      return const <Uint8List>[];
+    } on MissingPluginException catch (_) {
+      return const <Uint8List>[];
     }
   }
 }

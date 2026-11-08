@@ -24,6 +24,8 @@ import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.File
+import java.nio.ByteBuffer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -59,6 +61,28 @@ class YandiChatService : Service() {
         private const val PING_INTERVAL_SCREEN_OFF = 90_000L
 
         @Volatile var running = false
+
+        private const val PENDING_LIVE_FILE = "yandi_pending_live.bin"
+
+        @Synchronized
+        fun drainPendingLive(context: Context): ArrayList<ByteArray> {
+            val file = File(context.filesDir, PENDING_LIVE_FILE)
+            if (!file.exists()) return arrayListOf()
+            return runCatching {
+                val bytes = file.readBytes()
+                val result = arrayListOf<ByteArray>()
+                var offset = 0
+                while (offset + 4 <= bytes.size) {
+                    val size = ByteBuffer.wrap(bytes, offset, 4).int
+                    offset += 4
+                    if (size <= 0 || size > 45 + 32 * 1024 || offset + size > bytes.size) break
+                    result.add(bytes.copyOfRange(offset, offset + size))
+                    offset += size
+                }
+                file.delete()
+                result
+            }.getOrDefault(arrayListOf())
+        }
     }
 
     @Volatile private var host        = ""
@@ -280,6 +304,30 @@ class YandiChatService : Service() {
                 if (appInForeground()) return
                 showMessageNotif(from)
             }
+
+            // FT_LIVE_MSG: сигнал звонка зашифрован для Flutter/E2E. Native-слой
+            // только сохраняет пакет и будит приложение; он не доверяет его содержимому.
+            0x13.toByte() -> {
+                if (data.size < 45 || data.size > 45 + 32 * 1024) return
+                val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
+                if (payloadLen < 1 || data.size < 45 + payloadLen) return
+                if (appInForeground()) return
+                persistPendingLive(data)
+                showCallWakeNotif()
+            }
+        }
+    }
+
+    @Synchronized
+    private fun persistPendingLive(data: ByteArray) {
+        runCatching {
+            val file = File(filesDir, PENDING_LIVE_FILE)
+            // Ограничиваем очередь: старые сигналы звонка уже неактуальны.
+            val existing = if (file.exists()) file.readBytes() else ByteArray(0)
+            val record = ByteBuffer.allocate(4).putInt(data.size).array() + data
+            val combined = (existing + record)
+            val maxBytes = (45 + 32 * 1024) * 8
+            file.writeBytes(if (combined.size > maxBytes) combined.takeLast(maxBytes).toByteArray() else combined)
         }
     }
 
@@ -361,6 +409,26 @@ class YandiChatService : Service() {
             .build()
         getSystemService(NotificationManager::class.java)
             .notify(from.hashCode(), notif)
+    }
+
+    private fun showCallWakeNotif() {
+        val intent = PendingIntent.getActivity(
+            this, System.currentTimeMillis().toInt(),
+            Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setContentTitle("YANDI")
+            .setContentText("Входящий звонок")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setFullScreenIntent(intent, true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(45_000)
+            .setContentIntent(intent)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(0x0CA11, notif)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────

@@ -146,6 +146,7 @@ class MainActivity : FlutterActivity() {
                 }
                 "stop" -> { startService(Intent(this, YandiChatService::class.java).setAction(YandiChatService.ACTION_STOP)); result.success(true) }
                 "isRunning" -> result.success(YandiChatService.running)
+                "drainPendingLive" -> result.success(YandiChatService.drainPendingLive(this))
                 else -> result.notImplemented()
             }
         }
