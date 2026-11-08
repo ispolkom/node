@@ -20,6 +20,9 @@ import android.os.Build
 import android.os.IBinder
 import android.util.Base64
 import android.util.Log
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
@@ -31,6 +34,9 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -63,6 +69,8 @@ class YandiChatService : Service() {
         @Volatile var running = false
 
         private const val PENDING_LIVE_FILE = "yandi_pending_live.bin"
+        private const val PREFS = "yandi_background_service"
+        private const val KEY_ALIAS = "yandi_background_token_v1"
 
         @Synchronized
         fun drainPendingLive(context: Context): ArrayList<ByteArray> {
@@ -82,6 +90,44 @@ class YandiChatService : Service() {
                 file.delete()
                 result
             }.getOrDefault(arrayListOf())
+        }
+
+        private fun secretKey(): SecretKey {
+            val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+            return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+                init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setUserAuthenticationRequired(false)
+                    .build())
+            }.generateKey()
+        }
+
+        private fun encryptToken(token: String): String {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
+            val packed = cipher.iv + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+            return Base64.encodeToString(packed, Base64.NO_WRAP)
+        }
+
+        private fun decryptToken(value: String): String? = runCatching {
+            val packed = Base64.decode(value, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), javax.crypto.spec.GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            cipher.doFinal(packed.copyOfRange(12, packed.size)).toString(Charsets.UTF_8)
+        }.getOrNull()
+
+        fun saveConfig(context: Context, host: String, port: Int, token: String, fingerprint: String) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString("host", host).putInt("port", port).putString("token", encryptToken(token)).putString("fingerprint", fingerprint).apply()
+        }
+
+        fun loadConfig(context: Context): Array<String>? {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val host = prefs.getString("host", null) ?: return null
+            val encrypted = prefs.getString("token", null) ?: return null
+            val token = decryptToken(encrypted) ?: return null
+            return arrayOf(host, prefs.getInt("port", 8766).toString(), token, prefs.getString("fingerprint", "") ?: "")
         }
     }
 
@@ -148,10 +194,11 @@ class YandiChatService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val newHost  = intent.getStringExtra("host")  ?: return START_NOT_STICKY
-                val newPort  = intent.getIntExtra("port", 8766)
-                val newToken = intent.getStringExtra("token") ?: return START_NOT_STICKY
-                val newPrint = intent.getStringExtra("fingerprint") ?: ""
+                val stored = loadConfig(this)
+                val newHost  = intent.getStringExtra("host") ?: stored?.getOrNull(0) ?: return START_NOT_STICKY
+                val newPort  = if (intent.hasExtra("port")) intent.getIntExtra("port", 8766) else stored?.getOrNull(1)?.toIntOrNull() ?: 8766
+                val newToken = intent.getStringExtra("token") ?: stored?.getOrNull(2) ?: return START_NOT_STICKY
+                val newPrint = intent.getStringExtra("fingerprint") ?: stored?.getOrNull(3) ?: ""
                 // смена узла (или токена) у работающей службы: соединение прежнего узла закрывается ДО нового запуска,
                 // иначе оно жило бы со старым токеном и продолжало получать уведомления удалённого узла
                 val changed = running && (newHost != host || newPort != port || newToken != token || newPrint != fingerprint)
@@ -164,6 +211,7 @@ class YandiChatService : Service() {
                     workerThread?.interrupt()
                 }
                 host = newHost; port = newPort; token = newToken; fingerprint = newPrint
+                saveConfig(this, newHost, newPort, newToken, newPrint)
                 start()
             }
             ACTION_STOP -> stop()
