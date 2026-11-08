@@ -130,6 +130,17 @@ class MainActivity : FlutterActivity() {
 
         MethodChannel(messenger, "com.yandi/chat").setMethodCallHandler { call, result ->
             when (call.method) {
+                "batteryOptimizationIgnored" -> {
+                    val power = getSystemService(android.os.PowerManager::class.java)
+                    result.success(power?.isIgnoringBatteryOptimizations(packageName) == true)
+                }
+                "requestBatteryOptimizationException" -> {
+                    runCatching {
+                        startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS).apply {
+                            data = android.net.Uri.parse("package:$packageName")
+                        })
+                    }.fold({ result.success(true) }, { result.error("battery", it.message, null) })
+                }
                 "messageSound" -> {
                     getSharedPreferences("yandi_alerts", MODE_PRIVATE).edit()
                         .putBoolean("messages", call.argument<Boolean>("enabled") ?: true).apply()

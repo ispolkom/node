@@ -46,6 +46,18 @@ class ChatBgService {
     }
   }
 
+  Future<bool> batteryOptimizationIgnored() async {
+    try {
+      return await _channel.invokeMethod<bool>('batteryOptimizationIgnored') ?? false;
+    } on PlatformException catch (_) { return false; }
+  }
+
+  Future<bool> requestBatteryOptimizationException() async {
+    try {
+      return await _channel.invokeMethod<bool>('requestBatteryOptimizationException') ?? false;
+    } on PlatformException catch (_) { return false; }
+  }
+
   Future<List<Uint8List>> drainPendingLive() async {
     try {
       final raw = await _channel.invokeMethod<List<dynamic>>('drainPendingLive');

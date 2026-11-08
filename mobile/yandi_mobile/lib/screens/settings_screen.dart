@@ -233,6 +233,18 @@ class SettingsScreen extends StatelessWidget {
           ),
           if (state.nodeError != null)
             _InfoTile(label: tr('Ошибка'), value: state.nodeError!, valueColor: Colors.redAccent),
+          FutureBuilder<bool>(
+            future: state.chatBg.batteryOptimizationIgnored(),
+            builder: (context, snapshot) {
+              final ignored = snapshot.data == true;
+              return ListTile(
+                leading: Icon(ignored ? Icons.battery_saver : Icons.battery_alert, color: ignored ? Colors.greenAccent : Colors.orangeAccent),
+                title: Text(tr('Фоновые уведомления'), style: TextStyle(color: AppTheme.text)),
+                subtitle: Text(ignored ? tr('Работа без ограничений батареи') : tr('Система может остановить связь в фоне'), style: TextStyle(color: ignored ? Colors.greenAccent : Colors.orangeAccent, fontSize: 12)),
+                onTap: ignored ? null : () => state.chatBg.requestBatteryOptimizationException(),
+              );
+            },
+          ),
 
           // Прокси
           _Section(title: tr('Прокси')),
