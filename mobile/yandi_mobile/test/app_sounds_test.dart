@@ -50,7 +50,7 @@ void main() {
   });
 
   test('all five mapped MP3s are included in the mobile asset bundle', () async {
-    expect(AppSounds.assets, {'messages': 'icq.mp3', 'groups': 'icq-online.mp3', 'calls': 'calling.mp3', 'videoCalls': 'sqype.mp3', 'dialing': 'call_out.mp3'});
+    expect(AppSounds.assets, {'messages': 'icq.mp3', 'groups': 'icq-online.mp3', 'calls': 'calling.mp3', 'videoCalls': 'sqype.mp3', 'dialing': 'calling.mp3'});
     for (final asset in AppSounds.assets.values) {
       expect((await rootBundle.load('assets/sounds/$asset')).lengthInBytes, greaterThan(1000));
     }

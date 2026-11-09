@@ -59,6 +59,7 @@ class YandiChatService : Service() {
         const val CHANNEL_STATUS = "yandi_status"
         // New ID: Android keeps the sound of an existing channel unchanged.
         const val CHANNEL_MSG    = "yandi_messages_icq_v1"
+        const val CHANNEL_CALLS = "yandi_calls_calling_v1"
         const val CHANNEL_MSG_SILENT = "yandi_messages_silent"
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
@@ -417,6 +418,16 @@ class YandiChatService : Service() {
             }
         )
         nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_CALLS, "YANDI звонки",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Входящие аудио- и видеозвонки"
+                setSound(Uri.parse("android.resource://$packageName/raw/calling"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
             NotificationChannel(CHANNEL_MSG_SILENT, "YANDI сообщения без звука",
                 NotificationManager.IMPORTANCE_HIGH).apply {
                 setSound(null, null)
@@ -481,7 +492,7 @@ class YandiChatService : Service() {
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
+        val notif = NotificationCompat.Builder(this, CHANNEL_CALLS)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle("YANDI")
             .setContentText("Входящий звонок")

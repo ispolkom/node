@@ -162,7 +162,7 @@ class CallService extends ChangeNotifier {
       return null;
     }
     if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video);
-    _playRing('dialing');
+    _playRing(video ? 'videoCalls' : 'calls');
     _ringTimer = Timer(const Duration(seconds: 45), () {
       _signal('hangup');
       _finish(tr('Нет ответа'), log: true);
@@ -673,8 +673,11 @@ class CallService extends ChangeNotifier {
   }
 
   void refreshRingtone() {
-    final kind = phase == CallPhase.calling ? 'dialing'
-        : phase == CallPhase.ringing ? (video ? 'videoCalls' : 'calls') : null;
+    final kind = phase == CallPhase.calling
+        ? (video ? 'videoCalls' : 'calls')
+        : phase == CallPhase.ringing
+            ? (video ? 'videoCalls' : 'calls')
+            : null;
     if (kind == null || soundEnabled?.call(kind) == false) {
       _stopRing();
     } else if (!_ringing) {
