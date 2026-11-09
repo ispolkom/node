@@ -253,6 +253,10 @@ class WsService {
   @visibleForTesting
   Future<void> debugFeed(List<int> raw) async => _onData(raw);
 
+  /// Injects a frame received by the Android background service. It goes
+  /// through the same E2E validation and replay checks as a live socket frame.
+  Future<void> ingestBackgroundFrame(Uint8List raw) async => _onData(raw);
+
   @visibleForTesting
   int get debugLiveInFlight => _liveInFlight;
 

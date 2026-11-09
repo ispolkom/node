@@ -18,17 +18,26 @@ import android.net.Uri
 import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Base64
 import android.util.Log
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.File
+import java.nio.ByteBuffer
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -54,11 +63,74 @@ class YandiChatService : Service() {
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
 
-        // Интервалы ping: экран вкл = 30s, выкл = 90s
+        // Интервалы ping: экран вкл = 30s, выкл = 180s, Doze = 300s
         private const val PING_INTERVAL_SCREEN_ON  = 30_000L
-        private const val PING_INTERVAL_SCREEN_OFF = 90_000L
+        private const val PING_INTERVAL_SCREEN_OFF = 180_000L
+        private const val PING_INTERVAL_DOZE = 300_000L
 
         @Volatile var running = false
+
+        private const val PENDING_LIVE_FILE = "yandi_pending_live.bin"
+        private const val PREFS = "yandi_background_service"
+        private const val KEY_ALIAS = "yandi_background_token_v1"
+
+        @Synchronized
+        fun drainPendingLive(context: Context): ArrayList<ByteArray> {
+            val file = File(context.filesDir, PENDING_LIVE_FILE)
+            if (!file.exists()) return arrayListOf()
+            return runCatching {
+                val bytes = file.readBytes()
+                val result = arrayListOf<ByteArray>()
+                var offset = 0
+                while (offset + 4 <= bytes.size) {
+                    val size = ByteBuffer.wrap(bytes, offset, 4).int
+                    offset += 4
+                    if (size <= 0 || size > 45 + 32 * 1024 || offset + size > bytes.size) break
+                    result.add(bytes.copyOfRange(offset, offset + size))
+                    offset += size
+                }
+                file.delete()
+                result
+            }.getOrDefault(arrayListOf())
+        }
+
+        private fun secretKey(): SecretKey {
+            val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+            return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+                init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setUserAuthenticationRequired(false)
+                    .build())
+            }.generateKey()
+        }
+
+        private fun encryptToken(token: String): String {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
+            val packed = cipher.iv + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+            return Base64.encodeToString(packed, Base64.NO_WRAP)
+        }
+
+        private fun decryptToken(value: String): String? = runCatching {
+            val packed = Base64.decode(value, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), javax.crypto.spec.GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            cipher.doFinal(packed.copyOfRange(12, packed.size)).toString(Charsets.UTF_8)
+        }.getOrNull()
+
+        fun saveConfig(context: Context, host: String, port: Int, token: String, fingerprint: String) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString("host", host).putInt("port", port).putString("token", encryptToken(token)).putString("fingerprint", fingerprint).apply()
+        }
+
+        fun loadConfig(context: Context): Array<String>? {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val host = prefs.getString("host", null) ?: return null
+            val encrypted = prefs.getString("token", null) ?: return null
+            val token = decryptToken(encrypted) ?: return null
+            return arrayOf(host, prefs.getInt("port", 8766).toString(), token, prefs.getString("fingerprint", "") ?: "")
+        }
     }
 
     @Volatile private var host        = ""
@@ -67,6 +139,7 @@ class YandiChatService : Service() {
     @Volatile private var fingerprint = ""
 
     private val screenOn      = AtomicBoolean(true)
+    private val deviceIdle  = AtomicBoolean(false)
     private val lastPongMs    = AtomicLong(System.currentTimeMillis())
     private val networkReady  = AtomicBoolean(true)
     /** Поколение соединения: потоки прежней настройки видят, что номер сменился, и выходят, не трогая новую. */
@@ -83,6 +156,10 @@ class YandiChatService : Service() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON  -> screenOn.set(true)
                 Intent.ACTION_SCREEN_OFF -> screenOn.set(false)
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                    val pm = getSystemService(POWER_SERVICE) as? PowerManager
+                    deviceIdle.set(pm?.isDeviceIdleMode == true)
+                }
             }
         }
     }
@@ -109,9 +186,15 @@ class YandiChatService : Service() {
     override fun onCreate() {
         super.onCreate()
         // Регистрируем слушатель экрана (только динамически — манифест не работает)
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        screenOn.set(pm?.isInteractive != false)
+        deviceIdle.set(pm?.isDeviceIdleMode == true)
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
         })
         // Регистрируем слушатель сети
         val cm  = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -124,10 +207,11 @@ class YandiChatService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                val newHost  = intent.getStringExtra("host")  ?: return START_NOT_STICKY
-                val newPort  = intent.getIntExtra("port", 8766)
-                val newToken = intent.getStringExtra("token") ?: return START_NOT_STICKY
-                val newPrint = intent.getStringExtra("fingerprint") ?: ""
+                val stored = loadConfig(this)
+                val newHost  = intent.getStringExtra("host") ?: stored?.getOrNull(0) ?: return START_NOT_STICKY
+                val newPort  = if (intent.hasExtra("port")) intent.getIntExtra("port", 8766) else stored?.getOrNull(1)?.toIntOrNull() ?: 8766
+                val newToken = intent.getStringExtra("token") ?: stored?.getOrNull(2) ?: return START_NOT_STICKY
+                val newPrint = intent.getStringExtra("fingerprint") ?: stored?.getOrNull(3) ?: ""
                 // смена узла (или токена) у работающей службы: соединение прежнего узла закрывается ДО нового запуска,
                 // иначе оно жило бы со старым токеном и продолжало получать уведомления удалённого узла
                 val changed = running && (newHost != host || newPort != port || newToken != token || newPrint != fingerprint)
@@ -140,6 +224,7 @@ class YandiChatService : Service() {
                     workerThread?.interrupt()
                 }
                 host = newHost; port = newPort; token = newToken; fingerprint = newPrint
+                saveConfig(this, newHost, newPort, newToken, newPrint)
                 start()
             }
             ACTION_STOP -> stop()
@@ -219,8 +304,11 @@ class YandiChatService : Service() {
         val gen = generation.get()
         pingThread = thread(name = "yandi-ping", isDaemon = true) {
             while (running && gen == generation.get()) {
-                val interval = if (screenOn.get()) PING_INTERVAL_SCREEN_ON
-                               else                PING_INTERVAL_SCREEN_OFF
+                val interval = when {
+                    screenOn.get() -> PING_INTERVAL_SCREEN_ON
+                    deviceIdle.get() -> PING_INTERVAL_DOZE
+                    else -> PING_INTERVAL_SCREEN_OFF
+                }
                 try {
                     Thread.sleep(interval)
                 } catch (_: InterruptedException) {
@@ -280,6 +368,30 @@ class YandiChatService : Service() {
                 if (appInForeground()) return
                 showMessageNotif(from)
             }
+
+            // FT_LIVE_MSG: сигнал звонка зашифрован для Flutter/E2E. Native-слой
+            // только сохраняет пакет и будит приложение; он не доверяет его содержимому.
+            0x13.toByte() -> {
+                if (data.size < 45 || data.size > 45 + 32 * 1024) return
+                val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
+                if (payloadLen < 1 || data.size < 45 + payloadLen) return
+                if (appInForeground()) return
+                persistPendingLive(data)
+                showCallWakeNotif()
+            }
+        }
+    }
+
+    @Synchronized
+    private fun persistPendingLive(data: ByteArray) {
+        runCatching {
+            val file = File(filesDir, PENDING_LIVE_FILE)
+            // Ограничиваем очередь: старые сигналы звонка уже неактуальны.
+            val existing = if (file.exists()) file.readBytes() else ByteArray(0)
+            val record = ByteBuffer.allocate(4).putInt(data.size).array() + data
+            val combined = (existing + record)
+            val maxBytes = (45 + 32 * 1024) * 8
+            file.writeBytes(if (combined.size > maxBytes) combined.takeLast(maxBytes).toByteArray() else combined)
         }
     }
 
@@ -361,6 +473,26 @@ class YandiChatService : Service() {
             .build()
         getSystemService(NotificationManager::class.java)
             .notify(from.hashCode(), notif)
+    }
+
+    private fun showCallWakeNotif() {
+        val intent = PendingIntent.getActivity(
+            this, System.currentTimeMillis().toInt(),
+            Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setContentTitle("YANDI")
+            .setContentText("Входящий звонок")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setFullScreenIntent(intent, true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(45_000)
+            .setContentIntent(intent)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(0x0CA11, notif)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -476,7 +608,8 @@ class RawWsClient(
         val sock = ctx.socketFactory.createSocket() as SSLSocket
         try {
             sock.connect(InetSocketAddress(host, port), 10_000)
-            sock.soTimeout = 120_000   // 2 мин — достаточно для 90s ping интервала
+            sock.soTimeout = 360_000   // запас для 180–300s low-power ping интервала
+            sock.keepAlive = true
             sock.startHandshake()
         } catch (e: Exception) {
             runCatching { sock.close() }

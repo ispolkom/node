@@ -28,7 +28,7 @@ void main() {
     final gate = Completer<PeerKeyBundle?>();
     final ws = WsService(_FakeIdentity(), getPeerBundle: (_) { calls++; return gate.future; }, ownPeerId: () async => 'self');
     for (var i = 0; i < 200; i++) {
-      unawaited(ws.debugFeed(_fakeLive(i)));
+      unawaited(ws.ingestBackgroundFrame(_fakeLive(i)));
     }
     await Future<void>.delayed(const Duration(milliseconds: 50));
     expect(calls, lessThanOrEqualTo(8));

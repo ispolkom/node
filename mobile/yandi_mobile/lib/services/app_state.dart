@@ -243,6 +243,7 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws!.groupStream.listen(_onGroupHint);
     _ws!.profileStream.listen((_) => unawaited(syncProfile()));   // узел сообщил, что профиль изменился
     _ws!.forgottenStream.listen((_) => unawaited(syncForgotten()));   // убраны устройства: их сообщения становятся надгробиями
+    unawaited(_drainBackgroundLive());
 
     chatBg.start(node);
 
@@ -267,6 +268,15 @@ class AppState extends ChangeNotifier implements FilesHost {
     _pruneTimer = async_lib.Timer.periodic(const Duration(days: 1), (_) => unawaited(pruneExpired()));
 
     unawaited(_loadInitialData());
+  }
+
+  Future<void> _drainBackgroundLive() async {
+    final ws = _ws;
+    if (ws == null) return;
+    final frames = await chatBg.drainPendingLive();
+    for (final frame in frames) {
+      await ws.ingestBackgroundFrame(frame);
+    }
   }
 
   async_lib.Timer? _presenceTimer;
