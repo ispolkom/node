@@ -18,6 +18,7 @@ import android.net.Uri
 import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Base64
 import android.util.Log
 import android.content.SharedPreferences
@@ -62,9 +63,10 @@ class YandiChatService : Service() {
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
 
-        // Интервалы ping: экран вкл = 30s, выкл = 90s
+        // Интервалы ping: экран вкл = 30s, выкл = 180s, Doze = 300s
         private const val PING_INTERVAL_SCREEN_ON  = 30_000L
-        private const val PING_INTERVAL_SCREEN_OFF = 90_000L
+        private const val PING_INTERVAL_SCREEN_OFF = 180_000L
+        private const val PING_INTERVAL_DOZE = 300_000L
 
         @Volatile var running = false
 
@@ -137,6 +139,7 @@ class YandiChatService : Service() {
     @Volatile private var fingerprint = ""
 
     private val screenOn      = AtomicBoolean(true)
+    private val deviceIdle  = AtomicBoolean(false)
     private val lastPongMs    = AtomicLong(System.currentTimeMillis())
     private val networkReady  = AtomicBoolean(true)
     /** Поколение соединения: потоки прежней настройки видят, что номер сменился, и выходят, не трогая новую. */
@@ -153,6 +156,10 @@ class YandiChatService : Service() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON  -> screenOn.set(true)
                 Intent.ACTION_SCREEN_OFF -> screenOn.set(false)
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                    val pm = getSystemService(POWER_SERVICE) as? PowerManager
+                    deviceIdle.set(pm?.isDeviceIdleMode == true)
+                }
             }
         }
     }
@@ -179,9 +186,15 @@ class YandiChatService : Service() {
     override fun onCreate() {
         super.onCreate()
         // Регистрируем слушатель экрана (только динамически — манифест не работает)
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        screenOn.set(pm?.isInteractive != false)
+        deviceIdle.set(pm?.isDeviceIdleMode == true)
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
         })
         // Регистрируем слушатель сети
         val cm  = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -291,8 +304,11 @@ class YandiChatService : Service() {
         val gen = generation.get()
         pingThread = thread(name = "yandi-ping", isDaemon = true) {
             while (running && gen == generation.get()) {
-                val interval = if (screenOn.get()) PING_INTERVAL_SCREEN_ON
-                               else                PING_INTERVAL_SCREEN_OFF
+                val interval = when {
+                    screenOn.get() -> PING_INTERVAL_SCREEN_ON
+                    deviceIdle.get() -> PING_INTERVAL_DOZE
+                    else -> PING_INTERVAL_SCREEN_OFF
+                }
                 try {
                     Thread.sleep(interval)
                 } catch (_: InterruptedException) {
@@ -592,7 +608,8 @@ class RawWsClient(
         val sock = ctx.socketFactory.createSocket() as SSLSocket
         try {
             sock.connect(InetSocketAddress(host, port), 10_000)
-            sock.soTimeout = 120_000   // 2 мин — достаточно для 90s ping интервала
+            sock.soTimeout = 360_000   // запас для 180–300s low-power ping интервала
+            sock.keepAlive = true
             sock.startHandshake()
         } catch (e: Exception) {
             runCatching { sock.close() }
