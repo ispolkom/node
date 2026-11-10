@@ -79,6 +79,18 @@ void main() {
     });
   }
 
+  for (final video in [false, true]) {
+    test('outgoing ${video ? 'video' : 'audio'} uses the dial tone', () async {
+      final player = TonePlayer(), svc = service(player, {});
+      await svc.start('peer', withVideo: video);
+      await drain();
+      expect(player.played.last, 'sounds/call_out.mp3');
+      await svc.hangup();
+      svc.dispose();
+      await drain();
+    });
+  }
+
   test('cancel during audio setup cannot start a stale outgoing dial tone', () async {
     final player = TonePlayer()..contextGate = Completer<void>();
     final svc = service(player, {});

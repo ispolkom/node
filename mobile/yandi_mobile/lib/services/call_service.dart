@@ -162,7 +162,7 @@ class CallService extends ChangeNotifier {
       return null;
     }
     if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video);
-    _playRing(video ? 'videoCalls' : 'dialing');
+    _playRing('dialing');
     _ringTimer = Timer(const Duration(seconds: 45), () {
       _signal('hangup');
       _finish(tr('Нет ответа'), log: true);
@@ -674,7 +674,7 @@ class CallService extends ChangeNotifier {
 
   void refreshRingtone() {
     final kind = phase == CallPhase.calling
-        ? (video ? 'videoCalls' : 'dialing')
+        ? 'dialing'
         : phase == CallPhase.ringing
             ? (video ? 'videoCalls' : 'calls')
             : null;
