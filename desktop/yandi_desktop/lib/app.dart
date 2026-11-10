@@ -1252,7 +1252,6 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                             ),
                           if (entered &&
                               connected &&
-                              visible &&
                               vault != null &&
                               !vault!.hasError &&
                               (!vault!.configured || vault!.unlocked))

@@ -135,8 +135,11 @@ class _CallsFeatureState extends State<CallsFeature> {
       await coordinator.start(peer, video: video, phone: phone);
     };
     coordinator.poll();
+    // Keep signaling alive while the window is minimized or another page is shown.
+    // isActive is a UI/authorization guard and is false during backgrounding.
     timer = Timer.periodic(const Duration(seconds: 1), (_) {
-      if (widget.isActive()) coordinator.poll();
+      unawaited(coordinator.poll());
+      if (widget.isActive()) syncOverlay();
     });
   }
 

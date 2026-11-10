@@ -7,7 +7,7 @@ abstract final class AppSounds {
     'groups': 'icq-online.mp3',
     'calls': 'calling.mp3',
     'videoCalls': 'sqype.mp3',
-    'dialing': 'calling.mp3',
+    'dialing': 'call_out.mp3',
   };
   static const labels = <String, String>{
     'messages': 'Личные сообщения',
