@@ -30,6 +30,7 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.io.File
 import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
@@ -73,6 +74,9 @@ class YandiChatService : Service() {
 
         private const val PENDING_LIVE_FILE = "yandi_pending_live.bin"
         private const val PREFS = "yandi_background_service"
+        private const val KEY_LAST_LIVE_DIGEST = "last_live_digest"
+        private const val KEY_LAST_LIVE_AT = "last_live_at"
+        private const val LIVE_DEDUP_WINDOW_MS = 120_000L
         private const val KEY_ALIAS = "yandi_background_token_v1"
 
         @Synchronized
@@ -377,10 +381,28 @@ class YandiChatService : Service() {
                 val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
                 if (payloadLen < 1 || data.size < 45 + payloadLen) return
                 if (appInForeground()) return
-                persistPendingLive(data)
-                showCallWakeNotif()
+                // A live packet may be retransmitted while the screen is locked.
+                // The native layer cannot decrypt it, so deduplicate the exact
+                // encrypted frame before waking the device again. Otherwise a
+                // stale invite/reject can ring on every reconnect.
+                if (shouldWakeForLive(data)) {
+                    persistPendingLive(data)
+                    showCallWakeNotif()
+                }
             }
         }
+    }
+
+    private fun shouldWakeForLive(data: ByteArray): Boolean {
+        val digest = MessageDigest.getInstance("SHA-256").digest(data)
+            .joinToString("") { "%02x".format(it) }
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val previous = prefs.getString(KEY_LAST_LIVE_DIGEST, null)
+        val previousAt = prefs.getLong(KEY_LAST_LIVE_AT, 0L)
+        val now = System.currentTimeMillis()
+        if (previous == digest && now - previousAt in 0..LIVE_DEDUP_WINDOW_MS) return false
+        prefs.edit().putString(KEY_LAST_LIVE_DIGEST, digest).putLong(KEY_LAST_LIVE_AT, now).apply()
+        return true
     }
 
     @Synchronized
@@ -498,6 +520,7 @@ class YandiChatService : Service() {
             .setContentText("Входящий звонок")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setOnlyAlertOnce(true)
             .setFullScreenIntent(intent, true)
             .setAutoCancel(true)
             .setTimeoutAfter(45_000)
