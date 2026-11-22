@@ -117,6 +117,8 @@ struct Mail {
     /// абсолютный срок (мс), если письмо гостя или гостю: назначается при приёме и не продлевается ни сменой роли, ни перезапуском
     #[serde(default)]
     exp: u64,
+    #[serde(default)]
+    wake: Vec<u8>,
 }
 static PAIRING: Mutex<Option<Pairing>> = Mutex::new(None);
 static DEVICES: Mutex<Option<Vec<Device>>> = Mutex::new(None);
@@ -1172,6 +1174,7 @@ fn deliver_mail(from: &str, to: &str, payload: &[u8]) -> bool {
         to: to.to_string(),
         payload_b64: base64_of(payload),
         exp: 0,
+        wake: Vec::new(),
     };
     // отправитель (устройство или сам узел) проверяется под замком очереди: remove_device сначала убирает устройство, потом чистит его
     // письма, поэтому письмо забытого устройства либо не попадёт в очередь, либо будет вычищено вместе с остальными
@@ -1916,6 +1919,51 @@ fn node_mail_to_device(st: &MobileState, device: &str, text: &str) {
 }
 
 /// «Живой» сигнал телефону от узла (не хранится): ответ на пинг поддержки квитанций.
+fn call_wake_hint(text: &str) -> Vec<u8> {
+    let Some(json) = text.strip_prefix(crate::mobile_self::CALL_MARKER) else { return Vec::new() };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { return Vec::new() };
+    if v["v"] != 1 { return Vec::new() }
+    let Some(ts) = v["ts"].as_i64() else { return Vec::new() };
+    if (now_ms() as i128 - ts as i128).abs() >= 90_000 { return Vec::new() }
+    if !v["video"].is_null() && !v["video"].is_boolean() { return Vec::new() }
+    let kind = match v["t"].as_str() {
+        Some("invite") => if v["video"] == true { 2 } else { 1 },
+        Some("hangup" | "reject" | "busy") => 3,
+        Some("ringing" | "accept" | "offer" | "answer" | "ice") => 4,
+        _ => return Vec::new(),
+    };
+    let Some(cid) = v["cid"].as_str() else { return Vec::new() };
+    if !(8..=64).contains(&cid.len()) { return Vec::new() }
+    let mut out = vec![kind];
+    out.extend_from_slice(&Sha256::digest(cid.as_bytes())[..16]);
+    out
+}
+
+#[cfg(test)]
+mod call_wake_hint_tests {
+    use super::*;
+
+    #[test]
+    fn only_fresh_call_events_produce_wake_hints() {
+        let cid = "0123456789abcdef";
+        let signal = |kind: &str, video: bool, ts: u64| format!(
+            "{}{{\"v\":1,\"t\":\"{}\",\"cid\":\"{}\",\"video\":{},\"ts\":{}}}",
+            crate::mobile_self::CALL_MARKER, kind, cid, video, ts
+        );
+        let now = now_ms();
+        let audio = call_wake_hint(&signal("invite", false, now));
+        let video = call_wake_hint(&signal("invite", true, now));
+        assert_eq!(audio.len(), 17);
+        assert_eq!(audio[0], 1);
+        assert_eq!(video[0], 2);
+        assert_eq!(&audio[1..], &video[1..]);
+        assert_eq!(call_wake_hint(&signal("hangup", false, now))[0], 3);
+        assert_eq!(call_wake_hint(&signal("ice", false, now))[0], 4);
+        assert!(call_wake_hint(&signal("invite", false, now - 91_000)).is_empty());
+        assert!(call_wake_hint("capPing").is_empty());
+    }
+}
+
 fn node_live_to_device(st: &MobileState, device: &str, text: &str) -> Result<(), String> {
     if crate::mobile_self::is_blocked_phone(device) {
         return Err("устройство заблокировано".into());
@@ -1924,7 +1972,8 @@ fn node_live_to_device(st: &MobileState, device: &str, text: &str) -> Result<(),
     let node = hex::encode(st.my_id.0);
     let blob = crate::mobile_self::seal(text, &x, &node, device, 2)
         .map_err(|_| "не удалось зашифровать сигнал звонка".to_string())?;
-    let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob), exp: 0 };
+    let wake = call_wake_hint(text);
+    let m = Mail { ts: next_ts(), from: node, to: device.to_string(), payload_b64: base64_of(&blob), exp: 0, wake };
     bus().send(Event::Live(Arc::new(m)))
         .map_err(|_| "нет получателя живого сигнала".to_string())?;
     Ok(())
@@ -2919,7 +2968,9 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                     // гость получает сигналы звонка только от негостевых устройств (docs/GUEST.md, P10-5)
                     if m.to == me && live_allowed(&me, &m.from) {
                         if let (Some(from), Ok(p)) = (hex32(&m.from), base64::engine::general_purpose::STANDARD.decode(&m.payload_b64)) {
-                            if sock.send(Message::Binary(frame(FT_LIVE_MSG, &from, m.ts, &p))).await.is_err() { break; }
+                            let mut f = frame(FT_LIVE_MSG, &from, m.ts, &p);
+                            f.extend_from_slice(&m.wake);
+                            if sock.send(Message::Binary(f)).await.is_err() { break; }
                         }
                     }
                 }
@@ -3000,7 +3051,10 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                             if sock.send(Message::Binary(f)).await.is_err() { break; }
                             continue;
                         }
-                        let m = Mail { ts: next_ts(), from: me.clone(), to, payload_b64: base64::engine::general_purpose::STANDARD.encode(&d[37..37 + len]), exp: 0 };
+                        let wake = if d.len() == 37 + len + 17 && (1..=4).contains(&d[37 + len]) {
+                            d[37 + len..].to_vec()
+                        } else { Vec::new() };
+                        let m = Mail { ts: next_ts(), from: me.clone(), to, payload_b64: base64::engine::general_purpose::STANDARD.encode(&d[37..37 + len]), exp: 0, wake };
                         let _ = bus().send(Event::Live(Arc::new(m)));
                     }
                     Some(FT_SEND_MSG) if d.len() >= 37 => {
@@ -3467,7 +3521,7 @@ mod mail_quota_tests {
     use super::*;
 
     fn mail(from: &str, to: &str, ts: u64) -> Mail {
-        Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into(), exp: 0 }
+        Mail { ts, from: from.into(), to: to.into(), payload_b64: "AA==".into(), exp: 0, wake: Vec::new() }
     }
 
     #[test]
@@ -3476,7 +3530,7 @@ mod mail_quota_tests {
         let mut l: Vec<Mail> = Vec::new();
         let mut accepted = 0;
         for i in 0..2000 {
-            let m = Mail { ts: 1_000 + i as u64, from: format!("s{}", i % 50), to: format!("r{}", i % 70), payload_b64: big.clone(), exp: 0 };
+            let m = Mail { ts: 1_000 + i as u64, from: format!("s{}", i % 50), to: format!("r{}", i % 70), payload_b64: big.clone(), exp: 0, wake: Vec::new() };
             if mail_accept(&mut l, m, 2_000) {
                 accepted += 1;
             }
@@ -3723,7 +3777,7 @@ mod hardening_tests {
         let p = mail_path();
         let _ = std::fs::remove_file(&p);
         std::fs::create_dir_all(&p).unwrap(); // запись в файл невозможна
-        let m = Mail { ts: 1, from: "a".into(), to: "b".into(), payload_b64: "eA==".into(), exp: 0 };
+        let m = Mail { ts: 1, from: "a".into(), to: "b".into(), payload_b64: "eA==".into(), exp: 0, wake: Vec::new() };
         let (_, saved) = with_mail_saved(|l| mail_accept(l, m.clone(), now_ms()));
         assert!(!saved, "сбой записи виден вызывающему");
         std::fs::remove_dir_all(&p).unwrap();
@@ -4070,7 +4124,7 @@ mod guest_tests {
         let up = device_peer_of(&user).unwrap();
         let day = 24 * 3600 * 1000u64;
         let now = now_ms();
-        let mk = |from: &str, to: &str, age: u64| Mail { ts: now - age, from: from.into(), to: to.into(), payload_b64: "x".into(), exp: 0 };
+        let mk = |from: &str, to: &str, age: u64| Mail { ts: now - age, from: from.into(), to: to.into(), payload_b64: "x".into(), exp: 0, wake: Vec::new() };
         // срок назначается при приёме: письмо гостя получает exp = приём + сутки
         let mut l: Vec<Mail> = Vec::new();
         assert!(mail_accept(&mut l, mk(&gp, &up, 0), now));

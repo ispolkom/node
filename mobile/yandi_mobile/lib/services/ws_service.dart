@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
@@ -7,6 +8,7 @@ import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import '../models/trusted_node.dart';
+import '../models/call_signal.dart';
 import '../crypto/identity.dart';
 import '../crypto/e2e_crypto.dart';
 import '../crypto/peer_trust.dart';
@@ -27,6 +29,21 @@ const int ftGroupHint   = 0x15;
 const int ftProfile     = 0x16;
 /// намёк «устройства убраны с узла, их сообщения стали надгробиями»: [0x17][8 номер LE]; сам список — GET /mobile/forgotten
 const int ftForgotten   = 0x17;
+
+/// Метка для фонового Android-сервиса; содержимое сигнала остаётся E2E.
+@visibleForTesting
+Uint8List liveWakeHint(String text) {
+  final signal = CallSignal.tryParse(text);
+  final kind = signal == null || !signal.fresh ? 0
+      : signal.type == 'invite' ? (signal.video ? 2 : 1)
+      : const ['hangup', 'reject', 'busy'].contains(signal.type) ? 3
+      : const ['ringing', 'accept', 'offer', 'answer', 'ice'].contains(signal.type) ? 4 : 0;
+  if (kind == 0) return Uint8List(0);
+  return Uint8List.fromList([
+    kind,
+    ...crypto.sha256.convert(utf8.encode(signal!.cid)).bytes.sublist(0, 16),
+  ]);
+}
 
 class GroupHintEvent {
   final String gid;
@@ -428,6 +445,8 @@ class WsService {
     buf.add(_hexToBytes(toPeerIdHex));
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
+    // Hint for the locked Android service; Flutter still verifies E2E content.
+    buf.add(liveWakeHint(text));
     return _sendRaw(buf.toBytes());
   }
 

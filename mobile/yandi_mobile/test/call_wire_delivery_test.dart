@@ -91,6 +91,22 @@ void main() {
   final invite =
       '\u0001yandi-call:{"v":1,"t":"invite","cid":"testcall0001","video":false,"ts":${DateTime.now().millisecondsSinceEpoch}}';
 
+  test('locked Android wake hint distinguishes calls from capability ping', () {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    String signal(String type, {bool video = false, int? ts}) =>
+        CallSignal(type: type, cid: 'testcall0001', video: video, ts: ts ?? now).encode();
+    final audio = liveWakeHint(signal('invite'));
+    final video = liveWakeHint(signal('invite', video: true));
+    expect(audio.length, 17);
+    expect(audio.first, 1);
+    expect(video.first, 2);
+    expect(video.sublist(1), audio.sublist(1));
+    expect(liveWakeHint(signal('hangup')).first, 3);
+    expect(liveWakeHint(signal('ice')).first, 4);
+    expect(liveWakeHint(signal('invite', ts: now - 91000)), isEmpty);
+    expect(liveWakeHint('\u0001yandi-cap:ping'), isEmpty);
+  });
+
   test('fresh encrypted retransmission recovers a transient key lookup failure',
       () async {
     var fetches = 0;

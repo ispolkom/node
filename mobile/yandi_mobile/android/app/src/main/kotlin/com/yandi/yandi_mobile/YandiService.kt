@@ -61,6 +61,7 @@ class YandiChatService : Service() {
         // New ID: Android keeps the sound of an existing channel unchanged.
         const val CHANNEL_MSG    = "yandi_messages_icq_v1"
         const val CHANNEL_CALLS = "yandi_calls_calling_v1"
+        const val CHANNEL_VIDEO_CALLS = "yandi_calls_video_v1"
         const val CHANNEL_MSG_SILENT = "yandi_messages_silent"
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
@@ -151,6 +152,7 @@ class YandiChatService : Service() {
     private val generation    = java.util.concurrent.atomic.AtomicInteger(0)
 
     @Volatile private var ws: RawWsClient? = null
+    private var activeWake: String? = null
     private var workerThread: Thread?      = null
     private var pingThread:   Thread?      = null
 
@@ -381,13 +383,24 @@ class YandiChatService : Service() {
                 val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
                 if (payloadLen < 1 || data.size < 45 + payloadLen) return
                 if (appInForeground()) return
-                // A live packet may be retransmitted while the screen is locked.
-                // The native layer cannot decrypt it, so deduplicate the exact
-                // encrypted frame before waking the device again. Otherwise a
-                // stale invite/reject can ring on every reconnect.
-                if (shouldWakeForLive(data)) {
-                    persistPendingLive(data)
-                    showCallWakeNotif()
+                val hintAt = 45 + payloadLen
+                if (data.size == hintAt + 17) {
+                    val kind = data[hintAt].toInt() and 0xff
+                    if (kind in 1..4 && shouldWakeForLive(data)) {
+                        persistPendingLive(data)
+                        val callId = data.copyOfRange(hintAt + 1, hintAt + 17).toHex()
+                        when (kind) {
+                            1, 2 -> if (activeWake != callId) {
+                                activeWake = callId
+                                getSystemService(NotificationManager::class.java).cancel(0x0CA11)
+                                showCallWakeNotif(kind == 2)
+                            }
+                            3 -> if (activeWake == callId) {
+                                activeWake = null
+                                getSystemService(NotificationManager::class.java).cancel(0x0CA11)
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -409,12 +422,24 @@ class YandiChatService : Service() {
     private fun persistPendingLive(data: ByteArray) {
         runCatching {
             val file = File(filesDir, PENDING_LIVE_FILE)
-            // Ограничиваем очередь: старые сигналы звонка уже неактуальны.
             val existing = if (file.exists()) file.readBytes() else ByteArray(0)
-            val record = ByteBuffer.allocate(4).putInt(data.size).array() + data
-            val combined = (existing + record)
-            val maxBytes = (45 + 32 * 1024) * 8
-            file.writeBytes(if (combined.size > maxBytes) combined.takeLast(maxBytes).toByteArray() else combined)
+            val frames = ArrayDeque<ByteArray>()
+            var offset = 0
+            while (offset + 4 <= existing.size) {
+                val size = ByteBuffer.wrap(existing, offset, 4).int
+                offset += 4
+                if (size <= 0 || size > 45 + 32 * 1024 || offset + size > existing.size) break
+                frames.addLast(existing.copyOfRange(offset, offset + size))
+                offset += size
+            }
+            frames.addLast(data)
+            while (frames.size > 8) frames.removeFirst()
+            file.outputStream().use { out ->
+                for (frame in frames) {
+                    out.write(ByteBuffer.allocate(4).putInt(frame.size).array())
+                    out.write(frame)
+                }
+            }
         }
     }
 
@@ -444,6 +469,15 @@ class YandiChatService : Service() {
                 NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Входящие аудио- и видеозвонки"
                 setSound(Uri.parse("android.resource://$packageName/raw/calling"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_VIDEO_CALLS, "YANDI видеозвонки",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(Uri.parse("android.resource://$packageName/raw/sqype"),
                     AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
                         .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
@@ -508,16 +542,16 @@ class YandiChatService : Service() {
             .notify(from.hashCode(), notif)
     }
 
-    private fun showCallWakeNotif() {
+    private fun showCallWakeNotif(video: Boolean) {
         val intent = PendingIntent.getActivity(
             this, System.currentTimeMillis().toInt(),
             Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notif = NotificationCompat.Builder(this, CHANNEL_CALLS)
+        val notif = NotificationCompat.Builder(this, if (video) CHANNEL_VIDEO_CALLS else CHANNEL_CALLS)
             .setSmallIcon(android.R.drawable.ic_menu_call)
             .setContentTitle("YANDI")
-            .setContentText("Входящий звонок")
+            .setContentText(if (video) "Входящий видеозвонок" else "Входящий звонок")
             .setCategory(NotificationCompat.CATEGORY_CALL)
             .setPriority(NotificationCompat.PRIORITY_MAX)
             .setOnlyAlertOnce(true)
