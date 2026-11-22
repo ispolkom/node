@@ -34,6 +34,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateMixin {
+  AppState? _appState;
   late final TabController _tabs;
   final _filesKey = GlobalKey<FilesTabState>();
   final _searchCtrl = TextEditingController();
@@ -53,12 +54,16 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
       if (_tabs.index == 3 && !_tabs.indexIsChanging) _filesKey.currentState?.reload();
     });
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      context.read<AppState>().refreshContacts();
+      if (!mounted) return;
+      _appState = context.read<AppState>();
+      _appState!.onHomeReady();
+      _appState!.refreshContacts();
       NotificationService.cancelAll();   // события просмотрены — гасим значок у иконки
       _handlePendingNotification();
       _askNickOnce();
     });
   }
+
 
   /// Профиль: ник обязателен (его увидят другие пользователи узла и участники групп; другого имени в группах нет), аватар — по желанию
   /// (в настройках). Окно не закрывается, пока ник не введён.
@@ -101,6 +106,7 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
 
   @override
   void dispose() {
+    _appState?.onHomeGone();
     _tabs.dispose();
     _searchCtrl.dispose();
     _searchFocus.dispose();

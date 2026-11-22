@@ -1,12 +1,18 @@
 import 'package:flutter/services.dart';
 import '../models/trusted_node.dart';
-import 'dart:typed_data';
 
 /// Управляет фоновым Android-сервисом для WebSocket-соединения с нодой.
 /// Сервис держит соединение живым когда приложение свёрнуто и показывает
 /// уведомления о входящих сообщениях — без Google, без FCM.
 class ChatBgService {
   static const _channel = MethodChannel('com.yandi/chat');
+
+  Future<void> setLiveReady(bool ready) async {
+    try {
+      await _channel.invokeMethod<void>('setLiveReady', {'ready': ready});
+    } on PlatformException catch (_) {
+    } on MissingPluginException catch (_) {}
+  }
 
   Future<void> setMessageSoundEnabled(bool enabled) async {
     try {
@@ -58,9 +64,9 @@ class ChatBgService {
     } on PlatformException catch (_) { return false; }
   }
 
-  Future<List<Uint8List>> drainPendingLive() async {
+  Future<List<Uint8List>> drainPendingLive({bool ready = false}) async {
     try {
-      final raw = await _channel.invokeMethod<List<dynamic>>('drainPendingLive');
+      final raw = await _channel.invokeMethod<List<dynamic>>('drainPendingLive', {'ready': ready});
       return (raw ?? const <dynamic>[]).map<Uint8List?>((item) {
         if (item is Uint8List) return item;
         if (item is List) return Uint8List.fromList(item.whereType<int>().toList());
@@ -71,5 +77,13 @@ class ChatBgService {
     } on MissingPluginException catch (_) {
       return const <Uint8List>[];
     }
+  }
+
+  Future<void> ackPendingLive(List<Uint8List> frames) async {
+    if (frames.isEmpty) return;
+    try {
+      await _channel.invokeMethod<void>('ackPendingLive', {'frames': frames});
+    } on PlatformException catch (_) {
+    } on MissingPluginException catch (_) {}
   }
 }

@@ -86,6 +86,10 @@ class AppState extends ChangeNotifier implements FilesHost {
 
   api_svc.ApiService? _api;
   WsService?  _ws;
+  bool _homeReady = false;
+  bool _liveWsOpen = false;
+  bool _liveHandoffRunning = false;
+  int _liveHandoffEpoch = 0;
 
   String? activeChatPeerId;
   final _player = AudioPlayer();
@@ -197,6 +201,9 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   Future<void> _startServices(TrustedNode node) async {
+    _liveHandoffEpoch++;
+    _liveWsOpen = false;
+    await chatBg.setLiveReady(false);
     _api?.dispose();
     _ws?.dispose();
 
@@ -219,8 +226,16 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws  = WsService(
       identity!,
       onPermanentLoss: _onConnectionLost,
-      onSignalLoss: () => calls.onSignalingLost(),
+      onSignalLoss: () {
+        _liveHandoffEpoch++;
+        _liveWsOpen = false;
+        _ws?.holdLive();
+        unawaited(chatBg.setLiveReady(false));
+        calls.onSignalingLost();
+      },
       onOpen: () {
+        _liveWsOpen = true;
+        unawaited(_drainBackgroundLive());
         // сокет открылся (первый раз или после обрыва): статусы за время обрыва не приходили, берём заново, и забираем накопленную почту
         unawaited(refreshContacts());
         unawaited(_syncInbox());
@@ -234,6 +249,7 @@ class AppState extends ChangeNotifier implements FilesHost {
       getPeerBundle: (peerId) => _api!.getPeerBundle(peerId),
       ownPeerId: () => _api!.devicePeerId(),
     );
+    _ws!.holdLive();
     _ws!.connect(node);
     _ws!.chatStream.listen(_onIncomingChat);
     _ws!.statusStream.listen(_onPeerStatus);
@@ -243,8 +259,6 @@ class AppState extends ChangeNotifier implements FilesHost {
     _ws!.groupStream.listen(_onGroupHint);
     _ws!.profileStream.listen((_) => unawaited(syncProfile()));   // узел сообщил, что профиль изменился
     _ws!.forgottenStream.listen((_) => unawaited(syncForgotten()));   // убраны устройства: их сообщения становятся надгробиями
-    unawaited(_drainBackgroundLive());
-
     chatBg.start(node);
 
     // неотправленные сообщения повторяются сами (паузы и срок — в Outbox)
@@ -271,12 +285,40 @@ class AppState extends ChangeNotifier implements FilesHost {
   }
 
   Future<void> _drainBackgroundLive() async {
+    if (!_homeReady || !_liveWsOpen || _liveHandoffRunning) return;
     final ws = _ws;
     if (ws == null) return;
-    final frames = await chatBg.drainPendingLive();
-    for (final frame in frames) {
-      await ws.ingestBackgroundFrame(frame);
+    final epoch = _liveHandoffEpoch;
+    _liveHandoffRunning = true;
+    try {
+      final frames = await chatBg.drainPendingLive(ready: true);
+      if (epoch != _liveHandoffEpoch || !identical(_ws, ws) || !_homeReady || !_liveWsOpen) {
+        await chatBg.setLiveReady(false);
+        return;
+      }
+      await ws.releaseLiveWithBacklog(frames);
+      if (epoch == _liveHandoffEpoch && identical(_ws, ws)) {
+        await chatBg.ackPendingLive(frames);
+      }
+    } finally {
+      _liveHandoffRunning = false;
+      if (epoch != _liveHandoffEpoch && _homeReady && _liveWsOpen) {
+        unawaited(_drainBackgroundLive());
+      }
     }
+  }
+
+  void onHomeReady() {
+    _homeReady = true;
+    unawaited(_drainBackgroundLive());
+    if (calls.busy) _showCallScreen();
+  }
+
+  void onHomeGone() {
+    _homeReady = false;
+    _liveHandoffEpoch++;
+    _ws?.holdLive();
+    unawaited(chatBg.setLiveReady(false));
   }
 
   async_lib.Timer? _presenceTimer;
@@ -859,6 +901,7 @@ class AppState extends ChangeNotifier implements FilesHost {
   bool _callScreenOpen = false;
 
   void _showCallScreen() {
+    if (!_homeReady) return;
     if (_callScreenOpen) return;
     final nav = NotificationService.navigatorKey.currentState;
     if (nav == null) return;
@@ -2169,6 +2212,10 @@ class AppState extends ChangeNotifier implements FilesHost {
   /// (Уведомления о новых сообщениях при этом приходят: служба в фоне ничего не расшифровывает; почта ждёт на узле до входа.)
   Future<void> lockDown() async {
     _lockEpoch++;
+    _liveHandoffEpoch++;
+    _liveWsOpen = false;
+    _homeReady = false;
+    await chatBg.setLiveReady(false);
     _presenceTimer?.cancel();
     _updateTimer?.cancel();
     _pruneTimer?.cancel();

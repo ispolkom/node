@@ -107,6 +107,22 @@ void main() {
     expect(liveWakeHint('\u0001yandi-cap:ping'), isEmpty);
   });
 
+  test('buffered invite is decrypted before a newer live hangup', () async {
+    final ws = service((_) async => bundle());
+    ws.holdLive();
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final hangup = CallSignal.now('hangup', 'pending-call').encode();
+    final invite = CallSignal.now('invite', 'pending-call',
+        until: DateTime.now().millisecondsSinceEpoch + 45000).encode();
+    await ws.debugFeed(await frame(hangup));
+    expect(events, isEmpty);
+    await ws.releaseLiveWithBacklog([await frame(invite)]);
+    await until(() => events.length == 2);
+    expect(events.map((e) => CallSignal.tryParse(e.text)!.type), ['invite', 'hangup']);
+    ws.dispose();
+  });
+
   test('fresh encrypted retransmission recovers a transient key lookup failure',
       () async {
     var fetches = 0;

@@ -34,7 +34,8 @@ const int ftForgotten   = 0x17;
 @visibleForTesting
 Uint8List liveWakeHint(String text) {
   final signal = CallSignal.tryParse(text);
-  final kind = signal == null || !signal.fresh ? 0
+  final kind = signal == null || !signal.fresh ||
+          (signal.type == 'invite' && signal.until != null && signal.until! <= DateTime.now().millisecondsSinceEpoch) ? 0
       : signal.type == 'invite' ? (signal.video ? 2 : 1)
       : const ['hangup', 'reject', 'busy'].contains(signal.type) ? 3
       : const ['ringing', 'accept', 'offer', 'answer', 'ice'].contains(signal.type) ? 4 : 0;
@@ -249,9 +250,29 @@ class WsService {
   final _liveQueue = Queue<Uint8List>();
   bool _disposed = false;
   int _liveGeneration = 0;
+  bool _liveHeld = false;
+
+  /// При открытии хранилища сначала обрабатываем кадры Android-службы,
+  /// затем сигналы нового сокета. Это сохраняет порядок invite/hangup.
+  void holdLive() {
+    _liveHeld = true;
+  }
+
+  Future<void> releaseLiveWithBacklog(List<Uint8List> frames) async {
+    if (_disposed) return;
+    for (final frame in frames.reversed) {
+      if (_liveQueue.length >= _maxLiveQueued) _liveQueue.removeLast();
+      _liveQueue.addFirst(frame);
+    }
+    _liveHeld = false;
+    while (_liveInFlight != 0 && !_disposed) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    await _drainLive();
+  }
 
   Future<void> _drainLive() async {
-    if (_liveInFlight != 0) return;
+    if (_liveHeld || _liveInFlight != 0) return;
     _liveInFlight = 1;
     try {
       while (!_disposed && _liveQueue.isNotEmpty) {
@@ -303,7 +324,7 @@ class WsService {
           return;
         }
         _liveQueue.addLast(data);
-        unawaited(_drainLive());
+        if (!_liveHeld) unawaited(_drainLive());
 
       case ftGroupHint:
         if (data.length >= 26) {

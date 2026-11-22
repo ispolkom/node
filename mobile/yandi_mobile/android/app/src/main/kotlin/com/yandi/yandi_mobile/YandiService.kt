@@ -79,9 +79,14 @@ class YandiChatService : Service() {
         private const val KEY_LAST_LIVE_AT = "last_live_at"
         private const val LIVE_DEDUP_WINDOW_MS = 120_000L
         private const val KEY_ALIAS = "yandi_background_token_v1"
+        private val pendingLiveLock = Any()
+        @Volatile private var flutterLiveReady = false
 
-        @Synchronized
-        fun drainPendingLive(context: Context): ArrayList<ByteArray> {
+        fun setFlutterLiveReady(ready: Boolean) = synchronized(pendingLiveLock) {
+            flutterLiveReady = ready
+        }
+
+        private fun readPendingLive(context: Context): ArrayList<ByteArray> {
             val file = File(context.filesDir, PENDING_LIVE_FILE)
             if (!file.exists()) return arrayListOf()
             return runCatching {
@@ -95,9 +100,29 @@ class YandiChatService : Service() {
                     result.add(bytes.copyOfRange(offset, offset + size))
                     offset += size
                 }
-                file.delete()
                 result
             }.getOrDefault(arrayListOf())
+        }
+
+        // Снимок не удаляет шифротекст: если Flutter закроется во время проверки E2E,
+        // следующий вход сможет повторить попытку. Новые кадры не теряются при ack.
+        fun drainPendingLive(context: Context, ready: Boolean): ArrayList<ByteArray> = synchronized(pendingLiveLock) {
+            val frames = readPendingLive(context)
+            if (ready) flutterLiveReady = true
+            frames
+        }
+
+        fun ackPendingLive(context: Context, handled: List<ByteArray>) = synchronized(pendingLiveLock) {
+            if (handled.isEmpty()) return@synchronized
+            val frames = readPendingLive(context)
+            val remaining = frames.filterNot { frame -> handled.any { it.contentEquals(frame) } }
+            val file = File(context.filesDir, PENDING_LIVE_FILE)
+            if (remaining.isEmpty()) file.delete() else file.outputStream().use { out ->
+                for (frame in remaining) {
+                    out.write(ByteBuffer.allocate(4).putInt(frame.size).array())
+                    out.write(frame)
+                }
+            }
         }
 
         private fun secretKey(): SecretKey {
@@ -382,15 +407,15 @@ class YandiChatService : Service() {
                 if (data.size < 45 || data.size > 45 + 32 * 1024) return
                 val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
                 if (payloadLen < 1 || data.size < 45 + payloadLen) return
-                if (appInForeground()) return
                 val hintAt = 45 + payloadLen
                 if (data.size == hintAt + 17) {
                     val kind = data[hintAt].toInt() and 0xff
                     if (kind in 1..4 && shouldWakeForLive(data)) {
-                        persistPendingLive(data)
+                        val foreground = appInForeground()
+                        if (!persistPendingLive(data, foreground)) return
                         val callId = data.copyOfRange(hintAt + 1, hintAt + 17).toHex()
                         when (kind) {
-                            1, 2 -> if (activeWake != callId) {
+                            1, 2 -> if (!foreground && activeWake != callId) {
                                 activeWake = callId
                                 getSystemService(NotificationManager::class.java).cancel(0x0CA11)
                                 showCallWakeNotif(kind == 2)
@@ -418,8 +443,8 @@ class YandiChatService : Service() {
         return true
     }
 
-    @Synchronized
-    private fun persistPendingLive(data: ByteArray) {
+    private fun persistPendingLive(data: ByteArray, foreground: Boolean): Boolean = synchronized(pendingLiveLock) {
+        if (foreground && flutterLiveReady) return@synchronized false
         runCatching {
             val file = File(filesDir, PENDING_LIVE_FILE)
             val existing = if (file.exists()) file.readBytes() else ByteArray(0)
@@ -440,7 +465,7 @@ class YandiChatService : Service() {
                     out.write(frame)
                 }
             }
-        }
+        }.isSuccess
     }
 
     // ── Notifications ──────────────────────────────────────────────────────────

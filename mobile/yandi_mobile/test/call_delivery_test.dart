@@ -78,6 +78,28 @@ void main() {
     c.dispose();
     await t.pump();
   });
+  testWidgets('expired buffered invite never opens the answer screen', (t) async {
+    var screens = 0;
+    final c = make((_, __) async => true, show: () => screens++);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final expired = CallSignal(type: 'invite', cid: 'expired01', ts: now - 45001, until: now - 1);
+    await c.onSignal('peer', CallSignal.tryParse(expired.encode())!);
+    expect(c.phase, CallPhase.idle);
+    expect(screens, 0);
+    c.dispose();
+    await t.pump();
+  });
+  testWidgets('receiver uses the caller deadline after unlock', (t) async {
+    final c = make((_, __) async => true);
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final invite = CallSignal(type: 'invite', cid: 'pending01', ts: now - 40000, until: now + 5000);
+    await c.onSignal('peer', CallSignal.tryParse(invite.encode())!);
+    expect(c.phase, CallPhase.ringing);
+    await t.pump(const Duration(seconds: 6));
+    expect(c.phase, CallPhase.ended);
+    c.dispose();
+    await t.pump();
+  });
   testWidgets('outgoing retries stop on receipt and preserve cid and video',
       (t) async {
     final sent = <CallSignal>[];
@@ -90,6 +112,8 @@ void main() {
     expect(sent.length, 2);
     expect(sent.every((s) => s.type == 'invite' && s.cid == c.cid && s.video),
         isTrue);
+    expect(sent.map((s) => s.until).toSet().length, 1);
+    expect(sent.first.until, isNotNull);
     await c.onSignal('peer', CallSignal.now('ringing', c.cid!, video: true));
     await t.pump(const Duration(seconds: 10));
     expect(sent.length, 2);

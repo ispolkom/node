@@ -1925,6 +1925,11 @@ fn call_wake_hint(text: &str) -> Vec<u8> {
     if v["v"] != 1 { return Vec::new() }
     let Some(ts) = v["ts"].as_i64() else { return Vec::new() };
     if (now_ms() as i128 - ts as i128).abs() >= 90_000 { return Vec::new() }
+    if !v["until"].is_null() {
+        let Some(until) = v["until"].as_i64() else { return Vec::new() };
+        if until < ts || until as i128 - ts as i128 > 45_000 { return Vec::new() }
+        if v["t"] == "invite" && until <= now_ms() as i64 { return Vec::new() }
+    }
     if !v["video"].is_null() && !v["video"].is_boolean() { return Vec::new() }
     let kind = match v["t"].as_str() {
         Some("invite") => if v["video"] == true { 2 } else { 1 },

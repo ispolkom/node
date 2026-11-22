@@ -95,7 +95,7 @@ class CallService extends ChangeNotifier {
   bool _wasClosed(String peer, String id) =>
       _closedCalls['$peer/$id']?.isAfter(DateTime.now()) ?? false;
 
-  void _retryInvite(String peer, String id, bool withVideo) {
+  void _retryInvite(String peer, String id, bool withVideo, int until) {
     var attempts = 0;
     bool sending = false;
     _inviteRetry = Timer.periodic(const Duration(seconds: 2), (timer) async {
@@ -111,7 +111,7 @@ class CallService extends ChangeNotifier {
       attempts++;
       try {
         await _send(
-            peer, CallSignal.now('invite', id, video: withVideo).encode());
+            peer, CallSignal.now('invite', id, video: withVideo, until: until).encode());
       } catch (_) {
         // Retry transient transport failures until the existing ring deadline.
       } finally {
@@ -155,15 +155,16 @@ class CallService extends ChangeNotifier {
     notifyListeners();
     showScreen();
     final ownCid = cid!;
-    final ok = await _send(toPeerId, CallSignal.now('invite', ownCid, video: video).encode());
+    final until = DateTime.now().millisecondsSinceEpoch + 45000;
+    final ok = await _send(toPeerId, CallSignal.now('invite', ownCid, video: video, until: until).encode());
     if (_disposed || cid != ownCid || phase != CallPhase.calling) return null;
     if (!ok) {
       _finish(tr('Нет связи с узлом или это не ваше устройство'), log: false);
       return null;
     }
-    if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video);
+    if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video, until);
     _playRing('dialing');
-    _ringTimer = Timer(const Duration(seconds: 45), () {
+    _ringTimer = Timer(Duration(milliseconds: (until - DateTime.now().millisecondsSinceEpoch).clamp(0, 45000)), () {
       _signal('hangup');
       _finish(tr('Нет ответа'), log: true);
     });
@@ -203,6 +204,8 @@ class CallService extends ChangeNotifier {
     switch (s.type) {
       case 'invite':
         if (_wasClosed(from, s.cid)) return;
+        final remaining = (s.until ?? s.ts + 45000) - DateTime.now().millisecondsSinceEpoch;
+        if (remaining <= 0) return;
         if (busy) {
           // встречные звонки друг другу: побеждает звонок с меньшим номером, второй уступает и принимается автоматически
           if (phase == CallPhase.calling && from == peerId && s.cid.compareTo(cid!) < 0) {
@@ -226,7 +229,7 @@ class CallService extends ChangeNotifier {
         notifyListeners();
         onIncomingNotify(from, nameOf(from), video);
         _playRing(video ? 'videoCalls' : 'calls');
-        _ringTimer = Timer(const Duration(seconds: 45), () => _finish(tr('Пропущенный звонок'), log: true));
+        _ringTimer = Timer(Duration(milliseconds: remaining.clamp(0, 45000)), () => _finish(tr('Пропущенный звонок'), log: true));
         showScreen();
         await _acknowledge(from, s);
       case 'ringing':

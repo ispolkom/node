@@ -42,6 +42,7 @@
     function sig(t, extra) {
         if (!call) return Promise.resolve();
         var m = { v: 1, t: t, cid: call.cid, video: call.video, ts: Date.now() };
+        if (t === 'invite') m.until = call.until;
         if (extra) for (var k in extra) m[k] = extra[k];
         return send(call.peer, m);
     }
@@ -221,7 +222,7 @@
 
     function start(peer, name, video) {
         if (call) { alert('Вы уже разговариваете'); return; }
-        call = { peer: peer, name: name || 'Телефон', cid: newCid(), video: !!video, incoming: false, phase: 'calling', pendingIce: [] };
+        call = { peer: peer, name: name || 'Телефон', cid: newCid(), video: !!video, incoming: false, phase: 'calling', until: Date.now() + 45000, pendingIce: [] };
         render(); ringStart(true);
         var c = call;
         retryInvite(c);
@@ -238,12 +239,15 @@
         if (typeof s.cid !== 'string' || s.cid.length < 8 || s.cid.length > 64) return;
         if (!Number.isInteger(s.ts) || Math.abs(Date.now() - s.ts) > 90000) return;
         if (s.video !== undefined && typeof s.video !== 'boolean') return;
+        if (s.until !== undefined && (!Number.isInteger(s.until) || s.until < s.ts || s.until - s.ts > 45000)) return;
         if (typeof e.name !== 'string') e.name = 'Телефон';
         if (['hangup', 'reject', 'busy'].indexOf(s.t) >= 0) rememberClosed(e.from, s.cid);
         var mine = call && call.peer === e.from && call.cid === s.cid && call.phase !== 'ended';
         switch (s.t) {
             case 'invite':
                 if ((closedCalls.get(e.from + '/' + s.cid) || 0) > Date.now()) return;
+                var remaining = (s.until === undefined ? s.ts + 45000 : s.until) - Date.now();
+                if (remaining <= 0) return;
                 if (call) {
                     if (mine && call.incoming) acknowledge(e.from, s);
                     else if (!mine) send(e.from, { v: 1, t: 'busy', cid: s.cid, video: !!s.video, ts: Date.now() }).catch(function () {});
@@ -253,7 +257,7 @@
                 render(); ringStart(false);
                 acknowledge(e.from, s);
                 if (window.Notification && Notification.permission === 'granted' && document.hidden) new Notification((s.video ? 'Видеозвонок' : 'Звонок') + ': ' + e.name);
-                call.ringTimeout = setTimeout(function () { if (call && call.phase === 'ringing') finish('Пропущенный звонок'); }, 45000);
+                call.ringTimeout = setTimeout(function () { if (call && call.phase === 'ringing') finish('Пропущенный звонок'); }, Math.min(remaining, 45000));
                 break;
             case 'ringing': if (mine && !call.incoming) clearInterval(call.retry); break;
             case 'accept': if (mine && !call.incoming && call.phase === 'calling') { clearInterval(call.retry); ringStop(); clearTimeout(call.ringTimeout); call.phase = 'connecting'; render(); startMedia(true); } break;

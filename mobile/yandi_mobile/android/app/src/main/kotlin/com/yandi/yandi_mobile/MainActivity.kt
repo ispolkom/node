@@ -157,7 +157,12 @@ class MainActivity : FlutterActivity() {
                 }
                 "stop" -> { startService(Intent(this, YandiChatService::class.java).setAction(YandiChatService.ACTION_STOP)); result.success(true) }
                 "isRunning" -> result.success(YandiChatService.running)
-                "drainPendingLive" -> result.success(YandiChatService.drainPendingLive(this))
+                "setLiveReady" -> { YandiChatService.setFlutterLiveReady(call.argument<Boolean>("ready") == true); result.success(null) }
+                "drainPendingLive" -> result.success(YandiChatService.drainPendingLive(this, call.argument<Boolean>("ready") == true))
+                "ackPendingLive" -> {
+                    YandiChatService.ackPendingLive(this, call.argument<List<ByteArray>>("frames") ?: emptyList())
+                    result.success(null)
+                }
                 else -> result.notImplemented()
             }
         }
