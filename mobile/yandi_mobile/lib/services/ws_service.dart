@@ -258,17 +258,19 @@ class WsService {
     _liveHeld = true;
   }
 
-  Future<void> releaseLiveWithBacklog(List<Uint8List> frames) async {
-    if (_disposed) return;
-    for (final frame in frames.reversed) {
-      if (_liveQueue.length >= _maxLiveQueued) _liveQueue.removeLast();
-      _liveQueue.addFirst(frame);
-    }
-    _liveHeld = false;
+  Future<List<bool>> releaseLiveWithBacklog(List<Uint8List> frames) async {
+    if (_disposed) return List<bool>.filled(frames.length, false);
     while (_liveInFlight != 0 && !_disposed) {
       await Future<void>.delayed(const Duration(milliseconds: 1));
     }
+    if (_disposed) return List<bool>.filled(frames.length, false);
+    final handled = <bool>[];
+    for (final frame in frames) {
+      handled.add(await _handleLiveMsg(frame, _liveGeneration));
+    }
+    _liveHeld = false;
     await _drainLive();
+    return handled;
   }
 
   Future<void> _drainLive() async {
@@ -314,7 +316,7 @@ class WsService {
         _handlePeerStatus(data);
 
       case ftLiveMsg:
-        if (_disposed || data.length > 45 + 32 * 1024) return;
+        if (_disposed || data.length > 45 + 32 * 1024 + 17) return;
         if (_liveQueue.length >= _maxLiveQueued) {
           // Bound hostile traffic without silently keeping a broken socket alive.
           _liveQueue.clear();
@@ -395,17 +397,19 @@ class WsService {
   static const _maxDateMs = 8640000000000000;
 
   /// [1B 0x13][32B от кого][8B время][4B длина][зашифрованный сигнал]. Открытый текст не принимаем: сигналы звонка только E2E.
-  Future<void> _handleLiveMsg(Uint8List data, int generation) async {
-    if (data.length < 45) return;
+  Future<bool> _handleLiveMsg(Uint8List data, int generation) async {
+    if (data.length < 45) return false;
     final from = _bytesToHex(data.sublist(1, 33));
     final tsMs = ByteData.sublistView(data, 33, 41).getInt64(0, Endian.little);
     final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
-    if (data.length < 45 + pLen) return;
+    if (pLen == 0 || pLen > 32 * 1024 || data.length < 45 + pLen ||
+        (data.length != 45 + pLen && data.length != 45 + pLen + 17)) return false;
     final payload = data.sublist(45, 45 + pLen);
-    if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
+    if (tsMs < 0 || tsMs > _maxDateMs) return false;
     final text = await decryptIncoming(payload, fromPeerId: from, kind: 2);
-    if (text == null || _disposed || generation != _liveGeneration) return;
+    if (text == null || _disposed || generation != _liveGeneration) return false;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
+    return true;
   }
 
   void _handlePeerStatus(Uint8List data) {

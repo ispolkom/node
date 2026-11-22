@@ -296,9 +296,12 @@ class AppState extends ChangeNotifier implements FilesHost {
         await chatBg.setLiveReady(false);
         return;
       }
-      await ws.releaseLiveWithBacklog(frames);
+      final handled = await ws.releaseLiveWithBacklog(frames);
       if (epoch == _liveHandoffEpoch && identical(_ws, ws)) {
-        await chatBg.ackPendingLive(frames);
+        await chatBg.ackPendingLive([
+          for (var i = 0; i < frames.length; i++)
+            if (i < handled.length && handled[i]) frames[i],
+        ]);
       }
     } finally {
       _liveHandoffRunning = false;

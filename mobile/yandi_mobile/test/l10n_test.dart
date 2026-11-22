@@ -9,6 +9,7 @@ import 'package:yandi_mobile/screens/guest_screen.dart';
 import 'package:yandi_mobile/screens/invite_device_screen.dart';
 import 'package:yandi_mobile/screens/support_screen.dart';
 import 'package:yandi_mobile/models/invite_payload.dart';
+import 'package:yandi_mobile/services/app_sounds.dart';
 
 /// Ключи `tr('…')`/`trf('…')` из исходников: склеенные соседние литералы, как их видит компилятор.
 Set<String> keysIn(String src) {
@@ -45,7 +46,7 @@ void main() {
     }
     // команды меню сообщения показываются через tr(команда), их ключи берутся из констант, а не из tr('…')
     final cmds = RegExp(r"cmd\w+ = '([^']+)'").allMatches(File('lib/widgets/message_menu.dart').readAsStringSync()).map((m) => m.group(1)!).toSet();
-    final extra = enTable.keys.where((k) => !keys.contains(k) && !cmds.contains(k)).toList();
+    final extra = enTable.keys.where((k) => !keys.contains(k) && !cmds.contains(k) && !AppSounds.labels.containsValue(k)).toList();
     expect(extra, isEmpty, reason: 'лишние ключи: ${extra.take(5)}');
     expect(enTable.values.every((v) => v.trim().isNotEmpty), isTrue);
   });

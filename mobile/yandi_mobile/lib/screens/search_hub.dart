@@ -50,7 +50,9 @@ class _SearchHubState extends State<SearchHub> {
       if (!mounted) return;
       final state = context.read<AppState>();
       state.refreshDirectory();
-      setState(() => _nodes = state.nodeDirectory());
+      setState(() {
+        _nodes = state.nodeDirectory();
+      });
     });
   }
 

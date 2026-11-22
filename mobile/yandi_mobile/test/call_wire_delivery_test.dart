@@ -123,6 +123,23 @@ void main() {
     ws.dispose();
   });
 
+  test('backlog frame is acknowledged only after E2E decryption succeeds', () async {
+    var lookups = 0;
+    final ws = service((_) async => ++lookups == 1 ? null : bundle());
+    ws.holdLive();
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final pending = await frame(invite);
+    final first = await ws.releaseLiveWithBacklog([pending]);
+    expect(first, [false], reason: 'Missing peer keys must retain the Android frame');
+    expect(events, isEmpty);
+    ws.holdLive();
+    final retry = await ws.releaseLiveWithBacklog([pending]);
+    expect(retry, [true]);
+    expect(events, hasLength(1));
+    ws.dispose();
+  });
+
   test('fresh encrypted retransmission recovers a transient key lookup failure',
       () async {
     var fetches = 0;

@@ -19,6 +19,7 @@ import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
 import android.os.PowerManager
+import android.system.Os
 import android.util.Base64
 import android.util.Log
 import android.content.SharedPreferences
@@ -79,6 +80,10 @@ class YandiChatService : Service() {
         private const val KEY_LAST_LIVE_AT = "last_live_at"
         private const val LIVE_DEDUP_WINDOW_MS = 120_000L
         private const val KEY_ALIAS = "yandi_background_token_v1"
+        private const val MAX_LIVE_PAYLOAD = PendingLiveQueue.MAX_PAYLOAD
+        private const val LIVE_FRAME_HEADER = PendingLiveQueue.FRAME_HEADER
+        private const val LIVE_WAKE_TRAILER = PendingLiveQueue.WAKE_TRAILER
+        private const val MAX_LIVE_FRAME = PendingLiveQueue.MAX_FRAME
         private val pendingLiveLock = Any()
         @Volatile private var flutterLiveReady = false
 
@@ -89,19 +94,8 @@ class YandiChatService : Service() {
         private fun readPendingLive(context: Context): ArrayList<ByteArray> {
             val file = File(context.filesDir, PENDING_LIVE_FILE)
             if (!file.exists()) return arrayListOf()
-            return runCatching {
-                val bytes = file.readBytes()
-                val result = arrayListOf<ByteArray>()
-                var offset = 0
-                while (offset + 4 <= bytes.size) {
-                    val size = ByteBuffer.wrap(bytes, offset, 4).int
-                    offset += 4
-                    if (size <= 0 || size > 45 + 32 * 1024 || offset + size > bytes.size) break
-                    result.add(bytes.copyOfRange(offset, offset + size))
-                    offset += size
-                }
-                result
-            }.getOrDefault(arrayListOf())
+            return runCatching { PendingLiveQueue.decode(file.readBytes()) }
+                .getOrDefault(arrayListOf())
         }
 
         // Снимок не удаляет шифротекст: если Flutter закроется во время проверки E2E,
@@ -117,11 +111,21 @@ class YandiChatService : Service() {
             val frames = readPendingLive(context)
             val remaining = frames.filterNot { frame -> handled.any { it.contentEquals(frame) } }
             val file = File(context.filesDir, PENDING_LIVE_FILE)
-            if (remaining.isEmpty()) file.delete() else file.outputStream().use { out ->
-                for (frame in remaining) {
-                    out.write(ByteBuffer.allocate(4).putInt(frame.size).array())
-                    out.write(frame)
+            writePendingLiveAtomically(context, remaining)
+        }
+
+        private fun writePendingLiveAtomically(context: Context, frames: Collection<ByteArray>) {
+            val target = File(context.filesDir, PENDING_LIVE_FILE)
+            val temp = File(context.filesDir, "$PENDING_LIVE_FILE.tmp")
+            try {
+                temp.outputStream().use { stream ->
+                    stream.write(PendingLiveQueue.encode(frames))
+                    stream.fd.sync()
                 }
+                if (frames.isEmpty()) target.delete()
+                else Os.rename(temp.absolutePath, target.absolutePath)
+            } finally {
+                temp.delete()
             }
         }
 
@@ -177,7 +181,7 @@ class YandiChatService : Service() {
     private val generation    = java.util.concurrent.atomic.AtomicInteger(0)
 
     @Volatile private var ws: RawWsClient? = null
-    private var activeWake: String? = null
+    private val activeWakes = ActiveWakeCalls()
     private var workerThread: Thread?      = null
     private var pingThread:   Thread?      = null
 
@@ -404,26 +408,24 @@ class YandiChatService : Service() {
             // FT_LIVE_MSG: сигнал звонка зашифрован для Flutter/E2E. Native-слой
             // только сохраняет пакет и будит приложение; он не доверяет его содержимому.
             0x13.toByte() -> {
-                if (data.size < 45 || data.size > 45 + 32 * 1024) return
+                if (data.size < LIVE_FRAME_HEADER || data.size > MAX_LIVE_FRAME) return
                 val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
-                if (payloadLen < 1 || data.size < 45 + payloadLen) return
-                val hintAt = 45 + payloadLen
-                if (data.size == hintAt + 17) {
+                if (payloadLen < 1 || payloadLen > MAX_LIVE_PAYLOAD || data.size < LIVE_FRAME_HEADER + payloadLen) return
+                val hintAt = LIVE_FRAME_HEADER + payloadLen
+                if (data.size == hintAt + LIVE_WAKE_TRAILER) {
                     val kind = data[hintAt].toInt() and 0xff
                     if (kind in 1..4 && shouldWakeForLive(data)) {
                         val foreground = appInForeground()
                         if (!persistPendingLive(data, foreground)) return
                         val callId = data.copyOfRange(hintAt + 1, hintAt + 17).toHex()
                         when (kind) {
-                            1, 2 -> if (!foreground && activeWake != callId) {
-                                activeWake = callId
+                            1, 2 -> if (!foreground && activeWakes.invite(callId, kind == 2)) {
                                 getSystemService(NotificationManager::class.java).cancel(0x0CA11)
                                 showCallWakeNotif(kind == 2)
                             }
-                            3 -> if (activeWake == callId) {
-                                activeWake = null
-                                getSystemService(NotificationManager::class.java).cancel(0x0CA11)
-                            }
+                            // Metadata is not E2E-authenticated. A forged/stale hangup
+                            // must never silence an invitation before Flutter verifies it.
+                            3 -> activeWakes.finish(callId)
                         }
                     }
                 }
@@ -448,23 +450,8 @@ class YandiChatService : Service() {
         runCatching {
             val file = File(filesDir, PENDING_LIVE_FILE)
             val existing = if (file.exists()) file.readBytes() else ByteArray(0)
-            val frames = ArrayDeque<ByteArray>()
-            var offset = 0
-            while (offset + 4 <= existing.size) {
-                val size = ByteBuffer.wrap(existing, offset, 4).int
-                offset += 4
-                if (size <= 0 || size > 45 + 32 * 1024 || offset + size > existing.size) break
-                frames.addLast(existing.copyOfRange(offset, offset + size))
-                offset += size
-            }
-            frames.addLast(data)
-            while (frames.size > 8) frames.removeFirst()
-            file.outputStream().use { out ->
-                for (frame in frames) {
-                    out.write(ByteBuffer.allocate(4).putInt(frame.size).array())
-                    out.write(frame)
-                }
-            }
+            val frames = PendingLiveQueue.append(existing, data)
+            writePendingLiveAtomically(this, frames)
         }.isSuccess
     }
 

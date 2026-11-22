@@ -1,6 +1,9 @@
 /// Английские надписи интерфейса: ключ — русский текст из `tr('…')`/`trf('…')`. Тест `l10n_test.dart` требует перевод для каждого ключа в коде
 /// и совпадения подстановок `{имя}` в обоих текстах.
 const Map<String, String> enTable = {
+  'Фоновые уведомления': 'Background notifications',
+  'Работа без ограничений батареи': 'Unrestricted battery use',
+  'Система может остановить связь в фоне': 'The system may stop the connection in the background',
   'Звуки YANDI': 'YANDI sounds',
   'Личные сообщения': 'Private messages',
   'События в группах': 'Group events',
@@ -701,7 +704,6 @@ const Map<String, String> enTable = {
   'Не удалось затереть временную копию выбранного файла; попытка повторится при следующем входе.': 'Could not erase the temporary copy of the chosen file; the attempt will repeat at the next sign-in.',
   'Не удалось затереть временных копий выбора файлов: {n}; попытка повторится при следующем входе.': 'Could not erase temporary copies of the chosen files: {n}; the attempt will repeat at the next sign-in.',
   'Не удалось начать запись: {e}': 'Could not start recording: {e}',
-  'Не удалось начать звонок: {e}': 'Could not start the call: {e}',
   'Не удалось начать отправку: {e}': 'Could not start sending: {e}',
   'Не удалось ответить: {e}': 'Could not answer: {e}',
   'Не удалось отозвать коды ({c})': 'Could not revoke the codes ({c})',

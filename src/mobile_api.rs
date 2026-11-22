@@ -3018,6 +3018,7 @@ async fn ws_session(st: Arc<MobileState>, me: String, mut sock: WebSocket) {
                         id.copy_from_slice(&d[1..33]);
                         let len = u32::from_le_bytes([d[33], d[34], d[35], d[36]]) as usize;
                         if len == 0 || len > MAX_LIVE || d.len() < 37 + len { continue; }
+                        if d.len() != 37 + len && d.len() != 37 + len + 17 { continue; }
                         let to = hex::encode(id);
                         if HashId(id) == st.my_id {
                             // ПК — участник: сигналы ему шлют все роли (звонок гостя — только аудио, срок держит доступ к серверу звонков)
