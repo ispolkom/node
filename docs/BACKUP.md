@@ -1,109 +1,77 @@
-# Сид-фраза, контрольное слово и копия связей (`.yandibak`)
+# Seed Phrase, Control Word, and Relationship Backup (`.yandibak`)
 
-**Сид-фраза полностью определяет узел.** Тот же сид (и контрольное слово, если оно было) на любой машине возвращает ту же личность узла (номер и ключи),
-доверие к нему (другие узлы, список входных узлов) и ключ подписи списка входных узлов. **Файл `.yandibak` необязателен**: он добавляет то, что из сида
-не вывести: сопряжённые телефоны, контакты и группы. Без файла телефоны сопрягаются заново.
+**The seed phrase completely determines the node.** The same seed, and the same control word if one was used, restores the same node identity (number and keys), its trust state (other nodes and entry-node list), and the entry-list signing key on any machine. The `.yandibak` file is **optional**: it adds data that cannot be derived from the seed, such as paired phones, contacts, and groups. Without the file, phones must be paired again.
 
-* **Сид-фраза:** 24 слова по умолчанию (256 бит); по желанию 12 (128 бит) или 18 (192 бита). Печатается только она, больше ничего.
-* **Контрольное слово (необязательно):** одно слово (8–64 знака, регистр важен), которое админ придумывает и помнит сам или хранит отдельно от сид-фразы.
-  Оно подмешивается в ключи (Argon2id), нигде не хранится и не печатается. Без него та же сид-фраза даёт ДРУГОЙ узел; забыв слово, узел вернуть нельзя.
-  Сменить слово позже нельзя (это другой узел).
-* **Номер узла** (16 знаков, группами по четыре) показывается при настройке и перед восстановлением: так видно, что фраза и слово введены верно (опечатка
-  в слове иначе молча дала бы чужой узел). Он не секрет, но на листок с сид-фразой не пишется. Проверить фразу и слово, ничего не меняя: `yandi setup --check`.
+* **Seed phrase:** 24 words by default (256 bits); optionally 12 (128 bits) or 18 (192 bits). Only the phrase is displayed.
+* **Control word (optional):** one 8–64-character, case-sensitive word that the administrator creates and remembers or stores separately from the seed phrase. It is mixed into the keys with Argon2id, never stored or printed. The same seed with a missing control word produces a DIFFERENT node; if the word is forgotten, the node cannot be restored. The word cannot be changed later because that would create a different node.
+* **Node number** (16 characters in groups of four) is shown during setup and before restoration. This makes an incorrect phrase or control word visible; an incorrect word would otherwise silently produce another node. It is not secret and is not written on the seed-phrase sheet. Check the phrase and word without changing anything with `yandi setup --check`.
 
-## Что в копии, а чего нет
+## What is and is not in the backup
 
-| В копии | Не в копии |
+| In the backup | Not in the backup |
 |---|---|
-| ключи и сертификат узла (`~/.yandi_keys`, `~/.yandi/tls`) | переписка |
-| реестр сопряжённых устройств, их ключи и права | файлы любых видов (в том числе голосовые) |
-| контакты, закреплённые ключи доверенных узлов | история и итоги звонков |
-| группы: название, участники, роли, эпоха ключей, аватарки | статусы доставки/прочтения, счётчики непрочитанного |
-| закрытая среда (оболочка пароля владельца), настройки выхода и маршрутов | журналы групп (сообщения на узле) |
-| | recovery-фраза и машинная печать `device.seal` |
+| Node keys and certificate (`~/.yandi_keys`, `~/.yandi/tls`) | Messages |
+| Paired-device registry, keys, and permissions | Files of any kind, including voice files |
+| Contacts and pinned trusted-node keys | Call history and results |
+| Groups: name, members, roles, key epoch, and avatars | Delivery/read status and unread counters |
+| Closed environment (owner-password shell), exit and routing settings | Group logs, meaning messages stored on the node |
+| | Recovery phrase and machine seal `device.seal` |
 
-После восстановления группа возвращается **без сообщений на узле**; у участников остаётся то, что они получили раньше (телефон не стирает
-ключи и ленту пропавшей группы 30 дней). Участникам приходит извещение «группа восстановлена, переписка и файлы на узле не сохранены».
-Номера записей журнала продолжаются с большим запасом (+1 000 000 000), чтобы новые сообщения не совпали с уже лежащими в кеше телефонов.
+After restoration, a group returns **without messages stored on the node**. Participants retain what they received earlier; the phone does not erase the keys and feed of a missing group for 30 days. Participants receive “group restored; messages and files on the node were not saved”. Log record numbers continue with a large offset (+1,000,000,000) so new messages do not collide with records already cached on phones.
 
-## Где лежат копии (место выбирает владелец)
+## Where backups are stored
 
-При первой настройке после сида и пароля мастер просит выбрать место: в нём узел создаёт папку `yandi-node` (итоговый путь `…/yandi-node`). Пишется и стирается
-пробный файл **от имени самого узла**: нет прав (диск принадлежит root, только для чтения, нет места) — «У меня нет прав для записи в это место» с причиной.
-Место на системном диске допускается только после подтверждения, с предупреждением «храните копии вне системного диска». Можно пропустить: тогда в оболочке и
-в `yandi admin backup status` остаётся напоминание. Меняется позже: панель «Копии связей» (Настройки узла) или `yandi admin backup set-dir ПУТЬ`.
+The owner chooses the location during first setup after the seed and password. The node creates a `yandi-node` directory there, producing a final path such as `…/yandi-node`. A probe file is written and deleted **as the node itself**: if there is no permission, the disk belongs to root, the disk is read-only, or there is no space, the UI reports “I do not have permission to write here” with the reason.
 
-Копия делается, когда меняются связи: контакты, группы, смена владельца группы, добавление, повышение и удаление пользователей (в том числе по таймауту
-бездействия), в течение 10 минут и только если содержимое изменилось; серия правок подряд — одна копия. Гости в копию не входят (они живут в памяти узла),
-их приход и уход копию не вызывает. Хранятся 7 автокопий (старые перезаписываются); «Сохранить сейчас» (`yandi admin backup now`) хранится отдельно,
-последние 5.
+A system-disk location is allowed only after confirmation and a warning to keep backups elsewhere. It can be skipped; the shell and `yandi admin backup status` then keep a reminder. Change the location later in the “Relationship backups” panel under Node settings or with `yandi admin backup set-dir PATH`.
 
-## Как сделать копию
+A backup is made when relationships change: contacts, groups, group ownership, adding, promoting, or removing users, including removal after an inactivity timeout. It is made within ten minutes and only when content changed; consecutive edits produce one backup. Guests are not included because they live in node memory; their arrival and departure do not trigger a backup.
 
-* **По кнопке:** оболочка → «Настройки узла» → «Копии связей» → «Сохранить копию сейчас», или `yandi admin backup now`: файл кладётся в папку копий
-  (`yandi-manual-<узел>-<номер>-<дата>.yandibak`, последние 5). Если папка не настроена, кнопка в оболочке не показывается — сначала выберите место.
-* **Автоматически:** в выбранной папке `…/yandi-node` (см. выше). Подвижные поля (в сети, последняя активность, номера журнала) изменением не считаются.
-  Копию стоит дублировать на флешку или в облако: не на тот же диск, что узел.
+Seven automatic backups are kept and older ones overwritten. “Save now” (`yandi admin backup now`) is stored separately, with the latest five retained.
 
-## Сид-фраза и пароль
+## Creating a backup
 
-При первой настройке узел сам создаёт **сид-фразу**: 24 английских слова (по выбору 12 или 18) из стандартного списка BIP-39. Слова записывают случайные
-256 (128 или 192) бит: ключ делается из этих байтов, а не из текста, поэтому язык экрана ничего не меняет. Окно мастера показывает слова один раз; затем просит
-нажать на них в исходном порядке и ввести три слова по номерам. Потом по желанию контрольное слово, пароль и место для копий. Пока пароль не принят, ничего не
-пишется, закрытие окна выбрасывает сид (при следующем запуске будет новый).
+* **Button:** shell → Node settings → Relationship backups → Save backup now, or `yandi admin backup now`. The file goes into the backup directory as `yandi-manual-<node>-<number>-<date>.yandibak`; the latest five are retained. If no directory is configured, the shell hides the button until a location is selected.
+* **Automatic:** stored in the selected `…/yandi-node` directory. Moving fields such as network state, last activity, and log numbers do not count as content changes. Duplicate the backup to a USB drive or cloud storage, not to the same disk as the node.
 
-* **Сид-фраза (и контрольное слово)** возвращают личность узла, доверие к нему и ключи; открывают любую копию `.yandibak` узла с той же личностью. Храните их
-  отдельно друг от друга и от копий. На листок печатается только сид-фраза.
-* **Пароль** привязан к установке (как в кошельках): он открывает закрытую среду на этом компьютере. В копию он не входит. На новой машине пароль прежней установки
-  **не действует**: нужны сид-фраза (и слово) и **новый** пароль для этой машины; файл копии нужен лишь для телефонов, контактов и групп.
-* **Лимиты:** пять неверных паролей подряд закрывают вход по паролю (остаётся вход по сид-фразе); двадцать неверных сид-фраз подряд стирают закрытую среду на этом
-  компьютере (личность живёт в сиде). Ошибка в контрольном слове отличить от подбора нельзя: это такая же неверная попытка, как неверная фраза. Фраза с опечаткой
-  в самих словах (не из списка, не сходится контрольная сумма) попыткой не считается. Пауза между попытками растёт после четвёртой ошибки.
-* Честные границы: лимиты работают в этом экземпляре приложения. Они не защищают зашифрованные файлы, скопированные заранее (там защита — сила сида и Argon2id), и не
-  умеют запретить откат снимка диска. Копия защищена сид-фразой и контрольным словом: кто увидел сид (и знает слово), прочитает копии этого поколения; смена пароля
-  старые копии не отзывает. Сценарий замены сида (ротация) пока не сделан.
+## Seed phrase and password
 
-## Чем открывается
+During first setup the node creates a **seed phrase**: 24 English words, or 12 or 18 by choice, from the standard BIP-39 list. The words encode random 256, 128, or 192 bits; the key is derived from those bytes rather than the displayed text, so the screen language makes no difference. The wizard shows the words once, then asks the user to select them in the original order and enter three words by number. It then optionally asks for the control word, password, and backup location. Nothing is written before the password is accepted; closing the window discards the seed and the next startup creates a new one.
 
-Файл зашифрован. Открыть его можно **сид-фразой вместе с контрольным словом, если оно было** (подходят и прежний код восстановления, и мастер-пароль, на который сделана обёртка).
-Посторонним файл бесполезен. Без сид-фразы (и слова) копию не прочитать.
+* **Seed phrase and control word** restore the node identity, trust state, and keys, and open any `.yandibak` backup made by that node. Store them separately from each other and from backups. Only the seed phrase should be printed on paper.
+* **Password** is tied to the installation, as in a wallet. It opens the closed environment on this computer and is not included in the backup. On a new machine, the old installation password **does not work**: use the seed phrase and control word, then create a new password for that machine. The backup is needed only for phones, contacts, and groups.
+* **Limits:** five consecutive incorrect passwords close password login, leaving seed-phrase login available. Twenty consecutive incorrect seed phrases erase the closed environment on this computer; the identity remains in the seed. A wrong control word is indistinguishable from guessing and counts as an incorrect phrase. A phrase with words outside the list or an invalid checksum does not count as an attempt. The delay between attempts grows after the fourth error.
+* **Honest boundaries:** limits work only in this application instance. They do not protect encrypted files copied in advance; those rely on seed strength and Argon2id, and they cannot prevent disk-snapshot rollback. A backup is protected by the seed phrase and control word: anyone who has both can read backups from that generation. Changing the password does not revoke old backups. Seed rotation is not implemented.
 
-## Как восстановить на новой машине
+## What opens the backup
 
-Из сида (с файлом или без): `yandi setup --restore` (в оболочке: «Восстановить по сид-фразе»). Мастер спрашивает сид, контрольное слово (если было), показывает
-номер узла и просит подтвердить, что он совпадает с вашей записью (до любой записи), затем новый пароль и необязательный файл `.yandibak` или папку `yandi-node`
-(берётся самая свежая копия). Без файла: личность, доверие и ключ подписи списка узлов возвращены, телефоны сопрягите заново (`yandi admin pairing`).
-Описание `yandi backup restore` ниже — прежний способ «только из файла».
+The file is encrypted. It opens with the **seed phrase and control word, if one was used**; both the old recovery code and the master password wrapper made for that node are accepted. The file is useless to others. Without the seed phrase and control word, it cannot be read.
 
-Оболочка: первый экран «Восстановить по сид-фразе» (см. выше). Прежний способ только из файла — командой:
+## Restoring on a new machine
 
+From the seed, with or without a file, run `yandi setup --restore` or choose “Restore with seed phrase” in the shell. The wizard asks for the seed and control word, if any, shows the node number and asks the owner to confirm it matches their record before writing anything, then asks for a new password and an optional `.yandibak` file or `yandi-node` directory, taking the newest backup. Without a file, identity, trust, and the entry-list signing key return, but phones must be paired again with `yandi admin pairing`.
 
-1. Установите пакет узла, но **не запускайте и не настраивайте** его.
-2. `yandi backup inspect файл.yandibak` — номер, дата, узел (сид не нужен).
-3. `yandi backup verify файл.yandibak` — проверка сид-фразой без записи.
-4. `yandi backup restore файл.yandibak` — введите сид-фразу и новый пароль (без эха) и `yes`. Команда запишет ключи и связи, создаст ключ
-   устройства для этой машины, заново обернёт закрытую среду новым паролем и вернёт ту же личность узла. Если на машине уже есть ключи, нужен
-   явный `--force` (прежние файлы сохраняются рядом как `*.before-restore-*`).
-5. `sudo systemctl start yandi-node`, войдите новым паролем.
+The shell shows “Restore with seed phrase” on its first screen. The legacy file-only method is:
 
-Если команда восстановления была прервана (выключили питание, убили процесс), активные файлы могут оказаться частично новыми: запустите её ещё раз
-с `--force`, она доведёт замену до конца, а прежние версии останутся рядом как `*.before-restore-*`.
+1. Install the node package, but **do not start or configure** it.
+2. `yandi backup inspect file.yandibak` — show number, date, and node without the seed.
+3. `yandi backup verify file.yandibak` — verify with the seed without writing.
+4. `yandi backup restore file.yandibak` — enter the seed and a new password without echo, then enter `yes`. The command writes keys and relationships, creates a device key for this machine, reseals the closed environment with the new password, and restores the same node identity. If keys already exist, explicit `--force` is required; old files are saved beside them as `*.before-restore-*`.
+5. `sudo systemctl start yandi-node`, then log in with the new password.
 
-Для проверки без риска: `python3 tests/backup/restore_drill.py` поднимает изолированные узлы и проверяет оба способа: на «пустой машине» тот же
-узел и те же контакты, пароль прежней установки не действует, новый открывает среду.
+If restoration is interrupted by power loss or process termination, active files may be partly new. Run it again with `--force`; it completes the replacement and leaves earlier versions beside them as `*.before-restore-*`.
 
-## Копии прежних версий
+For a risk-free check, `python3 tests/backup/restore_drill.py` starts isolated nodes and checks both methods: on an “empty machine” the same node and contacts return, the old installation password does not work, and the new one opens the environment.
 
-Узлы, настроенные до перехода на «сид как единственный секрет» (корень ключей был случайным), сид-фразой одной не восстанавливаются, а новый мастер
-(`yandi setup --restore`) отвергнет такую копию (номер узла не совпадёт). Для них остаётся `yandi backup restore ФАЙЛ`: он открывает обёртку копии и сохраняет прежние ключи.
-Команды `yandi backup verify|restore` спрашивают контрольное слово (или `--control-word-stdin`), если фраза — сид.
+## Backups from older versions
 
-## Чего это не обещает
+Nodes configured before the “seed as the only secret” transition used a random key root and cannot be restored from the seed alone. The new `yandi setup --restore` rejects such a backup because the node number does not match. Use `yandi backup restore FILE`; it opens the backup wrapper and preserves the old keys. `yandi backup verify|restore` asks for the control word, or accepts `--control-word-stdin`, when the phrase is a seed.
 
-* Изменения после последней копии (при автокопии — до десяти минут) и всё, что не входит в копию, не возвращаются.
-* Если потеряны и узел, и копия, и сид-фраза, личность восстановить нельзя: это не недоработка, иначе так мог бы сделать любой.
-* Удалённое сообщение в копию не попадает вовсе, но старая копия может хранить связи (участников, устройства), которых уже нет: после отзыва
-  устройства или бана узел делает копию сразу, а в папке остаются последние 7 копий.
-* Сквозная личность человека (смена узла без повторного добавления контактов) и перенос групп на другой узел — отдельные этапы.
+## What this does not promise
 
-При восстановлении из файла узел сверяет два признака до любой записи: отпечаток содержимого (SHA-256) с тем, что показал просмотр копии, и номер узла в копии с номером, получаемым из фразы и слова. Подменённый после просмотра файл и копия со случайным корнем (не из этой фразы) отвергаются.
+* Changes after the last backup, up to ten minutes for automatic backups, and anything outside the backup are not restored.
+* If the node, backup, and seed phrase are all lost, the identity cannot be restored. Otherwise anyone could do it.
+* A deleted message is never added to a backup, but an old backup may contain relationships (members and devices) that no longer exist. After a device is revoked or banned, the node creates a backup immediately; the directory still retains the latest seven backups.
+* Portable human identity, meaning changing nodes without adding contacts again, and moving groups to another node are separate stages.
+
+When restoring from a file, the node checks two values before writing anything: the content fingerprint (SHA-256) against the value shown during backup inspection, and the backup node number against the number derived from the seed and control word. A file changed after inspection and a backup created from a random root rather than this phrase are rejected.
