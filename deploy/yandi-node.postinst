@@ -1,7 +1,8 @@
 #!/bin/sh
 # postinst пакета yandi-node. Шаблон службы yandi-node@.service уже лежит в /usr/lib/systemd/system/; здесь служба включается и запускается
 # для пользователя, который ставит пакет (sudo apt install → SUDO_USER; иначе — единственный обычный пользователь системы).
-#  • Только при ПЕРВОЙ установке; при обновлении служба лишь перезапускается (если запущена), выбор владельца не меняется.
+#  • При первой установке служба включается и запускается; при обновлении существующий экземпляр перезапускается,
+#    а отсутствующий экземпляр создаётся для найденного пользователя.
 #  • Если рядом есть служба, созданная вручную (/etc/systemd/system/yandi-node.service), новая не включается: порты были бы заняты дважды.
 #  • Пропускается без systemd (контейнер) и при YANDI_NO_SERVICE=1.
 # Узел до `yandi setup` ждёт первой настройки, поэтому запуск до неё безопасен.
@@ -9,14 +10,6 @@ set -e
 [ "$1" = configure ] || exit 0
 [ -d /run/systemd/system ] || exit 0
 systemctl daemon-reload >/dev/null 2>&1 || true
-
-if [ -n "$2" ]; then      # обновление: подхватить новый бинарь
-    systemctl try-restart yandi-node >/dev/null 2>&1 || true
-    for u in $(systemctl list-units --plain --no-legend 'yandi-node@*.service' 2>/dev/null | awk '{print $1}'); do
-        systemctl try-restart "$u" >/dev/null 2>&1 || true
-    done
-    exit 0
-fi
 
 [ "${YANDI_NO_SERVICE:-0}" = 1 ] && exit 0
 if [ -e /etc/systemd/system/yandi-node.service ]; then
@@ -58,8 +51,20 @@ if [ -z "$U" ]; then
 fi
 UNIT="yandi-node@$U.service"
 if [ -n "$2" ]; then
-    if ! systemctl try-restart "$UNIT" >/dev/null 2>&1; then
-        echo "yandi-node: failed to restart $UNIT; inspect: journalctl -u $UNIT -b" >&2
+    # An older package may have installed only the template without enabling
+    # a concrete instance. Repair that state during upgrade, then restart an
+    # already-running instance so it uses the new binary.
+    if ! systemctl enable "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to enable $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
+    if systemctl is-active --quiet "$UNIT"; then
+        systemctl restart "$UNIT" >/dev/null 2>&1 || {
+            echo "yandi-node: failed to restart $UNIT; inspect: journalctl -u $UNIT -b" >&2
+            exit 1
+        }
+    elif ! systemctl start "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to start $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
         exit 1
     fi
 else
