@@ -1,40 +1,40 @@
-# Протокол проверки этапа 2а (удаление RESUME и секретов)
+# Stage 2a verification protocol (removal of RESUME and secrets)
 
-Коммит реализации: `9689280` (ветка `claude/fix-rev5-6`). Машина: ПК разработчика (Linux 6.1, x86_64), `cargo`/`rustc` stable из `~/.rustup`. Дата: 2026-10-18.
-Этот документ фиксирует только то, что **проверялось фактически**; всё остальное помечено «не проводилось».
+Implementation commit: `9689280` (branch `claude/fix-rev5-6`). Machine: developer workstation (Linux 6.1, x86_64), stable `cargo`/`rustc` from `~/.rustup`. Date: 2026-10-18.
+This document records only what was **actually tested**; everything else is marked “not tested”.
 
-> **Итог независимой проверки (Sol, круг 36, `ANALYSIS16.md`): этап 2а НЕ принят. Исправления P16-1…10 сделаны в `f98f1fd`; повторная проверка (круг 37) приняла их частично и нашла P17-1…10; исправления P17 — `7fe7021`, ждут повторной проверки Sol. Тесты: `cargo test --lib` 780 прошли.** Сетевой RESUME удалён, но найдено 10 недостатков (2 высоких): очистка вложенных полей, гонки чтение–запись, сохранение секретов в `.before-restore-*` при ошибках, `--anchor-store` не входит в копии, слабые оракулы тестов. Описанное ниже «очищается» верно для проверенных частных случаев, а не как общая гарантия; исправление — следующий шаг.
+> **Independent review result (Sol, round 36, `ANALYSIS16.md`): stage 2a was NOT accepted. Fixes P16-1…10 were made in `f98f1fd`; the follow-up review (round 37) accepted them partially and found P17-1…10; the P17 fixes are in `7fe702` and await Sol's follow-up. Tests: 780 `cargo test --lib` tests passed.** Network RESUME was removed, but 10 issues (two high severity) were found: nested-field cleanup, read/write races, secrets retained in `.before-restore-*` files after errors, `--anchor-store` missing from backups, and weak test oracles. The “cleaned” claims below apply to the tested cases, not as a general guarantee; the next fix is still pending.
 
-## 1. Автоматические тесты (выполнялись)
-| Команда | Результат |
+## 1. Automated tests (run)
+| Command | Result |
 |---|---|
-| `cargo test --lib` (на `9689280`) | 764 прошли, 0 упали |
-| `cargo test --lib netlayer::pairing` | 10 прошли: роль записи права без секретов; чтение v2; миграция старых файлов клиентов и якорей (в том числе с 128-битными номерами сеансов); v2 со старым секретным полем отвергается и файл не меняется; повреждённый/будущий/нечитаемый/ссылочный файл не заменяется пустым состоянием; очистка для копий; страж по исходникам (`PKT_RESUME`, `SessionToken`, `new_with_session_key` и пр. в коде отсутствуют) |
-| `cargo test --lib node_backup` | 21 прошёл, включая `old_resume_secrets_never_enter_a_backup_or_survive_a_restore` (секрет не попадает в копию, не восстанавливается, не остаётся в файле «до восстановления»; неразобранный файл связи в копию не кладётся) |
-| `cargo test --test robustness --test hello_replay_test --test hello_adversarial_test` | прошли (кроме помеченного `ignore` в robustness) |
+| `cargo test --lib` (on `9689280`) | 764 passed, 0 failed |
+| `cargo test --lib netlayer::pairing` | 10 passed: secret-free grant records; v2 reading; migration of old client and anchor files (including 128-bit session numbers); v2 with an old secret field is rejected without changing the file; corrupt/future/unreadable/link files are not replaced by empty state; copy cleanup; source guard (`PKT_RESUME`, `SessionToken`, `new_with_session_key`, and related symbols are absent) |
+| `cargo test --lib node_backup` | 21 passed, including `old_resume_secrets_never_enter_a_backup_or_survive_a_restore` (the secret is not copied, restored, or left in the pre-restore file; an unparsed pairing file is not copied) |
+| `cargo test --test robustness --test hello_replay_test --test hello_adversarial_test` | passed (apart from the test marked `ignore` in robustness) |
 
-## 2. Тесты на настоящих процессах (тренировочная сеть `yandi testnet`, 2–3 копии на одной машине; выполнялись)
-Команда: `cargo test --offline --test <имя> -- --ignored`; бинарь собран из `9689280`.
-| Тест | Что проверяет | Результат |
+## 2. Tests with real processes (training network `yandi testnet`, 2–3 copies on one machine; run)
+Command: `cargo test --offline --test <name> -- --ignored`; the binary was built from `9689280`.
+| Test | What it checks | Result |
 |---|---|---|
-| `testnet_test` | две копии находят друг друга, видят друг друга, переживают перезапуск, ничего не оставляют | прошёл, 88 с |
-| `testnet_comms_test` | сообщения в обе стороны, файл байт в байт, сигналы звонка, подделка без шифрования отвергается, в журнале только шифрованные пакеты | прошёл, 104 с |
-| `testnet_rekey_test` | смена ключей в работающей сети без потери сообщений | прошёл, 141 с |
+| `testnet_test` | two copies discover and see each other, survive a restart, and leave no state behind | passed, 88 s |
+| `testnet_comms_test` | bidirectional messages, byte-for-byte file transfer, call signals, rejection of unencrypted forgery, and encrypted packets only in logs | passed, 104 s |
+| `testnet_rekey_test` | key replacement in a running network without losing messages | passed, 141 s |
 
-## 3. Что НЕ проводилось (прямо)
-- Физические устройства (два телефона, ПК-узел, реальные сети, смена IP/интерфейса).
-- Маршрутизация через три и четыре узла; потеря и восстановление соединения при активной передаче; параллельные соединения; перезапуск одного узла посреди обмена (кроме перезапуска в `testnet_test`).
-- WS-подключение облегчённого клиента к якорю (`--anchor-url`/`--anchor-fp`): автоматического теста нет, вручную не запускалось. Путь выполняет обычный подписанный Hello; отдельного измерения его стоимости не проводилось.
-- Звонки на реальных устройствах.
-- Сценарий «кража файлов состояния» как отдельный эксперимент: проверено лишь, что в файлах формата v2 нет ключевого материала, а старые файлы очищаются (разделы 1–2); имея `paired_*.json`, сеанс не восстановить, потому что кода возобновления нет.
-- Независимая проверка реализации Sol (Codex) — ещё не выполнена.
+## 3. Explicitly not tested
+- Physical devices (two phones, a PC node, real networks, and IP/interface changes).
+- Routing through three and four nodes; loss and recovery during an active transfer; parallel connections; restarting one node mid-exchange (apart from the restart in `testnet_test`).
+- WS connection of the lightweight client to an anchor (`--anchor-url`/`--anchor-fp`): no automated test exists and it was not run manually. The path uses the ordinary signed Hello; its cost was not measured separately.
+- Calls on real devices.
+- State-file theft as a separate experiment: only the absence of key material from v2 files and cleanup of old files was checked (sections 1–2); possessing `paired_*.json` cannot restore a session because resume code no longer exists.
+- Independent review of the Sol (Codex) implementation — not yet performed.
 
-## 3а. Что тесты 2а доказывают и чего НЕ доказывают (P18-7, P19)
-Проверено пробами отказов (в тестах отказ замены и записи при откате вызывается намеренно): откат возвращает то, что записал параллельный писатель до замены; созданный восстановлением файл связи при откате убирается; неудавшийся откат попадает в предупреждения и в признак «файлы изменены»; пропущенный файл связи назван в отчёте; оболочка показывает предупреждения при отказе после записи файлов.
-**Не проверено:** ошибка fsync каталога (EIO) и потеря питания, внезапная остановка (kill) во время записи, два процесса, которые не берут замок файла связи (замок обязывает только код YANDI; узел при восстановлении должен быть остановлен), поведение на не-Unix, нестандартные файловые системы. Зелёный тест на чтение не означает того же для очистки и восстановления. Подробнее — `docs/AUDIT38_TRIAGE.md`.
+## 3a. What the stage 2a tests do and do not prove (P18-7, P19)
+Failure injection was tested (replacement and write failures during rollback are triggered deliberately): rollback restores what a concurrent writer wrote before replacement; a pairing file created by restore is removed during rollback; a failed rollback appears in warnings and in the “files changed” flag; an omitted pairing file is named in the report; the shell shows warnings after a post-write failure.
+**Not tested:** directory `fsync` failure (EIO) and power loss, abrupt termination (`kill`) during a write, two processes that do not take the pairing-file lock (the lock binds YANDI code only; the node must be stopped during restore), non-Unix behavior, and unusual filesystems. A green read test does not imply the same for cleanup and restore. See `docs/AUDIT38_TRIAGE.md`.
 
-## 4. Что этап 2а НЕ закрывает
-Усиление самого рукопожатия (привязка `HelloAck` к запросу, подтверждение ключа, живость при повторе записанного Hello, бюджет до проверки подписи, политика «только сопряжённые», стирание ключей) — этап 2б, находки P15-3…7 и P15-12 остаются открытыми.
+## 4. What stage 2a does NOT cover
+Hardening the handshake itself (binding `HelloAck` to the request, key confirmation, liveness when a recorded Hello is replayed, budgeting before signature verification, the “paired clients only” policy, and key wiping) belongs to stage 2b; findings P15-3…7 and P15-12 remain open.
 
-## 5. Границы гарантии очистки (P17-1)
-Хранилище гарантирует: известные секретные поля старого формата удаляются; принимается только строгая схема v2 с проверенной формой публичных полей (адрес — только `wss://узел[:порт]/`). Хранилище **не может** распознать секрет «правильной формы» внутри допустимого поля (например, 64 hex в имени узла или в `anchor_x25519_hex`): криптографическую истинность публичного ключа доказывает подписанная привязка к личности, а не проверка формы. Прежние внешние резервные копии, блоки SSD/COW и снимки очисткой не затрагиваются. На не-Unix платформах межпроцессной блокировки хранилищ нет (работает только блокировка внутри процесса): параллельный запуск нескольких процессов над одним каталогом там не поддерживается.
+## 5. Cleanup guarantee boundaries (P17-1)
+The store guarantees that known secret fields from the old format are removed and that only the strict v2 schema with validated public-field shapes is accepted (the address must be `wss://host[:port]/`). The store **cannot** recognize a secret hidden in an allowed field that has the correct public shape (for example, 64 hex characters in a node name or `anchor_x25519_hex`): cryptographic validity of a public key comes from its signed binding to an identity, not from shape validation. Older external backups, SSD/COW blocks, and snapshots are outside the scope of cleanup. Non-Unix platforms have no inter-process store lock (only an in-process lock works), so running multiple processes against one directory is unsupported there.

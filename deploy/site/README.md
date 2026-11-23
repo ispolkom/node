@@ -1,14 +1,18 @@
-# Файлы для https://yandi.su (привязка ссылок-приглашений к приложению)
+# Files for https://yandi.su (binding invitation links to the application)
 
-Нужны для Android App Links: ссылка `https://yandi.su/i#…` должна открывать приложение YANDI без выбора. **Состояние:** файлы на сайте выложены; сторона приложения (intent-filter с autoVerify в AndroidManifest.xml и обработчик ссылки) ещё не сделана (этап G4 в ROADMAP11/12), поэтому сейчас ссылка пока открывается в браузере.
+These files are used for Android App Links: `https://yandi.su/i#…` should open YANDI without a chooser.
+**Status:** the website files are deployed; the application side (an `intent-filter` with `autoVerify` in
+`AndroidManifest.xml` and the link handler) has not been implemented yet (stage G4 in ROADMAP11/12), so the
+link currently opens in a browser.
 
-Положить в корень сайта (`/var/www/yandi_su_usr/data/www/yandi.su/`):
-- `.well-known/assetlinks.json` — пакет `com.yandi.yandi_mobile` и SHA-256 отпечаток подписи релиза (если ключ подписи сменится — обновить);
-- `i/index.html` — статичная страница для тех, у кого приложения нет (без скриптов, счётчиков и сторонних ресурсов).
+Place these files in the website root (`/var/www/yandi_su_usr/data/www/yandi.su/`):
+- `.well-known/assetlinks.json` — package `com.yandi.yandi_mobile` and the SHA-256 release-signing fingerprint (update it if the signing key changes);
+- `i/index.html` — a static page for people who do not have the application (no scripts, counters, or third-party resources).
 
-Проверка: `curl -s https://yandi.su/.well-known/assetlinks.json` должен вернуть этот JSON с типом `application/json` и без перенаправлений.
+Check with `curl -s https://yandi.su/.well-known/assetlinks.json`; it must return this JSON as `application/json` without redirects.
 
-## Сайт yandi.su (с 2026-10-20)
-`deploy/site/yandi.su/` — исходники сайта без `update/` (пакеты и APK в git не хранятся). Живое зеркало с `update/` — `/mnt/backup/node-release/site/`.
-Версии и контрольные суммы на страницах скачивания — в `includes/releases.php` (правится при каждом выпуске). Подписанные манифесты выпуска и список
-входных узлов лежат копиями в `release/manifests/` (публичные файлы; секретов нет).
+## Website source (since 2026-10-20)
+`deploy/site/yandi.su/` contains the website source without `update/` (packages and APKs are not stored in git).
+The live mirror including `update/` is `/mnt/backup/node-release/site/`.
+Release versions and checksums shown on download pages are in `includes/releases.php` (update it for every release).
+Signed release manifests and the entry-node list are copied to `release/manifests/` (public files; no secrets).
