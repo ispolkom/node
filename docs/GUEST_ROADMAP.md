@@ -1,28 +1,27 @@
-# Гость: мини-роадмап (2026-10-20) / Guest mini-roadmap
+# Guest: mini-roadmap (2026-10-20)
 
-Решение владельца: гость не «заглушка», но и не полноправный. Ничего не скрываем: закрытое показывается, при нажатии — жёлтое окно «Доступно после полной авторизации».
-*Owner's decision: a guest is not a dummy and not a full user. Nothing is hidden: closed features are shown, tapping one opens a yellow notice "Available after full authorisation".*
+Owner's decision: a guest is not a dummy and not a full user. Nothing is hidden: closed features are shown, and selecting one opens a yellow notice: “Available after full authorisation”.
 
-## Правила / Rules
-| | Гость / Guest |
+## Rules
+| | Guest |
 |---|---|
-| Приём гостей на узле | **включён по умолчанию**, владелец может выключить (файл `guest_pairing.json`) |
-| Личная переписка с пользователями узла, голосовые, аудио, видео в чате | можно |
-| Список людей узла: гость видит только тех, кто сейчас в сети (ник и картинка, без адресов); гости видят друг друга, пишут и звонят друг другу; приложение прячет не бывших в сети больше суток | можно |
-| Файлы | до 30 МБ, 20 файлов и 300 МБ в сутки (как было) |
-| Аудиозвонки | можно: до **15 минут** на звонок, до **60 минут** в сутки |
-| Видеозвонки | **нельзя** (жёлтое окно) |
-| Группы, VPN/прокси, приглашать устройства | **нельзя** (жёлтое окно) |
-| Ник и картинка, жалобы | можно (профиль стирается вместе с гостем) |
-| «Запрос на статус пользователя» с текстом гостя | можно → у админа «Гость Х: текст», принять/отклонить |
+| Guest intake on the node | **enabled by default**; the owner can disable it (`guest_pairing.json`). |
+| Private messages with node users, voice messages, audio, and video in chat | allowed |
+| Node people list: a guest sees only people currently online (nickname and picture, no addresses); guests see, message, and call each other; the application hides anyone offline for more than one day | allowed |
+| Files | up to 30 MB, 20 files, and 300 MB per day (unchanged) |
+| Audio calls | allowed: up to **15 minutes** per call and **60 minutes** per day |
+| Video calls | **not allowed** (yellow notice) |
+| Groups, VPN/proxy, and inviting devices | **not allowed** (yellow notice) |
+| Nickname, picture, and complaints | allowed; the profile is erased with the guest |
+| “Request user status” with guest text | allowed → the administrator sees “Guest X: text” and can accept or reject it |
 
-## Этапы / Stages
-1. **Узел**: приём гостей по умолчанию; список пользователей, ник, жалобы, аудио-сигналы гостю; лимиты звонков (TURN-доступ 15 мин, 4 звонка в сутки = 60 мин, не больше 4 гостевых звонков на узле одновременно); текст запроса статуса; тесты.
-2. **Приложение**: роль гостя; жёлтое окно (русский/английский) для закрытых функций; запрос статуса в «Настройках» (ждёт/принят/отклонён); видео-кнопка закрыта; тесты.
-3. **Оболочка ПК**: у запроса виден текст гостя; роль «Гость» в списке устройств; тесты.
-4. **Документы и сайт**: `GUEST.md`, страницы загрузок; выпуск (узел, оболочка, APK) и проверка на телефоне.
+## Stages
+1. **Node**: guest intake by default; user list, nickname, complaints, audio signals to guests; call limits (15-minute TURN access, four calls per day = 60 minutes, no more than four simultaneous guest calls per node); status-request text; tests.
+2. **Application**: guest role; yellow notice in Russian and English for closed features; status request in Settings (pending/accepted/rejected); video button closed; tests.
+3. **Desktop shell**: the guest's request text is visible; “Guest” role in the device list; tests.
+4. **Documents and site**: `GUEST.md`, download pages, release of node/shell/APK, and phone verification.
 
-## Честные ограничения / Honest limits
-* Сигналы звонка шифруются между устройствами, узел не видит, аудио это или видео: запрет видео для гостя держит приложение; узел держит время и число звонков (срок TURN-доступа).
-* Приложение гостя звонит только через сервер звонков узла (relay) и без него отказывает; модифицированный клиент прямое соединение узел оборвать не может.
-* Квоты гостя живут в памяти: перезапуск узла или новый гость обнуляют их (поэтому есть общий потолок гостей и звонков).
+## Honest limits
+* Call signals are encrypted between devices, so the node cannot see whether a call is audio or video. The application enforces the guest video restriction; the node enforces call time and count through the TURN-access lifetime.
+* The guest application calls only through the node's call server (relay) and rejects calls without it; the node cannot break a direct connection from a modified client.
+* Guest quotas live in memory: restarting the node or creating a new guest resets them, which is why the node also has a global guest and call ceiling.

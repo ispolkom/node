@@ -1,67 +1,69 @@
-# Карта шифрования (аудит 2026-10-05, обновлено после исправлений)
+# Encryption Map (Audit 2026-10-05, Updated After Fixes)
 
-Как защищён каждый вид трафика сейчас, что в этом плохо и в каком порядке исправляется. Составлено по чтению кода, не по домыслам; номера строк на момент аудита.
+How each traffic type is currently protected, what remains weak, and the order of fixes. This is based on reading the code, not speculation; line numbers refer to the audit snapshot.
 
-## Что чем защищено
+## What protects what
 
-| Трафик | Реализация | Ключ | Прямая секретность | Оценка |
+| Traffic | Implementation | Key | Forward secrecy | Assessment |
 |---|---|---|---|---|
-| Переписка, файлы, звонки (`p2p::P2PTransport`) | `p2p/encryption_manager.rs`, AES-256-GCM | рукопожатие с **одноразовыми** ключами X25519 на каждое приветствие | да | хорошо по замыслу; есть мелкие дефекты (см. ниже) |
-| Основная сеть узлов: DHT, ретрансляция, прокси/туннели, станция/поезд (`netlayer::P2PTransport`, `protocol::*`) | `netlayer/encryption.rs` → `crypto/handshake.rs`, AES-256-GCM | одноразовые ключи на каждое рукопожатие (**исправлено**; раньше один ключ на процесс) | да | хорошо по замыслу |
-| Цепочки через несколько узлов (`hops.rs`, `hops_net.rs`) | рукопожатие X25519 по звеньям (телескопом), ответ узла **подписан его долгим ключом из карточки**; ключи слоёв — HKDF-SHA256; слои — потоковое шифрование BLAKE3 по номеру ячейки, метка `MAC` внутри; ячейки одного размера | одноразовые ключи с обеих сторон | да | хорошо по замыслу; нет подмешивания пустого трафика и закрепления входа (см. I21) |
-| Сквозное шифрование между людьми | `communication/encryption.rs`, `p2p/encryption.rs` | — | — | **заглушки** («для прототипа используем шифрование транспорта») |
-| Ключи сессии возобновления (QR-спаривание) | **удалены** (этап 2а, `docs/RESUME_REDESIGN.md`): в `paired_clients.json` / `paired_anchors.json` формата v2 только записи о праве без секретов | ключ сессии в открытом виде на диске | нет | дефект: файл сначала пишется обычным правом, потом `chmod 0600` |
-| Личность узла на диске | Argon2id + AES-GCM | пароль владельца | — | хорошо (SEC-04 закрыт) |
-| Приветствие (Hello) | подпись Ed25519 | ключ личности | — | хорошо (SEC-03 закрыт) |
+| Messages, files, and calls (`p2p::P2PTransport`) | `p2p/encryption_manager.rs`, AES-256-GCM | Handshake with **one-time** X25519 keys for every hello | yes | Good by design; minor defects remain below. |
+| Core node network: DHT, relaying, proxies/tunnels, station/train (`netlayer::P2PTransport`, `protocol::*`) | `netlayer/encryption.rs` → `crypto/handshake.rs`, AES-256-GCM | One-time keys for every handshake (**fixed**; previously one key per process) | yes | Good by design. |
+| Multi-node circuits (`hops.rs`, `hops_net.rs`) | X25519 handshake per link using a telescope; the node's reply is **signed with its long-term card key**; layer keys use HKDF-SHA256; layers use BLAKE3 stream encryption by cell number with an internal `MAC`; cells have equal size | One-time keys on both sides | yes | Good by design; no cover traffic or entry pinning (see I21). |
+| End-to-end encryption between people | `communication/encryption.rs`, `p2p/encryption.rs` | — | — | **Stubs** (“transport encryption is used for the prototype”). |
+| Resumption-session keys (QR pairing) | **Removed** (stage 2a, `docs/RESUME_REDESIGN.md`): v2 `paired_clients.json` / `paired_anchors.json` contain permission records without secrets | Session key stored in plaintext on disk | no | Defect: the file was first created with ordinary permissions and only then changed to `0600`. |
+| Node identity on disk | Argon2id + AES-GCM | Owner password | — | Good (SEC-04 closed). |
+| Hello | Ed25519 signature | Identity key | — | Good (SEC-03 closed). |
 
-## Дефекты по убыванию опасности
+## Defects in descending severity
 
-### Критичные
-- **C1. Ключи цепочек из публичных данных — ЗАКРЫТО.** Прототип цепочек (`derive_hop_key` из публичных данных) удалён; вместо него `hops.rs` с настоящим обменом ключей и подписанными рукопожатиями. Анонимной сеть всё же называть нельзя (I21: нет подмешивания трафика и закрепления входа).
-- **C2. Нет сквозного шифрования между людьми.** При прямом соединении двух узлов спасает шифрование транспорта (с прямой секретностью), но при ретрансляции или в схеме «клиент отдельно от узла» читать сможет посредник. Исправление: отдельный слой E2E между устройствами людей (фаза 3 и 5).
-- **C3. Основная сеть без одноразовых ключей.** `netlayer/encryption.rs`: ключ сессии = HKDF(ECDH(ключ процесса, ключ соседа)). Утечка секрета процесса раскрывает все записанные за время работы пакеты. Исправление: одно общее шифрование для обоих транспортов с одноразовыми ключами на каждое рукопожатие.
+### Critical
 
-### Высокие
-- **H1. Секреты в журналах.** `println!` печатает 8 байт общего секрета (`Shared: …`), 8 байт ключа сессии (`Session key derived: …`), 4 байта ключа на каждый пакет (`key=…`), префиксы публичных ключей. Исправление: убрать всё, добавить тест-сторож.
-- **H2. Секретные файлы создаются с обычными правами.** `fs::write` и потом `set_permissions(0o600)` — окно, где файл читаем другими; ошибка `chmod` молча игнорируется (`let _ =`). Исправление: создавать сразу с `0600`, ошибку считать ошибкой.
-- **H3. Ключ сессии на диске открытым текстом.** *Исправлено в коде (этап 2а, `docs/RESUME_REDESIGN.md`):* возобновления по сохранённым секретам и самих секретов нет, формат файлов связи v2 без секретов, старые файлы переписываются. Независимая проверка (круг 36) нашла недостатки очистки — их исправление проверяется повторно (`docs/SECURITY_STATUS.md`, P16-*). Усиление самого рукопожатия — этап 2б, не сделано.
-- **H4. Окно защиты от повторов — 1024 последних случайных одноразовых номера.** Старый пакет можно воспроизвести после 1024 новых; после перезапуска окно пустое. Исправление: счётчики вместо случайных номеров и скользящее окно по счётчику.
-- **H5. Ключ сессии живёт весь срок процесса.** Случайные 96-битные номера GCM при одном ключе безопасны примерно до 2^32 пакетов; сервер, работающий месяцами, подходит к этому. Исправление: смена ключа по числу пакетов и времени.
+- **C1. Circuit keys derived from public data — CLOSED.** The circuit prototype (`derive_hop_key` from public data) was removed. `hops.rs` now uses real key exchange and signed handshakes. It is still not correct to call the network anonymous (I21: no cover traffic or entry pinning).
+- **C2. No end-to-end encryption between people.** Direct node connections benefit from transport encryption with forward secrecy, but a relay or a “client separate from node” intermediary can read the traffic. Fix: a separate E2E layer between people's devices (phases 3 and 5).
+- **C3. Core network without one-time keys.** `netlayer/encryption.rs` used `HKDF(ECDH(process key, neighbor key))` as the session key. A process-secret leak could reveal all packets recorded during its lifetime. Fix: one shared encryption implementation for both transports with one-time keys for every handshake.
 
-### Средние
-- **M1. Номер отправителя в открытом заголовке и вне проверки подлинности.** Не в `associated data` шифрования. Исправление: включить заголовок в AAD; позже — шифровать идентификатор отправителя на путь.
-- **M2. Две копии менеджера шифрования** (`netlayer/encryption.rs` и `p2p/encryption_manager.rs`, в шапке второй — название первого), расходятся. Исправление: один модуль `crypto`, одно место для правки.
-- **M3. Закрытый ключ сессии хранится в `Session` без обнуления памяти при удалении.**
+### High
 
+- **H1. Secrets in logs.** `println!` printed eight bytes of the shared secret (`Shared: …`), eight bytes of the session key (`Session key derived: …`), four bytes of the per-packet key (`key=…`), and public-key prefixes. Fix: remove all of them and add a guard test.
+- **H2. Secret files created with ordinary permissions.** `fs::write` followed by `set_permissions(0o600)` created a window in which another user could read the file; `chmod` errors were silently ignored (`let _ =`). Fix: create with `0600` and treat errors as errors.
+- **H3. Session key stored on disk in plaintext.** *Fixed in code (stage 2a, `docs/RESUME_REDESIGN.md`):* resumption through saved secrets and the secrets themselves are gone; v2 connection files contain no secrets and old files are rewritten. Independent review (round 36) found cleanup weaknesses; their fix is being rechecked (`docs/SECURITY_STATUS.md`, P16-*). Hardening the handshake itself is stage 2b and is not complete.
+- **H4. Replay protection window — the last 1024 random one-time numbers.** An old packet could be replayed after 1024 new packets; the window was empty after a restart. Fix: counters instead of random numbers and a counter-based sliding window.
+- **H5. Session key lives for the entire process lifetime.** Random 96-bit GCM nonces under one key are safe only up to roughly 2^32 packets; a server running for months approaches that limit. Fix: rotate the key by packet count and time.
 
-## Статус исправлений
+### Medium
 
-| Пункт | Статус |
+- **M1. Sender number in a plaintext unauthenticated header.** It was not part of the encryption associated data. Fix: include the header in AAD; later, encrypt the sender identifier on the path.
+- **M2. Two copies of the encryption manager** (`netlayer/encryption.rs` and `p2p/encryption_manager.rs`; the second file was named after the first in its header) had diverged. Fix: one `crypto` module and one place to make changes.
+- **M3. Session private key stored in `Session` without clearing memory on drop.**
+
+## Fix status
+
+| Item | Status |
 |---|---|
-| H1 секреты в журналах | **исправлено**, тест-сторож `tests/no_secrets_in_logs.rs` (проверен на возвращённой утечке) |
-| H2 секретные файлы с обычными правами | **исправлено**: `util::private_file::write_private` (0600 при создании, временный файл + переименование, без перехода по ссылке), сторож `tests/private_files_guard.rs` |
-| C1 ключи цепочек из публичных данных | **закрыто**: прототип удалён, вместо него `hops.rs` с настоящим обменом ключей по звеньям и подписанными рукопожатиями (I10) |
-| M2 две копии менеджера | **исправлено**: общий модуль `src/crypto/` (`session`, `store`, `x25519`), обе оболочки тонкие |
-| H4 окно повторов | **исправлено**: счётчики и окно 2048 пакетов, окно не портится подделками |
-| H5 ключ живёт вечно | **исправлено**: потолок 2^32 пакетов; ключ старше часа (или 2^28 пакетов; настраивается `YANDI_REKEY_AFTER_SECS`, 10 с…сутки) меняется сам новым рукопожатием; прежний ключ ещё 30 с принимает пакеты в пути; проверено живой сетью (60 сообщений при возрасте ключа 15 с, ни одно не потеряно) |
-| M1 заголовок вне проверки | **исправлено**: номер отправителя входит в AAD |
-| M3 ключи в памяти | **исправлено**: ключи затираются (`zeroize`) |
-| Слабые точки X25519 | **добавлено**: отказ при нулевом общем секрете |
-| Подпись приветствия основной сети охватывала не всё | **исправлено**: подписываются ВСЕ поля (тип, версия, возможности, адреса, юрисдикция…) с меткой `yandi-hello-v2`; изменение любого поля ломает подпись (тест на 25 изменений), «золотой» вектор собран независимо (Python). Раньше тот, кто стоит на пути пакета, мог подменить адреса и заявленные возможности |
-| Разбор приветствия терял поля | **исправлено**: после строк `ipv6_external` и `p2p_data_addr` позиция не сдвигалась, ключ канала переписки и юрисдикция принимались неверно и молча терялись; найдено расширенной подписью. Теперь записанное и разобранное совпадают (тест «подписываемые данные переживают передачу»), длинные и пустые строки отвергаются при записи, юрисдикция нормализуется при создании |
-| C3 основная сеть без одноразовых ключей | **исправлено**: обе сети используют общий `crypto::handshake` (одноразовые ключи на каждое рукопожатие, приглашение → подтверждение, встречное знакомство решается по меньшему номеру); статический ключ процесса удалён; проверено настоящей сетью из трёх узлов |
-| H3 ключ сеанса на диске (старое QR-спаривание телефона с узлом) | **исправлено в коде** (этап 2а), независимая проверка (круг 36) нашла недостатки очистки — повторная проверка; рукопожатие — этап 2б |
-| Смена ключей в работающей сети теряла сообщения | **исправлено** (2026-10-06): ожидающий ключ ответчика, правило победителя при встречной смене, порядок запасных ключей; см. журнал в ROADMAP |
-| C2 сквозное шифрование между людьми | **открыто** (фазы 3 и 5) |
+| H1 secrets in logs | **fixed**; guard test `tests/no_secrets_in_logs.rs` checks the previously returned leak. |
+| H2 secret files with ordinary permissions | **fixed**: `util::private_file::write_private` uses `0600` at creation, a temporary file and rename, and does not follow links; guard `tests/private_files_guard.rs`. |
+| C1 circuit keys from public data | **closed**: the prototype was removed and replaced by `hops.rs` with real per-link key exchange and signed handshakes (I10). |
+| M2 two encryption-manager copies | **fixed**: shared `src/crypto/` (`session`, `store`, `x25519`); both wrappers are thin. |
+| H4 replay window | **fixed**: counters and a 2048-packet window; forged packets cannot corrupt the window. |
+| H5 key lives forever | **fixed**: 2^32 packet ceiling; a key older than one hour or 2^28 packets (configurable through `YANDI_REKEY_AFTER_SECS`, 10 seconds to one day) rotates through a new handshake. The previous key accepts in-flight packets for another 30 seconds. Verified on a live network with 60 messages and a 15-second key age, with none lost. |
+| M1 header outside authentication | **fixed**: sender number is part of AAD. |
+| M3 keys in memory | **fixed**: keys are cleared with `zeroize`. |
+| Weak X25519 points | **added**: reject a zero shared secret. |
+| Core-network hello signature did not cover every field | **fixed**: ALL fields (type, version, capabilities, addresses, jurisdiction, and so on) are signed with the `yandi-hello-v2` label. Changing any field breaks the signature; the golden vector was independently generated in Python. Previously an on-path attacker could change addresses and declared capabilities. |
+| Hello parsing lost fields | **fixed**: after `ipv6_external` and `p2p_data_addr`, the parser position no longer shifted, so the messaging-channel key and jurisdiction are not silently lost. Serialized and parsed values now match; long and empty strings are rejected during serialization, and jurisdiction is normalized at creation. |
+| C3 core network without one-time keys | **fixed**: both networks use shared `crypto::handshake` with one-time keys per handshake, invitation → confirmation, and simultaneous discovery resolved by the lower node number. The process-static key was removed; verified on a real three-node network. |
+| H3 session key on disk (old QR phone pairing) | **fixed in code** (stage 2a); independent review (round 36) found cleanup weaknesses and is rechecking them. The handshake is stage 2b. |
+| Key rotation in a live network lost messages | **fixed** (2026-10-06): responder pending key, winner rule for simultaneous rotation, and fallback-key ordering; see the roadmap log. |
+| C2 end-to-end encryption between people | **open** (phases 3 and 5). |
 
-Формат пакета (версия 2): `[номер отправителя:32][версия:1 | соль:5 | счётчик:6][шифртекст с тегом]`, внутри шифртекста `[длина:4][данные][заполнитель]`, ключи направлений из HKDF-SHA256 (`yandi-v2 key low->high / high->low`), AAD = `[версия] ‖ номер отправителя`. «Золотой» вектор проверен независимой реализацией (Node.js/OpenSSL).
+Packet format (version 2): `[sender number:32][version:1 | salt:5 | counter:6][ciphertext with tag]`; inside the ciphertext: `[length:4][data][padding]`; directional keys from HKDF-SHA256 (`yandi-v2 key low->high / high->low`); AAD = `[version] ‖ sender number`. The golden vector was checked by an independent implementation (Node.js/OpenSSL).
 
-Известная особенность: при одновременном знакомстве двух узлов первый пробный пакет может уйти со «проигравшим» ключом и не расшифроваться (одна ошибка на узел в журнале); сразу после этого ключи совпадают (проверено по журналам двух живых узлов), обмен идёт. Улучшение на будущее: не слать пробные пакеты до подтверждения единого ключа.
+Known behavior: when two nodes discover each other simultaneously, the first probe packet may use the losing key and fail to decrypt (one log error per node). Keys match immediately afterward and communication continues; this was checked in the logs of two live nodes. Future improvement: do not send probe packets until a single key is confirmed.
 
-## Порядок исправления
+## Fix order
 
-1. H1 и H2 (быстро, безопасно, проверяется тестами-сторожами).
-2. C1 (цепочки): **сделано** — `hops.rs`; осталось подмешивание пустого трафика и закрепление входного узла (I21).
-3. M2 + C3 + H4 + H5 + M1 + M3: один общий модуль шифрования с одноразовыми ключами, счётчиками, окном, сменой ключа, AAD; оба транспорта переводятся на него.
-4. H3: (выполнено в коде, на повторной проверке) ключ на диске убран; рукопожатие — этап 2б.
-5. C2: сквозное шифрование между устройствами (вместе с протоколом «клиент — узел»).
+1. H1 and H2 (quick, safe, and checked by guard tests).
+2. C1 (circuits): **done** — `hops.rs`; cover traffic and entry pinning remain (I21).
+3. M2 + C3 + H4 + H5 + M1 + M3: one shared encryption module with one-time keys, counters, a window, key rotation, and AAD; migrate both transports to it.
+4. H3: completed in code and under recheck; the on-disk key is removed and the handshake is stage 2b.
+5. C2: end-to-end encryption between devices, including the “client — node” protocol.

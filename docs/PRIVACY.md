@@ -1,39 +1,45 @@
-# Что видят узел, ретранслятор, провайдер и тот, кто отобрал устройство
+# What the Node, Relay, ISP, and Device Seizure Can See
 
-Этот документ описывает **фактическое** положение дел, без обещаний, которых нет. Полной анонимности у YANDI нет.
+This document describes the **actual** situation without promises the system does not make. YANDI does not provide complete anonymity.
 
-## Что защищено
-- **Сообщения и файлы между телефонами** (устройствами, чьи ключи зарегистрированы на узле) и **группы телефонов** — сквозное шифрование между самими устройствами (формат E4; тесты — `mobile/yandi_mobile/test/e2e_security_test.dart` и тесты групп); узел и ретрансляторы видят шифртекст.
-- **Чего сквозным шифрованием НЕ покрыто:** между узлами сеанс шифруется между конечными узлами (по чтению кода UDP-ретранслятор ключей внутреннего сеанса не имеет; в сети из нескольких узлов не испытывалось; но якорь — конечная точка своего канала WebSocket, выходной узел цепочки видит данные к интернет-цели, а узел, через который телефон пишет внешнему компьютеру, читает это сообщение), но у переписки узел↔узел нет асинхронного слоя «запечатанного конверта», прямой секретности хранимого содержимого и проверки ключа собеседника человеком; история на конечных узлах лежит в закрытой среде. Звонки: медиапоток WebRTC шифруется DTLS-SRTP между участниками (TURN-ретранслятор передаёт шифртекст), сигнализация телефонов зашифрована, сигнализация компьютера не везде аутентифицирована конечными участниками; физических испытаний нет. Подробности — `docs/E2E_ARCHITECTURE.md`.
-- **Закрытая среда** (переписка и файлы ПК, пул внешних прокси, локальные имена контактов) — запечатана ключом из пароля; без пароля или сид-фразы не читается.
-- **Служебные части узла** (группы ПК, ключи «Компьютера» как собеседника телефонов, жалобы) работают, пока владельца нет у экрана (иначе узел не принимал бы сообщения ночью), поэтому они запечатаны **ключом устройства этой машины**, а не паролем. Тому, кто отобрал **включённый или запущенный** компьютер, они доступны так же, как сам узел; пароль их не защищает. Экстренное стирание их удаляет вместе с закрытой средой.
-- **Данные на выключенном и заблокированном устройстве** — защищены паролем. Лимиты 5 неверных паролей и 20 неверных сидов работают **внутри приложения**: тот, кто скопировал файлы и перебирает офлайн, лимитов не встречает. Против него держит только стойкость пароля (сид-фраза в 128 бит не подбирается).
+## What is protected
 
-## Что видно
-| Кто | Что видит |
+- **Messages and files between phones** whose keys are registered on the node, and **phone groups**, use end-to-end encryption between the devices themselves (E4 format; tests are in `mobile/yandi_mobile/test/e2e_security_test.dart` and the group tests). The node and relays see ciphertext.
+- **What is NOT covered by end-to-end encryption:** the session between nodes is encrypted between endpoint nodes (the UDP relay does not have the internal-session key according to the code; multi-node operation has not been tested). An anchor is the endpoint of its WebSocket channel, an exit node sees traffic to the Internet destination, and the node through which a phone writes to an external computer reads that message. Node-to-node messaging has no asynchronous sealed-envelope layer, no forward secrecy for stored content, and no human key verification. History on endpoint nodes is stored in the closed environment. Calls: the WebRTC media stream uses DTLS-SRTP between participants and a TURN relay forwards ciphertext; phone signaling is encrypted, while computer signaling is not authenticated by endpoint participants everywhere. There have been no physical-device tests. See `docs/E2E_ARCHITECTURE.md`.
+- **The closed environment** (PC messages and files, external proxy pool, and local contact names) is sealed with a password-derived key and cannot be read without the password or seed phrase.
+- **Node service data** (PC groups, “Computer” keys used as a phone contact, and complaints) works while the owner is away from the screen, because the node must receive messages overnight. It is therefore sealed with the machine's device key rather than a password. Anyone who seizes an **powered-on or running** computer can access it like the node itself; the password does not protect it. Emergency erase removes it together with the closed environment.
+- **Data on a powered-off and locked device** is protected by the password. The limits of five incorrect passwords and 20 incorrect seeds work **inside the application**; someone who copies the files and tries them offline does not encounter those limits. Only password strength protects against that attacker; a 128-bit seed phrase is not practically guessable.
+
+## What is visible
+
+| Who | What they see |
 |---|---|
-| Узел, к которому вы подключены | что устройство на связи, время и объём обмена, номера собеседников в почте (шифртекст) до срока хранения; IP источника — только как свойство сетевого соединения |
-| Ретрансляторы и узлы в цепочке | соседей по цепочке, время и объём; не содержимое |
-| Собеседник при звонке | ваш IP, если звонок идёт напрямую (WebRTC); при звонке через TURN — IP видит TURN вашего узла |
-| Провайдер и наблюдатель сети | что вы подключаетесь к YANDI и объём, не содержимое |
-| Тот, кто завладел **включённым и открытым** устройством | всё, что открыто в приложении |
-| Шпионская программа на телефоне (уровня Pegasus) | практически всё, что видит владелец: сквозное шифрование защищает канал, а не взломанное устройство |
+| The node you connect to | That the device is online, exchange time and volume, and correspondent numbers in mail (ciphertext) until retention expires; the source IP as a property of the network connection. |
+| Relays and nodes in a circuit | Circuit neighbors, time, and volume; not contents. |
+| A call correspondent | Your IP when the call is direct WebRTC; through TURN, the correspondent sees the TURN address of your node. |
+| ISP and network observer | That you connect to YANDI and the traffic volume, not the contents. |
+| Someone who takes a **powered-on and unlocked** device | Everything currently open in the application. |
+| Phone spyware such as Pegasus | Practically everything visible to the owner: end-to-end encryption protects the channel, not a compromised device. |
 
-## Журналы
-- Приложение и узел **не пишут** в свои журналы адреса собеседников, клиентов и сайтов, куда ходили через узел: такие строки идут через `util::logsafe::a` и печатают «адрес скрыт». Владелец узла может включить показ для отладки переменной окружения `YANDI_LOG_ADDRS=1`. Тест `log_lines_do_not_print_peer_client_or_destination_addresses_raw` не даёт вернуть такие строки.
-- Журналы операционной системы, межсетевого экрана и провайдера приложение не контролирует.
-- На телефоне в системный журнал попадают только названия типов ошибок, без адресов.
+## Logs
 
-## Что хранится и сколько
-- Почта между устройствами (шифртекст, «от кого и кому»): на узле до срока, который задаёт владелец в «Настройках» (по умолчанию 7 суток, от 1 до 30; у гостей всегда 24 часа).
-- Гости: только в памяти узла, не попадают на диск и в резервную копию; молчавший сутки удаляется.
-- Очереди запросов сопряжения и приглашений: только в памяти, до суток.
+- The application and node **do not write** correspondent, client, or destination-site addresses to their logs. Such values pass through `util::logsafe::a` and are printed as “address hidden”. The node owner can enable display for debugging with `YANDI_LOG_ADDRS=1`. The `log_lines_do_not_print_peer_client_or_destination_addresses_raw` test prevents these lines from returning.
+- The operating system, firewall, and ISP logs are outside the application's control.
+- The phone system log receives only error type names, without addresses.
 
-## Что можно сделать самому
-- **Пароль.** Слабый пароль подбирается офлайн: при создании и смене приложение предупреждает (цвет и подсказка под полем). Лучше фраза из нескольких слов.
-- **Экстренное стирание.** «Настройки → Экстренное стирание» на ПК (закрытая среда) и на телефоне (все данные приложения): без пароля, но со словом-подтверждением «СТЕРЕТЬ».
-- **Срок хранения почты.** Чем короче, тем меньше следов на узле, который могут отобрать.
+## What is stored and for how long
 
-## Известные ограничения (не скрываем)
-- Реестр сопряжённых устройств (имена, хэши токенов, ключи) лежит на диске узла открыто: он нужен телефонам для входа, пока закрытая среда заперта (например, после перезапуска узла ночью). Запечатать его ключом закрытой среды нельзя без потери связи; безопасный вариант (ключ, производный от корня узла, с миграцией и резервной копией на одну версию) — в планах.
-- Лимиты попыток (5 паролей, 20 сидов) защищают от перебора через приложение, но не от перебора скопированных файлов.
+- Device-to-device mail (ciphertext and “from/to” metadata) remains on the node until the owner-selected retention period: seven days by default, from one to 30 days; guest mail is always retained for 24 hours.
+- Guests exist only in node memory and are not written to disk or backups; a guest that has been silent for a day is removed.
+- Pairing and invitation request queues exist only in memory, for up to one day.
+
+## What you can do
+
+- **Password.** A weak password can be attacked offline. The application warns about it during creation and change through the field color and hint. A phrase of several words is better.
+- **Emergency erase.** Use “Settings → Emergency erase” on the PC for the closed environment and on the phone for all application data. It requires no password but does require the confirmation word “ERASE” in the relevant interface.
+- **Mail retention.** A shorter period leaves fewer traces on a node that could be seized.
+
+## Known limitations (not hidden)
+
+- The paired-device registry (names, token hashes, and keys) is stored openly on the node disk. Phones need it for login while the closed environment is locked, for example after a node restart overnight. Sealing it with the closed-environment key would break connectivity; a safer design using a node-root-derived key with migration and one-version backup is planned.
+- Attempt limits (five passwords and 20 seeds) protect against guessing through the application, not against guessing copied files.

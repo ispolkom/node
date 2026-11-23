@@ -1,63 +1,71 @@
-# Роли, админ-панель и извещения (ТЗ, решения владельца 18.10)
+# Roles, Administration Panel, and Notifications (Specification, Owner Decisions 2026-10-18)
 
-## Модель
-Узел — как компьютер с системой: на нём **администратор (root)** и **пользователи**.
+## Model
 
-| Кто | Что делает | Чего не делает |
+The node is like a computer with an operating system: it has an **administrator (root)** and **users**.
+
+| Who | What they do | What they do not do |
 |---|---|---|
-| **Владелец узла = администратор** | управляет: принимает жалобы, удаляет группы, предупреждает и удаляет пользователей, выдаёт код сопряжения, подтверждает сопряжение, настраивает узел | не читает ничью переписку (в том числе чужую); не пишет в личных чатах и группах **от админа** |
-| **Пользователь узла** (в том числе личный аккаунт самого владельца) | общается, создаёт группы, передаёт права группы (создатель/владелец группы), пользуется прокси-выходом, звонит | не управляет узлом |
-| **Приглашённый** (по коду от доверенного устройства) | как пользователь: свои почта, профиль, группы, жалобы, выход в интернет через узел | **приглашать других** — пока администратор узла не повысит его до пользователя |
-| **Гость** (без QR; телефон, планшет или ПК) | общается с ограничениями (docs/GUEST.md): люди онлайн и ПК узла, 10 сообщений в сутки, аудиозвонки, жалобы | группы, интернет, видео, чтение переписки владельца |
+| **Node owner = administrator** | Manage the node: handle complaints, delete groups, warn and remove users, issue pairing codes, approve pairing, and configure the node. | Read anyone's messages, including other people's messages; write in personal chats or groups **as admin**. |
+| **Node user** (including the owner's personal account) | Communicate, create groups, transfer group rights (creator/group owner), use proxy exits, and make calls. | Manage the node. |
+| **Invited device** (using a code from a trusted device) | Act as a user: use its own email, profile, groups, complaints, and Internet access through the node. | **Invite others** until the node administrator promotes it to a user. |
+| **Guest** (without QR; phone, tablet, or PC) | Communicate with limits (see `docs/GUEST.md`): online people and the node PC, 10 messages per day, audio calls, and complaints. | Groups, Internet, video, and reading the owner's messages. |
 
-Владелец, когда переписывается, делает это **как пользователь** (личный аккаунт на ПК): управленческих прав в личном аккаунте нет.
+When the owner communicates, they do so **as a user** through the personal PC account; the personal account has no administrative rights.
 
-## Секреты
-- **Один сид на всё** (сид пишется под владельца; по нему восстанавливается и узел, и закрытая среда личного аккаунта).
-- **Админ-пароль** — открывает админ-панель (сеанс администратора). Он **не** открывает чаты.
-- **Пароль пользователя** — закрытая среда личного аккаунта (чаты, группы, контакты, файлы). Админ-пароль её не открывает.
-- Рабочие данные узла (реестр устройств, ключи для приёма сообщений, пул прокси, жалобы) остаются под ключом машины: узлу ночью нужно работать без владельца. Вложенной «матрёшки» ключей не делаем.
-- Первый запуск: (1) админ — сид, логин, админ-пароль; (2) пользователь — логин, пароль, повтор.
+## Secrets
 
-## Оболочка ПК
-- Верхнее меню личного аккаунта: Главная, Чат, Поиск, Группы, Настройки (личные: язык, оповещения, профиль, моя закрытая среда), О приложении, **Админ-панель** (со счётчиком извещений).
-- **Админ-панель** открывается по админ-паролю на 15 минут (сеанс администратора; повторный ввод после истечения). Внутри первое меню — «Личный аккаунт» (возврат), затем: Статус узла, Шлюзы, Жалобы, Настройки узла (гостевой приём, срок почты, внешние прокси, устройства и коды сопряжения, копии, обновления, экстренное стирание).
-- Оформление то же, что у остальных страниц.
-- Сервер проверяет сеанс администратора на каждом админском маршруте (а не только интерфейс).
+- **One seed for everything** (the seed is written for the owner; it restores both the node and the personal account's closed environment).
+- **Administrator password** — opens the administration panel and administrator session. It does **not** open chats.
+- **User password** — opens the personal account's closed environment (chats, groups, contacts, and files). The administrator password does not open it.
+- Node working data (device registry, message-reception keys, proxy pool, and complaints) remains under the machine key because the node must work without the owner. We do not create a nested key “matryoshka”.
+- First startup: (1) administrator — seed, login, and administrator password; (2) user — login, password, and confirmation.
 
-## Извещения в личный аккаунт
-Админские события дублируются в личный аккаунт, чтобы не заходить в админку без нужды:
-- жалобы (число новых), запросы сопряжения, доступно обновление, прокси не отвечают;
-- **только тип, подпись, число, время**: без текста жалобы, вложений, токенов и кодов;
-- одинаковые события склеиваются в счётчик; прочитанное запоминается;
-- действие по извещению: открывается админ-панель на нужном месте, просит админ-пароль.
-- Извещения считаются на узле по текущему состоянию (ничего лишнего не хранится); на телефон по умолчанию не уходят.
+## Desktop shell
 
-## Этапы
-1. (сделано) Вкладка «Админ-панель» с переносом страниц, сеанс администратора по паролю входа (в этом этапе админ-пароль = пароль входа), извещения.
-2. (сделано) Отдельный админ-пароль: `admin_auth.json` рядом с `auth.json` (Argon2id). Нет файла — админ-пароль = пароль входа (миграция без действий). Назначается в мастере (необязательно) или в «Настройках узла» (нужны сеанс и текущий админ-пароль); должен отличаться от пароля входа. Забытый админ-пароль сбрасывается входом по сид-фразе. Порча файла — отказ, а не откат на пароль входа. Счёт неверных попыток общий с входом.
-3. (сделано) Снять лишние ограничения с роли «пользователь» (прокси, чаты) и разделить личный аккаунт ПК и администрирование на узле; проверка Codex на каждом шаге.
+- Personal-account top menu: Home, Chat, Search, Groups, Settings (personal language, notifications, profile, and closed environment), About, and **Administration panel** with a notification counter.
+- **The administration panel** opens with the administrator password for 15 minutes. The password must be entered again after expiry. Its first menu item is “Personal account” (return); the other items are Node status, Gateways, Complaints, Node settings (guest access, email lifetime, external proxies, devices and pairing codes, backups, updates, and emergency erase).
+- The visual style is the same as on the other pages.
+- The server checks the administrator session on every administration route, rather than relying on the interface.
 
-Шаг 3 в коде: роли `user` открыт `/mobile/proxy/info` (выход в интернет через узел); личные чаты и контакты ПК (`/mobile/chat/`, `/mobile/contacts`) остаются закрытыми для `user` и гостя — это личный аккаунт владельца, а не чаты пользователя. Группы и прокси-выход пользователю уже доступны; гостю закрыты.
+## Notifications in the personal account
 
-R9 (2026-10-21): **ПК — участник.** Пользователь и гость видят «Компьютер» в списке людей и пишут ему (E2E, связка ПК по `/mobile/pubkey/<номер узла>` открыта всем ролям); их сообщения ложатся в веб-чат ПК под номером устройства, и владелец отвечает им как обычному собеседнику. Чужая переписка владельца по-прежнему закрыта (`/mobile/chat/*`, `/mobile/contacts`, события `Node` по WS).
+Administrator events are duplicated in the personal account so the user does not need to open the administration panel without a reason:
 
-## Уточнения после аудита 34 (P14-1…11)
-- Админский доступ определяется на сервере по методу и пути (`admin::is_admin_route`): помимо списка префиксов — запись `/api/settings`, `/api/network/relay`, `/api/node/start|stop`, `/api/backup/export|config`, секреты сопряжения (`/api/devices/pairing`, `/pair/qr`), группы всего узла и их удаление (`/api/mobile/groups…`).
-- Сеанс принадлежит клиенту: при входе узел выдаёт случайный токен (хранит только хэш), клиент шлёт его в заголовке `x-yandi-admin`; другой клиент того же пользователя доступа не получает. Выход, блокировка личной среды, выход из аккаунта и восстановление по сид-фразе сеанс закрывают.
-- Удаление чужой группы: сеанс + админ-пароль ещё раз.
-- Бюджет неверных попыток раздельный: пять для пароля входа и пять для отдельного админ-пароля; верный вход одним не обнуляет другой. Пока админ-пароль общий с паролем входа, бюджет один.
-- Извещения помнят виденные события (отпечатки идентификаторов, на диске, без текста), а не число; «прочитано» отмечается страницей, которая показывает событие.
-- Админ-панель не требует открытой личной среды.
-- Админ-пароль записывается до создания ключей; сбой записи отменяет настройку. Сброс при восстановлении по сид-фразе возвращает ошибку, если файл не удалился.
-- Веб-страницы узла по TCP (если включены) формы админ-сеанса не имеют: управление узлом — через оболочку ПК.
+- complaints (number of new complaints), pairing requests, an available update, and unresponsive proxies;
+- **type, label, count, and time only**: no complaint text, attachments, tokens, or codes;
+- identical events are merged into one counter; read state is remembered;
+- acting on a notification opens the administration panel at the relevant location and asks for the administrator password;
+- notifications are calculated on the node from its current state, with nothing unnecessary stored; they are not sent to the phone by default.
 
-## Приглашения устройств (роль «приглашённый»)
+## Stages
 
-Рост сети идёт по цепочке доверия, а не открытой дверью.
-- **Кто приглашает.** Устройство, сопряжённое по QR администратором (роль `owner` или `user`), в приложении («Настройки → Пригласить устройство») получает одноразовый 8-значный код и QR (`YANDI-PAIR-1:…`, тот же формат, что у кода сопряжения). Код живёт 60 минут, одноразовый; вместе с ним выдаётся PIN из 4 цифр, который пригласивший называет другим каналом (три неверных PIN сжигают код).
-- **Кто приглашён.** Подключившееся по такому коду устройство получает роль `invited`: права пользователя, но выдавать приглашения оно не может (узел отвечает отказом, в приложении раздела нет), пока администратор не нажмёт «Подтвердить пользователя» в панели устройств (там видны ник и картинка, которые человек задал себе сам, и ник и картинка того, кто его пригласил; ник не доказательство личности, поэтому рядом всегда техническое имя и пригласивший) или не выполнит `yandi admin device-promote ID`.
-- **Журнал.** Узел хранит, кто кого пригласил (`invited_by`). В панели устройств и в `yandi admin devices` видно роль и пригласившего. «Отозвать с приглашёнными» (`device-revoke-branch`) удаляет устройство, всех его приглашённых и приглашённых ими.
-- **Пределы** (меняются администратором: панель/`yandi admin invites set`, файл `mobile_invites.json`): включено/выключено (по умолчанию включено), кодов в сутки от одного человека (10), одновременно живых кодов (3); на всём узле не больше 64 живых кодов и 48 приглашённых устройств. Приглашения **никого не вытесняют**: нет места — код отклоняется.
-- **Подбор кода.** 20 неверных попыток за 5 минут на весь узел блокируют приём приглашений на это время. Код одноразовый; если пригласивший потерял право или удалён, его код не работает.
-- **Чего нет.** Приглашение не даёт доступа к переписке пригласившего; пригласивший не видит, чем занят приглашённый. Приглашённые счётчики сутки/живые коды держатся в памяти узла (перезапуск обнуляет суточный счёт: известное ограничение).
+1. (done) “Administration panel” tab with the pages moved into it, administrator session by login password (at this stage the administrator password equalled the login password), and notifications.
+2. (done) Separate administrator password: `admin_auth.json` next to `auth.json` (Argon2id). If the file is absent, the administrator password equals the login password for migration without user action. It is set in the wizard (optional) or in Node settings, where an active session and the current administrator password are required. It must differ from the login password. A forgotten administrator password is reset by signing in with the seed phrase. A corrupt file causes rejection instead of falling back to the login password. Failed-attempt counting is shared with login.
+3. (done) Remove unnecessary restrictions from the user role (proxy and chats) and separate the PC personal account from node administration; Codex checks each step.
+
+Step 3 in code: the `user` role can access `/mobile/proxy/info` (Internet access through the node); the PC personal chats and contacts (`/mobile/chat/`, `/mobile/contacts`) remain closed to `user` and guest because they belong to the owner's personal account. Groups and proxy exit are already available to users; guests are denied them.
+
+R9 (2026-10-21): **The PC is a participant.** Users and guests see “Computer” in the people list and can message it (the PC key at `/mobile/pubkey/<node number>` is open to every role). Their messages appear in the PC web chat under the device number, and the owner answers them like any other contact. The owner's other conversations remain closed (`/mobile/chat/*`, `/mobile/contacts`, and `Node` events over WS).
+
+## Clarifications after audit 34 (P14-1…11)
+
+- Administrator access is determined on the server by method and path (`admin::is_admin_route`). Besides prefix lists, this includes `/api/settings`, `/api/network/relay`, `/api/node/start|stop`, `/api/backup/export|config`, pairing secrets (`/api/devices/pairing`, `/pair/qr`), all-node groups, and their deletion (`/api/mobile/groups…`).
+- A session belongs to the client: on login the node issues a random token and stores only its hash; the client sends it in the `x-yandi-admin` header. Another client of the same user receives no access. Logout, locking the personal environment, signing out, and seed-phrase recovery close the session.
+- Deleting another user's group requires the session and the administrator password again.
+- Failed-attempt budgets are separate: five for the login password and five for the separate administrator password. A successful login with one does not reset the other. While both passwords are the same, there is one budget.
+- Notifications remember seen events by identifier fingerprints on disk, without text, rather than storing a count. “Read” is marked by the page that displays the event.
+- The administration panel does not require the personal environment to be open.
+- The administrator password is written before keys are created; a write failure cancels setup. Reset during seed-phrase recovery returns an error if the file cannot be deleted.
+- Node web pages over TCP, when enabled, do not have administrator-session forms; node management is done through the desktop shell.
+
+## Device invitations (the “invited” role)
+
+Network growth follows a chain of trust rather than an open door.
+
+- **Who invites.** A device paired by an administrator through QR, with role `owner` or `user`, selects “Settings → Invite device” and receives a one-time 8-digit code and QR (`YANDI-PAIR-1:…`, the same format as a pairing code). The code lasts 60 minutes and can be used once. It also provides a 4-digit PIN, which the inviter tells the other person through another channel; three incorrect PINs burn the code.
+- **Who is invited.** A device connected with this code receives the `invited` role: user rights, but no ability to issue invitations. The node rejects such requests and the application hides the section until the administrator presses “Promote user” in the device panel or runs `yandi admin device-promote ID`. The panel shows the nickname and picture chosen by the person, as well as those of the inviter. A nickname is not proof of identity, so the technical name and inviter are always shown beside it.
+- **Record.** The node stores who invited whom (`invited_by`). The device panel and `yandi admin devices` show the role and inviter. “Revoke with invited branch” (`device-revoke-branch`) removes the device, all devices it invited, and all devices invited by those devices.
+- **Limits** are set by the administrator through the panel or `yandi admin invites set`, and stored in `mobile_invites.json`: enabled or disabled (enabled by default), codes per day per person (10), and simultaneously live codes (3). The whole node allows at most 64 live codes and 48 invited devices. Invitations **never evict anyone**; when there is no room, the code is rejected.
+- **Code guessing.** Twenty incorrect attempts within five minutes across the node block invitation intake for that period. A code is one-time; if the inviter loses the right or is removed, their code stops working.
+- **What is not included.** An invitation grants no access to the inviter's messages, and the inviter cannot see what the invited person is doing. The daily invitation and live-code counters are kept in node memory; restarting resets the daily counter, which is a known limitation.
