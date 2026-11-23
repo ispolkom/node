@@ -15,4 +15,4 @@ Thank you for helping. The rules are short.
 7. **One request, one change.** Describe what changed, why it changed, how it was checked, and what could break.
 8. **Report vulnerabilities** through [`SECURITY.md`](SECURITY.md), not in public issues.
 
-Code comments and documents are currently mostly in Russian; English is also accepted.
+Code comments and documents are currently being translated to English; English is the preferred language for new technical comments and documents.
