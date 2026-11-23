@@ -1,11 +1,8 @@
-# Установка и управление из консоли (сервер без оболочки)
+# Console installation and administration (server without the shell)
 
-Оболочка ПК необязательна: узел (`yandi-node`) полностью управляется из терминала. Консольные команды — тонкие клиенты того же
-локального сокета `~/.local/share/yandi/run/yandi-ui.sock`, которым пользуется оболочка; своей логики настройки в них нет.
-Сокет принимает только владельца каталога данных (проверка uid), админские действия, как и в оболочке, требуют пароль администратора
-(сеанс 15 минут, токен хранится только в памяти процесса).
+The desktop shell is optional: the `yandi-node` is fully managed from the terminal. Console commands are thin clients of the same local socket used by the shell, `~/.local/share/yandi/run/yandi-ui.sock`; they contain no separate setup logic. The socket accepts only the owner of the data directory, checked by uid. Administrative actions require the administrator password just as they do in the shell; the session lasts 15 minutes and the token exists only in process memory.
 
-## Язык (русский / English)
+## Language (Russian / English)
 Установщик, `yandi setup`, `yandi admin` и справка `yandi --help` работают на двух языках. Выбирается по порядку: ключ `--lang ru|en`,
 переменная `YANDI_LANG`, сохранённый выбор (`~/.config/yandi/lang`), язык системы (`LC_ALL`/`LC_MESSAGES`/`LANG`: начинается с `ru` — русский,
 иначе английский). В терминале без явного выбора установщик и `yandi setup` в самом начале спрашивают «Выберите язык / Select language [ru/en]»
@@ -15,21 +12,18 @@
 Установка перед запуском `apt` просит подтверждение (`Подтвердите установку? [Д/н]` / `Confirm the installation? [Y/n]`); `--yes` и запуск без
 терминала вопросов не задают. Сообщения самого узла (ошибки в ответах) пока приходят по-русски.
 
-## Установка
+## Installation
 ```
 bash tools/install.sh            # спросит: 1) только узел (сервер) 2) узел и оболочка ПК
 bash tools/install.sh --server   # без оболочки, без вопросов
 bash tools/install.sh --desktop  # узел + оболочка
 bash tools/install.sh --verify-only --from КАТАЛОГ_ВЫПУСКА   # только проверить выпуск
 ```
-Установщик скачивает `MANIFEST.json` и подпись, проверяет подпись Ed25519 (домен `YANDI-RELEASE-MANIFEST-V1\0`, OpenSSL 3), затем строго
-разбирает манифест (python3: формат, продукт, платформа, срок действия, уникальные имена, ровно поля name/sha256/size у каждого файла),
-сверяет сумму и размер каждого нужного `.deb`, отказывает при откате номера выпуска (последний установленный хранится в
-`~/.local/state/yandi/installed-seq`) и только потом ставит пакеты (`apt-get install`) и создаёт службу systemd для текущего пользователя.
+The installer downloads `MANIFEST.json` and its signature, verifies the Ed25519 signature (domain `YANDI-RELEASE-MANIFEST-V1\0`, OpenSSL 3), strictly parses the manifest, checks the hash and size of every required `.deb`, rejects release rollback (the last installed sequence is stored in `~/.local/state/yandi/installed-seq`), and only then installs the packages with `apt-get install` and creates a systemd service for the current user.
 От root и при домашней папке с пробелами или `%` установщик отказывает ДО любых изменений (для такой папки службу создают вручную, `--no-service`). Ключ подписи вшит в скрипт; сверьте его отпечаток с сайтом (`--pubkey` задаёт другой). Проверка самого
 установщика: `bash tools/test_install.sh КАТАЛОГ_ВЫПУСКА` (подмена манифеста, подписи, пакета, чужой ключ, обрезка).
 
-## Первая настройка и восстановление
+## First setup and recovery
 ```
 yandi setup                       # новая настройка: пароль, сид-фраза (24 слова), необязательное контрольное слово, закрытая среда, место для копий
 yandi setup --words 12|18|24      # длина сид-фразы
@@ -45,7 +39,7 @@ yandi setup --seed-file seed.txt --password-stdin --control-word-stdin --backup-
 место без вопросов, `--no-backup-dir` пропускает шаг (останется напоминание), `--yes` принимает риск системного диска.
 Копии связей позже: `yandi admin backup status | places | set-dir ПУТЬ [--yes] | off | now`.
 
-## Управление
+## Administration
 ```
 yandi admin                       # меню
 yandi admin status | devices | alerts | update
@@ -65,7 +59,7 @@ yandi admin raw GET /api/status
 `proxies add|test` пароль администратора запрашивается ДО списка прокси: порядок строк — пароль, затем прокси по одному в строке, пустая
 строка. `proxies settings` принимает только `on` или `off`. Ответ узла проверяется строго: оборванный или не-JSON ответ — ошибка.
 
-## Что НЕ делает
+## What this does not do
 - Не заменяет резервную копию связей: сид-фраза (и контрольное слово) возвращают узел, а телефоны, контакты и группы — только копия `.yandibak`; восстановление: `yandi setup --restore`.
 - Не открывает порты брандмауэра и не настраивает роутер: см. `DEPLOYMENT.md` и `deploy/nftables.conf.example`.
 - Служба создаётся для обычного пользователя; запуск установщика от root отказывает (данные узла лежат в домашней папке).

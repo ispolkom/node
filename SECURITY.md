@@ -1,26 +1,26 @@
-# Безопасность
+# Security
 
-## Как сообщить об уязвимости
+## Reporting a vulnerability
 
-**Не публикуйте уязвимость в открытых задачах (issues) и обсуждениях.** Напишите владельцам репозитория лично: используйте раздел *Security → Report a vulnerability* на странице репозитория на GitHub (закрытое обращение). В сообщении укажите: что найдено, как воспроизвести, версию (коммит), что, по-вашему, может случиться.
+**Do not publish vulnerabilities in public issues or discussions.** Contact the repository owners privately through *Security → Report a vulnerability* on GitHub. Include what you found, how to reproduce it, the affected version or commit, and what you think could happen.
 
-Мы ответим по возможности быстро, исправим, а потом (по договорённости с вами) опишем исправление публично. Просьба не использовать найденное против чужих работающих узлов.
+We will respond as soon as possible, fix the issue, and describe the fix publicly later if we agree with you. Do not use a finding against other people's running nodes.
 
-## Что считается уязвимостью
+## What counts as a vulnerability
 
-Особенно важно: чтение или подмена чужого трафика; обход проверки подписей или защиты от повторов; выход в домашнюю сеть владельца через выход-узел; выполнение чужих данных как кода; падение или зависание узла от чужих байтов; утечка ключей или паролей в журналы и файлы; подмена списка входных узлов (`bootstrap/`).
+Examples include reading or altering another user's traffic; bypassing signature or replay checks; reaching the owner's home network through an exit node; executing attacker-controlled data as code; crashing or hanging a node with attacker-controlled bytes; leaking keys or passwords into logs or files; and replacing the entry-node list (`bootstrap/`).
 
-## Что проект обещает и чего нет
+## What the project promises and what it does not
 
-Обещания, которые охраняют тесты, — в [`docs/INVARIANTS.md`](docs/INVARIANTS.md). Известные недостатки и план их закрытия — в [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md) и [`docs/ROADMAP.md`](docs/ROADMAP.md). Коротко:
+The promises guarded by tests are listed in [`docs/INVARIANTS.md`](docs/INVARIANTS.md). Known limitations and the plan for addressing them are in [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md). In short:
 
-- проект **не проходил независимый аудит**;
-- шифрование — по звену между соседними узлами, а не «человек — человек» целиком (сквозного слоя ещё нет);
-- сеть **нельзя считать анонимной** против наблюдателя, который видит значительную часть сети;
-- узел, через который выходят в интернет, виден как источник этого трафика: владелец выхода отвечает за то, что через него идёт.
+- the project **has not undergone an independent audit**;
+- encryption is applied per link between neighboring nodes, not end-to-end from person to person (the end-to-end layer is not complete);
+- the network **must not be considered anonymous** against an observer who can see a significant part of it;
+- an exit node is visible as the source of traffic leaving through it, so the exit owner is responsible for traffic sent through that node.
 
-## Для тех, кто запускает узел
+## For node operators
 
-- Держите узел обновлённым; не открывайте выход для «всех», если не готовы отвечать за чужой трафик (по умолчанию выход — только для доверенных).
-- Секреты (ключи, пароль входа, секрет своих устройств, ключ подписи списка входных узлов) создаются с правами `0600`; не кладите их в общий доступ и в резервные копии без защиты.
-- Страница управления слушает только `127.0.0.1`; не пробрасывайте её наружу.
+- Keep the node up to date. Do not open the exit to “everyone” unless you are prepared to take responsibility for other people's traffic; the default is trusted nodes only.
+- Secrets such as keys, the login password, device secrets, and the entry-list signing key are created with mode `0600`. Do not expose them or put them into unprotected backups.
+- The administration page listens only on `127.0.0.1`; do not expose it externally.
