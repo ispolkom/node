@@ -99,3 +99,41 @@ jobs:
       - name: mobile audio and group event tests
         working-directory: mobile/yandi_mobile
         run: flutter test --no-pub test/app_sounds_test.dart test/call_collision_test.dart test/call_delivery_test.dart test/call_wire_delivery_test.dart test/replay_priority_test.dart test/bug_r13_ledger_notification_test.dart test/ws_live_flood_test.dart test/e2e_security_test.dart test/group_service_test.dart
+
+  deb-installability:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12, ubuntu:24.04]
+    runs-on: ubuntu-latest
+    env:
+      CMAKE_POLICY_VERSION_MINIMUM: "3.5"
+    steps:
+      - uses: actions/checkout@v4
+      - name: build dependencies
+        run: sudo apt-get update && sudo apt-get install -y fakeroot imagemagick clang cmake ninja-build pkg-config libasound2-dev libgtk-3-dev libmpv-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.38.9'
+          channel: stable
+          cache: true
+      - name: build node package
+        run: |
+          cargo build --release
+          bash tools/build_deb.sh
+      - name: build desktop package
+        working-directory: desktop/yandi_desktop
+        run: |
+          flutter pub get
+          flutter build linux --release --no-pub
+      - name: package desktop
+        run: bash tools/build_desktop_deb.sh
+      - name: test install and removal in clean image
+        run: |
+          docker run --rm --privileged \
+            -v "$PWD/dist:/packages:ro" \
+            -v "$PWD/tools/test_deb_packages.sh:/test_deb_packages.sh:ro" \
+            "${{ matrix.image }}" \
+            bash /test_deb_packages.sh /packages

@@ -37,7 +37,7 @@ Maintainer: YANDI <yandi-world@outlook.com>
 Section: net
 Priority: optional
 Installed-Size: ${SIZE}
-Depends: libc6 (>= 2.36), libgcc-s1, libopus0, libssl3 (>= 3.0)
+Depends: libc6 (>= 2.36), libgcc-s1, libopus0, libssl3 (>= 3.0) | libssl3t64 (>= 3.0)
 Recommends: coturn, nftables
 Homepage: https://github.com/ispolkom/node
 Description: YANDI — узел сети личных соединений
