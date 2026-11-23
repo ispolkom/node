@@ -37,6 +37,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   AuthStage? auth;
   VaultState? vault;
   bool connected = false, entered = false, busy = false, visible = true;
+  // Keep the call poller alive after focus is lost while clearing the vault
+  // status and private UI state. The actual accept path still re-checks the
+  // current vault state before authorizing a call.
+  bool keepCallPoller = false;
+
   /// Мастер первой настройки: при уходе из окна скрывается (слова не остаются на экране), через [_wizardWipeAfter] пересоздаётся без введённого.
   int wizardGeneration = 0;
   Timer? wizardWipeTimer;
@@ -44,16 +49,20 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   /// Сообщение «Доступно обновление …» из /api/update/status (null — нет).
   String? updateNotice;
+
   /// Ответ `/api/update/status` целиком (для закреплённого блока новостей на главной).
   Map<String, dynamic>? updateStatus;
   bool polling = false, lockUnconfirmed = false;
   int epoch = 0, tick = 0, formVersion = 0, operation = 0;
   String? error, notice;
   String page = 'Панель';
+
   /// Режим администратора (docs/ROLES.md): отдельное меню; сеанс держит узел 15 минут по паролю.
   bool adminMode = false;
+
   /// Счётчики колокольчика (только числа; считаются узлом без расшифровки, поэтому видны и при запертой среде).
   int alertMessages = 0, alertNotices = 0;
+
   /// Предупреждение после восстановления из копии (что не очищено); остаётся на экране, пока его не закроют.
   String? restoreWarning;
   List<Map<String, dynamic>> notices = [];
@@ -71,8 +80,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     callsController.onStopped = () {
       final state = WidgetsBinding.instance.lifecycleState;
-      if (mounted && blurIgnored && !callsController.running &&
-          state != null && state != AppLifecycleState.resumed) {
+      if (mounted &&
+          blurIgnored &&
+          !callsController.running &&
+          state != null &&
+          state != AppLifecycleState.resumed) {
         didChangeAppLifecycleState(state);
       }
     };
@@ -107,11 +119,17 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       timer = Timer.periodic(const Duration(seconds: 1), (_) => poll());
   }
 
-  static const adminPages = {'Статус узла', 'Шлюзы', 'Жалобы', 'Настройки узла'};
+  static const adminPages = {
+    'Статус узла',
+    'Шлюзы',
+    'Жалобы',
+    'Настройки узла',
+  };
 
   /// [keepAdmin]: потеря фокуса окна стирает содержимое, но не сеанс администратора — он живёт на узле ограниченное время и ничего личного
   /// не содержит; иначе после любого переключения окна страницы управления остались бы на экране без токена и отвечали бы 403.
-  void wipe({bool keepAdmin = false}) {
+  void wipe({bool keepAdmin = false, bool keepCalls = false}) {
+    if (!keepCalls) keepCallPoller = false;
     if (!keepAdmin) {
       // сеанс администратора не переживает блокировку, выход, обрыв связи и смену пользователя: токен забывается, админ-страницы закрываются
       AdminToken.value = null;
@@ -176,7 +194,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       });
     }
     timer?.cancel();
-    wipe(keepAdmin: true);
+    wipe(keepAdmin: true, keepCalls: true);
     if (mounted) setState(() {});
     if (visible) {
       checkAuth(preserveEntry: entered);
@@ -251,6 +269,7 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     setState(() {
       vault = next;
       lockUnconfirmed = false;
+      keepCallPoller = next.unlocked;
     });
     if (entered && next.unlocked && !nickAsked) ensureNick();
   }
@@ -284,20 +303,30 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       if (!mounted || own != epoch) return;
       int n(Object? v) => v is num ? v.toInt().clamp(0, 99999) : 0;
       final m = n(r['messages']), x = n(r['notices']), c = n(r['missed_calls']);
-      if (m != alertMessages || x != alertNotices || c != alertCalls) setState(() { alertMessages = m; alertNotices = x; alertCalls = c; });
+      if (m != alertMessages || x != alertNotices || c != alertCalls)
+        setState(() {
+          alertMessages = m;
+          alertNotices = x;
+          alertCalls = c;
+        });
     } catch (_) {}
   }
 
   /// Число на колокольчике: ожидающие сообщения + непрочитанные чаты текущего сеанса + новые извещения админ-панели.
-  int get alertTotal => alertMessages + background.unread.length + alertNotices + alertCalls;
+  int get alertTotal =>
+      alertMessages + background.unread.length + alertNotices + alertCalls;
 
   /// Подсказка к колокольчику: что именно посчитано (без имён и текста).
   String get alertHint {
     final parts = <String>[
-      if (alertMessages > 0) '${preferences.english ? 'Messages waiting' : 'Сообщений ждёт'}: $alertMessages',
-      if (background.unread.isNotEmpty) '${preferences.english ? 'Unread chats' : 'Непрочитанных чатов'}: ${background.unread.length}',
-      if (alertCalls > 0) '${preferences.english ? 'Missed calls' : 'Пропущенных звонков'}: $alertCalls',
-      if (alertNotices > 0) '${preferences.english ? 'Admin notices' : 'Извещений админ-панели'}: $alertNotices',
+      if (alertMessages > 0)
+        '${preferences.english ? 'Messages waiting' : 'Сообщений ждёт'}: $alertMessages',
+      if (background.unread.isNotEmpty)
+        '${preferences.english ? 'Unread chats' : 'Непрочитанных чатов'}: ${background.unread.length}',
+      if (alertCalls > 0)
+        '${preferences.english ? 'Missed calls' : 'Пропущенных звонков'}: $alertCalls',
+      if (alertNotices > 0)
+        '${preferences.english ? 'Admin notices' : 'Извещений админ-панели'}: $alertNotices',
     ];
     final base = preferences.english
         ? 'YANDI sounds: ${preferences.sound && !preferences.dnd ? 'on' : 'off'}'
@@ -324,7 +353,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
           adminMode = false;
           AdminToken.value = null;
           page = 'Панель';
-          notice = 'Сеанс администратора закончился. Войдите в админ-панель снова.';
+          notice =
+              'Сеанс администратора закончился. Войдите в админ-панель снова.';
           formVersion++;
         }
       });
@@ -340,7 +370,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     if (!ok) {
       final ctx = navigator.currentContext;
       if (ctx == null) return;
-      ok = await showDialog<bool>(context: ctx, builder: (_) => AdminPasswordDialog(api: widget.api)) ?? false;
+      ok =
+          await showDialog<bool>(
+            context: ctx,
+            builder: (_) => AdminPasswordDialog(api: widget.api),
+          ) ??
+          false;
     }
     if (!ok || !mounted) return;
     ackNotices('Статус узла');
@@ -366,14 +401,22 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     };
     final kinds = byPage[page];
     if (kinds == null) return;
-    unawaited(widget.api.request('/api/notices/ack', body: {'kinds': kinds}).then((_) {}, onError: (_) {}));
+    unawaited(
+      widget.api
+          .request('/api/notices/ack', body: {'kinds': kinds})
+          .then((_) {}, onError: (_) {}),
+    );
   }
 
   /// Владелец открыл чат: пропущенные звонки просмотрены, счётчик на узле и на колоколе обнуляется.
   void ackCalls() {
     if (alertCalls == 0) return;
     setState(() => alertCalls = 0);
-    unawaited(widget.api.request('/api/alerts/ack', method: 'POST', body: const {}).then((_) {}, onError: (_) {}));
+    unawaited(
+      widget.api
+          .request('/api/alerts/ack', method: 'POST', body: const {})
+          .then((_) {}, onError: (_) {}),
+    );
   }
 
   /// Выйти из админ-панели: сеанс на узле закрывается.
@@ -495,9 +538,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
       final pending = widget.api.request(path, body: body);
       body.clear();
       final response = await pending;
-      if (path == '/api/auth/restore' && response['warnings'] is List && (response['warnings'] as List).isNotEmpty) {
+      if (path == '/api/auth/restore' &&
+          response['warnings'] is List &&
+          (response['warnings'] as List).isNotEmpty) {
         // что не удалось очистить от секретов старого формата — владельцу, с точными путями
-        restoreWarning = 'Копия восстановлена, но не всё очищено от секретов старого формата: ${(response['warnings'] as List).join('; ')}';
+        restoreWarning =
+            'Копия восстановлена, но не всё очищено от секретов старого формата: ${(response['warnings'] as List).join('; ')}';
       }
       if (!mounted || own != epoch) return;
       if (path == '/api/auth/setup' || path == '/api/auth/restore') {
@@ -545,16 +591,23 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     } catch (e) {
       if (!mounted || own != epoch) return;
       final failure = e is ApiFailure ? e : const ApiFailure('protocol');
-      if (path == '/api/auth/restore' && (failure.warnings.isNotEmpty || failure.filesWritten)) {
+      if (path == '/api/auth/restore' &&
+          (failure.warnings.isNotEmpty || failure.filesWritten)) {
         // отказ после записи части файлов: владелец узнаёт, что файлы уже на диске (повтор может отказать из-за них), и пути из предупреждений (P19-3, P20-4)
-        restoreWarning = '${failure.filesWritten ? 'Часть файлов копии записана; повтор восстановления может отказать из-за них. ' : ''}${failure.warnings.isEmpty ? '' : 'Не очищено, пропущено или не подтверждено: ${failure.warnings.join('; ')}'}';
+        restoreWarning =
+            '${failure.filesWritten ? 'Часть файлов копии записана; повтор восстановления может отказать из-за них. ' : ''}${failure.warnings.isEmpty ? '' : 'Не очищено, пропущено или не подтверждено: ${failure.warnings.join('; ')}'}';
       }
       setState(() {
         if (failure.kind == 'disconnected' || failure.kind == 'timeout') {
           disconnect(failure);
         } else {
           // отказ восстановления после записи файлов: мастер всё ещё на экране, поэтому предупреждение идёт и в текст ошибки
-          error = path == '/api/auth/restore' && restoreWarning != null && (failure.warnings.isNotEmpty || failure.filesWritten) ? '${failure.message} $restoreWarning' : failure.message;
+          error =
+              path == '/api/auth/restore' &&
+                  restoreWarning != null &&
+                  (failure.warnings.isNotEmpty || failure.filesWritten)
+              ? '${failure.message} $restoreWarning'
+              : failure.message;
         }
         if (isLock) lockUnconfirmed = true;
       });
@@ -602,7 +655,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
 
   /// Кнопки тёмно-зелёные внутри (страница настроек, формы закрытой среды).
   Widget solidScope(Widget child) => Builder(
-    builder: (context) => Theme(data: Icq.solidButtons(Theme.of(context)), child: child),
+    builder: (context) =>
+        Theme(data: Icq.solidButtons(Theme.of(context)), child: child),
   );
 
   Widget vaultPanel() => solidScope(vaultPanelBody());
@@ -650,7 +704,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                 );
               final payload = <String, dynamic>{
                 'password': values[0],
-                'phrase': joinSeedPhrase(phrase.split(RegExp(r'\s+')).join(' '), values[3]),
+                'phrase': joinSeedPhrase(
+                  phrase.split(RegExp(r'\s+')).join(' '),
+                  values[3],
+                ),
               };
               await act('/api/vault/setup', payload);
             },
@@ -677,7 +734,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             submit: (values) {
               validateNew(values[2], values[3], minimum: 6);
               return act('/api/vault/recover', {
-                'phrase': joinSeedPhrase(values[0].trim().split(RegExp(r'\s+')).join(' '), values[1]),
+                'phrase': joinSeedPhrase(
+                  values[0].trim().split(RegExp(r'\s+')).join(' '),
+                  values[1],
+                ),
                 'new_password': values[2],
               });
             },
@@ -719,7 +779,11 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
   }
 
   /// Конец мастера: ключи из сид-фразы (пароль входа = пароль владельца), затем закрытая среда с теми же паролем и фразой.
-  Future<void> createWithSeed(String password, String phrase, [String admin = '']) async {
+  Future<void> createWithSeed(
+    String password,
+    String phrase, [
+    String admin = '',
+  ]) async {
     await act('/api/auth/setup', {
       'login_password': password,
       'login_password_repeat': password,
@@ -732,14 +796,18 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
     setState(() => entered = true);
     await act('/api/vault/setup', {'password': password, 'phrase': phrase});
     // после сида и пароля — где хранить копии связей (можно пропустить; напоминание остаётся)
-    if (mounted && error == null) await offerBackupPlace(admin.isNotEmpty ? admin : password);
+    if (mounted && error == null)
+      await offerBackupPlace(admin.isNotEmpty ? admin : password);
   }
 
   /// Первая настройка закончена: предложить место для копий связей. Сеанс администратора открывается только на это окно паролем, который человек
   /// только что задал, и закрывается сразу после.
   Future<void> offerBackupPlace(String adminPassword) async {
     try {
-      final r = await widget.api.request('/api/admin/session', body: {'password': adminPassword});
+      final r = await widget.api.request(
+        '/api/admin/session',
+        body: {'password': adminPassword},
+      );
       AdminToken.value = r['token'] is String ? r['token'] as String : null;
     } catch (_) {
       return;
@@ -755,7 +823,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             constraints: const BoxConstraints(maxWidth: 680),
             child: SingleChildScrollView(
               padding: const EdgeInsets.all(16),
-              child: BackupPanel(api: widget.api, isActive: () => true, firstRun: true, onDone: () => Navigator.pop(c)),
+              child: BackupPanel(
+                api: widget.api,
+                isActive: () => true,
+                firstRun: true,
+                onDone: () => Navigator.pop(c),
+              ),
             ),
           ),
         ),
@@ -856,7 +929,12 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
               validateNew(v[2], v[3]);
               // ошибка в слове или его пропуск — неверная попытка (после 20 таких данные закрытой среды стираются)
               return act('/api/auth/recover', {
-                'recovery_code': v[1].isEmpty ? v[0] : joinSeedPhrase(v[0].trim().split(RegExp(r'\s+')).join(' '), v[1]),
+                'recovery_code': v[1].isEmpty
+                    ? v[0]
+                    : joinSeedPhrase(
+                        v[0].trim().split(RegExp(r'\s+')).join(' '),
+                        v[1],
+                      ),
                 'new_login_password': v[2],
                 'remember_me': false,
               });
@@ -884,7 +962,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               vaultPanel(),
-              if (vault!.configured) ...[const SizedBox(height: 12), SupportBlock(signed: updateStatus?['support'])],
+              if (vault!.configured) ...[
+                const SizedBox(height: 12),
+                SupportBlock(signed: updateStatus?['support']),
+              ],
             ],
           )
         else if (page == 'Панель')
@@ -909,77 +990,86 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
             ],
           )
         else if (page == 'Настройки')
-          solidScope(Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          vaultPanel(),
-          const Divider(),
-          AnimatedBuilder(
-            animation: preferences,
-            builder: (context, _) => PanelStack(
-              title: 'Настройки оболочки',
+          solidScope(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
-                CheckboxListTile(
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Язык / Language'),
-                  subtitle: UiText(preferences.english ? 'English' : 'Русский'),
-                  value: preferences.english,
-                  onChanged: (value) {
-                    preferences.english = value!;
-                    preferences.changed();
-                  },
+                vaultPanel(),
+                const Divider(),
+                AnimatedBuilder(
+                  animation: preferences,
+                  builder: (context, _) => PanelStack(
+                    title: 'Настройки оболочки',
+                    children: [
+                      CheckboxListTile(
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const UiText('Язык / Language'),
+                        subtitle: UiText(
+                          preferences.english ? 'English' : 'Русский',
+                        ),
+                        value: preferences.english,
+                        onChanged: (value) {
+                          preferences.english = value!;
+                          preferences.changed();
+                        },
+                      ),
+                      const UiText(
+                        'Язык применяется ко всем формам и состояниям оболочки. Пользовательский текст не переводится.',
+                      ),
+                      CheckboxListTile(
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const UiText('Фоновые оповещения узловых чатов'),
+                        value: preferences.background,
+                        onChanged: (v) {
+                          preferences.background = v!;
+                          background.reset();
+                          preferences.changed();
+                        },
+                      ),
+                      CheckboxListTile(
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const UiText('Звуки YANDI'),
+                        value: preferences.sound,
+                        onChanged: (value) {
+                          preferences.sound = value!;
+                          preferences.changed();
+                        },
+                      ),
+                      CheckboxListTile(
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const UiText('Уведомления ОС'),
+                        value: preferences.notifications,
+                        onChanged: (value) {
+                          preferences.notifications = value!;
+                          preferences.changed();
+                        },
+                      ),
+                      CheckboxListTile(
+                        controlAffinity: ListTileControlAffinity.leading,
+                        title: const UiText('Не беспокоить'),
+                        value: preferences.dnd,
+                        onChanged: (value) {
+                          preferences.dnd = value!;
+                          preferences.changed();
+                        },
+                      ),
+                      const UiText(
+                        'Оповещения не передают содержимое и имя в ОС. Фоновый опрос: до 32 доверенных узловых контактов и 8 групп. Для телефонов нужен отдельный API непрочитанных. Настройки действуют до закрытия оболочки.',
+                      ),
+                      if (preferences.failure != null)
+                        UiText(preferences.failure!),
+                    ],
+                  ),
                 ),
-                const UiText(
-                  'Язык применяется ко всем формам и состояниям оболочки. Пользовательский текст не переводится.',
-                ),
-                CheckboxListTile(
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Фоновые оповещения узловых чатов'),
-                  value: preferences.background,
-                  onChanged: (v) {
-                    preferences.background = v!;
-                    background.reset();
-                    preferences.changed();
-                  },
-                ),
-                CheckboxListTile(
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Звуки YANDI'),
-                  value: preferences.sound,
-                  onChanged: (value) {
-                    preferences.sound = value!;
-                    preferences.changed();
-                  },
-                ),
-                CheckboxListTile(
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Уведомления ОС'),
-                  value: preferences.notifications,
-                  onChanged: (value) {
-                    preferences.notifications = value!;
-                    preferences.changed();
-                  },
-                ),
-                CheckboxListTile(
-                  controlAffinity: ListTileControlAffinity.leading,
-                  title: const UiText('Не беспокоить'),
-                  value: preferences.dnd,
-                  onChanged: (value) {
-                    preferences.dnd = value!;
-                    preferences.changed();
-                  },
-                ),
-                const UiText(
-                  'Оповещения не передают содержимое и имя в ОС. Фоновый опрос: до 32 доверенных узловых контактов и 8 групп. Для телефонов нужен отдельный API непрочитанных. Настройки действуют до закрытия оболочки.',
-                ),
-                if (preferences.failure != null) UiText(preferences.failure!),
+                if (visible &&
+                    vault != null &&
+                    !vault!.hasError &&
+                    (!vault!.configured || vault!.unlocked))
+                  features(),
               ],
             ),
-          ),
-          if (visible &&
-              vault != null &&
-              !vault!.hasError &&
-              (!vault!.configured || vault!.unlocked))
-            features(),
-        ])) else if (adminMode && visible)
+          )
+        else if (adminMode && visible)
           // управление узлом не требует личной среды: жалобы, шлюзы и настройки узла открываются одним админ-сеансом (P14-9)
           (page == 'Настройки узла' ? solidScope(features()) : features())
         else if (!visible || vault == null)
@@ -1020,7 +1110,13 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                   ? TabStrip(
                       header: true,
                       labels: adminMode
-                          ? const ['Личный аккаунт', 'Статус узла', 'Шлюзы', 'Жалобы', 'Настройки узла']
+                          ? const [
+                              'Личный аккаунт',
+                              'Статус узла',
+                              'Шлюзы',
+                              'Жалобы',
+                              'Настройки узла',
+                            ]
                           : [
                               'Главная',
                               'Чат',
@@ -1028,7 +1124,9 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                               'Группы',
                               'Настройки',
                               'О приложении',
-                              unreadNotices > 0 ? 'Админ-панель ($unreadNotices)' : 'Админ-панель',
+                              unreadNotices > 0
+                                  ? 'Админ-панель ($unreadNotices)'
+                                  : 'Админ-панель',
                             ],
                       selected: page == 'Панель' ? 'Главная' : page,
                       onSelected: busy
@@ -1102,7 +1200,8 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                         size: 18,
                       ),
                       onPressed: () {
-                        preferences.sound = !preferences.sound || preferences.dnd;
+                        preferences.sound =
+                            !preferences.sound || preferences.dnd;
                         if (preferences.sound) preferences.dnd = false;
                         preferences.changed();
                       },
@@ -1114,13 +1213,26 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                         top: -2,
                         child: IgnorePointer(
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
-                            constraints: const BoxConstraints(minWidth: 16, minHeight: 16),
-                            decoration: BoxDecoration(color: const Color(0xffb3261e), borderRadius: BorderRadius.circular(8)),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 1,
+                            ),
+                            constraints: const BoxConstraints(
+                              minWidth: 16,
+                              minHeight: 16,
+                            ),
+                            decoration: BoxDecoration(
+                              color: const Color(0xffb3261e),
+                              borderRadius: BorderRadius.circular(8),
+                            ),
                             child: Text(
                               alertTotal > 99 ? '99+' : '$alertTotal',
                               textAlign: TextAlign.center,
-                              style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                           ),
                         ),
@@ -1252,9 +1364,10 @@ class _DesktopAppState extends State<DesktopApp> with WidgetsBindingObserver {
                             ),
                           if (entered &&
                               connected &&
-                              vault != null &&
-                              !vault!.hasError &&
-                              (!vault!.configured || vault!.unlocked))
+                              (keepCallPoller ||
+                                  (vault != null &&
+                                      !vault!.hasError &&
+                                      (!vault!.configured || vault!.unlocked))))
                             callPanel(),
                           if (!connected)
                             Panel(

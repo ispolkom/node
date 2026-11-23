@@ -20,8 +20,10 @@ class FakeApi implements Api {
     'migration_pending': false,
     'error': null,
   };
+
   /// Сеанс администратора, как его держит узел, и извещения для личного аккаунта.
   bool adminActive = false;
+
   /// Счётчики колокольчика, как их отдаёт узел (только числа).
   int alertMessages = 0, alertNotices = 0, alertCalls = 0;
   List<Map<String, dynamic>> notices = [];
@@ -40,11 +42,26 @@ class FakeApi implements Api {
     if (path == '/api/admin/session') {
       if (method == 'DELETE') adminActive = false;
       if (body != null) adminActive = true;
-      return {'ok': true, 'active': adminActive, if (body != null) 'token': 'tok-test'};
+      return {
+        'ok': true,
+        'active': adminActive,
+        if (body != null) 'token': 'tok-test',
+      };
     }
-    if (path == '/api/notices') return {'items': notices, 'unread': notices.length, 'admin_active': adminActive};
+    if (path == '/api/notices')
+      return {
+        'items': notices,
+        'unread': notices.length,
+        'admin_active': adminActive,
+      };
     if (path == '/api/notices/ack') return {'ok': true};
-    if (path == '/api/alerts') return {'messages': alertMessages, 'notices': alertNotices, 'missed_calls': alertCalls, 'locked': false};
+    if (path == '/api/alerts')
+      return {
+        'messages': alertMessages,
+        'notices': alertNotices,
+        'missed_calls': alertCalls,
+        'locked': false,
+      };
     if (path == '/api/status') return {'short_id': 'abc', 'status': 'online'};
     if (path == '/api/nodes') return {'nodes': []};
     if (path == '/api/speed') return {'rx_speed': 12};
@@ -81,12 +98,24 @@ Finder action(String label) {
   final tip = find.byTooltip(label);
   return tip.evaluate().isNotEmpty ? tip.first : find.text(label).first;
 }
+
 /// Страница админ-панели: сначала «Админ-панель» и пароль администратора, затем сама страница.
 Future<void> admin(WidgetTester tester, String page) async {
   await click(tester, 'Админ-панель');
   if (find.byType(AlertDialog).evaluate().isNotEmpty) {
-    await tester.enterText(find.descendant(of: find.byType(AlertDialog), matching: find.byType(TextField)), 'admin-pass');
-    await tester.tap(find.descendant(of: find.byType(AlertDialog), matching: find.widgetWithText(ElevatedButton, 'Войти')));
+    await tester.enterText(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.byType(TextField),
+      ),
+      'admin-pass',
+    );
+    await tester.tap(
+      find.descendant(
+        of: find.byType(AlertDialog),
+        matching: find.widgetWithText(ElevatedButton, 'Войти'),
+      ),
+    );
     await tester.pumpAndSettle();
   }
   if (page != 'Статус узла') await click(tester, page);
@@ -150,7 +179,11 @@ void main() {
     final api = FakeApi();
     await start(t, api);
     await click(t, 'Войти');
-    expect(find.text('Запустить узел'), findsNothing, reason: 'Главная пока пустая');
+    expect(
+      find.text('Запустить узел'),
+      findsNothing,
+      reason: 'Главная пока пустая',
+    );
     await admin(t, 'Статус узла');
     expect(find.text('Запустить узел'), findsOneWidget);
     expect(find.text('abc'), findsOneWidget);
@@ -169,43 +202,76 @@ void main() {
     t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await t.pump(const Duration(seconds: 1));
     await t.pumpAndSettle();
-    expect(api.calls.where((p) => p == '/api/speed').length, greaterThan(count));
-    await stop(t);
-  });
-  testWidgets('vault setup requires a 12, 18 or 24 word seed phrase, with an optional control word', (t) async {
-    t.view.physicalSize = const Size(1000, 1500);
-    t.view.devicePixelRatio = 1;
-    addTearDown(t.view.resetPhysicalSize);
-    addTearDown(t.view.resetDevicePixelRatio);
-    final api = m2.FeatureApi()..configured = false..unlocked = false;
-    await start(t, api);
-    await vaultPage(t);
-    await t.enterText(find.byType(TextField).at(0), 'owner password');
-    await t.enterText(find.byType(TextField).at(1), 'owner password');
-    await click(t, 'Создать закрытую среду');
-    expect(find.byType(AlertDialog), findsNothing);
-    expect(api.calls.contains('/api/vault/setup'), false);
-    await t.enterText(find.byType(TextField).at(0), 'owner password');
-    await t.enterText(find.byType(TextField).at(1), 'owner password');
-    await t.enterText(find.byType(TextField).at(2), 'alpha1 bravo2 charlie3 delta4');
-    await click(t, 'Создать закрытую среду');
-    expect(find.text('Введите 12, 18 или 24 слова сид-фразы'), findsOneWidget);
-    expect(api.calls.contains('/api/vault/setup'), false);
-    const seed = 'legal winner thank year wave sausage worth useful legal winner thank yellow';
-    await t.enterText(find.byType(TextField).at(0), 'owner password');
-    await t.enterText(find.byType(TextField).at(1), 'owner password');
-    await t.enterText(find.byType(TextField).at(2), seed);
-    await click(t, 'Создать закрытую среду');
-    expect(api.bodies.last, {
-      'password': 'owner password',
-      'phrase': seed,
-    });
     expect(
-      find.text('Открыта. Узел может читать историю и группы ПК.'),
-      findsOneWidget,
+      api.calls.where((p) => p == '/api/speed').length,
+      greaterThan(count),
     );
     await stop(t);
   });
+
+  testWidgets('incoming call poller survives a hidden window', (t) async {
+    final api = FakeApi();
+    await start(t, api);
+    await click(t, 'Войти');
+    await t.pump(const Duration(seconds: 1));
+    final before = api.calls
+        .where((p) => p == '/api/mobile/call/events?after=0')
+        .length;
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.hidden);
+    await t.pump(const Duration(seconds: 3));
+    final after = api.calls
+        .where((p) => p.startsWith('/api/mobile/call/events'))
+        .length;
+    expect(after, greaterThan(before));
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.inactive);
+    t.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
+    await t.pumpAndSettle();
+    await stop(t);
+  });
+
+  testWidgets(
+    'vault setup requires a 12, 18 or 24 word seed phrase, with an optional control word',
+    (t) async {
+      t.view.physicalSize = const Size(1000, 1500);
+      t.view.devicePixelRatio = 1;
+      addTearDown(t.view.resetPhysicalSize);
+      addTearDown(t.view.resetDevicePixelRatio);
+      final api = m2.FeatureApi()
+        ..configured = false
+        ..unlocked = false;
+      await start(t, api);
+      await vaultPage(t);
+      await t.enterText(find.byType(TextField).at(0), 'owner password');
+      await t.enterText(find.byType(TextField).at(1), 'owner password');
+      await click(t, 'Создать закрытую среду');
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(api.calls.contains('/api/vault/setup'), false);
+      await t.enterText(find.byType(TextField).at(0), 'owner password');
+      await t.enterText(find.byType(TextField).at(1), 'owner password');
+      await t.enterText(
+        find.byType(TextField).at(2),
+        'alpha1 bravo2 charlie3 delta4',
+      );
+      await click(t, 'Создать закрытую среду');
+      expect(
+        find.text('Введите 12, 18 или 24 слова сид-фразы'),
+        findsOneWidget,
+      );
+      expect(api.calls.contains('/api/vault/setup'), false);
+      const seed =
+          'legal winner thank year wave sausage worth useful legal winner thank yellow';
+      await t.enterText(find.byType(TextField).at(0), 'owner password');
+      await t.enterText(find.byType(TextField).at(1), 'owner password');
+      await t.enterText(find.byType(TextField).at(2), seed);
+      await click(t, 'Создать закрытую среду');
+      expect(api.bodies.last, {'password': 'owner password', 'phrase': seed});
+      expect(
+        find.text('Открыта. Узел может читать историю и группы ПК.'),
+        findsOneWidget,
+      );
+      await stop(t);
+    },
+  );
   testWidgets('vault unlock, change, timeout, lock, phrase recovery', (
     t,
   ) async {
@@ -229,7 +295,10 @@ void main() {
       'old_password': 'owner password',
       'new_password': 'new password',
     });
-    await click(t, 'Никогда не блокировать'); // по умолчанию в тесте выключена: включаем таймер
+    await click(
+      t,
+      'Никогда не блокировать',
+    ); // по умолчанию в тесте выключена: включаем таймер
     await t.enterText(
       find.descendant(
         of: find.byType(TimeoutForm),
@@ -244,7 +313,9 @@ void main() {
     for (var i = 1; i <= 4; i++) {
       await t.enterText(
         find.byType(TextField).at(i),
-        i == 1 ? 'alpha1 bravo2 charlie3 delta4' : (i == 2 ? '' : 'recovered password'),
+        i == 1
+            ? 'alpha1 bravo2 charlie3 delta4'
+            : (i == 2 ? '' : 'recovered password'),
       );
     }
     await click(t, 'Восстановить словами');
@@ -313,16 +384,25 @@ void main() {
     expect(find.textContaining('Закрытая среда заперта'), findsOneWidget);
     await stop(t);
   });
-  testWidgets('logout locks the vault even when the cached state says it is already locked', (t) async {
-    final api = FakeApi()..configured = true..unlocked = false;
-    await start(t, api);
-    await click(t, 'Войти');
-    expect(api.calls.contains('/api/vault/lock'), false);
-    await t.tap(find.byTooltip('Выйти (запирает закрытую среду)'));
-    await t.pumpAndSettle();
-    expect(api.calls.contains('/api/vault/lock'), true, reason: 'выход всегда запирает среду');
-    await stop(t);
-  });
+  testWidgets(
+    'logout locks the vault even when the cached state says it is already locked',
+    (t) async {
+      final api = FakeApi()
+        ..configured = true
+        ..unlocked = false;
+      await start(t, api);
+      await click(t, 'Войти');
+      expect(api.calls.contains('/api/vault/lock'), false);
+      await t.tap(find.byTooltip('Выйти (запирает закрытую среду)'));
+      await t.pumpAndSettle();
+      expect(
+        api.calls.contains('/api/vault/lock'),
+        true,
+        reason: 'выход всегда запирает среду',
+      );
+      await stop(t);
+    },
+  );
   testWidgets('auth recovery sends existing API contract', (t) async {
     final api = FakeApi();
     await start(t, api);
