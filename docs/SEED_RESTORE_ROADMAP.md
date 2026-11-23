@@ -1,54 +1,45 @@
-# Сид-фраза как единственный секрет узла: роадмап (утверждён владельцем 2026-10-21)
+# Seed phrase as the node's only root secret: roadmap (owner-approved 2026-10-21)
 
-## Зачем
-Сегодня корень ключей узла случаен, а сид — лишь замок на файле `auth.json`. Без файлов (после переустановки, потери диска) сид ничего не восстанавливает, а мастер
-`yandi setup` вообще не умеет принять существующий сид. Решение владельца: сид (с необязательным контрольным словом) полностью определяет узел, как у кошельков;
-файл связей `.yandibak` — необязательное дополнение для того, что из сида не вывести.
+## Why
 
-## Решения владельца
-1. Сид 24 слова по умолчанию; выпадающий список 12 / 18 / 24. Человек сам решает степень защиты.
-2. **Контрольное слово** (одно слово, без пробелов, вводит и запоминает сам админ; не короче 8 знаков; регистр важен; вводится дважды; пусто — без слова). Без слова сид не
-   восстанавливает тот же узел. Слово подмешивается в вывод ключей и нигде не хранится. Слабое слово из словаря — предупреждение, не запрет.
-3. **Печатается только сид-фраза**, больше ничего (ни слова, ни памятки, ни номера узла).
-4. Восстановление: сид, слово (если было), новый пароль; показ номера узла и подтверждение до записи; необязательный файл `.yandibak` (флажок и кнопка «Прикрепить файл»,
-   в консоли путь) либо указание папки `yandi-node`, откуда берётся последняя копия. Без файла: личность, ключ подписи списка узлов и доверие к узлу возвращаются,
-   телефоны/контакты/группы нет (телефоны сопрягаются заново).
-5. **Копии связей по событиям**, место выбирается при первой настройке после сида и пароля (можно пропустить, тогда напоминание). Итоговый путь `…/yandi-node`.
-   Пишется и стирается пробный файл от имени самого узла; нет прав — «У меня нет прав для записи в это место» с причиной; системный диск — предупреждение
-   «храните копии вне системного диска». 7 автокопий, старые перезаписываются; «Сохранить сейчас» хранится отдельно (последние 5).
-   Триггеры: контакты, группы, смена владельца группы, добавление/удаление/повышение пользователей (в т. ч. по таймауту), ручное сохранение. Гости в копию не входят
-   (живут в памяти), поэтому их приход/уход копию не вызывает.
-6. Вся логика в консоли и в оболочке, на русском и английском.
+Today the node key root is random and the seed is only a lock on `auth.json`. Without the files (after reinstalling or losing the disk), the seed restores nothing, and the `yandi setup` wizard cannot accept an existing seed. The owner's decision is that the seed, with an optional control word, fully determines the node as in a wallet; the `.yandibak` pairing file is an optional supplement for data that cannot be derived from the seed.
 
-## Что уже есть (проверено по коду)
-* `key_root`: `Seed` (12/24, BIP-39), `login::create_keys` (корень случаен), `RootDocument` (обёртки устройство+восстановление), `identity_store` (v3, ключи под HKDF корня),
-  `looks_like_seed`, `recovery_secret`.
-* `core/identity.rs`: `NodeIdentity::new()` (случайные ключи) и `load_or_create_with_root`.
-* `node_vault.rs`: `VaultEnvelope::create_unlocked` (случайные `id` и `key`), `subkey(domain)` — из них ключ подписи списка узлов.
-* `node_backup.rs`: `seal/open_with_root/open_with_code`, `run_backup`, `write_to_dir`, `prune_dir` (KEEP_AUTO=7), `decide`, состояние, `finalize_vault`; `backup_api.rs`:
-  `/api/backup/{status,export,config}`, планировщик раз в сутки + `notify_critical`, `check_dir` (пробный файл); `backup_cli.rs`.
-* `web/first_setup.rs`: `/api/auth/seed/new`, `/api/auth/setup`, восстановление из копии (`do_restore`, нужен файл).
-* `admin_cli.rs`: `yandi setup` (всегда новый сид, без ввода существующего).
-* Оболочка: `setup_wizard.dart` (4 шага, список 12/24, печать сида).
+## Owner decisions
 
-## Состояние (2026-10-21)
-Сделано: ядро (сид → корень → личность → среда → ключ подписи списка), серверные ручки и предпросмотр, копии (папка yandi-node, проверка записи, 10 минут, ручные отдельно), консоль (`setup`, `--restore`, `--check`, `admin backup`), мастер оболочки и панель «Копии связей», сквозные тесты (`tests/admin_cli_test.rs`). Осталось: круги Codex, выпуск.
+1. Use 24 words by default; offer 12 / 18 / 24 in the selector. The user chooses the protection level.
+2. **Control word**: one word without spaces, entered and remembered by the administrator; at least 8 characters; case-sensitive; entered twice; empty means no word. Without it, the seed does not restore the same node. The word is mixed into key derivation and is never stored. A weak dictionary word produces a warning, not a rejection.
+3. **Print only the seed phrase**, and nothing else (no word, reminder, or node number).
+4. Restore with the seed, the word if one was used, and a new password. Show the node number and require confirmation before writing. An optional `.yandibak` file (checkbox and “Attach file” button; a path in the console) or a `yandi-node` directory can provide the latest backup. Without the file, the identity, node-list signing key, and trust in the node return; phones, contacts, and groups do not, and phones must be paired again.
+5. **Back up pairing data on events.** The location is selected during first setup after the seed and password (it can be skipped, with a reminder). The final path is `…/yandi-node`. The node writes and removes a probe file as its own user; if it lacks permission, show “I cannot write to this location” with the reason; warn when the system disk is selected. Keep seven automatic backups, replacing old ones; keep “Save now” separately (the latest five). Triggers include contacts, groups, group-owner changes, user add/remove/promotion (including timeout-based changes), and manual saves. Guests are not included (they live in memory), so guest arrival and departure do not trigger a backup.
+6. All console and shell logic is available in Russian and English.
 
-## Этапы
-1. **Ядро (key_root + узел).** `Seed` 12/18/24; `SeedSecret` = сид + контрольное слово → `seed_root` (Argon2id, пароль = сид‖слово, фикс. соль-домен);
-   корень узла = HKDF(seed_root) вместо случайного (только для сида); ключи личности узла (X25519, Ed25519) = HKDF(корень); `id` и ключ закрытой среды = HKDF(seed_root).
-   Тесты: тот же сид+слово → тот же номер узла и тот же ключ подписи списка; другое слово/сид → другие; без слова работает; старый путь с мастер-паролем не ломается.
-2. **Серверная часть.** `/api/auth/seed/preview` (номер узла по сиду и слову, ничего не пишет); `setup`/`vault/setup`/восстановление принимают `control_word`;
-   сверка номера с заголовком копии; копия открывается сидом+словом.
-3. **Копии.** Подпапка `yandi-node`, коды причин отказа записи, предупреждение о системном диске, список кандидатов (`/proc/mounts`), проверка раз в 10 минут (изменения
-   подхватываются быстро, без лишних записей), «сохранить сейчас» отдельно, напоминание «копии не настроены», `yandi backup status|now|set-dir|off`.
-4. **Консоль.** `yandi setup`: длина фразы, слово, номер узла, папка копий; `yandi setup --restore`, `--check`, `--control-word-stdin`; всё на двух языках.
-5. **Оболочка.** `setup_wizard.dart`: «новая настройка / восстановление», список 12/18/24, поле слова, флажок и кнопка файла, шаг папки копий, печать только сида.
-6. **Документы и сайт.** BACKUP.md, CONSOLE.md, страницы Debian/Ubuntu (ru/en), README.
-7. **Проверка и выпуск.** Тесты узла/приложения/оболочки, четыре круга Codex (Sol), CI зелёный, выпуск, сверка сайта.
+## Already implemented (verified in code)
 
-## Честные границы
-* Забыл слово — узел потерян без возврата; смена слова = смена узла (новый номер).
-* Слово слабее сида: у укравшего сид есть проверка по открытому номеру узла, поэтому Argon2id тяжёлый, а слову советуем 10+ случайных знаков.
-* Из сида не выводятся: телефоны (токены), контакты, группы, переписка — они в `.yandibak` (кроме переписки и файлов).
-* Телефонное приложение (своя сид-фраза и среда) в этот объём не входит.
+* `key_root`: `Seed` (12/18/24, BIP-39), `login::create_keys` (random root), `RootDocument` (device and recovery wrappers), `identity_store` (v3, keys under root HKDF), `looks_like_seed`, and `recovery_secret`.
+* `core/identity.rs`: `NodeIdentity::new()` (random keys) and `load_or_create_with_root`.
+* `node_vault.rs`: `VaultEnvelope::create_unlocked` (random `id` and `key`), `subkey(domain)` (the node-list signing key is derived from them).
+* `node_backup.rs`: `seal/open_with_root/open_with_code`, `run_backup`, `write_to_dir`, `prune_dir` (`KEEP_AUTO=7`), `decide`, state handling, and `finalize_vault`; `backup_api.rs`: `/api/backup/{status,export,config}`, the daily scheduler plus `notify_critical`, and `check_dir` (probe file); `backup_cli.rs`.
+* `web/first_setup.rs`: `/api/auth/seed/new`, `/api/auth/setup`, and restore from a backup (`do_restore`, a file is required).
+* `admin_cli.rs`: `yandi setup` (always creates a new seed; it does not accept an existing one).
+* Shell: `setup_wizard.dart` (four steps, 12/24 selector, seed printing).
+
+## Status (2026-10-21)
+
+Completed: the core (seed → root → identity → environment → node-list signing key), server endpoints and preview, backups (the `yandi-node` directory, write check, ten-minute polling, manual backups separately), the console (`setup`, `--restore`, `--check`, `admin backup`), the shell wizard and the “Pairing backups” panel, and end-to-end tests (`tests/admin_cli_test.rs`). Remaining: Codex review rounds and release.
+
+## Stages
+
+1. **Core (`key_root` + node).** `Seed` 12/18/24; `SeedSecret` = seed + control word → `seed_root` (Argon2id, password = seed‖word, fixed salt domain); node root = HKDF(`seed_root`) instead of random (seed-based path only); node identity keys (X25519, Ed25519) = HKDF(root); `id` and the closed-environment key = HKDF(`seed_root`). Tests: the same seed + word gives the same node number and node-list signing key; another word or seed gives different values; no word works; the old master-password path remains intact.
+2. **Server side.** `/api/auth/seed/preview` (derives the node number from the seed and word without writing); `setup` / `vault/setup` / restore accept `control_word`; compare the number with the backup header; open a backup with seed + word.
+3. **Backups.** `yandi-node` subdirectory, write-failure reason codes, system-disk warning, candidate list (`/proc/mounts`), ten-minute checks (pick up changes quickly without extra writes), a separate “save now” operation, a “backups are not configured” reminder, and `yandi backup status|now|set-dir|off`.
+4. **Console.** `yandi setup`: phrase length, word, node number, backup directory; `yandi setup --restore`, `--check`, `--control-word-stdin`; everything in both languages.
+5. **Shell.** `setup_wizard.dart`: “new setup / restore”, 12/18/24 selector, word field, file checkbox and button, backup-directory step, and seed-only printing.
+6. **Documents and website.** `BACKUP.md`, `CONSOLE.md`, Debian/Ubuntu pages (ru/en), and README.
+7. **Verification and release.** Node, application, and shell tests; four Codex (Sol) rounds; green CI; release; website reconciliation.
+
+## Honest boundaries
+
+* Forgetting the word loses the node irreversibly; changing the word changes the node (new number).
+* The word is weaker than the seed: someone with the seed can check guesses against the public node number, so Argon2id is deliberately expensive and we recommend 10+ random characters for the word.
+* The seed does not derive phones (tokens), contacts, groups, or chat history; those are in `.yandibak` where applicable (except chat history and files).
+* The phone application, with its own seed phrase and environment, is outside this scope.
