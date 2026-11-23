@@ -3,41 +3,45 @@
 The desktop shell is optional: the `yandi-node` is fully managed from the terminal. Console commands are thin clients of the same local socket used by the shell, `~/.local/share/yandi/run/yandi-ui.sock`; they contain no separate setup logic. The socket accepts only the owner of the data directory, checked by uid. Administrative actions require the administrator password just as they do in the shell; the session lasts 15 minutes and the token exists only in process memory.
 
 ## Language (Russian / English)
-Установщик, `yandi setup`, `yandi admin` и справка `yandi --help` работают на двух языках. Выбирается по порядку: ключ `--lang ru|en`,
-переменная `YANDI_LANG`, сохранённый выбор (`~/.config/yandi/lang`), язык системы (`LC_ALL`/`LC_MESSAGES`/`LANG`: начинается с `ru` — русский,
-иначе английский). В терминале без явного выбора установщик и `yandi setup` в самом начале спрашивают «Выберите язык / Select language [ru/en]»
-и запоминают ответ. Ответ «да/нет» принимается строго по раскладке выбранного языка: по-русски `Д/н` (только кириллица), по-английски `Y/n`
-(только латиница); ответ другой раскладки не засчитывается ни как «да», ни как «нет», вопрос повторяется с подсказкой (латинская `Y` на русской
-раскладке печатает «н»). Опасные действия (стирание, отвязка, отзыв ветки) просят ввести слово целиком («ДА»/«YES», стереть — «СТЕРЕТЬ»/«ERASE»).
-Установка перед запуском `apt` просит подтверждение (`Подтвердите установку? [Д/н]` / `Confirm the installation? [Y/n]`); `--yes` и запуск без
-терминала вопросов не задают. Сообщения самого узла (ошибки в ответах) пока приходят по-русски.
+The installer, `yandi setup`, `yandi admin`, and `yandi --help` support both languages. Selection order is: `--lang ru|en`,
+the `YANDI_LANG` variable, the saved choice (`~/.config/yandi/lang`), and the system locale
+(`LC_ALL`/`LC_MESSAGES`/`LANG`: values beginning with `ru` select Russian; otherwise English). In an interactive terminal, the installer and
+`yandi setup` first ask “Выберите язык / Select language [ru/en]” and remember the answer. Yes/no input is strict for the selected keyboard
+layout: Russian uses `Д/н` (Cyrillic only), English uses `Y/n` (Latin only). Input from the other layout counts as neither yes nor no, and the
+question is repeated with a hint (Latin `Y` on a Russian layout produces `н`). Dangerous actions (erase, unlink, and branch revocation) require
+the complete confirmation word (“ДА”/“YES”; erase uses “СТЕРЕТЬ”/“ERASE”). Before running `apt`, installation asks for confirmation
+(`Подтвердите установку? [Д/н]` / `Confirm the installation? [Y/n]`); `--yes` and non-interactive runs do not ask. Node-generated error messages
+are currently still in Russian.
 
 ## Installation
 ```
 bash tools/install.sh            # спросит: 1) только узел (сервер) 2) узел и оболочка ПК
 bash tools/install.sh --server   # без оболочки, без вопросов
 bash tools/install.sh --desktop  # узел + оболочка
-bash tools/install.sh --verify-only --from КАТАЛОГ_ВЫПУСКА   # только проверить выпуск
+bash tools/install.sh --verify-only --from RELEASE_DIRECTORY   # verify the release only
 ```
 The installer downloads `MANIFEST.json` and its signature, verifies the Ed25519 signature (domain `YANDI-RELEASE-MANIFEST-V1\0`, OpenSSL 3), strictly parses the manifest, checks the hash and size of every required `.deb`, rejects release rollback (the last installed sequence is stored in `~/.local/state/yandi/installed-seq`), and only then installs the packages with `apt-get install` and creates a systemd service for the current user.
-От root и при домашней папке с пробелами или `%` установщик отказывает ДО любых изменений (для такой папки службу создают вручную, `--no-service`). Ключ подписи вшит в скрипт; сверьте его отпечаток с сайтом (`--pubkey` задаёт другой). Проверка самого
-установщика: `bash tools/test_install.sh КАТАЛОГ_ВЫПУСКА` (подмена манифеста, подписи, пакета, чужой ключ, обрезка).
+The installer refuses to run as root or when the home path contains spaces or `%`, before making any changes (create the service manually for
+such a path, using `--no-service`). The signing key is embedded in the script; compare its fingerprint with the website (`--pubkey` selects a
+different key). Test the installer itself with `bash tools/test_install.sh RELEASE_DIRECTORY` (manifest, signature, package, wrong-key, and truncation tampering).
 
 ## First setup and recovery
 ```
-yandi setup                       # новая настройка: пароль, сид-фраза (24 слова), необязательное контрольное слово, закрытая среда, место для копий
+yandi setup                       # new setup: password, seed phrase (24 words), optional control word, closed environment, backup location
 yandi setup --words 12|18|24      # длина сид-фразы
-yandi setup --restore             # восстановление по сид-фразе (и слову): тот же узел, то же доверие, тот же ключ подписи списка узлов
-yandi setup --restore --backup-file ФАЙЛ_ИЛИ_ПАПКА   # то же + копия связей (.yandibak или папка …/yandi-node)
-yandi setup --check               # проверить фразу и слово: показать номер узла, ничего не делая (узел не нужен)
+yandi setup --restore             # restore from the seed phrase (and word): same node, trust, and node-list signing key
+yandi setup --restore --backup-file FILE_OR_DIRECTORY   # same + pairing backup (.yandibak or …/yandi-node directory)
+yandi setup --check               # check the phrase and word: show the node number without changing anything (the node is not needed)
 yandi setup --seed-file seed.txt --password-stdin --control-word-stdin --backup-dir /media/iam/FLASH --yes   # без терминала
 ```
-Сид-фраза показывается только в терминале и проверяется повторным вводом целиком; без терминала нужен `--seed-file` (существующий файл не перезаписывается).
-Контрольное слово — одно слово (8–64 знака, регистр важен), вводится дважды без эха, необязательно: без него сид один защищает узел; забыв слово, узел вернуть
-нельзя. Номер узла выводится при настройке и перед восстановлением (там с подтверждением). Порядок строк на стандартном вводе (`--password-stdin`): фраза
-(только `--restore`), контрольное слово (только `--control-word-stdin`), пароль входа. Это же порядок и при новой настройке (слово до пароля). Без терминала `--restore` требует `--yes` (подтвердить номер узла некому, он выводится выше). Шаг «где хранить копии»: см. `docs/BACKUP.md`; `--backup-dir ПУТЬ` задаёт
-место без вопросов, `--no-backup-dir` пропускает шаг (останется напоминание), `--yes` принимает риск системного диска.
-Копии связей позже: `yandi admin backup status | places | set-dir ПУТЬ [--yes] | off | now`.
+The seed phrase is shown only in the terminal and must be entered again in full; without a terminal, use `--seed-file` (an existing file is not overwritten).
+The optional control word is one word (8–64 characters, case-sensitive), entered twice without echo. Without it, the seed alone protects the node;
+if the word is forgotten, the node cannot be restored. The node number is shown during setup and before restore (with confirmation there). On
+standard input (`--password-stdin`), lines are ordered as follows: phrase (only with `--restore`), control word (only with
+`--control-word-stdin`), login password. New setup uses the same order, with the word before the password. Non-interactive `--restore` requires
+`--yes` because nobody can confirm the displayed node number. For the “where to store backups” step, see `docs/BACKUP.md`; `--backup-dir PATH`
+sets the location without questions, `--no-backup-dir` skips it (a reminder remains), and `--yes` accepts the system-disk risk.
+Pairing backups can later be managed with `yandi admin backup status | places | set-dir PATH [--yes] | off | now`.
 
 ## Administration
 ```
@@ -55,11 +59,11 @@ yandi admin vault status | lock | unlock | change-password | panic-erase   # с�
 yandi admin node stop | start
 yandi admin raw GET /api/status
 ```
-`--socket ПУТЬ` — другой сокет; `--admin-password-stdin` — пароль администратора первой строкой стандартного ввода (для скриптов). Для
-`proxies add|test` пароль администратора запрашивается ДО списка прокси: порядок строк — пароль, затем прокси по одному в строке, пустая
-строка. `proxies settings` принимает только `on` или `off`. Ответ узла проверяется строго: оборванный или не-JSON ответ — ошибка.
+`--socket PATH` selects another socket; `--admin-password-stdin` reads the administrator password from the first standard-input line (for scripts).
+For `proxies add|test`, the administrator password is requested BEFORE the proxy list: password first, then one proxy per line, followed by an empty
+line. `proxies settings` accepts only `on` or `off`. Node responses are checked strictly: a truncated or non-JSON response is an error.
 
 ## What this does not do
-- Не заменяет резервную копию связей: сид-фраза (и контрольное слово) возвращают узел, а телефоны, контакты и группы — только копия `.yandibak`; восстановление: `yandi setup --restore`.
-- Не открывает порты брандмауэра и не настраивает роутер: см. `DEPLOYMENT.md` и `deploy/nftables.conf.example`.
-- Служба создаётся для обычного пользователя; запуск установщика от root отказывает (данные узла лежат в домашней папке).
+- It does not replace a pairing backup: the seed phrase (and control word) restore the node, while phones, contacts, and groups require the `.yandibak` backup; restore with `yandi setup --restore`.
+- It does not open firewall ports or configure a router; see `DEPLOYMENT.md` and `deploy/nftables.conf.example`.
+- The service is created for the regular user; the installer refuses root (node data is stored in the user's home directory).
