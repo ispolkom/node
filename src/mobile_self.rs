@@ -1,11 +1,10 @@
-//! Компьютер как собеседник телефонов владельца: переписка «телефон ↔ этот узел» (веб-чат на странице узла).
+//! The computer as a correspondent for the owner's phones: “phone ↔ this node” chat (the node's web chat).
 //!
-//! У узла своя пара ключей для телефонов (x25519 для шифрования, ed25519 для подписи связки), она лежит в `mobile_self.json` в папке данных
-//! (права 0600). Телефон видит компьютер в контактах под номером узла, берёт его подписанную связку из `/mobile/pubkey/<номер узла>` и
-//! шифрует, как для другого телефона (подписанный конверт E4, `e2e_crypto.dart`). Узел здесь — конечная точка переписки: он расшифровывает
-//! сообщение и кладёт его в историю чата, которую показывает страница. Ответ со страницы узел шифрует открытым ключом телефона
-//! (из подписанной связки, которую телефон зарегистрировал) и кладёт в очередь телефона. Открытым текстом между телефоном и узлом
-//! ничего не ходит, кроме TLS.
+//! The node has a separate phone key pair (X25519 for encryption, Ed25519 for bundle signatures), stored in `mobile_self.json` in the data directory
+//! (mode 0600). The phone sees the computer under the node number, obtains its signed bundle from `/mobile/pubkey/<node number>`, and encrypts
+//! as it would for another phone (signed E4 envelope, `e2e_crypto.dart`). The node is the chat endpoint here: it decrypts the message and stores
+//! it in the chat history shown by the page. The node encrypts page replies with the phone's public key (from the signed bundle registered by the phone)
+//! and places them in the phone queue. Nothing travels in plaintext between phone and node except the TLS-protected transport.
 use aes_gcm::aead::{Aead, KeyInit, Payload};
 use aes_gcm::{Aes256Gcm, Nonce};
 use base64::Engine;
@@ -49,13 +48,13 @@ fn unb64(s: &str) -> Option<Vec<u8>> {
 struct KeyHolder {
     master: Option<Zeroizing<[u8; 32]>>,
     keys: Option<Keys>,
-    /// узел без мастер-ключа и без закрытой среды (первый запуск): прежний открытый файл ключей, как до закрытой среды
+    /// Node without a master key or closed environment (first run): the legacy plaintext key file used before the closed environment.
     plain_mode: bool,
 }
 
 impl KeyHolder {
     fn revoke(&mut self) {
-        // X25519 StaticSecret и Ed25519 SigningKey стирают секреты при Drop.
+        // X25519 StaticSecret and Ed25519 SigningKey wipe their secrets on Drop.
         self.keys = None;
         self.master = None;
         self.plain_mode = false;
@@ -67,7 +66,7 @@ impl KeyHolder {
 }
 
 fn key_cell() -> &'static Mutex<KeyHolder> {
-    // OnceLock хранит только адрес изменяемого держателя, не ключ или сеанс.
+    // OnceLock stores only the address of the mutable holder, not a key or session.
     static CELL: OnceLock<Mutex<KeyHolder>> = OnceLock::new();
     CELL.get_or_init(|| Mutex::new(KeyHolder::default()))
 }
@@ -84,7 +83,7 @@ fn keys_from(holder: &Mutex<KeyHolder>, load: impl FnOnce(Option<&[u8; 32]>) -> 
         Err(error) => { error.into_inner().revoke(); return None; }
     };
     if state.keys.is_none() {
-        // запертый держатель не читает и не создаёт открытый файл; без мастер-ключа — только в явном plain_mode
+        // A locked holder neither reads nor creates a plaintext file; without a master key, only explicit plain_mode is allowed.
         let master = match state.master.as_deref() {
             Some(m) => Some(m),
             None if state.plain_mode => None,
@@ -100,8 +99,8 @@ fn keys() -> Option<KeyGuard<'static>> {
     keys_from(key_cell(), |master| load_protected(&crate::util::data_dir::data_dir(), master))
 }
 
-/// Перенос ключей «компьютера как собеседника» на ключ закрытой среды: из файла под прежним мастер-ключом или из открытого
-/// `mobile_self.json`. Идемпотентно. Прежнее содержимое заменяется только после проверки записанного; открытый файл затирается.
+/// Move “computer as a correspondent” keys under the closed-environment key: from a file protected by the old master key or from plaintext
+/// `mobile_self.json`. Idempotent. Replace old content only after verifying the new file; wipe the plaintext file.
 pub fn rekey(dir: &std::path::Path, old: Option<&[u8; 32]>, new: &[u8; 32]) -> Result<(), String> {
     let enc = dir.join("mobile_self.enc");
     let plain = dir.join("mobile_self.json");
@@ -156,18 +155,17 @@ pub fn rekey(dir: &std::path::Path, old: Option<&[u8; 32]>, new: &[u8; 32]) -> R
     Ok(())
 }
 
-/// Отзыв ждёт завершения операции, удерживающей guard; после возврата старых
-/// signing/X25519 ключей в держателе нет и ленивое чтение не может их воскресить.
+/// Revocation waits for the operation holding the guard to finish; after return, old signing/X25519 keys are absent from the holder and lazy loading cannot resurrect them.
 pub fn lock_keys() {
     revoke_holder(key_cell());
 }
 
 fn revoke_holder(holder: &Mutex<KeyHolder>) {
-    // Panic предыдущей операции не должен препятствовать стиранию секретов.
+    // A panic in the previous operation must not prevent secret wiping.
     holder.lock().unwrap_or_else(|e| e.into_inner()).revoke();
 }
 
-/// Узел без мастер-ключа и без закрытой среды: ключи в прежнем открытом файле (как до закрытой среды). Отзыв отменяет режим.
+/// Node without a master key or closed environment: keys remain in the legacy plaintext file. Revocation disables this mode.
 pub fn allow_plain_keys() {
     match key_cell().lock() {
         Ok(mut state) => {
@@ -179,14 +177,13 @@ pub fn allow_plain_keys() {
     }
 }
 
-/// Переходный legacy-вход main. Парольный controller должен устанавливать сеанс
-/// только после проверки поколения/миграции; автоматическая загрузка root в main
-/// пока остаётся отдельной незавершённой интеграцией, а не защитой новой среды.
+/// Transitional legacy entry point used by main. The password controller must establish a session only after generation/migration checks;
+/// automatic root loading in main remains a separate unfinished integration, not protection for the new environment.
 pub fn set_master(mk: [u8; 32]) {
     let master = Zeroizing::new(mk);
     match key_cell().lock() {
         Ok(mut state) => state.replace(master),
-        Err(e) => e.into_inner().revoke(), // после panic остаёмся запертыми
+        Err(e) => e.into_inner().revoke(), // remain locked after a panic
     }
 }
 
@@ -196,8 +193,8 @@ fn protect_key(master: &[u8; 32]) -> [u8; 32] {
     k
 }
 
-/// Ключи компьютера: при наличии мастер-ключа — в `mobile_self.enc` (AES-256-GCM); старый открытый `mobile_self.json` переносится
-/// в шифрованный и затирается. Повреждённый или не открывающийся файл не трогаем (временная пара, как и раньше).
+/// Computer keys: with a master key, store them in `mobile_self.enc` (AES-256-GCM); migrate and wipe the old plaintext `mobile_self.json`.
+/// Do not touch a corrupt or unopened file (use a temporary key pair, as before).
 fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
     let plain = dir.join("mobile_self.json");
     let Some(master) = master else { return load_or_create(&plain) };
