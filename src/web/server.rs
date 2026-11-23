@@ -3566,7 +3566,7 @@ async fn api_chat_delete(
 
 /// Пути с расшифрованным содержимым владельца: при запертой среде отвечают 423 (служебная доставка идёт внутри узла и не страдает).
 fn is_owner_content_path(path: &str) -> bool {
-    ["/api/groups", "/api/files/content"]
+    ["/api/chat", "/api/groups", "/api/files/content"]
         .iter()
         .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
 }
@@ -6338,11 +6338,14 @@ mod locked_guard_tests {
 
     #[test]
     fn owner_content_paths_are_matched_exactly() {
+        assert!(p("/api/chat/history/abc"));
+        assert!(p("/api/chat/send/abc"));
         assert!(p("/api/groups"));
         assert!(p("/api/groups/abc/messages"));
         assert!(!p("/api/complaints/7/reply"), "жалобы — служебные данные узла под админ-сеансом, а не личное содержимое под паролем среды");
         assert!(p("/api/files/content/id/name.txt"));
         assert!(!p("/api/groupsx"));
+        assert!(!p("/api/chatty"));
         assert!(!p("/api/mobile/groups"));
         assert!(!p("/api/auth/login"));
     }
