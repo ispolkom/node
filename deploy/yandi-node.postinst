@@ -18,25 +18,55 @@ if [ -n "$2" ]; then      # обновление: подхватить новы�
     exit 0
 fi
 
-[ "$YANDI_NO_SERVICE" = 1 ] && exit 0
+[ "${YANDI_NO_SERVICE:-0}" = 1 ] && exit 0
 if [ -e /etc/systemd/system/yandi-node.service ]; then
-    echo "yandi-node: найдена служба yandi-node.service, созданная вручную; новая не включена." >&2
+    echo "yandi-node: найдена служба yandi-node.service, созданная вручную; шаблонный экземпляр не включается." >&2
+    systemctl try-restart yandi-node.service >/dev/null 2>&1 || true
     exit 0
 fi
+
+# Prefer an already enabled template instance so upgrades never silently switch
+# the node to another user. A fresh install then falls back to the user who ran
+# sudo/Polkit, or to the only ordinary login user.
+valid_user() {
+    [ -n "$1" ] && [ "$1" != root ] || return 1
+    getent passwd "$1" | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {ok=1} END {exit ok ? 0 : 1}'
+}
+instance_unit() {
+    systemctl list-unit-files --type=service --no-legend 'yandi-node@*.service' 2>/dev/null |
+        awk '$1 ~ /^yandi-node@[^.]+\.service$/ {print $1; exit}'
+}
 U=""
-if [ -n "$SUDO_USER" ] && [ "$SUDO_USER" != root ] && getent passwd "$SUDO_USER" >/dev/null 2>&1; then
+EXISTING=$(instance_unit || true)
+if [ -n "$EXISTING" ]; then
+    U=${EXISTING#yandi-node@}
+    U=${U%.service}
+elif valid_user "${SUDO_USER:-}"; then
     U="$SUDO_USER"
+elif [ -n "${PKEXEC_UID:-}" ] && U=$(getent passwd "$PKEXEC_UID" | cut -d: -f1) && valid_user "$U"; then
+    :
+elif valid_user "${DOAS_USER:-}"; then
+    U="$DOAS_USER"
 else
     N=$(getent passwd | awk -F: '$3>=1000 && $3<65534 && $7 !~ /(nologin|false)$/ {print $1}')
     [ "$(printf '%s\n' "$N" | grep -c .)" = 1 ] && U="$N"
 fi
 if [ -z "$U" ]; then
-    echo "yandi-node: пользователь не определён. Включите вручную: sudo systemctl enable --now yandi-node@ИМЯ_ПОЛЬЗОВАТЕЛЯ" >&2
+    echo "yandi-node: ordinary user was not determined; service was not enabled." >&2
+    echo "yandi-node: run: sudo systemctl enable --now yandi-node@USER.service" >&2
     exit 0
 fi
-if systemctl enable --now "yandi-node@$U" >/dev/null 2>&1; then
-    echo "yandi-node: служба включена для пользователя $U. Дальше, от этого пользователя: yandi setup" >&2
+UNIT="yandi-node@$U.service"
+if [ -n "$2" ]; then
+    if ! systemctl try-restart "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to restart $UNIT; inspect: journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
 else
-    echo "yandi-node: не удалось включить службу. Вручную: sudo systemctl enable --now yandi-node@$U" >&2
+    if ! systemctl enable --now "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to enable/start $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
 fi
+echo "yandi-node: service is enabled for $U; continue setup from the Desktop." >&2
 exit 0

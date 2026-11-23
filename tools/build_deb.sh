@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Сборка пакета узла `yandi-node_<версия>_amd64.deb` из готового release-бинаря (без службы systemd: юнит ставится отдельно).
+# Сборка пакета узла `yandi-node_<версия>_amd64.deb` из готового release-бинаря и шаблона службы systemd.
 #
 # Запуск из корня репозитория, после `cargo build --release --offline`:
 #   bash tools/build_deb.sh
@@ -42,7 +42,7 @@ Recommends: coturn, nftables
 Homepage: https://github.com/ispolkom/node
 Description: YANDI — узел сети личных соединений
  Узел P2P-сети: чаты, файлы, звонки, группы, выход в интернет для доверенных узлов.
- Пакет ставит только бинарники (/usr/bin/yandi, /usr/bin/yandi-keys) и шаблон службы yandi-node@.service (не включается сам: sudo systemctl enable --now yandi-node@ПОЛЬЗОВАТЕЛЬ). Правила брандмауэра
+ Пакет ставит бинарники (/usr/bin/yandi, /usr/bin/yandi-keys) и шаблон службы yandi-node@.service; postinst включает экземпляр для пользователя установки. Правила брандмауэра
  настраиваются отдельно (см. /usr/share/doc/yandi-node/DEPLOYMENT.md). Данные узла лежат в каталоге пользователя
  (~/.local/share/yandi); обычное удаление их не трогает, а «dpkg --purge» затирает нулями и удаляет без следа.
 CTL
