@@ -1,11 +1,11 @@
-//! Обмен профилем (ник и аватар) между узлами — делает сам узел, а не каждое приложение отдельно.
+//! Profile exchange (nickname and avatar) between nodes is handled by the node, not separately by each application.
 //!
-//! Протокол тот же, что у телефонов (`avatar_msg.dart`), поэтому телефоны и узел понимают друг друга:
-//!   `\u0001yandi-avh:{"h":хэш}` — «моя картинка сейчас такая» (пусто — картинки нет),
-//!   `\u0001yandi-avq:{"h":хэш}` — «пришли картинку с этим хэшем»,
-//!   `\u0001yandi-ava:{"h":хэш,"png":base64}` — сама картинка,
-//!   `\u0001yandi-avn:{"n":ник}` — ник (пусто — убран); у старых приложений тоже скрывается как «аватарное».
-//! Принимаем только от сохранённых контактов; картинку — только запрошенную, PNG ≤ 40 КБ, с совпавшим хэшем и в пределах размеров.
+//! It uses the same protocol as phones (`avatar_msg.dart`), so phones and nodes understand each other:
+//!   `\u0001yandi-avh:{"h":hash}` — “this is my current picture” (empty means no picture),
+//!   `\u0001yandi-avq:{"h":hash}` — “send the picture with this hash”,
+//!   `\u0001yandi-ava:{"h":hash,"png":base64}` — the picture,
+//!   `\u0001yandi-avn:{"n":nickname}` — the nickname (empty removes it); older applications also hide it as an avatar message.
+//! Accept messages only from saved contacts; accept only requested pictures, PNG ≤ 40 KiB, with a matching hash and valid dimensions.
 
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet};
@@ -22,9 +22,9 @@ const MAX_SIDE: u32 = 1024;
 const PENDING_TTL: Duration = Duration::from_secs(300);
 const MAX_NICK: usize = 40;
 
-/// Служебное сообщение профиля: не показывается в переписке.
+/// Profile service message; it is not shown in the conversation.
 pub fn is_service(text: &str) -> bool {
-    text.starts_with("\u{1}yandi-av") || text.starts_with("\u{1}yandi-rx:") // профиль и реакции-смайлы телефонов
+    text.starts_with("\u{1}yandi-av") || text.starts_with("\u{1}yandi-rx:") // profiles and phone emoji reactions
 }
 
 fn hex64(h: &str) -> bool {
@@ -57,7 +57,7 @@ fn base_dir() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from(".")).join(".yandi")
 }
 
-/// Сохранённые контакты (короткие номера) из contacts.json.
+/// Saved contacts (short IDs) from contacts.json.
 fn contact_shorts() -> HashSet<String> {
     let raw: serde_json::Value = std::fs::read_to_string(crate::util::data_dir::data_dir().join("contacts.json"))
         .ok()
@@ -69,7 +69,7 @@ fn contact_shorts() -> HashSet<String> {
         .unwrap_or_default()
 }
 
-// ── хранение чужого профиля ──
+// ── remote profile storage ──
 
 fn nicks_path(base: &Path) -> PathBuf {
     base.join("peer_nicks.json")
@@ -78,7 +78,7 @@ fn nicks_path(base: &Path) -> PathBuf {
 #[derive(serde::Serialize, serde::Deserialize, Clone)]
 struct NickRec {
     n: String,
-    /// когда контакт в последний раз сообщал ник (мс)
+    /// When the contact last announced its nickname (ms).
     t: u64,
 }
 
@@ -113,11 +113,11 @@ fn set_nick(base: &Path, short: &str, nick: &str) {
     }
 }
 
-/// Срок хранения чужого профиля, когда человек больше не в контактах.
+/// How long to retain a remote profile after the person is no longer a contact.
 const KEEP_NON_CONTACT_MS: u64 = 30 * 24 * 3600 * 1000;
 
-/// Локальная очистка кэша: ники и аватары тех, кого нет в контактах, стираются через 30 дней после последнего обновления
-/// (до нового появления человека в сети). Сети не касается, у контактов и своего профиля ничего не трогает.
+/// Local cache cleanup: nicknames and avatars for non-contacts are deleted 30 days after the last update
+/// (before the person appears online again). It does not affect the network and does not touch contacts or the local profile.
 fn cleanup(base: &Path, contacts: &HashSet<String>, my_short: &str, now: u64) -> usize {
     let mut removed = 0;
     let mut recs = load_recs(base);
@@ -143,12 +143,12 @@ fn cleanup(base: &Path, contacts: &HashSet<String>, my_short: &str, now: u64) ->
     removed
 }
 
-/// Очистка по таймеру (вызывается из фоновой рассылки).
+/// Timer-driven cleanup (called by the background announcer).
 fn cleanup_now() {
     cleanup(&base_dir(), &contact_shorts(), &my_short_cell(), now_ms());
 }
 
-/// Ник, который контакт задал себе сам (локальное имя в contacts.json его перекрывает на стороне показа).
+/// The nickname chosen by the contact (the local name in contacts.json overrides it when displayed).
 pub fn peer_nick(short: &str) -> Option<String> {
     load_nicks(&base_dir()).remove(short)
 }
@@ -167,9 +167,9 @@ fn peer_avatar_hash(base: &Path, short: &str) -> Option<String> {
     std::fs::read(avatar_path(base, short)).ok().map(|b| sha(&b))
 }
 
-// ── приём ──
+// ── receive ──
 
-/// Запрошенные картинки: «контакт|хэш» → когда просили (чужой не может заставить нас писать на диск что попало).
+/// Requested pictures: “contact|hash” → request time (a remote peer cannot make us write arbitrary data to disk).
 static PENDING: Mutex<Vec<(String, Instant)>> = Mutex::new(Vec::new());
 
 fn mark_pending(key: String) {
@@ -188,8 +188,8 @@ fn take_pending(key: &str) -> bool {
     n != p.len()
 }
 
-/// Разобрать входящее служебное сообщение от контакта [short]. Возвращает тексты, которые надо отправить ему в ответ.
-/// [mine] — наша картинка (PNG), если есть. Вне списка контактов — ничего не делаем.
+/// Parse an incoming service message from contact [short]. Returns response texts to send back.
+/// [mine] is our picture (PNG), if present. Do nothing for non-contacts.
 fn process(base: &Path, short: &str, text: &str, is_contact: bool, mine: Option<&[u8]>) -> Vec<String> {
     if !is_contact || !is_service(text) {
         return vec![];
@@ -235,7 +235,7 @@ fn process(base: &Path, short: &str, text: &str, is_contact: bool, mine: Option<
     vec![]
 }
 
-/// Входящее сообщение чата: служебное разбирается здесь. Ответы отправляются самим вызывающим (чат).
+/// Incoming chat message: service messages are parsed here. The caller (chat) sends the responses.
 pub fn on_incoming(from: &crate::util::HashId, text: &str) -> Vec<String> {
     if !is_service(text) {
         return vec![];
@@ -245,7 +245,7 @@ pub fn on_incoming(from: &crate::util::HashId, text: &str) -> Vec<String> {
     process(&base_dir(), &short, text, contact_shorts().contains(&short), mine.as_deref())
 }
 
-// ── рассылка ──
+// ── announcements ──
 
 static MY_SHORT: Mutex<String> = Mutex::new(String::new());
 
@@ -253,7 +253,7 @@ fn my_short_cell() -> String {
     MY_SHORT.lock().unwrap_or_else(|e| e.into_inner()).clone()
 }
 
-/// Что слать контакту, которому уже сообщали состояние [prev] (хэш, ник) — пусто, если ничего не изменилось.
+/// What to send to a contact that already received state [prev] (hash and nickname); empty if nothing changed.
 fn plan(prev: Option<&(String, String)>, hash: &str, nick: &str) -> Vec<String> {
     let mut out = Vec::new();
     let (ph, pn) = prev.map(|(h, n)| (h.as_str(), n.as_str())).unwrap_or(("", ""));
@@ -268,7 +268,7 @@ fn plan(prev: Option<&(String, String)>, hash: &str, nick: &str) -> Vec<String> 
     out
 }
 
-/// Своё состояние: (хэш картинки — только если это PNG до 40 КБ, ник).
+/// Our state: (picture hash, only for a PNG up to 40 KiB; nickname).
 fn my_state() -> (String, String) {
     let short = my_short_cell();
     let hash = crate::mobile_profile::avatar_bytes(&short)
@@ -279,20 +279,20 @@ fn my_state() -> (String, String) {
     (hash, nick)
 }
 
-// События, по которым узел сверяет профиль с контактами (таймеров нет): профиль сохранён, контакт подключился, узел запущен.
+// Events that make the node reconcile the profile with contacts (no polling timer): profile saved, contact connected, node started.
 static WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 static DIRTY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static SEEN: Mutex<Vec<[u8; 32]>> = Mutex::new(Vec::new());
 
-/// Профиль (ник или картинка) изменился: сверить всех контактов, которые сейчас на связи, и сообщить своим телефонам.
+/// The profile (nickname or picture) changed: reconcile all currently connected contacts and notify our phones.
 pub fn changed() {
     DIRTY.store(true, std::sync::atomic::Ordering::SeqCst);
     WAKE.notify_one();
     crate::mobile_api::announce_profile_changed();
-    crate::group_client::nudge(); // визитка ПК в группах обновляется сразу, а не к следующему обходу
+    crate::group_client::nudge(); // update the PC card in groups immediately, not on the next sweep
 }
 
-/// Контакт подключился (или подтвердил себя): если у него не тот хэш, что мы ему уже отдали, отправим разницу.
+/// A contact connected (or confirmed itself): if its hash differs from what we sent, send the difference.
 pub fn peer_seen(id: &crate::util::HashId) {
     let mut seen = SEEN.lock().unwrap_or_else(|e| e.into_inner());
     if !seen.contains(&id.0) && seen.len() < 4096 {
@@ -304,8 +304,8 @@ pub fn peer_seen(id: &crate::util::HashId) {
 
 type Sent = HashMap<String, (String, String)>;
 
-/// Отправка профиля не подтверждается получателем (он мог быть заперт или потерять пакет): раз в этот срок, при встрече с контактом,
-/// профиль отправляется заново целиком. После перезапуска узла «когда отправлял» неизвестно, и первая встреча тоже шлёт заново.
+/// Profile delivery is not acknowledged by the recipient (it may be locked or have lost the packet): at this interval, when meeting a contact,
+/// send the complete profile again. After a node restart, the last-send time is unknown, so the first meeting also sends it again.
 const RESEND_AFTER: Duration = Duration::from_secs(3600);
 
 fn resend_due(last_sent: Option<Instant>) -> bool {
@@ -329,10 +329,10 @@ fn save_sent(sent: &Sent) {
     }
 }
 
-/// Рассылка по событиям: какой хэш и какой ник кому уже отдан, помнится на диске — после перезапуска повторно не шлём.
+/// Event-driven announcements: remember the last hash and nickname sent to each contact on disk, so they are not resent after restart.
 pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::sync::Arc<crate::p2p::P2PTransport>, my_id: crate::util::HashId) {
     *MY_SHORT.lock().unwrap_or_else(|e| e.into_inner()) = hex::encode(&my_id.0[..8]);
-    DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); // старт: сверить тех, кто уже на связи
+    DIRTY.store(true, std::sync::atomic::Ordering::SeqCst); // startup: reconcile contacts already online
     crate::supervisor::supervise("profile_sync", crate::supervisor::Policy::restart(), move || {
         let chat = chat.clone();
         let p2p = p2p.clone();
@@ -342,7 +342,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
             let mut last_cleanup: Option<Instant> = None;
             loop {
                 WAKE.notified().await;
-                tokio::time::sleep(Duration::from_millis(400)).await; // слить пачку событий в одну сверку
+                tokio::time::sleep(Duration::from_millis(400)).await; // coalesce a batch of events into one reconciliation
                 let full = DIRTY.swap(false, std::sync::atomic::Ordering::SeqCst);
                 let seen: HashSet<[u8; 32]> = std::mem::take(&mut *SEEN.lock().unwrap_or_else(|e| e.into_inner())).into_iter().collect();
                 if !full && seen.is_empty() {
@@ -356,7 +356,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                     if !contacts.contains(&short) || (!full && !seen.contains(&peer.id.0)) {
                         continue;
                     }
-                    // подтверждения доставки нет: давно не отправленный профиль (и первая встреча после старта) уходит заново целиком
+                    // There is no delivery acknowledgement: resend a profile that has not been sent recently (and on the first meeting after startup).
                     let prev = if seen.contains(&peer.id.0) && resend_due(sent_at.get(&short).copied()) { None } else { sent.get(&short) };
                     let texts = plan(prev, &hash, &nick);
                     if texts.is_empty() {
@@ -381,7 +381,7 @@ pub fn spawn(chat: std::sync::Arc<crate::communication::ChatManager>, p2p: std::
                     save_sent(&sent);
                 }
                 if last_cleanup.map_or(true, |t| t.elapsed() > Duration::from_secs(3600)) {
-                    cleanup_now(); // раз в час, по случаю
+                    cleanup_now(); // opportunistically, about once an hour
                     last_cleanup = Some(Instant::now());
                 }
             }
@@ -411,18 +411,18 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = png(200);
         let h = sha(&p);
-        // картинку, которую не просили, не берём
+        // Do not accept an unsolicited picture.
         assert!(process(d.path(), "aa11", &ava(&p), true, None).is_empty());
         assert!(peer_avatar_hash(d.path(), "aa11").is_none());
-        // объявление → запрос
+        // announcement → request
         let reply = process(d.path(), "aa11", &format!("{H}{{\"h\":\"{h}\"}}"), true, None);
         assert_eq!(reply, vec![format!("{Q}{{\"h\":\"{h}\"}}")]);
-        // теперь пришедшая картинка принимается
+        // The requested picture can now be accepted.
         process(d.path(), "aa11", &ava(&p), true, None);
         assert_eq!(peer_avatar_hash(d.path(), "aa11").as_deref(), Some(h.as_str()));
-        // такая же уже есть — повторно не просим
+        // The same picture is already present; do not request it again.
         assert!(process(d.path(), "aa11", &format!("{H}{{\"h\":\"{h}\"}}"), true, None).is_empty());
-        // убрал картинку
+        // The contact removed the picture.
         process(d.path(), "aa11", &format!("{H}{{\"h\":\"\"}}"), true, None);
         assert!(peer_avatar_hash(d.path(), "aa11").is_none());
     }
@@ -433,13 +433,13 @@ mod tests {
         let p = png(50);
         let h = sha(&p);
         assert!(process(d.path(), "bb22", &format!("{H}{{\"h\":\"{h}\"}}"), false, None).is_empty(), "не контакт");
-        // подмена: хэш просили один, пришла другая картинка под тем же хэшем
+        // Substitution: the requested hash does not match the received picture.
         process(d.path(), "cc33", &format!("{H}{{\"h\":\"{h}\"}}"), true, None);
         let other = png(51);
         let forged = ava(&other).replacen(&sha(&other), &h, 1);
         process(d.path(), "cc33", &forged, true, None);
         assert!(peer_avatar_hash(d.path(), "cc33").is_none());
-        // не PNG
+        // Not a PNG.
         let junk = vec![1u8; 100];
         let jh = sha(&junk);
         process(d.path(), "dd44", &format!("{H}{{\"h\":\"{jh}\"}}"), true, None);
@@ -525,7 +525,7 @@ mod tests {
         peer_seen(&id);
         peer_seen(&id);
         assert_eq!(SEEN.lock().unwrap().iter().filter(|x| **x == [7u8; 32]).count(), 1);
-        // разницу плана считает plan(): тот же хэш и ник — ничего слать не надо, новый ник — одно сообщение
+        // plan() computes the difference: the same hash and nickname send nothing; a new nickname sends one message.
         let prev = ("h".to_string(), "Х".to_string());
         assert!(plan(Some(&prev), "h", "Х").is_empty());
         assert_eq!(plan(Some(&prev), "h", "111").len(), 1);

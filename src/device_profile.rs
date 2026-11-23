@@ -1,8 +1,8 @@
-//! Профиль устройства: ник и аватар каждого сопряжённого телефона.
+//! Device profile: the nickname and avatar of each paired phone.
 //!
-//! Нужен, чтобы в «Пользователях» узла люди были видны под собственными именами и картинками (как их задал сам человек),
-//! а не как «YANDI Mobile». Картинка проходит ту же обработку, что аватар владельца: пересборка из пикселей, без метаданных.
-//! Человек может скрыть профиль (`hide`): тогда другие видят устройство без ника и картинки.
+//! This lets people appear in the node's “People” list under the names and pictures they chose,
+//! rather than as “YANDI Mobile”. The image is processed like the owner's avatar: rebuilt from pixels without metadata.
+//! A person can hide the profile (`hide`); other users then see the device without its nickname or picture.
 
 use crate::mobile_profile::{sanitize_avatar, MAX_AVATAR_IN, MAX_NICK};
 use axum::http::StatusCode;
@@ -47,7 +47,7 @@ fn valid_peer(peer: &str) -> bool {
 fn with_store<R>(f: impl FnOnce(&mut HashMap<String, Entry>) -> R) -> R {
     let mut g = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let root = dir();
-    // каталог данных может смениться (тесты, смена профиля узла): состояние читается заново
+    // The data directory can change (tests or a node-profile switch), so reload the state.
     if g.as_ref().map_or(true, |(p, _)| *p != root) {
         let map = std::fs::read_to_string(index_path()).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         *g = Some((root, map));
@@ -62,7 +62,7 @@ fn save(map: &HashMap<String, Entry>) -> Result<(), (StatusCode, String)> {
     crate::util::private_file::write_private(&index_path(), &s).map_err(|_| fail())
 }
 
-/// Сохранить профиль устройства. `None` — не менять; пустая строка у картинки — убрать.
+/// Save a device profile. `None` means unchanged; an empty image string removes the image.
 pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Option<bool>) -> Result<Value, (StatusCode, String)> {
     let bad = |m: &str| (StatusCode::BAD_REQUEST, m.to_string());
     if !valid_peer(peer) {
@@ -81,7 +81,7 @@ pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Optio
         }
         None => None,
     };
-    // картинку проверяем и обрабатываем до любых записей
+    // Validate and process the image before writing anything.
     let image: Option<Option<Vec<u8>>> = match avatar_b64 {
         None => None,
         Some("") => Some(None),
@@ -121,12 +121,12 @@ pub fn put(peer: &str, nick: Option<&str>, avatar_b64: Option<&str>, hide: Optio
     })
 }
 
-/// Сколько профиль должен пролежать, прежде чем его можно считать осиротевшим: только что зарегистрированное устройство успевает задать ник
-/// раньше, чем очистка увидит его в списке (гонка регистрации и очистки не стирает свежий профиль).
+/// How long a profile must remain before it can be considered orphaned: a newly registered device gets time to set its nickname
+/// before cleanup sees it in the registry (registration and cleanup cannot erase a fresh profile).
 pub const ORPHAN_MIN_AGE_MS: u64 = 10 * 60 * 1000;
 
-/// Забыть профили (ник, картинку) тех, кого на узле больше нет: гость пропал при перезапуске узла, а его ник и картинка остались на диске.
-/// `registered` — номера устройств, которые на узле есть. Профили моложе `ORPHAN_MIN_AGE_MS` не трогаются. Возвращает, сколько убрано.
+/// Forget profiles (nickname and picture) for devices no longer on the node: a guest may disappear on restart while its profile remains on disk.
+/// `registered` contains the device IDs still present on the node. Profiles younger than `ORPHAN_MIN_AGE_MS` are preserved. Returns the count removed.
 pub fn retain_registered(registered: &std::collections::HashSet<String>) -> usize {
     retain_registered_aged(registered, ORPHAN_MIN_AGE_MS)
 }
@@ -139,7 +139,7 @@ pub(crate) fn retain_registered_aged(registered: &std::collections::HashSet<Stri
     for p in &gone {
         forget(p);
     }
-    // картинки без записи в индексе (остались от прерванной очистки): только старые файлы
+    // Images without an index entry (left by interrupted cleanup): remove only old files.
     let known: std::collections::HashSet<String> = with_store(|m| m.keys().cloned().collect());
     let mut files = 0;
     if let Ok(rd) = std::fs::read_dir(dir()) {
@@ -159,7 +159,7 @@ pub(crate) fn retain_registered_aged(registered: &std::collections::HashSet<Stri
     gone.len() + files
 }
 
-/// Профиль для других: у скрытого — пусто.
+/// Profile visible to others; a hidden profile is empty.
 pub fn public(peer: &str) -> (String, String) {
     with_store(|m| match m.get(peer) {
         Some(e) if !e.hide => (e.nick.clone(), e.avatar_hash.clone()),
@@ -167,7 +167,7 @@ pub fn public(peer: &str) -> (String, String) {
     })
 }
 
-/// Свой профиль устройства (с флагом скрытия).
+/// The device's own profile, including the hide flag.
 pub fn own(peer: &str) -> Value {
     with_store(|m| {
         let e = m.get(peer).cloned().unwrap_or_default();
@@ -175,7 +175,7 @@ pub fn own(peer: &str) -> Value {
     })
 }
 
-/// Картинка устройства для других (скрытого — нет).
+/// Device picture for others; hidden profiles have none.
 pub fn avatar(peer: &str) -> Option<Vec<u8>> {
     if !valid_peer(peer) || with_store(|m| m.get(peer).map_or(true, |e| e.hide || e.avatar_hash.is_empty())) {
         return None;
@@ -183,7 +183,7 @@ pub fn avatar(peer: &str) -> Option<Vec<u8>> {
     std::fs::read(avatar_path(peer)).ok()
 }
 
-/// Устройство забыто узлом: профиль и картинка стираются.
+/// The node forgot the device: remove its profile and picture.
 pub fn forget(peer: &str) {
     if !valid_peer(peer) {
         return;
@@ -218,7 +218,7 @@ mod tests {
         assert_eq!(hash.len(), 64);
         let img = avatar(&peer).unwrap();
         assert_eq!(&img[..4], &[0x89, b'P', b'N', b'G']);
-        // скрытый профиль для других пуст, у владельца виден
+        // A hidden profile is empty for others but visible to its owner.
         put(&peer, None, None, Some(true)).unwrap();
         assert_eq!(public(&peer), (String::new(), String::new()));
         assert!(avatar(&peer).is_none());
@@ -248,13 +248,13 @@ mod orphan_tests {
         let (keep, gone) = ("a1".repeat(32), "b2".repeat(32));
         put(&keep, Some("Остаётся"), None, None).unwrap();
         put(&gone, Some("Пропал"), None, None).unwrap();
-        // чужие записи общего хранилища (другие тесты) считаем «зарегистрированными»: проверяем только свои
+        // Treat records from other tests as registered; check only this test's entries.
         let mut reg: std::collections::HashSet<String> = with_store(|m| m.keys().cloned().collect());
         reg.remove(&gone);
-        // свежий профиль не стирается, даже если устройства нет в снимке: регистрация могла отстать от очистки
+        // A fresh profile is not erased even when the device is absent from the snapshot: registration may lag behind cleanup.
         assert_eq!(retain_registered(&reg), 0, "свежий профиль не тронут");
         assert_eq!(public(&gone).0, "Пропал");
-        // старый (возраст не меньше нуля) осиротевший — стирается, зарегистрированный остаётся
+        // An old orphan is erased; a registered profile remains.
         assert_eq!(retain_registered_aged(&reg, 0), 1);
         assert_eq!(public(&keep).0, "Остаётся");
         assert_eq!(public(&gone).0, "", "ник пропавшего не остался");
