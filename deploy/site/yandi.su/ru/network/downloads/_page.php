@@ -20,6 +20,12 @@ $rel = $downloadRelease !== null ? (YANDI_RELEASES[$downloadRelease] ?? null) : 
             <a class="btn big" href="<?= e($f['href']) ?>" download>Скачать <?= e($f['name']) ?></a>
         <?php endforeach; ?>
         </div>
+    <?php elseif (!empty($downloadTestFile)): ?>
+        <div class="file-box">
+            <h3><?= e($downloadTestFile['name']) ?></h3>
+            <dl><dt>Размер</dt><dd><?= e($downloadTestFile['size']) ?> МБ</dd><dt>SHA-256</dt><dd><code><?= e($downloadTestFile['sha256']) ?></code></dd></dl>
+            <a class="btn big" href="<?= e($downloadTestFile['href']) ?>" download>Скачать тестовый ZIP</a>
+        </div>
     <?php else: ?>
         <p class="muted">Сборки для этой платформы пока нет.</p>
     <?php endif; ?>
