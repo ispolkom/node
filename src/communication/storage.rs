@@ -659,8 +659,25 @@ impl ChatStorage {
         let path = self.chats_dir.join("outbox.enc");
         // заперто — очередь на диске не трогаем (в том числе не стираем пустой)
         let key_bytes = self.get_encryption_key()?;
+        // A failed rekey may leave the only copy encrypted with the old key.
+        // Never replace or remove an existing outbox until this key can read it.
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => {
+                let blobs = Self::read_blobs(&path)?;
+                if blobs.len() != 1 {
+                    return Err(anyhow::anyhow!("outbox cannot be verified"));
+                }
+                let (_, plain) = Self::open_blob(&[key_bytes], &blobs[0])
+                    .ok_or_else(|| anyhow::anyhow!("outbox cannot be opened with the current key"))?;
+                let _: Vec<OutboxEntry> = serde_json::from_slice(&plain)?;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
         if entries.is_empty() {
-            let _ = std::fs::remove_file(&path);
+            if path.exists() {
+                std::fs::remove_file(&path)?;
+            }
             return Ok(());
         }
         let plaintext = serde_json::to_vec(entries)?;
@@ -1015,7 +1032,6 @@ mod concurrency_tests {
     }
 
     #[test]
-    #[ignore = "R16-3: после неполного переноса outbox нельзя стирать единственную старую копию"]
     fn bug_r16_failed_outbox_migration_preserves_source_on_save() {
         let dir = tempfile::Builder::new().prefix("r16_outbox_migration_").tempdir().unwrap();
         let me = HashId([1; 32]);
@@ -1030,8 +1046,14 @@ mod concurrency_tests {
         assert_eq!(st.rekey_to(None, [8; 32]).unwrap(), 1, "старый мастер недоступен, перенос очереди не состоялся");
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let result = st.save_outbox(&[]);
-        assert_eq!(std::fs::read(&path).ok(), Some(before), "пустая очередь под новым ключом уничтожила старую");
+        assert_eq!(std::fs::read(&path).as_deref().ok(), Some(before.as_slice()), "пустая очередь под новым ключом уничтожила старую");
         assert!(result.is_err());
+        assert!(st.save_outbox(&[OutboxEntry { peer, msg: ChatMessage::new(me, peer, "новое".into()), first_sent: 2 }]).is_err());
+        assert_eq!(std::fs::read(&path).as_deref().ok(), Some(before.as_slice()), "новая очередь затёрла старую при неполной миграции");
+        assert_eq!(st.rekey_to(Some([7; 32]), [8; 32]).unwrap(), 0);
+        let restored = st.load_outbox();
+        assert_eq!(restored.len(), 1);
+        assert_eq!(restored[0].msg.text, "не доставлено");
     }
 
     #[test]

@@ -1103,7 +1103,7 @@ mod tests {
     /// delivery-timeout scenarios below share ONE ChatManager/transport
     /// instead of racing each other over the same env vars in parallel
     /// test threads.
-    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>) {
+    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         // порты берутся из переменных окружения процесса: проверки, которым нужен транспорт, идут строго по одной
         static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let guard = SERIAL.lock().await;
@@ -1118,9 +1118,9 @@ mod tests {
             .await
             .expect("start transport");
         // чаты проверки — во временной папке, не в ~/.yandi/chats владельца
-        let dir = std::env::temp_dir().join(format!("yandi-chat-test-{}", std::process::id()));
-        let storage = ChatStorage::in_dir(my_node_id, dir).expect("storage");
-        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard)
+        let dir = tempfile::tempdir().expect("temporary chat storage");
+        let storage = ChatStorage::in_dir(my_node_id, dir.path().to_path_buf()).expect("storage");
+        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard, dir)
     }
 
     #[tokio::test]
@@ -1165,7 +1165,7 @@ mod tests {
     /// unconfirmed one is NOT failed — it stays in the queue and is sent again (it used to be marked Failed after 45 seconds, and lost).
     #[tokio::test]
     async fn a_deleted_or_cleared_message_leaves_the_retry_queue_and_the_outbox() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
         let mk = |peer: HashId, text: &str| {
             let m = ChatMessage::new(cm.my_node_id, peer, text.to_string());
             (m.msg_id, m)
@@ -1198,7 +1198,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_queue_fails_only_day_old_messages_and_keeps_young_ones_for_resending() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
 
         let old_peer = crate::util::HashId::new_random();
         let old_msg = ChatMessage::new(cm.my_node_id, old_peer, "hello?".to_string());
@@ -1334,7 +1334,7 @@ mod tests {
     /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
     #[tokio::test(flavor = "multi_thread")]
     async fn locked_chat_does_not_swallow_incoming_and_keeps_outbox() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
         cm.storage.set_master([9; 32]);
         let peer = crate::util::HashId::new_random();
         let queued = ChatMessage::new(cm.my_node_id, peer, "в очереди".to_string());
@@ -1379,7 +1379,7 @@ mod tests {
     /// E2E v1: содержимое чата запечатывается на ключ собеседника; чужой, подмена отправителя и прежний открытый вид отвергаются.
     #[tokio::test]
     async fn chat_content_is_sealed_end_to_end_and_plaintext_is_refused() {
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
         let peer = HashId([77u8; 32]);
         let other = HashId([78u8; 32]);
@@ -1405,7 +1405,7 @@ mod tests {
     #[tokio::test]
     async fn call_signals_are_accepted_only_sealed_signed_and_with_the_right_type() {
         use crate::p2p::P2PPacketType as T;
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
         let peer = HashId([91u8; 32]);
         let me_vk = cm.transport.sealing_key().verifying_key();
@@ -1447,7 +1447,7 @@ mod tests {
     #[tokio::test]
     async fn a_replayed_or_stale_call_signal_is_refused() {
         use crate::p2p::P2PPacketType as T;
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[93u8; 32]);
         let peer = HashId([93u8; 32]);
         cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
