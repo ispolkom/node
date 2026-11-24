@@ -64,13 +64,16 @@ for lib in $NEEDED; do
   # several ABI-compatible runtime packages to *t64.  Express those names as
   # alternatives so the same amd64 package is installable on both systems.
   case "$pkg" in
-    libasound2) pkg='libasound2 | libasound2t64' ;;
-    libatk1.0-0) pkg='libatk1.0-0 | libatk1.0-0t64' ;;
-    libglib2.0-0) pkg='libglib2.0-0 | libglib2.0-0t64' ;;
-    libgtk-3-0) pkg='libgtk-3-0 | libgtk-3-0t64' ;;
+    libasound2|libasound2t64) pkg='libasound2 | libasound2t64' ;;
+    libatk1.0-0|libatk1.0-0t64) pkg='libatk1.0-0 | libatk1.0-0t64' ;;
+    libglib2.0-0|libglib2.0-0t64) pkg='libglib2.0-0 | libglib2.0-0t64' ;;
+    libgtk-3-0|libgtk-3-0t64) pkg='libgtk-3-0 | libgtk-3-0t64' ;;
   esac
   printf '%s\n' "$pkg" >> "$DEPS_FILE"
 done
+# Flutter loads GLESv2 at runtime with dlopen; readelf NEEDED cannot discover it.
+# It is provided by libgles2 on both Debian 12 and Ubuntu 24.04.
+printf '%s\n' libgles2 >> "$DEPS_FILE"
 DEPS=$(grep -v -E '^(libc6|)$' "$DEPS_FILE" | sort -u | paste -sd, - | sed 's/,/, /g')
 SIZE=$(du -sk "$R/opt" "$R/usr" | awk '{s+=$1} END {print s}')
 cat > "$R/DEBIAN/control" <<CTL
