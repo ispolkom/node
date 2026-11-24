@@ -3,62 +3,62 @@ declare(strict_types=1);
 // Download metadata verified against signed release manifests.
 const YANDI_RELEASES = [
     'android' => [
-        'version' => '1.0.0 (build 9)',
-        'date' => '2026-10-28',
+        'version' => '1.0.0 (build 10)',
+        'date' => '2026-11-25',
         'changes' => [
             'ru' => [
-                'Добавлены подтверждение доставки приглашения и ограниченные повторы при потере сигнала звонка.',
-                'Сигналы звонков получают приоритет перед ожидающими записями переписки; отменённые звонки не открываются от запоздавшего приглашения.'
+                'Исправлена фоновая доставка сигналов входящих звонков с подтверждением после E2E-обработки.',
+                'Повторные приглашения и несколько одновременных вызовов обрабатываются с сохранением состояния звонка.'
             ],
             'en' => [
-                'Added invite delivery receipts and bounded retransmission after signal loss.',
-                'Call signals take priority over pending history writes; delayed invitations cannot reopen canceled calls.'
+                'Background incoming-call signals are acknowledged after E2E processing.',
+                'Repeated invitations and concurrent calls preserve call state.'
             ]
         ],
         'compat' => [
-            'ru' => 'Собрано вместе с узлом 0.2.0+g898.',
-            'en' => 'Built together with node 0.2.0+g898.'
+            'ru' => 'Собрано вместе с узлом 0.2.0+g961.',
+            'en' => 'Built together with node 0.2.0+g961.'
         ],
         'files' => [
             [
                 'href' => '/update/android/yandi.apk',
                 'name' => 'yandi.apk',
-                'size' => '123.3',
-                'sha256' => '3e94b4a1244bfeed3bc79c21ea13f19e1760545853a87c1fb30d07e622ca857b'
+                'size' => '130.6',
+                'sha256' => '840f893413c22ed421091c71bda4fcca6cceb4559da3fad59c2708c12abc9820'
             ]
         ]
     ],
     'debian' => [
-        'version' => '0.2.0+g898',
-        'date' => '2026-10-28',
+        'version' => '0.2.0+g961',
+        'date' => '2026-11-25',
         'changes' => [
             'ru' => [
-                'Добавлены подтверждение получения вызова телефоном и ограниченные повторы приглашения.',
-                'Дубликаты и запоздавшие приглашения отменённых звонков обрабатываются без повторного открытия окна.',
-                'Узел сообщает об ошибках шифрования и отправки сигналов вместо ложного подтверждения отправки.'
+                'Оболочка продолжает проверять звонки, когда её окно находится в фоне.',
+                'Исправлены зависимости пакетов и запуск пользовательской службы после установки и обновления.',
+                'Закрыты ошибки хранения очереди сообщений и блокировки личной среды при сбоях записи и смене ключей.'
             ],
             'en' => [
-                'Added phone invite delivery receipts and bounded retransmission.',
-                'Duplicate and delayed canceled-call invitations do not reopen the call window.',
-                'The node reports encryption and signal send failures instead of false success.'
+                'The desktop shell continues polling for calls while its window is in the background.',
+                'Package dependencies and user service startup after install and upgrade were corrected.',
+                'Fixed message queue preservation and private environment lock behavior during failed writes and key changes.'
             ]
         ],
         'compat' => [
-            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0, сборка 9.',
-            'en' => 'Install both packages of the same version together. Android: 1.0.0 build 9.'
+            'ru' => 'Установите оба пакета одной версии вместе. Android: 1.0.0, сборка 10.',
+            'en' => 'Install both packages of the same version together. Android: 1.0.0 build 10.'
         ],
         'files' => [
             [
-                'href' => '/update/deb/yandi-desktop_0.2.0-g898_amd64.deb',
-                'name' => 'yandi-desktop_0.2.0-g898_amd64.deb',
-                'size' => '30.7',
-                'sha256' => '28e4d64d1da74c3430b1d6fc1eefc8e59802a06bcad439ef259258aa6822d480'
+                'href' => '/update/deb/yandi-desktop_0.2.0-g961_amd64.deb',
+                'name' => 'yandi-desktop_0.2.0-g961_amd64.deb',
+                'size' => '32.2',
+                'sha256' => 'f73feddc518898d7dc04016bda0b5d61f3ef062892b082cc49996d340be15e32'
             ],
             [
-                'href' => '/update/deb/yandi-node_0.2.0-g898_amd64.deb',
-                'name' => 'yandi-node_0.2.0-g898_amd64.deb',
-                'size' => '7.0',
-                'sha256' => '5cf388c18d76f1aa00de81ce3a576ae73fca49970e3268aaf29e2bfaa52397d0'
+                'href' => '/update/deb/yandi-node_0.2.0-g961_amd64.deb',
+                'name' => 'yandi-node_0.2.0-g961_amd64.deb',
+                'size' => '7.3',
+                'sha256' => '3ee7f894993079d6f8520f490f2a90fcf7b6828089b75ed8f4ee6b455ad602f1'
             ]
         ]
     ]
