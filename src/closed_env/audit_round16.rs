@@ -4,9 +4,12 @@ use super::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Notify;
 
+const TEST_PHRASE: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
 struct Probe {
     key: Mutex<Option<[u8; 32]>>,
     fail_migration: AtomicBool,
+    stop_migration: AtomicBool,
     stop_lock: AtomicBool,
     entered: Notify,
     resume: Notify,
@@ -17,6 +20,7 @@ impl Probe {
         Arc::new(Self {
             key: Mutex::new(None),
             fail_migration: AtomicBool::new(false),
+            stop_migration: AtomicBool::new(false),
             stop_lock: AtomicBool::new(false),
             entered: Notify::new(),
             resume: Notify::new(),
@@ -27,7 +31,13 @@ impl Probe {
 impl Consumer for Probe {
     fn domain(&self) -> &'static str { DOMAIN_CHAT }
     fn migrate(&self, _: Option<[u8; 32]>, _: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
-        Box::pin(async { Ok(usize::from(self.fail_migration.load(Ordering::SeqCst))) })
+        Box::pin(async {
+            if self.stop_migration.load(Ordering::SeqCst) {
+                self.entered.notify_one();
+                self.resume.notified().await;
+            }
+            Ok(usize::from(self.fail_migration.load(Ordering::SeqCst)))
+        })
     }
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()> {
         Box::pin(async move { *self.key.lock().unwrap() = Some(key); })
@@ -44,20 +54,19 @@ impl Consumer for Probe {
 }
 
 #[tokio::test]
-#[ignore = "R16-1: lock во время KDF должен отменять позднюю выдачу ключей"]
 async fn bug_r16_lock_during_kdf_must_win() {
     let base = tempfile::Builder::new().prefix("r16_late_kdf_").tempdir().unwrap();
     let dir = base.path().join("closed");
     let env = ClosedEnv::open(&dir, Box::new(|| None)).unwrap();
     let probe = Probe::new();
     env.register(probe.clone());
-    env.setup("owner password".into(), None).await.unwrap();
+    env.setup("owner password".into(), Some(TEST_PHRASE.into())).await.unwrap();
     env.lock().await;
     let task_env = env.clone();
     let task = tokio::spawn(async move { task_env.unlock("owner password".into()).await });
     // Счётчик зарезервирован ДО KDF и сбрасывается после него: ловим именно работающий KDF,
     // а не задержку после install. На однопоточном runtime install не может обогнать lock.
-    tokio::time::timeout(Duration::from_secs(30), async {
+    tokio::time::timeout(Duration::from_secs(180), async {
         loop {
             let bytes = std::fs::read(dir.join("attempts.json")).unwrap();
             let state: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
@@ -68,19 +77,18 @@ async fn bug_r16_lock_during_kdf_must_win() {
     }).await.unwrap();
     env.lock().await;
     assert!(!env.unlocked() && probe.key.lock().unwrap().is_none());
-    task.await.unwrap().unwrap();
+    assert!(task.await.unwrap().is_err(), "вход, начатый до блокировки, должен быть отменён");
     assert!(!env.unlocked(), "завершившийся lock не должен отменяться более старым unlock");
     assert!(probe.key.lock().unwrap().is_none(), "старый KDF не должен вернуть ключ потребителю");
 }
 
 #[tokio::test]
-#[ignore = "R16-2: отмена lock не должна оставлять ключи при status.unlocked=false"]
 async fn bug_r16_cancelled_lock_must_revoke_consumers() {
     let base = tempfile::Builder::new().prefix("r16_cancel_lock_").tempdir().unwrap();
     let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| None)).unwrap();
     let probe = Probe::new();
     env.register(probe.clone());
-    env.setup("owner password".into(), None).await.unwrap();
+    env.setup("owner password".into(), Some(TEST_PHRASE.into())).await.unwrap();
     probe.stop_lock.store(true, Ordering::SeqCst);
     let task_env = env.clone();
     let task = tokio::spawn(async move { task_env.lock().await; });
@@ -88,18 +96,30 @@ async fn bug_r16_cancelled_lock_must_revoke_consumers() {
     assert!(!env.unlocked(), "DK уже отозван");
     task.abort();
     assert!(task.await.unwrap_err().is_cancelled());
-    assert!(probe.key.lock().unwrap().is_none(), "потребитель остался с ключом после отменённого lock");
+    probe.stop_lock.store(false, Ordering::SeqCst);
+    probe.resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while probe.key.lock().unwrap().is_some() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    }).await.expect("отмена вызывающего не должна отменять отзыв ключа");
 }
 
 #[tokio::test]
-#[ignore = "R16-3: незавершённая миграция не должна открывать потребителей для записи"]
 async fn bug_r16_failed_migration_must_not_publish_open_session() {
     let base = tempfile::Builder::new().prefix("r16_migration_fail_").tempdir().unwrap();
     let env = ClosedEnv::open(&base.path().join("closed"), Box::new(|| None)).unwrap();
     let probe = Probe::new();
     probe.fail_migration.store(true, Ordering::SeqCst);
+    probe.stop_migration.store(true, Ordering::SeqCst);
     env.register(probe.clone());
-    let result = env.setup("owner password".into(), None).await;
+    let task_env = env.clone();
+    let setup = tokio::spawn(async move { task_env.setup("owner password".into(), Some(TEST_PHRASE.into())).await });
+    tokio::time::timeout(Duration::from_secs(180), probe.entered.notified()).await.unwrap();
+    assert!(env.status().migration_pending);
+    assert!(!env.unlocked(), "migration must not publish an open session before it succeeds");
+    probe.resume.notify_one();
+    let result = setup.await.unwrap();
     assert!(env.status().migration_pending, "неудача миграции действительно воспроизведена");
     assert!(!env.unlocked(), "неперенесённые файлы нельзя отдавать новому ключу для перезаписи");
     assert!(probe.key.lock().unwrap().is_none());
@@ -107,7 +127,6 @@ async fn bug_r16_failed_migration_must_not_publish_open_session() {
 }
 
 #[tokio::test]
-#[ignore = "R16-4: crash после prepare_attempts до save не должен навсегда ломать первичную настройку"]
 async fn bug_r16_setup_retries_after_counter_only_crash() {
     let base = tempfile::Builder::new().prefix("r16_setup_crash_").tempdir().unwrap();
     let dir = base.path().join("closed");
@@ -119,6 +138,6 @@ async fn bug_r16_setup_retries_after_counter_only_crash() {
     }
     let env = ClosedEnv::open(&dir, Box::new(|| None)).unwrap();
     assert!(!env.configured());
-    env.setup("owner password".into(), None).await.expect("повторная настройка после обрыва должна восстановиться");
+    env.setup("owner password".into(), Some(TEST_PHRASE.into())).await.expect("повторная настройка после обрыва должна восстановиться");
     assert!(env.configured() && env.unlocked());
 }

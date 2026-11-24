@@ -1214,7 +1214,6 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    #[ignore = "R16-9: отказ сохранения при Locked не должен включать прокси в памяти"]
     fn bug_r16_locked_proxy_save_has_no_memory_side_effects() {
         struct Restore { mode: Mode, pool: Option<Pool> }
         impl Drop for Restore {

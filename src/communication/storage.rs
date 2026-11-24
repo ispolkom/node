@@ -456,6 +456,7 @@ impl ChatStorage {
     /// Всё под замком записи: параллельное дописывание не может вклиниться между проверкой и заменой.
     pub fn rekey_to(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize> {
         let _g = self.locked();
+        let was_locked = self.is_locked();
         let candidates = {
             let mut c = vec![self.key_for(&new)];
             if let Some(o) = old.as_ref() {
@@ -530,7 +531,9 @@ impl ChatStorage {
             }
         }
         // Хранилище переключается всегда: перенесённое читается только новым ключом, а неоткрываемые файлы не читались и раньше.
-        *self.key_mode.write().unwrap_or_else(|e| e.into_inner()) = KeyMode::Master(new);
+        if !was_locked {
+            *self.key_mode.write().unwrap_or_else(|e| e.into_inner()) = KeyMode::Master(new);
+        }
         Ok(failed)
     }
 
@@ -695,6 +698,26 @@ impl ChatStorage {
             Some((_, p)) => serde_json::from_slice(&p).unwrap_or_default(),
             None => Vec::new(),
         }
+    }
+
+    /// Keep a failed disk write encrypted while the owner locks the environment.
+    pub(crate) fn seal_outbox_snapshot(&self, entries: &[OutboxEntry]) -> Result<Vec<u8>> {
+        Self::seal_blob(&self.get_encryption_key()?, &serde_json::to_vec(entries)?)
+    }
+
+    pub(crate) fn open_outbox_snapshot(&self, snapshot: &[u8]) -> Result<Vec<OutboxEntry>> {
+        let key = self.get_encryption_key()?;
+        let (_, plain) = Self::open_blob(&[key], snapshot)
+            .ok_or_else(|| anyhow::anyhow!("outbox snapshot cannot be opened"))?;
+        Ok(serde_json::from_slice(&plain)?)
+    }
+
+    pub(crate) fn rekey_outbox_snapshot(&self, snapshot: &[u8], old: Option<[u8; 32]>, new: [u8; 32]) -> Result<Vec<u8>> {
+        let old_key = self.key_for(&old.unwrap_or(new));
+        let (_, plain) = Self::open_blob(&[old_key], snapshot)
+            .ok_or_else(|| anyhow::anyhow!("outbox snapshot cannot be opened for migration"))?;
+        let _: Vec<OutboxEntry> = serde_json::from_slice(&plain)?;
+        Self::seal_blob(&self.key_for(&new), &plain)
     }
 
     /// Загрузить историю чата (расшифрованную)
@@ -942,6 +965,7 @@ impl ChatStorage {
 
     /// Получить список всех peer, с которыми был чат
     pub fn list_chats(&self) -> Result<Vec<HashId>> {
+        self.get_encryption_key()?;
         let mut peers = Vec::new();
         
         if !self.chats_dir.exists() {
@@ -980,7 +1004,6 @@ mod concurrency_tests {
     use std::sync::Arc;
 
     #[test]
-    #[ignore = "R16-5: Locked не должен разрешать удаление истории"]
     fn bug_r16_locked_clear_history_preserves_ciphertext() {
         let dir = tempfile::Builder::new().prefix("r16_clear_peer_").tempdir().unwrap();
         let st = ChatStorage::in_dir(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
@@ -996,7 +1019,6 @@ mod concurrency_tests {
     }
 
     #[test]
-    #[ignore = "R16-5: Locked не должен разрешать удаление всех чатов и outbox"]
     fn bug_r16_locked_clear_all_preserves_ciphertext() {
         let dir = tempfile::Builder::new().prefix("r16_clear_all_").tempdir().unwrap();
         let chats = dir.path().join("chats");
@@ -1010,7 +1032,6 @@ mod concurrency_tests {
     }
 
     #[test]
-    #[ignore = "R16-6: Locked не должен раскрывать список собеседников"]
     fn bug_r16_locked_list_chats_refuses_metadata() {
         let dir = tempfile::Builder::new().prefix("r16_list_locked_").tempdir().unwrap();
         let st = ChatStorage::in_dir(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
@@ -1023,7 +1044,6 @@ mod concurrency_tests {
     }
 
     #[test]
-    #[ignore = "R16-7: миграция сама не должна снимать Locked"]
     fn bug_r16_rekey_does_not_unlock_storage() {
         let dir = tempfile::Builder::new().prefix("r16_rekey_lock_").tempdir().unwrap();
         let st = ChatStorage::in_dir_locked(HashId([1; 32]), dir.path().to_path_buf()).unwrap();
@@ -1051,6 +1071,7 @@ mod concurrency_tests {
         assert!(st.save_outbox(&[OutboxEntry { peer, msg: ChatMessage::new(me, peer, "новое".into()), first_sent: 2 }]).is_err());
         assert_eq!(std::fs::read(&path).as_deref().ok(), Some(before.as_slice()), "новая очередь затёрла старую при неполной миграции");
         assert_eq!(st.rekey_to(Some([7; 32]), [8; 32]).unwrap(), 0);
+        st.set_master([8; 32]);
         let restored = st.load_outbox();
         assert_eq!(restored.len(), 1);
         assert_eq!(restored[0].msg.text, "не доставлено");
@@ -1071,6 +1092,7 @@ mod concurrency_tests {
         assert_eq!(st.rekey_to(None, [8; 32]).unwrap(), 1);
         assert_eq!(std::fs::read(&path).unwrap(), before, "неоткрываемая история сама миграцией не затёрта");
         assert_eq!(st.rekey_to(Some([7; 32]), [8; 32]).unwrap(), 0);
+        st.set_master([8; 32]);
         let history = st.load_history(&peer, 10).unwrap();
         assert_eq!(history.len(), 1);
         assert_eq!(history[0].msg_id, msg.msg_id);

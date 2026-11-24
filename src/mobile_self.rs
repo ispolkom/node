@@ -127,13 +127,24 @@ pub fn rekey(dir: &std::path::Path, old: Option<&[u8; 32]>, new: &[u8; 32]) -> R
         }
         let _ = std::fs::remove_file(&plain);
     };
-    if open_with(new).is_some() {
+    if let Some(current) = open_with(new) {
         if plain.exists() {
+            if from_plain() != Some(current) {
+                return Err("конфликт ключей компьютера: открытая и зашифрованная пары различаются; файлы не тронуты".into());
+            }
             wipe_plain();
         }
         return Ok(());
     }
-    let pair = old.and_then(|o| open_with(o)).or_else(from_plain);
+    let encrypted_pair = old.and_then(|o| open_with(o));
+    if enc.exists() && encrypted_pair.is_none() {
+        return Err("зашифрованные ключи компьютера не открываются прежним ключом; файлы не тронуты".into());
+    }
+    let plain_pair = from_plain();
+    if plain.exists() && (plain_pair.is_none() || (encrypted_pair.is_some() && encrypted_pair != plain_pair)) {
+        return Err("конфликт ключей компьютера: открытая и зашифрованная пары различаются; файлы не тронуты".into());
+    }
+    let pair = encrypted_pair.or(plain_pair);
     let Some((x, e)) = pair else {
         return if enc.exists() || plain.exists() { Err("ключи компьютера не открываются ни прежним, ни новым ключом; файлы не тронуты".into()) } else { Ok(()) };
     };
@@ -1055,7 +1066,6 @@ mod tests {
     use super::*;
 
     #[test]
-    #[ignore = "R16-8: успешный rekey не должен стирать другую единственную открытую пару"]
     fn bug_r16_rekey_preserves_distinct_plain_identity() {
         let dir = tempfile::Builder::new().prefix("r16_self_distinct_").tempdir().unwrap();
         let key = [3; 32];

@@ -1,5 +1,7 @@
 # YANDI Node: final E2EE audit and release gate
 
+> This document records the pre-remediation audit at commit `2abf631`. Its R16 failure table and 951-test count are historical. See [R16 remediation](R16_REMEDIATION.md) for the verified current branch state (962 Rust tests passed, 17 ignored). No merge or release has occurred.
+
 Date: 24 November 2026. Baseline: `origin/main` at `c91a743`. Audit worktree: `codex/e2e-roadmap`. This report closes the current extended test cycle; it does not certify untested routes or change protocol design.
 
 ## Current confirmed findings
