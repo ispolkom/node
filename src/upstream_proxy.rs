@@ -1226,7 +1226,7 @@ mod tests {
         let old_mode = mode();
         *mode_cell().lock().unwrap() = Mode::Locked;
         // Инициализация при Locked не читает файлы. Сохраняем и возвращаем глобальное состояние даже при панике.
-        let old_pool = std::mem::replace(&mut *pool(), Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new() });
+        let old_pool = std::mem::replace(&mut *pool(), Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: false });
         let _restore = Restore { mode: old_mode, pool: Some(old_pool) };
         let result = save(Settings { enabled: true, kind: Kind::Socks5, host: "127.0.0.1".into(), port: 12345, auth: Auth::Password { user: "test".into(), password: "test-only-password".into() } });
         assert!(result.is_err(), "запись действительно запрещена до пароля");
