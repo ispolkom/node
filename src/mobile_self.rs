@@ -1055,6 +1055,22 @@ mod tests {
     use super::*;
 
     #[test]
+    #[ignore = "R16-8: успешный rekey не должен стирать другую единственную открытую пару"]
+    fn bug_r16_rekey_preserves_distinct_plain_identity() {
+        let dir = tempfile::Builder::new().prefix("r16_self_distinct_").tempdir().unwrap();
+        let key = [3; 32];
+        let first = serde_json::to_vec(&Stored { x25519_secret: b64(&[1; 32]), ed25519_secret: b64(&[2; 32]) }).unwrap();
+        std::fs::write(dir.path().join("mobile_self.json"), first).unwrap();
+        rekey(dir.path(), None, &key).unwrap();
+        let second = serde_json::to_vec(&Stored { x25519_secret: b64(&[4; 32]), ed25519_secret: b64(&[5; 32]) }).unwrap();
+        let plain = dir.path().join("mobile_self.json");
+        std::fs::write(&plain, &second).unwrap();
+        let result = rekey(dir.path(), None, &key);
+        assert_eq!(std::fs::read(&plain).ok(), Some(second), "уничтожена отличающаяся пара, которой нет в enc");
+        assert!(result.is_err(), "конфликт должен быть явно сообщён");
+    }
+
+    #[test]
     fn missed_calls_count_only_fresh_invites_once() {
         clear_missed_calls();
         let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
