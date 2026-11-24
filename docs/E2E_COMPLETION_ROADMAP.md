@@ -21,3 +21,12 @@ Status: in progress. Baseline: `c91a743` (24 November 2026). This plan does not 
 6. **Migration and release.** Dual-version testing, downgrade refusal after migration, physical Android Doze tests, PC background-call tests and independent review. Gate: update documentation/site claims only after all supported communication paths pass.
 
 No live keys or owner data may enter the stand. Keep `release/SEQ`, signed artifacts and production nodes untouched. A PASS applies to its exact scenario only. Physical device behavior remains NOT TESTED until exercised on the devices.
+
+## Relay evidence (24 November 2026)
+
+- PASS: `CARGO_TARGET_DIR=/mnt/ssd480/yandi-e2e-target cargo test --locked --lib a_sealed_chat_message_crosses_relay_without_exposing_content`. The test uses the production UDP relay forwarding loop on four relay sockets, production YSE1 and an endpoint transport session. The receiver gets the original chat message through the relay sockets; the intermediary's signing key cannot open YSE1; transport rejects replay of the forwarded datagram. The relay forwarding loop copies the endpoint ciphertext without opening it.
+- PASS: `CARGO_TARGET_DIR=/mnt/ssd480/yandi-e2e-target cargo test --locked --test e2e_boundary_baseline`. A distinct intermediary key cannot open a sealed node message.
+- PASS: three real node processes exchanged a synthetic marker from node 1 to node 3, with node 2 running as a relay and nodes 1 and 3 in client mode. Delivery was observed in node 3's history. No relay allocation or forwarding was observed in node 2's log for this message, so the selected path may have been direct on loopback.
+- NOT TESTED: forced relay routing between separate node processes in isolated network namespaces, hostile relay packet modification in the live route, Android physical lifecycle, and end-to-end confidentiality between a phone and a remote contact's phone.
+
+The first relay socket test run dropped the sender's datagram before the receiver address was pinned. The test now waits for the receiver's pin datagram to be processed before sending. This was a stand setup race, not evidence of lost production chat traffic.

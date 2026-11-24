@@ -404,6 +404,52 @@ mod tests {
         assert_eq!(from, ra);
     }
 
+    /// Real relay sockets carry a node message sealed with the production YSE1
+    /// envelope and encrypted with the endpoint transport session.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn a_sealed_chat_message_crosses_relay_without_exposing_content() {
+        use crate::communication::ChatMessage;
+        use crate::core::NodeIdentity;
+        use crate::crypto::{handshake::HandshakeManager, sealed};
+        use ed25519_dalek::SigningKey;
+
+        let (relay_sockets, a, b, relay_task) = rig().await;
+        let (ra, rb) = (relay_sockets[1].local_addr().unwrap(), relay_sockets[3].local_addr().unwrap());
+        let (alice, bob, intermediary) = (NodeIdentity::new(), NodeIdentity::new(), NodeIdentity::new());
+        let (alice_id, bob_id) = (alice.node_id(), bob.node_id());
+        let (mut a_session, mut b_session) = (HandshakeManager::new(alice_id), HandshakeManager::new(bob_id));
+        let request = a_session.generate_hello_ephemeral(7);
+        let response = b_session.complete_hello_responder(alice_id, &request).unwrap();
+        a_session.complete_hello_initiator(7, bob_id, &response).unwrap();
+
+        let marker = "relay-private-test-message-7391";
+        let plain = serde_json::to_vec(&ChatMessage::new(alice_id, bob_id, marker.into())).unwrap();
+        let a_key = SigningKey::from_bytes(&alice.signing_private_key);
+        let b_key = SigningKey::from_bytes(&bob.signing_private_key);
+        let relay_key = SigningKey::from_bytes(&intermediary.signing_private_key);
+        let created_ms = 1_800_000_000_000;
+        let envelope = sealed::seal(&a_key, &b_key.verifying_key(), &alice_id.0, &bob_id.0, created_ms, &plain).unwrap();
+        let datagram = a_session.encrypt(&bob_id, &envelope).unwrap();
+        assert!(!datagram.windows(marker.len()).any(|part| part == marker.as_bytes()));
+        assert!(sealed::open(&relay_key, &a_key.verifying_key(), &alice_id.0, &bob_id.0, created_ms, &envelope).is_err());
+
+        // B's initial datagram pins its address; only relay ports are used for delivery.
+        b.send_to(b"pin", rb).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        a.send_to(&datagram, ra).await.unwrap();
+        let (forwarded, from) = recv(&b).await.expect("relay must forward encrypted datagram");
+        assert_eq!(from, rb);
+        assert_eq!(forwarded, datagram);
+        assert!(b_session.decrypt(&intermediary.node_id(), &forwarded).is_err());
+        let opened = b_session.decrypt(&alice_id, &forwarded).unwrap();
+        let (_, content) = sealed::open(&b_key, &a_key.verifying_key(), &alice_id.0, &bob_id.0, created_ms, &opened).unwrap();
+        let received: ChatMessage = serde_json::from_slice(&content).unwrap();
+        assert_eq!(received.text, marker);
+        assert!(b_session.decrypt(&alice_id, &forwarded).is_err(), "replayed datagram accepted");
+        relay_task.abort();
+    }
+
     // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
     #[cfg(target_os = "linux")]
     #[tokio::test]
