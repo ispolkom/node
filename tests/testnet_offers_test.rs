@@ -15,6 +15,15 @@ fn yandi(stand: &Path, home: &Path, args: &[&str]) -> (i32, String) {
     (out.status.code().unwrap_or(-1), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
+/// Сеанс администратора узла (docs/ROLES.md): управленческие ручки требуют токена в заголовке `x-yandi-admin`.
+async fn admin(http: &reqwest::Client, web: &str, cookie: &str, stand: &std::path::Path) -> String {
+    let pw = std::fs::read_to_string(stand.join("passwords.txt")).unwrap();
+    let login = pw.lines().find_map(|l| l.strip_prefix("пароль входа:")).unwrap().trim().to_string();
+    let r = http.post(format!("{web}/api/admin/session")).header("cookie", cookie).json(&json!({"password": login})).send().await.unwrap();
+    assert!(r.status().is_success(), "admin session: {}", r.status());
+    r.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string()
+}
+
 struct Down(PathBuf, PathBuf);
 impl Drop for Down {
     fn drop(&mut self) {
@@ -81,7 +90,8 @@ async fn every_copy_learns_every_card_and_country_lists_are_built_from_signed_se
     assert_eq!(list["offers"].as_array().unwrap().len(), 3, "{list}");
     assert_eq!(list["countries"][&country], json!(3));
     // то, чем узел помогает, обновляется без ожидания получаса: копия 1 выключает выход — через минуту её карточка у других без выхода
-    let r = http.post("http://127.0.0.1:26100/api/exit/settings").header("cookie", &cookies[0]).json(&json!({"mode": "off"})).send().await.unwrap();
+    let adm1 = admin(&http, "http://127.0.0.1:26100", &cookies[0], &stand).await;
+    let r = http.post("http://127.0.0.1:26100/api/exit/settings").header("cookie", &cookies[0]).header("x-yandi-admin", &adm1).json(&json!({"mode": "off"})).send().await.unwrap();
     assert!(r.status().is_success());
     let mut seen_off = false;
     for _ in 0..40 {

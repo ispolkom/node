@@ -10,6 +10,7 @@ import '../crypto/file_vault.dart';
 import '../models/file_offer.dart';
 import 'api_service.dart';
 import 'pool.dart';
+import '../l10n_core.dart';
 
 /// Размер куска в открытом виде. На проводе он на 28 байт больше (случайное число и метка шифрования).
 const int chunkSize = 256 * 1024;
@@ -84,7 +85,7 @@ class FileTransferService {
       if (r != null) return r;
       await Future<void>.delayed(Duration(milliseconds: 400 * (1 << i)));
     }
-    throw TransferException('$what: нет связи с узлом');
+    throw TransferException(trf('{what}: нет связи с узлом', {'what': what}));
   }
 
   /// Шаг 1 отправки: занять передачу на узле и подготовить ключ. Ещё ничего не залито.
@@ -92,13 +93,13 @@ class FileTransferService {
     final src = await FileSource.open(path, vault: vault);
     final size = src.length;
     await src.close();
-    if (size == 0) throw TransferException('Файл пустой');
-    if (size > maxFileSize) throw TransferException('Файл больше 1 ГБ');
+    if (size == 0) throw TransferException(tr('Файл пустой'));
+    if (size > maxFileSize) throw TransferException(tr('Файл больше 1 ГБ'));
     final fileName = safeName(name ?? path.split(Platform.pathSeparator).last);
     final chunks = max(1, (size / chunkSizeFor(size)).ceil());
     // узлу уходит безликая подпись: настоящее имя только внутри зашифрованного предложения
     final tid = await _api.startFileTransfer(toPeerId: toPeerId, fileName: 'file', fileSize: size, totalChunks: chunks);
-    if (tid == null) throw TransferException('Узел не принял передачу (нет места, лимит или это не ваше устройство)');
+    if (tid == null) throw TransferException(tr('Узел не принял передачу (нет места, лимит или это не ваше устройство)'));
     return FileOffer(
       tid: tid, name: fileName, size: size, chunks: chunks, mime: guessMime(fileName),
       key: base64.encode(FileCrypto.newKey()),
@@ -124,9 +125,9 @@ class FileTransferService {
           try {
             buf = await src.readAt(i * cs, want);
           } on FileVaultException catch (e) {
-            throw TransferException('Не удалось прочитать файл: $e');
+            throw TransferException(trf('Не удалось прочитать файл: {e}', {'e': e}));
           }
-          if (buf.length != want) throw TransferException('Файл изменился во время отправки');
+          if (buf.length != want) throw TransferException(tr('Файл изменился во время отправки'));
           hash.add(buf);
           result.complete(buf);
         } catch (e, st) {
@@ -139,14 +140,14 @@ class FileTransferService {
       await runPool(offer.chunks, parallelFor(offer.size), (i) async {
         final buf = await readChunk(i);
         final wire = await FileCrypto.encryptChunk(key, offer.tid, i, offer.chunks, buf);
-        await _retry<bool>(() async => await _api.uploadChunk(offer.tid, i, wire) ? true : null, 'кусок ${i + 1}');
+        await _retry<bool>(() async => await _api.uploadChunk(offer.tid, i, wire) ? true : null, trf('кусок {n}', {'n': i + 1}));
         onProgress?.call(++finished / offer.chunks);
       });
     } finally {
       await src.close();
     }
     hash.close();
-    await _retry<bool>(() async => await _api.completeTransfer(offer.tid) ? true : null, 'завершение');
+    await _retry<bool>(() async => await _api.completeTransfer(offer.tid) ? true : null, tr('завершение'));
     return offer.withSha(out.value.toString());
   }
 
@@ -166,13 +167,13 @@ class FileTransferService {
       var i = -1;
       // куски скачиваются с опережением (для больших файлов — по несколько сразу), а расшифровка, сумма и запись — строго по порядку
       await for (final wire in orderedPrefetch<List<int>>(
-          offer.chunks, parallelFor(offer.size), (k) => _retry<List<int>>(() => _api.downloadChunk(offer.tid, k), 'кусок ${k + 1}'))) {
+          offer.chunks, parallelFor(offer.size), (k) => _retry<List<int>>(() => _api.downloadChunk(offer.tid, k), trf('кусок {n}', {'n': k + 1})))) {
         i++;
         final Uint8List plain;
         try {
           plain = await FileCrypto.decryptChunk(key, offer.tid, i, offer.chunks, wire);
         } catch (_) {
-          throw TransferException('Кусок ${i + 1} не прошёл проверку: файл повреждён или подменён');
+          throw TransferException(trf('Кусок {n} не прошёл проверку: файл повреждён или подменён', {'n': i + 1}));
         }
         total += plain.length;
         hash.add(plain);
@@ -180,7 +181,7 @@ class FileTransferService {
           try {
             await w.add(plain);
           } on FileVaultException {
-            throw TransferException('Размер не совпал: получено больше, чем заявлено (${offer.size} байт)');
+            throw TransferException(trf('Размер не совпал: получено больше, чем заявлено ({n} байт)', {'n': offer.size}));
           }
         } else {
           sink!.add(plain);
@@ -188,9 +189,9 @@ class FileTransferService {
         onProgress?.call((i + 1) / offer.chunks);
       }
       hash.close();
-      if (total != offer.size) throw TransferException('Размер не совпал: получено $total из ${offer.size} байт');
+      if (total != offer.size) throw TransferException(trf('Размер не совпал: получено {a} из {b} байт', {'a': total, 'b': offer.size}));
       if (offer.sha.isNotEmpty && out.value.toString() != offer.sha) {
-        throw TransferException('Контрольная сумма не совпала: файл повреждён');
+        throw TransferException(tr('Контрольная сумма не совпала: файл повреждён'));
       }
       if (w != null) {
         await w.close();

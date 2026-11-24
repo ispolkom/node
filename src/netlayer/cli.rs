@@ -24,8 +24,6 @@ pub struct P2PCli {
     proxy_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
     proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
     proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-    // 🔄 NACK channel (для wagon retransmission)
-    nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     // SOCKS5 channels
     socks5_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
@@ -48,7 +46,6 @@ impl P2PCli {
             proxy_resp_rx: Arc::new(tokio::sync::Mutex::new(None)),
             proxy_req_rx: Arc::new(tokio::sync::Mutex::new(None)),
             proxy_tunnel_rx: Arc::new(tokio::sync::Mutex::new(None)),
-            nack_rx: Arc::new(tokio::sync::Mutex::new(None)), // 🔄 NACK channel
             socks5_resp_rx: Arc::new(tokio::sync::Mutex::new(None)),
             socks5_req_rx: Arc::new(tokio::sync::Mutex::new(None)),
             socks5_tunnel_rx: Arc::new(tokio::sync::Mutex::new(None)),
@@ -74,12 +71,6 @@ impl P2PCli {
     /// Set proxy tunnel data channel (for CONNECT)
     pub fn with_proxy_tunnel_data_channel(mut self, rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>) -> Self {
         self.proxy_tunnel_rx = rx;
-        self
-    }
-
-    /// Set NACK channel (для wagon retransmission)
-    pub fn with_nack_channel(mut self, rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>) -> Self {
-        self.nack_rx = rx;
         self
     }
 
@@ -133,7 +124,6 @@ impl P2PCli {
         let proxy_resp_rx = self.proxy_resp_rx.clone();
         let proxy_req_rx = self.proxy_req_rx.clone();
         let proxy_tunnel_rx = self.proxy_tunnel_rx.clone();
-        let nack_rx = self.nack_rx.clone(); // 🔄 NACK channel
         let socks5_resp_rx = self.socks5_resp_rx.clone();
         let socks5_req_rx = self.socks5_req_rx.clone();
         let socks5_tunnel_rx = self.socks5_tunnel_rx.clone();
@@ -150,9 +140,6 @@ impl P2PCli {
         println!("   socks5 hops [NL]   - анонимно: цепочка через три узла");
         println!("   proxy <SHORT_ID>   - запустить HTTP Proxy (DPI bypass) через пира");
         println!("   proxy-gateway      - запустить HTTP Proxy Gateway (на exit node)");
-        println!("   relay-server       - включить режим relay сервера");
-        println!("   relay-connect <ID> - подключиться к пиру через relay");
-        println!("   relay-list         - показать активные relay сессии");
         println!("   tun link <ID>      - связать TUN с exit node (entry node)");
         println!("   tun exit           - открыть внешний трафик (exit node)");
         println!("   exit               - запустить Exit Node Handler (SOCKS5/Proxy)");
@@ -197,7 +184,6 @@ impl P2PCli {
                             proxy_resp_rx.clone(),
                             proxy_req_rx.clone(),
                             proxy_tunnel_rx.clone(),
-                            nack_rx.clone(), // 🔄 NACK channel
                             socks5_resp_rx.clone(),
                             socks5_req_rx.clone(),
                             socks5_tunnel_rx.clone(),
@@ -228,7 +214,6 @@ impl P2PCli {
         proxy_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
         proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
         proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-        nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>, // 🔄 NACK channel
         socks5_resp_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
         socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
         socks5_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -336,96 +321,13 @@ impl P2PCli {
             }
 
             "proxy-gateway" => {
-                Self::handle_proxy_gateway_command(transport, proxy_req_rx, proxy_tunnel_rx.clone(), nack_rx.clone()).await?
+                Self::handle_proxy_gateway_command(transport, proxy_req_rx, proxy_tunnel_rx.clone()).await?
             }
 
             "socks5-gateway" => {
-                Self::handle_socks5_gateway_command(transport, socks5_req_rx, socks5_tunnel_rx.clone(), nack_rx.clone()).await?
+                Self::handle_socks5_gateway_command(transport, socks5_req_rx, socks5_tunnel_rx.clone()).await?
             }
 
-            "relay-server" => {
-                Self::handle_relay_server_command(transport).await?
-            }
-
-            "relay-connect" => {
-                if parts.len() < 2 {
-                    println!("Использование: relay-connect <SHORT_ID>");
-                    println!("Пример: relay-connect 0021944b");
-                    println!();
-                    println!("Подключается к пиру через публичный relay сервер");
-                    println!("Используется для пиров за NAT");
-                    return Ok(());
-                }
-
-                let short_id_hex = parts[1];
-                Self::handle_relay_connect_command(transport, short_id_hex).await?
-            }
-
-            "relay-list" => {
-                Self::handle_relay_list_command(transport).await?
-            }
-
-            "tcp" => {
-                if parts.len() < 2 {
-                    println!("Использование: tcp <SHORT_ID>");
-                    println!("Пример: tcp 0021944b");
-                    println!();
-                    println!("Запускает Raw TCP Tunnel over HTTP CONNECT на 127.0.0.1:9090");
-                    println!("весь трафик будет проксироваться через указанного пира (exit node)");
-                    println!();
-                    println!("⚡ Это экспериментальная функция для максимальной скорости!");
-                    println!("   Убирает SOCKS5 и JSON слои, отправляя raw bytes в YTP wagon");
-                    println!();
-                    println!("Используйте 'peers' чтобы узнать Short ID пира");
-                    return Ok(());
-                }
-
-                let short_id_hex = parts[1];
-
-                // Парсим короткий ID
-                let short_id_bytes = hex::decode(short_id_hex)
-                    .map_err(|_| format!("Неверный формат Short ID: {}", short_id_hex))?;
-
-                if short_id_bytes.len() != 8 {
-                    return Err(format!("Short ID должен быть 8 байт (16 hex), получено: {}", short_id_bytes.len()));
-                }
-
-                // Ищем пира по короткому ID
-                let peers = transport.get_peers().await;
-                let exit_peer = peers.iter()
-                    .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-                    .ok_or_else(|| format!("Пир с Short ID {} не найден", short_id_hex))?;
-
-                println!("🚇 Запуск Raw TCP Tunnel...");
-                println!("   HTTP Proxy на 127.0.0.1:9090 → Exit Node {} ({})", exit_peer.addr, short_id_hex);
-                println!();
-
-                // Создаем TcpTunnel
-                use crate::protocol::TcpTunnel;
-
-                let transport_for_tcp = transport.clone();
-                let exit_peer_id = exit_peer.id;
-
-                let tcp_tunnel = TcpTunnel::new(
-                    std::sync::Arc::new(transport_for_tcp),
-                    exit_peer_id,
-                    9090  // Порт 9090 как в плане
-                );
-
-                println!("✅ Raw TCP Tunnel запускается на http://127.0.0.1:9090");
-                println!("📡 Configure browser: HTTP Proxy = 127.0.0.1:9090");
-                println!();
-
-                tokio::spawn(async move {
-                    if let Err(e) = tcp_tunnel.run().await {
-                        eprintln!("❌ TCP Tunnel Error: {}", e);
-                    }
-                });
-
-                println!("✅ TCP Tunnel активен!");
-                println!("⚡ Raw bytes → YTP wagon → Exit Node → Интернет");
-                println!();
-            }
 
             "tunnel" => {
                 if parts.len() < 2 {
@@ -623,61 +525,6 @@ impl P2PCli {
                 });
 
                 println!("✅ SOCKS5 Exit Node запущен в фоне!");
-            }
-
-            "tcp-exit" => {
-                println!("🚇 Запуск TCP Tunnel Exit Handler...");
-                println!();
-                println!("   Эта нода будет принимать входящие HTTP/HTTPS CONNECT запросы");
-                println!("   от TcpTunnel клиентов и проксировать трафик в интернет.");
-                println!("   Raw TCP bytes → YTP wagons → Internet");
-                println!();
-
-                use crate::protocol::TcpTunnelExitHandler;
-
-                let transport_clone = std::sync::Arc::new(transport.clone());
-
-                println!("✅ TCP Tunnel Exit Handler запускается...");
-
-                tokio::spawn(async move {
-                    let exit_handler = TcpTunnelExitHandler::new(transport_clone).await;
-                    if let Err(e) = exit_handler.run().await {
-                        eprintln!("❌ TCP Tunnel Exit error: {}", e);
-                    }
-                });
-
-                println!("✅ TCP Tunnel Exit Handler запущен в фоне!");
-                println!("   Теперь entry nodes могут использовать эту ноду как gateway.");
-            }
-
-            "rawip-exit" => {
-                println!("🚀 Запуск RawIP Tunnel Exit Handler...");
-                println!();
-                println!("   Эта нода будет принимать сырые IP пакеты через TCP (порт 10001)");
-                println!("   от Entry Nodes и проксировать их в интернет.");
-                println!("   IP packets (RawIP protocol) → Internet");
-                println!();
-
-                use crate::netlayer::RawIpTunnel;
-
-                let transport_clone = std::sync::Arc::new(transport.clone());
-
-                println!("✅ RawIP Tunnel запускается...");
-
-                tokio::spawn(async move {
-                    let station_clone = {
-                        let station_opt = transport_clone.station.lock().await;
-                        station_opt.as_ref().unwrap().clone()
-                    };
-
-                    let rawip_tunnel = RawIpTunnel::new(station_clone, 10001);
-                    if let Err(e) = rawip_tunnel.run().await {
-                        eprintln!("❌ RawIP Tunnel error: {}", e);
-                    }
-                });
-
-                println!("✅ RawIP Tunnel запущен на порту 10001!");
-                println!("   Теперь мобильные приложения могут подключаться.");
             }
 
             "tun" => {
@@ -886,12 +733,6 @@ impl P2PCli {
                 println!("   socks5 <SHORT_ID>  - запустить SOCKS5 Proxy через пира");
                 println!("   proxy <SHORT_ID>   - запустить HTTP Proxy (DPI bypass) через пира");
                 println!("   proxy-gateway      - запустить HTTP Proxy Gateway (на exit node)");
-                println!("   relay-server       - включить режим relay сервера");
-                println!("   relay-connect <ID> - подключиться к пиру через relay");
-                println!("   relay-list         - показать активные relay сессии");
-                println!("   tcp <SHORT_ID>     - запустить TCP Tunnel через пира (entry node)");
-                println!("   tcp-exit           - запустить TCP Tunnel Exit Handler (gateway)");
-                println!("   rawip-exit         - запустить RawIP Tunnel (порт 10001) для мобильных приложений");
                 println!("   tunnel <CMD>       - управление P2P тоннелями (voice/video/file)");
                 println!("   tun init           - создать TUN устройства");
                 println!("   tun link <ID>      - связать TUN с exit node (entry node)");
@@ -1045,7 +886,6 @@ impl P2PCli {
         transport: &P2PTransport,
         proxy_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyRequest)>>>>,
         proxy_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::proxy::ProxyTunnelData)>>>>,
-        nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     ) -> Result<(), String> {
         println!("🌐 Запуск HTTP Proxy Gateway...");
         println!();
@@ -1086,24 +926,6 @@ impl P2PCli {
             println!("⚠️  No tunnel data channel - CONNECT won't work!");
         }
 
-        // 🔄 Take the NACK receiver (для wagon retransmission)
-        let nack_rx_chan = {
-            let mut rx_lock = nack_rx.lock().await;
-            rx_lock.take()
-        };
-
-        if let Some(nack_rx) = nack_rx_chan {
-            println!("✅ NACK channel connected - wagon retransmission enabled");
-
-            // Запускаем NACK handler task
-            let gateway_clone = gateway.clone_for_handler();
-            tokio::spawn(async move {
-                Self::handle_nack_packets(gateway_clone, nack_rx).await;
-            });
-        } else {
-            println!("⚠️  No NACK channel - wagon retransmission disabled!");
-        }
-
         // Регистрируем Station в transport для обработки YTP пакетов
         transport.set_station(gateway.station.clone()).await;
         println!("🚂 YTP Station registered in transport");
@@ -1120,57 +942,6 @@ impl P2PCli {
         println!();
 
         Ok(())
-    }
-
-    /// 🔄 Обработка NACK пакетов - повторная отправка потерянных wagon-ов
-    async fn handle_nack_packets(
-        gateway: crate::proxy::HttpProxyGateway,
-        mut nack_rx: tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>,
-    ) {
-
-        println!("🔄 NACK Handler started - listening for retransmission requests");
-
-        while let Some((source_node, nack)) = nack_rx.recv().await {
-            info!("🔄 Received NACK from {} for train #{}: {} missing wagons",
-                  hex::encode(&source_node.0[..8]), nack.train_id, nack.missing_wagons.len());
-
-            // Получаем отправленные wagons из хранилища
-            let sent_trains = gateway.sent_trains.clone();
-            let mut trains_lock = sent_trains.lock().await;
-
-            if let Some(sent_train) = trains_lock.get_mut(&nack.train_id) {
-                info!("📦 Found train #{} in storage, retransmitting {} wagons",
-                      nack.train_id, nack.missing_wagons.len());
-
-                let mut retransmitted = 0;
-                for wagon_num in &nack.missing_wagons {
-                    if let Some(wagon_bytes) = sent_train.get_wagon(*wagon_num) {
-                        // Повторно отправляем wagon
-                        let target_node = sent_train.target_node;
-                        let mut packet = vec![0x60u8]; // YTP Wagon prefix
-                        packet.extend_from_slice(wagon_bytes);
-
-                        if let Err(e) = gateway.transport.send_encrypted(source_node, &packet).await {
-                            error!("❌ Failed to retransmit wagon #{} of train #{}: {}",
-                                   wagon_num, nack.train_id, e);
-                        } else {
-                            debug!("✅ Retransmitted wagon #{} of train #{} ({} bytes)",
-                                   wagon_num, nack.train_id, wagon_bytes.len());
-                            retransmitted += 1;
-                        }
-                    } else {
-                        warn!("⚠️  Wagon #{} not found in train #{} storage",
-                              wagon_num, nack.train_id);
-                    }
-                }
-
-                info!("✅ Retransmitted {} wagons for train #{}", retransmitted, nack.train_id);
-            } else {
-                warn!("⚠️  Train #{} not found in storage (may have expired)", nack.train_id);
-            }
-        }
-
-        warn!("⚠️  NACK channel closed");
     }
 
     /// Handle socks5 command - start SOCKS5 proxy client
@@ -1387,7 +1158,6 @@ impl P2PCli {
         transport: &P2PTransport,
         socks5_req_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::socks5::Socks5ProxyRequest)>>>>,
         socks5_tunnel_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::socks5::Socks5TunnelData)>>>>,
-        _nack_rx: Arc<tokio::sync::Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, crate::protocol::WagonNack)>>>>,
     ) -> Result<(), String> {
         println!("🧦 Запуск SOCKS5 Exit Node (Gateway)...");
         println!();
@@ -1446,131 +1216,4 @@ impl P2PCli {
         Ok(())
     }
 
-    /// Handle relay-server command - enable relay server mode
-    async fn handle_relay_server_command(transport: &P2PTransport) -> Result<(), String> {
-        println!("🌐 Включение режима Relay Server...");
-        println!();
-        println!("   Эта нода будет ретранслировать трафик между пирами за NAT");
-        println!("   Публичный IP требуется для работы в качестве relay сервера");
-        println!();
-
-        // Получаем relay manager из транспорта
-        let mut relay_manager = transport.relay_manager.lock().await;
-        relay_manager.set_relay_server_mode(true);
-
-        println!("✅ Relay Server режим ВКЛЮЧЕН!");
-        println!("   Нода готова принимать relay-соединения");
-        println!();
-
-        Ok(())
-    }
-
-    /// Handle relay-connect command - connect to peer via relay
-    async fn handle_relay_connect_command(transport: &P2PTransport, short_id_hex: &str) -> Result<(), String> {
-        // Парсим short_id
-        let short_id_bytes = hex::decode(short_id_hex)
-            .map_err(|_| format!("Неверный формат Short ID: {}", short_id_hex))?;
-
-        if short_id_bytes.len() != 8 {
-            return Err(format!("Short ID должен быть 8 байт (16 hex), получено: {}", short_id_bytes.len()));
-        }
-
-        // Ищем пира по short_id
-        let peers = transport.get_peers().await;
-        let target_peer = peers.iter()
-            .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-            .ok_or_else(|| format!("Пир с Short ID {} не найден", short_id_hex))?;
-
-        println!("🔌 Подключение к пиру {} через Relay...", short_id_hex);
-        println!("   Peer: {} ({})", target_peer.addr, short_id_hex);
-        println!("   NAT статус: {}", target_peer.get_nat_status().as_str());
-
-        // Проверяем, есть ли у нас relay manager
-        let relay_manager = transport.relay_manager.lock().await;
-
-        if !relay_manager.is_relay_server() {
-            println!("⚠️  Предупреждение: Эта нода не является relay сервером");
-            println!("   Для подключения нужна публичная нода с relay-server");
-            println!();
-            println!("   Сначала найдите публичную ноду и включите на ней relay-server");
-            drop(relay_manager);
-            return Ok(());
-        }
-
-        // Создаем relay сессию
-        let my_id = transport.identity().node_id();
-        let session_id = {
-            let mut manager = transport.relay_manager.lock().await;
-            manager.create_session(my_id, target_peer.id)
-        };
-
-        println!("🔗 Relay сессия #{} создана", session_id);
-
-        // Отправляем запрос на подключение
-        use crate::netlayer::packet::RelayConnectRequest;
-
-        let request = RelayConnectRequest {
-            source_peer: my_id,
-            target_peer: target_peer.id,
-            session_id,
-            timestamp: std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_secs(),
-        };
-
-        let request_bytes = serde_json::to_vec(&request)
-            .map_err(|e| format!("Failed to serialize relay request: {}", e))?;
-
-        let mut packet = vec![0x60u8]; // RelayConnectRequest
-        packet.extend_from_slice(&request_bytes);
-
-        transport.send_encrypted(target_peer.id, &packet).await?;
-
-        println!("📤 Запрос на relay-соединение отправлен пиру {}", short_id_hex);
-        println!("⏳ Ожидание ответа...");
-
-        Ok(())
-    }
-
-    /// Handle relay-list command - show active relay sessions
-    async fn handle_relay_list_command(transport: &P2PTransport) -> Result<(), String> {
-        let relay_manager = transport.relay_manager.lock().await;
-
-        if !relay_manager.is_relay_server() {
-            println!("ℹ️  Relay server режим НЕ АКТИВЕН");
-            println!("   Включите: relay-server");
-        } else {
-            println!("🌐 Relay Server режим АКТИВЕН");
-        }
-
-        let stats = relay_manager.get_stats();
-
-        println!();
-        println!("📊 Статистика Relay:");
-        println!("   Активных сессий: {}", stats.active_sessions);
-        println!("   Всего передано: {} байт", stats.total_bytes_forwarded);
-        println!("   Всего пакетов: {}", stats.total_packets_forwarded);
-        println!();
-
-        let active_sessions = relay_manager.get_active_sessions();
-
-        if active_sessions.is_empty() {
-            println!("   (нет активных relay сессий)");
-        } else {
-            println!("📋 Активные relay сессии:");
-            for (i, session) in active_sessions.iter().enumerate() {
-                println!("   {}. Сессия #{}", i + 1, session.session_id);
-                println!("      От: {}", hex::encode(&session.source_peer.0[..8]));
-                println!("      Кому: {}", hex::encode(&session.target_peer.0[..8]));
-                println!("      Статус: {:?}", session.status);
-                println!("      Передано: {} байт", session.bytes_forwarded);
-                println!("      Бездействие: {:?}", session.idle_time());
-                println!();
-            }
-        }
-
-        drop(relay_manager);
-        Ok(())
-    }
 }

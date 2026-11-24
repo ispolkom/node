@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
@@ -9,6 +8,7 @@ import '../services/vault_files.dart';
 import '../theme.dart';
 import '../widgets/vault_image.dart';
 import 'file_viewer_screen.dart';
+import '../l10n.dart';
 
 /// Вкладка «Файлы»: общее защищённое хранилище приложения. Смотреть можно, не выходя из приложения; удаление — сразу и насовсем, без корзины;
 /// пересылать можно только контактам YANDI (системного «Поделиться» нет: файл не должен уйти к постороннему приложению).
@@ -16,8 +16,7 @@ class FilesTab extends StatefulWidget {
   /// Для тестов: готовое хранилище вместо папки приложения.
   final VaultFiles? vault;
   final FilesHost? host;
-  final Future<void> Function(String)? dropPickerCopy;
-  const FilesTab({super.key, this.vault, this.host, this.dropPickerCopy});
+  const FilesTab({super.key, this.vault, this.host});
   @override
   State<FilesTab> createState() => FilesTabState();
 }
@@ -52,37 +51,6 @@ class FilesTabState extends State<FilesTab> {
     });
   }
 
-  /// «+» на вкладке: взять файл из памяти телефона и положить в хранилище (чтобы переслать оттуда). Временную копию выбора сразу чистим.
-  Future<void> addFiles() async {
-    final cleanup = widget.dropPickerCopy ?? context.read<AppState>().dropPickerCopy;
-    final res = await FilePicker.platform.pickFiles(allowMultiple: true);
-    if (res == null) return;
-    var failed = 0;
-    try {
-      final v = _vault;
-      if (v == null) return;
-      for (final f in res.files) {
-        final p = f.path;
-        if (p == null) continue;
-        try {
-          await v.importFile(p, name: f.name);
-        } catch (_) {
-          failed++;
-        }
-      }
-    } finally {
-      // открытая копия выбора не должна остаться во временном каталоге ни при какой ошибке
-      for (final file in res.files) {
-        final path = file.path;
-        if (path != null) await cleanup(path);
-      }
-    }
-    if (failed > 0 && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Не удалось добавить файлов: $failed (нет места или нет доступа)')));
-    }
-    await reload();
-  }
-
   Future<void> _open(VaultFile f) async {
     await Navigator.push(context, MaterialPageRoute(
       builder: (_) => FileViewerScreen(file: f, onShare: () => _share([f]), onDelete: () async { await _vault?.deleteForever(f.path); }),
@@ -95,11 +63,11 @@ class FilesTabState extends State<FilesTab> {
       context: context,
       builder: (ctx) => AlertDialog(
         backgroundColor: AppTheme.surface,
-        title: Text(n == 1 ? 'Удалить файл?' : 'Удалить файлы ($n)?', style: const TextStyle(color: AppTheme.text)),
-        content: Text('$what будет удалено сразу и насовсем, без корзины.', style: const TextStyle(color: AppTheme.textSecondary)),
+        title: Text(n == 1 ? tr('Удалить файл?') : trf('Удалить файлы ({n})?', {'n': n}), style: const TextStyle(color: AppTheme.text)),
+        content: Text(trf('{what} будет удалено сразу и насовсем, без корзины.', {'what': what}), style: const TextStyle(color: AppTheme.textSecondary)),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Отмена')),
-          TextButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: Text(tr('Отмена'))),
+          TextButton(onPressed: () => Navigator.pop(ctx, true), child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
         ],
       ),
     );
@@ -107,7 +75,7 @@ class FilesTabState extends State<FilesTab> {
   }
 
   Future<void> _delete(List<VaultFile> files) async {
-    if (files.isEmpty || !await _confirmDelete(files.length, files.length == 1 ? '«${files.first.name}»' : 'Выбранное')) return;
+    if (files.isEmpty || !await _confirmDelete(files.length, files.length == 1 ? '«${files.first.name}»' : tr('Выбранное'))) return;
     await _vault?.deleteAll(files.map((f) => f.path));
     _selected.clear();
     await reload();
@@ -121,7 +89,7 @@ class FilesTabState extends State<FilesTab> {
     final contacts = state.contacts.where((c) => c.saved || !c.isStale(now)).toList()
       ..sort((a, b) => a.saved != b.saved ? (a.saved ? -1 : 1) : a.online != b.online ? (a.online ? -1 : 1) : a.displayName.compareTo(b.displayName));
     if (contacts.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Некому отправлять: в списке нет контактов')));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(tr('Некому отправлять: в списке нет контактов'))));
       return;
     }
     final picked = await showModalBottomSheet<String>(
@@ -131,17 +99,17 @@ class FilesTabState extends State<FilesTab> {
         child: ListView(shrinkWrap: true, children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
-            child: Text(files.length == 1 ? 'Переслать «${files.first.name}»' : 'Переслать файлы (${files.length})', style: const TextStyle(color: AppTheme.text, fontSize: 16)),
+            child: Text(files.length == 1 ? trf('Переслать «{n}»', {'n': files.first.name}) : trf('Переслать файлы ({n})', {'n': files.length}), style: const TextStyle(color: AppTheme.text, fontSize: 16)),
           ),
-          const Padding(
+          Padding(
             padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
-            child: Text('Только внутри сети YANDI: файл уходит зашифрованным выбранному контакту.', style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+            child: Text(tr('Только внутри сети YANDI: файл уходит зашифрованным выбранному контакту.'), style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
           ),
           for (final c in contacts)
             ListTile(
               leading: Icon(Icons.person_outline, color: c.online ? AppTheme.accent : AppTheme.textSecondary),
               title: Text(c.displayName, style: const TextStyle(color: AppTheme.text)),
-              subtitle: Text(c.online ? 'в сети' : 'не в сети', style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
+              subtitle: Text(c.online ? tr('в сети') : tr('не в сети'), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
               onTap: () => Navigator.pop(ctx, c.peerId),
             ),
         ]),
@@ -149,7 +117,7 @@ class FilesTabState extends State<FilesTab> {
     );
     if (picked == null || !mounted) return;
     final name = contacts.firstWhere((c) => c.peerId == picked).displayName;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Отправка → $name. Ход — в чате с ним.')));
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(trf('Отправка → {name}. Ход — в чате с ним.', {'name': name}))));
     for (final f in files) {
       state.sendFile(picked, f.path, name: f.name).then((err) {
         if (err != null && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${f.name}: $err')));
@@ -189,20 +157,20 @@ class FilesTabState extends State<FilesTab> {
       _seenStates = states;
       if (!first) WidgetsBinding.instance.addPostFrameCallback((_) => reload());
     }
-    if (_loading) return const Center(child: CircularProgressIndicator(color: AppTheme.accent));
+    if (_loading) return Center(child: CircularProgressIndicator(color: AppTheme.accent));
     final fmt = DateFormat('dd.MM.yy HH:mm');
     final selected = _files.where((f) => _selected.contains(f.path)).toList();
     return Column(children: [
       Expanded(
         child: _files.isEmpty
-            ? ListView(children: const [
+            ? ListView(children: [
                 SizedBox(height: 120),
                 Icon(Icons.folder_open_outlined, color: AppTheme.textSecondary, size: 64),
                 SizedBox(height: 16),
-                Center(child: Text('Файлов пока нет', style: TextStyle(color: AppTheme.textSecondary))),
+                Center(child: Text(tr('Файлов пока нет'), style: TextStyle(color: AppTheme.textSecondary))),
                 Padding(
                   padding: EdgeInsets.all(24),
-                  child: Text('Здесь лежит всё, что вы получили, и то, что добавили кнопкой «+». Хранилище изолировано: другие приложения его не видят.',
+                  child: Text(tr('Здесь лежит всё, что вы получили в чатах и группах. Добавить файл отсюда нельзя: отправляйте файлы из чата или группы. Хранилище изолировано: другие приложения его не видят.'),
                       textAlign: TextAlign.center, style: TextStyle(color: AppTheme.textSecondary, fontSize: 12)),
                 ),
               ])
@@ -235,16 +203,16 @@ class FilesTabState extends State<FilesTab> {
                           ? null
                           : PopupMenuButton<String>(
                               color: AppTheme.surface,
-                              icon: const Icon(Icons.more_vert, color: AppTheme.textSecondary),
+                              icon: Icon(Icons.more_vert, color: AppTheme.textSecondary),
                               onSelected: (v) {
                                 if (v == 'open') _open(f);
                                 if (v == 'share') _share([f]);
                                 if (v == 'delete') _delete([f]);
                               },
-                              itemBuilder: (_) => const [
-                                PopupMenuItem(value: 'open', child: Text('Открыть')),
-                                PopupMenuItem(value: 'share', child: Text('Переслать контакту')),
-                                PopupMenuItem(value: 'delete', child: Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+                              itemBuilder: (_) => [
+                                PopupMenuItem(value: 'open', child: Text(tr('Открыть'))),
+                                PopupMenuItem(value: 'share', child: Text(tr('Переслать контакту'))),
+                                PopupMenuItem(value: 'delete', child: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
                               ],
                             ),
                     );
@@ -258,11 +226,11 @@ class FilesTabState extends State<FilesTab> {
           child: SafeArea(
             top: false,
             child: Row(children: [
-              IconButton(tooltip: 'Снять выбор', icon: const Icon(Icons.close), onPressed: () => setState(_selected.clear)),
-              Text('Выбрано: ${selected.length}', style: const TextStyle(color: AppTheme.text)),
+              IconButton(tooltip: tr('Снять выбор'), icon: const Icon(Icons.close), onPressed: () => setState(_selected.clear)),
+              Text(trf('Выбрано: {n}', {'n': selected.length}), style: const TextStyle(color: AppTheme.text)),
               const Spacer(),
-              TextButton.icon(onPressed: () => _share(selected), icon: const Icon(Icons.share_outlined), label: const Text('Переслать')),
-              TextButton.icon(onPressed: () => _delete(selected), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), label: const Text('Удалить', style: TextStyle(color: Colors.redAccent))),
+              TextButton.icon(onPressed: () => _share(selected), icon: const Icon(Icons.share_outlined), label: Text(tr('Переслать'))),
+              TextButton.icon(onPressed: () => _delete(selected), icon: const Icon(Icons.delete_outline, color: Colors.redAccent), label: Text(tr('Удалить'), style: TextStyle(color: Colors.redAccent))),
             ]),
           ),
         ),
@@ -272,5 +240,5 @@ class FilesTabState extends State<FilesTab> {
 
 /// Подпись размера (общая для списка и просмотра).
 class FileViewerScreenSize {
-  static String human(int b) => b < 1024 ? '$b Б' : b < 1024 * 1024 ? '${(b / 1024).toStringAsFixed(1)} КБ' : '${(b / 1024 / 1024).toStringAsFixed(1)} МБ';
+  static String human(int b) => b < 1024 ? trf('{n} Б', {'n': b}) : b < 1024 * 1024 ? trf('{n} КБ', {'n': (b / 1024).toStringAsFixed(1)}) : trf('{n} МБ', {'n': (b / 1024 / 1024).toStringAsFixed(1)});
 }

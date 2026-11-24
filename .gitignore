@@ -43,3 +43,14 @@ nodes/bootstrap.json
 bootstrap_cache.json
 __pycache__/
 *.pyc
+
+# Updater/reproducibility builds and evidence
+/target-updater/
+/.repro-check.*/
+/dist/
+dist/
+release/.lock
+release/.SEQ.lock
+
+# файл привязки ссылок-приглашений к приложению (Android App Links) должен лежать в репозитории
+!deploy/site/**/assetlinks.json

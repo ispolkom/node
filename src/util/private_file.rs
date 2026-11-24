@@ -7,7 +7,46 @@ use std::io::Write;
 use std::path::Path;
 
 /// Записать `data` в `path` так, чтобы читать мог только владелец.
+/// Временные файлы, оставшиеся от записи, которую оборвали (падение, питание, kill -9): имя `.<файл>.tmp<pid>-<n>`.
+/// Удаляются те, чей процесс уже не существует; временные файлы живых процессов (в том числе этого) не трогаются.
+fn sweep_stale_temps(path: &Path, name: &str) {
+    let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()).or(Some(Path::new("."))) else { return };
+    let prefix = format!(".{name}.tmp");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let me = std::process::id();
+    for e in rd.flatten() {
+        let fname = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = fname.strip_prefix(&prefix) else { continue };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        if pid == me {
+            continue;
+        }
+        // жив ли процесс, создавший временный файл: kill(pid, 0) (работает и на Linux, и на macOS; EPERM — процесс есть, но чужой);
+        // там, где проверить нельзя (не Unix), чужие временные файлы не трогаем
+        #[cfg(unix)]
+        let alive = unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM) };
+        #[cfg(not(unix))]
+        let alive = true;
+        if !alive {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
+
+/// Чем закончилась запись: файл на месте и целиком (переименование выполнено), а долговечность записи каталога подтверждена или нет.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Committed {
+    Durable,
+    /// Переименование выполнено, но сбросить запись каталога на диск не удалось: после отключения питания прежний файл мог бы вернуться.
+    DurabilityUnknown(String),
+}
+
 pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
+    write_private_checked(path, data).map(|_| ())
+}
+
+/// То же, что `write_private`, но ошибка сброса каталога не теряется: вызывающий узнаёт, что запись выполнена, а её долговечность не подтверждена.
+pub fn write_private_checked(path: &Path, data: &[u8]) -> std::io::Result<Committed> {
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
             std::fs::create_dir_all(dir)?;
@@ -18,6 +57,7 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let tmp = path.with_file_name(format!(".{name}.tmp{}-{}", std::process::id(), COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let _ = std::fs::remove_file(&tmp);
+    sweep_stale_temps(path, &name);
     let mut f = open_new_private(&tmp)?;
     let res = f.write_all(data).and_then(|_| f.sync_all());
     drop(f);
@@ -29,7 +69,39 @@ pub fn write_private(path: &Path, data: &[u8]) -> std::io::Result<()> {
         let _ = std::fs::remove_file(&tmp);
         return Err(e);
     }
-    Ok(())
+    // само переименование живёт в каталоге: без его fsync после отключения питания может вернуться прежний файл
+    match sync_dir_checked(path) {
+        Ok(()) => Ok(Committed::Durable),
+        Err(e) => Ok(Committed::DurabilityUnknown(e.to_string())),
+    }
+}
+
+/// Сбросить на диск запись каталога, где лежит `path`; ошибка возвращается.
+pub fn sync_dir_checked(path: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        std::fs::File::open(dir)?.sync_all()
+    }
+    #[cfg(not(unix))]
+    {
+        // сбросить запись каталога здесь нечем: честно «не подтверждено», а не «долговечно» (P19-2)
+        let _ = path;
+        Err(std::io::Error::new(std::io::ErrorKind::Unsupported, "сброс каталога на диск на этой платформе не поддержан"))
+    }
+}
+
+/// Сбросить на диск запись каталога, где лежит `path` (где ОС это умеет; ошибка не фатальна — файл уже записан и сохранён).
+pub fn sync_dir(path: &Path) {
+    #[cfg(unix)]
+    {
+        let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = path;
 }
 
 /// Read a secret that is created once: if it is there and `valid`, that is the secret (a file left readable by others is made
@@ -92,6 +164,18 @@ fn open_new_private(path: &Path) -> std::io::Result<std::fs::File> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn directory_sync_after_write_is_harmless_everywhere() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("secret.bin");
+        super::write_private(&p, b"x").unwrap();
+        super::write_private(&p, b"y").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"y");
+        super::sync_dir(&p);
+        super::sync_dir(std::path::Path::new("только-имя"));
+        super::sync_dir(std::path::Path::new("/нет/такого/каталога/файл"));
+    }
+
     use super::*;
 
     #[test]

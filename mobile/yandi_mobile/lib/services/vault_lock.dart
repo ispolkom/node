@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/widgets.dart';
 import 'package:provider/provider.dart';
 import 'app_state.dart';
+import 'call_service.dart';
 import 'vault_service.dart';
 
 /// Блокировка приложения: через минуту после ухода в фон (или при возврате, если минута прошла) соединения закрываются, память
@@ -36,15 +37,21 @@ class VaultLockObserver with WidgetsBindingObserver {
     }
   }
 
-  Future<void> lockNow() async {
+  /// [manual] — владелец нажал «Заблокировать сейчас»: звонок завершается и ключи отзываются сразу. Автоблокировка откладывается
+  /// только пока идёт настоящий разговор (соединяющийся или звонящий вызов её не задерживает).
+  Future<void> lockNow({bool manual = false}) async {
     if (_locking || !VaultService.instance.active) return;
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
     final state = ctx.read<AppState>();
     if (state.calls.busy) {
-      _timer?.cancel();
-      _timer = Timer(const Duration(seconds: 30), lockNow);   // идёт звонок: заблокируем после него
-      return;
+      if (manual || state.calls.phase != CallPhase.active) {
+        try { await state.calls.hangup(); } catch (_) {}
+      } else {
+        _timer?.cancel();
+        _timer = Timer(const Duration(seconds: 30), lockNow);   // идёт разговор: заблокируем после него
+        return;
+      }
     }
     _locking = true;
     try {

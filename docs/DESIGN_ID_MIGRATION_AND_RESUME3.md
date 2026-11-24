@@ -1,3 +1,4 @@
+<!-- NOTE 2026-10-18: the RESUME3 section (PSK + ephemeral X25519, option B) was superseded by docs/RESUME_REDESIGN.md: resumption through stored secrets was removed, and connections recover through a signed Hello. The node-identity migration section remains a proposal. -->
 <!-- Design proposal produced by a read-only analysis of the code on 2026-10-07; nothing here is implemented yet. -->
 DESIGN: bound identity migration and fresh-key session resume
 

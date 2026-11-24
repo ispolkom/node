@@ -28,7 +28,7 @@ pub mod file_transfer;
 pub use types::*;
 pub use storage::*;
 pub use protocol::*;
-pub use protocol::{GroupPacket, GroupControlPacket};
+pub use protocol::GroupControlPacket;
 pub use chat::*;
 pub use encryption::*;
 pub use file_transfer::*;

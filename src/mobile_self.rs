@@ -255,7 +255,14 @@ fn load_protected(dir: &std::path::Path, master: Option<&[u8; 32]>) -> Keys {
             }
         },
         Err(err) if err.kind() != std::io::ErrorKind::NotFound => {
-            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); используется временная пара", enc.display());
+            // файл есть, но прочесть его нельзя: заменять нечем и нельзя — новая пара не записывается поверх (прежняя личность
+            // иначе была бы потеряна безвозвратно); работает временная пара, которая нигде не сохраняется
+            eprintln!("[mobile-self] ⚠️  файл ключей {} не читается ({err}); используется временная пара, файл не тронут", enc.display());
+            let mut x = [0u8; 32];
+            let mut e = [0u8; 32];
+            rand::thread_rng().fill_bytes(&mut x);
+            rand::thread_rng().fill_bytes(&mut e);
+            return make_keys(x, e);
         }
         Err(_) => {}
     }
@@ -334,10 +341,33 @@ fn make_keys(x: [u8; 32], e: [u8; 32]) -> Keys {
     Keys { x_secret, x_pub, ed_pub, sig, signing }
 }
 
+/// Подпись ключом «компьютера как собеседника» (тот же, что в связке для телефонов): так ПК доказывает контактам, что это он.
+/// `None` — закрытая среда заперта.
+pub fn sign_identity(message: &[u8]) -> Option<Vec<u8>> {
+    use ed25519_dalek::Signer;
+    let k = keys()?;
+    Some(k.signing.sign(message).to_bytes().to_vec())
+}
+
 /// Подписанная связка ключей узла для `/mobile/pubkey/<номер узла>` (тот же вид, что у телефонов).
 pub fn bundle_json() -> serde_json::Value {
-    let Some(k) = keys() else { return serde_json::json!({"error":"vault_locked"}); };
-    serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)})
+    let public_path = crate::util::data_dir::data_dir().join("mobile_self_public.json");
+    let Some(k) = keys() else {
+        // среда заперта: открытая часть связки (только открытые ключи и подпись) лежит отдельно, чтобы телефоны могли писать ПК
+        // и пока владельца нет у экрана — сообщение зашифровано ключом ПК и дождётся входа
+        return std::fs::read_to_string(&public_path)
+            .ok()
+            .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+            .filter(|v| v.get("x25519_pub").is_some())
+            .unwrap_or_else(|| serde_json::json!({"error":"vault_locked"}));
+    };
+    let v = serde_json::json!({"x25519_pub": b64(&k.x_pub), "ed25519_pub": b64(&k.ed_pub), "signature": b64(&k.sig)});
+    if let Ok(text) = serde_json::to_string(&v) {
+        if std::fs::read_to_string(&public_path).ok().as_deref() != Some(text.as_str()) {
+            let _ = crate::util::private_file::write_private(&public_path, text.as_bytes());
+        }
+    }
+    v
 }
 
 fn aad(header: &[u8]) -> Vec<u8> {
@@ -395,6 +425,40 @@ pub fn open(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -
     Some(text)
 }
 
+/// Как [`open`], но номер письма в журнале повторов НЕ занимается: письмо проверено (подпись, AEAD, срок) и ещё не виденное.
+/// Занять номер — отдельно, [`commit_replay`], когда результат обработки уже долговечен (сообщение сохранено): иначе сбой
+/// сохранения после занятия номера терял бы сообщение (повтор отвергался бы как «уже виденное»).
+pub fn open_deferred(blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32]) -> Option<String> {
+    let k = keys()?;
+    let text = open_with(&k.x_secret, blob, from, to, kind, sender_ed, now_ms())?;
+    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
+    match replay_seen(&path, blob, now_ms()) {
+        Ok(false) => Some(text),
+        _ => None, // уже видели либо журнал повреждён (закрытый отказ, как у open)
+    }
+}
+
+/// Занять номер письма после успешной обработки. `false` — не удалось записать журнал: письмо надо обработать повторно
+/// (повтор безопасен: сохранение сообщения идемпотентно по номеру).
+pub fn commit_replay(blob: &[u8]) -> bool {
+    let path = crate::util::data_dir::data_dir().join("mobile_replay_e4.json");
+    claim_replay(&path, blob, now_ms()).is_ok()
+}
+
+fn replay_seen(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, String> {
+    let _lock = REPLAY_LOCK.lock().map_err(|_| "replay lock poisoned")?;
+    let seen: std::collections::BTreeMap<String, u64> = match std::fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt replay ledger")?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
+        Err(e) => return Err(e.to_string()),
+    };
+    if blob.len() < 82 {
+        return Err("short blob".into());
+    }
+    let id = hex::encode(&blob[2..82]);
+    Ok(seen.get(&id).is_some_and(|expires| *expires >= now))
+}
+
 fn open_with(secret: &StaticSecret, blob: &[u8], from: &str, to: &str, kind: u8, sender_ed: &[u8; 32], now: u64) -> Option<String> {
     use ed25519_dalek::{Signature, VerifyingKey};
     if blob.len() < HEADER + 16 + 64 || blob[0] != MAGIC || blob[1] != kind || !matches!(kind, 1 | 2) {
@@ -414,10 +478,11 @@ fn open_with(secret: &StaticSecret, blob: &[u8], from: &str, to: &str, kind: u8,
     String::from_utf8(plain).ok()
 }
 
+static REPLAY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Called only after successful signature and AEAD checks. Never evict unexpired IDs.
 fn claim_replay(path: &std::path::Path, blob: &[u8], now: u64) -> Result<bool, String> {
-    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-    let _lock = LOCK.lock().map_err(|_| "replay lock poisoned")?;
+    let _lock = REPLAY_LOCK.lock().map_err(|_| "replay lock poisoned")?;
     let mut seen: std::collections::BTreeMap<String, u64> = match std::fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes).map_err(|_| "corrupt replay ledger")?,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Default::default(),
@@ -497,7 +562,6 @@ pub struct ReceivedFile {
 /// загрузки страницы. Куски с узла удаляются после успеха.
 pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -> Result<ReceivedFile, String> {
     use sha2::{Digest, Sha256};
-    use tokio::io::AsyncWriteExt;
     let o: Offer = serde_json::from_str(offer_text.strip_prefix(FILE_MARKER).ok_or("не предложение файла")?).map_err(|e| e.to_string())?;
     let key = unb64(&o.key).filter(|k| k.len() == 32).ok_or("неверный ключ файла")?;
     let (chunks, size) = crate::mobile_files::ready_for(&o.tid, from_device, node_hex).await.ok_or("передача не найдена или не завершена")?;
@@ -509,7 +573,8 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
     tokio::fs::create_dir_all(&dir).await.map_err(|e| e.to_string())?;
     let stored = format!("{}__{}", file_id, crate::web::server::sanitize_storage_filename(&o.name));
     let part = dir.join(format!("{stored}.part"));
-    let mut out = tokio::fs::File::create(&part).await.map_err(|e| e.to_string())?;
+    // принятое сразу ложится запечатанными блоками (ключ защитной среды): открытого файла на диске нет
+    let mut out = crate::file_vault::Writer::create(&part, o.size).map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
     let mut total = 0u64;
     let res: Result<(), String> = async {
@@ -518,25 +583,27 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
             let plain = open_chunk(&key, &o.tid, i, o.chunks, &wire).ok_or(format!("кусок {} не прошёл проверку: подменён или повреждён", i + 1))?;
             hash.update(&plain);
             total += plain.len() as u64;
-            out.write_all(&plain).await.map_err(|e| e.to_string())?;
+            if total > o.size {
+                return Err(format!("размер не совпал: больше {}", o.size));
+            }
+            out.push(&plain).map_err(|e| e.to_string())?;
         }
-        out.flush().await.map_err(|e| e.to_string())?;
         if total != o.size {
             return Err(format!("размер не совпал: {total} из {}", o.size));
         }
+        out.finish().map_err(|e| e.to_string())?;
         if !o.sha.is_empty() && hex::encode(hash.finalize()) != o.sha.to_lowercase() {
             return Err("контрольная сумма не совпала".into());
         }
         Ok(())
     }
     .await;
-    drop(out);
     if let Err(e) = res {
         let _ = tokio::fs::remove_file(&part).await;
         return Err(e);
     }
     tokio::fs::rename(&part, dir.join(&stored)).await.map_err(|e| e.to_string())?;
-    crate::mobile_files::drop_transfer(&o.tid).await;
+    // серверные куски остаются: их удаляет вызывающий (`drop_transfer`) после записи сообщения в историю
     let mime = if o.mime.is_empty() { "application/octet-stream".to_string() } else { o.mime };
     Ok(ReceivedFile {
         receipt_id: format!("file_{}", o.tid),
@@ -554,22 +621,23 @@ pub async fn receive_file(node_hex: &str, from_device: &str, offer_text: &str) -
 /// предложения (его надо запечатать ключом телефона и положить в его очередь).
 pub async fn send_file(node_hex: &str, device: &str, path: &std::path::Path, name: &str, mime: &str) -> Result<String, String> {
     use sha2::{Digest, Sha256};
-    use tokio::io::AsyncReadExt;
-    let size = tokio::fs::metadata(path).await.map_err(|e| e.to_string())?.len();
+    let size = crate::file_vault::plain_len(path).map_err(|e| e.to_string())?;
     let chunk = file_chunk_for(size);
     let chunks = (size.div_ceil(chunk as u64)).max(1) as u32;
     let tid = crate::mobile_files::node_begin(node_hex, device, size, chunks).await?;
     let mut key = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut key);
-    let mut f = tokio::fs::File::open(path).await.map_err(|e| e.to_string())?;
     let mut hash = Sha256::new();
-    let mut buf = vec![0u8; chunk];
     let res: Result<(), String> = async {
         for i in 0..chunks {
             let want = (size - i as u64 * chunk as u64).min(chunk as u64) as usize;
-            f.read_exact(&mut buf[..want]).await.map_err(|e| e.to_string())?;
-            hash.update(&buf[..want]);
-            crate::mobile_files::node_put(&tid, i, &seal_chunk(&key, &tid, i, chunks, &buf[..want])).await?;
+            let (p, off) = (path.to_path_buf(), i as u64 * chunk as u64);
+            let buf = tokio::task::spawn_blocking(move || crate::file_vault::read_range(&p, off, want))
+                .await
+                .map_err(|e| e.to_string())?
+                .map_err(|e| e.to_string())?;
+            hash.update(&buf);
+            crate::mobile_files::node_put(&tid, i, &seal_chunk(&key, &tid, i, chunks, &buf)).await?;
         }
         crate::mobile_files::node_finish(&tid).await
     }
@@ -604,13 +672,15 @@ const EDIT_MARKER: &str = "\u{1}yandi-edit:";
 
 pub enum Envelope {
     /// сообщение с номером отправителя
-    Message { cmid: String, text: String },
+    Message { cmid: String, text: String, reply: Option<(String, String)> },
     /// квитанция: «delivered» или «read» по номерам наших сообщений
     Receipt { read: bool, ids: Vec<String> },
     /// правка ранее присланного сообщения
     Edit { cmid: String, text: String },
     /// устройство умеет квитанции
     CapPing,
+    /// смайл на сообщение (пустой — снят): номер сообщения как у приложения
+    Reaction { cmid: String, emoji: String },
     /// служебный конверт, которого этот узел не знает (например, аватарки `yandi-avh/avq/ava` между телефонами): молча отбрасывается,
     /// чтобы не показываться на странице чата как мусорное сообщение
     Ignored,
@@ -623,6 +693,13 @@ pub fn classify(text: String) -> Envelope {
     struct M {
         cmid: String,
         text: String,
+        #[serde(default)]
+        reply: Option<Rp>,
+    }
+    #[derive(Deserialize)]
+    struct Rp {
+        id: String,
+        text: String,
     }
     #[derive(Deserialize)]
     struct R {
@@ -632,7 +709,7 @@ pub fn classify(text: String) -> Envelope {
     if let Some(j) = text.strip_prefix(MSG_MARKER) {
         if let Ok(m) = serde_json::from_str::<M>(j) {
             if !m.cmid.is_empty() {
-                return Envelope::Message { cmid: m.cmid, text: m.text };
+                return Envelope::Message { cmid: m.cmid, text: m.text, reply: m.reply.map(|r| (r.id, r.text)) };
             }
         }
     } else if let Some(j) = text.strip_prefix(RCPT_MARKER) {
@@ -649,6 +726,11 @@ pub fn classify(text: String) -> Envelope {
         }
     } else if text.starts_with(CAP_MARKER) {
         return Envelope::CapPing;
+    } else if text.starts_with(crate::chat_reactions::MARKER) {
+        return match crate::chat_reactions::parse(&text) {
+            Some((cmid, emoji)) => Envelope::Reaction { cmid, emoji },
+            None => Envelope::Ignored,
+        };
     } else if text.starts_with("\u{1}yandi-") && !text.starts_with(FILE_MARKER) {
         return Envelope::Ignored;
     }
@@ -656,7 +738,16 @@ pub fn classify(text: String) -> Envelope {
 }
 
 pub fn wrap_message(cmid: &str, text: &str) -> String {
-    format!("{MSG_MARKER}{}", serde_json::json!({"v": 1, "cmid": cmid, "text": text}))
+    wrap_message_reply(cmid, text, None)
+}
+
+/// Сообщение с ответом-цитатой: `reply` = (номер сообщения на узле, выдержка его текста).
+pub fn wrap_message_reply(cmid: &str, text: &str, reply: Option<(&str, &str)>) -> String {
+    let mut j = serde_json::json!({"v": 1, "cmid": cmid, "text": text});
+    if let Some((id, quote)) = reply {
+        j["reply"] = serde_json::json!({"id": id, "text": quote});
+    }
+    format!("{MSG_MARKER}{j}")
 }
 
 pub fn receipt(read: bool, ids: &[String]) -> String {
@@ -684,20 +775,28 @@ struct Unread {
     cmid: String,
 }
 
-static UNREAD: std::sync::Mutex<Option<std::collections::HashMap<String, Unread>>> = std::sync::Mutex::new(None);
+static UNREAD: crate::util::sealed_json::SealedJson<std::collections::HashMap<String, Unread>> =
+    crate::util::sealed_json::SealedJson::new("mobile_self_unread.json", "mobile_self_unread.enc", "mobile_self_unread");
 
 fn with_unread<R>(f: impl FnOnce(&mut std::collections::HashMap<String, Unread>) -> R) -> R {
-    let path = crate::util::data_dir::data_dir().join("mobile_self_unread.json");
-    let mut g = UNREAD.lock().unwrap_or_else(|e| e.into_inner());
-    let map = g.get_or_insert_with(|| std::fs::read_to_string(&path).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default());
-    let r = f(map);
-    if map.len() > 20000 {
-        map.clear(); // старьё: «прочитано» по ним уже не нужно
-    }
-    if let Ok(s) = serde_json::to_vec(&*map) {
-        let _ = crate::util::private_file::write_private(&path, &s);
-    }
-    r
+    UNREAD.with(|map| {
+        let r = f(map);
+        if map.len() > 20000 {
+            map.clear(); // старьё: «прочитано» по ним уже не нужно
+        }
+        r
+    })
+}
+
+/// Закрытая среда: ключ области выдан / среда заперта / среда стёрта (индекс непрочитанного — закрытый уровень).
+pub fn unread_unlock(key: [u8; 32]) {
+    UNREAD.unlock(key)
+}
+pub fn unread_lock() {
+    UNREAD.lock()
+}
+pub fn unread_erase() {
+    UNREAD.erase()
 }
 
 pub fn remember_unread(local: &crate::util::HashId, device: &str, cmid: &str) {
@@ -837,6 +936,28 @@ pub fn phone_action(peer: &str, action: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// «Удалить контакт» на ПК: телефон выходит из контактов и возвращается в общий список людей узла («Поиск»). Не скрывается и не блокируется,
+/// сопряжение не отзывается. Принимает полный номер (64) или короткий (16 и больше, ровно одно устройство).
+pub fn delete_phone_contact(id: &str) -> Result<(), String> {
+    if id.len() < 16 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("неверный номер устройства".into());
+    }
+    let full = if id.len() == 64 {
+        id.to_string()
+    } else {
+        let hits: Vec<String> = crate::mobile_api::devices_overview().iter().filter_map(|d| d["peer_id"].as_str().map(str::to_string)).filter(|p| p.starts_with(id)).collect();
+        match hits.as_slice() {
+            [one] => one.clone(),
+            [] => return Err("такого устройства нет".into()),
+            _ => return Err("номер неоднозначен".into()),
+        }
+    };
+    phone_action(&full, "remove")?;
+    unhide_phone(&full);
+    crate::local_overrides::forget(&full);
+    Ok(())
+}
+
 /// Спрятать телефон из списка чата (номер устройства полностью или его начало, не короче 16 знаков).
 pub fn hide_phone(id: &str) {
     if id.len() >= 16 {
@@ -879,6 +1000,35 @@ pub fn call_page_alive() -> bool {
     CALLS.lock().unwrap_or_else(|e| e.into_inner()).last_poll.map(|t| t.elapsed() < std::time::Duration::from_secs(6)).unwrap_or(false)
 }
 
+/// Номера звонков, на которые страница не ответила (её не было открыто). Хранятся только в памяти и только номера: ни имён, ни времени.
+static MISSED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// Запомнить пропущенный звонок: сигнал «invite» свежий и корректный, а страница не открыта. Повтор того же звонка не считается.
+pub fn note_missed_call(text: &str) {
+    let Some(rest) = text.strip_prefix(CALL_MARKER) else { return };
+    let Ok(m) = serde_json::from_str::<serde_json::Value>(rest) else { return };
+    let (Some("invite"), Some(cid), Some(ts)) = (m["t"].as_str(), m["cid"].as_str(), m["ts"].as_i64()) else { return };
+    if m["v"] != 1 || cid.len() < 8 || cid.len() > 64 {
+        return;
+    }
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as i64).unwrap_or(0);
+    if (now - ts).abs() >= 90_000 {
+        return;
+    }
+    let mut l = MISSED.lock().unwrap_or_else(|e| e.into_inner());
+    if !l.iter().any(|c| c == cid) && l.len() < 99 {
+        l.push(cid.to_string());
+    }
+}
+
+pub fn missed_calls() -> usize {
+    MISSED.lock().unwrap_or_else(|e| e.into_inner()).len()
+}
+
+pub fn clear_missed_calls() {
+    MISSED.lock().unwrap_or_else(|e| e.into_inner()).clear();
+}
+
 pub fn push_call(from_device: &str, text: &str) {
     let mut q = CALLS.lock().unwrap_or_else(|e| e.into_inner());
     q.seq += 1;
@@ -918,6 +1068,21 @@ mod tests {
         let result = rekey(dir.path(), None, &key);
         assert_eq!(std::fs::read(&plain).ok(), Some(second), "уничтожена отличающаяся пара, которой нет в enc");
         assert!(result.is_err(), "конфликт должен быть явно сообщён");
+    }
+
+    #[test]
+    fn missed_calls_count_only_fresh_invites_once() {
+        clear_missed_calls();
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis();
+        let invite = |t: &str, cid: &str, ts: u128| format!("{CALL_MARKER}{{\"v\":1,\"t\":\"{t}\",\"cid\":\"{cid}\",\"video\":false,\"ts\":{ts}}}");
+        note_missed_call(&invite("invite", "abcdefgh1", now));
+        note_missed_call(&invite("invite", "abcdefgh1", now)); // повтор того же звонка
+        note_missed_call(&invite("hangup", "abcdefgh2", now)); // не вызов
+        note_missed_call(&invite("invite", "abcdefgh3", now - 600_000)); // устарел
+        note_missed_call("обычный текст");
+        assert_eq!(missed_calls(), 1);
+        clear_missed_calls();
+        assert_eq!(missed_calls(), 0);
     }
 
     #[test]
@@ -1068,7 +1233,11 @@ mod tests {
 
     #[test]
     fn service_envelopes_round_trip_like_the_app_writes_them() {
-        assert!(matches!(classify(wrap_message("12", "hi")), Envelope::Message { cmid, text } if cmid == "12" && text == "hi"));
+        assert!(matches!(classify(wrap_message("12", "hi")), Envelope::Message { cmid, text, .. } if cmid == "12" && text == "hi"));
+        assert!(matches!(
+            classify(wrap_message_reply("13", "ok", Some(("abc", "было")))),
+            Envelope::Message { cmid, text, reply: Some((id, q)) } if cmid == "13" && text == "ok" && id == "abc" && q == "было"
+        ));
         assert!(matches!(classify(receipt(true, &["a".into()])), Envelope::Receipt { read: true, ids } if ids == ["a"]));
         assert!(matches!(classify(edit("7", "new")), Envelope::Edit { cmid, text } if cmid == "7" && text == "new"));
         assert!(matches!(classify(cap_ping()), Envelope::CapPing));
@@ -1080,6 +1249,46 @@ mod tests {
         assert!(matches!(classify("\u{1}yandi-rcpt:{\"kind\":\"delivered\",\"ids\":[\"1791\"]}".into()), Envelope::Receipt { read: false, .. }));
         assert_eq!(incoming_id("d", "1"), incoming_id("d", "1"));
         assert_ne!(incoming_id("d", "1"), incoming_id("e", "1"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_unreadable_key_file_is_never_replaced_by_a_new_identity() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let master = [9u8; 32];
+        // настоящая личность записывается как обычно
+        let first = load_protected(dir.path(), Some(&master));
+        let enc = dir.path().join("mobile_self.enc");
+        let before = std::fs::read(&enc).unwrap();
+        // файл временно нечитаем (режим 000): новая пара поверх него не пишется
+        std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o000)).unwrap();
+        if std::fs::read(&enc).is_ok() {
+            return; // запуск от root: режим не мешает чтению, проверять нечего
+        }
+        let temp = load_protected(dir.path(), Some(&master));
+        std::fs::set_permissions(&enc, std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(std::fs::read(&enc).unwrap(), before, "прежний файл личности не заменён");
+        assert!(!dir.path().join("mobile_self.json").exists(), "открытый промежуточный файл не создан");
+        let again = load_protected(dir.path(), Some(&master));
+        assert_eq!(again.x_pub, first.x_pub, "после починки прав — прежняя личность");
+        assert_ne!(temp.x_pub, first.x_pub, "временная пара — другая");
+    }
+
+    /// Номер письма занимается после обработки: пока не занят, письмо «не виденное» и повтор проходит; после — отвергается.
+    #[test]
+    fn a_letter_is_seen_only_after_its_number_is_committed() {
+        let phone = make_keys([7; 32], [8; 32]);
+        let blob = seal_with(&phone, "x", &phone.x_pub, &hex::encode([1;32]), &hex::encode([2;32]), 1, now_ms()).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("replays.json");
+        assert!(!replay_seen(&path, &blob, now_ms()).unwrap(), "ещё не видели");
+        // обработка сорвалась до фиксации: повтор допустим
+        assert!(!replay_seen(&path, &blob, now_ms()).unwrap());
+        assert!(claim_replay(&path, &blob, now_ms()).unwrap());
+        assert!(replay_seen(&path, &blob, now_ms()).unwrap(), "после фиксации — уже виденное");
+        std::fs::write(&path, b"broken").unwrap();
+        assert!(replay_seen(&path, &blob, now_ms()).is_err(), "повреждённый журнал — закрытый отказ");
     }
 
     #[test]
@@ -1115,7 +1324,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("receipt-test.txt");
         let data = b"file receipt round trip";
-        tokio::fs::write(&path, data).await.unwrap();
+        crate::file_vault::write_all(&path, data).unwrap();
         let device = format!("receipt-test-{}", rand::random::<u64>());
         let offer = send_file(&device, "receipt-test-pc", &path, "receipt-test.txt", "text/plain").await.unwrap();
         let tid = offer_tid(&offer).unwrap();
@@ -1126,17 +1335,20 @@ mod tests {
         let to = hex::encode([25;32]);
         let wire = seal_with(&phone, &wrap_message(&cmid, &offer), &phone.x_pub, &from, &to, 1, now_ms()).unwrap();
         assert!(matches!(classify(open_with(&phone.x_secret, &wire, &from, &to, 1, &phone.ed_pub, now_ms()).unwrap()),
-            Envelope::Message { cmid: id, text } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
+            Envelope::Message { cmid: id, text, .. } if id == cmid && text == offer && offer_tid(&text) == Some(tid.clone())));
 
         let received = receive_file("receipt-test-pc", &device, &offer).await.unwrap();
         assert_eq!(received.receipt_id, format!("file_{tid}"));
         let saved = crate::communication::files_dir("downloads")
             .join(received.attachment.file_ref.unwrap().local_name.unwrap());
-        assert_eq!(tokio::fs::read(&saved).await.unwrap(), data);
+        assert_eq!(crate::file_vault::read_all(&saved).unwrap(), data);
+        assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_some(), "куски остаются до записи сообщения");
+        crate::mobile_files::drop_transfer(&tid).await;
         assert!(crate::mobile_files::ready_for(&tid, &device, "receipt-test-pc").await.is_none());
         let id = received.receipt_id;
         assert!(matches!(classify(receipt(false, &[id.clone()])), Envelope::Receipt { read: false, ids } if ids == [id.clone()]));
         let local = incoming_id(&device, &id);
+        unread_unlock([9; 32]); // индекс непрочитанного теперь закрытый: в тесте выдаём ему ключ области
         remember_unread(&local, &device, &id);
         assert!(take_unread("another-device").is_empty());
         let unread = take_unread(&device);
@@ -1150,7 +1362,7 @@ mod tests {
     async fn a_corrupt_file_has_no_success_receipt() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("bad.txt");
-        tokio::fs::write(&path, b"must not acknowledge corruption").await.unwrap();
+        crate::file_vault::write_all(&path, b"must not acknowledge corruption").unwrap();
         let from = format!("receipt-bad-{}", rand::random::<u64>());
         let offer = send_file(&from, "receipt-bad-pc", &path, "bad.txt", "text/plain").await.unwrap();
         let mut parsed: Offer = serde_json::from_str(offer.strip_prefix(FILE_MARKER).unwrap()).unwrap();

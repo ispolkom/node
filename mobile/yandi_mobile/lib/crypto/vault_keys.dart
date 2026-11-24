@@ -4,6 +4,7 @@ import 'dart:isolate';
 import 'dart:math';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
+import '../l10n_core.dart';
 
 /// Ядро «закрытой среды»: один случайный ключ данных (DK), которым шифруется всё содержимое приложения (база, файлы).
 /// Сам DK на диск не попадает, лежит только в обёрнутом виде, под двумя независимыми замками:
@@ -70,7 +71,7 @@ class VaultWrongSecret implements Exception {
   final int failures;
   VaultWrongSecret(this.failures);
   @override
-  String toString() => 'Неверный пароль или фраза (попыток подряд: $failures)';
+  String toString() => trf('Неверный пароль или фраза (попыток подряд: {n})', {'n': failures});
 }
 
 /// Слишком много неверных попыток: подождать.
@@ -78,13 +79,13 @@ class VaultThrottled implements Exception {
   final Duration wait;
   VaultThrottled(this.wait);
   @override
-  String toString() => 'Слишком много попыток, подождите ${wait.inSeconds} с';
+  String toString() => trf('Слишком много попыток, подождите {n} с', {'n': wait.inSeconds});
 }
 
 /// Фразу при создании не вводили: забытый пароль восстановить нельзя.
 class VaultNoRecovery implements Exception {
   @override
-  String toString() => 'Фраза восстановления не задана';
+  String toString() => tr('Фраза восстановления не задана');
 }
 
 /// Файл ключей повреждён или не наш: не перезаписываем его, а сообщаем.
@@ -92,7 +93,7 @@ class VaultCorrupt implements Exception {
   final String why;
   VaultCorrupt(this.why);
   @override
-  String toString() => 'Хранилище ключей повреждено: $why';
+  String toString() => trf('Хранилище ключей повреждено: {why}', {'why': why});
 }
 
 class VaultKeys {
@@ -117,6 +118,8 @@ class VaultKeys {
   /// Поколение файла ключей (растёт при смене пароля и восстановлении) — копия в защищённом хранилище: возвращённый старый файл
   /// ключей (с прежним паролем) отвергается.
   static const _kGen = 'vault_gen';
+  /// Метка «этот файл уже был заверен»: после неё файл без `gt` — подделка/откат, а не прежний формат.
+  static const _kGt = 'vault_gt';
   /// Метка «счётчики попыток заведены»: если метка есть, а счётчика нет — его стёрли, это считается нарушением и наказывается паузой.
   static const _kCnt = 'vault_cnt';
 
@@ -136,6 +139,9 @@ class VaultKeys {
   }
 
   bool get unlocked => _dk != null;
+
+  /// Только для проверок: прежний тег поколения (до заверения обёрток), каким его писали старые версии.
+  Future<String> legacyTagForTest(int gen) => _genTagV1(_dk!, gen);
 
   /// Подключ для конкретной цели (ключ базы, ключ файлов …): из DK одним HKDF, чтобы сам DK нигде не использовался напрямую.
   Future<Uint8List> subKey(String purpose) async {
@@ -175,10 +181,10 @@ class VaultKeys {
     bool legacyPhraseEncoding = false,
   }) async {
     if (await exists(b)) throw StateError('хранилище уже создано');
-    if (password.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    if (password.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
     final hasPhrase = phraseFields != null && _normalizedList(phraseFields).any((x) => x.isNotEmpty);
     if (hasPhrase && (phraseFields.length != phraseFieldCount || !phraseStrongEnough(phraseFields))) {
-      throw VaultPolicyError('Фраза: $phraseFieldCount разных слова, в каждом не меньше $minPhraseFieldChars знаков');
+      throw VaultPolicyError(trf('Фраза: {n} разных слова, в каждом не меньше {m} знаков', {'n': phraseFieldCount, 'm': minPhraseFieldChars}));
     }
     final phrase = !hasPhrase ? null : (legacyPhraseEncoding ? normalizePhrase(phraseFields) : canonicalPhrase(phraseFields));
     final rnd = Random.secure();
@@ -191,15 +197,18 @@ class VaultKeys {
     final wrapPw = await _wrap(dk, kekPw, 'pw');
     Uint8List? wrapPh;
     if (hasPhrase) wrapPh = await _wrap(dk, await _kekPhrase(phrase!, saltPh, phKdf), 'ph');
-    await b.writeBlob(jsonEncode({
+    final file = <String, dynamic>{
       'v': 1,
       'gen': 1,
       'pw': {'kdf': pwKdf.toJson(), 'salt': base64.encode(saltPw), 'wrap': base64.encode(wrapPw)},
       'ph': hasPhrase
           ? {'kdf': phKdf.toJson(), 'salt': base64.encode(saltPh), 'wrap': base64.encode(wrapPh!), if (!legacyPhraseEncoding) 'enc': 2}
           : null,
-    }));
+    };
+    file['gt'] = await _genTag(dk, 1, file);   // заверены номер поколения и обе секции обёрток
+    await b.writeBlob(jsonEncode(file));
     await b.secureWrite(_kGen, '1');
+    await b.secureWrite(_kGt, '2');   // файл создан сразу заверенным: снять `gt` и поднять `gen` до первого входа уже нельзя
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -220,6 +229,7 @@ class VaultKeys {
       dk = await _unwrap(base64.decode(pw['wrap'] as String), kek, 'pw');
     }
     if (dk == null) throw VaultWrongSecret(failures);
+    await _adoptGeneration(b, f, dk);
     await _resetCounters(b);
     return VaultKeys._(b).._dk = dk;
   }
@@ -233,8 +243,8 @@ class VaultKeys {
     await _checkGeneration(b, f);
     final ph = f['ph'] as Map<String, dynamic>?;
     if (ph == null) throw VaultNoRecovery();
-    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
-    if (phraseFields.length != phraseFieldCount) throw VaultPolicyError('Нужно $phraseFieldCount слова');
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
+    if (phraseFields.length != phraseFieldCount) throw VaultPolicyError(trf('Нужно {n} слова', {'n': phraseFieldCount}));
     await _gate(b, _kFailPh, _kNextPh);
     final failures = await _bump(b, _kFailPh, _kNextPh);
     // новые замки записывают слова однозначно (JSON); старые — как были (поля через «|»)
@@ -242,6 +252,7 @@ class VaultKeys {
     final kek = await _kekPhrase(phrase, base64.decode(ph['salt'] as String), VaultKdf.fromJson(ph['kdf'] as Map<String, dynamic>));
     final dk = await _unwrap(base64.decode(ph['wrap'] as String), kek, 'ph');
     if (dk == null) throw VaultWrongSecret(failures);
+    await _adoptGeneration(b, f, dk);
     try {
       beforeCommit?.call();
       await _setPassword(b, f, dk, newPassword, beforeCommit: beforeCommit);
@@ -255,7 +266,7 @@ class VaultKeys {
 
   /// Сменить пароль (хранилище должно быть открыто; старый пароль проверяется заново).
   Future<void> changePassword(String oldPassword, String newPassword) async {
-    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError('Пароль не короче $minPasswordLength знаков');
+    if (newPassword.runes.length < minPasswordLength) throw VaultPolicyError(trf('Пароль не короче {n} знаков', {'n': minPasswordLength}));
     final generation = _generation;
     void alive() {
       if (_dk == null || generation != _generation) throw StateError('смена пароля прервана блокировкой');
@@ -277,7 +288,7 @@ class VaultKeys {
   /// Удалить все ключи (кнопка «Удалить всё»): после этого данные нечитаемы навсегда.
   static Future<void> destroy(VaultBackend b) => _serial(() async {
     await b.writeBlob('');
-    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kCnt]) {
+    for (final k in [_kHw, _kFail, _kFailPh, _kNext, _kNextPh, _kGen, _kGt, _kCnt]) {
       await b.secureDelete(k);
     }
   });
@@ -336,9 +347,11 @@ class VaultKeys {
     f['pw'] = {'kdf': kdf.toJson(), 'salt': base64.encode(salt), 'wrap': base64.encode(await _wrap(dk, kek, 'pw'))};
     final gen = ((f['gen'] as int?) ?? 0) + 1;
     f['gen'] = gen;
+    f['gt'] = await _genTag(dk, gen, f);
     beforeCommit?.call();   // после всех вычислений, непосредственно перед записью нового замка
     await b.writeBlob(jsonEncode(f));      // сначала файл, потом метка: оборвёт между ними — файл новее метки, это допустимо
     await b.secureWrite(_kGen, '$gen');
+    await b.secureWrite(_kGt, '2');
   }
 
   /// Файл старее записанной метки поколения — его вернули из копии (с прежним паролем): отвергаем. Метки ещё нет (хранилище создано
@@ -348,7 +361,72 @@ class VaultKeys {
     final fg = (f['gen'] as int?) ?? 0;
     final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
     if (sg != null && fg < sg) throw VaultCorrupt('файл ключей старее текущего: возвращена прежняя копия');
-    if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
+  }
+
+  /// Поколение файла запоминается только после того, как замок в нём реально открылся: изменённый, но не проходящий проверку файл
+  /// не может поднять метку и сделать исправную копию «устаревшей».
+  /// Номер поколения в файле заверен ключом данных (`gt` = HMAC(DK, «gen:N»)): изменить только `gen` и поднять метку нельзя.
+  /// Файл прежнего вида без заверения метку не поднимает (только заводит, когда её ещё нет) и заверяется при первом входе.
+  static Future<void> _adoptGeneration(VaultBackend b, Map<String, dynamic> f, Uint8List dk) async {
+    final fg = (f['gen'] as int?) ?? 0;
+    final sg = int.tryParse(await b.secureRead(_kGen) ?? '');
+    final tag = f['gt'];
+    if (tag is String) {
+      final v2 = await _genTag(dk, fg, f);
+      final legacy = tag != v2 && tag == await _genTagV1(dk, fg) && await b.secureRead(_kGt) != '2';
+      if (tag != v2 && !legacy) throw VaultCorrupt('поколение файла ключей не заверено: файл изменён');
+      var migrated = !legacy;
+      if (legacy) {
+        // прежний тег заверял только номер поколения: один раз перезаверяем по-новому (с обёртками)
+        f['gt'] = v2;
+        try {
+          await b.writeBlob(jsonEncode(f));
+          migrated = true;
+        } catch (_) {
+          // запись не удалась (диск полон): файл остаётся с прежним тегом, а метка НЕ поднимается до версии 2 — иначе следующий вход
+          // отверг бы исправный файл как «понижение формата». Миграция повторится при следующем входе.
+        }
+      }
+      if (sg == null || fg > sg) await b.secureWrite(_kGen, '$fg');
+      if (migrated) {
+        await b.secureWrite(_kGt, '2');
+      } else if (await b.secureRead(_kGt) == null) {
+        await b.secureWrite(_kGt, '1');
+      }
+      return;
+    }
+    // файл без заверения допустим только как прежний формат; если заверенный файл уже был, удалённое `gt` — подмена
+    if (await b.secureRead(_kGt) != null) throw VaultCorrupt('у файла ключей снято заверение поколения: файл изменён');
+    // незаверенное поколение не может быть выше метки больше чем на оборванную запись (на 1): иначе это подъём «в долг»
+    if (sg != null && fg > sg + 1) throw VaultCorrupt('поколение файла ключей выше записанной метки: файл изменён');
+    if (sg == null) await b.secureWrite(_kGen, '$fg');
+    try {
+      f['gt'] = await _genTag(dk, fg, f);
+      await b.writeBlob(jsonEncode(f));   // заверяем прежний файл (то же поколение)
+    } catch (_) {}
+  }
+
+  /// Тег поколения v2: HMAC(DK) над номером поколения И обеими секциями обёрток (`pw`, `ph`: KDF, соль, обёртка). Старую (корректную)
+  /// секцию пароля под текущий `gt` подставить нельзя: тег перестаёт сходиться.
+  static Future<String> _genTag(Uint8List dk, int gen, Map<String, dynamic> f) async {
+    final mac = await Hmac.sha256().calculateMac(utf8.encode('yandi-vault:gen:v2:$gen:${_canon(f['pw'])}:${_canon(f['ph'])}'), secretKey: SecretKey(dk));
+    return base64.encode(mac.bytes);
+  }
+
+  /// Прежний тег (только номер поколения): принимается один раз, чтобы перезаверить файл по-новому.
+  static Future<String> _genTagV1(Uint8List dk, int gen) async {
+    final mac = await Hmac.sha256().calculateMac(utf8.encode('yandi-vault:gen:v1:$gen'), secretKey: SecretKey(dk));
+    return base64.encode(mac.bytes);
+  }
+
+  /// Каноническая запись JSON-значения (ключи по порядку): одинаковая у файла, только что собранного и прочитанного заново.
+  static String _canon(Object? v) {
+    if (v is Map) {
+      final keys = v.keys.map((k) => '$k').toList()..sort();
+      return '{${keys.map((k) => '${jsonEncode(k)}:${_canon(v[k])}').join(',')}}';
+    }
+    if (v is List) return '[${v.map(_canon).join(',')}]';
+    return jsonEncode(v);
   }
 
   /// Сколько неверных подряд. Метка заведена, а счётчика нет — его стёрли: засчитываем как несколько ошибок (с паузой).

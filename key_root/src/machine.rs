@@ -4,8 +4,8 @@ pub trait MachineContext {
     fn id(&self) -> String;
 }
 
-/// What the legacy code used when `/etc/machine-id` cannot be read (containers, macOS): kept so that files written then still open.
-const LEGACY_FALLBACK_MACHINE_ID: &str = "YANDI_FALLBACK_MACHINE_ID";
+/// Used when `/etc/machine-id` cannot be read (containers, macOS).
+const FALLBACK_MACHINE_ID: &str = "YANDI_FALLBACK_MACHINE_ID";
 
 pub struct SystemMachine;
 
@@ -15,7 +15,7 @@ impl MachineContext for SystemMachine {
             .map(|s| s.trim().to_owned())
             .ok()
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| LEGACY_FALLBACK_MACHINE_ID.to_owned())
+            .unwrap_or_else(|| FALLBACK_MACHINE_ID.to_owned())
     }
 }
 

@@ -183,6 +183,74 @@ pub fn configured_ports() -> (u16, u16) {
     (get("YANDI_P2P_DATA_PORT", 9998), get("YANDI_P2P_DISCOVERY_PORT", 9001))
 }
 
+/// Типы пакетов, которые всегда идут запечатанными на ключ собеседника. Кроме `ChatMessage` (запечатывает слой чата) и `FileChunk`
+/// (свой ключ файла от сеанса) и служебных пакетов самого транспорта (связь, пробивка NAT, ретрансляция).
+/// Окно свежести запечатанных управляющих пакетов и ограничения защиты от повторов и стоимости.
+pub(crate) const SIGNAL_WINDOW_MS: u64 = 5 * 60 * 1000;
+const SEAL_REPLAY_CAP: usize = 16_384;
+const SEAL_RATE_PER_SEC: f64 = 100.0;
+const SEAL_BURST: f64 = 200.0;
+const SEAL_PEERS_CAP: usize = 4096;
+
+/// Память отпечатков принятых конвертов на окно свежести и ведро токенов на собеседника: тяжёлые операции (подпись, DH) выполняются только в рамках бюджета.
+#[derive(Default)]
+pub(crate) struct SealGuard {
+    seen: std::collections::HashSet<[u8; 32]>,
+    order: std::collections::VecDeque<([u8; 32], std::time::Instant)>,
+    buckets: HashMap<HashId, (f64, std::time::Instant)>,
+}
+
+impl SealGuard {
+    /// Можно ли сейчас потратить одну дорогую проверку на пакет от `peer`.
+    pub(crate) fn allow(&mut self, peer: HashId, now: std::time::Instant) -> bool {
+        if self.buckets.len() >= SEAL_PEERS_CAP && !self.buckets.contains_key(&peer) {
+            self.buckets.retain(|_, (_, t)| now.duration_since(*t).as_secs() < 60);
+            if self.buckets.len() >= SEAL_PEERS_CAP {
+                return false;
+            }
+        }
+        let b = self.buckets.entry(peer).or_insert((SEAL_BURST, now));
+        let dt = now.duration_since(b.1).as_secs_f64();
+        b.0 = (b.0 + dt * SEAL_RATE_PER_SEC).min(SEAL_BURST);
+        b.1 = now;
+        if b.0 >= 1.0 {
+            b.0 -= 1.0;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Запомнить принятый конверт; false — такой уже был в окне (повтор).
+    pub(crate) fn remember(&mut self, fingerprint: [u8; 32], now: std::time::Instant) -> bool {
+        let window = std::time::Duration::from_millis(SIGNAL_WINDOW_MS + 60_000);
+        while let Some((fp, t)) = self.order.front().copied() {
+            if now.duration_since(t) > window || self.order.len() >= SEAL_REPLAY_CAP {
+                self.order.pop_front();
+                self.seen.remove(&fp);
+            } else {
+                break;
+            }
+        }
+        if !self.seen.insert(fingerprint) {
+            return false;
+        }
+        self.order.push_back((fingerprint, now));
+        true
+    }
+}
+
+pub(crate) fn must_seal(t: P2PPacketType) -> bool {
+    use P2PPacketType as T;
+    matches!(
+        t,
+        T::ChatAck | T::ChatRead | T::ChatTyping | T::ChatDeleteMessage
+            | T::VoiceCallRequest | T::VoiceCallAccept | T::VoiceCallEnd | T::VoiceCallReject | T::VoiceData
+            | T::VideoCallRequest | T::VideoCallAccept | T::VideoCallEnd | T::VideoCallReject | T::VideoData
+            | T::FileTransferStart | T::FileTransferEnd | T::FileTransferCancel | T::FileMissing | T::FileComplete
+    )
+}
+
 #[derive(Clone)]
 pub struct P2PTransport {
     /// Node identity
@@ -236,6 +304,8 @@ pub struct P2PTransport {
     admission: Arc<Mutex<crate::netlayer::admission::Admission>>,
     /// Когда в последний раз просили новый ключ у узла (не чаще раза в минуту)
     rekey_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
+    /// бюджет и память повторов для запечатанных пакетов (P26-1, P26-2)
+    seal_guard: Arc<std::sync::Mutex<SealGuard>>,
     /// when a broken session with a peer was last repaired by a new handshake (see `request_resync`)
     resync_requested: Arc<Mutex<HashMap<HashId, std::time::Instant>>>,
     /// hole punching through introducers (src/p2p/punch.rs)
@@ -323,6 +393,7 @@ impl P2PTransport {
             bootstrap_fingerprints: Arc::new(std::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(Mutex::new(HashMap::new())),
+            seal_guard: Arc::new(std::sync::Mutex::new(SealGuard::default())),
             resync_requested: Arc::new(Mutex::new(HashMap::new())),
             punch: Arc::new(punch::PunchState::default()),
             relay: Arc::new(relay::RelayState::default()),
@@ -391,6 +462,54 @@ impl P2PTransport {
         format!("{}:{}", self.external_ip, port)
     }
 
+    /// Проверенный Ed25519-ключ собеседника (из подписанного Hello, привязан к его идентификатору).
+    pub async fn peer_signing_key(&self, id: &HashId) -> Option<[u8; 32]> {
+        self.peers.lock().await.get(id).and_then(|p| p.ed25519_public)
+    }
+
+    #[cfg(test)]
+    pub async fn test_add_peer_key(&self, id: HashId, key: [u8; 32]) {
+        use crate::p2p::peer::P2PPeer;
+        let p = P2PPeer { id, addr: String::new(), data_addr: None, p2p_data_addr: None, local_addr: None, public_addr: None, ipv6_virtual: None, last_seen: 0, nat_status: P2PNatStatus::Unknown, ed25519_public: Some(key) };
+        self.peers.lock().await.insert(id, p);
+    }
+
+    /// Устарело как отдельный путь: пакеты нужных типов запечатываются в `send_packet_dual_path` сами.
+    pub async fn send_sealed(&self, peer: HashId, packet: P2PPacket) -> Result<(), String> {
+        self.send_packet_dual_path(peer, packet).await
+    }
+
+    /// Открыть запечатанный пакет от `sender`: подпись отправителя, адресат — мы, тип пакета внутри совпадает с внешним. Иначе None.
+    pub async fn open_signal(&self, sender: HashId, packet_type: P2PPacketType, payload: &[u8]) -> Option<Vec<u8>> {
+        // бюджет тяжёлых проверок на собеседника (P26-2): сверх него пакет отбрасывается до подписи и DH
+        if !self.seal_guard.lock().ok()?.allow(sender, std::time::Instant::now()) {
+            return None;
+        }
+        let pk = self.peer_signing_key(&sender).await?;
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).ok()?;
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+        let (_, plain) = crate::crypto::sealed::open_within(&self.sealing_key(), &vk, &sender.0, &self.node_id().0, now, SIGNAL_WINDOW_MS, payload).ok()?;
+        let (first, rest) = plain.split_first()?;
+        if *first != packet_type.to_byte() {
+            return None;
+        }
+        // повтор того же конверта в окне свежести отвергается (P26-1)
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(sender.0);
+        h.update(payload);
+        let fp: [u8; 32] = h.finalize().into();
+        if !self.seal_guard.lock().ok()?.remember(fp, std::time::Instant::now()) {
+            return None;
+        }
+        Some(rest.to_vec())
+    }
+
+    /// Ключ подписи этого узла для запечатанных конвертов.
+    pub fn sealing_key(&self) -> ed25519_dalek::SigningKey {
+        ed25519_dalek::SigningKey::from_bytes(&self.identity.signing_private_key)
+    }
+
     /// Get node ID
     pub fn node_id(&self) -> HashId {
         self.identity.node_id()
@@ -412,8 +531,11 @@ impl P2PTransport {
     }
 
     pub async fn add_peer(&self, peer: P2PPeer) {
+        let id = peer.id;
         let mut peers = self.peers.lock().await;
         peers.insert(peer.id, peer);
+        drop(peers);
+        crate::profile_sync::peer_seen(&id);
     }
 
     /// Get peer by ID
@@ -423,6 +545,11 @@ impl P2PTransport {
     }
 
     /// Snapshot of known P2P peers.
+    /// Забыть пира: без записи его пакеты данных не сопоставляются отправителю и отбрасываются (аудит R9 №11).
+    pub async fn forget_peer(&self, id: &HashId) {
+        self.peers.lock().await.remove(id);
+    }
+
     pub async fn list_peers(&self) -> Vec<P2PPeer> {
         let peers = self.peers.lock().await;
         peers.values().cloned().collect()
@@ -454,6 +581,20 @@ impl P2PTransport {
     /// 🔄 Отправить пакет по DUAL-PATH (Path0 + Path1)
     /// Создаёт 2 копии пакета с разными line_id
     pub async fn send_packet_dual_path(&self, peer_id: HashId, mut packet: P2PPacket) -> Result<(), String> {
+        // E2E: управляющие пакеты чата, файлов и звонков запечатываются на ключ собеседника (тип пакета внутри конверта); открытого пути нет
+        if must_seal(packet.packet_type) {
+            let pk = self.peer_signing_key(&peer_id).await.ok_or_else(|| "ключ собеседника ещё не получен".to_string())?;
+            let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| "недопустимый ключ собеседника".to_string())?;
+            let mut plain = Vec::with_capacity(1 + packet.payload.len());
+            plain.push(packet.packet_type.to_byte());
+            plain.extend_from_slice(&packet.payload);
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0);
+            packet.payload = crate::crypto::sealed::seal(&self.sealing_key(), &vk, &self.node_id().0, &peer_id.0, now, &plain).map_err(|e| e.to_string())?;
+        }
+        self.send_packet_inner(peer_id, packet).await
+    }
+
+    async fn send_packet_inner(&self, peer_id: HashId, mut packet: P2PPacket) -> Result<(), String> {
         // Найти peer address
         let peer_addr = {
             let peers = self.peers.lock().await;
@@ -522,7 +663,7 @@ impl P2PTransport {
         self.data_send_socket.send_to(&bytes0, &peer_addr)
             .await
             .map_err(|e| format!("Failed to send Path0 packet to {}: {}", peer_addr, e))?;
-        println!("[P2P] 📤 Path0 → {} ({}B, ts: {})", peer_addr, bytes0.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        println!("[P2P] 📤 Path0 → {} ({}B, ts: {})", crate::util::logsafe::a(&peer_addr), bytes0.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
 
         self.stats_sent_packets.fetch_add(1, Ordering::Relaxed);
         self.stats_sent_bytes.fetch_add(bytes0.len() as u64, Ordering::Relaxed);
@@ -539,7 +680,7 @@ impl P2PTransport {
 
         self.stats_sent_packets.fetch_add(1, Ordering::Relaxed);
         self.stats_sent_bytes.fetch_add(bytes1.len() as u64, Ordering::Relaxed);
-        println!("[P2P] 📤 Path1 → {} ({}B, ts: {})", peer_addr, bytes1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
+        println!("[P2P] 📤 Path1 → {} ({}B, ts: {})", crate::util::logsafe::a(&peer_addr), bytes1.len(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs());
         self.stats_sent_path1.fetch_add(1, Ordering::Relaxed);
 
         println!("[P2P] 🔄 DUAL-PATH: Path0 + Path1 → {} ({} bytes)",
@@ -562,6 +703,12 @@ impl P2PTransport {
                         if prev != 0 && now.saturating_sub(prev) > 1000 {
                             println!("[P2P] ⚠️ Gap in receive: {} ms", now - prev);
                         }
+                    // Проба hole punching (49 байт) — не P2PPacket: распознаётся ДО разбора, иначе парсер (минимум 54 байта) её
+                    // отбрасывал, и настоящий внешний порт канала данных не запоминался
+                    if len == punch::PROBE_LEN && buf[0] == punch::PROBE_MAGIC {
+                        self.on_punch_probe(&buf[..len], from_addr, false).await;
+                        continue;
+                    }
                     // Парсим P2PPacket из сырых байт
                     if let Some(p2p_packet) = P2PPacket::from_bytes(&buf[..len]) {
                         let packet_id = p2p_packet.packet_id;
@@ -876,7 +1023,7 @@ impl P2PTransport {
                         }
 
                     } else {
-                        eprintln!("[P2P] ⚠️  Failed to parse packet from {}", from_addr);
+                        eprintln!("[P2P] ⚠️  Failed to parse packet from {}", crate::util::logsafe::a(&from_addr));
                     }
                 }
                 Err(e) => {
@@ -918,10 +1065,19 @@ impl P2PTransport {
                     }
                     match P2PHelloPacket::from_bytes(data) {
                         Ok(hello) => {
-                            println!("[P2P] 📨 Received P2P Hello from {}: {:?}", from, hello.hello_type);
+                            println!("[P2P] 📨 Received P2P Hello from {}: {:?}", crate::util::logsafe::a(&from), hello.hello_type);
                             // SEC-03: reject Hello packets with invalid signatures
                             if let Err(e) = hello.verify_signature() {
-                                eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", from, e);
+                                eprintln!("[P2P] ⚠️ Hello from {} rejected — bad signature: {}", crate::util::logsafe::a(&from), e);
+                                continue;
+                            }
+                            // подпись не доказывает свежесть: записанный Hello нельзя проигрывать после окна, которое помнит кэш nonce
+                            if !hello.is_fresh() {
+                                eprintln!("[P2P] ⚠️ Hello from {} rejected — stale timestamp", crate::util::logsafe::a(&from));
+                                continue;
+                            }
+                            // автономный узел молчит перед всеми, кого владелец не внёс в меш
+                            if !crate::autonomy::admits(&hello.node_id) {
                                 continue;
                             }
 
@@ -934,6 +1090,10 @@ impl P2PTransport {
                                 let verdict = self.admission.lock().await.check(from.ip(), hello.node_id, known, table_len, std::time::Instant::now());
                                 let verdict = match verdict {
                                     Err(crate::netlayer::admission::Reject::TableFull) => {
+                                        // сначала квоты новой личности (с адреса и общая): вытеснение честного узла не бесплатно
+                                        if let Err(r) = self.admission.lock().await.quotas_for_new(from.ip(), hello.node_id, std::time::Instant::now()) {
+                                            Err(r)
+                                        } else {
                                         let mut p = self.peers.lock().await;
                                         let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
                                         let victim = crate::netlayer::admission::pick_victim(p.values().map(|x| (x.id, x.last_seen, false, false)), now_ms, 120_000);
@@ -943,6 +1103,7 @@ impl P2PTransport {
                                                 Ok(())
                                             }
                                             None => Err(crate::netlayer::admission::Reject::TableFull),
+                                        }
                                         }
                                     }
                                     other => other,
@@ -963,7 +1124,7 @@ impl P2PTransport {
                             {
                                 let mut seen = self.seen_hello_nonces.lock().await;
                                 if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
-                                    eprintln!("[P2P] ⛔ REJECTED: REPLAY — Hello for {} reuses a nonce already accepted within the freshness window (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                    eprintln!("[P2P] ⛔ REJECTED: REPLAY — Hello for {} reuses a nonce already accepted within the freshness window (from {})", hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&from));
                                     continue;
                                 }
                             }
@@ -980,7 +1141,7 @@ impl P2PTransport {
                                 if let Some(existing) = peers.get(&hello.node_id) {
                                     if let Some(known_key) = existing.ed25519_public {
                                         if known_key != hello.ed25519_public {
-                                            eprintln!("[P2P] ⛔ REJECTED: IDENTITY_CONFLICT — {} previously verified with a different signing key (from {})", hex::encode(&hello.node_id.0[..8]), from);
+                                            eprintln!("[P2P] ⛔ REJECTED: IDENTITY_CONFLICT — {} previously verified with a different signing key (from {})", hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&from));
                                             continue;
                                         }
                                     }
@@ -997,7 +1158,7 @@ impl P2PTransport {
                                             eprintln!(
                                                 "[P2P] ❌ BOOTSTRAP FINGERPRINT MISMATCH from {} — \
                                                  expected {}, got {}. Rejecting.",
-                                                from,
+                                                crate::util::logsafe::a(&from),
                                                 hex::encode(&expected[..8]),
                                                 hex::encode(&hello.ed25519_public[..8])
                                             );
@@ -1090,7 +1251,7 @@ impl P2PTransport {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[P2P] ⚠️ Invalid P2P Hello packet from {}: {}", from, e);
+                            eprintln!("[P2P] ⚠️ Invalid P2P Hello packet from {}: {}", crate::util::logsafe::a(&from), e);
                         }
                     }
                 }
@@ -1128,7 +1289,7 @@ impl P2PTransport {
             // Это CommPacket (control 0x50-0x5F, data 0x60-0x6F)
             if let Some(comm_packet) = crate::communication::CommPacket::from_bytes(data) {
                 let packet_type_name = format!("{:?}", comm_packet.packet_type);
-                println!("[P2P] 📦 Received CommPacket ({}) from {}", packet_type_name, from);
+                println!("[P2P] 📦 Received CommPacket ({}) from {}", packet_type_name, crate::util::logsafe::a(&from));
 
                 // Отправляем в chat handler
                 if let Some(ref tx) = self.chat_packet_tx {
@@ -1147,7 +1308,7 @@ impl P2PTransport {
                     if let Some(id) = peer_id {
                         let _ = tx.try_send((id, comm_packet));
                     } else {
-                        eprintln!("[P2P] ⚠️  Received CommPacket from unknown peer: {}", from);
+                        eprintln!("[P2P] ⚠️  Received CommPacket from unknown peer: {}", crate::util::logsafe::a(&from));
                     }
                 }
 
@@ -1157,7 +1318,7 @@ impl P2PTransport {
 
         // 🔗 P2P Tunnel packets (0x80-0x8F) - для p2p_tunnel manager
         if packet_type_byte >= 0x80 && packet_type_byte <= 0x8F {
-            println!("[P2P] 🔗 Received Tunnel packet (0x{:02X}) from {}", packet_type_byte, from);
+            println!("[P2P] 🔗 Received Tunnel packet (0x{:02X}) from {}", packet_type_byte, crate::util::logsafe::a(&from));
 
             // Ищем peer по from addr
             let peer_id = {
@@ -1174,7 +1335,7 @@ impl P2PTransport {
                     return Ok(());
                 }
             } else {
-                eprintln!("[P2P] ⚠️  Received Tunnel packet from unknown peer: {}", from);
+                eprintln!("[P2P] ⚠️  Received Tunnel packet from unknown peer: {}", crate::util::logsafe::a(&from));
             }
 
             return Ok(());
@@ -1235,10 +1396,19 @@ impl P2PTransport {
             _ => "Unknown",
         };
 
-        println!("[P2P] 📦 Received P2PPacket {} from {}", packet_type_name, from);
+        println!("[P2P] 📦 Received P2PPacket {} from {}", packet_type_name, crate::util::logsafe::a(&from));
 
         // Сохраняем sender до move
         let sender = p2p_packet.sender;
+        // E2E: такие пакеты принимаются только запечатанными и подписанными отправителем, с совпадающим типом внутри конверта
+        let mut p2p_packet = p2p_packet;
+        if must_seal(p2p_packet.packet_type) {
+            let Some(payload) = self.open_signal(sender, p2p_packet.packet_type, &p2p_packet.payload).await else {
+                debug!("🔒 пакет {} от {} отвергнут: нет верного конверта", packet_type_name, hex::encode(&sender.0[..8]));
+                return Ok(());
+            };
+            p2p_packet.payload = payload;
+        }
 
         // Отправить в соответствующий handler
         match p2p_packet.packet_type {
@@ -1368,6 +1538,11 @@ impl P2PTransport {
     /// ask the peer for a fresh handshake — at most once every 5 seconds per peer. Without this, two nodes whose keys ended up different
     /// (handshakes crossing, answers lost or reordered) stay unable to talk until something else happens to renew the key.
     pub async fn request_resync(&self, peer_id: HashId) {
+        // Номер отправителя в пакете ещё ничем не удостоверен: незнакомых узлов в кэш не заносим, иначе поток пакетов с выдуманными
+        // номерами раздувает его и заставляет чистить всю таблицу на каждый пакет.
+        let Some(addr) = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone()) else {
+            return;
+        };
         {
             let mut asked = self.resync_requested.lock().await;
             if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
@@ -1378,11 +1553,8 @@ impl P2PTransport {
                 asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
             }
         }
-        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
-        if let Some(addr) = addr {
-            println!("[P2P] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
-            let _ = self.send_hello_request(&addr).await;
-        }
+        println!("[P2P] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+        let _ = self.send_hello_request(&addr).await;
     }
 
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
@@ -1408,7 +1580,7 @@ impl P2PTransport {
         let bytes = hello.to_bytes().map_err(|e| e.to_string())?;
         self.discovery_socket.send_to(&bytes, addr).await
             .map_err(|e| format!("Failed to send: {}", e))?;
-        println!("[P2P] ✅ HELLO_REQ sent to {} (PFS ephemeral key)", addr);
+        println!("[P2P] ✅ HELLO_REQ sent to {} (PFS ephemeral key)", crate::util::logsafe::a(&addr));
         Ok(())
     }
 }

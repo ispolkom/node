@@ -30,7 +30,10 @@ void main() {
       final b = key.currentContext!.findRenderObject() as RenderRepaintBoundary;
       final img = await b.toImage(pixelRatio: 3);
       final data = await img.toByteData(format: ui.ImageByteFormat.png);
-      File('/tmp/claude-1000/-home-iam-node/bab8b393-8730-45fe-914f-22779bc40b91/scratchpad/icons.png').writeAsBytesSync(data!.buffer.asUint8List());
+      final bytes = data!.buffer.asUint8List();
+      // лист значков действительно рисуется в PNG; файл никуда не сохраняется (нет жёстких путей и мусора на диске)
+      expect(bytes.sublist(0, 4), [0x89, 0x50, 0x4E, 0x47]);
+      expect(bytes.length, greaterThan(1000));
     });
   });
 }

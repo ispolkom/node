@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../theme.dart';
+import '../l10n.dart';
 
 /// Чёрный список: заблокированные собеседники. Блок двусторонний и держится в приложении (узел о нём не знает).
 class BlacklistScreen extends StatelessWidget {
@@ -15,15 +16,15 @@ class BlacklistScreen extends StatelessWidget {
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: const Text('Чёрный список', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Чёрный список'), style: TextStyle(color: AppTheme.text)),
         iconTheme: const IconThemeData(color: AppTheme.text),
       ),
       body: blocked.isEmpty
-          ? const Center(
+          ? Center(
               child: Padding(
                 padding: EdgeInsets.all(32),
                 child: Text(
-                  'Список пуст.\nЗаблокированные собеседники не могут писать и звонить вам, а вы — им.',
+                  tr('Список пуст.\nЗаблокированные собеседники не могут писать и звонить вам, а вы — им.'),
                   textAlign: TextAlign.center,
                   style: TextStyle(color: AppTheme.textSecondary),
                 ),
@@ -44,7 +45,7 @@ class BlacklistScreen extends StatelessWidget {
                       style: const TextStyle(color: AppTheme.textSecondary, fontSize: 11)),
                   trailing: TextButton(
                     onPressed: () => context.read<AppState>().unblockContact(e.key),
-                    child: const Text('Разблокировать', style: TextStyle(color: AppTheme.accent)),
+                    child: Text(tr('Разблокировать'), style: TextStyle(color: AppTheme.accent)),
                   ),
                 );
               },

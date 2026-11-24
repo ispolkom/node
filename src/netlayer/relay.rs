@@ -127,8 +127,6 @@ pub struct RelayManager {
     next_session_id: u64,
     /// Timeout configuration
     timeout_config: RelayTimeout,
-    /// Are we acting as relay server?
-    is_relay_server: bool,
 }
 
 impl RelayManager {
@@ -139,7 +137,6 @@ impl RelayManager {
             by_pair: HashMap::new(),
             next_session_id: 1,
             timeout_config: RelayTimeout::default(),
-            is_relay_server: false,
         }
     }
 
@@ -150,22 +147,7 @@ impl RelayManager {
             by_pair: HashMap::new(),
             next_session_id: 1,
             timeout_config,
-            is_relay_server: false,
         }
-    }
-
-    /// Enable relay server mode (this node will relay traffic for others)
-    pub fn set_relay_server_mode(&mut self, enabled: bool) {
-        self.is_relay_server = enabled;
-        if enabled {
-            println!("[relay] 🌐 Relay server mode ENABLED - will forward traffic for NAT'd peers");
-        } else {
-            println!("[relay] 🌐 Relay server mode DISABLED");
-        }
-    }
-
-    pub fn is_relay_server(&self) -> bool {
-        self.is_relay_server
     }
 
     /// Generate new session ID
@@ -350,7 +332,6 @@ impl RelayManager {
             active_sessions: active_sessions.len(),
             total_bytes_forwarded: total_bytes,
             total_packets_forwarded: total_packets,
-            is_relay_server: self.is_relay_server,
         }
     }
 }
@@ -361,7 +342,6 @@ pub struct RelayStats {
     pub active_sessions: usize,
     pub total_bytes_forwarded: u64,
     pub total_packets_forwarded: u64,
-    pub is_relay_server: bool,
 }
 
 /// Background task to monitor relay sessions
@@ -452,19 +432,6 @@ mod tests {
         assert_eq!(expired.len(), 1);
         assert_eq!(expired[0], session_id);
         assert_eq!(manager.session_count(), 0);
-    }
-
-    #[test]
-    fn test_relay_server_mode() {
-        let mut manager = RelayManager::new();
-
-        assert!(!manager.is_relay_server());
-
-        manager.set_relay_server_mode(true);
-        assert!(manager.is_relay_server());
-
-        manager.set_relay_server_mode(false);
-        assert!(!manager.is_relay_server());
     }
 
     #[test]

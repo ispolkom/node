@@ -1,0 +1,197 @@
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:media_kit/media_kit.dart';
+import 'package:media_kit_video/media_kit_video.dart';
+import 'theme.dart';
+
+/// Встроенный в окно оболочки проигрыватель (libmpv через media_kit): видео и звук показываются в диалоге поверх чата, без отдельного
+/// окна. Источник — тот же адрес петли 127.0.0.1, что и у внешнего проигрывателя: расшифрованные данные живут только в памяти оболочки.
+/// Если библиотеки нет (libmpv не установлен), `enabled` остаётся false и оболочка работает через внешний проигрыватель, как раньше.
+/// Пока идёт воспроизведение (окно проигрывателя открыто или запущен внешний проигрыватель), потеря фокуса главным окном не стирает
+/// чат: иначе проигрыватель, забрав фокус, сразу закрывался бы вместе с чатом. Счётчик, а не флаг: проигрывателей может быть несколько.
+abstract final class PlaybackGuard {
+  static int _active = 0;
+  static bool get active => _active > 0;
+  static void enter() => _active++;
+  static void leave() {
+    if (_active > 0) _active--;
+  }
+
+  static void reset() => _active = 0;
+}
+
+class EmbeddedPlayer {
+  /// Включается в `main` после успешной инициализации; тесты оставляют false (внешний путь).
+  static bool enabled = false;
+
+  /// Проверка при запуске: true — библиотеки на месте.
+  static bool init() {
+    try {
+      MediaKit.ensureInitialized();
+      enabled = true;
+    } catch (_) {
+      enabled = false;
+    }
+    return enabled;
+  }
+
+  /// Сигнал «закрыть все окна проигрывателя» (запирание оболочки, закрытие карточки): стирание памяти не должно ждать пользователя.
+  static final ValueNotifier<int> closeAll = ValueNotifier<int>(0);
+
+  /// Подменяется в тестах. Завершается, когда диалог закрыт.
+  static Future<void> Function(BuildContext context, Uri url, String title, bool video) show = _show;
+
+  static Future<void> _show(BuildContext context, Uri url, String title, bool video) => showDialog<void>(
+    context: context,
+    barrierDismissible: false,
+    builder: (_) => _PlayerDialog(url: url, title: title, video: video),
+  );
+}
+
+class _PlayerDialog extends StatefulWidget {
+  final Uri url;
+  final String title;
+  final bool video;
+  const _PlayerDialog({required this.url, required this.title, required this.video});
+  @override
+  State<_PlayerDialog> createState() => _PlayerDialogState();
+}
+
+class _PlayerDialogState extends State<_PlayerDialog> {
+  late final Player player = Player();
+  // Программный рендеринг: аппаратный (текстура GL) на ряде видеокарт Linux роняет весь процесс (SIGSEGV в TextureGL сразу после
+  // создания вывода). Программного вывода хватает для видео до full HD, звук от рендеринга не зависит.
+  late final VideoController controller = VideoController(
+    player,
+    configuration: const VideoControllerConfiguration(enableHardwareAcceleration: false),
+  );
+  String? error;
+  StreamSubscription<String>? errors;
+  StreamSubscription<dynamic>? _audioReady;
+  Timer? _audioOutputTimer;
+  bool _audioOutputPrepared = false, _audioOutputBusy = false;
+
+  @override
+  void initState() {
+    super.initState();
+    EmbeddedPlayer.closeAll.addListener(_closeRequested);
+    errors = player.stream.error.listen((e) {
+      if (mounted) setState(() => error = 'Не удалось воспроизвести: файл повреждён или формат не поддерживается');
+    });
+    _open();
+  }
+
+  void _closeRequested() {
+    if (mounted) Navigator.of(context).pop();
+  }
+
+  Future<void> _open() async {
+    try {
+      final native = player.platform;
+      if (native is NativePlayer) {
+        // адрес петли идёт напрямую, даже если в окружении пользователя стоит http_proxy
+        await native.setProperty('stream-lavf-o', 'http_proxy=');
+        await native.setProperty('network-timeout', '15');
+        // Собственное имя звукового клиента: звуковой сервер хранит громкость потока по имени программы, и у общего имени «mpv» могла
+        // остаться нулевая громкость (видео без звука при исправном воспроизведении); у нового имени громкость начинается со 100%.
+        await native.setProperty('audio-client-name', 'YANDI');
+        // Only PulseAudio offers per-stream ao-volume; ALSA may change the
+        // hardware mixer, so never fall back to it for this operation.
+        await native.setProperty('ao', 'pulse,pipewire,alsa');
+        _audioReady = player.stream.audioParams.listen((_) {
+          if (_audioOutputPrepared || _audioOutputTimer != null) return;
+          var attempts = 0;
+          _audioOutputTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) async {
+            if (!mounted || _audioOutputPrepared || ++attempts > 30) {
+              timer.cancel();
+              return;
+            }
+            if (_audioOutputBusy) return;
+            _audioOutputBusy = true;
+            try {
+              if (await native.getProperty('current-ao') == 'pulse') {
+                await native.setProperty('ao-volume', '100');
+                await native.setProperty('ao-mute', 'no');
+                _audioOutputPrepared = true;
+                timer.cancel();
+              }
+            } catch (_) {
+              // Audio output is not ready yet; retry without touching other streams.
+            } finally {
+              _audioOutputBusy = false;
+            }
+          });
+        });
+      }
+      await player.setVolume(100);
+      await player.open(Media(widget.url.toString()), play: true);
+      _debugTrace();
+    } catch (_) {
+      if (mounted) setState(() => error = 'Не удалось открыть проигрыватель');
+    }
+  }
+
+  /// Диагностика звука и видео по запросу: YANDI_PLAYER_DEBUG=1 пишет технические сведения (дорожки, устройство вывода, громкость, ошибки
+  /// libmpv) в /tmp/yandi_player_debug.log. Содержимое файла и переписка не пишутся.
+  void _debugTrace() {
+    if (Platform.environment['YANDI_PLAYER_DEBUG'] != '1') return;
+    void out(String t) {
+      try {
+        File('/tmp/yandi_player_debug.log').writeAsStringSync('${DateTime.now().toIso8601String().substring(11, 23)} $t\n', mode: FileMode.append);
+      } catch (_) {}
+    }
+    player.stream.log.listen((l) {
+      if (RegExp(r'ao|audio|volume|mute|error|fail|decoder|track', caseSensitive: false).hasMatch('${l.prefix} ${l.text}')) out('mpv ${l.prefix}: ${l.text.trim()}');
+    });
+    Timer(const Duration(seconds: 4), () {
+      final s = player.state;
+      out('STATE volume=${s.volume} playing=${s.playing} pos=${s.position} dur=${s.duration} audioParams=${s.audioParams} audioDevice=${s.audioDevice} '
+          'audioTracks=${s.tracks.audio.map((t) => '${t.id}:${t.codec}:${t.channels}:${t.language}').toList()} videoTracks=${s.tracks.video.map((t) => '${t.id}:${t.codec}').toList()} track=${s.track.audio}');
+    });
+  }
+
+  @override
+  void dispose() {
+    _audioOutputTimer?.cancel();
+    _audioReady?.cancel();
+    EmbeddedPlayer.closeAll.removeListener(_closeRequested);
+    errors?.cancel();
+    player.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Icq.panel,
+      insetPadding: const EdgeInsets.all(24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 1100, maxHeight: 720),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              color: Icq.header,
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              child: Row(
+                children: [
+                  Expanded(child: Text(widget.title, overflow: TextOverflow.ellipsis, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold))),
+                  TextButton(onPressed: () => Navigator.of(context).pop(), child: const Text('Закрыть', style: TextStyle(color: Colors.white))),
+                ],
+              ),
+            ),
+            Flexible(
+              child: AspectRatio(
+                aspectRatio: widget.video ? 16 / 9 : 16 / 4,
+                child: error != null
+                    ? Center(child: Text(error!, style: const TextStyle(color: Color(0xFFC62828))))
+                    : Video(controller: controller, controls: MaterialDesktopVideoControls),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

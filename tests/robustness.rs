@@ -18,7 +18,7 @@ fn probe<F: Fn(&[u8]) + 'static>(f: F) -> Probe {
 }
 
 fn decoders() -> Vec<(&'static str, Probe)> {
-    use yandi::communication::protocol::{CommPacket, GroupPacket};
+    use yandi::communication::protocol::CommPacket;
     use yandi::dataplane::stream::{StreamFrame, StreamHeader};
     use yandi::dht::messages::{DhtQuery, DhtResponse};
     use yandi::dht::record::NodeRecord;
@@ -29,8 +29,6 @@ fn decoders() -> Vec<(&'static str, Probe)> {
     use yandi::p2p::packet::P2PPacket;
     use yandi::p2p_tunnel::protocol::TunnelPacket;
     use yandi::protocol::station::BatchedWagon;
-    use yandi::protocol::tcp_station::TcpWagon;
-    use yandi::protocol::tcp_transport::TcpPacketHeader;
     use yandi::protocol::wagon::Wagon;
     use yandi::socks5::proxy_protocol as pp;
     use yandi::socks5::protocol as sp;
@@ -56,20 +54,14 @@ fn decoders() -> Vec<(&'static str, Probe)> {
         d!("P2PPacket", |b| drop(P2PPacket::from_bytes(b))),
         d!("P2PHelloPacket", |b| drop(P2PHelloPacket::from_bytes(b))),
         d!("CommPacket", |b| drop(CommPacket::from_bytes(b))),
-        d!("GroupPacket", |b| drop(GroupPacket::from_bytes(b))),
         d!("TunnelPacket", |b| drop(TunnelPacket::from_bytes(b))),
         d!("Wagon", |b| drop(Wagon::from_bytes(b))),
         d!("BatchedWagon", |b| drop(BatchedWagon::from_bytes(b))),
-        d!("TcpWagon", |b| drop(TcpWagon::from_bytes(b))),
-        d!("TcpPacketHeader", |b| drop(TcpPacketHeader::from_bytes(b))),
         d!("StreamHeader", |b| drop(StreamHeader::from_bytes(b))),
         d!("StreamFrame", |b| drop(StreamFrame::from_bytes(b))),
         d!("DhtQuery", |b| drop(DhtQuery::from_bytes(b))),
         d!("DhtResponse", |b| drop(DhtResponse::from_bytes(b))),
         d!("NodeRecord", |b| drop(NodeRecord::from_bytes(b))),
-        d!("decode_resume", |b| drop(pairing::decode_resume(b))),
-        d!("decode_session_issue", |b| drop(pairing::decode_session_issue(b))),
-        d!("decode_resume_ack", |b| drop(pairing::decode_resume_ack(b))),
         d!("Socks5Request", |b| drop(sp::Socks5Request::from_bytes(b))),
         d!("Socks5AuthSelect", |b| drop(sp::Socks5AuthSelect::from_bytes(b))),
         d!("ConnectRequest", |b| drop(pp::ConnectRequest::from_bytes(b))),
@@ -168,6 +160,8 @@ fn child_decoder() {
     let (_, f) = all.iter().find(|(n, _)| *n == name).expect("unknown decoder");
     std::panic::set_hook(Box::new(|_| {}));
     let mut bad: Vec<String> = vec![];
+    // прогрев: первая ошибка в процессе может стоить секунду на разворачивании отладочных сведений (macOS) — это не медленный разбор
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&[0u8; 1])));
     for input in corpus() {
         let t = Instant::now();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(&input)));

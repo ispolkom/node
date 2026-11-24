@@ -1,6 +1,7 @@
 import 'vault_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import '../l10n_core.dart';
 
 /// Сервис локальных уведомлений (без Firebase/Google).
 ///
@@ -22,7 +23,7 @@ class NotificationService {
 
   static Future<void> init() async {
     const androidSettings =
-        AndroidInitializationSettings('@drawable/ic_notification');
+        AndroidInitializationSettings('ic_notification');
     const settings = InitializationSettings(android: androidSettings);
 
     await _plugin.initialize(
@@ -67,12 +68,12 @@ class NotificationService {
   }) async {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
-        'yandi_messages',
-        'Сообщения',
-        channelDescription: 'Входящие сообщения YANDI',
+        'yandi_messages_silent',
+        tr('Сообщения'),
+        channelDescription: tr('Входящие сообщения YANDI'),
         importance:   Importance.high,
         priority:     Priority.high,
-        icon:         '@drawable/ic_notification',
+        icon:         'ic_notification',
         color:        const Color(0xFF00E5FF),
         playSound:    false,  // звук воспроизводит AppState через audioplayers
         enableVibration: true,
@@ -86,7 +87,7 @@ class NotificationService {
     await _plugin.show(
       _stableId(fromPeerId),
       'YANDI',
-      'Новое сообщение',
+      tr('Новое сообщение'),
       details,
       payload: fromPeerId,
     );
@@ -99,21 +100,22 @@ class NotificationService {
     required String displayName,
     required String fileName,
   }) async {
-    const details = NotificationDetails(
+    final details = NotificationDetails(
       android: AndroidNotificationDetails(
         'yandi_files',
-        'Файлы',
-        channelDescription: 'Входящие файлы YANDI',
+        tr('Файлы'),
+        channelDescription: tr('Входящие файлы YANDI'),
         importance: Importance.high,
         priority:   Priority.high,
-        icon:       '@drawable/ic_notification',
+        playSound: false, // The same bundled icq.mp3 is played by AppState.
+        icon:       'ic_notification',
         color:      Color(0xFF00E5FF),
       ),
     );
     await _plugin.show(
       _stableId('file_$fromPeerId'),
       'YANDI',
-      'Новый файл',
+      tr('Новый файл'),
       details,
       payload: fromPeerId,
     );
@@ -127,11 +129,11 @@ class NotificationService {
     final details = NotificationDetails(
       android: AndroidNotificationDetails(
         'yandi_calls',
-        'Звонки',
-        channelDescription: 'Входящие звонки и видеозвонки YANDI',
+        tr('Звонки'),
+        channelDescription: tr('Входящие звонки и видеозвонки YANDI'),
         importance: Importance.max,
         priority:   Priority.max,
-        icon:       '@drawable/ic_notification',
+        icon:       'ic_notification',
         color:      const Color(0xFF00E5FF),
         category:   AndroidNotificationCategory.call,
         fullScreenIntent: true,
@@ -142,7 +144,7 @@ class NotificationService {
         timeoutAfter: 45000,
       ),
     );
-    await _plugin.show(_callId, 'YANDI', video ? 'Входящий видеозвонок' : 'Входящий звонок', details, payload: fromPeerId);
+    await _plugin.show(_callId, 'YANDI', video ? tr('Входящий видеозвонок') : tr('Входящий звонок'), details, payload: fromPeerId);
   }
 
   static Future<void> cancelIncomingCall() async {

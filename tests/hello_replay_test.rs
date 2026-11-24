@@ -71,7 +71,6 @@ async fn spawn_transport(
         None, // proxy_request_tx
         None, // proxy_response_tx
         None, // proxy_tunnel_data_tx
-        None, // nack_tx
         None, // socks5_gateway_tx
         None, // socks5_request_tx
         None, // socks5_response_tx
@@ -80,7 +79,6 @@ async fn spawn_transport(
         None, // tun_wagon_resp_tx
         None, // p2p_tunnel_tx
         None, // chat_packet_tx
-        None, // group_packet_tx
         None, // new_peer_tx
         None, // external_ip
         None, // topology

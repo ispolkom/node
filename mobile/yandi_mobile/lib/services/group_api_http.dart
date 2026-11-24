@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'api_service.dart';
 import 'group_api.dart';
 
@@ -19,11 +20,15 @@ class HttpGroupApi implements GroupApi {
   @override
   Future<List<Map<String, dynamic>>> openGroups() async => _list(await _call('GET', '/mobile/groups/open'), 'groups');
   @override
-  Future<String> create(String name, String topic, String about, String kind) async =>
-      (await _call('POST', '/mobile/groups', {'name': name, 'topic': topic, 'about': about, 'kind': kind}))['id'] as String;
+  Future<String> create(String name, String topic, String about, String kind, {String? logoB64}) async =>
+      (await _call('POST', '/mobile/groups', {'name': name, 'topic': topic, 'about': about, 'kind': kind, if (logoB64 != null && logoB64.isNotEmpty) 'logo_b64': logoB64}))['id'] as String;
   @override
-  Future<void> settings(String gid, {String? name, String? topic, String? about}) async =>
-      _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about});
+  Future<void> settings(String gid, {String? name, String? topic, String? about, String? logoB64}) async =>
+      _call('POST', '/mobile/groups/$gid/settings', {if (name != null) 'name': name, if (topic != null) 'topic': topic, if (about != null) 'about': about, if (logoB64 != null) 'logo_b64': logoB64});
+  @override
+  Future<Uint8List?> logo(String gid) => _api.getGroupLogo(gid);
+  @override
+  Future<void> autoClean(String gid, int days) async => _call('POST', '/mobile/groups/$gid/autoclean', {'days': days});
   @override
   Future<Map<String, dynamic>> deleted(String gid, int after) => _call('GET', '/mobile/groups/$gid/deleted?after=$after');
   @override
@@ -43,6 +48,16 @@ class HttpGroupApi implements GroupApi {
   Future<Map<String, dynamic>> members(String gid) => _call('GET', '/mobile/groups/$gid/members');
   @override
   Future<void> setPub(String gid, String memberPub) async => _call('POST', '/mobile/groups/$gid/pubkey', {'member_pub': memberPub});
+  @override
+  Future<void> setCard(String gid, String nick, String avatarB64) async =>
+      _call('POST', '/mobile/groups/$gid/profile', {'nick': nick, 'avatar_b64': avatarB64});
+  @override
+  Future<void> setProof(String gid, String proofB64) async => _call('POST', '/mobile/groups/$gid/proof', {'proof': proofB64});
+  @override
+  Future<List<int>?> cardAvatar(String gid, String alias) async {
+    final (code, b) = await _api.bytes('GET', '/mobile/groups/$gid/members/${Uri.encodeComponent(alias)}/avatar');
+    return code == 200 && b.isNotEmpty ? b : null;
+  }
   @override
   Future<Map<String, dynamic>> keys(String gid) => _call('GET', '/mobile/groups/$gid/keys');
   @override

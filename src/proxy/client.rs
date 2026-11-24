@@ -7,21 +7,13 @@
 use crate::netlayer::P2PTransport;
 use crate::proxy::{ProxyRequest, ProxyResponse, ProxyTunnelData, ProxyConfig, UrlMapper};
 use crate::util::HashId;
-use crate::protocol::{Station, WagonNack, NackReason};
+use crate::protocol::Station;
 use std::sync::Arc;
-use std::collections::{HashMap, HashSet};
-use std::time::{Duration, Instant};
-use std::io::ErrorKind;
+use std::time::Duration;
+use std::collections::HashMap;
 use tokio::sync::{Mutex, RwLock};
 use anyhow::{Result, Context};
 use tracing::{info, error, debug, warn};
-
-fn is_normal_tunnel_shutdown(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::NotConnected
-    )
-}
 
 /// Helper function to send tunnel data to gateway
 async fn send_tunnel_data_to_gateway(
@@ -29,9 +21,7 @@ async fn send_tunnel_data_to_gateway(
     gateway_node: HashId,
     tunnel_data: ProxyTunnelData,
 ) -> Result<()> {
-    // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-    let data_bytes = tunnel_data.to_bincode()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize tunnel data: {}", e))?;
+    let data_bytes = tunnel_data.encode();
 
     // ✅ Используем ОДНУ И ТУ ЖЕ Station (не создаём новую!)
     station.send_train(gateway_node, data_bytes).await
@@ -50,169 +40,6 @@ async fn send_tunnel_data_dispatch(
     send_tunnel_data_to_gateway(station, gateway_node, tunnel_data).await
 }
 
-/// 🚂 Состояние сборки поезда на клиенте (DUAL-PATH с deduplication)
-#[derive(Debug)]
-struct TrainReassemblyState {
-    /// ID поезда
-    train_id: u64,
-
-    /// Общее количество wagon-ов
-    total_wagons: u16,
-
-    /// 📦 Wagons с Path0 (deduplication)
-    path0_wagons: HashMap<u16, Vec<u8>>,
-
-    /// 📦 Wagons с Path1 (deduplication)
-    path1_wagons: HashMap<u16, Vec<u8>>,
-
-    /// ✅ Собранные wagon-ы (уже взяты из любого пути)
-    assembled: HashSet<u16>,
-
-    /// 📦 Полный train (собранный из данных wagon-ов)
-    train_data: Vec<u8>,
-
-    /// Время получения последнего wagon-а
-    last_wagon_time: Instant,
-
-    /// NACK уже отправлен?
-    nack_sent: bool,
-
-    /// Target node (откуда получили train)
-    source_node: HashId,
-}
-
-impl TrainReassemblyState {
-    /// Создать новое состояние сборки
-    fn new(train_id: u64, total_wagons: u16, source_node: HashId) -> Self {
-        Self {
-            train_id,
-            total_wagons,
-            path0_wagons: HashMap::new(),
-            path1_wagons: HashMap::new(),
-            assembled: HashSet::new(),
-            train_data: Vec::new(),
-            last_wagon_time: Instant::now(),
-            nack_sent: false,
-            source_node,
-        }
-    }
-
-    /// 🔄 Добавить wagon из определённого пути (с deduplication)
-    fn add_wagon(&mut self, wagon_num: u16, wagon_data: Vec<u8>, path_id: u8) {
-        // Сохраняем wagon в соответствующий путь
-        match path_id {
-            0 => {
-                self.path0_wagons.insert(wagon_num, wagon_data);
-            }
-            1 => {
-                self.path1_wagons.insert(wagon_num, wagon_data);
-            }
-            _ => {
-                warn!("⚠️ Unknown path_id: {}", path_id);
-                return;
-            }
-        }
-
-        self.last_wagon_time = Instant::now();
-    }
-
-    /// 🔧 Пытается собрать train из обоих путей
-    /// Возвращает true если train собран полностью
-    fn try_assemble(&mut self) -> bool {
-        let mut complete = true;
-        let mut assembled_data = Vec::new();
-
-        for wagon_num in 0..self.total_wagons {
-            // ✅ Пропускаем уже собранные
-            if self.assembled.contains(&wagon_num) {
-                continue;
-            }
-
-            // 🔄 Priority: Path0 → Path1 → Missing
-            let wagon_data = self.path0_wagons
-                .get(&wagon_num)
-                .or_else(|| self.path1_wagons.get(&wagon_num));
-
-            if let Some(data) = wagon_data {
-                // ✅ Собрали wagon из любого пути
-                self.assembled.insert(wagon_num);
-                assembled_data.extend_from_slice(data);
-            } else {
-                // ❌ Wagon missing в обоих путях
-                complete = false;
-            }
-        }
-
-        if complete {
-            // ✅ TRAIN COMPLETE!
-            self.train_data = assembled_data;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Отметить wagon как полученный (legacy, для совместимости)
-    fn mark_received(&mut self, wagon_num: u16) {
-        self.assembled.insert(wagon_num);
-        self.last_wagon_time = Instant::now();
-    }
-
-    /// Проверить все ли wagon-ы получены
-    fn is_complete(&self) -> bool {
-        self.assembled.len() as u16 == self.total_wagons
-    }
-
-    /// Получить количество полученных wagon-ов
-    fn received_count(&self) -> usize {
-        self.assembled.len()
-    }
-
-    /// Получить список потерянных wagon-ов (нет ни в Path0, ни в Path1)
-    fn missing_wagons(&self) -> Vec<u16> {
-        let mut missing = Vec::new();
-        for i in 0..self.total_wagons {
-            if !self.assembled.contains(&i) {
-                // Проверяем есть ли в любом пути
-                let has_in_path0 = self.path0_wagons.contains_key(&i);
-                let has_in_path1 = self.path1_wagons.contains_key(&i);
-
-                if !has_in_path0 && !has_in_path1 {
-                    missing.push(i);
-                }
-            }
-        }
-        missing
-    }
-
-    /// Получить собранные данные
-    fn get_train_data(&self) -> Vec<u8> {
-        self.train_data.clone()
-    }
-
-    /// Проверить нужно ли отправлять NACK
-    fn should_send_nack(&self) -> bool {
-        if self.nack_sent {
-            return false; // Уже отправляли
-        }
-
-        let elapsed = self.last_wagon_time.elapsed();
-        let received_pct = (self.received_count() as f64 / self.total_wagons as f64) * 100.0;
-
-        // ⚡ Timeout: 1 секунда без новых wagon-ов (было 5 сек!)
-        if elapsed > Duration::from_secs(1) {
-            return true;
-        }
-
-        // ⚡ Threshold: получили 50%+ но не все (было 90%!)
-        if received_pct >= 50.0 && !self.is_complete() {
-            return true;
-        }
-
-        false
-    }
-}
-
 /// HTTP Proxy Client (runs on client node)
 ///
 /// Listens on localhost:8080 and forwards HTTP requests via P2P network
@@ -224,11 +51,11 @@ pub struct HttpProxyClient {
     next_request_id: Arc<RwLock<u64>>,
     response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// Туннели в процессе установки: ранние данные шлюза ждут здесь публикации приёмника (см. `early_tunnel`)
+    establishing: Arc<super::early_tunnel::EarlyTunnels>,
     pub station: Arc<Station>,
-    /// Состояния сборки поездов: train_id -> TrainReassemblyState
-    train_reassembly: Arc<Mutex<HashMap<u64, TrainReassemblyState>>>,
 }
 
 impl HttpProxyClient {
@@ -248,8 +75,8 @@ impl HttpProxyClient {
             response_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            establishing: super::early_tunnel::EarlyTunnels::new(),
             station: Arc::new(station),
-            train_reassembly: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -274,50 +101,46 @@ impl HttpProxyClient {
     /// Start the proxy server
     pub async fn start(&self) -> Result<()> {
         let addr = &self.config.client_listen_addr;
-        info!("🌐 HTTP Proxy Client listening on {}", addr);
+        info!("🌐 HTTP Proxy Client listening on {}", crate::util::logsafe::a(&addr));
 
         let listener = tokio::net::TcpListener::bind(addr)
             .await
             .context(format!("Failed to bind to {}", addr))?;
 
-        info!("✅ HTTP Proxy ready! Configure browser: HTTP proxy = {}", addr);
+        info!("✅ HTTP Proxy ready! Configure browser: HTTP proxy = {}", crate::util::logsafe::a(&addr));
         info!("📡 Gateway node: {}", hex::encode(&self.gateway_node.0[..8]));
 
         // Subscribe to P2P packets for responses
         let transport_clone = self.transport.clone();
         let pending_clone = self.pending_requests.clone();
         let response_rx_clone = self.response_rx.clone();
+        let gateway_for_responses = self.gateway_node;
         tokio::spawn(async move {
-            Self::handle_responses(transport_clone, pending_clone, response_rx_clone).await;
+            Self::handle_responses(transport_clone, pending_clone, response_rx_clone, gateway_for_responses).await;
         });
 
         // Subscribe to tunnel data packets
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
+        let gateway_for_tunnels = self.gateway_node;
+        let establishing_clone = self.establishing.clone();
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
-        });
-
-        // 🔄 Start NACK monitoring task (каждую секунду проверяет timeout)
-        let reassembly_clone = self.train_reassembly.clone();
-        let station_clone = self.station.clone(); // ✅ Передаём station вместо transport
-        tokio::spawn(async move {
-            Self::nack_monitor_task(reassembly_clone, station_clone).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, gateway_for_tunnels, establishing_clone).await;
         });
 
         // Accept incoming connections
         loop {
             match listener.accept().await {
                 Ok((mut stream, client_addr)) => {
-                    debug!("📥 New connection from {}", client_addr);
+                    debug!("📥 New connection from {}", crate::util::logsafe::a(&client_addr));
 
                     // Проверяем аутентификацию если настроен токен
                     if let Some(token) = &self.config.auth_token {
                         if !Self::authenticate_socket(&mut stream, token).await {
-                            warn!("❌ Auth failed from {}", client_addr);
+                            warn!("❌ Auth failed from {}", crate::util::logsafe::a(&client_addr));
                             continue;
                         }
-                        debug!("✅ Auth successful from {}", client_addr);
+                        debug!("✅ Auth successful from {}", crate::util::logsafe::a(&client_addr));
                     }
 
                     let client = self.clone_for_handler();
@@ -345,8 +168,8 @@ impl HttpProxyClient {
             response_rx: self.response_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            establishing: self.establishing.clone(),
             station: self.station.clone(),
-            train_reassembly: self.train_reassembly.clone(),
         }
     }
 
@@ -379,13 +202,13 @@ impl HttpProxyClient {
 
         // Parse request line
         let request_line = Self::get_request_line(&request_data)?;
-        debug!("📨 Request: {}", request_line);
+        debug!("📨 Request: {}", crate::util::logsafe::a(&request_line));
 
         // Convert to real URL (now returns tuple: method, url)
         let (method, target_url) = UrlMapper::parse_request_line(&request_line)
             .context("Failed to parse target URL")?;
 
-        debug!("🎯 Method: {}, URL: {}", method, target_url);
+        debug!("🎯 Method: {}, URL: {}", method, crate::util::logsafe::a(&target_url));
 
         // Check if this is CONNECT (HTTPS tunneling)
         if method == "CONNECT" {
@@ -418,7 +241,7 @@ impl HttpProxyClient {
             url: target_url.clone(),
             method,
             headers,
-            body: Vec::new(),
+            body: Self::header_end(&request_data).map(|e| request_data[e..].to_vec()).unwrap_or_default(),
         };
 
         // Serialize and send via YTP
@@ -459,37 +282,57 @@ impl HttpProxyClient {
         Ok(())
     }
 
-    /// Read HTTP request from stream
+    /// Границы тела запроса: сколько байт занимает заголовок вместе с пустой строкой.
+    fn header_end(buf: &[u8]) -> Option<usize> {
+        buf.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4)
+    }
+
+    /// Заявленная длина тела (`Content-Length`) в заголовке запроса.
+    fn content_length(head: &[u8]) -> usize {
+        String::from_utf8_lossy(head)
+            .lines()
+            .skip(1)
+            .filter_map(|l| l.split_once(':'))
+            .find(|(k, _)| k.trim().eq_ignore_ascii_case("content-length"))
+            .and_then(|(_, v)| v.trim().parse::<usize>().ok())
+            .unwrap_or(0)
+    }
+
+    /// Read HTTP request from stream: заголовок целиком (граница ищется во всём прочитанном, а не только в последних четырёх
+    /// байтах) и тело по `Content-Length` (не больше MAX_REQUEST_BODY). Тело без Content-Length (chunked) не поддерживается.
     async fn read_http_request(stream: &mut tokio::net::TcpStream) -> Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
+        const MAX_HEAD: usize = 64 * 1024;
+        const MAX_REQUEST_BODY: usize = 1 << 20;
 
-        let mut buffer = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for HTTP requests
-        let mut total_read = 0;
+        let mut buffer: Vec<u8> = Vec::with_capacity(8 * 1024);
+        let mut chunk = [0u8; 16 * 1024];
+        let mut want: Option<usize> = None; // сколько всего байт нужно (заголовок + тело)
 
         loop {
-            let n = stream.read(&mut buffer[total_read..]).await
-                .context("Failed to read from socket")?;
-
-            if n == 0 {
-                break;
-            }
-
-            total_read += n;
-
-            // Check if we have complete headers (double CRLF)
-            if total_read >= 4 {
-                let window = &buffer[total_read.saturating_sub(4)..total_read];
-                if window == b"\r\n\r\n" {
+            if let Some(w) = want {
+                if buffer.len() >= w {
                     break;
                 }
             }
-
-            if total_read >= buffer.len() {
+            let n = stream.read(&mut chunk).await.context("Failed to read from socket")?;
+            if n == 0 {
                 break;
+            }
+            buffer.extend_from_slice(&chunk[..n]);
+            if want.is_none() {
+                if let Some(end) = Self::header_end(&buffer) {
+                    let len = Self::content_length(&buffer[..end]);
+                    if len > MAX_REQUEST_BODY {
+                        return Err(anyhow::anyhow!("request body too large"));
+                    }
+                    want = Some(end + len);
+                } else if buffer.len() > MAX_HEAD {
+                    return Err(anyhow::anyhow!("request header too large"));
+                }
             }
         }
 
-        buffer.truncate(total_read);
         Ok(buffer)
     }
 
@@ -577,7 +420,7 @@ impl HttpProxyClient {
     ) -> Result<()> {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        info!("🔐 Starting CONNECT tunnel to {}", target_url);
+        info!("🔐 Starting CONNECT tunnel to {}", crate::util::logsafe::a(&target_url));
 
         // Generate request ID
         let request_id = {
@@ -607,6 +450,9 @@ impl HttpProxyClient {
             let mut pending = self.pending_requests.lock().await;
             pending.insert(request_id, tx);
         }
+
+        // отметка до отправки: ответ шлюза и его первые данные могут прийти раньше, чем будет опубликован приёмник
+        let _establishing = self.establishing.begin(request_id);
 
         debug!("📤 Sending CONNECT request via YTP to gateway");
 
@@ -653,19 +499,34 @@ impl HttpProxyClient {
         let (mut read_half, write_half) = stream.into_split();
 
         // Store write_half in active_tunnels
+        let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            tunnels.insert(tunnel_id, write_half);
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::HTTP_CONNECT, gateway_node, tunnel_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), tunnel_id, Some(credit));
+            writer_closed = writer.subscribe();
+            // данные, пришедшие до публикации, передаются приёмнику по порядку (снимаем отметку под замком таблицы)
+            for (data, close, offset) in self.establishing.take(tunnel_id) {
+                if writer.enqueue_offset(data, close, offset).is_err() {
+                    break;
+                }
+            }
+            tunnels.insert(tunnel_id, writer);
             info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
         }
 
         let active_tunnels_for_reader = self.active_tunnels.clone();
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::HTTP_CONNECT, gateway_node, tunnel_id);
 
         // Task 1: Read from browser and send to gateway via YTP
         tokio::spawn(async move {
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
-                match read_half.read(&mut buf).await {
+                match tokio::select! {
+                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                    result = read_half.read(&mut buf) => result,
+                } {
                     Ok(0) => {
                         info!("🚇 Tunnel #{}: Browser closed connection", tunnel_id);
                         {
@@ -677,20 +538,39 @@ impl HttpProxyClient {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
-                        let _ = send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data)).await;
                         break;
                     }
                     Ok(n) => {
                         debug!("🚇 Tunnel #{}: Read {} bytes from browser", tunnel_id, n);
 
+                        let Ok(byte_offset) = cursor.block(n) else {
+                            active_tunnels_for_reader.lock().await.remove(&tunnel_id);
+                            break;
+                        };
+                        // регулятор скорости получателя: не читаем дальше браузера, пока шлюз не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", tunnel_id);
+                            active_tunnels_for_reader.lock().await.remove(&tunnel_id);
+                            break;
+                        }
                         let tunnel_data = ProxyTunnelData {
+                            byte_offset,
                             tunnel_id,
                             data: buf[..n].to_vec(),
                             close: false,
                         };
 
-                        if let Err(e) = send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data).await {
+                        if let Err(e) = tokio::select! {
+                            _ = writer_closed.changed() => Err(anyhow::anyhow!("tunnel writer closed")),
+                            result = send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data) => result,
+                        } {
                             error!("❌ Failed to send tunnel data: {}", e);
                             {
                                 let mut tunnels = active_tunnels_for_reader.lock().await;
@@ -701,8 +581,9 @@ impl HttpProxyClient {
                                 tunnel_id,
                                 data: Vec::new(),
                                 close: true,
+                                byte_offset: cursor.end(),
                             };
-                            let _ = send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, close_data).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, close_data)).await;
                             break;
                         }
                     }
@@ -717,8 +598,9 @@ impl HttpProxyClient {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
-                        let _ = send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data_dispatch(&station_clone, &transport_for_circuit, gateway_node, tunnel_data)).await;
                         break;
                     }
                 }
@@ -740,81 +622,33 @@ impl HttpProxyClient {
 
     /// Handle incoming tunnel data from gateway
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
+        gateway: HashId,
+        establishing: Arc<super::early_tunnel::EarlyTunnels>,
     ) {
-        info!("🚇 Tunnel data handler started");
-
-        // Get the receiver - take ownership
-        let mut rx_opt = {
-            let mut rx_lock = tunnel_rx.lock().await;
-            rx_lock.take()
-        };
-
-        let mut rx = match rx_opt {
-            Some(r) => r,
-            None => {
-                warn!("⚠️  No tunnel data channel configured!");
-                return;
-            }
-        };
-
-        // Listen for tunnel data packets
-        while let Some((_source_node, tunnel_data)) = rx.recv().await {
-            let tunnel_id = tunnel_data.tunnel_id;
-            let data_len = tunnel_data.data.len();
-            let is_close = tunnel_data.close;
-
-            debug!("🚇 Received tunnel data #{}: {} bytes, close={}",
-                   tunnel_id, data_len, is_close);
-
-            // ✅ FIX: Используем get_mut() вместо remove() чтобы устранить race condition!
-            let mut tunnels = active_tunnels.lock().await;
-
-            if let Some(write_half) = tunnels.get_mut(&tunnel_id) {
-                use tokio::io::AsyncWriteExt;
-
-                if is_close {
-                    info!("🚇 Tunnel #{}: close packet received", tunnel_id);
-                    // Close the connection to browser
-                    let _ = write_half.shutdown().await;
-                    // Remove tunnel from active list
-                    tunnels.remove(&tunnel_id);
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                if source_node != gateway {
+                    warn!("[rx] tunnel #{}: данные не от шлюза, отброшены", tunnel_data.tunnel_id);
                     continue;
                 }
-
-                if !tunnel_data.data.is_empty() {
-                    if let Err(e) = write_half.write_all(&tunnel_data.data).await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: browser side already closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error writing to browser: {}", e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&tunnel_id);
-                        continue;
+                let key = tunnel_data.tunnel_id;
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
-
-                    debug!("✅ Tunnel #{}: wrote {} bytes to browser", tunnel_id, data_len);
-
-                    // Flush to ensure data is sent
-                    if let Err(e) = write_half.flush().await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: browser flush skipped, socket closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error flushing browser tunnel #{}: {}", tunnel_id, e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&tunnel_id);
-                        continue;
-                    }
+                } else {
+                    // туннель ещё устанавливается: данные ждут публикации приёмника (проверка — под замком таблицы, как и
+                    // публикация, поэтому между ними кусок не потеряется)
+                    establishing.offer(key, tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset);
                 }
-            } else {
-                debug!("🚇 Tunnel #{}: data arrived after local close, dropping", tunnel_id);
             }
         }
-
-        warn!("⚠️  Tunnel data channel closed");
     }
 
     /// Handle incoming P2P responses
@@ -822,6 +656,7 @@ impl HttpProxyClient {
         _transport: Arc<P2PTransport>,
         pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<ProxyResponse>>>>,
         response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyResponse)>>>>,
+        gateway: HashId,
     ) {
         info!("📡 P2P response handler started");
 
@@ -840,7 +675,12 @@ impl HttpProxyClient {
         };
 
         // Listen for responses
-        while let Some((_source_node, response)) = rx.recv().await {
+        while let Some((source_node, response)) = rx.recv().await {
+            if source_node != gateway {
+                // ответ принимается только от шлюза, которому ушёл запрос: иначе любой узел подставит чужой ответ по номеру
+                warn!("⚠️  ProxyResponse #{} не от шлюза, отброшен", response.request_id);
+                continue;
+            }
             let request_id = response.request_id;
             let status = response.status;
             let body_len = response.body.len();
@@ -867,83 +707,65 @@ impl HttpProxyClient {
         }
     }
 
-    /// 🔄 NACK Monitor Task - проверяет все собираемые поезда каждую секунду
-    /// и отправляет NACK если нужно
-    async fn nack_monitor_task(
-        train_reassembly: Arc<Mutex<HashMap<u64, TrainReassemblyState>>>,
-        station: Arc<Station>,  // ✅ Используем Station вместо Transport
-    ) {
-        use tokio::time::interval;
-        use std::time::Duration;
+}
 
-        let mut ticker = interval(Duration::from_secs(1));
+#[cfg(test)]
+mod request_reading_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
 
-        loop {
-            ticker.tick().await;
-
-            let mut reassembly = train_reassembly.lock().await;
-
-            // Проверяем каждый train
-            let mut trains_to_remove = Vec::new();
-
-            for (train_id, state) in reassembly.iter_mut() {
-                // Проверяем нужно ли отправлять NACK
-                if state.should_send_nack() {
-                    let missing = state.missing_wagons();
-
-                    if !missing.is_empty() {
-                        info!("🔄 Sending NACK for train #{}: {} missing wagons (got {}/{})",
-                             train_id,
-                             missing.len(),
-                             state.received_count(),
-                             state.total_wagons);
-
-                        // Создаём NACK
-                        let elapsed = state.last_wagon_time.elapsed();
-                        let reason = if elapsed > Duration::from_secs(1) { // ⚡ Было 5 сек!
-                            NackReason::Timeout
-                        } else {
-                            NackReason::Threshold
-                        };
-
-                        let nack = WagonNack::new(*train_id, missing.clone(), reason);
-
-                        // ✅ Используем переданную station (не создаём новую!)
-                        // Сериализуем NACK с префиксом 0x62 (NACK packet type)
-                        let nack_bytes = serde_json::to_vec(&nack).unwrap_or_default();
-                        let mut packet = vec![0x62u8]; // Префикс NACK
-                        packet.extend_from_slice(&nack_bytes);
-
-                        // Отправляем source node
-                        if let Err(e) = station.send_train(state.source_node, packet).await {
-                            error!("❌ Failed to send NACK for train #{}: {}", train_id, e);
-                        } else {
-                            info!("✅ NACK sent for train #{} (missing: {:?})", train_id,
-                                 &missing[..missing.len().min(10)]); // Показываем первые 10
-                        }
-
-                        // Помечаем что NACK отправлен
-                        state.nack_sent = true;
-                    }
-                }
-
-                // Если поезд собран полностью - удаляем через 5 секунд
-                if state.is_complete() && state.last_wagon_time.elapsed() > Duration::from_secs(5) {
-                    trains_to_remove.push(*train_id);
-                }
-
-                // Если поезд устарел (60 секунд) - удаляем
-                if state.last_wagon_time.elapsed() > Duration::from_secs(60) {
-                    warn!("⏱️  Train #{} timeout after 60s, removing", train_id);
-                    trains_to_remove.push(*train_id);
-                }
+    async fn read_from(parts: Vec<Vec<u8>>) -> Result<Vec<u8>> {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        tokio::task::spawn(async move {
+            let mut c = tokio::net::TcpStream::connect(addr).await.unwrap();
+            for p in parts {
+                c.write_all(&p).await.unwrap();
+                c.flush().await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
             }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        });
+        let (mut s, _) = l.accept().await.unwrap();
+        HttpProxyClient::read_http_request(&mut s).await
+    }
 
-            // Удаляем завершённые поезда
-            for train_id in trains_to_remove {
-                reassembly.remove(&train_id);
-                debug!("🧹 Removed completed/expired train #{}", train_id);
-            }
+    #[tokio::test]
+    async fn the_body_of_a_post_is_read_whether_or_not_it_came_with_the_headers() {
+        let head = b"POST http://example.org/x HTTP/1.1\r\nHost: example.org\r\nContent-Length: 11\r\n\r\n".to_vec();
+        // заголовок и тело одним куском
+        let all = [head.clone(), b"hello world".to_vec()].concat();
+        let got = read_from(vec![all.clone()]).await.unwrap();
+        assert_eq!(got, all);
+        // заголовок отдельно, тело отдельно
+        let got = read_from(vec![head.clone(), b"hello ".to_vec(), b"world".to_vec()]).await.unwrap();
+        assert_eq!(got, all);
+        let e = HttpProxyClient::header_end(&got).unwrap();
+        assert_eq!(&got[e..], b"hello world");
+    }
+}
+
+#[cfg(test)]
+mod early_tunnel_data_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn data_that_arrives_while_a_tunnel_is_establishing_is_kept_and_unknown_tunnels_are_dropped() {
+        let gateway = HashId([9u8; 32]);
+        let active: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>> = Arc::new(Mutex::new(HashMap::new()));
+        let establishing = super::super::early_tunnel::EarlyTunnels::new();
+        let _g = establishing.begin(5);
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        let rx = Arc::new(Mutex::new(Some(rx)));
+        tokio::task::spawn(HttpProxyClient::handle_tunnel_data(active, rx, gateway, establishing.clone()));
+        for off in 0..3u64 {
+            tx.send((gateway, ProxyTunnelData { tunnel_id: 5, data: vec![off as u8; 10], close: false, byte_offset: off * 10 })).await.unwrap();
         }
+        tx.send((gateway, ProxyTunnelData { tunnel_id: 6, data: vec![1; 10], close: false, byte_offset: 0 })).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        assert!(!establishing.is_establishing(6), "неизвестный туннель ничего не занимает");
+        let got = establishing.take(5);
+        assert_eq!(got.len(), 3, "три куска ждали публикации приёмника");
+        assert_eq!(got[2].2, 20, "порядок сохранён");
     }
 }

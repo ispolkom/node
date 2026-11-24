@@ -14,6 +14,7 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
+use std::future::IntoFuture;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tower_http::trace::TraceLayer;
@@ -108,6 +109,8 @@ pub struct AppState {
     pub p2p_transport: Option<Arc<crate::p2p::P2PTransport>>,
     /// Список активных proxy подключений
     pub active_proxies: Arc<Mutex<std::collections::HashMap<String, ProxyInfo>>>,
+    /// Задачи работающих прокси (слушатель и перекачка каналов): остановка прекращает их, а не только стирает запись
+    pub proxy_tasks: Arc<Mutex<std::collections::HashMap<String, Vec<tokio::task::AbortHandle>>>>,
     /// Кэш обнаруженных нод (обновляется в фоне)
     pub discovered_nodes: Arc<Mutex<Vec<DiscoveredNode>>>,
     /// Информация о текущей ноде
@@ -193,6 +196,10 @@ pub struct WebServer {
 impl WebServer {
     /// Создать новый веб-сервер (standalone режим)
     pub fn new(port: u16) -> Self {
+        Self::new_with_auth(port, crate::web::auth::load_auth_state())
+    }
+
+    fn new_with_auth(port: u16, auth_state: crate::web::auth::AuthState) -> Self {
         let (media_signal_bus, _) = tokio::sync::broadcast::channel(256);
         Self {
             port,
@@ -201,6 +208,7 @@ impl WebServer {
                 transport: None,
                 p2p_transport: None,
                 active_proxies: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                proxy_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 discovered_nodes: Arc::new(Mutex::new(Vec::new())),
                 node_info: NodeInfo::default_standalone(),
                 node_running: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -217,7 +225,7 @@ impl WebServer {
                 media_signal_bus,
                 incoming_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 incoming_video_calls: Arc::new(Mutex::new(std::collections::HashMap::new())),
-                auth_state: crate::web::auth::load_auth_state(),
+                auth_state,
             },
         }
     }
@@ -232,6 +240,7 @@ impl WebServer {
                 transport: Some(transport),
                 p2p_transport: None,
                 active_proxies: Arc::new(Mutex::new(std::collections::HashMap::new())),
+                proxy_tasks: Arc::new(Mutex::new(std::collections::HashMap::new())),
                 discovered_nodes: Arc::new(Mutex::new(Vec::new())),
                 node_info: NodeInfo::default(),
                 node_running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
@@ -419,21 +428,45 @@ impl WebServer {
         let state = self.state.clone();
         let app = self.create_router(state.clone()).with_state(state);
 
-        let addr = format!("127.0.0.1:{}", port);
-        info!("🌐 Web UI available at: http://{}", addr);
-
-        let listener = tokio::net::TcpListener::bind(&addr)
-            .await
-            .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
-
-        axum::serve(listener, app)
-            .with_graceful_shutdown(async {
-                tokio::signal::ctrl_c()
+        // На Linux оболочка работает через локальный сокет владельца; TCP-порт для браузера не открывается.
+        #[cfg(target_os = "linux")]
+        {
+            let socket = super::ui_socket::Endpoint::bind(&crate::util::data_dir::data_dir())
+                .map_err(|_| "Cannot start UI socket: unsafe permissions, occupied socket, or unavailable data directory".to_string())?;
+            if std::env::var_os("YANDI_LOCAL_TCP").is_some() {
+                // только тренировочная сеть (testnet): рядом с сокетом открывается и петля; на боевом узле переменной нет
+                let addr = format!("127.0.0.1:{}", port);
+                let listener = tokio::net::TcpListener::bind(&addr).await.map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+                info!("🌐 Тренировочная сеть: управление ещё и по http://{}", addr);
+                let tcp = axum::serve(listener, app.clone()).into_future();
+                tokio::select! {
+                    result = tcp => result.map_err(|e| format!("Server error: {e}"))?,
+                    result = socket.serve(app) => result.map_err(|_| "UI socket listener stopped".to_string())?,
+                }
+            } else {
+                info!("🌐 Оболочка подключается через локальный сокет (TCP-порта нет)");
+                socket
+                    .serve(app)
                     .await
-                    .expect("failed to install CTRL+C handler");
-            })
-            .await
-            .map_err(|e| format!("Server error: {}", e))?;
+                    .map_err(|_| "UI socket listener stopped".to_string())?;
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let addr = format!("127.0.0.1:{}", port);
+            info!("🌐 Web UI available at: http://{}", addr);
+            let listener = tokio::net::TcpListener::bind(&addr)
+                .await
+                .map_err(|e| format!("Failed to bind to {}: {}", addr, e))?;
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async {
+                    tokio::signal::ctrl_c()
+                        .await
+                        .expect("failed to install CTRL+C handler");
+                })
+                .await
+                .map_err(|e| format!("Server error: {e}"))?;
+        }
 
         Ok(())
     }
@@ -445,6 +478,10 @@ impl WebServer {
             .route("/", get(index_handler))
             // кто может выходить в интернет через этот узел (выбор владельца)
             .merge(crate::exit_policy::router())
+            .merge(crate::guest::router())
+            .merge(crate::autonomy::router())
+            .route("/api/nodes/directory", get(api_nodes_directory))
+            .merge(crate::mail_policy::router())
             // закрытая среда узла: пароль владельца, блокировка, смена пароля
             .merge(vault_router())
             .merge(crate::upstream_proxy::router())
@@ -453,13 +490,11 @@ impl WebServer {
             .merge(crate::web::peers::router())
             .merge(crate::network_offers::router())
             .merge(crate::hops_net::router())
-            .merge(crate::relay_net::router())
             .merge(crate::supervisor::router())
             .route("/contacts", get(contacts_handler))
             .route("/gateways", get(gateways_handler))
             .route("/settings", get(settings_handler))
             .route("/chat", get(chat_handler))
-            .route("/relay", get(relay_handler))
             .route("/groups", get(groups_handler))
             // Static files (protected — served only to logged-in users)
             .route("/style.css", get(style_handler))
@@ -472,6 +507,14 @@ impl WebServer {
             .route("/media/*path", get(media_handler))
             // API endpoints (protected)
             .route("/api/status", get(api_status))
+            .route("/api/admin/session", get(api_admin_session_get).post(api_admin_session_post).delete(api_admin_session_delete))
+            .route("/api/admin/password", post(api_admin_password_post))
+            .route("/api/alerts", get(api_alerts))
+            .route("/api/alerts/ack", post(api_alerts_ack))
+            .route("/api/notices", get(api_notices_get))
+            .route("/api/notices/ack", post(api_notices_ack))
+            .route("/api/update/status", get(|| async { Json(crate::updates::status_json()) }))
+            .route("/api/update/check", post(|| async { Json(crate::updates::check_now().await) }))
             .route("/api/speed", get(api_speed))
             .route("/api/nodes", get(api_nodes))
             .route("/api/connect/:short_id", post(api_connect))
@@ -483,12 +526,6 @@ impl WebServer {
             .route("/api/socks5/stop/:short_id", post(api_socks5_stop))
             .route("/api/socks5/status", get(api_socks5_status))
             .route("/api/socks5/personal", post(api_socks5_personal))
-            // Relay API endpoints
-            .route("/api/relay/status", get(api_relay_status))
-            .route("/api/relay/sessions", get(api_relay_sessions))
-            .route("/api/relay/server/start", post(api_relay_server_start))
-            .route("/api/relay/server/stop", post(api_relay_server_stop))
-            .route("/api/relay/connect/:short_id", post(api_relay_connect))
             .route("/api/gateway/start", post(api_gateway_start))
             .route("/api/gateway/stop", post(api_gateway_stop))
             .route(
@@ -498,6 +535,8 @@ impl WebServer {
                     .delete(api_contacts_delete),
             )
             .route("/api/contacts/export", get(api_contacts_export))
+            .route("/api/contacts/local", post(api_contacts_local))
+            .route("/api/network/relay", get(api_network_relay).post(api_network_relay_set))
             .route(
                 "/api/gateways",
                 get(api_gateways_get)
@@ -509,6 +548,7 @@ impl WebServer {
             .route("/api/chat/send/:peer_id", post(api_chat_send))
             .route("/api/chat/history/:peer_id", get(api_chat_history))
             .route("/api/chat/clear/:peer_id", post(api_chat_clear))
+            .route("/api/chat/react/:peer_id", post(api_chat_react))
             .route(
                 "/api/chat/edit/:peer_id",
                 axum::routing::patch(api_chat_edit),
@@ -600,7 +640,21 @@ impl WebServer {
             .route("/api/mobile/pairing", get(mobile_pairing_handler))
             .route("/api/mobile/devices", get(mobile_devices_handler))
             .route("/api/mobile/other-devices", get(mobile_other_devices_handler))
+            .route("/api/mobile/directory", get(mobile_directory_handler))
+            .route("/api/complaints", get(complaints_list_handler))
+            .route("/api/complaints/:id", get(complaint_get_handler))
+            .route("/api/complaints/:id/reply", post(complaint_reply_handler))
+            .route("/api/complaints/:id/status", post(complaint_status_handler))
+            .route("/api/complaints/:id/measure", post(complaint_measure_handler))
             .route("/api/mobile/phone-action", post(mobile_phone_action_handler))
+            .route("/api/mobile/devices/:id/promote", post(mobile_device_promote_handler))
+            .route("/api/mobile/devices/:id/revoke-branch", post(mobile_device_revoke_branch_handler))
+            .route("/api/mobile/invite-policy", get(mobile_invite_policy_get).post(mobile_invite_policy_post))
+            // подпись списка входных узлов ключом из закрытой среды (файла с ключом нет)
+            .route("/api/admin/bootstrap/pubkey", get(bootstrap_pubkey_handler))
+            .route("/api/admin/bootstrap/sign", post(bootstrap_sign_handler))
+            .route("/api/admin/bootstrap/applications", get(bootstrap_applications_handler))
+            .route("/api/admin/bootstrap/applications/dismiss", post(bootstrap_dismiss_handler))
             .route(
                 "/api/mobile/devices/:id",
                 axum::routing::delete(mobile_device_remove_handler),
@@ -630,6 +684,10 @@ impl WebServer {
             .route("/api/groups/:gid/info", get(api_groups_info))
             .route("/api/groups/:gid/mod", post(api_groups_mod))
             .route("/api/groups/:gid/settings", post(api_groups_settings))
+            .route("/api/groups/:gid/autoclean", post(api_groups_autoclean))
+            .route("/api/groups/:gid/profile", post(api_groups_profile))
+            .route("/api/groups/:gid/vote", post(api_groups_vote))
+            .route("/api/groups/:gid/avatar/:alias", get(api_groups_member_avatar))
             .route("/api/groups/:gid/transfer", post(api_groups_transfer))
             // файлы групп от компьютера: тело запроса — сам файл (до 200 МБ), шифрование и нарезка — в узле
             .route(
@@ -644,6 +702,10 @@ impl WebServer {
             .route("/pair/qr", get(pair_qr_handler))
             .route("/pair/qr.json", get(pair_qr_json_handler))
             .route("/pair/issue", post(pair_issue_handler))
+            // пока закрытая среда заперта, расшифрованное содержимое владельца (группы, жалобы, файлы переписки) не отдаётся
+            .route_layer(axum::middleware::from_fn(locked_guard))
+            // админские маршруты (жалобы, сопряжение, настройки узла) — только в сеансе администратора (после auth: он слой снаружи)
+            .route_layer(axum::middleware::from_fn(admin_guard))
             // Apply auth middleware to all routes above
             .route_layer(axum::middleware::from_fn_with_state(
                 state_for_auth,
@@ -653,6 +715,9 @@ impl WebServer {
             .route("/login", get(login_page_handler))
             .route("/setup", get(setup_page_handler))
             .route("/api/auth/login", post(api_auth_login))
+            .route("/api/auth/state", get(|State(state): State<AppState>| async move {
+                crate::web::auth::ui_auth_state(&state.auth_state)
+            }))
             .route("/api/auth/setup", post(api_auth_setup))
             .route("/api/auth/logout", get(api_auth_logout))
             .route("/api/auth/rebind", post(api_auth_rebind))
@@ -664,7 +729,7 @@ impl WebServer {
 
 #[cfg(unix)]
 fn vault_router() -> Router<AppState> {
-    crate::closed_api::router()
+    crate::closed_api::router().merge(crate::backup_api::router())
 }
 
 #[cfg(not(unix))]
@@ -885,6 +950,12 @@ async fn auth_middleware(
 
     let auth = &state.auth_state;
 
+    #[cfg(target_os = "linux")]
+    if super::ui_socket::is_local(&req) {
+        // Local owner authorisation does not unlock the vault or bypass StepUp.
+        return next.run(req).await;
+    }
+
     // First run — redirect to setup
     if !auth.is_setup.load(Ordering::Relaxed) {
         return Redirect::to("/setup").into_response();
@@ -968,6 +1039,18 @@ async fn api_groups_messages(axum::extract::Path(gid): axum::extract::Path<Strin
 #[derive(Deserialize)]
 struct MyGroupSend {
     text: String,
+    /// ответ-цитата: номер записи группы, псевдоним автора и выдержка текста
+    #[serde(default)]
+    reply: Option<MyGroupReply>,
+}
+
+#[derive(Deserialize)]
+struct MyGroupReply {
+    seq: u64,
+    #[serde(default)]
+    author: String,
+    #[serde(default)]
+    text: String,
 }
 
 async fn api_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSend>) -> Response {
@@ -981,7 +1064,16 @@ async fn api_groups_send(axum::extract::Path(gid): axum::extract::Path<String>, 
         l.contains("http://") || l.contains("https://") || l.contains("www.")
     };
     let kind = if is_link { crate::group_client::KIND_LINK } else { crate::group_client::KIND_TEXT };
-    grp_reply(crate::group_client::send(&gid, kind, serde_json::json!({"t": text})).map(|seq| serde_json::json!({"seq": seq})))
+    let mut body = serde_json::json!({"t": text});
+    if let Some(r) = b.reply {
+        // поле «r» в записи группы: s — номер цитируемой записи, a — автор, t — выдержка (не длиннее 200 знаков)
+        body["r"] = serde_json::json!({
+            "s": r.seq,
+            "a": r.author.chars().take(64).collect::<String>(),
+            "t": r.text.chars().take(200).collect::<String>(),
+        });
+    }
+    grp_reply(crate::group_client::send(&gid, kind, body).map(|seq| serde_json::json!({"seq": seq})))
 }
 
 #[derive(Deserialize)]
@@ -1022,6 +1114,44 @@ struct MyGroupSettings {
     topic: Option<String>,
     #[serde(default)]
     about: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct MyGroupAutoClean {
+    days: u32,
+}
+
+async fn api_groups_autoclean(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupAutoClean>) -> Response {
+    grp_reply(crate::group_client::set_auto_clean(&gid, b.days).map(|d| serde_json::json!({"ok": true, "days": d})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupVote {
+    seq: u64,
+    v: i64,
+}
+
+/// Картинка визитки участника группы (маленький PNG) для ленты и списка участников.
+async fn api_groups_member_avatar(axum::extract::Path((gid, alias)): axum::extract::Path<(String, String)>) -> Response {
+    match crate::group_client::member_avatar(&gid, &alias) {
+        Ok(Some(png)) => ([(axum::http::header::CONTENT_TYPE, "image/png"), (axum::http::header::CACHE_CONTROL, "no-store")], png).into_response(),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Монетка одобрения: v = 1 или -1.
+async fn api_groups_vote(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupVote>) -> Response {
+    grp_reply(crate::group_client::vote(&gid, b.seq, b.v).map(|_| serde_json::json!({"ok": true})))
+}
+
+#[derive(Deserialize)]
+struct MyGroupShare {
+    share: bool,
+}
+
+/// Показывать ли ник и аватар компьютера в группе (по желанию, из единого профиля узла).
+async fn api_groups_profile(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupShare>) -> Response {
+    grp_reply(crate::group_client::share_card(&gid, b.share).map(|_| serde_json::json!({"ok": true})))
 }
 
 async fn api_groups_settings(axum::extract::Path(gid): axum::extract::Path<String>, Json(b): Json<MyGroupSettings>) -> Response {
@@ -1106,27 +1236,62 @@ struct StepUpDelete {
     password: String,
 }
 
-/// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
-/// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
-async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
+/// Повторная проверка пароля владельца перед разрушительным действием (удаление групп). `Err` — готовый ответ: пароль не передан
+/// (403 `password_required`), неверен (401), слишком частые попытки (429). Попытки считаются тем же счётчиком, что и вход.
+async fn require_step_up(state: &AppState, password: Option<&str>) -> Result<(), Response> {
+    let Some(password) = password else {
+        return Err((
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"status": "error", "error": "password_required", "message": "для этого действия нужен пароль узла"})),
+        )
+            .into_response());
+    };
     if let Some(remaining) = state.auth_state.login_backoff_remaining() {
-        return (
+        return Err((
             StatusCode::TOO_MANY_REQUESTS,
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         )
-            .into_response();
+            .into_response());
     }
-    match crate::web::auth::verify_login(&body.password) {
+    match crate::web::auth::verify_login_counted(password) {
         Ok(true) => {
             state.auth_state.record_login_success();
-            crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
+            Ok(())
         }
         Ok(false) => {
             state.auth_state.record_login_failure();
-            (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response()
+            Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль"}))).into_response())
         }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": e}))).into_response(),
+        Err(e) => Err(counted_login_error(e)),
     }
+}
+
+/// То же для действий администратора: проверяется админ-пароль с его собственным бюджетом попыток.
+async fn require_admin_step_up(password: &str) -> Result<(), Response> {
+    let password = password.to_string();
+    match tokio::task::spawn_blocking(move || crate::web::auth::verify_admin_counted(&password)).await {
+        Ok(Ok(true)) => Ok(()),
+        Ok(Ok(false)) => Err((StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response()),
+        Ok(Err(e)) => Err(counted_login_error(e)),
+        Err(_) => Err((StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Внутренняя ошибка"}))).into_response()),
+    }
+}
+
+/// Удаление группы телефонов: пароль узла спрашивается заново (забытая открытой админка, дети, гости не удалят группу).
+/// Попытки считаются тем же счётчиком, что и вход: перебор пароля через эту ручку упирается в ту же задержку.
+async fn api_mobile_group_delete(State(state): State<AppState>, axum::extract::Path(gid): axum::extract::Path<String>, Json(body): Json<StepUpDelete>) -> Response {
+    // удаление чужой группы — управление узлом: нужен сеанс администратора (его проверил admin_guard) и ЕЩЁ РАЗ админ-пароль
+    if let Err(resp) = require_admin_step_up(&body.password).await {
+        return resp;
+    }
+    crate::mobile_groups::pc_delete(axum::extract::Path(gid)).await
+}
+
+/// Каталог «Узлы» для страницы поиска оболочки: онлайн-узлы без адресов (docs/ROADMAP_R9.md §3).
+async fn api_nodes_directory() -> Json<serde_json::Value> {
+    let (online, me) = crate::mobile_api::online_node_ids().await;
+    let nodes = crate::node_directory::rows(&online, &me, false);
+    Json(serde_json::json!({ "nodes": nodes, "total": nodes.len() }))
 }
 
 async fn login_page_handler() -> Html<&'static str> {
@@ -1146,6 +1311,22 @@ struct LoginRequest {
     remember_me: bool,
 }
 
+/// Ответ на отказ счётчика проверки пароля: закрыт вход паролем (403), счёт не сохранён или сбой проверки (500).
+fn counted_login_error(e: crate::web::auth::CountedLogin) -> Response {
+    use crate::web::auth::CountedLogin::*;
+    match e {
+        Locked => (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({"error": "Слишком много неверных паролей: войдите по сид-фразе (восстановление доступа)"})),
+        ).into_response(),
+        Storage(m) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": format!("Вход временно невозможен: {m}")})),
+        ).into_response(),
+        Failed(m) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": m}))).into_response(),
+    }
+}
+
 async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginRequest>) -> Response {
     // Brute-force throttle: reject before even hashing the password if
     // we're still cooling down from prior failures (see AuthState::
@@ -1157,7 +1338,8 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
-    match crate::web::auth::verify_login(&body.login_password) {
+    // все проверки пароля идут через один счёт: пять неверных подряд — дальше пароль не принимается совсем (даже верный)
+    match crate::web::auth::verify_login_counted(&body.login_password) {
         Ok(true) => {
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(body.remember_me);
@@ -1179,11 +1361,7 @@ async fn api_auth_login(State(state): State<AppState>, Json(body): Json<LoginReq
             )
                 .into_response()
         }
-        Err(e) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({"error": e})),
-        )
-            .into_response(),
+        Err(e) => counted_login_error(e),
     }
 }
 
@@ -1233,6 +1411,7 @@ async fn api_auth_logout(State(state): State<AppState>, headers: HeaderMap) -> R
     if let Some(token) = crate::web::auth::extract_session_token(cookie_str) {
         state.auth_state.invalidate_session(&token);
     }
+    crate::web::admin::end(); // выход закрывает и сеанс администратора
     let mut resp_headers = HeaderMap::new();
     resp_headers.insert(
         "Set-Cookie",
@@ -1262,8 +1441,8 @@ async fn api_auth_rebind(
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
-    // Verify login password first
-    match crate::web::auth::verify_login(&body.login_password) {
+    // Verify login password first (тот же счёт попыток, что и у входа)
+    match crate::web::auth::verify_login_counted(&body.login_password) {
         Ok(true) => {
             state.auth_state.record_login_success();
         }
@@ -1275,13 +1454,7 @@ async fn api_auth_rebind(
             )
                 .into_response();
         }
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({"error": e})),
-            )
-                .into_response()
-        }
+        Err(e) => return counted_login_error(e),
     }
 
     match crate::web::auth::rebind_to_machine(&state.auth_state, &body.master_password) {
@@ -1329,6 +1502,17 @@ async fn api_auth_recover(
             Json(serde_json::json!({"error": format!("Слишком много попыток, подождите {}с", remaining.as_secs().max(1))})),
         ).into_response();
     }
+    // новый пароль проверяется целиком до любых действий; сид-фраза проходит счёт закрытой среды (двадцать неверных стирают её), и только
+    // потом заменяется пароль входа — отдельного проверочного пути для сида без лимита нет
+    #[cfg(unix)]
+    if let Err(e) = crate::web::auth::check_new_password(&body.new_login_password) {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": e}))).into_response();
+    }
+    #[cfg(unix)]
+    if let Some(Err((code, text))) = crate::closed_api::recover_vault_if_configured(body.recovery_code.clone(), body.new_login_password.clone()).await {
+        state.auth_state.record_login_failure();
+        return (code, Json(serde_json::json!({"error": text}))).into_response();
+    }
     let auth_state = state.auth_state.clone();
     let result = tokio::task::spawn_blocking(move || {
         crate::web::auth::recover_login(&auth_state, &body.recovery_code, &body.new_login_password)
@@ -1338,6 +1522,16 @@ async fn api_auth_recover(
     .unwrap_or_else(|_| Err("Внутренняя ошибка".to_string()));
     match result {
         Ok(remember_me) => {
+            crate::web::auth::reset_login_failures(); // вход по сид-фразе снимает запрет входа паролем
+            crate::web::admin::end();
+            // сид-фраза владельца возвращает общий пароль: забытый админ-пароль не запирает узел; не удалось — не говорим «успех»
+            if let Err(e) = crate::web::admin::clear_password() {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({"error": format!("Пароль входа изменён, но админ-пароль не сброшен: {e}. Повторите восстановление или удалите файл admin_auth.json.")})),
+                )
+                    .into_response();
+            }
             state.auth_state.record_login_success();
             let token = state.auth_state.create_session(remember_me);
             let cookie = crate::web::auth::make_session_cookie(&token, remember_me);
@@ -1381,10 +1575,6 @@ async fn settings_handler() -> Html<&'static str> {
 
 async fn chat_handler() -> Html<&'static str> {
     Html(include_str!("ui/chat.html"))
-}
-
-async fn relay_handler() -> Html<&'static str> {
-    Html(include_str!("ui/relay.html"))
 }
 
 async fn groups_handler() -> Html<&'static str> {
@@ -1471,6 +1661,9 @@ async fn api_status(State(state): State<AppState>) -> impl IntoResponse {
         "status": status,
         "nat_status": nat_status,
         "active_proxies": proxy_count,
+        // внешние прокси из настроек: добавлено и сколько отвечает по последней проверке (null — среда заперта)
+        "upstream_added": crate::upstream_proxy::summary().map(|s| s.0),
+        "upstream_working": crate::upstream_proxy::summary().map(|s| s.1),
         "mode": if state.transport.is_some() { &info.role } else { "Web UI only" },
     });
 
@@ -1516,7 +1709,6 @@ async fn api_speed(State(state): State<AppState>) -> impl IntoResponse {
         "wagon_recv_total": metrics.wagon_recv_total,
         "wagon_drop_total": metrics.wagon_drop_total,
         "wagon_checksum_failed_total": metrics.wagon_checksum_failed_total,
-        "wagon_retrans_total": metrics.wagon_retrans_total,
         "wagon_drop_crc_pct": metrics.wagon_drop_crc_pct,
         "peer_count": metrics.peer_count,
     }))
@@ -1692,23 +1884,16 @@ async fn api_proxy_start(
         }));
     }
 
-    // Берём receivers
-    let resp_rx = {
-        let mut rx_lock = state.proxy_resp_rx.lock().await;
-        rx_lock.take()
-    };
-
-    let tunnel_rx = {
-        let mut rx_lock = state.proxy_tunnel_rx.lock().await;
-        rx_lock.take()
-    };
-
-    if resp_rx.is_none() || tunnel_rx.is_none() {
+    // Приёмники остаются в состоянии узла; прокси получает каналы-перекачки (после остановки можно запустить снова)
+    let channels_present = state.proxy_resp_rx.lock().await.is_some() && state.proxy_tunnel_rx.lock().await.is_some();
+    if !channels_present {
         return Json(serde_json::json!({
             "status": "error",
             "message": "Proxy channels not available. May be already in use by CLI?"
         }));
     }
+    let (resp_rx, resp_pump) = pump_channel(state.proxy_resp_rx.clone());
+    let (tunnel_rx, tunnel_pump) = pump_channel(state.proxy_tunnel_rx.clone());
 
     // Создаём HttpProxyClient
     use crate::proxy::HttpProxyClient;
@@ -1719,18 +1904,23 @@ async fn api_proxy_start(
     let http_proxy =
         HttpProxyClient::new(transport.clone(), gateway_peer.id.clone()).with_config(proxy_config);
 
-    let http_proxy = http_proxy.with_response_channel(resp_rx.unwrap());
-    let http_proxy = http_proxy.with_tunnel_data_channel(tunnel_rx.unwrap());
+    let http_proxy = http_proxy.with_response_channel(resp_rx);
+    let http_proxy = http_proxy.with_tunnel_data_channel(tunnel_rx);
 
     // Регистрируем Station
     transport.set_station(http_proxy.station.clone()).await;
 
     // Запускаем прокси в фоне
-    tokio::spawn(async move {
+    let listener_task = tokio::spawn(async move {
         if let Err(e) = http_proxy.start().await {
             eprintln!("❌ HTTP Proxy error: {}", e);
         }
     });
+    state
+        .proxy_tasks
+        .lock()
+        .await
+        .insert(short_id.clone(), vec![listener_task.abort_handle(), resp_pump, tunnel_pump]);
 
     // 🚨 ОТПРАВЛЯЕМ 0x30 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА!
     info!(
@@ -1740,6 +1930,7 @@ async fn api_proxy_start(
     let cmd_bytes = vec![0x30u8]; // StartProxyGateway
 
     if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
+        abort_proxy_tasks(&state, &short_id).await;
         return Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to send StartProxyGateway command: {}", e)
@@ -1773,9 +1964,46 @@ async fn api_proxy_start(
     Json(serde_json::json!({
         "status": "success",
         "message": format!("Proxy started through {}", short_id),
-        "local_port": 8080,
+        "local_port": http_port,
         "gateway": short_id
     }))
+}
+
+/// Передаёт сообщения из общего приёмника узла в канал, который забирает прокси. Приёмник остаётся в состоянии,
+/// поэтому после остановки прокси его можно запустить снова (раньше приёмник уходил в прокси навсегда).
+fn pump_channel<T: Send + 'static>(
+    src: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<T>>>>,
+) -> (tokio::sync::mpsc::Receiver<T>, tokio::task::AbortHandle) {
+    let (tx, rx) = tokio::sync::mpsc::channel(256);
+    let task = tokio::spawn(async move {
+        loop {
+            let item = {
+                let mut guard = src.lock().await;
+                match guard.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => None,
+                }
+            };
+            match item {
+                Some(v) => {
+                    if tx.send(v).await.is_err() {
+                        break;
+                    }
+                }
+                None => break,
+            }
+        }
+    });
+    (rx, task.abort_handle())
+}
+
+/// Прекратить задачи прокси этого шлюза (слушатель закрывается, порт освобождается).
+async fn abort_proxy_tasks(state: &AppState, short_id: &str) {
+    if let Some(handles) = state.proxy_tasks.lock().await.remove(short_id) {
+        for h in handles {
+            h.abort();
+        }
+    }
 }
 
 /// Остановить proxy
@@ -1783,7 +2011,8 @@ async fn api_proxy_stop(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
-    // Удаляем из active_proxies
+    // Прекращаем слушатель и перекачку каналов, затем стираем запись
+    abort_proxy_tasks(&state, &short_id).await;
     let removed = state.active_proxies.lock().await.remove(&short_id);
 
     if removed.is_some() {
@@ -1904,23 +2133,16 @@ async fn api_socks5_start(
         }));
     }
 
-    // Берём receivers
-    let resp_rx = {
-        let mut rx_lock = state.socks5_resp_rx.lock().await;
-        rx_lock.take()
-    };
-
-    let tunnel_rx = {
-        let mut rx_lock = state.socks5_tunnel_rx.lock().await;
-        rx_lock.take()
-    };
-
-    if resp_rx.is_none() || tunnel_rx.is_none() {
+    // Приёмники остаются в состоянии узла; прокси получает каналы-перекачки (после остановки можно запустить снова)
+    let channels_present = state.socks5_resp_rx.lock().await.is_some() && state.socks5_tunnel_rx.lock().await.is_some();
+    if !channels_present {
         return Json(serde_json::json!({
             "status": "error",
             "message": "SOCKS5 channels not available. May be already in use by CLI?"
         }));
     }
+    let (resp_rx, resp_pump) = pump_channel(state.socks5_resp_rx.clone());
+    let (tunnel_rx, tunnel_pump) = pump_channel(state.socks5_tunnel_rx.clone());
 
     // Прокси для браузера — ТОЛЬКО на этом компьютере и со своим паролем узла. Раньше он открывался на внешнем адресе с общим для
     // всех паролем «yandi123»: любой в интернете мог гнать через него свой трафик в чужой выход.
@@ -1961,8 +2183,8 @@ async fn api_socks5_start(
     let socks5_proxy = Socks5ProxyServer::new(socks5_config, transport.clone());
 
     let socks5_proxy = socks5_proxy
-        .with_response_channel(resp_rx.unwrap())
-        .with_tunnel_data_channel(tunnel_rx.unwrap());
+        .with_response_channel(resp_rx)
+        .with_tunnel_data_channel(tunnel_rx);
     let socks5_proxy = match (&gateway_peer, &auto_country) {
         (Some(gw), _) => socks5_proxy.with_exit_node(gw.id.clone()),
         (None, Some(c)) => {
@@ -1991,11 +2213,16 @@ async fn api_socks5_start(
     transport.set_station(socks5_proxy.station.clone()).await;
 
     // Запускаем прокси в фоне (переменная перемещается в spawn)
-    tokio::spawn(async move {
+    let listener_task = tokio::spawn(async move {
         if let Err(e) = socks5_proxy.run().await {
             eprintln!("❌ SOCKS5 Proxy error: {}", e);
         }
     });
+    state
+        .proxy_tasks
+        .lock()
+        .await
+        .insert(short_id.clone(), vec![listener_task.abort_handle(), resp_pump, tunnel_pump]);
 
     // 🚨 ОТПРАВЛЯЕМ 0x34 ПАКЕТ НА GATEWAY ДЛЯ АВТОЗАПУСКА SOCKS5 EXIT NODE! (в режиме auto это делает очередь выходов)
     if let Some(gateway_peer) = &gateway_peer {
@@ -2006,6 +2233,7 @@ async fn api_socks5_start(
         let cmd_bytes = vec![0x34u8]; // StartSocks5Gateway
 
         if let Err(e) = transport.send_encrypted(gateway_peer.id, &cmd_bytes).await {
+            abort_proxy_tasks(&state, &short_id).await;
             return Json(serde_json::json!({
                 "status": "error",
                 "message": format!("Failed to send StartSocks5Gateway command: {}", e)
@@ -2141,11 +2369,12 @@ async fn api_socks5_personal(
         enable_udp: false,
     };
     let proxy = Socks5ProxyServer::new(cfg, transport.clone()).with_personal(path, secret);
-    tokio::spawn(async move {
+    let personal_task = tokio::spawn(async move {
         if let Err(e) = proxy.run().await {
             eprintln!("❌ SOCKS5 Proxy error: {}", e);
         }
     });
+    state.proxy_tasks.lock().await.insert("personal".to_string(), vec![personal_task.abort_handle()]);
     state.active_proxies.lock().await.insert(
         "personal".to_string(),
         ProxyInfo {
@@ -2167,7 +2396,8 @@ async fn api_socks5_stop(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
-    // Удаляем из active_proxies
+    // Прекращаем слушатель и перекачку каналов, затем стираем запись
+    abort_proxy_tasks(&state, &short_id).await;
     let removed = state.active_proxies.lock().await.remove(&short_id);
 
     // Очищаем active_socks5_proxy
@@ -2221,208 +2451,36 @@ async fn api_socks5_status(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Ретрансляция: узел сам служит ретранслятором по запросам других узлов (если не запрещено) и сам пользуется ретрансляторами,
+/// когда до него нельзя достучаться. Здесь — состояние и один переключатель «служить ретранслятором для других».
+async fn api_network_relay(State(state): State<AppState>) -> impl IntoResponse {
+    let mut j = crate::relay_net::status_json();
+    if let Some(t) = &state.transport {
+        let st = t.relay_manager.lock().await.get_stats();
+        j["forwarding"] = serde_json::json!({
+            "active_sessions": st.active_sessions,
+            "bytes": st.total_bytes_forwarded,
+            "packets": st.total_packets_forwarded,
+        });
+    }
+    Json(j)
+}
+
+#[derive(Deserialize)]
+struct RelaySetRequest {
+    enabled: bool,
+}
+
+async fn api_network_relay_set(Json(b): Json<RelaySetRequest>) -> impl IntoResponse {
+    match crate::relay_net::set_relay_enabled(b.enabled) {
+        Ok(()) => Json(serde_json::json!({"status": "success", "relay_enabled": b.enabled})),
+        Err(e) => Json(serde_json::json!({"status": "error", "message": format!("не удалось сохранить: {e}")})),
+    }
+}
+
 // ═══════════════════════════════════════════════════════════════
-// RELAY API HANDLERS
+// GATEWAY API HANDLERS
 // ═══════════════════════════════════════════════════════════════
-
-/// Получить статус relay сервера
-async fn api_relay_status(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let relay_manager = transport.relay_manager.lock().await;
-
-    let stats = relay_manager.get_stats();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "relay_server": relay_manager.is_relay_server(),
-        "active_sessions": stats.active_sessions,
-        "total_bytes_forwarded": stats.total_bytes_forwarded,
-        "total_packets_forwarded": stats.total_packets_forwarded
-    }))
-}
-
-/// Получить список активных relay сессий
-async fn api_relay_sessions(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let relay_manager = transport.relay_manager.lock().await;
-
-    let sessions: Vec<serde_json::Value> = relay_manager
-        .get_active_sessions()
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "session_id": s.session_id,
-                "source_peer": hex::encode(&s.source_peer.0[..8]),
-                "target_peer": hex::encode(&s.target_peer.0[..8]),
-                "status": format!("{:?}", s.status),
-                "bytes_forwarded": s.bytes_forwarded,
-                "packets_forwarded": s.packets_forwarded,
-                "idle_time_secs": s.idle_time().as_secs()
-            })
-        })
-        .collect();
-
-    Json(serde_json::json!({
-        "status": "success",
-        "sessions": sessions
-    }))
-}
-
-/// Включить режим relay сервера
-async fn api_relay_server_start(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let mut relay_manager = transport.relay_manager.lock().await;
-
-    relay_manager.set_relay_server_mode(true);
-
-    info!("🌐 Relay server mode ENABLED via Web UI");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Relay server mode enabled"
-    }))
-}
-
-/// Выключить режим relay сервера
-async fn api_relay_server_stop(State(state): State<AppState>) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-    let mut relay_manager = transport.relay_manager.lock().await;
-
-    relay_manager.set_relay_server_mode(false);
-
-    info!("🌐 Relay server mode DISABLED via Web UI");
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Relay server mode disabled"
-    }))
-}
-
-/// Подключиться к пиру через relay сервер
-async fn api_relay_connect(
-    State(state): State<AppState>,
-    PathExtractor(short_id): PathExtractor<String>,
-) -> impl IntoResponse {
-    if state.transport.is_none() {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "P2P transport not available"
-        }));
-    }
-
-    let transport = state.transport.as_ref().unwrap();
-
-    // Парсим short_id
-    let short_id_bytes = match hex::decode(&short_id) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Invalid short ID: {}", e)
-            }));
-        }
-    };
-
-    if short_id_bytes.len() != 8 {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": "Short ID must be 8 bytes (16 hex chars)"
-        }));
-    }
-
-    // Ищем пира по short_id
-    let peers = transport.get_peers().await;
-    let target_peer = match peers
-        .iter()
-        .find(|p| &p.id.0[..8] == short_id_bytes.as_slice())
-    {
-        Some(peer) => peer,
-        None => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Peer with short ID {} not found", short_id)
-            }));
-        }
-    };
-
-    info!("🔌 Connecting to peer {} via relay", short_id);
-
-    // Создаём relay сессию
-    let my_id = transport.identity().node_id();
-    let session_id = {
-        let mut manager = transport.relay_manager.lock().await;
-        manager.create_session(my_id, target_peer.id)
-    };
-
-    // Отправляем запрос на подключение
-    use crate::netlayer::packet::RelayConnectRequest;
-
-    let request = RelayConnectRequest {
-        source_peer: my_id,
-        target_peer: target_peer.id,
-        session_id,
-        timestamp: std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs(),
-    };
-
-    let request_bytes = match serde_json::to_vec(&request) {
-        Ok(bytes) => bytes,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "status": "error",
-                "message": format!("Failed to serialize relay request: {}", e)
-            }));
-        }
-    };
-
-    let mut packet = vec![0x60u8]; // RelayConnectRequest
-    packet.extend_from_slice(&request_bytes);
-
-    if let Err(e) = transport.send_encrypted(target_peer.id, &packet).await {
-        return Json(serde_json::json!({
-            "status": "error",
-            "message": format!("Failed to send relay request: {}", e)
-        }));
-    }
-
-    info!("✅ Relay connection request sent to {}", short_id);
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": format!("Relay connection request sent to {}", short_id),
-        "session_id": session_id
-    }))
-}
 
 /// Запустить Gateway mode (на этой ноде)
 async fn api_gateway_start() -> impl IntoResponse {
@@ -2459,6 +2517,39 @@ async fn mobile_other_devices_handler() -> impl IntoResponse {
     Json(serde_json::json!({"devices": list}))
 }
 
+/// Все люди узла для страницы «Поиск» оболочки: гости и пользователи, в сети и не в сети, с ролью, именем, картинкой и отметкой «в контактах».
+/// Остаются в списке, пока запись жива: удалена администратором или самим человеком (гость — ещё и после суток молчания или перезапуска узла).
+pub(crate) async fn mobile_directory_handler() -> impl IntoResponse {
+    crate::mobile_self::init_phone_status();
+    let mut list: Vec<serde_json::Value> = crate::mobile_api::devices_overview()
+        .into_iter()
+        .filter_map(|d| {
+            let full = d["peer_id"].as_str()?.to_string();
+            let (nick, avatar_hash) = crate::device_profile::public(&full);
+            let local = crate::local_overrides::name(&full).unwrap_or_default();
+            let dev_name = d["name"].as_str().unwrap_or("Телефон").to_string();
+            let name = crate::local_overrides::display_name(&local, &nick, &dev_name);
+            let status = if crate::mobile_self::is_blocked_phone(&full) {
+                "blocked"
+            } else if crate::mobile_self::is_hidden_phone(&full) {
+                "hidden"
+            } else {
+                "ok"
+            };
+            Some(serde_json::json!({
+                "peer_id": full, "name": name, "device_name": dev_name, "nick": nick, "avatar_hash": avatar_hash,
+                "role": d["role"], "online": d["online"], "last_seen_ms": d["last_seen_ms"],
+                "saved": crate::mobile_self::is_saved_phone(&full), "status": status,
+            }))
+        })
+        .collect();
+    list.sort_by(|a, b| {
+        let on = |x: &serde_json::Value| x["online"].as_bool().unwrap_or(false);
+        on(b).cmp(&on(a)).then_with(|| a["name"].as_str().unwrap_or("").to_lowercase().cmp(&b["name"].as_str().unwrap_or("").to_lowercase()))
+    });
+    Json(serde_json::json!({"devices": list}))
+}
+
 #[derive(Deserialize)]
 struct PhoneActionReq {
     peer: String,
@@ -2480,12 +2571,24 @@ fn append_phone_contacts(data: &mut serde_json::Value) {
             if crate::mobile_self::is_hidden_phone(full) || crate::mobile_self::is_blocked_phone(full) || !crate::mobile_self::is_saved_phone(full) {
                 continue; // «Удалить» на странице — спрятан; заблокированные и не добавленные в контакты — в списке «Другие устройства узла»
             }
+            // глобальное — то, что человек задал себе (ник и картинка его профиля); локальное — как я его назвал и какую картинку поставил.
+            // Локальное главнее; без него — его собственный ник; без ника — имя устройства.
+            let (nick, avatar_hash) = crate::device_profile::public(full);
+            let local_name = crate::local_overrides::name(full).unwrap_or_default();
+            let device_name = d["name"].as_str().unwrap_or("Телефон");
+            let name = crate::local_overrides::display_name(&local_name, &nick, &format!("📱 {device_name}"));
             arr.push(serde_json::json!({
                 "id": format!("phone-{}", &full[..16]),
-                "name": format!("📱 {}", d["name"].as_str().unwrap_or("Телефон")),
+                "name": name,
+                "local_name": local_name,
+                "global_name": nick,
                 "short_id": full,
                 "online": d["online"],
                 "is_phone": true,
+                // картинка именно этого телефона (локальная, иначе его собственная), а не картинка ПК
+                "avatar_id": full,
+                "avatar_local": crate::local_overrides::has_avatar(full),
+                "avatar_global": !avatar_hash.is_empty(),
             }));
         }
     }
@@ -2493,7 +2596,8 @@ fn append_phone_contacts(data: &mut serde_json::Value) {
 
 async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
     // Загружаем из contacts.json
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     // Если файл не существует, возвращаем пустой список
     if !std::path::Path::new(contacts_path).exists() {
@@ -2520,9 +2624,14 @@ async fn api_contacts_get(State(state): State<AppState>) -> impl IntoResponse {
                     // Обновляем поле online для каждого контакта
                     if let Some(contacts_arr) = data["contacts"].as_array_mut() {
                         for contact in contacts_arr.iter_mut() {
-                            if let Some(short_id) = contact["short_id"].as_str() {
-                                let is_online = online_peers.contains(short_id);
+                            if let Some(short_id) = contact["short_id"].as_str().map(str::to_string) {
+                                let is_online = online_peers.contains(&short_id);
                                 contact["online"] = serde_json::json!(is_online);
+                                // локальная картинка есть — интерфейс покажет «Как он сам» (снять её)
+                                contact["avatar_local"] = serde_json::json!(crate::local_overrides::has_avatar(&short_id));
+                                if let Some(n) = crate::profile_sync::peer_nick(&short_id) {
+                                    contact["nick"] = serde_json::json!(n);
+                                }
                             }
                         }
                     }
@@ -2552,22 +2661,23 @@ struct ContactRequest {
 }
 
 async fn api_contacts_post(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     axum::extract::Json(payload): axum::extract::Json<ContactRequest>,
 ) -> impl IntoResponse {
-    // Загружаем текущие контакты
-    let contacts_path = "contacts.json";
-    let mut contacts: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(contacts_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(contacts_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("contacts").and_then(|v| v.as_array()) {
-                    contacts = arr.clone();
-                }
-            }
-        }
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
+    // телефон владельца в contacts.json не хранится: «Переименовать» задаёт ему локальное имя (его ник у него самого не меняется)
+    if payload.id.as_deref().is_some_and(|i| i.starts_with("phone-")) {
+        return match crate::local_overrides::set(&payload.short_id, Some(&payload.name), None) {
+            Ok(()) => Json(serde_json::json!({"status": "success", "message": "Contact saved"})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
     }
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = match load_contacts_for_edit(contacts_path).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
+    };
 
     // Проверяем, это новый контакт или редактирование
     if let Some(id) = &payload.id {
@@ -2590,13 +2700,8 @@ async fn api_contacts_post(
         contacts.push(new_contact);
     }
 
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "contacts": contacts
-    });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(contacts_path, content).await;
+    if let Err(e) = save_contacts(contacts_path, &contacts).await {
+        return Json(serde_json::json!({"status": "error", "message": e}));
     }
 
     Json(serde_json::json!({
@@ -2606,33 +2711,56 @@ async fn api_contacts_post(
 }
 
 #[derive(Deserialize)]
-struct DeleteContactRequest {
+struct LocalOverrideRequest {
+    /// номер человека (телефон — 64 знака, контакт — 16)
     id: String,
+    #[serde(default)]
+    name: Option<String>,
+    /// PNG/JPEG/GIF в base64; пустая строка — убрать свою картинку этому человеку
+    #[serde(default)]
+    avatar_b64: Option<String>,
 }
 
-async fn api_contacts_delete(
+/// Локальные имя и картинка контакта (видны только владельцу узла; человеку ничего не отправляется).
+async fn api_contacts_local(axum::extract::Json(b): axum::extract::Json<LocalOverrideRequest>) -> impl IntoResponse {
+    match crate::local_overrides::set(&b.id, b.name.as_deref(), b.avatar_b64.as_deref()) {
+        Ok(()) => Json(serde_json::json!({"status": "success"})).into_response(),
+        Err(e) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DeleteContactRequest {
+    pub(crate) id: String,
+}
+
+pub(crate) async fn api_contacts_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
 ) -> impl IntoResponse {
-    // Загружаем текущие контакты
-    let contacts_path = "contacts.json";
-    let mut contacts: Vec<serde_json::Value> = Vec::new();
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
-    if std::path::Path::new(contacts_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(contacts_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("contacts").and_then(|v| v.as_array()) {
-                    contacts = arr.clone();
-                }
-            }
+    // телефон: он не в contacts.json (список строит узел из сопряжённых устройств). «Удалить» снимает его из контактов и возвращает в общий
+    // список людей узла на странице «Поиск»; скрытие — отдельное действие (phone-action hide)
+    if let Some(prefix) = payload.id.strip_prefix("phone-") {
+        return match crate::mobile_self::delete_phone_contact(prefix) {
+            Ok(()) => Json(serde_json::json!({"status": "success", "message": "Contact deleted"})),
+            Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
+        };
+    }
+
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = match load_contacts_for_edit(contacts_path).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"status": "error", "message": e})),
+    };
+
+    // локальные имя и картинка удаляемого контакта стираются вместе с ним
+    for c in contacts.iter().filter(|c| c.get("id").and_then(|v| v.as_str()) == Some(payload.id.as_str())) {
+        if let Some(sid) = c.get("short_id").and_then(|v| v.as_str()) {
+            crate::local_overrides::forget(sid);
         }
     }
-
-    // телефон владельца: он не в contacts.json (список строит узел из сопряжённых устройств) — прячем из чата
-    if let Some(prefix) = payload.id.strip_prefix("phone-") {
-        crate::mobile_self::hide_phone(prefix);
-        return Json(serde_json::json!({"status": "success", "message": "Contact deleted"}));
-    }
-
     // Удаляем контакт (id в файле бывает строкой или числом)
     contacts.retain(|c| match c.get("id") {
         Some(serde_json::Value::String(s)) => s != &payload.id,
@@ -2640,13 +2768,8 @@ async fn api_contacts_delete(
         None => true,
     });
 
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "contacts": contacts
-    });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(contacts_path, content).await;
+    if let Err(e) = save_contacts(contacts_path, &contacts).await {
+        return Json(serde_json::json!({"status": "error", "message": e}));
     }
 
     Json(serde_json::json!({
@@ -2657,7 +2780,8 @@ async fn api_contacts_delete(
 
 /// Export contacts as a JSON file download (only short_id and name fields)
 async fn api_contacts_export() -> impl IntoResponse {
-    let contacts_path = "contacts.json";
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     let contacts: Vec<serde_json::Value> = if std::path::Path::new(contacts_path).exists() {
         match tokio::fs::read_to_string(contacts_path).await {
@@ -2695,7 +2819,8 @@ async fn api_contacts_export() -> impl IntoResponse {
 
 async fn api_gateways_get(State(state): State<AppState>) -> impl IntoResponse {
     // Загружаем из gateways.json
-    let gateways_path = "gateways.json";
+    let gateways_path_owned = crate::util::data_dir::data_dir().join("gateways.json").display().to_string();
+    let gateways_path = gateways_path_owned.as_str();
 
     // Если файл не существует, возвращаем пустой список
     if !std::path::Path::new(gateways_path).exists() {
@@ -2773,94 +2898,75 @@ struct GatewayRequest {
     id: Option<String>,
 }
 
-async fn api_gateways_post(
-    axum::extract::Json(payload): axum::extract::Json<GatewayRequest>,
-) -> impl IntoResponse {
-    // Загружаем текущие шлюзы
-    let gateways_path = "gateways.json";
-    let mut gateways: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(gateways_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(gateways_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("gateways").and_then(|v| v.as_array()) {
-                    gateways = arr.clone();
-                }
+/// Прочитать список шлюзов строго: нет файла — пусто; файл есть, но не читается или не разбирается — ошибка (его не затираем).
+fn load_gateways(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => {
+            let data: serde_json::Value = serde_json::from_str(&content).map_err(|e| format!("gateways.json повреждён: {e}"))?;
+            // структура проверяется: «gateways» не массив — повреждение, а не пустой список (иначе следующая запись затёрла бы документ)
+            // корень обязан быть объектом с полем gateways; иначе (массив, чужое имя поля) это не «пустой список», а чужой документ
+            match data.get("gateways") {
+                None => Err("gateways.json повреждён: нет поля gateways".to_string()),
+                Some(v) => match v.as_array() {
+                    Some(a) if a.iter().all(|x| x.is_object()) => Ok(a.clone()),
+                    _ => Err("gateways.json повреждён: поле gateways должно быть списком объектов".to_string()),
+                },
             }
         }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
+        Err(e) => Err(format!("gateways.json не читается: {e}")),
     }
+}
 
-    // Проверяем, это новый шлюз или редактирование
-    if let Some(id) = &payload.id {
-        // Редактирование существующего шлюза
-        if let Some(gateway) = gateways
-            .iter_mut()
-            .find(|g| g.get("id").and_then(|v| v.as_str()) == Some(id))
-        {
-            gateway["name"] = serde_json::json!(payload.name);
-            gateway["short_id"] = serde_json::json!(payload.short_id);
-            gateway["country"] = serde_json::json!(payload.country);
+/// Изменить список шлюзов: один замок на чтение-изменение-запись (два окна не затирают друг друга), строгое чтение, атомарная запись.
+fn update_gateways(path: &str, f: impl FnOnce(&mut Vec<serde_json::Value>)) -> Result<(), String> {
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let mut gateways = load_gateways(path)?;
+    f(&mut gateways);
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "gateways": gateways })).map_err(|e| e.to_string())?;
+    crate::util::private_file::write_private(std::path::Path::new(path), content.as_bytes()).map_err(|e| format!("не удалось записать gateways.json: {e}"))
+}
+
+async fn api_gateways_post(
+    axum::extract::Json(payload): axum::extract::Json<GatewayRequest>,
+) -> axum::response::Response {
+    let r = update_gateways(&crate::util::data_dir::data_dir().join("gateways.json").display().to_string(), |gateways| {
+        // Проверяем, это новый шлюз или редактирование
+        if let Some(id) = &payload.id {
+            // Редактирование существующего шлюза
+            if let Some(gateway) = gateways.iter_mut().find(|g| g.get("id").and_then(|v| v.as_str()) == Some(id)) {
+                gateway["name"] = serde_json::json!(payload.name);
+                gateway["short_id"] = serde_json::json!(payload.short_id);
+                gateway["country"] = serde_json::json!(payload.country);
+            }
+        } else {
+            // Добавление нового шлюза
+            gateways.push(serde_json::json!({
+                "id": uuid::Uuid::new_v4().to_string(),
+                "name": payload.name,
+                "short_id": payload.short_id,
+                "country": payload.country,
+                "connected": false
+            }));
         }
-    } else {
-        // Добавление нового шлюза
-        let new_gateway = serde_json::json!({
-            "id": uuid::Uuid::new_v4().to_string(),
-            "name": payload.name,
-            "short_id": payload.short_id,
-            "country": payload.country,
-            "connected": false
-        });
-        gateways.push(new_gateway);
-    }
-
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "gateways": gateways
     });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(gateways_path, content).await;
+    match r {
+        Ok(()) => Json(serde_json::json!({"status": "success", "message": "Gateway saved"})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
     }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway saved"
-    }))
 }
 
 async fn api_gateways_delete(
     axum::extract::Json(payload): axum::extract::Json<DeleteContactRequest>,
-) -> impl IntoResponse {
-    // Загружаем текущие шлюзы
-    let gateways_path = "gateways.json";
-    let mut gateways: Vec<serde_json::Value> = Vec::new();
-
-    if std::path::Path::new(gateways_path).exists() {
-        if let Ok(content) = tokio::fs::read_to_string(gateways_path).await {
-            if let Ok(data) = serde_json::from_str::<serde_json::Value>(&content) {
-                if let Some(arr) = data.get("gateways").and_then(|v| v.as_array()) {
-                    gateways = arr.clone();
-                }
-            }
-        }
-    }
-
-    // Удаляем шлюз
-    gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
-
-    // Сохраняем в файл
-    let data = serde_json::json!({
-        "gateways": gateways
+) -> axum::response::Response {
+    let r = update_gateways(&crate::util::data_dir::data_dir().join("gateways.json").display().to_string(), |gateways| {
+        gateways.retain(|g| g.get("id").and_then(|v| v.as_str()) != Some(payload.id.as_str()));
     });
-
-    if let Ok(content) = serde_json::to_string_pretty(&data) {
-        let _ = tokio::fs::write(gateways_path, content).await;
+    match r {
+        Ok(()) => Json(serde_json::json!({"status": "success", "message": "Gateway deleted"})).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"status": "error", "message": e}))).into_response(),
     }
-
-    Json(serde_json::json!({
-        "status": "success",
-        "message": "Gateway deleted"
-    }))
 }
 
 async fn api_settings_get() -> impl IntoResponse {
@@ -3028,7 +3134,8 @@ async fn api_chat_send(
                 Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
             };
         }
-        return match crate::mobile_api::pc_send_to_device(&peer_id, req.text).await {
+        let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.msg_id, text: r.text });
+        return match crate::mobile_api::pc_send_to_device_reply(&peer_id, req.text, reply).await {
             Ok(msg) => Json(serde_json::json!({"status": "success", "message": "Message sent", "msg_id": hex::encode(&msg.msg_id.0[..8]), "timestamp": msg.timestamp})),
             Err(e) => Json(serde_json::json!({"status": "error", "message": e})),
         };
@@ -3075,8 +3182,9 @@ async fn api_chat_send(
         });
 
     // Отправить сообщение
+    let reply = req.reply_to.map(|r| crate::communication::ReplyRef { msg_id: r.msg_id, text: r.text });
     match chat_manager
-        .send_message_with_attachment(peer_hash, req.text, attachment)
+        .send_message_full(peer_hash, req.text, attachment, reply)
         .await
     {
         Ok(msg) => Json(serde_json::json!({
@@ -3089,6 +3197,62 @@ async fn api_chat_send(
             "status": "error",
             "message": format!("Failed to send message: {}", e)
         })),
+    }
+}
+
+#[derive(Deserialize)]
+struct ReactRequest {
+    /// номер сообщения (hex, 64 знака — как в истории)
+    msg_id: String,
+    /// смайл из набора; пустой — снять
+    emoji: String,
+}
+
+/// Поставить или снять смайл на сообщение личного чата (повтор того же смайла снимает).
+async fn api_chat_react(
+    State(state): State<AppState>,
+    PathExtractor(peer_id): PathExtractor<String>,
+    Json(req): Json<ReactRequest>,
+) -> impl IntoResponse {
+    let err = |m: &str| Json(serde_json::json!({"status": "error", "message": m}));
+    if !(req.emoji.is_empty() || crate::chat_reactions::SET.contains(&req.emoji.as_str())) {
+        return err("такого смайла нет");
+    }
+    if req.msg_id.len() != 64 || !req.msg_id.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f')) {
+        return err("неверный номер сообщения");
+    }
+    // собеседник: полный номер или короткий
+    let peer_hash = match crate::util::HashId::from_hex(&peer_id) {
+        Ok(id) => id,
+        Err(_) => match &state.p2p_transport {
+            Some(t) => match t.find_peer_by_short_id(&peer_id).await {
+                Some(id) => id,
+                None => return err("собеседник не найден"),
+            },
+            None => return err("сеть недоступна"),
+        },
+    };
+    let short = hex::encode(&peer_hash.0[..8]);
+    let current = crate::chat_reactions::of_peer(&short).get(&req.msg_id).map(|r| r.0.clone()).unwrap_or_default();
+    let next = if current == req.emoji { String::new() } else { req.emoji.clone() };
+    let sent = if crate::mobile_api::is_device_peer(&peer_id) || crate::mobile_api::is_device_peer(&hex::encode(peer_hash.0)) {
+        crate::mobile_api::pc_react_device(&hex::encode(peer_hash.0), &req.msg_id, &next)
+    } else {
+        let chat = state.chat_manager.lock().await;
+        match chat.as_ref() {
+            Some(c) => c
+                .send_service(peer_hash, crate::chat_reactions::envelope(&req.msg_id, &next))
+                .await
+                .map_err(|e| format!("не удалось отправить: {e}")),
+            None => Err("чат недоступен".to_string()),
+        }
+    };
+    match sent {
+        Ok(()) => {
+            crate::chat_reactions::set_me(&short, &req.msg_id, &next);
+            Json(serde_json::json!({"status": "success", "emoji": next}))
+        }
+        Err(e) => err(&e),
     }
 }
 
@@ -3143,11 +3307,13 @@ async fn api_chat_history(
     }
     // println!("🔍 Loading history for short_id: {}, peer_hash: {}", peer_id, hex::encode(&peer_hash.0[..8]));
     // Загрузить историю (последние 100 сообщений)
+    let reactions = crate::chat_reactions::of_peer(&hex::encode(&peer_hash.0[..8]));
     match chat_manager.load_history(&peer_hash, 100) {
         Ok(messages) => {
             // Конвертировать HashId в hex строку для JSON (полные 32 байта)
             let messages_json: Vec<serde_json::Value> = messages
                 .into_iter()
+                .filter(|msg| !crate::profile_sync::is_service(&msg.text)) // служебные сообщения профиля в переписке не показываем
                 .map(|msg| {
                     serde_json::json!({
                         "msg_id": hex::encode(&msg.msg_id.0),  // Полный HashId (32 байта)
@@ -3159,7 +3325,9 @@ async fn api_chat_history(
                         "status": format!("{:?}", msg.status),
                         "edited": msg.edited,
                         "edit_timestamp": msg.edit_timestamp,
-                        "attachment": msg.attachment
+                        "attachment": msg.attachment,
+                        "reply_to": msg.reply_to,
+                        "reactions": reactions.get(&hex::encode(&msg.msg_id.0)).map(|(me, peer)| serde_json::json!({"me": me, "peer": peer}))
                     })
                 })
                 .collect();
@@ -3223,7 +3391,7 @@ async fn api_chat_clear(
     };
 
     // Очистить историю
-    match chat_manager.clear_history(&peer_hash) {
+    match chat_manager.clear_history(&peer_hash).await {
         Ok(_) => Json(serde_json::json!({
             "status": "success",
             "message": "Chat history cleared"
@@ -3383,7 +3551,7 @@ async fn api_chat_delete(
         }
     } else {
         // Удалить только у себя
-        match chat_manager.delete_message_local(&peer_hash, &msg_id) {
+        match chat_manager.delete_message_local(&peer_hash, &msg_id).await {
             Ok(_) => Json(serde_json::json!({
                 "status": "success",
                 "message": "Message deleted locally"
@@ -3394,6 +3562,137 @@ async fn api_chat_delete(
             })),
         }
     }
+}
+
+/// Пути с расшифрованным содержимым владельца: при запертой среде отвечают 423 (служебная доставка идёт внутри узла и не страдает).
+fn is_owner_content_path(path: &str) -> bool {
+    ["/api/groups", "/api/files/content"]
+        .iter()
+        .any(|p| path == *p || path.strip_prefix(p).is_some_and(|r| r.starts_with('/')))
+}
+
+/// Звонки: начать, принять, входящие, список и сокет сигнализации требуют открытой среды; завершить и отклонить можно всегда (очистка).
+fn is_locked_media_path(path: &str) -> bool {
+    // и звонки через /api/media/, и звонки телефонов владельца: события (расшифрованные сигналы), TURN и запись звонка в чат при запертой среде закрыты;
+    // /api/mobile/call/signal остаётся доступным — через него отправляется «положить трубку»
+    (path.starts_with("/api/media/") && !path.ends_with("/end") && !path.ends_with("/reject"))
+        || matches!(path, "/api/mobile/call/events" | "/api/mobile/call/turn" | "/api/mobile/call/log")
+}
+
+/// Админские маршруты без сеанса администратора: 403 `admin_required` (интерфейс просит админ-пароль).
+async fn admin_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    let token = req.headers().get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    if !crate::web::admin::allowed(req.method(), req.uri().path(), token) {
+        return (StatusCode::FORBIDDEN, Json(serde_json::json!({"error": "admin_required", "message": "нужен пароль администратора"}))).into_response();
+    }
+    next.run(req).await
+}
+
+#[derive(Deserialize)]
+struct AdminSessionBody {
+    password: String,
+}
+
+/// Открыть админ-панель: пароль проверяется тем же счётчиком попыток, что и вход (пять неверных закрывают вход паролем).
+async fn api_admin_session_post(State(state): State<AppState>, Json(b): Json<AdminSessionBody>) -> Response {
+    match crate::web::auth::verify_admin_counted(&b.password) {
+        Ok(true) => {
+            // токен знает только вошедший клиент; он нужен на каждом админском запросе
+            let token = crate::web::admin::start();
+            Json(serde_json::json!({"ok": true, "token": token, "ttl_secs": crate::web::admin::TTL.as_secs()})).into_response()
+        }
+        Ok(false) => (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный пароль администратора"}))).into_response(),
+        Err(e) => counted_login_error(e),
+    }
+}
+
+#[derive(Deserialize)]
+struct AdminPasswordBody {
+    current: String,
+    new: String,
+    #[serde(default)]
+    repeat: String,
+}
+
+/// Назначить или сменить отдельный админ-пароль. Нужен действующий сеанс (маршрут админский) и текущий админ-пароль ещё раз.
+async fn api_admin_password_post(Json(b): Json<AdminPasswordBody>) -> Response {
+    let bad = |m: &str| (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response();
+    if b.new != b.repeat {
+        return bad("Пароли не совпадают");
+    }
+    if let Err(e) = crate::web::auth::check_new_password(&b.new) {
+        return bad(&e);
+    }
+    match crate::web::auth::verify_admin_counted(&b.current) {
+        Ok(true) => {}
+        Ok(false) => return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "Неверный текущий пароль администратора"}))).into_response(),
+        Err(e) => return counted_login_error(e),
+    }
+    let new = b.new.clone();
+    match tokio::task::spawn_blocking(move || crate::web::admin::set_password(&new)).await {
+        Ok(Ok(())) => Json(serde_json::json!({"ok": true, "separate": true})).into_response(),
+        Ok(Err(e)) => bad(&e),
+        Err(_) => (StatusCode::INTERNAL_SERVER_ERROR, Json(serde_json::json!({"error": "Внутренняя ошибка"}))).into_response(),
+    }
+}
+
+async fn api_admin_session_get(headers: HeaderMap) -> Json<serde_json::Value> {
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    let left = crate::web::admin::remaining_for(token);
+    Json(serde_json::json!({"active": left.is_some(), "separate": crate::web::admin::has_separate(), "remaining_secs": left.map(|d| d.as_secs()).unwrap_or(0), "ttl_secs": crate::web::admin::TTL.as_secs()}))
+}
+
+async fn api_admin_session_delete(headers: HeaderMap) -> Json<serde_json::Value> {
+    // закрыть сеанс может только его владелец: чужой клиент не выгонит администратора
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    if crate::web::admin::remaining_for(token).is_some() {
+        crate::web::admin::end();
+    }
+    Json(serde_json::json!({"ok": true}))
+}
+
+/// Счётчики для колокольчика в шапке оболочки. **Только числа** (ни текста, ни имён, ни времени): они не раскрывают содержимого, поэтому
+/// доступны и при запертой закрытой среде. `messages` — сообщения, ожидающие владельца ПК на узле; `notices` — непрочитанные извещения админ-панели.
+async fn api_alerts() -> Json<serde_json::Value> {
+    #[cfg(unix)]
+    let locked = crate::closed_api::is_locked();
+    #[cfg(not(unix))]
+    let locked = false;
+    Json(serde_json::json!({
+        "messages": crate::mobile_api::pc_inbox_pending(),
+        "notices": crate::web::admin::view(None)["unread"].as_u64().unwrap_or(0),
+        "missed_calls": crate::mobile_self::missed_calls(),
+        "locked": locked,
+    }))
+}
+
+/// Владелец открыл чат: пропущенные звонки просмотрены (счётчик сбрасывается).
+async fn api_alerts_ack() -> Json<serde_json::Value> {
+    crate::mobile_self::clear_missed_calls();
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn api_notices_get(headers: HeaderMap) -> Json<serde_json::Value> {
+    let token = headers.get(crate::web::admin::HEADER).and_then(|v| v.to_str().ok());
+    Json(crate::web::admin::view(token))
+}
+
+#[derive(Deserialize)]
+struct NoticesAck {
+    kinds: Vec<String>,
+}
+
+async fn api_notices_ack(Json(b): Json<NoticesAck>) -> Json<serde_json::Value> {
+    crate::web::admin::ack(&b.kinds);
+    Json(serde_json::json!({"ok": true}))
+}
+
+async fn locked_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    #[cfg(unix)]
+    if (is_owner_content_path(req.uri().path()) || is_locked_media_path(req.uri().path())) && crate::closed_api::is_locked() {
+        return (StatusCode::LOCKED, Json(serde_json::json!({"status": "locked", "message": "закрытая среда заперта: введите пароль"}))).into_response();
+    }
+    next.run(req).await
 }
 
 /// Получить список всех чатов
@@ -3414,6 +3713,12 @@ async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
     }
 
     let chat_manager = chat_manager.unwrap();
+
+    // пока закрытая среда заперта, даже список собеседников (имена файлов истории) не отдаётся: это метаданные владельца
+    #[cfg(unix)]
+    if crate::closed_api::is_locked() {
+        return Json(serde_json::json!({"status": "locked", "chats": [], "message": "закрытая среда заперта"}));
+    }
 
     // Получить список чатов
     match chat_manager.list_chats() {
@@ -3436,8 +3741,17 @@ async fn api_chats_list(State(state): State<AppState>) -> impl IntoResponse {
 #[derive(Deserialize)]
 struct SendMessageRequest {
     text: String,
+    /// ответ-цитата: на какое сообщение отвечают
+    #[serde(default)]
+    reply_to: Option<ReplyToRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     attachment: Option<MessageAttachment>,
+}
+
+#[derive(Deserialize)]
+struct ReplyToRequest {
+    msg_id: String,
+    text: String,
 }
 
 /// Attachment в запросе
@@ -3569,7 +3883,7 @@ async fn api_files_upload(
     let file_path = uploads_dir.join(&safe_filename);
 
     // Сохраняем файл
-    if let Err(e) = tokio::fs::write(&file_path, file_data.clone()).await {
+    if let Err(e) = crate::file_vault::write_all(&file_path, &file_data) {
         error!("❌ Failed to save file: {}", e);
         return Json(serde_json::json!({
             "status": "error",
@@ -3580,8 +3894,8 @@ async fn api_files_upload(
     let file_size = file_data.len();
 
     info!(
-        "📤 File uploaded: {} ({} bytes) -> {:?}",
-        filename, file_size, file_path
+        "📤 File uploaded ({} bytes)",
+        file_size
     );
 
     Json(serde_json::json!({
@@ -3710,7 +4024,7 @@ async fn api_files_send_direct(
         transfer_id,
         sanitize_storage_filename(&filename)
     ));
-    if let Err(e) = std::fs::write(&temp_path, &file_data) {
+    if let Err(e) = crate::file_vault::write_all(&temp_path, &file_data) {
         error!("❌ Failed to write file to disk: {}", e);
         return Json(serde_json::json!({
             "status": "error",
@@ -3719,8 +4033,7 @@ async fn api_files_send_direct(
     }
 
     info!(
-        "📤 Sending file '{}' ({} bytes) to {} directly from memory",
-        filename,
+        "📤 Sending file ({} bytes) to {} directly from memory",
         file_size,
         crate::util::mask_hash_id(&peer_hash)
     );
@@ -3737,8 +4050,8 @@ async fn api_files_send_direct(
     {
         Ok(file_id) => {
             info!(
-                "✅ File transfer started: {} (file_id: {})",
-                filename, file_id
+                "✅ File transfer started (file_id: {})",
+                file_id
             );
             Json(serde_json::json!({
                 "status": "success",
@@ -4001,6 +4314,7 @@ async fn api_files_send_chunk(
         let alive = u.started.elapsed() < PENDING_UPLOAD_TTL;
         if !alive {
             let _ = std::fs::remove_file(&u.temp_path);
+            let _ = std::fs::remove_dir_all(upload_parts_dir(&u.temp_path));
         }
         alive
     });
@@ -4043,18 +4357,11 @@ async fn api_files_send_chunk(
         }));
     }
 
+    // каждая часть — отдельный запечатанный файл; открытого файла на диске нет, целый запечатанный файл собирается по завершении
     let write_result = (|| -> std::io::Result<()> {
-        use std::io::{Seek, SeekFrom, Write};
-
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(false)
-            .open(&upload.temp_path)?;
-        let offset = (chunk_index as u64) * (chunk_limit as u64);
-        file.seek(SeekFrom::Start(offset))?;
-        file.write_all(&chunk_data)?;
-        Ok(())
+        let dir = upload_parts_dir(&upload.temp_path);
+        std::fs::create_dir_all(&dir)?;
+        crate::file_vault::write_all(&dir.join(chunk_index.to_string()), &chunk_data)
     })();
 
     if let Err(e) = write_result {
@@ -4071,10 +4378,9 @@ async fn api_files_send_chunk(
     }
 
     info!(
-        "📦 Received chunk {}/{} for '{}' ({} bytes)",
+        "📦 Received chunk {}/{} ({} bytes)",
         chunk_index + 1,
         total_chunks,
-        upload.filename,
         chunk_data.len()
     );
 
@@ -4089,6 +4395,34 @@ async fn api_files_send_chunk(
 
     drop(uploads);
 
+    // все части на месте: собираем запечатанный файл (с него идут повторы недостающих кусков)
+    if is_complete {
+        let parts: Vec<std::path::PathBuf> =
+            (0..upload_total_chunks).map(|i| upload_parts_dir(&temp_path).join(i.to_string())).collect();
+        let tp = temp_path.clone();
+        let size = file_size;
+        let built = tokio::task::spawn_blocking(move || {
+            let r = crate::file_vault::assemble(&parts, &tp, size);
+            // принятые части удаляются только после успешной сборки; при отказе (диск, замок) они остаются для повтора последней части
+            if r.is_ok() {
+                let _ = std::fs::remove_dir_all(upload_parts_dir(&tp));
+            } else {
+                let _ = std::fs::remove_file(&tp); // недособранный итоговый файл
+            }
+            r
+        })
+        .await;
+        match built {
+            Ok(Ok(())) => {}
+            other => {
+                let why = match other { Ok(Err(e)) => e.to_string(), Err(e) => e.to_string(), Ok(Ok(())) => String::new() };
+                // запись о загрузке остаётся: повтор последней части снова запустит сборку из сохранённых частей
+                error!("❌ Failed to assemble upload: {}", why);
+                return Json(serde_json::json!({"status": "error", "message": format!("Failed to assemble upload: {}", why)}));
+            }
+        }
+    }
+
     // телефон владельца: по сети узлов не шлём; когда файл собран, кладём его в uploads — отправит api_chat_send (зашифровав для телефона)
     if crate::mobile_api::is_device_peer(&peer_id) {
         if !is_complete {
@@ -4099,7 +4433,7 @@ async fn api_files_send_chunk(
             return Json(serde_json::json!({"status": "error", "message": format!("Failed to store upload: {}", e)}));
         }
         CHUNK_UPLOADS.lock().await.remove(&file_id);
-        let size = std::fs::metadata(&stored).map(|m| m.len()).unwrap_or(file_size);
+        let size = crate::file_vault::plain_len(&stored).unwrap_or(file_size);
         return Json(serde_json::json!({"status": "success", "message": "File transfer completed", "file_id": file_id, "size": size, "complete": true}));
     }
 
@@ -4136,8 +4470,8 @@ async fn api_files_send_chunk(
     }
 
     if is_complete {
-        let file_size = match std::fs::metadata(&temp_path) {
-            Ok(meta) => meta.len(),
+        let file_size = match crate::file_vault::plain_len(&temp_path) {
+            Ok(len) => len,
             Err(e) => {
                 error!("❌ Failed to stat temp upload file: {}", e);
                 return Json(serde_json::json!({
@@ -4156,7 +4490,7 @@ async fn api_files_send_chunk(
             Ok(_) => {
                 info!(
                     "✅ Streaming P2P transfer finalized for file {}",
-                    upload_filename
+                    file_id
                 );
                 CHUNK_UPLOADS.lock().await.remove(&file_id);
                 return Json(serde_json::json!({
@@ -4234,7 +4568,7 @@ async fn api_files_send_uploaded(
 
     // Читаем файл из uploads
     let file_path = crate::communication::files_dir("uploads").join(&filename);
-    let file_data = match tokio::fs::read(&file_path).await {
+    let file_data = match crate::file_vault::read_all(&file_path) {
         Ok(data) => data,
         Err(e) => {
             return Json(serde_json::json!({
@@ -4250,8 +4584,7 @@ async fn api_files_send_uploaded(
         .to_string();
 
     info!(
-        "📤 Sending file '{}' ({} bytes) to {} with chunking",
-        filename,
+        "📤 Sending file ({} bytes) to {} with chunking",
         file_data.len(),
         crate::util::mask_hash_id(&peer_hash)
     );
@@ -4274,8 +4607,8 @@ async fn api_files_send_uploaded(
     {
         Ok(file_id) => {
             info!(
-                "✅ File transfer started: {} (file_id: {})",
-                filename, file_id
+                "✅ File transfer started (file_id: {})",
+                file_id
             );
             Json(serde_json::json!({
                 "status": "success",
@@ -4436,6 +4769,12 @@ fn parse_single_http_range(range_header: &str, data_len: usize) -> Option<(usize
     Some((start, end))
 }
 
+/// Папка с отдельными запечатанными частями загрузки, пока файл не собран.
+fn upload_parts_dir(temp: &std::path::Path) -> std::path::PathBuf {
+    let name = temp.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    temp.with_file_name(format!(".{name}.parts"))
+}
+
 async fn api_files_content(
     headers: HeaderMap,
     PathExtractor((file_id, filename)): PathExtractor<(String, String)>,
@@ -4451,7 +4790,7 @@ async fn api_files_content(
         }
     };
 
-    match std::fs::read(&file_path) {
+    match crate::file_vault::read_all(&file_path) {
         Ok(data) => {
             let content_type = safe_served_type(&filename);
             let data_len = data.len();
@@ -4463,8 +4802,8 @@ async fn api_files_content(
                 .and_then(|v| v.to_str().ok())
             {
                 debug!(
-                    "📡 File content request: file_id={}, filename={}, range={}, media={}",
-                    file_id, filename, range_header, is_streaming_media
+                    "📡 File content request: file_id={}, range={}, media={}",
+                    file_id, range_header, is_streaming_media
                 );
 
                 if !is_streaming_media {
@@ -4980,6 +5319,69 @@ async fn api_profile_get(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Удалить файлы аватара своего узла (кроме расширения `keep`): иначе после смены png→jpg старый файл отдаётся первым,
+/// а «удалённый» аватар остаётся на диске.
+fn remove_avatar_files(short_id: &str, keep: Option<&str>) {
+    let Some(home) = dirs::home_dir() else { return };
+    remove_avatar_files_in(&home.join(".yandi/avatars"), short_id, keep);
+}
+
+fn remove_avatar_files_in(dir: &std::path::Path, short_id: &str, keep: Option<&str>) {
+    if short_id.is_empty() || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return;
+    }
+    for ext in ["png", "jpg", "gif"] {
+        if keep == Some(ext) {
+            continue;
+        }
+        let _ = std::fs::remove_file(dir.join(format!("{short_id}.{ext}")));
+    }
+}
+
+/// Один писатель на файл контактов: чтение–изменение–запись без потерь при одновременных запросах.
+static CONTACTS_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+/// Имя контакта из приложения на телефоне: завести контакт или переименовать (общий список узла, его видят все устройства и ПК).
+pub async fn contacts_upsert(short_id: &str, name: &str) -> Result<(), String> {
+    let name: String = name.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(64).collect();
+    if name.is_empty() || short_id.len() != 16 || !short_id.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("неверное имя или номер".into());
+    }
+    let short_id = short_id.to_ascii_lowercase();
+    let _guard = CONTACTS_LOCK.lock().await;
+    let mut contacts = load_contacts_for_edit(&crate::util::data_dir::data_dir().join("contacts.json").display().to_string()).await?;
+    match contacts.iter_mut().find(|c| c.get("short_id").and_then(|v| v.as_str()) == Some(short_id.as_str())) {
+        Some(c) => c["name"] = serde_json::json!(name),
+        None => contacts.push(serde_json::json!({"id": uuid::Uuid::new_v4().to_string(), "name": name, "short_id": short_id, "online": false})),
+    }
+    save_contacts(&crate::util::data_dir::data_dir().join("contacts.json").display().to_string(), &contacts).await
+}
+
+
+/// Список контактов для изменения. Нет файла — пустой список; файл есть, но не читается или не разбирается — ошибка
+/// (раньше такой файл считался пустым и затем перезаписывался одним новым контактом).
+async fn load_contacts_for_edit(path: &str) -> Result<Vec<serde_json::Value>, String> {
+    if !std::path::Path::new(path).exists() {
+        return Ok(Vec::new());
+    }
+    let content = tokio::fs::read_to_string(path).await.map_err(|e| format!("не удалось прочитать список контактов: {e}"))?;
+    let data: serde_json::Value = serde_json::from_str(&content).map_err(|_| "файл контактов повреждён, список не менялся".to_string())?;
+    match data.get("contacts").and_then(|v| v.as_array()) {
+        Some(arr) => Ok(arr.clone()),
+        None => Err("файл контактов в неизвестном формате, список не менялся".to_string()),
+    }
+}
+
+/// Записать список контактов целиком и атомарно (временный файл и переименование), ошибка диска возвращается.
+async fn save_contacts(path: &str, contacts: &[serde_json::Value]) -> Result<(), String> {
+    let content = serde_json::to_string_pretty(&serde_json::json!({ "contacts": contacts })).map_err(|e| e.to_string())?;
+    let path = path.to_string();
+    tokio::task::spawn_blocking(move || crate::util::private_file::write_private(std::path::Path::new(&path), content.as_bytes()))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| format!("не удалось сохранить список контактов: {e}"))
+}
+
 /// Update current user profile
 async fn api_profile_put(
     State(state): State<AppState>,
@@ -5000,10 +5402,15 @@ async fn api_profile_put(
         _ => UserProfile::new(short_id),
     };
 
+    let avatar_cleared = avatar.as_deref() == Some("");
     profile.update(display_name, avatar);
 
     match profile.save() {
-        Ok(()) => Json(serde_json::json!({
+        Ok(()) => {
+            if avatar_cleared {
+                remove_avatar_files(&state.node_info.short_id, None);
+            }
+            Json(serde_json::json!({
             "status": "success",
             "message": "Profile updated",
             "profile": {
@@ -5012,7 +5419,8 @@ async fn api_profile_put(
                 "short_id": profile.short_id,
                 "updated_at": profile.updated_at
             }
-        })),
+        }))
+        }
         Err(e) => Json(serde_json::json!({
             "status": "error",
             "message": format!("Failed to save profile: {}", e)
@@ -5021,11 +5429,32 @@ async fn api_profile_put(
 }
 
 /// Get profile by short_id (from contacts cache)
+fn phone_profile(short_id: &str) -> Option<serde_json::Value> {
+    // телефон владельца в contacts.json не хранится: профиль строим из списка сопряжённых устройств
+    let mut data = serde_json::json!({ "contacts": [] });
+    append_phone_contacts(&mut data);
+    data["contacts"].as_array()?.iter().find(|c| c["short_id"].as_str() == Some(short_id)).map(|c| {
+        serde_json::json!({
+            "status": "success",
+            "profile": {
+                "display_name": c.get("name").and_then(|n| n.as_str()).unwrap_or(short_id),
+                "avatar": c.get("avatar"),
+                "short_id": short_id,
+                "online": c.get("online").and_then(|o| o.as_bool()).unwrap_or(false)
+            }
+        })
+    })
+}
+
 async fn api_profile_get_by_short_id(
     State(state): State<AppState>,
     PathExtractor(short_id): PathExtractor<String>,
 ) -> impl IntoResponse {
-    let contacts_path = "contacts.json";
+    if let Some(found) = phone_profile(&short_id) {
+        return Json(found);
+    }
+    let contacts_path_owned = crate::util::data_dir::data_dir().join("contacts.json").display().to_string();
+    let contacts_path = contacts_path_owned.as_str();
 
     if !std::path::Path::new(contacts_path).exists() {
         return Json(serde_json::json!({
@@ -5136,6 +5565,17 @@ async fn api_profile_avatar(
         return Json(serde_json::json!({"status": "error", "message": "Avatar must be a PNG, JPEG or GIF image"}));
     }.to_string();
 
+    // картинка пересобирается из пикселей (метаданных нет) и сводится к маленькому PNG — так её принимают и телефоны
+    let file_data = match crate::mobile_profile::sanitize_avatar(&file_data) {
+        Some(png) => {
+            file_ext = "png".to_string();
+            png
+        }
+        None => {
+            return Json(serde_json::json!({"status": "error", "message": "Avatar could not be read as an image"}));
+        }
+    };
+
     // Save file
     let avatar_path = avatar_dir.join(format!("{}.{}", short_id, file_ext));
     if let Err(e) = tokio::fs::write(&avatar_path, &file_data).await {
@@ -5144,6 +5584,9 @@ async fn api_profile_avatar(
             "message": format!("Failed to save avatar: {}", e)
         }));
     }
+
+    // файл другого типа от прошлой загрузки отдавался бы первым — убираем
+    remove_avatar_files(&short_id, Some(file_ext.as_str()));
 
     // Update profile with avatar path
     let mut profile = match UserProfile::load() {
@@ -5181,6 +5624,16 @@ async fn api_avatar_get(PathExtractor(short_id): PathExtractor<String>) -> impl 
         || !short_id.bytes().all(|b| b.is_ascii_hexdigit())
     {
         return StatusCode::NOT_FOUND.into_response();
+    }
+
+    // сначала локальная картинка, которую владелец поставил этому человеку, потом картинка, заданная им самим (профиль устройства)
+    if let Some(png) = crate::local_overrides::avatar(&short_id) {
+        return (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response();
+    }
+    if short_id.len() == 64 {
+        if let Some(png) = crate::device_profile::avatar(&short_id) {
+            return (StatusCode::OK, [(axum::http::header::CONTENT_TYPE, "image/png")], png).into_response();
+        }
     }
 
     for ext in ["png", "jpg", "gif"] {
@@ -5361,20 +5814,262 @@ async fn mobile_devices_handler() -> impl IntoResponse {
     resp
 }
 
-async fn mobile_device_remove_handler(
+/// Забыть устройство. Если оно владеет группами, удаление уносит и их (журналы, файлы), поэтому нужен повторный ввод пароля узла,
+/// как при прямом удалении группы; устройство без групп забывается без пароля.
+/// Повысить приглашённое устройство до пользователя (оно сможет приглашать само). Админский маршрут.
+async fn mobile_device_promote_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    match crate::mobile_api::promote_device(&id) {
+        Ok(()) => (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response(),
+        Err(m) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"status": "error", "message": m}))).into_response(),
+    }
+}
+
+/// Отозвать устройство вместе со всеми, кого оно пригласило (и кого пригласили они). Админский маршрут.
+async fn mobile_device_revoke_branch_handler(
+    State(state): State<AppState>,
     axum::extract::Path(id): axum::extract::Path<String>,
-) -> impl IntoResponse {
-    if crate::mobile_api::remove_device(&id) {
-        (StatusCode::OK, Json(serde_json::json!({"status": "ok"})))
+    body: axum::body::Bytes,
+) -> Response {
+    let Some(peer) = crate::mobile_api::resolve_device(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    };
+    // отзыв ветки уносит и группы, которыми владеют её устройства: как при удалении одного устройства, нужен повторный пароль узла
+    let mut names: Vec<String> = Vec::new();
+    for p in crate::mobile_api::branch_of(&peer) {
+        names.extend(crate::mobile_groups::owned_by(&p).into_iter().map(|(_, name, _)| name));
+    }
+    if !names.is_empty() {
+        let password = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string));
+        if password.is_none() {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"status": "error", "error": "password_required", "message": "в ветке есть устройства, владеющие группами; для отзыва нужен пароль узла", "groups": names})),
+            )
+                .into_response();
+        }
+        if let Err(resp) = require_step_up(&state, password.as_deref()).await {
+            return resp;
+        }
+    }
+    let removed = crate::mobile_api::remove_branch(&peer);
+    if removed == 0 {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    }
+    (StatusCode::OK, Json(serde_json::json!({"status": "ok", "removed": removed}))).into_response()
+}
+
+/// Открытый ключ подписи списка входных узлов; `unlocked: false` — закрытая среда заперта (ключа в памяти нет).
+async fn bootstrap_pubkey_handler() -> Response {
+    let pk = crate::bootstrap::signer::public_hex();
+    Json(serde_json::json!({
+        "unlocked": pk.is_some(),
+        "pubkey": pk,
+        "pinned": pk.as_deref().is_some_and(crate::bootstrap::signer::is_pinned),
+    }))
+    .into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct BootstrapSignReq {
+    list: crate::bootstrap::Doc,
+    #[serde(default)]
+    network: Option<String>,
+}
+
+/// Подписать список входных узлов ключом из закрытой среды: узел возвращает подписанный список, секрет наружу не выходит.
+async fn bootstrap_sign_handler(Json(req): Json<BootstrapSignReq>) -> Response {
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    match crate::bootstrap::signer::sign_doc(req.list, now, req.network) {
+        Ok(d) => {
+            let pinned = crate::bootstrap::signer::is_pinned(&d.signer);
+            Json(serde_json::json!({"status": "ok", "list": d, "pinned": pinned})).into_response()
+        }
+        Err(m) => (StatusCode::CONFLICT, Json(serde_json::json!({"status": "error", "message": m}))).into_response(),
+    }
+}
+
+/// Заявки узлов во входной список: данные подключения, результат прозвона каждого адреса и готовая команда `from-card`.
+async fn bootstrap_applications_handler() -> Response {
+    let list: Vec<serde_json::Value> = crate::bootstrap::apply::list()
+        .into_iter()
+        .map(|p| {
+            serde_json::json!({
+                "id": p.app.node_id, "key": p.app.key, "addr": p.app.addr, "mobile": p.app.mobile, "region": p.app.region, "roles": p.app.roles,
+                "received": p.received, "status": p.status, "probes": p.probes, "card": p.app.card_text(), "command": p.app.command(),
+            })
+        })
+        .collect();
+    Json(serde_json::json!({"applications": list})).into_response()
+}
+
+#[derive(serde::Deserialize)]
+struct BootstrapDismissReq {
+    id: String,
+}
+
+async fn bootstrap_dismiss_handler(Json(req): Json<BootstrapDismissReq>) -> Response {
+    if crate::bootstrap::apply::dismiss(&req.id) {
+        Json(serde_json::json!({"status": "ok"})).into_response()
     } else {
-        (
-            StatusCode::NOT_FOUND,
-            Json(serde_json::json!({"status": "error", "message": "нет такого устройства"})),
-        )
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такой заявки"}))).into_response()
+    }
+}
+
+async fn mobile_invite_policy_get() -> Response {
+    Json(serde_json::to_value(crate::mobile_api::invite_policy()).unwrap_or_default()).into_response()
+}
+
+async fn mobile_invite_policy_post(Json(p): Json<crate::mobile_api::InvitePolicy>) -> Response {
+    match crate::mobile_api::set_invite_policy(p) {
+        Ok(()) => Json(serde_json::to_value(crate::mobile_api::invite_policy()).unwrap_or_default()).into_response(),
+        Err(m) => (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": m}))).into_response(),
+    }
+}
+
+async fn mobile_device_remove_handler(
+    State(state): State<AppState>,
+    axum::extract::Path(id): axum::extract::Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    // права проверяются над полным номером: по сокращению владение группами не находится
+    let Some(id) = crate::mobile_api::resolve_device(&id) else {
+        return (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response();
+    };
+    let owned = crate::mobile_groups::owned_by(&id);
+    if !owned.is_empty() {
+        let password = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("password").and_then(|p| p.as_str()).map(str::to_string));
+        if password.is_none() {
+            let names: Vec<String> = owned.iter().map(|(_, name, _)| name.clone()).collect();
+            return (
+                StatusCode::FORBIDDEN,
+                Json(serde_json::json!({"status": "error", "error": "password_required", "message": "устройство владеет группами; для удаления нужен пароль узла", "groups": names})),
+            )
+                .into_response();
+        }
+        if let Err(resp) = require_step_up(&state, password.as_deref()).await {
+            return resp;
+        }
+    }
+    if crate::mobile_api::remove_device(&id) {
+        (StatusCode::OK, Json(serde_json::json!({"status": "ok"}))).into_response()
+    } else {
+        (StatusCode::NOT_FOUND, Json(serde_json::json!({"status": "error", "message": "нет такого устройства"}))).into_response()
     }
 }
 
 /// QR для приложения на телефоне: адрес узла, порт TLS-входа, отпечаток сертификата и новый разовый код (живёт 5 минут).
+fn complaint_err(c: StatusCode, m: String) -> Response {
+    (c, Json(serde_json::json!({"error": m}))).into_response()
+}
+
+async fn complaints_list_handler() -> Response {
+    Json(serde_json::json!({"complaints": crate::complaints::list()})).into_response()
+}
+
+async fn complaint_get_handler(axum::extract::Path(id): axum::extract::Path<String>) -> Response {
+    match crate::complaints::get(&id) {
+        Some(v) => Json(v).into_response(),
+        None => complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()),
+    }
+}
+
+#[derive(Deserialize)]
+struct ComplaintReply {
+    /// `reporter` — ответить заявителю, `target` — нарушителю (только если это пользователь)
+    side: String,
+    text: String,
+}
+
+async fn complaint_reply_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintReply>) -> Response {
+    let Some(c) = crate::complaints::find(&id) else { return complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()) };
+    let to = match b.side.as_str() {
+        "reporter" => c.reporter.clone(),
+        "target" if c.target_kind == "user" => c.target_id.clone(),
+        _ => return complaint_err(StatusCode::BAD_REQUEST, "адресат: заявитель или нарушитель-пользователь".into()),
+    };
+    if let Err((code, m)) = crate::complaints::add_message(&id, &b.side, "admin", &b.text) {
+        return complaint_err(code, m);
+    }
+    // доставка от имени узла; если телефона уже нет, запись в журнале остаётся
+    let delivered = crate::mobile_api::pc_admin_message(&to, &b.text).await.is_ok();
+    Json(serde_json::json!({"ok": true, "delivered": delivered})).into_response()
+}
+
+#[derive(Deserialize)]
+struct ComplaintStatus {
+    status: String,
+}
+
+async fn complaint_status_handler(axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintStatus>) -> Response {
+    match crate::complaints::set_status(&id, &b.status) {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err((c, m)) => complaint_err(c, m),
+    }
+}
+
+#[derive(Deserialize)]
+struct ComplaintMeasure {
+    /// `warn` | `restrict` | `remove` | `delete_group`
+    kind: String,
+    #[serde(default)]
+    note: String,
+    /// для `restrict`: на сколько часов (1–720)
+    #[serde(default)]
+    hours: u64,
+    /// пароль узла: нужен мерам, которые удаляют группы (`delete_group`, и `remove` устройства-владельца групп)
+    #[serde(default)]
+    password: Option<String>,
+}
+
+async fn complaint_measure_handler(State(state): State<AppState>, axum::extract::Path(id): axum::extract::Path<String>, Json(b): Json<ComplaintMeasure>) -> Response {
+    let Some(c) = crate::complaints::find(&id) else { return complaint_err(StatusCode::NOT_FOUND, "жалобы нет".into()) };
+    let is_user = c.target_kind == "user";
+    // меры, уничтожающие группы, требуют того же повторного ввода пароля, что и прямое удаление группы
+    let destroys_groups = match b.kind.as_str() {
+        "delete_group" => !is_user,
+        "remove" => {
+            let full = crate::mobile_api::resolve_device(&c.target_id).unwrap_or_else(|| c.target_id.clone());
+            is_user && !crate::mobile_groups::owned_by(&full).is_empty()
+        }
+        _ => false,
+    };
+    if destroys_groups {
+        if let Err(resp) = require_step_up(&state, b.password.as_deref()).await {
+            return resp;
+        }
+    }
+    let until = if b.kind == "restrict" { crate::complaints::now_ms() + b.hours.clamp(1, 720) * 3600 * 1000 } else { 0 };
+    let result: Result<(), String> = match b.kind.as_str() {
+        "warn" if is_user => {
+            let text = if b.note.trim().is_empty() { "Предупреждение: ваше поведение нарушает правила узла. При повторении будут применены ограничения.".to_string() } else { b.note.clone() };
+            let _ = crate::complaints::add_message(&id, "target", "admin", &text);
+            crate::mobile_api::pc_admin_message(&c.target_id, &text).await.map_err(|e| format!("предупреждение записано, доставить не удалось: {e}"))
+        }
+        "restrict" if is_user => {
+            let text = format!("Ограничение на {} ч.: создание групп и отправка файлов недоступны. {}", b.hours.clamp(1, 720), b.note);
+            let _ = crate::complaints::add_message(&id, "target", "admin", &text);
+            let _ = crate::mobile_api::pc_admin_message(&c.target_id, &text).await;
+            Ok(())
+        }
+        "remove" if is_user => {
+            if crate::mobile_api::remove_device(&c.target_id) { Ok(()) } else { Err("устройство не найдено или не удалено".into()) }
+        }
+        "delete_group" if !is_user => crate::mobile_groups::admin_delete_group(&c.target_id),
+        _ => return complaint_err(StatusCode::BAD_REQUEST, "эта мера к этой жалобе не применима".into()),
+    };
+    if let Err(e) = crate::complaints::add_measure(&id, &b.kind, &b.note, until) {
+        return complaint_err(e.0, e.1);
+    }
+    match result {
+        Ok(()) => Json(serde_json::json!({"ok": true})).into_response(),
+        Err(m) => Json(serde_json::json!({"ok": true, "warning": m})).into_response(),
+    }
+}
+
 async fn mobile_pairing_handler(
     State(state): State<AppState>,
     axum::extract::Query(q): axum::extract::Query<std::collections::HashMap<String, String>>,
@@ -5411,7 +6106,9 @@ async fn mobile_pairing_handler(
                 "127.0.0.1".to_string()
             }
         });
-    let text = crate::mobile_api::pairing_qr_json(&host, port, &fp);
+    // ?role=user — код для постороннего пользователя узла (без личной переписки владельца), по умолчанию телефон владельца
+    let role = q.get("role").map(String::as_str).unwrap_or("owner");
+    let text = crate::mobile_api::pairing_qr_json(&host, port, &fp, role);
     let svg = match qrcode::QrCode::new(text.as_bytes()) {
         Ok(qr) => qr
             .render::<qrcode::render::svg::Color>()
@@ -5500,11 +6197,9 @@ struct PairIssueRequest {
 #[derive(Debug, Serialize)]
 struct PairIssueResponse {
     status: String,
+    /// Номер выданного права (не секрет). Секретов в ответе нет: рабочих ключей и секретов возобновления больше не существует.
     session_id: Option<String>,
-    resume_secret_hex: Option<String>,
     expires_at: Option<u64>,
-    /// hex(32B) session-key — mobile сохраняет одновременно с resume_secret.
-    session_key_hex: Option<String>,
     message: Option<String>,
 }
 
@@ -5537,9 +6232,7 @@ async fn pair_issue_handler(
                 Json(PairIssueResponse {
                     status: "error".into(),
                     session_id: None,
-                    resume_secret_hex: None,
                     expires_at: None,
-                    session_key_hex: None,
                     message: Some(format!("origin {} blocked (host {})", origin, host)),
                 }),
             )
@@ -5555,9 +6248,7 @@ async fn pair_issue_handler(
                 Json(PairIssueResponse {
                     status: "error".into(),
                     session_id: None,
-                    resume_secret_hex: None,
                     expires_at: None,
-                    session_key_hex: None,
                     message: Some("P2P transport not available".into()),
                 }),
             )
@@ -5574,9 +6265,7 @@ async fn pair_issue_handler(
             Json(PairIssueResponse {
                 status: "error".into(),
                 session_id: None,
-                resume_secret_hex: None,
                 expires_at: None,
-                session_key_hex: None,
                 message: Some("client_pubkey_hex must be 64 hex characters".into()),
             }),
         )
@@ -5591,38 +6280,43 @@ async fn pair_issue_handler(
         .ttl_secs
         .unwrap_or(crate::netlayer::pairing::DEFAULT_SESSION_TTL_SECS);
 
-    // Генерируем session_key прямо здесь (32 случайных байта). Anchor должен
-    // отдать тот же session_key мобилке через 0xC2 при первом encrypted connect'е.
-    use rand::RngCore;
-    let mut session_key = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut session_key);
-
-    let tok = crate::netlayer::pairing::SessionToken::new_with_session_key(ttl, &session_key);
-
-    // Сохраняем в paired_clients store (key = client_pubkey_hex).
-    let mut store = transport.paired_clients.lock().await;
-    store
-        .clients
-        .insert(req.client_pubkey_hex.clone(), tok.clone());
+    // Право клиента — запись без секретов (docs/RESUME_REDESIGN.md): кому и до какого срока. Срок ограничен годом.
+    let ttl = ttl.min(365 * 24 * 3600);
     let path = crate::netlayer::pairing::default_paired_clients_path();
-    if let Err(e) = store.save(&path) {
-        return (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PairIssueResponse {
-                status: "error".into(),
-                session_id: None,
-                resume_secret_hex: None,
-                expires_at: None,
-                session_key_hex: None,
-                message: Some(format!("persist failed: {}", e)),
-            }),
-        )
-            .into_response();
-    }
+    let pk = req.client_pubkey_hex.clone();
+    // транзакция над файлом: блокировка → строгое чтение → изменение копии → запись; заблокированное или переполненное хранилище не
+    // меняется, память обновляется только после успешной записи
+    let issued = tokio::task::spawn_blocking(move || {
+        crate::netlayer::pairing::PairedClientStore::update(&path, |st| {
+            st.gc_expired();
+            if !st.clients.contains_key(&pk) && st.clients.len() >= crate::netlayer::pairing::MAX_CLIENTS {
+                anyhow::bail!("слишком много выданных прав");
+            }
+            Ok(st.issue(pk.clone(), ttl))
+        })
+    })
+    .await;
+    let tok = match issued {
+        Ok(Ok(g)) => g,
+        Ok(Err(e)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PairIssueResponse { status: "error".into(), session_id: None, expires_at: None, message: Some(format!("persist failed: {}", e)) }),
+            )
+                .into_response();
+        }
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PairIssueResponse { status: "error".into(), session_id: None, expires_at: None, message: Some("internal error".into()) }),
+            )
+                .into_response();
+        }
+    };
 
     info!(
-        "[pair/issue] issued session {:#x} for pubkey {}",
-        tok.session_id,
+        "[pair/issue] issued grant {} for pubkey {}",
+        tok.session_id_hex,
         &req.client_pubkey_hex[..16.min(req.client_pubkey_hex.len())]
     );
 
@@ -5630,14 +6324,28 @@ async fn pair_issue_handler(
         StatusCode::OK,
         Json(PairIssueResponse {
             status: "ok".into(),
-            session_id: Some(format!("{:#x}", tok.session_id)),
-            resume_secret_hex: Some(tok.resume_secret_hex.clone()),
+            session_id: Some(tok.session_id_hex.clone()),
             expires_at: Some(tok.expires_at),
-            session_key_hex: Some(hex::encode(session_key)),
             message: None,
         }),
     )
         .into_response()
+}
+
+#[cfg(test)]
+mod locked_guard_tests {
+    use super::is_owner_content_path as p;
+
+    #[test]
+    fn owner_content_paths_are_matched_exactly() {
+        assert!(p("/api/groups"));
+        assert!(p("/api/groups/abc/messages"));
+        assert!(!p("/api/complaints/7/reply"), "жалобы — служебные данные узла под админ-сеансом, а не личное содержимое под паролем среды");
+        assert!(p("/api/files/content/id/name.txt"));
+        assert!(!p("/api/groupsx"));
+        assert!(!p("/api/mobile/groups"));
+        assert!(!p("/api/auth/login"));
+    }
 }
 
 #[cfg(test)]
@@ -5665,5 +6373,231 @@ mod served_file_tests {
     fn the_download_name_cannot_inject_header_syntax() {
         let d = served_disposition("application/octet-stream", "a\"; b=\r\nX: y.zip");
         assert!(!d.contains('\r') && !d.contains('\n') && d.matches('"').count() == 2, "{d}");
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+mod ui_socket_parity_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[tokio::test]
+    async fn real_handlers_match_tcp_without_weakening_tcp_auth_or_step_up() {
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let cookie = format!("yandi_session={}", auth.create_session(false));
+        let web = WebServer::new_with_auth(0, auth.clone());
+        let app = web.create_router(web.state.clone()).with_state(web.state.clone());
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        let endpoint = crate::web::ui_socket::Endpoint::bind(&data).unwrap();
+        let unix = tokio::spawn(endpoint.serve(app.clone()));
+        let tcp_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = tcp_listener.local_addr().unwrap();
+        let tcp = tokio::spawn(axum::serve(tcp_listener, app).into_future());
+        let client = reqwest::Client::builder().no_proxy().redirect(reqwest::redirect::Policy::none()).build().unwrap();
+        let base = format!("http://{addr}");
+        assert_eq!(client.get(format!("{base}/api/status")).send().await.unwrap().status(), StatusCode::SEE_OTHER);
+        // A caller-supplied header is not the connection capability.
+        assert_eq!(client.get(format!("{base}/api/status")).header("x-yandi-local-owner", "true").send().await.unwrap().status(), StatusCode::SEE_OTHER);
+        assert_eq!(client.post(format!("{base}/api/node/start")).header("cookie", &cookie).header("origin", "http://evil.example").send().await.unwrap().status(), StatusCode::FORBIDDEN);
+        for (method, path, body) in [("GET", "/api/auth/state", ""), ("GET", "/api/status", ""), ("GET", "/api/speed", ""), ("GET", "/api/network/relay", ""), ("GET", "/api/vault/status", ""), ("POST", "/api/node/start", ""), ("POST", "/api/mobile/groups/0123456789abcdef0123456789abcdef/delete", "{\"password\":\"wrong\"}")] {
+            if path.ends_with("/delete") {
+                // Exercise the actual StepUp backoff without reading the owner's key files.
+                for _ in 0..10 { auth.record_login_failure(); }
+            }
+            let response = client.request(method.parse().unwrap(), format!("{base}{path}")).header("cookie", &cookie).header("content-type", "application/json").body(body).send().await.unwrap();
+            let expected_status = response.status().as_u16();
+            let expected: serde_json::Value = response.json().await.unwrap();
+            let mut stream = tokio::net::UnixStream::connect(data.join("run/yandi-ui.sock")).await.unwrap();
+            let request = format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}", body.len());
+            stream.write_all(request.as_bytes()).await.unwrap();
+            let mut raw = Vec::new();
+            tokio::time::timeout(std::time::Duration::from_secs(3), stream.read_to_end(&mut raw)).await.unwrap().unwrap();
+            let text = String::from_utf8(raw).unwrap();
+            let (head, payload) = text.split_once("\r\n\r\n").unwrap();
+            assert!(head.starts_with(&format!("HTTP/1.1 {expected_status}")), "{path}: {head}");
+            assert_eq!(serde_json::from_str::<serde_json::Value>(payload).unwrap(), expected, "{path}");
+            // удаление группы — действие администратора: без его сеанса отказ одинаков и по TCP, и по сокету (права сокета сеанс не заменяют)
+            if path.ends_with("/delete") { assert_eq!(expected_status, 403, "peer credentials must not replace the admin session"); assert_eq!(expected["error"], "admin_required"); }
+        }
+        unix.abort(); tcp.abort();
+        let _ = unix.await; let _ = tcp.await;
+    }
+}
+
+#[cfg(test)]
+mod contacts_and_avatar_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn contacts_list_is_saved_atomically_and_a_broken_file_is_an_error_not_an_empty_list() {
+        let d = tempfile::tempdir().unwrap();
+        let path = d.path().join("contacts.json");
+        let p = path.to_str().unwrap();
+        // нет файла — пустой список
+        assert!(load_contacts_for_edit(p).await.unwrap().is_empty());
+        // запись и чтение
+        save_contacts(p, &[serde_json::json!({"id": "1", "name": "a"})]).await.unwrap();
+        assert_eq!(load_contacts_for_edit(p).await.unwrap().len(), 1);
+        // повреждённый файл: ошибка, и файл не тронут
+        std::fs::write(&path, b"{not json").unwrap();
+        assert!(load_contacts_for_edit(p).await.is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), b"{not json");
+        // чужой формат (нет ключа contacts) — тоже ошибка
+        std::fs::write(&path, b"{\"x\": 1}").unwrap();
+        assert!(load_contacts_for_edit(p).await.is_err());
+        // ошибка диска возвращается, а не «успех»
+        let bad = d.path().join("a_file");
+        std::fs::write(&bad, b"file, not a directory").unwrap();
+        let under_file = bad.join("contacts.json");
+        assert!(save_contacts(under_file.to_str().unwrap(), &[]).await.is_err());
+    }
+
+    #[test]
+    fn avatar_files_of_other_types_and_a_cleared_avatar_are_removed() {
+        let d = tempfile::tempdir().unwrap();
+        for ext in ["png", "jpg", "gif"] {
+            std::fs::write(d.path().join(format!("abc123.{ext}")), b"x").unwrap();
+        }
+        std::fs::write(d.path().join("def456.png"), b"other node").unwrap();
+        remove_avatar_files_in(d.path(), "abc123", Some("jpg"));
+        assert!(d.path().join("abc123.jpg").exists());
+        assert!(!d.path().join("abc123.png").exists() && !d.path().join("abc123.gif").exists());
+        remove_avatar_files_in(d.path(), "abc123", None);
+        assert!(!d.path().join("abc123.jpg").exists());
+        assert!(d.path().join("def456.png").exists(), "чужой аватар не тронут");
+        // имя с путём не выводит за каталог
+        std::fs::write(d.path().join("keep.png"), b"x").unwrap();
+        remove_avatar_files_in(d.path(), "../keep", None);
+        assert!(d.path().join("keep.png").exists());
+    }
+}
+
+#[cfg(test)]
+mod gateways_file_tests {
+    use super::*;
+
+    #[test]
+    fn gateways_are_changed_under_a_lock_and_a_broken_file_is_not_overwritten() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("gateways.json");
+        let ps = p.to_str().unwrap();
+        update_gateways(ps, |g| g.push(serde_json::json!({"id": "1"}))).unwrap();
+        update_gateways(ps, |g| g.push(serde_json::json!({"id": "2"}))).unwrap();
+        assert_eq!(load_gateways(ps).unwrap().len(), 2);
+        // валидный JSON с неверной схемой — тоже повреждение, а не пустой список
+        std::fs::write(&p, br#"{"gateways":{"saved":[]}}"#).unwrap();
+        assert!(load_gateways(ps).is_err(), "gateways не массив");
+        assert!(update_gateways(ps, |g| g.clear()).is_err());
+        assert_eq!(std::fs::read(&p).unwrap(), br#"{"gateways":{"saved":[]}}"#.to_vec(), "файл не затёрт");
+        // корень-массив и объект без поля gateways — тоже чужой документ
+        for body in [&br#"[{"id":"1"}]"#[..], &br#"{"gatways":[]}"#[..], &br#"{}"#[..]] {
+            std::fs::write(&p, body).unwrap();
+            assert!(update_gateways(ps, |g| g.clear()).is_err(), "{}", String::from_utf8_lossy(body));
+            assert_eq!(std::fs::read(&p).unwrap(), body.to_vec(), "файл не затёрт");
+        }
+        std::fs::write(&p, b"{broken").unwrap();
+        assert!(update_gateways(ps, |g| g.clear()).is_err(), "повреждённый список не заменяется пустым");
+        assert_eq!(std::fs::read(&p).unwrap(), b"{broken");
+    }
+}
+
+#[cfg(test)]
+mod step_up_tests {
+    use super::*;
+
+    #[test]
+    fn calls_need_an_open_environment_but_can_always_be_ended() {
+        for p in ["/api/media/call/start", "/api/media/video/call/start", "/api/media/ws/abc", "/api/media/incoming-call", "/api/media/call/x/accept", "/api/media/calls"] {
+            assert!(is_locked_media_path(p), "{p}");
+        }
+        for p in ["/api/mobile/call/events", "/api/mobile/call/turn", "/api/mobile/call/log"] {
+            assert!(is_locked_media_path(p), "{p}");
+        }
+        for p in ["/api/mobile/call/signal", "/api/media/call/end", "/api/media/call/x/end", "/api/media/call/x/reject", "/api/media/video/call/end", "/api/status"] {
+            assert!(!is_locked_media_path(p), "{p}");
+        }
+    }
+
+    /// Меры жалобы, уничтожающие группу, требуют пароль узла: без него — 403, с неверным — отказ, группа цела.
+    #[tokio::test]
+    async fn deleting_a_group_through_a_complaint_needs_the_node_password() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let id = crate::complaints::submit(&"a".repeat(64), "group", &"b".repeat(32), "G", "abuse", "плохая группа", &[]).unwrap();
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let web = WebServer::new_with_auth(0, auth);
+        let measure = |password: Option<&str>| ComplaintMeasure { kind: "delete_group".into(), note: String::new(), hours: 0, password: password.map(String::from) };
+        let r = complaint_measure_handler(State(web.state.clone()), axum::extract::Path(id.clone()), Json(measure(None))).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "без пароля мера не выполняется");
+        let r = complaint_measure_handler(State(web.state.clone()), axum::extract::Path(id.clone()), Json(measure(Some("точно неверный пароль")))).await;
+        assert_ne!(r.status(), StatusCode::OK, "с неверным паролем — тоже нет");
+        let c = crate::complaints::find(&id).unwrap();
+        assert!(c.measures.is_empty(), "мера в журнале не появилась");
+    }
+    /// Прямой DELETE устройства-владельца групп по сокращённому номеру не обходит пароль.
+    #[tokio::test]
+    async fn removing_a_group_owner_by_id_prefix_needs_the_node_password() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let peer = crate::mobile_api::test_add_device("prefix-owner-token");
+        let gid = crate::mobile_groups::with_store(|s| {
+            s.create("Группа префикса", "тест", crate::mobile_groups::Kind::Open, &peer, &[]).unwrap()
+        });
+        let auth = crate::web::auth::AuthState::default();
+        auth.is_setup.store(true, std::sync::atomic::Ordering::Relaxed);
+        let web = WebServer::new_with_auth(0, auth);
+        let r = mobile_device_remove_handler(State(web.state.clone()), axum::extract::Path(peer[..8].to_string()), axum::body::Bytes::new()).await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN, "префикс не должен обходить пароль");
+        assert!(!crate::mobile_groups::owned_by(&peer).is_empty(), "группа цела");
+        crate::mobile_groups::with_store(|s| { let _ = s.delete(&gid); });
+        crate::mobile_api::remove_device(&peer);
+    }
+
+}
+
+#[cfg(test)]
+mod admin_guard_tests {
+    use super::*;
+    use tower::ServiceExt;
+
+    async fn status_of(app: &Router, path: &str, token: Option<&str>) -> StatusCode {
+        let mut r = axum::http::Request::get(path);
+        if let Some(t) = token {
+            r = r.header(crate::web::admin::HEADER, t);
+        }
+        app.clone().oneshot(r.body(axum::body::Body::empty()).unwrap()).await.unwrap().status()
+    }
+
+    #[tokio::test]
+    async fn admin_routes_answer_403_without_the_sessions_token_and_work_with_it() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::web::admin::reset_for_test();
+        let app: Router = Router::new()
+            .route("/api/complaints", get(|| async { "ok" }))
+            .route("/api/guest-pairing", get(|| async { "ok" }))
+            .route("/api/devices/pairing", get(|| async { "ok" }))
+            .route("/api/settings", get(|| async { "ok" }).put(|| async { "ok" }))
+            .route("/api/status", get(|| async { "ok" }))
+            .route("/api/chats", get(|| async { "ok" }))
+            .layer(axum::middleware::from_fn(admin_guard));
+        assert_eq!(status_of(&app, "/api/complaints", None).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/guest-pairing", None).await, StatusCode::FORBIDDEN);
+        assert_eq!(status_of(&app, "/api/devices/pairing", None).await, StatusCode::FORBIDDEN);
+        // чтение настроек личное, запись — управление узлом
+        assert_eq!(status_of(&app, "/api/settings", None).await, StatusCode::OK);
+        let put = app.clone().oneshot(axum::http::Request::put("/api/settings").body(axum::body::Body::empty()).unwrap()).await.unwrap().status();
+        assert_eq!(put, StatusCode::FORBIDDEN);
+        // личные маршруты без сеанса работают как раньше
+        assert_eq!(status_of(&app, "/api/status", None).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/chats", None).await, StatusCode::OK);
+        let token = crate::web::admin::start();
+        assert_eq!(status_of(&app, "/api/complaints", Some(&token)).await, StatusCode::OK);
+        assert_eq!(status_of(&app, "/api/complaints", None).await, StatusCode::FORBIDDEN, "другой клиент без токена не пользуется чужим сеансом");
+        assert_eq!(status_of(&app, "/api/complaints", Some("чужой")).await, StatusCode::FORBIDDEN);
+        crate::web::admin::end();
+        assert_eq!(status_of(&app, "/api/complaints", Some(&token)).await, StatusCode::FORBIDDEN, "после выхода снова закрыто");
+        crate::web::admin::reset_for_test();
     }
 }

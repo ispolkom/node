@@ -25,6 +25,15 @@ impl Drop for Down {
     }
 }
 
+/// Сеанс администратора узла (docs/ROLES.md): управленческие ручки требуют токена в заголовке `x-yandi-admin`.
+async fn admin(http: &reqwest::Client, web: &str, cookie: &str, stand: &std::path::Path) -> String {
+    let pw = std::fs::read_to_string(stand.join("passwords.txt")).unwrap();
+    let login = pw.lines().find_map(|l| l.strip_prefix("пароль входа:")).unwrap().trim().to_string();
+    let r = http.post(format!("{web}/api/admin/session")).header("cookie", cookie).json(&json!({"password": login})).send().await.unwrap();
+    assert!(r.status().is_success(), "admin session: {}", r.status());
+    r.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string()
+}
+
 async fn login(http: &reqwest::Client, stand: &Path, k: usize) -> (String, String, String) {
     let pw = std::fs::read_to_string(stand.join("passwords.txt")).unwrap();
     let login = pw.lines().find_map(|l| l.strip_prefix("пароль входа:")).unwrap().trim().to_string();
@@ -108,7 +117,11 @@ async fn a_phone_reaches_the_internet_through_its_own_computer_via_a_relay() {
     let (web3, ck3, _) = login(&http, &stand, 3).await;
     let pair = |web: String, ck: String| {
         let http = http.clone();
-        async move { http.get(format!("{web}/api/devices/pairing")).header("cookie", ck).send().await.unwrap().json::<Value>().await.unwrap() }
+        let stand = stand.clone();
+        async move {
+            let adm = admin(&http, &web, &ck, &stand).await;
+            http.get(format!("{web}/api/devices/pairing")).header("cookie", ck).header("x-yandi-admin", adm).send().await.unwrap().json::<Value>().await.unwrap()
+        }
     };
     let gw = pair(web1, ck1).await;
     let relay = pair(web2, ck2).await;
@@ -198,7 +211,11 @@ async fn a_gateway_behind_nat_is_found_through_its_announced_relays_and_reached_
     let (web3, ck3, _) = login(&http, &stand, 4).await; // «телефон» — копия 4
     let pair = |web: String, ck: String| {
         let http = http.clone();
-        async move { http.get(format!("{web}/api/devices/pairing")).header("cookie", ck).send().await.unwrap().json::<Value>().await.unwrap() }
+        let stand = stand.clone();
+        async move {
+            let adm = admin(&http, &web, &ck, &stand).await;
+            http.get(format!("{web}/api/devices/pairing")).header("cookie", ck).header("x-yandi-admin", adm).send().await.unwrap().json::<Value>().await.unwrap()
+        }
     };
     let gw = pair(web1, ck1).await;
     let relay = pair(web2.clone(), ck2.clone()).await;

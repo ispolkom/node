@@ -1,10 +1,14 @@
 import 'dart:async';
+import 'dart:collection';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 import 'package:crypto/crypto.dart' as crypto;
+import 'package:flutter/foundation.dart' show visibleForTesting;
 import 'package:web_socket_channel/web_socket_channel.dart';
 import 'package:web_socket_channel/io.dart';
 import '../models/trusted_node.dart';
+import '../models/call_signal.dart';
 import '../crypto/identity.dart';
 import '../crypto/e2e_crypto.dart';
 import '../crypto/peer_trust.dart';
@@ -22,6 +26,25 @@ const int ftPeerOffline = 0x14;
 const int ftSendLive    = 0x31;
 // намёк «в группе что-то изменилось» (без содержимого): [0x15][16 номер группы][1 что][8 seq LE]
 const int ftGroupHint   = 0x15;
+const int ftProfile     = 0x16;
+/// намёк «устройства убраны с узла, их сообщения стали надгробиями»: [0x17][8 номер LE]; сам список — GET /mobile/forgotten
+const int ftForgotten   = 0x17;
+
+/// Метка для фонового Android-сервиса; содержимое сигнала остаётся E2E.
+@visibleForTesting
+Uint8List liveWakeHint(String text) {
+  final signal = CallSignal.tryParse(text);
+  final kind = signal == null || !signal.fresh ||
+          (signal.type == 'invite' && signal.until != null && signal.until! <= DateTime.now().millisecondsSinceEpoch) ? 0
+      : signal.type == 'invite' ? (signal.video ? 2 : 1)
+      : const ['hangup', 'reject', 'busy'].contains(signal.type) ? 3
+      : const ['ringing', 'accept', 'offer', 'answer', 'ice'].contains(signal.type) ? 4 : 0;
+  if (kind == 0) return Uint8List(0);
+  return Uint8List.fromList([
+    kind,
+    ...crypto.sha256.convert(utf8.encode(signal!.cid)).bytes.sublist(0, 16),
+  ]);
+}
 
 class GroupHintEvent {
   final String gid;
@@ -34,7 +57,11 @@ class IncomingChatEvent {
   final String   fromPeerId;
   final DateTime timestamp;
   final String   text;
-  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text});
+  /// Занять номер письма в журнале повторов: вызывается ПОСЛЕ сохранения сообщения (до этого повтор не считается «виденным»).
+  final Future<bool> Function()? commit;
+  /// Обработка не удалась (сохранение не прошло): письмо снимается с «в работе», его повтор будет обработан заново.
+  final void Function()? abort;
+  const IncomingChatEvent({required this.fromPeerId, required this.timestamp, required this.text, this.commit, this.abort});
 }
 
 /// Живой сигнал от другого телефона (звонок): расшифрованный текст.
@@ -74,6 +101,7 @@ class WsService {
   /// Вызывается когда переподключение к текущей ноде не удалось
   /// (задержка достигла максимума). AppState использует это для failover.
   final Future<void> Function()? onPermanentLoss;
+  final void Function()? onSignalLoss;
 
   TrustedNode?        _node;
   WebSocketChannel?   _channel;
@@ -97,6 +125,8 @@ class WsService {
   final _liveCtrl      = StreamController<LiveSignalEvent>.broadcast();
   final _offlineCtrl   = StreamController<String>.broadcast();
   final _groupCtrl     = StreamController<GroupHintEvent>.broadcast();
+  final _profileCtrl   = StreamController<void>.broadcast();
+  final _forgottenCtrl = StreamController<void>.broadcast();
 
   Stream<IncomingChatEvent> get chatStream      => _chatCtrl.stream;
   Stream<PeerStatusEvent>   get statusStream    => _statusCtrl.stream;
@@ -105,12 +135,15 @@ class WsService {
   /// Номер телефона, которому сигнал не доставлен: его нет на связи.
   Stream<String>            get offlineStream   => _offlineCtrl.stream;
   Stream<GroupHintEvent>    get groupStream     => _groupCtrl.stream;
+  /// Узел сообщил: профиль владельца (ник или картинка) изменился — подтянуть его.
+  Stream<void>              get profileStream   => _profileCtrl.stream;
+  Stream<void>              get forgottenStream => _forgottenCtrl.stream;
   bool get connected => _channel != null;
 
   /// Вызывается, когда сокет к узлу реально открыт (в том числе после переподключения): самое время обновить статусы.
   final void Function()? onOpen;
 
-  WsService(this._identity, {this.onPermanentLoss, this.onOpen,
+  WsService(this._identity, {this.onPermanentLoss, this.onOpen, this.onSignalLoss,
     Future<PeerKeyBundle?> Function(String)? getPeerBundle,
     Future<String?> Function()? ownPeerId})
       : _getPeerBundle = getPeerBundle, _ownPeerId = ownPeerId;
@@ -128,6 +161,9 @@ class WsService {
 
   /// Переключиться на другую ноду (failover).
   void switchNode(TrustedNode node) {
+    _liveGeneration++;
+    _liveQueue.clear();
+    onSignalLoss?.call();
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
     _channel?.sink.close();
@@ -161,7 +197,7 @@ class WsService {
       }).catchError((_) {});
       // обратные вызовы старого сокета (после переключения узла) не трогают новое соединение
       ch.stream.listen(
-        _onData,
+        (data) { if (identical(_channel, ch)) _onData(data); },
         onError: (_) { if (identical(_channel, ch)) _scheduleReconnect(); },
         onDone:  ()  { if (identical(_channel, ch)) _scheduleReconnect(); },
       );
@@ -172,6 +208,10 @@ class WsService {
   }
 
   void _scheduleReconnect() {
+    if (_disposed) return;
+    _liveGeneration++;
+    _liveQueue.clear();
+    onSignalLoss?.call();
     _pingTimer?.cancel();
     _channel = null;
     _reconnectTimer?.cancel();
@@ -205,6 +245,61 @@ class WsService {
 
   // ── Входящие данные ────────────────────────────────────────────────────────
 
+  static const _maxLiveQueued = 256;
+  int _liveInFlight = 0;
+  final _liveQueue = Queue<Uint8List>();
+  bool _disposed = false;
+  int _liveGeneration = 0;
+  bool _liveHeld = false;
+
+  /// При открытии хранилища сначала обрабатываем кадры Android-службы,
+  /// затем сигналы нового сокета. Это сохраняет порядок invite/hangup.
+  void holdLive() {
+    _liveHeld = true;
+  }
+
+  Future<List<bool>> releaseLiveWithBacklog(List<Uint8List> frames) async {
+    if (_disposed) return List<bool>.filled(frames.length, false);
+    while (_liveInFlight != 0 && !_disposed) {
+      await Future<void>.delayed(const Duration(milliseconds: 1));
+    }
+    if (_disposed) return List<bool>.filled(frames.length, false);
+    final handled = <bool>[];
+    for (final frame in frames) {
+      handled.add(await _handleLiveMsg(frame, _liveGeneration));
+    }
+    _liveHeld = false;
+    await _drainLive();
+    return handled;
+  }
+
+  Future<void> _drainLive() async {
+    if (_liveHeld || _liveInFlight != 0) return;
+    _liveInFlight = 1;
+    try {
+      while (!_disposed && _liveQueue.isNotEmpty) {
+        try {
+          await _handleLiveMsg(_liveQueue.removeFirst(), _liveGeneration);
+        } catch (_) {
+          // Invalid envelopes must not stop delivery of subsequent signals.
+        }
+      }
+    } finally {
+      _liveInFlight = 0;
+    }
+  }
+
+  /// Только для тестов: подать кадр сокета так, как будто он пришёл с узла.
+  @visibleForTesting
+  Future<void> debugFeed(List<int> raw) async => _onData(raw);
+
+  /// Injects a frame received by the Android background service. It goes
+  /// through the same E2E validation and replay checks as a live socket frame.
+  Future<void> ingestBackgroundFrame(Uint8List raw) async => _onData(raw);
+
+  @visibleForTesting
+  int get debugLiveInFlight => _liveInFlight;
+
   void _onData(dynamic raw) async {
     if (raw is! List<int>) return;
     final data = Uint8List.fromList(raw);
@@ -221,7 +316,17 @@ class WsService {
         _handlePeerStatus(data);
 
       case ftLiveMsg:
-        await _handleLiveMsg(data);
+        if (_disposed || data.length > 45 + 32 * 1024 + 17) return;
+        if (_liveQueue.length >= _maxLiveQueued) {
+          // Bound hostile traffic without silently keeping a broken socket alive.
+          _liveQueue.clear();
+          _liveGeneration++;
+          onSignalLoss?.call();
+          unawaited(_channel?.sink.close());
+          return;
+        }
+        _liveQueue.addLast(data);
+        if (!_liveHeld) unawaited(_drainLive());
 
       case ftGroupHint:
         if (data.length >= 26) {
@@ -229,10 +334,19 @@ class WsService {
           _groupCtrl.add(GroupHintEvent(_bytesToHex(data.sublist(1, 17)), data[17], seq));
         }
 
+      case ftProfile:
+        _profileCtrl.add(null);
+
+      case ftForgotten:
+        if (data.length >= 9) _forgottenCtrl.add(null);   // только намёк: список забирается запросом с сохранённым курсором
+
       case ftPeerOffline:
         if (data.length >= 33) _offlineCtrl.add(_bytesToHex(data.sublist(1, 33)));
     }
   }
+
+  /// Письма, у которых номер уже проверен, но ещё не занят (идёт сохранение): параллельный повтор не обрабатывается дважды.
+  final Set<String> _replayInFlight = {};
 
   Future<void> _handleChatMsg(Uint8List data) async {
     // [1B type][32B from][8B ts_ms_LE][4B payload_len_LE][payload]
@@ -244,13 +358,38 @@ class WsService {
     final payload = data.sublist(45, 45 + pLen);
     if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
 
-    final text = await decryptIncoming(payload, fromPeerId: from);
-    if (text == null) return;
+    // номер письма занимается после сохранения (см. IncomingChatEvent.commit): сбой между расшифровкой и записью не теряет сообщение
+    String? pendingId;
+    var pendingExp = 0;
+    final ledger = StorageService.replayLedger;
+    final text = await decryptIncoming(payload, fromPeerId: from,
+      claimOverride: ledger == null ? null : (rid, exp) async {
+        if (_replayInFlight.contains(rid) || await ledger.seen(rid)) return false;
+        _replayInFlight.add(rid);
+        pendingId = rid;
+        pendingExp = exp;
+        return true;
+      },
+    );
+    if (text == null || _disposed) return;
 
     _chatCtrl.add(IncomingChatEvent(
       fromPeerId: from,
       timestamp:  DateTime.fromMillisecondsSinceEpoch(tsMs),
       text:       text,
+      abort: () { final rid = pendingId; if (rid != null) _replayInFlight.remove(rid); },
+      commit: () async {
+        final rid = pendingId;
+        if (rid == null || ledger == null) return true;
+        try {
+          await ledger.claim(rid, pendingExp);
+          return true;
+        } catch (_) {
+          return false;
+        } finally {
+          _replayInFlight.remove(rid);
+        }
+      },
     ));
   }
 
@@ -258,17 +397,19 @@ class WsService {
   static const _maxDateMs = 8640000000000000;
 
   /// [1B 0x13][32B от кого][8B время][4B длина][зашифрованный сигнал]. Открытый текст не принимаем: сигналы звонка только E2E.
-  Future<void> _handleLiveMsg(Uint8List data) async {
-    if (data.length < 45) return;
+  Future<bool> _handleLiveMsg(Uint8List data, int generation) async {
+    if (data.length < 45) return false;
     final from = _bytesToHex(data.sublist(1, 33));
     final tsMs = ByteData.sublistView(data, 33, 41).getInt64(0, Endian.little);
     final pLen = ByteData.sublistView(data, 41, 45).getUint32(0, Endian.little);
-    if (data.length < 45 + pLen) return;
+    if (pLen == 0 || pLen > 32 * 1024 || data.length < 45 + pLen ||
+        (data.length != 45 + pLen && data.length != 45 + pLen + 17)) return false;
     final payload = data.sublist(45, 45 + pLen);
-    if (tsMs < 0 || tsMs > _maxDateMs) return;   // кривое время в заголовке: отбрасываем до расшифровки (журнал повторов не тратим)
+    if (tsMs < 0 || tsMs > _maxDateMs) return false;
     final text = await decryptIncoming(payload, fromPeerId: from, kind: 2);
-    if (text == null) return;
+    if (text == null || _disposed || generation != _liveGeneration) return false;
     _liveCtrl.add(LiveSignalEvent(fromPeerId: from, timestamp: DateTime.fromMillisecondsSinceEpoch(tsMs), text: text));
+    return true;
   }
 
   void _handlePeerStatus(Uint8List data) {
@@ -329,6 +470,8 @@ class WsService {
     buf.add(_hexToBytes(toPeerIdHex));
     buf.add(_uint32LE(payload.length));
     buf.add(payload);
+    // Hint for the locked Android service; Flutter still verifies E2E content.
+    buf.add(liveWakeHint(text));
     return _sendRaw(buf.toBytes());
   }
 
@@ -337,7 +480,8 @@ class WsService {
 
   /// Единственный вход для входящих блобов (сокет и почтовый ящик): только E2E-конверт текущего формата, с общим окном повторов.
   /// null — не E2E (открытый текст, старый формат 0xE2), не расшифровалось или повтор: такое пользователю не показываем.
-  Future<String?> decryptIncoming(List<int> payload, {required String fromPeerId, int kind = 1, void Function()? onDuplicate}) async {
+  Future<String?> decryptIncoming(List<int> payload, {required String fromPeerId, int kind = 1, void Function()? onDuplicate,
+      Future<bool> Function(String id, int expiresMs)? claimOverride}) async {
     try {
     if (!E2ECrypto.isEncrypted(payload)) return null;
     final bundle = await _getPeerBundle?.call(fromPeerId);
@@ -348,7 +492,7 @@ class WsService {
       Uint8List.fromList(payload),
       (theirPub) => _identity.ecdh(theirPub),
       from: fromPeerId, to: self, kind: kind, senderEd: bundle.ed25519,
-      claimReplay: ledger.claim,
+      claimReplay: claimOverride ?? (id, expiresMs) => ledger.claim(id, expiresMs, urgent: kind == 2),
       onDuplicate: onDuplicate,
     );
     } catch (_) { return null; }
@@ -382,6 +526,8 @@ class WsService {
   // ── Lifecycle ──────────────────────────────────────────────────────────────
 
   void disconnect() {
+    _liveGeneration++;
+    _liveQueue.clear();
     _pingTimer?.cancel();
     _reconnectTimer?.cancel();
     _channel?.sink.close();
@@ -389,12 +535,16 @@ class WsService {
   }
 
   void dispose() {
+    _disposed = true;
+    _liveQueue.clear();
     disconnect();
     _chatCtrl.close();
     _statusCtrl.close();
     _liveCtrl.close();
     _offlineCtrl.close();
     _groupCtrl.close();
+    _profileCtrl.close();
+    _forgottenCtrl.close();
   }
 
   // ── TLS pinning ────────────────────────────────────────────────────────────

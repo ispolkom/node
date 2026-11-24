@@ -1,35 +1,73 @@
+import 'dart:math';
+import '../services/limited_client.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show FilteringTextInputFormatter;
 import 'package:http/http.dart' as http;
 import 'package:http/io_client.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:provider/provider.dart';
 import '../models/trusted_node.dart';
 import '../services/app_state.dart';
+import '../services/invite_store.dart';
+import '../models/invite_payload.dart';
 import '../theme.dart';
+import 'guest_screen.dart';
+import '../widgets/secure_field.dart';
+import '../l10n.dart';
 
 /// QR-формат: JSON {"host":"...","port":8766,"pairing_code":"123456","tls_fingerprint":"...","tls":true}
 class PairScreen extends StatefulWidget {
-  const PairScreen({super.key});
+  /// Уже прочитанный QR сопряжения (его отсканировали в другом месте приложения): подключаемся сразу.
+  final String? initialPayload;
+  const PairScreen({super.key, this.initialPayload});
   @override
   State<PairScreen> createState() => _PairScreenState();
 }
 
+/// Это QR сопряжения с узлом (а не ID контакта)?
+bool isPairingPayload(String raw) {
+  final t = raw.trim();
+  return t.startsWith('YANDI-PAIR-1:') || t.startsWith('yandi://invite') || (t.startsWith('{') && t.contains('"pairing_code"'));
+}
+
 class _PairScreenState extends State<PairScreen> {
+  @override
+  void initState() {
+    super.initState();
+    final p = widget.initialPayload;
+    if (p != null && p.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted) _onQr(p); });
+    } else {
+      // принятая ранее ссылка-приглашение живёт час даже после закрытия приложения: ждём только PIN
+      InviteStore.pending().then((m) {
+        if (m != null && mounted && _inviteRaw == null) _onQr('${m['text']}');
+      }).catchError((_) {});
+    }
+  }
+
+  /// Приглашение от доверенного устройства: ждёт PIN, который пригласивший называет другим каналом.
+  String? _inviteRaw;
+  final TextEditingController _pin = TextEditingController();
+  String? _pinError;
+
   bool _processing = false;
   String? _error;
   final TextEditingController _manual = TextEditingController();
-  bool _scanMode = true;   // true — камера; false — ручной ввод текста (камера выключена)
+  int _tab = 0;   // 0 — гость (дом), 1 — QR (камера), 2 — код или ссылка (ключ); на старте открыта вкладка гостя
+  bool get _scanMode => _tab == 1;
 
-  void _setScanMode(bool on) {
-    if (_scanMode == on) return;
-    setState(() { _scanMode = on; _error = null; });
-    if (on) {
-      _resetScan('Наведите камеру на QR: код должен целиком поместиться в рамку');
-      _scanner.start();
-    } else {
+  /// Камера работает ТОЛЬКО на вкладке QR: при уходе с неё гасится, при возвращении включается.
+  void _selectTab(int i) {
+    if (_tab == i) return;
+    final wasScan = _scanMode;
+    setState(() { _tab = i; _error = null; });
+    if (i == 1) {
+      _resetScan(tr('Наведите камеру на QR: код должен целиком поместиться в рамку'));
+      WidgetsBinding.instance.addPostFrameCallback((_) { if (mounted && _scanMode) _scanner.start(); });
+    } else if (wasScan) {
       _scanner.stop();   // гасим камеру
     }
   }
@@ -37,7 +75,7 @@ class _PairScreenState extends State<PairScreen> {
   void _connectManual() {
     final t = _manual.text.trim();
     if (t.isEmpty) {
-      setState(() => _error = 'Поле пустое: вставьте текст из-под QR со страницы узла.');
+      setState(() => _error = tr('Поле пустое: вставьте текст из-под QR со страницы узла.'));
       return;
     }
     _onQr(t);
@@ -49,6 +87,7 @@ class _PairScreenState extends State<PairScreen> {
     detectionSpeed: DetectionSpeed.normal,
     detectionTimeoutMs: 200,
     facing: CameraFacing.back,
+    autoStart: false,   // камера включается только на вкладке QR и гасится на остальных
   );
 
   static const int _needHits = 4;                       // подряд одинаковых кадров
@@ -58,27 +97,31 @@ class _PairScreenState extends State<PairScreen> {
   int _hits = 0;
   DateTime? _firstHit;
   DateTime? _lastHit;
-  String _hint = 'Наведите камеру на QR: код должен целиком поместиться в рамку';
+  String _hint = tr('Наведите камеру на QR: код должен целиком поместиться в рамку');
   bool _recognized = false;
 
   @override
   void dispose() {
     _scanner.dispose();
     _manual.dispose();
+    _pin.dispose();
     super.dispose();
   }
+
+  /// Имя устройства на узле: «Телефон ab12» вместо одинакового «YANDI Mobile» у всех (потом человек задаёт ник).
+  static String _deviceLabel() => newDeviceLabel();
 
   /// Понятное объяснение вместо сырого текста исключения.
   String _humanError(Object e) {
     final t = e.toString();
     if (t.contains('bad or expired pairing code')) {
-      return 'Код устарел или уже использован. На компьютере нажмите «Показать QR» ещё раз и отсканируйте новый (код живёт 5 минут и подходит один раз).';
+      return tr('Код устарел или уже использован. На компьютере нажмите «Показать QR» ещё раз и отсканируйте новый (код живёт 5 минут и подходит один раз).');
     }
     if (e is FormatException) {
-      return 'Это не QR узла YANDI или текст вставлен не полностью. Вставьте весь текст из-под QR целиком.';
+      return tr('Это не QR узла YANDI или текст вставлен не полностью. Вставьте весь текст из-под QR целиком.');
     }
     if (t.contains('TimeoutException')) {
-      return 'Узел не ответил за 10 секунд. Проверьте адрес в QR, интернет на телефоне и что порт узла открыт.';
+      return tr('Узел не ответил за 10 секунд. Проверьте адрес в QR, интернет на телефоне и что порт узла открыт.');
     }
     return t;
   }
@@ -106,11 +149,11 @@ class _PairScreenState extends State<PairScreen> {
       return minX >= mx && minY >= my && maxX <= w - mx && maxY <= h - my;
     }
     if (!inside(image.width, image.height) && !inside(image.height, image.width)) {
-      return 'Код виден не весь: отодвиньте телефон, чтобы весь квадрат был в кадре';
+      return tr('Код виден не весь: отодвиньте телефон, чтобы весь квадрат был в кадре');
     }
     final side = (maxX - minX) < (maxY - minY) ? (maxX - minX) : (maxY - minY);
     final shortImage = image.width < image.height ? image.width : image.height;
-    if (side < shortImage * 0.22) return 'Код слишком мелкий: подвиньте телефон ближе';
+    if (side < shortImage * 0.22) return tr('Код слишком мелкий: подвиньте телефон ближе');
     return null;
   }
 
@@ -121,7 +164,7 @@ class _PairScreenState extends State<PairScreen> {
     final now = DateTime.now();
     if (b == null || raw == null || raw.isEmpty) {
       if (_lastHit != null && now.difference(_lastHit!) > _gapReset) {
-        _resetScan('Наведите камеру на QR: код должен целиком поместиться в рамку');
+        _resetScan(tr('Наведите камеру на QR: код должен целиком поместиться в рамку'));
       }
       return;
     }
@@ -134,34 +177,54 @@ class _PairScreenState extends State<PairScreen> {
     _hits++;
     _lastHit = now;
     if (_hits < _needHits || now.difference(_firstHit!) < _needStable) {
-      if (mounted) setState(() => _hint = 'Держите ровно, распознаю…');
+      if (mounted) setState(() => _hint = tr('Держите ровно, распознаю…'));
       return;
     }
     // код целиком и стабильно: показываем это, даём секунду увидеть, и только потом подключаемся
     _recognized = true;
-    if (mounted) setState(() => _hint = 'Код распознан. Подключаюсь…');
+    if (mounted) setState(() => _hint = tr('Код распознан. Подключаюсь…'));
     await Future<void>.delayed(const Duration(milliseconds: 800));
     if (!mounted) return;
     await _onQr(raw);
   }
 
-  Future<void> _onQr(String raw) async {
+  Future<void> _onQr(String raw, {String? pin}) async {
     if (_processing) return;
     setState(() { _processing = true; _error = null; });
 
     try {
       // Новый формат — непрозрачный blob YANDI-PAIR-1:<base64 JSON>; старый — открытый JSON. Понимаем оба.
       var payload = raw.trim();
+      final fromLink = inviteTextFromLink(payload);
+      if (fromLink != null) payload = fromLink;
       if (payload.startsWith('YANDI-PAIR-1:')) {
         payload = utf8.decode(base64.decode(payload.substring('YANDI-PAIR-1:'.length).trim()));
       }
       final data        = jsonDecode(payload) as Map<String, dynamic>;
+      final isInvite    = data['invite'] == true;
+      if (isInvite) {
+        final exp = data['exp'];
+        if (exp is int && exp * 1000 < DateTime.now().millisecondsSinceEpoch) {
+          await InviteStore.clearPending();
+          throw _InviteGone(tr('Срок действия приглашения истёк. Попросите прислать новое.'));
+        }
+        if (pin == null) {
+          // сохраняем ссылку на час и спрашиваем PIN
+          if (exp is int) await InviteStore.savePending(text: raw.trim(), expMs: exp * 1000);
+          if (!mounted) return;
+          setState(() { _processing = false; _inviteRaw = raw; _pinError = null; _pin.clear(); });
+          return;
+        }
+      }
       final host        = data['host']            as String;
       final port        = data['port']            as int;
       final code        = data['pairing_code']    as String;
       final fingerprint = data['tls_fingerprint'] as String? ?? '';
-      final useTls      = data['tls']             as bool? ?? false;
-      final scheme      = useTls ? 'https' : 'http';
+      // сопряжение только по HTTPS с закреплённым отпечатком: поле tls из QR безопасностью не управляет
+      if (!RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(fingerprint.trim())) {
+        throw Exception(tr('QR без отпечатка сертификата: сопряжение отклонено'));
+      }
+      const scheme = 'https';
 
       // Pinned HTTP client для паринга (fingerprint известен из QR)
       final client = _buildPinnedClient(fingerprint);
@@ -171,11 +234,41 @@ class _PairScreenState extends State<PairScreen> {
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'pairing_code': code,
-          'device_name':  'YANDI Mobile',
+          'device_name':  _deviceLabel(),
+          if (pin != null) 'pin': pin,
         }),
       ).timeout(const Duration(seconds: 10));
 
-      if (res.statusCode != 200) throw Exception('Pairing failed: ${res.body}');
+      if (res.statusCode != 200) {
+        if (isInvite) {
+          String? reason;
+          try { reason = (jsonDecode(res.body) as Map)['reason'] as String?; } catch (_) {}
+          switch (reason) {
+            case 'used':
+              await InviteStore.clearPending();
+              throw _InviteGone(tr('Ссылка уже активирована и больше не действительна.'));
+            case 'expired':
+            case 'bad':
+              await InviteStore.clearPending();
+              throw _InviteGone(tr('Срок действия приглашения истёк или ссылка недействительна.'));
+            case 'pin_burned':
+              await InviteStore.clearPending();
+              throw _InviteGone(tr('PIN введён неверно слишком много раз: приглашение погашено. Попросите новое.'));
+            case 'pin_wrong':
+              throw _PinWrong(tr('Неверный PIN. Осталось меньше попыток: три ошибки — и приглашение сгорит.'));
+            case 'pin_required':
+              throw _PinWrong(tr('Введите PIN из 4 цифр.'));
+            case 'rate_limited':
+              // узел временно не принимает коды: приглашение цело, ссылка остаётся
+              throw _PinWrong(tr('Слишком много неверных кодов за короткое время. Подождите несколько минут и нажмите «Подключиться» снова: приглашение цело.'));
+            case 'disabled':
+              throw _PinWrong(tr('Приглашения на этом узле сейчас выключены администратором. Ссылка сохранена: попробуйте позже.'));
+          }
+        }
+        if (isInvite && res.statusCode == 503) throw _PinWrong(tr('На узле сейчас нет места для новых приглашённых устройств. Попросите администратора или повторите позже.'));
+        throw Exception('Pairing failed: ${res.body}');
+      }
+      await InviteStore.clearPending();
 
       final body  = jsonDecode(res.body) as Map<String, dynamic>;
       final token = body['token'] as String;
@@ -206,55 +299,130 @@ class _PairScreenState extends State<PairScreen> {
       await context.read<AppState>().completePairing(node);
       if (!mounted) return;
       Navigator.of(context).pushReplacementNamed('/home');
-    } catch (e) {
+    } on _PinWrong catch (e) {
+      if (!mounted) return;
+      setState(() { _processing = false; _pinError = e.message; });
+    } on _InviteGone catch (e) {
       _recognized = false;
-      _resetScan('Не вышло подключиться. Наведите камеру на QR ещё раз');
+      _pin.clear();
+      if (!mounted) return;
+      setState(() { _processing = false; _inviteRaw = null; _error = e.message; });
+    } catch (e) {
+      // на экране PIN ошибку (нет связи, отказ узла) показываем прямо там, а не прячем под карточкой
+      if (pin != null && mounted) {
+        setState(() { _processing = false; _pinError = _humanError(e); });
+        return;
+      }
+      _recognized = false;
+      _resetScan(tr('Не вышло подключиться. Наведите камеру на QR ещё раз'));
       if (!mounted) return;
       setState(() { _processing = false; _error = _humanError(e); });
     }
   }
 
-  static http.Client _buildPinnedClient(String expectedFp) {
-    final normalizedFp = expectedFp.trim().toLowerCase();
-    if (normalizedFp.isEmpty) {
-      throw StateError('TLS certificate fingerprint is required');
-    }
-    final ctx = SecurityContext(withTrustedRoots: false);
-    final ioClient = HttpClient(context: ctx)
-      ..badCertificateCallback = (X509Certificate cert, String host, int port) {
-          final fp = crypto.sha256.convert(cert.der).toString();
-          return fp.toLowerCase() == normalizedFp;
-        };
-    return IOClient(ioClient);
-  }
+  static http.Client _buildPinnedClient(String expectedFp) => buildPinnedPairClient(expectedFp);
 
-  @override
-  Widget build(BuildContext context) {
+  Widget _pinCard() {
     return Scaffold(
       backgroundColor: AppTheme.bg,
       appBar: AppBar(
         backgroundColor: AppTheme.surface,
-        title: const Text('Подключение к ноде', style: TextStyle(color: AppTheme.text)),
+        title: Text(tr('Приглашение в YANDI'), style: TextStyle(color: AppTheme.text)),
         automaticallyImplyLeading: false,
+      ),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          Text(
+            tr('Вас пригласили подключиться к узлу. Введите PIN из 4 цифр: его должен назвать тот, кто прислал ссылку (голосом или в другом чате, не вместе со ссылкой). '
+            'Ссылка одноразовая и действует час.'),
+            style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
+          ),
+          const SizedBox(height: 16),
+          TextField(
+            key: const ValueKey('invite-pin-field'),
+            controller: _pin,
+            enabled: !_processing,
+            keyboardType: TextInputType.number,
+            maxLength: 4,
+            inputFormatters: [FilteringTextInputFormatter.digitsOnly],
+            style: const TextStyle(color: AppTheme.text, fontSize: 28, letterSpacing: 8),
+            textAlign: TextAlign.center,
+            decoration: const InputDecoration(hintText: 'PIN', counterText: ''),
+          ),
+          if (_pinError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_pinError!, key: const ValueKey('invite-pin-error'), style: const TextStyle(color: Colors.redAccent)),
+            ),
+          const SizedBox(height: 16),
+          FilledButton(
+            key: const ValueKey('invite-pin-go'),
+            onPressed: _processing ? null : () {
+              final v = _pin.text.trim();
+              if (v.length != 4) { setState(() => _pinError = tr('Введите PIN из 4 цифр.')); return; }
+              _onQr(_inviteRaw!, pin: v);
+            },
+            child: Text(_processing ? tr('Подключаюсь…') : tr('Подключиться')),
+          ),
+          TextButton(
+            onPressed: _processing ? null : () async {
+              await InviteStore.clearPending();
+              if (!mounted) return;
+              // камера снова принимает QR: прежнее «распознано» и накопленный кандидат сбрасываются
+              _recognized = false;
+              _pin.clear();
+              setState(() { _inviteRaw = null; _pinError = null; });
+              if (_scanMode) _resetScan(tr('Наведите камеру на QR: код должен целиком поместиться в рамку'));
+            },
+            child: Text(tr('Отмена')),
+          ),
+        ],
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (_inviteRaw != null) return _pinCard();
+    return Scaffold(
+      backgroundColor: AppTheme.bg,
+      appBar: AppBar(
+        backgroundColor: AppTheme.surface,
+        title: Text(tr('Подключение к ноде'), style: TextStyle(color: AppTheme.text)),
+        automaticallyImplyLeading: false,
+        actions: const [LangToggle(), SizedBox(width: 8)],
+      ),
+      bottomNavigationBar: NavigationBar(
+        key: const ValueKey('pair-tabs'),
+        backgroundColor: AppTheme.surface,
+        selectedIndex: _tab,
+        onDestinationSelected: _processing ? null : _selectTab,
+        destinations: [
+          NavigationDestination(key: const ValueKey('pair-tab-guest'), icon: const Icon(Icons.home_outlined), selectedIcon: const Icon(Icons.home), label: tr('Гость')),
+          NavigationDestination(key: const ValueKey('pair-tab-qr'), icon: const Icon(Icons.qr_code_scanner), label: 'QR'),
+          NavigationDestination(key: const ValueKey('pair-tab-code'), icon: const Icon(Icons.vpn_key_outlined), selectedIcon: const Icon(Icons.vpn_key), label: tr('Код')),
+        ],
       ),
       body: Column(
         children: [
-          const SizedBox(height: 12),
-          // выбор способа: камера или текст
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 16),
-            child: Row(children: [
-              Expanded(child: _modeButton('Сканировать QR', Icons.qr_code_scanner, _scanMode, () => _setScanMode(true))),
-              const SizedBox(width: 8),
-              Expanded(child: _modeButton('Ввести текст', Icons.keyboard, !_scanMode, () => _setScanMode(false))),
-            ]),
-          ),
-          const SizedBox(height: 12),
-          if (_scanMode) ...[
-            const Padding(
-              padding: EdgeInsets.symmetric(horizontal: 24),
+          if (_tab != 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 12, 16, 0),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(tr('Для входа нужен QR, код или ссылка от администратора узла либо от того, кто вас пригласил.'),
+                    key: const ValueKey('pair-intro'), style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13, height: 1.35)),
+              ),
+            ),
+          const SizedBox(height: 8),
+          if (_tab == 0)
+            Expanded(child: GuestPanel(busyChanged: (b) { if (mounted) setState(() => _processing = b); }))
+          else if (_tab == 1) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 24),
               child: Text(
-                'Откройте настройки узла → «Приложение на телефоне» → «Показать QR» и наведите камеру.',
+                tr('Откройте настройки узла → «Приложение на телефоне» → «Показать QR» и наведите камеру.'),
                 textAlign: TextAlign.center,
                 style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
               ),
@@ -298,7 +466,7 @@ class _PairScreenState extends State<PairScreen> {
                 ),
               ),
             ),
-          ] else ...[
+          ] else
             // ручной ввод: камера выключена
             Expanded(
               child: SingleChildScrollView(
@@ -306,67 +474,71 @@ class _PairScreenState extends State<PairScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
-                    const Text(
-                      'Вставьте текст подключения, который вам прислали (из-под QR на странице узла: он действует 5 минут и подходит один раз).',
+                    Text(
+                      tr('Вставьте текст подключения, который вам прислали (из-под QR на странице узла: он действует 5 минут и подходит один раз).'),
                       style: TextStyle(color: AppTheme.textSecondary, fontSize: 13),
                     ),
                     const SizedBox(height: 12),
-                    TextField(
+                    SecureField(
                       controller: _manual,
                       enabled: !_processing,
+                      hint: tr('Текст подключения'),
                       minLines: 4,
                       maxLines: 8,
-                      style: const TextStyle(color: AppTheme.text, fontSize: 12),
-                      decoration: InputDecoration(
-                        hintText: 'Текст подключения',
-                        hintStyle: const TextStyle(color: AppTheme.textSecondary),
-                        filled: true,
-                        fillColor: AppTheme.surface,
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10), borderSide: BorderSide.none),
-                      ),
+                      fontSize: 12,
                     ),
                     const SizedBox(height: 12),
                     ElevatedButton(
                       onPressed: _processing ? null : _connectManual,
                       child: _processing
                           ? const SizedBox(height: 18, width: 18, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
-                          : const Text('Подключить'),
+                          : Text(tr('Подключить')),
                     ),
                   ],
                 ),
               ),
             ),
-          ],
-          if (_error != null)
+          if (_error != null && _tab != 0)
             Padding(
               padding: const EdgeInsets.all(16),
               child: Text(_error!, style: const TextStyle(color: Colors.redAccent)),
             ),
-          const SizedBox(height: 16),
         ],
       ),
     );
   }
+}
 
-  Widget _modeButton(String label, IconData icon, bool active, VoidCallback onTap) {
-    return Material(
-      color: active ? AppTheme.accent : AppTheme.surface,
-      borderRadius: BorderRadius.circular(10),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(10),
-        child: Padding(
-          padding: const EdgeInsets.symmetric(vertical: 12),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, size: 18, color: active ? Colors.black : AppTheme.text),
-              const SizedBox(width: 8),
-              Text(label, style: TextStyle(color: active ? Colors.black : AppTheme.text, fontSize: 14, fontWeight: FontWeight.w600)),
-            ],
-          ),
-        ),
-      ),
-    );
+/// Неверный или недостающий PIN: приглашение живо, можно повторить.
+class _PinWrong implements Exception {
+  final String message;
+  const _PinWrong(this.message);
+}
+
+/// Приглашение больше не действует (истекло, использовано, сгорело).
+class _InviteGone implements Exception {
+  final String message;
+  const _InviteGone(this.message);
+}
+
+/// Клиент HTTPS с закреплённым отпечатком сертификата узла: другой сертификат не принимается.
+http.Client buildPinnedPairClient(String expectedFp) {
+  final normalizedFp = expectedFp.trim().toLowerCase();
+  if (normalizedFp.isEmpty) {
+    throw StateError('TLS certificate fingerprint is required');
   }
+  final ctx = SecurityContext(withTrustedRoots: false);
+  final ioClient = HttpClient(context: ctx)
+    ..badCertificateCallback = (X509Certificate cert, String host, int port) {
+      final fp = crypto.sha256.convert(cert.der).toString();
+      return fp.toLowerCase() == normalizedFp;
+    };
+  return LimitedClient(IOClient(ioClient));
+}
+
+/// Имя устройства на узле: «Телефон ab12» вместо одинакового «YANDI Mobile» у всех (потом человек задаёт ник).
+String newDeviceLabel() {
+  final r = Random.secure();
+  final tag = List.generate(2, (_) => r.nextInt(256).toRadixString(16).padLeft(2, '0')).join();
+  return 'Телефон $tag';
 }

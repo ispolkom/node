@@ -1,103 +1,110 @@
-# Архитектура и карта кода
+# Architecture and Code Map
 
-Один исполняемый файл `yandi` (`src/main.rs`) поднимает узел: связь с другими узлами, канал переписки, веб-страницу управления на `127.0.0.1`, прокси и выход в интернет. Библиотека (`src/lib.rs`) — те же модули, которые используют тесты.
+A single `yandi` executable (`src/main.rs`) starts the node: communication with other nodes, the messaging channel, the management web page on `127.0.0.1`, proxying, and Internet exit. The library (`src/lib.rs`) contains the same modules used by the tests.
 
-## Слои
+## Layers
 
 ```text
-        веб-страница управления (src/web)          CLI (netlayer/cli.rs)
+        management web page (src/web)          CLI (netlayer/cli.rs)
                       │                                   │
    ┌──────────────────┴───────────────────────────────────┴──────────────────┐
-   │ Сеть узлов: карточки, достижимость, выход, цепочки, ретрансляторы        │
+   │ Node network: cards, reachability, exit, circuits, relays                │
    │ network_offers · reachability · exit_select · exit_policy · reciprocity  │
    │ hops / hops_net · relay_net · route_rules · mobile_tls · bootstrap       │
    ├──────────────────────────────────────────────────────────────────────────┤
-   │ Основная связь узлов (UDP): netlayer + protocol (YTP «поезда и вагоны»)  │
-   │ DHT (dht) · NAT/ретрансляция (netlayer) · прокси и туннели (socks5/proxy)│
+   │ Core node transport (UDP): netlayer + protocol (YTP “trains and wagons”)│
+   │ DHT (dht) · NAT/relay (netlayer) · proxies and tunnels (socks5/proxy)   │
    ├──────────────────────────────────────────────────────────────────────────┤
-   │ Канал людей: переписка, файлы, звонки (p2p + communication + media)      │
+   │ Human channel: messaging, files, calls (p2p + communication + media)    │
    ├──────────────────────────────────────────────────────────────────────────┤
-   │ Шифрование звена: crypto (X25519 + HKDF + AES-256-GCM, счётчики, окна)   │
+   │ Link encryption: crypto (X25519 + HKDF + AES-256-GCM, counters, windows) │
    └──────────────────────────────────────────────────────────────────────────┘
 ```
 
-Два канала связи между узлами живут рядом: **основная сеть** (`netlayer::P2PTransport`, порты обнаружения и данных — списки узлов, DHT, прокси, цепочки) и **канал людей** (`p2p::P2PTransport` — переписка, файлы, звонки). Оба используют общее шифрование звена из `crypto` (одноразовые ключи на каждое рукопожатие).
+Two communication channels between nodes live side by side: the **core network** (`netlayer::P2PTransport`, discovery and data ports — node lists, DHT, proxies, and circuits) and the **human channel** (`p2p::P2PTransport` — messaging, files, and calls). Both use the shared link encryption from `crypto`, with one-time keys for every handshake.
 
-## Карта модулей
+## Module map
 
-### Шифрование и формат
-| Модуль | Назначение |
+### Encryption and format
+
+| Module | Purpose |
 |---|---|
-| `src/crypto/` | пакет сеанса (счётчик, окно повторов, смена ключей), обмен ключей X25519, рукопожатие с одноразовыми ключами. Формат закреплён «золотыми» векторами (`docs/WIRE.md`) |
-| `src/core/identity.rs` | личность узла: ключи подписи и обмена, хранение зашифрованным паролем владельца |
-| `src/util/` | вспомогательное: папка данных, закрытые файлы (`private_file`), маскирование адресов, замеры системы |
+| `src/crypto/` | Session package: counter, replay window, key rotation, X25519 key exchange, and one-time-key handshake. The format is fixed by golden vectors (`docs/WIRE.md`). |
+| `src/core/identity.rs` | Node identity: signing and exchange keys, stored encrypted with the owner's password. |
+| `src/util/` | Utilities: data directory, private files (`private_file`), address masking, and system measurements. |
 
-### Основная связь
-| Модуль | Назначение |
+### Core transport
+
+| Module | Purpose |
 |---|---|
-| `src/netlayer/` | основной транспорт узлов: приветствия и подпись, пиры, NAT, определение внешнего адреса, WebSocket/TLS-вход, ретрансляция (`relay.rs`), командная строка (`cli.rs`) |
-| `src/protocol/` | YTP («поезда и вагоны»): разбиение на вагоны, порядок, повторные запросы, регулятор скорости, станции, туннели выхода |
-| `src/dht/` | распределённая таблица (Kademlia): записи узлов, индекс юрисдикций, групповые записи |
-| `src/dataplane/`, `src/connectors/`, `src/state_manager/`, `src/observability/` | адаптивный транспорт, соединители (в т.ч. маскировка), управление состоянием, метрики |
+| `src/netlayer/` | Core node transport: hellos and signatures, peers, NAT, external-address detection, WebSocket/TLS entry, relaying (`relay.rs`), and the command line (`cli.rs`). |
+| `src/protocol/` | YTP (“trains and wagons”): wagon splitting, ordering, retransmission requests, rate control, stations, and exit tunnels. |
+| `src/dht/` | Distributed table (Kademlia): node records, jurisdiction index, and group records. |
+| `src/dataplane/`, `src/connectors/`, `src/state_manager/`, `src/observability/` | Adaptive transport, connectors including obfuscation, state management, and metrics. |
 
-### Прокси и выход
-| Модуль | Назначение |
+### Proxy and exit
+
+| Module | Purpose |
 |---|---|
-| `src/socks5/` | SOCKS5: сервер на вашем компьютере (`server.rs`) и обработчик выхода на узле-выходе (`exit_node.rs`) |
-| `src/proxy/` | HTTP-прокси и шлюз |
-| `src/exit_policy.rs` | **кто** может выходить через узел (никто / доверенные / все) и **куда** нельзя: на этот компьютер и в домашнюю сеть выход не пускает никогда |
-| `src/exit_select.rs` | автоматический выбор выхода из каталога карточек: фильтр по стране и связи, порядок по качеству, чередование, отдых сбойных, **измерение страны выхода через него самого** |
-| `src/reciprocity.rs` | взаимность: узел, который мог бы помогать, но отказывается, получает ограничение после льготного объёма; счёт переданных байт |
-| `src/route_rules.rs` | правила по сайтам: что через выход, что напрямую |
+| `src/socks5/` | SOCKS5: the server on your computer (`server.rs`) and the exit handler on an exit node (`exit_node.rs`). |
+| `src/proxy/` | HTTP proxy and gateway. |
+| `src/exit_policy.rs` | **Who** may exit through the node (nobody / trusted / everyone) and **where** it may not connect: the node's own computer and home network are always blocked. |
+| `src/exit_select.rs` | Automatic exit selection from the card directory: country and connection filters, quality ordering, rotation, failed-exit cooldown, and **measuring the exit country through the exit itself**. |
+| `src/reciprocity.rs` | Reciprocity: a node that could help but refuses is limited after its grace volume; transferred bytes are counted. |
+| `src/route_rules.rs` | Per-site routing rules: what goes through an exit and what goes directly. |
 
-### Сеть узлов
-| Модуль | Назначение |
+### Node network
+
+| Module | Purpose |
 |---|---|
-| `src/network_offers.rs` | подписанные **карточки узлов** (страна, мощность, чем помогает), каталог, обмен с соседями, списки по странам |
-| `src/reachability.rs` | проверка достижимости карточки **обратным подключением с подписью**; непроверенные карточки не используются и не раздаются |
-| `src/hops.rs`, `src/hops_net.rs` | **цепочки через несколько узлов** с шифрованием слоями: чистое ядро (построение «телескопом», подписанные рукопожатия, ячейки одного размера, окна повторов) и подключение к живому узлу (выход, SOCKS, личный шлюз) |
-| `src/relay_net.rs` | клиенты за NAT: подписанные записи «доступен через ретрансляторы», режим клиента, поиск ретранслятора |
-| `src/mobile_tls.rs` | вход для телефона по TLS с сайтом-маскировкой |
-| `src/bootstrap/` | подписанный список входных узлов и инструменты владельца списка (`yandi bootstrap …`), см. [`bootstrap/README.md`](../bootstrap/README.md) |
-| `src/mdns/` | обнаружение узлов в домашней сети |
+| `src/network_offers.rs` | Signed **node cards** (country, capacity, and offered services), directory, exchange with neighbors, and country lists. |
+| `src/reachability.rs` | Card reachability check through a **signed reverse connection**; unchecked cards are neither used nor distributed. |
+| `src/hops.rs`, `src/hops_net.rs` | **Multi-node circuits** with layered encryption: a pure core (telescope construction, signed handshakes, equal-size cells, replay windows) and connection to a live node (exit, SOCKS, or personal gateway). |
+| `src/relay_net.rs` | NAT clients: signed “reachable through relays” records, client mode, and relay discovery. |
+| `src/mobile_tls.rs` | TLS entry for phones with a site-like cover. |
+| `src/bootstrap/` | Signed entry-node list and owner tools (`yandi bootstrap …`); see [`bootstrap/README.md`](../bootstrap/README.md). |
+| `src/mdns/` | Node discovery on the local network. |
 
-### Люди
-| Модуль | Назначение |
+### Human channel
+
+| Module | Purpose |
 |---|---|
-| `src/p2p/` | канал людей: приветствие, рукопожатие, сеансы |
-| `src/communication/` | переписка (хранение, подтверждения прочтения), файлы, профили, группы |
-| `src/media/` | звонки: кодеки, сеансы |
-| `src/p2p_tunnel/`, `src/tunnel/`, `src/apps/` | туннели через канал людей, UDP-туннель, прикладной слой |
+| `src/p2p/` | Human channel: hello, handshake, and sessions. |
+| `src/communication/` | Messaging (storage and read receipts), files, profiles, and groups. |
+| `src/media/` | Calls: codecs and sessions. |
+| `src/p2p_tunnel/`, `src/tunnel/`, `src/apps/` | Tunnels through the human channel, UDP tunnel, and application layer. |
 
-### Веб-страница
-| Модуль | Назначение |
+### Web page
+
+| Module | Purpose |
 |---|---|
-| `src/web/` | страница управления (`ui/*.html`), вход по паролю, доверенные узлы по визитке (`peers.rs`), API. Слушает только `127.0.0.1`; защита от подмены Host |
+| `src/web/` | Management page (`ui/*.html`), password login, trusted nodes through a card (`peers.rs`), and API. On Linux it listens only through the owner-only local socket; on other platforms it uses the loopback web port and Host-header protection. |
 
-### Вспомогательное
-| Модуль | Назначение |
+### Supporting modules
+
+| Module | Purpose |
 |---|---|
-| `src/supervisor.rs` | присмотр за долгоживущими задачами: имя, политика перезапуска, причина завершения, `GET /api/kernel/status` |
-| `src/testnet.rs` | **тренировочная сеть**: `yandi testnet up N` поднимает N копий на одной машине (свои папки, порты, пароли) — на ней идут сетевые тесты |
-| `key_root/` | отдельная утилита корневого ключа узла |
+| `src/supervisor.rs` | Supervision of long-lived tasks: name, restart policy, termination reason, and `GET /api/kernel/status`. |
+| `src/testnet.rs` | **Test network**: `yandi testnet up N` starts N copies on one machine with separate directories, ports, and passwords; network tests run there. |
+| `key_root/` | Separate node root-key utility. |
 
-## Как проходит соединение «через сеть»
+## How a connection passes through the network
 
-1. Узел слушает соседей и обменивается **карточками**; каждую принятую карточку проверяет обратным подключением (`reachability`). Проверенные попадают в каталог.
-2. Пользователь запускает прокси: «быстро» (`socks5 auto`) или «анонимно» (`socks5 hops`). Приложение (браузер) ходит на `127.0.0.1` по SOCKS5.
-3. На каждое соединение `exit_select` выбирает выход (страна, качество, очередь), а в режиме «анонимно» `hops_net` строит цепочку вход → средний → выход.
-4. Выход (`socks5/exit_node.rs` или `hops_net`) открывает соединение с целью только на адрес в интернете и только по правилам владельца (`exit_policy`).
-5. Фоновая проверка периодически спрашивает выход, из какой он страны (`exit_select::probe_country`), и исключает обманувшего.
+1. The node listens for neighbors and exchanges **cards**; it checks every accepted card through a reverse connection (`reachability`). Verified cards enter the directory.
+2. The user starts a proxy: “fast” (`socks5 auto`) or “anonymous” (`socks5 hops`). The application (browser) connects to `127.0.0.1` through SOCKS5.
+3. For every connection, `exit_select` chooses an exit (country, quality, and queue). In “anonymous” mode, `hops_net` builds an entry → middle → exit circuit.
+4. The exit (`socks5/exit_node.rs` or `hops_net`) connects to the destination only at an Internet address and only under the owner's rules (`exit_policy`).
+5. A background check periodically asks the exit which country it is in (`exit_select::probe_country`) and excludes an exit that lied.
 
-## Порты (по умолчанию)
+## Default ports
 
-| Порт | Назначение |
+| Port | Purpose |
 |---|---|
-| 9000/UDP | основная связь узлов (обнаружение); на этом же номере по **TCP** слушает проверка достижимости |
-| 10000/UDP | данные основной связи |
-| 9001/UDP, 9998/UDP | канал людей: обнаружение и данные |
-| 9999/TCP | страница управления (только `127.0.0.1`) |
-| 8443/TCP | WebSocket-over-TLS вход (anchor) |
-| по желанию (`YANDI_MOBILE_TLS_PORT`, рекомендуется 443) | вход для телефона по TLS |
+| 9000/UDP | Core node transport (discovery); the reachability check also listens on this number over **TCP**. |
+| 10000/UDP | Core transport data. |
+| 9001/UDP, 9998/UDP | Human channel: discovery and data. |
+| — | Administration: the owner's Unix socket `~/.local/share/yandi/run/yandi-ui.sock` on Linux; there is no browser TCP port there. Other platforms use the loopback web UI port. |
+| 8443/TCP | WebSocket-over-TLS entry (anchor). |
+| Optional (`YANDI_MOBILE_TLS_PORT`, 443 recommended) | TLS entry for phones. |
 
-В тренировочной сети порты берутся блоком `26000 + 100·k`.
+In the test network, ports are allocated in blocks starting at `26000 + 100·k`.

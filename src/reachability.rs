@@ -75,6 +75,10 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
                     return;
                 }
             }
+            // автономный узел пробы чужих не подтверждает (молчит), запасной путь меша по TLS выше работает (аудит R9 №13)
+            if crate::autonomy::enabled() {
+                return;
+            }
             let work = async {
                 let mut req = [0u8; 20];
                 s.read_exact(&mut req).await.ok()?;
@@ -104,11 +108,16 @@ pub async fn serve(port: u16, node_id: [u8; 32], key: SigningKey, advertised: Op
 
 /// Проверить один адрес карточки: соединиться и проверить подпись. `Ok(())` — адрес достижим и принадлежит этому ключу.
 pub async fn probe(card: &NodeOffer, addr: &str) -> Result<(), &'static str> {
+    probe_identity(&card.key, &card.node_id, addr).await
+}
+
+/// То же по номеру и ключу узла (hex): подключиться по адресу и проверить подпись ключом под свежей строкой.
+pub async fn probe_identity(key_hex: &str, node_id_hex: &str, addr: &str) -> Result<(), &'static str> {
     if !probe_allowed(addr) {
         return Err("address not allowed");
     }
-    let key = hex::decode(&card.key).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
-    let want_id = hex::decode(&card.node_id).map_err(|_| "id")?;
+    let key = hex::decode(key_hex).ok().and_then(|b| <[u8; 32]>::try_from(b).ok()).and_then(|b| VerifyingKey::from_bytes(&b).ok()).ok_or("key")?;
+    let want_id = hex::decode(node_id_hex).map_err(|_| "id")?;
     let work = async {
         let mut s = TcpStream::connect(addr).await.map_err(|_| "no connection")?;
         let mut nonce = [0u8; 16];
@@ -146,7 +155,7 @@ mod tests {
     fn card_for(sk: &SigningKey, id: [u8; 32], addr: &str) -> NodeOffer {
         NodeOffer {
             v: 1, node_id: hex::encode(id), key: hex::encode(sk.verifying_key().to_bytes()), country: None, country_source: "unknown".into(), public_ip: true,
-            power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![addr.into()], exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, issued: 0, expires: 0, sig: String::new(),
+            power: "high".into(), cpu_cores: 4, ram_gb: 8, latency_ms: None, addr: vec![addr.into()], exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, version: String::new(), issued: 0, expires: 0, sig: String::new(),
         }
     }
 

@@ -375,13 +375,13 @@ mod hostile_input_tests {
         let _ = Socks5Address::from_bytes(Socks5AddressType::DomainName, &[255]);
     }
 
-    /// Недоверенный JSON от узла (запрос/данные туннеля) разбирается без паники.
+    /// Недоверенные запросы JSON и блоки туннеля разбираются без паники.
     #[test]
     fn json_messages_never_panic() {
         use crate::socks5::{Socks5ProxyRequest, Socks5TunnelData};
         for s in [&b""[..], b"{}", b"[", b"{\"request_id\":-1}", b"{\"request_id\":1,\"target_host\":\"x\",\"target_port\":70000,\"command\":1}", &[0xff; 64][..]] {
             let _ = serde_json::from_slice::<Socks5ProxyRequest>(s);
-            let _ = serde_json::from_slice::<Socks5TunnelData>(s);
+            let _ = Socks5TunnelData::parse(s);
         }
     }
 }

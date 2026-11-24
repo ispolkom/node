@@ -60,6 +60,10 @@ impl EnvelopeStore {
         if !path.is_absolute() || path.file_name().is_none() {
             bail!("нужен отдельный абсолютный каталог vault");
         }
+        // первый запуск: каталога данных ещё может не быть (иначе узел не стартовал бы на чистой установке)
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         match std::fs::DirBuilder::new().mode(0o700).create(path) {
             Ok(()) => {
                 File::open(
@@ -534,5 +538,15 @@ mod tests {
         altered.revision += 1;
         assert!(vault.unlock(&altered, "пароль владельца").is_err());
         assert!(!vault.unlocked());
+    }
+
+    #[test]
+    fn bug_r16_store_opens_when_the_data_directory_does_not_exist_yet() {
+        let base = tempfile::tempdir().unwrap();
+        let nested = base.path().join("fresh-install").join("yandi").join("closed");
+        assert!(!nested.parent().unwrap().exists());
+        let store = EnvelopeStore::open(&nested).unwrap();
+        assert!(store.load().unwrap().is_none());
+        assert!(EnvelopeStore::open(&nested).is_ok(), "повторное открытие тоже работает");
     }
 }

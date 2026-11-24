@@ -106,12 +106,16 @@ impl RecoveryCode {
     }
 }
 
-/// What to key the recovery wrapper with for whatever the person typed: a well-formed recovery code is used in its canonical form;
+/// What to key the recovery wrapper with for whatever the person typed: a well-formed recovery code or seed phrase is used in its canonical form;
 /// anything else is taken as a password, exactly as typed (older key directories were made with a chosen password).
 pub fn recovery_secret(input: &str) -> Zeroizing<String> {
     match RecoveryCode::parse(input) {
         Ok(code) => Zeroizing::new(code.secret().to_owned()),
-        Err(_) => Zeroizing::new(input.to_owned()),
+        // a seed phrase (12 or 24 words) is used by its bytes, whatever the spacing and letter case
+        Err(_) => match crate::seed::Seed::parse(input) {
+            Ok(seed) => seed.secret(),
+            Err(_) => Zeroizing::new(input.to_owned()),
+        },
     }
 }
 

@@ -6,6 +6,7 @@ import '../crypto/vault_keys.dart';
 import 'storage_service.dart';
 import 'vault_backend.dart';
 import 'vault_bytes_cache.dart';
+import 'video_frames.dart';
 
 /// Закрытая среда приложения: пароль (и, по желанию, секретные слова) → ключ данных → зашифрованная база.
 /// Пока приложение заблокировано, ключа нет ни в памяти, ни на диске: база не открывается.
@@ -164,6 +165,7 @@ class VaultService extends ChangeNotifier {
     _files?.dispose();
     _files = null;
     VaultBytesCache.clear();
+    VideoFrames.clear();         // готовые кадры превью видео — тоже расшифрованное содержимое
     StorageService.setSecureKey(null);
     keys?.lock();
     notifyListeners();

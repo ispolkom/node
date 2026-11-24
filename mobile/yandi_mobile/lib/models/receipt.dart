@@ -11,10 +11,34 @@ class MsgChannel {
   static const String rcptMarker = '\u0001yandi-rcpt:';  // {kind: delivered|read, ids: [...]} — квитанция
   static const String capMarker  = '\u0001yandi-cap:';   // поддержка квитанций этим устройством (пинг)
   static const String editMarker = '\u0001yandi-edit:';  // {cmid, text} — правка ранее отправленного сообщения
+  static const String rxMarker   = '\u0001yandi-rx:';    // {m: cmid, e: смайл} — реакция на сообщение личного чата (пустой смайл — снять)
+
+  /// Смайлы личного чата (простые, без счёта).
+  static const List<String> reactionSet = ['👍', '👎', '😊', '😢', '😂', '❤️'];
+
+  static String reaction(String cmid, String emoji) => rxMarker + jsonEncode({'m': cmid, 'e': emoji});
+
+  /// Разобрать реакцию: (cmid сообщения, смайл; пустой — снята). Неизвестный смайл отвергается.
+  static (String, String)? parseReaction(String t) {
+    if (!t.startsWith(rxMarker)) return null;
+    try {
+      final m = jsonDecode(t.substring(rxMarker.length)) as Map<String, dynamic>;
+      final id = m['m'], e = m['e'];
+      if (id is! String || id.isEmpty || id.length > 128 || e is! String) return null;
+      if (e.isNotEmpty && !reactionSet.contains(e)) return null;
+      return (id, e);
+    } catch (_) {
+      return null;
+    }
+  }
 
   /// Завернуть текст с его локальным id (cmid), чтобы получатель мог сослаться на него в квитанции.
-  static String wrapMessage(String cmid, String text) =>
-      msgMarker + jsonEncode({'v': 1, 'cmid': cmid, 'text': text});
+  static String wrapMessage(String cmid, String text, {String? replyId, String? replyText}) =>
+      msgMarker + jsonEncode({
+        'v': 1, 'cmid': cmid, 'text': text,
+        // ответ-цитата: id цитируемого сообщения (cmid у собеседника / номер на узле) и выдержка текста
+        if (replyText != null && replyText.isNotEmpty) 'reply': {'id': replyId ?? '', 'text': replyText},
+      });
 
   static String capPing() => '${capMarker}1';
 
@@ -25,7 +49,7 @@ class MsgChannel {
       editMarker + jsonEncode({'cmid': cmid, 'text': text});
 
   static bool isService(String t) =>
-      t.startsWith('\u0001yandi-av') || t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker);
+      t.startsWith('\u0001yandi-av') || t.startsWith(msgMarker) || t.startsWith(rcptMarker) || t.startsWith(capMarker) || t.startsWith(editMarker) || t.startsWith(rxMarker);
 
   static bool isCapPing(String t) => t.startsWith(capMarker);
 
@@ -55,6 +79,25 @@ class MsgChannel {
     } catch (_) {
       return null;
     }
+  }
+
+  /// Конверт сообщения с ответом-цитатой: (cmid, text, replyId, replyText); replyText == null — ответа нет.
+  static (String, String, String?, String?)? parseMessageFull(String t) {
+    final base = parseMessage(t);
+    if (base == null) return null;
+    try {
+      final m = jsonDecode(t.substring(msgMarker.length)) as Map<String, dynamic>;
+      final r = m['reply'];
+      if (r is Map) {
+        final text = r['text'];
+        final id = r['id'];
+        if (text is String && text.isNotEmpty) {
+          final cut = text.runes.length > 200 ? String.fromCharCodes(text.runes.take(200)) : text;
+          return (base.$1, base.$2, id is String ? id : '', cut);
+        }
+      }
+    } catch (_) {}
+    return (base.$1, base.$2, null, null);
   }
 
   /// Разобрать квитанцию: (kind, ids). kind — "delivered" или "read".

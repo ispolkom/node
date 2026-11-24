@@ -40,6 +40,10 @@ fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 /// Менеджер чата
 pub struct ChatManager {
     my_node_id: HashId,
@@ -68,6 +72,13 @@ const MAX_DELIVERY_AGE: Duration = Duration::from_secs(24 * 3600);
 const MAX_OUTBOX: usize = 2000;
 /// Incoming message ids remembered to recognise repeats.
 const SEEN_INCOMING_MAX: usize = 20_000;
+
+/// Наибольший размер сообщения (JSON) для одного пакета: полезная нагрузка пакета ограничена u16, остаток — на шифрование и заголовки.
+const MAX_WIRE_MESSAGE: usize = 60_000;
+
+fn fits_one_packet(msg: &ChatMessage) -> bool {
+    serde_json::to_vec(msg).map_or(false, |b| b.len() <= MAX_WIRE_MESSAGE)
+}
 
 impl ChatManager {
     /// Создать новый ChatManager
@@ -113,6 +124,11 @@ impl ChatManager {
     /// Перенос чатов и очереди на ключ закрытой среды (см. [`ChatStorage::rekey_to`]); возвращает число файлов с ошибкой.
     pub fn rekey_to(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize> {
         self.storage.rekey_to(old, new)
+    }
+
+    /// Среда стёрта: зашифрованные файлы чатов (история, очередь, журналы статусов) без ключа бесполезны — удаляются.
+    pub fn erase_encrypted(&self) {
+        self.storage.erase_encrypted();
     }
 
     pub fn is_locked(&self) -> bool {
@@ -177,9 +193,27 @@ impl ChatManager {
     pub fn spawn_delivery_timeout_task(self: Arc<Self>) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(2));
+            let mut last_prune = Instant::now() - Duration::from_secs(24 * 3600);
             loop {
                 interval.tick().await;
                 self.sweep_expired_acks().await;
+                // заглушки удалённых пользователей, отложенные при запертой среде
+                if !self.storage.is_locked() {
+                    self.apply_pending_tombstones();
+                }
+                // история одного чата — максимум год: раз в сутки (и при старте) удаляем более старое
+                if last_prune.elapsed() >= Duration::from_secs(24 * 3600) && !self.storage.is_locked() {
+                    last_prune = Instant::now();
+                    let now_ms = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_millis() as u64)
+                        .unwrap_or(0);
+                    if let Ok(n) = self.storage.prune_expired(now_ms) {
+                        if n > 0 {
+                            println!("💬 История: удалено сообщений старше года: {n}");
+                        }
+                    }
+                }
             }
         });
     }
@@ -187,7 +221,12 @@ impl ChatManager {
     /// One round of the outgoing queue: messages whose time has come are sent again; messages older than `MAX_DELIVERY_AGE`
     /// are marked `Failed`. (Split out so it can be called directly, e.g. from tests.)
     async fn sweep_expired_acks(&self) {
+        if self.storage.is_locked() {
+            return; // при запертой среде очередь не отправляется (она и так пуста после lock)
+        }
         let now = Instant::now();
+        // поколение запираний — до снятия снимка: lock/unlock во время отправки не оживляет снимок прошлого сеанса
+        let generation = self.storage.lock_generation();
         let mut due: Vec<(HashId, HashId, ChatMessage)> = Vec::new();
         let mut gave_up: Vec<(HashId, HashId)> = Vec::new();
         {
@@ -229,7 +268,37 @@ impl ChatManager {
             self.outbox_dirty
                 .store(true, std::sync::atomic::Ordering::Relaxed);
         }
+        self.send_due(due, generation).await;
+        self.persist_outbox_if_dirty().await;
+    }
+
+    /// Снять неподтверждённые исходящие с очереди повторов и из долговечного outbox: [peer] / [msg] — сузить выбор (оба None — всё).
+    async fn cancel_pending(&self, peer: Option<&HashId>, msg: Option<&HashId>) {
+        let removed = {
+            let mut pending = self.pending_acks.lock().await;
+            let before = pending.len();
+            pending.retain(|id, p| !(peer.is_none_or(|x| p.peer == *x) && msg.is_none_or(|m| id == m)));
+            before != pending.len()
+        };
+        if removed {
+            self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+            self.persist_outbox_if_dirty().await;
+        }
+    }
+
+    /// Отправить снимок «пора повторить». Перед каждой отправкой проверяется замок среды: снимок взят на открытой среде,
+    /// а запирание, случившееся во время отправки предыдущих, не должно выпускать оставшиеся копии. Возвращает число отправок.
+    async fn send_due(&self, due: Vec<(HashId, HashId, ChatMessage)>, generation: u64) -> usize {
+        let mut sent = 0usize;
         for (msg_id, peer, msg) in due {
+            if self.storage.is_locked() || self.storage.lock_generation() != generation {
+                break;
+            }
+            // сообщение могли удалить, пока шла предыдущая отправка: актуальность проверяется под очередью перед каждой отправкой
+            if !self.pending_acks.lock().await.contains_key(&msg_id) {
+                continue;
+            }
+            sent += 1;
             match self.send_once(&msg).await {
                 Ok(()) => debug!(
                     "🔁 resent message {} to {}",
@@ -248,7 +317,7 @@ impl ChatManager {
             // and the way to the peer may be closed (a NAT that has forgotten us, a new outside address): ask for an introduction (rate-limited inside)
             self.transport.request_punch(peer).await;
         }
-        self.persist_outbox_if_dirty().await;
+        sent
     }
 
     /// Write the outgoing queue to disk if it changed.
@@ -277,11 +346,29 @@ impl ChatManager {
         }
     }
 
+    /// Запечатать содержимое на ключ личности собеседника. Нет проверенного ключа — отказ (сообщение остаётся в очереди), открытого пути нет.
+    async fn seal_for(&self, to: HashId, plain: &[u8]) -> Result<Vec<u8>> {
+        let Some(pk) = self.transport.peer_signing_key(&to).await else {
+            return Err(anyhow::anyhow!("ключ собеседника ещё не получен: сообщение ждёт соединения"));
+        };
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| anyhow::anyhow!("недопустимый ключ собеседника"))?;
+        crate::crypto::sealed::seal(&self.transport.sealing_key(), &vk, &self.my_node_id.0, &to.0, now_ms(), plain)
+    }
+
+    /// Открыть присланное содержимое: конверт обязан быть от `from` и адресован нам; прежний открытый формат не принимается.
+    async fn open_from(&self, from: HashId, data: &[u8]) -> Result<Vec<u8>> {
+        let Some(pk) = self.transport.peer_signing_key(&from).await else {
+            return Err(anyhow::anyhow!("ключ отправителя неизвестен"));
+        };
+        let vk = ed25519_dalek::VerifyingKey::from_bytes(&pk).map_err(|_| anyhow::anyhow!("недопустимый ключ отправителя"))?;
+        let (_, plain) = crate::crypto::sealed::open(&self.transport.sealing_key(), &vk, &from.0, &self.my_node_id.0, now_ms(), data)?;
+        Ok(plain)
+    }
+
     /// One attempt to put a message on the wire.
     async fn send_once(&self, msg: &ChatMessage) -> Result<()> {
-        let msg_data = serde_json::to_vec(msg)?;
-        // P2PTransport applies the authenticated PFS session envelope to the
-        // whole packet. Do not add the unavailable legacy E2E stub here.
+        let msg_data = self.seal_for(msg.to, &serde_json::to_vec(msg)?).await?;
+        // содержимое запечатано на ключ получателя (E2E), поверх него транспорт добавляет сеансовое шифрование
         let p2p_packet =
             P2PPacket::new(P2PPacketType::ChatMessage, self.my_node_id, false, msg_data);
         self.transport
@@ -298,6 +385,12 @@ impl ChatManager {
         self.file_transfer_manager = Some(manager);
     }
 
+    /// Служебное сообщение (профиль и т.п.): одна попытка, без записи в историю и без очереди повторов.
+    pub async fn send_service(&self, to: HashId, text: String) -> Result<()> {
+        let msg = ChatMessage::new(self.my_node_id, to, text);
+        self.send_once(&msg).await
+    }
+
     /// Отправить текстовое сообщение
     pub async fn send_message(&self, to: HashId, text: String) -> Result<ChatMessage> {
         self.send_message_with_attachment(to, text, None).await
@@ -310,16 +403,40 @@ impl ChatManager {
         text: String,
         attachment: Option<crate::communication::FileAttachment>,
     ) -> Result<ChatMessage> {
+        self.send_message_full(to, text, attachment, None).await
+    }
+
+    /// Отправить сообщение с вложением и/или ответом-цитатой
+    pub async fn send_message_full(
+        &self,
+        to: HashId,
+        text: String,
+        attachment: Option<crate::communication::FileAttachment>,
+        reply_to: Option<crate::communication::ReplyRef>,
+    ) -> Result<ChatMessage> {
         info!("📤 Sending chat message to {}", hex::encode(&to.0[..8]));
+
+        // политика содержимого: ссылки не передаются, вложения только из белого списка
+        crate::content_policy::check_text(&text).map_err(|e| anyhow::anyhow!(e))?;
+        if let Some(att) = attachment.as_ref() {
+            crate::content_policy::attachment_allowed(&att.filename).map_err(|e| anyhow::anyhow!(e))?;
+        }
 
         // 1. Создать сообщение
         let mut msg = ChatMessage::new(self.my_node_id, to, text.clone());
         msg.status = MessageStatus::Shipping;
+        msg.reply_to = reply_to.and_then(|r| r.sanitized());
 
         // Добавить attachment если есть
         if let Some(att) = attachment {
             info!("📎 With attachment: {} ({} bytes)", att.filename, att.size);
             msg.attachment = Some(att);
+        }
+
+        // заведомо не уйдёт одним пакетом (длина полезной нагрузки пакета — u16): отказ до сохранения и постановки в очередь, иначе
+        // запись застряла бы в outbox и при каждой отправке ломала бы фоновый цикл повторов
+        if !fits_one_packet(&msg) {
+            return Err(anyhow::anyhow!("сообщение слишком длинное для отправки собеседнику (не более {MAX_WIRE_MESSAGE} байт)"));
         }
 
         if self.pending_acks.lock().await.len() >= MAX_OUTBOX {
@@ -330,6 +447,31 @@ impl ChatManager {
 
         // 2. Сохранить у себя (outgoing)
         self.storage.save_outgoing(&to, &msg)?;
+
+        // Ожидание подтверждения заводится ДО первой отправки: быстрый ACK, пришедший, пока отправка ещё в сети, находит запись и
+        // снимает её, а не теряется (иначе запись появилась бы потом и сообщение отправлялось бы повторно, а статус Read
+        // затирался бы на Shipping).
+        {
+            let mut pending = self.pending_acks.lock().await;
+            // среду могли запереть, пока отправка ждала очередь: возвращать в неё открытый текст нельзя
+            // (проверка под замком очереди: lock() сначала отзывает ключ, потом чистит очередь)
+            if self.storage.is_locked() {
+                return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+            }
+            pending.insert(
+                msg.msg_id,
+                PendingAck {
+                    peer: to,
+                    sent_at: Instant::now(),
+                    first_sent: unix_now(),
+                    attempts: 0,
+                    next_try: Instant::now() + retry_delay(1),
+                    msg: msg.clone(),
+                },
+            );
+        }
+        self.outbox_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
 
         // 3-6. Отправить; что не ушло или не подтверждено — остаётся в очереди и отправляется снова (см. PendingAck)
         let first_try = self.send_once(&msg).await;
@@ -349,23 +491,31 @@ impl ChatManager {
                 self.transport.request_punch(to).await; // no way to the peer yet: ask a mutual acquaintance to introduce us
             }
         }
-        self.pending_acks.lock().await.insert(
-            msg.msg_id,
-            PendingAck {
-                peer: to,
-                sent_at: Instant::now(),
-                first_sent: unix_now(),
-                attempts,
-                next_try: Instant::now() + retry_delay(attempts.max(1)),
-                msg: msg.clone(),
-            },
-        );
-        self.outbox_dirty
-            .store(true, std::sync::atomic::Ordering::Relaxed);
-
-        // 7. Обновить статус в файле
-        self.storage
-            .update_message_status(&to, &msg.msg_id, msg.status.clone())?;
+        // запись могла быть снята подтверждением, пришедшим во время отправки: тогда статус уже Read, и его не понижаем
+        let still_waiting = {
+            let mut pending = self.pending_acks.lock().await;
+            match pending.get_mut(&msg.msg_id) {
+                Some(p) => {
+                    p.attempts = attempts;
+                    p.next_try = Instant::now() + retry_delay(attempts.max(1));
+                    p.msg.status = msg.status.clone();
+                    true
+                }
+                None => false,
+            }
+        };
+        if still_waiting {
+            self.outbox_dirty
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            // 7. Обновить статус в файле
+            self.storage
+                .update_message_status(&to, &msg.msg_id, msg.status.clone())?;
+        } else if self.storage.is_locked() {
+            // среду заперли, пока шла отправка: очередь очищена замком, историю обновить нечем
+            return Err(anyhow::anyhow!("закрытая среда заперта: сообщение не поставлено в очередь"));
+        } else {
+            msg.status = MessageStatus::Read;
+        }
 
         Ok(msg)
     }
@@ -384,6 +534,17 @@ impl ChatManager {
         // 1. Расшифровать
         // 2. Десериализовать
         let mut msg: ChatMessage = serde_json::from_slice(&data)?;
+        msg.reply_to = msg.reply_to.take().and_then(|r| r.sanitized());
+        // старый или чужой клиент мог прислать ссылку или запрещённое вложение: у нас они не показываются
+        msg.text = crate::content_policy::strip_links(&msg.text);
+        if let Some(att) = msg.attachment.as_ref() {
+            if crate::content_policy::attachment_allowed(&att.filename).is_err() {
+                msg.attachment = None;
+                if msg.text.trim().is_empty() {
+                    msg.text = "[вложение не принято: такой тип файла в YANDI не передаётся]".into();
+                }
+            }
+        }
 
         // 3. Проверить: нам ли, от того ли, чьим ключом расшифровано, и в пределах размеров
         if let Err(why) = check_incoming(&msg, from, self.my_node_id) {
@@ -435,12 +596,21 @@ impl ChatManager {
 
         info!("✅ Message saved from {}", hex::encode(&from.0[..8]));
 
-        // 6. Отправить подтверждение доставки (ACK)
-        self.send_ack(from, msg.msg_id).await?;
+        // профиль контакта (ник, аватар): разбираем на узле; телефоны получат то же сообщение сами
+        for reply in crate::profile_sync::on_incoming(&from, &msg.text) {
+            let _ = self.send_service(from, reply).await;
+        }
+
+        // смайл-реакция собеседника на сообщение: запоминаем, в переписке её не показываем
+        crate::chat_reactions::on_incoming(&from, &msg.text);
 
         // 7. Уведомить Web UI (через канал)
         let _ = self.incoming_tx.send(msg.clone());
         crate::mobile_api::publish(&msg);
+
+        // 6. Подтверждение доставки (ACK) — ПОСЛЕ локальных действий: номер уже считается виденным, и повторная доставка (ветка
+        // дубля) их не повторит; сетевой сбой ACK не должен лишать телефоны события, а реакцию/профиль — применения.
+        self.send_ack(from, msg.msg_id).await?;
 
         Ok(msg)
     }
@@ -520,7 +690,15 @@ impl ChatManager {
                 info!("💬 ChatMessage from {}", hex::encode(&from.0[..8]));
 
                 // Расшифровать и обработать сообщение
-                match self.handle_incoming_message(from, packet.data).await {
+                let opened = match self.open_from(from, &packet.data).await {
+                    Ok(plain) => Ok(plain),
+                    Err(e) => Err(e),
+                };
+                let handled = match opened {
+                    Ok(plain) => self.handle_incoming_message(from, plain).await,
+                    Err(e) => Err(e),
+                };
+                match handled {
                     Ok(msg) => {
                         info!("✅ Chat message processed: {} bytes", msg.text.len());
 
@@ -557,6 +735,11 @@ impl ChatManager {
             CommControlPacket::ChatTyping => {
                 debug!("⌨️  ChatTyping from {}", hex::encode(&from.0[..8]));
                 // TODO: Показать индикатор "печатает..."
+            }
+            CommControlPacket::ChatDeleteMessage => {
+                if let Err(e) = self.handle_remote_delete(from, &packet.data) {
+                    debug!("🗑️ delete request from {} ignored: {}", hex::encode(&from.0[..8]), e);
+                }
             }
             CommControlPacket::FileTransferStart => {
                 info!("🚀 FileTransferStart from {}", hex::encode(&from.0[..8]));
@@ -663,14 +846,46 @@ impl ChatManager {
         self.storage.load_history(peer_id, limit)
     }
 
+    /// Удалённый пользователь: его сообщения в чате с ПК становятся заглушкой. Среда заперта — номер ждёт в отложенном
+    /// списке (без секретов) и применяется, как только среда откроется (см. `spawn_delivery_timeout_task`).
+    pub async fn tombstone_peer(&self, peer_id: &HashId) {
+        self.cancel_pending(Some(peer_id), None).await;
+        crate::chat_reactions::forget_peer(&hex::encode(&peer_id.0[..8]));
+        match self.storage.tombstone_author(peer_id) {
+            Ok(_) => {}
+            Err(_) => pending_tombstones_add(peer_id),
+        }
+    }
+
+    fn apply_pending_tombstones(&self) {
+        let pending = pending_tombstones();
+        if pending.is_empty() {
+            return;
+        }
+        let mut left = Vec::new();
+        for p in pending {
+            if self.storage.tombstone_author(&p).is_err() {
+                left.push(p);
+            }
+        }
+        pending_tombstones_save(&left);
+    }
+
     /// Очистить историю чата
-    pub fn clear_history(&self, peer_id: &HashId) -> Result<()> {
-        self.storage.clear_history(peer_id)
+    pub async fn clear_history(&self, peer_id: &HashId) -> Result<()> {
+        self.cancel_pending(Some(peer_id), None).await; // неподтверждённые исходящие тоже снимаются с очереди повторов
+        self.storage.clear_history(peer_id)?;
+        // реакции этой переписки не должны пережить саму историю
+        crate::chat_reactions::forget_peer(&hex::encode(&peer_id.0[..8]));
+        Ok(())
     }
 
     /// Очистить ВСЮ историю
-    pub fn clear_all_history(&self) -> Result<()> {
-        self.storage.clear_all()
+    pub async fn clear_all_history(&self) -> Result<()> {
+        self.cancel_pending(None, None).await;
+        self.storage.clear_all()?;
+        crate::chat_reactions::forget_all();
+        Ok(())
     }
 
     /// Редактировать сообщение
@@ -684,12 +899,13 @@ impl ChatManager {
     }
 
     /// Удалить сообщение локально (только у себя)
-    pub fn delete_message_local(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
+    pub async fn delete_message_local(&self, peer_id: &HashId, msg_id: &HashId) -> Result<()> {
         info!(
             "🗑️ Deleting message {} locally for peer {}",
             hex::encode(&msg_id.0[..8]),
             hex::encode(&peer_id.0[..8])
         );
+        self.cancel_pending(Some(peer_id), Some(msg_id)).await;
         self.storage.delete_message(peer_id, msg_id)
     }
 
@@ -705,7 +921,8 @@ impl ChatManager {
             hex::encode(&peer_id.0[..8])
         );
 
-        // 1. Удалить локально
+        // 1. Снять с очереди повторов (иначе удалённое содержимое ушло бы адресату позже) и удалить локально
+        self.cancel_pending(Some(peer_id), Some(msg_id)).await;
         self.storage.delete_message(peer_id, msg_id)?;
 
         // 2. Отправить запрос на удаление пиру
@@ -737,6 +954,31 @@ impl ChatManager {
             hex::encode(&peer_id.0[..8])
         );
         Ok(())
+    }
+
+    /// «Удалить для всех» от собеседника: стирается только сообщение, которое написал сам этот собеседник (`from` — проверенный
+    /// узел-отправитель пакета), и только в переписке с ним.
+    fn handle_remote_delete(&self, from: HashId, data: &[u8]) -> Result<()> {
+        #[derive(serde::Deserialize)]
+        struct Req {
+            msg_id: String,
+            #[serde(default)]
+            delete_for_everyone: bool,
+        }
+        let req: Req = serde_json::from_slice(data)?;
+        if !req.delete_for_everyone {
+            return Err(anyhow::anyhow!("not a delete-for-everyone request"));
+        }
+        let msg_id = HashId::from_hex(&req.msg_id).map_err(|_| anyhow::anyhow!("bad msg_id"))?;
+        let authored = self
+            .storage
+            .load_history(&from, usize::MAX)?
+            .iter()
+            .any(|m| m.msg_id == msg_id && m.from == from);
+        if !authored {
+            return Err(anyhow::anyhow!("no such message written by this peer"));
+        }
+        self.storage.delete_message(&from, &msg_id)
     }
 
     /// Получить список всех чатов
@@ -799,6 +1041,15 @@ fn check_incoming(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_message_too_long_for_one_packet_is_refused_before_it_is_queued() {
+        let id = HashId([1u8; 32]);
+        let short = ChatMessage::new(id, id, "привет".into());
+        assert!(fits_one_packet(&short));
+        let long = ChatMessage::new(id, id, "x".repeat(65_536));
+        assert!(!fits_one_packet(&long));
+    }
+
     use super::*;
 
     fn plain_msg(from: u8, to: u8, text: &str) -> ChatMessage {
@@ -813,6 +1064,7 @@ mod tests {
             edited: false,
             edit_timestamp: None,
             attachment: None,
+            reply_to: None,
         }
     }
 
@@ -851,9 +1103,15 @@ mod tests {
     /// delivery-timeout scenarios below share ONE ChatManager/transport
     /// instead of racing each other over the same env vars in parallel
     /// test threads.
-    async fn test_chat_manager() -> ChatManager {
-        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
-        std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
+    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>) {
+        // порты берутся из переменных окружения процесса: проверки, которым нужен транспорт, идут строго по одной
+        static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+        let guard = SERIAL.lock().await;
+        // у каждой проверки свои порты: транспорт прежней проверки может ещё не освободить сокеты
+        static NEXT_PORT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(19401);
+        let base = NEXT_PORT.fetch_add(2, std::sync::atomic::Ordering::SeqCst);
+        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", base.to_string());
+        std::env::set_var("YANDI_P2P_DATA_PORT", (base + 1).to_string());
         let identity = NodeIdentity::new();
         let my_node_id = identity.node_id();
         let transport = P2PTransport::new(identity, 0)
@@ -862,7 +1120,7 @@ mod tests {
         // чаты проверки — во временной папке, не в ~/.yandi/chats владельца
         let dir = std::env::temp_dir().join(format!("yandi-chat-test-{}", std::process::id()));
         let storage = ChatStorage::in_dir(my_node_id, dir).expect("storage");
-        ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager")
+        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard)
     }
 
     #[tokio::test]
@@ -906,8 +1164,41 @@ mod tests {
     /// The outgoing queue: a message nobody confirmed for a whole day is marked Failed; a confirmed one is left alone; a young
     /// unconfirmed one is NOT failed — it stays in the queue and is sent again (it used to be marked Failed after 45 seconds, and lost).
     #[tokio::test]
+    async fn a_deleted_or_cleared_message_leaves_the_retry_queue_and_the_outbox() {
+        let (cm, _serial) = test_chat_manager().await;
+        let mk = |peer: HashId, text: &str| {
+            let m = ChatMessage::new(cm.my_node_id, peer, text.to_string());
+            (m.msg_id, m)
+        };
+        let (pa, pb) = (crate::util::HashId::new_random(), crate::util::HashId::new_random());
+        let (a1, m_a1) = mk(pa, "a1");
+        let (a2, m_a2) = mk(pa, "a2");
+        let (b1, m_b1) = mk(pb, "b1");
+        for (peer, id, m) in [(pa, a1, &m_a1), (pa, a2, &m_a2), (pb, b1, &m_b1)] {
+            cm.storage.save_outgoing(&peer, m).unwrap();
+            cm.pending_acks.lock().await.insert(id, pending(peer, m.clone(), Duration::from_secs(5), Duration::from_secs(3600)));
+        }
+        // удалили одно сообщение «у себя»: оно уходит из очереди, остальные остаются
+        cm.delete_message_local(&pa, &a1).await.unwrap();
+        {
+            let q = cm.pending_acks.lock().await;
+            assert!(!q.contains_key(&a1) && q.contains_key(&a2) && q.contains_key(&b1));
+        }
+        // очистили переписку с pa: её сообщения уходят из очереди, чужие остаются
+        cm.clear_history(&pa).await.unwrap();
+        {
+            let q = cm.pending_acks.lock().await;
+            assert!(!q.contains_key(&a2) && q.contains_key(&b1));
+        }
+        // снимок «пора повторить», взятый до удаления, не должен отправиться
+        assert_eq!(cm.send_due(vec![(a2, pa, m_a2.clone())], cm.storage.lock_generation()).await, 0);
+        cm.clear_all_history().await.unwrap();
+        assert!(cm.pending_acks.lock().await.is_empty());
+    }
+
+    #[tokio::test]
     async fn the_queue_fails_only_day_old_messages_and_keeps_young_ones_for_resending() {
-        let cm = test_chat_manager().await;
+        let (cm, _serial) = test_chat_manager().await;
 
         let old_peer = crate::util::HashId::new_random();
         let old_msg = ChatMessage::new(cm.my_node_id, old_peer, "hello?".to_string());
@@ -1024,12 +1315,26 @@ mod tests {
             1,
             "a resend is not stored twice"
         );
+
+        // «удалить для всех»: чужое сообщение (написанное нами) собеседник стереть не может, своё — может
+        let ours = ChatMessage::new(cm.my_node_id, from, "наше".to_string());
+        cm.storage.save_outgoing(&from, &ours).unwrap();
+        let del = |id: &HashId| crate::communication::CommPacket {
+            packet_type: crate::communication::CommControlPacket::ChatDeleteMessage,
+            data: serde_json::to_vec(&serde_json::json!({"msg_id": hex::encode(id.0), "delete_for_everyone": true})).unwrap(),
+        };
+        cm.handle_comm_packet(from, del(&ours.msg_id)).await.unwrap();
+        assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 2, "чужое сообщение не стёрто");
+        cm.handle_comm_packet(from, del(&incoming.msg_id)).await.unwrap();
+        let left = cm.storage.load_history(&from, 10).unwrap();
+        assert_eq!(left.len(), 1, "своё сообщение собеседника стёрто по его просьбе");
+        assert_eq!(left[0].msg_id, ours.msg_id);
     }
 
     /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
     #[tokio::test(flavor = "multi_thread")]
     async fn locked_chat_does_not_swallow_incoming_and_keeps_outbox() {
-        let cm = test_chat_manager().await;
+        let (cm, _serial) = test_chat_manager().await;
         cm.storage.set_master([9; 32]);
         let peer = crate::util::HashId::new_random();
         let queued = ChatMessage::new(cm.my_node_id, peer, "в очереди".to_string());
@@ -1045,8 +1350,22 @@ mod tests {
         assert!(cm.handle_incoming_message(from, bytes.clone()).await.is_err());
         assert!(cm.storage.save_outbox(&[]).is_err(), "пустая очередь не стирает файл у запертого хранилища");
 
+        // отправка, прервавшая lock, могла оставить в очереди открытый текст: запертая очередь не отправляется
+        let stray = ChatMessage::new(cm.my_node_id, peer, "секрет".to_string());
+        cm.pending_acks.lock().await.insert(stray.msg_id, pending(peer, stray.clone(), Duration::from_secs(5), Duration::ZERO));
+        cm.sweep_expired_acks().await;
+        assert_eq!(cm.pending_acks.lock().await[&stray.msg_id].attempts, 1, "запертая очередь не отправляется");
+        cm.pending_acks.lock().await.clear();
+        // снимок, взятый до lock, после него не отправляется
+        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())], cm.storage.lock_generation()).await, 0, "после lock копии из снимка не уходят");
+
         cm.unlock([9; 32]).await;
         assert_eq!(cm.pending_acks.lock().await.len(), 1, "очередь поднята с диска после разблокировки");
+        // снимок прошлого сеанса не оживает после полного цикла lock/unlock
+        let old_session = cm.storage.lock_generation();
+        cm.lock().await;
+        cm.unlock([9; 32]).await;
+        assert_eq!(cm.send_due(vec![(stray.msg_id, peer, stray.clone())], old_session).await, 0, "снимок до lock/unlock не отправляется");
         let _ = cm.handle_incoming_message(from, bytes).await;
         assert_eq!(cm.storage.load_history(&from, 10).unwrap().len(), 1, "повтор после отказа сохранён, а не принят за дубль");
     }
@@ -1056,4 +1375,137 @@ mod tests {
         let d: Vec<u64> = (1..=9).map(|n| retry_delay(n).as_secs()).collect();
         assert_eq!(d, vec![3, 6, 12, 24, 48, 60, 60, 60, 60]);
     }
+
+    /// E2E v1: содержимое чата запечатывается на ключ собеседника; чужой, подмена отправителя и прежний открытый вид отвергаются.
+    #[tokio::test]
+    async fn chat_content_is_sealed_end_to_end_and_plaintext_is_refused() {
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
+        let peer = HashId([77u8; 32]);
+        let other = HashId([78u8; 32]);
+        // ключа собеседника ещё нет: отправка отказывает, открытого пути нет
+        assert!(cm.seal_for(peer, b"x").await.is_err());
+        assert!(cm.open_from(peer, b"{\"text\":\"hi\"}").await.is_err());
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        // исходящее: запечатано, не содержит текста, открывается ключом собеседника только для него
+        let env = cm.seal_for(peer, "секрет".as_bytes()).await.unwrap();
+        assert!(!env.windows("секрет".len()).any(|w| w == "секрет".as_bytes()));
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let (_, back) = crate::crypto::sealed::open(&peer_key, &me_vk, &cm.my_node_id.0, &peer.0, now_ms(), &env).unwrap();
+        assert_eq!(back, "секрет".as_bytes());
+        // входящее: от собеседника открывается, прежний открытый JSON — нет, чужой отправитель — нет
+        let to_me = crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), b"hello").unwrap();
+        assert_eq!(cm.open_from(peer, &to_me).await.unwrap(), b"hello");
+        assert!(cm.open_from(peer, b"{\"text\":\"hi\"}").await.is_err(), "открытый вид принят");
+        cm.transport.test_add_peer_key(other, ed25519_dalek::SigningKey::from_bytes(&[78u8; 32]).verifying_key().to_bytes()).await;
+        assert!(cm.open_from(other, &to_me).await.is_err(), "конверт, подписанный другим, принят от третьего");
+    }
+
+    /// E2E для сигнализации звонков: принимается только запечатанный подписанный сигнал с верным типом; открытый, чужой и с подменённым типом — нет.
+    #[tokio::test]
+    async fn call_signals_are_accepted_only_sealed_signed_and_with_the_right_type() {
+        use crate::p2p::P2PPacketType as T;
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
+        let peer = HashId([91u8; 32]);
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let make = |ty: T, body: &[u8]| {
+            let mut plain = vec![ty.to_byte()];
+            plain.extend_from_slice(body);
+            crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), &plain).unwrap()
+        };
+        let offer = make(T::VoiceData, br#"{"sdp":"v=0 a=fingerprint:sha-256 AA"}"#);
+        // ключа собеседника нет — отвергается
+        assert!(cm.transport.open_signal(peer, T::VoiceData, &offer).await.is_none());
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        assert_eq!(cm.transport.open_signal(peer, T::VoiceData, &offer).await.unwrap(), br#"{"sdp":"v=0 a=fingerprint:sha-256 AA"}"#);
+        // подмена внешнего типа (конверт от VoiceData выдан за запрос на видео) и открытый текст
+        assert!(cm.transport.open_signal(peer, T::VideoCallRequest, &offer).await.is_none());
+        assert!(cm.transport.open_signal(peer, T::VoiceData, br#"{"sdp":"x"}"#).await.is_none());
+        // конверт другого отправителя, выданный за пакет от peer
+        let evil = ed25519_dalek::SigningKey::from_bytes(&[92u8; 32]);
+        let mut plain = vec![T::VoiceData.to_byte()];
+        plain.extend_from_slice(b"{}");
+        let forged = crate::crypto::sealed::seal(&evil, &me_vk, &peer.0, &cm.my_node_id.0, now_ms(), &plain).unwrap();
+        assert!(cm.transport.open_signal(peer, T::VoiceData, &forged).await.is_none());
+    }
+
+    /// Какие пакеты идут только запечатанными; служебные пакеты самого транспорта и куски файла (свой ключ) — нет.
+    #[test]
+    fn the_sealed_packet_set_covers_control_traffic_only() {
+        use crate::p2p::P2PPacketType as T;
+        use crate::p2p::transport::must_seal;
+        for t in [T::ChatAck, T::ChatRead, T::ChatTyping, T::ChatDeleteMessage, T::VoiceCallRequest, T::VoiceData, T::VideoCallReject, T::VideoData, T::FileTransferStart, T::FileTransferEnd, T::FileTransferCancel, T::FileMissing, T::FileComplete] {
+            assert!(must_seal(t), "{t:?} должен идти запечатанным");
+        }
+        for t in [T::ChatMessage, T::FileChunk, T::PunchReq, T::PunchIntro, T::RelayReq, T::RelayGrant, T::PathChallenge, T::PathResponse] {
+            assert!(!must_seal(t), "{t:?} не должен запечатываться этим слоем");
+        }
+    }
+
+    /// P26-1: тот же конверт сигнала во второй раз не принимается, а просроченный по короткому окну отвергается.
+    #[tokio::test]
+    async fn a_replayed_or_stale_call_signal_is_refused() {
+        use crate::p2p::P2PPacketType as T;
+        let (cm, _g) = test_chat_manager().await;
+        let peer_key = ed25519_dalek::SigningKey::from_bytes(&[93u8; 32]);
+        let peer = HashId([93u8; 32]);
+        cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;
+        let me_vk = cm.transport.sealing_key().verifying_key();
+        let make = |at: u64| {
+            let mut plain = vec![T::VoiceCallRequest.to_byte()];
+            plain.extend_from_slice(br#"{"call_id":"abc"}"#);
+            crate::crypto::sealed::seal(&peer_key, &me_vk, &peer.0, &cm.my_node_id.0, at, &plain).unwrap()
+        };
+        let env = make(now_ms());
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &env).await.is_some());
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &env).await.is_none(), "повтор принят");
+        let old = make(now_ms() - crate::p2p::transport::SIGNAL_WINDOW_MS - 1_000);
+        assert!(cm.transport.open_signal(peer, T::VoiceCallRequest, &old).await.is_none(), "просроченный сигнал принят");
+    }
+
+    /// P26-2: поток запечатанных пакетов от одного собеседника упирается в бюджет дорогих проверок.
+    #[test]
+    fn expensive_opens_per_peer_are_budgeted() {
+        let mut g = crate::p2p::transport::SealGuard::default();
+        let peer = HashId([5u8; 32]);
+        let t0 = std::time::Instant::now();
+        let allowed = (0..1000).filter(|_| g.allow(peer, t0)).count();
+        assert!(allowed <= 200, "пропущено {allowed} подряд");
+        assert!(g.allow(HashId([6u8; 32]), t0), "другой собеседник не должен страдать");
+        assert!(g.allow(peer, t0 + std::time::Duration::from_secs(1)), "бюджет восстанавливается");
+    }
+}
+
+/// Отложенные заглушки: номера удалённых устройств (не секрет), ждущие открытия закрытой среды.
+fn pending_tombstones_path() -> std::path::PathBuf {
+    crate::util::data_dir::data_dir().join("tombstones_pending.json")
+}
+
+fn pending_tombstones() -> Vec<HashId> {
+    std::fs::read_to_string(pending_tombstones_path())
+        .ok()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default()
+        .iter()
+        .filter_map(|h| hex::decode(h).ok().and_then(|b| <[u8; 32]>::try_from(b.as_slice()).ok()).map(HashId))
+        .collect()
+}
+
+fn pending_tombstones_save(l: &[HashId]) {
+    let p = pending_tombstones_path();
+    if l.is_empty() {
+        let _ = std::fs::remove_file(p);
+        return;
+    }
+    let v: Vec<String> = l.iter().map(|h| hex::encode(h.0)).collect();
+    let _ = crate::util::private_file::write_private(&p, serde_json::to_string(&v).unwrap_or_default().as_bytes());
+}
+
+fn pending_tombstones_add(peer: &HashId) {
+    let mut l = pending_tombstones();
+    if !l.contains(peer) {
+        l.push(*peer);
+    }
+    pending_tombstones_save(&l);
 }

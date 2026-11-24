@@ -23,6 +23,18 @@ pub const OFFER_TTL_SECS: u64 = 2 * 3600;
 /// Срок карточки узла с динамическим адресом: сеть перепроверяет такой адрес чаще.
 pub const DYNAMIC_OFFER_TTL_SECS: u64 = 15 * 60;
 pub const RESIGN_EVERY_SECS: u64 = 30 * 60;
+/// Пора ли подписать собственную карточку заново: изменилось содержимое, прошёл период или до срока осталось меньше трети жизни.
+/// (Карточка динамического узла живёт 15 минут — перевыпуск раз в 30 оставлял её просроченной половину времени.)
+pub fn resign_due(changed: bool, now: u64, last_sign: u64, expires: Option<u64>) -> bool {
+    if changed || now.saturating_sub(last_sign) >= RESIGN_EVERY_SECS {
+        return true;
+    }
+    match expires {
+        Some(e) => e.saturating_sub(now) < DYNAMIC_OFFER_TTL_SECS / 3 * 2,
+        None => true,
+    }
+}
+
 /// Сколько карточек в одном пакете обмена (своя + чужие).
 pub const GOSSIP_BATCH: usize = 24;
 pub const MAX_DIRECTORY: usize = 5000;
@@ -63,6 +75,9 @@ pub struct NodeOffer {
     /// port where the node accepts the hello of the chat channel (0 = not announced): lets a contact find the node as a home node of a client
     #[serde(default)]
     pub p2p: u16,
+    /// версия сборки узла — мягкий сигнал (подделать можно; для диагностики и приоритета), docs/ROADMAP_R9.md §5
+    #[serde(default)]
+    pub version: String,
     pub issued: u64,
     pub expires: u64,
     /// подпись Ed25519 (128 hex) всего остального
@@ -349,6 +364,7 @@ pub fn build_own(node_id: &[u8; 32], key: &SigningKey, a: &SelfAssessment, now: 
         relay: can_exit && crate::relay_net::relay_enabled(),
         dynamic_ip,
         p2p: crate::p2p::transport::configured_ports().1,
+        version: crate::update_check::own_version(),
         issued: now,
         expires: now + if dynamic_ip { DYNAMIC_OFFER_TTL_SECS } else { OFFER_TTL_SECS },
         sig: String::new(),
@@ -391,6 +407,10 @@ fn rate_ok(sender: &[u8; 32], now: u64) -> bool {
 
 /// Принять пакет обмена от соседа (из общей раздачи пакетов основной связи).
 pub fn on_packet(sender: &[u8; 32], plaintext: &[u8]) -> usize {
+    // автономный узел карточек не принимает: иначе участник меша вывел бы его на пробы к узлам общей сети (аудит R9 №10)
+    if crate::autonomy::enabled() {
+        return 0;
+    }
     let now = now_secs();
     if !rate_ok(sender, now) {
         return 0;
@@ -512,6 +532,14 @@ pub fn start(
         println!("[offers] карточка узла: страна {} ({}), публичный адрес {}, мощность {}, выход {}",
             o.country.as_deref().unwrap_or("неизвестна"), o.country_source, if o.public_ip { "есть" } else { "нет" }, o.power, if o.exit { "да" } else { "нет" });
     }
+    start_listener(&a, node_id, &key);
+    let a = std::sync::Arc::new(Mutex::new(a));
+    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+    run_loops(transport, node_id, key, a, wake, watch_ip, on_address_change);
+}
+
+/// Слушатель на TCP-порту основной связи: пробы (только в общей сети) и запасной путь по TCP/TLS (в обоих мирах — меш тоже).
+pub fn start_listener(a: &SelfAssessment, node_id: [u8; 32], key: &SigningKey) {
     // слушатель проб: на TCP-порту основной связи (порты TCP и UDP независимы)
     // порт TCP — номер порта обнаружения (по нему же слушает запасной путь по TCP, даже если внешний адрес ещё не известен)
     let port = a.addr.first().and_then(|x| x.parse::<std::net::SocketAddr>().ok()).map(|s| s.port()).or_else(|| Some(crate::core::get_config().ports.discovery));
@@ -519,8 +547,18 @@ pub fn start(
         let key = key.clone();
         crate::supervisor::supervise("reachability_listener", crate::supervisor::Policy::restart(), move || crate::reachability::serve(port, node_id, key.clone(), None));
     }
-    let a = std::sync::Arc::new(Mutex::new(a));
-    let wake = std::sync::Arc::new(tokio::sync::Notify::new());
+}
+
+/// Циклы карточки: слежение за адресом, переподпись, раздача и пробы — только узлу общей сети.
+fn run_loops(
+    transport: std::sync::Arc<crate::netlayer::transport::P2PTransport>,
+    node_id: [u8; 32],
+    key: SigningKey,
+    a: std::sync::Arc<Mutex<SelfAssessment>>,
+    wake: std::sync::Arc<tokio::sync::Notify>,
+    watch_ip: bool,
+    on_address_change: Option<std::sync::Arc<dyn Fn(String) + Send + Sync>>,
+) {
     if watch_ip {
         let (a, wake) = (a.clone(), wake.clone());
         crate::supervisor::supervise("ip_watch", crate::supervisor::Policy::restart(), move || {
@@ -561,7 +599,7 @@ pub fn start(
             // или сменился адрес
             let fresh = build_own(&node_id, &key, &a.lock().unwrap_or_else(|e| e.into_inner()).clone(), now);
             let changed = own().map(|o| o.exit != fresh.exit || o.addr != fresh.addr).unwrap_or(true);
-            if changed || now - last_sign >= RESIGN_EVERY_SECS {
+            if resign_due(changed, now, last_sign, own().map(|o| o.expires)) {
                 set_own(fresh);
                 last_sign = now;
             }
@@ -643,7 +681,7 @@ mod tests {
     }
     // без правил выхода (они глобальные) — те же поля руками
     fn build_offer_for_test(node_id: &[u8; 32], k: &SigningKey, a: &SelfAssessment, now: u64) -> NodeOffer {
-        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
+        NodeOffer { v: 1, node_id: to_hex(node_id), key: String::new(), country: a.country.clone(), country_source: a.country_source.into(), public_ip: a.public_ip, power: a.power.into(), cpu_cores: a.cpu_cores, ram_gb: a.ram_gb, latency_ms: a.latency_ms, addr: a.addr.clone(), exit: true, can_exit: true, relay: false, dynamic_ip: false, p2p: 0, version: String::new(), issued: now, expires: now + OFFER_TTL_SECS, sig: String::new() }.sign(k)
     }
     const NOW: u64 = 1_800_000_000;
 
@@ -780,5 +818,25 @@ mod tests {
         assert_eq!(normalise_country("Unknown"), None);
         assert_eq!(normalise_country(""), None);
         assert_eq!(normalise_country("R1"), None);
+    }
+}
+
+#[cfg(test)]
+mod resign_tests {
+    use super::*;
+
+    #[test]
+    fn a_short_lived_card_is_renewed_before_it_expires() {
+        let now = 10_000;
+        // обычная карточка (2 часа): до срока далеко, период не прошёл — не трогаем
+        assert!(!resign_due(false, now, now - 60, Some(now + OFFER_TTL_SECS)));
+        // динамическая (15 минут): подписана 10 минут назад, осталось 5 — пора, хотя период в 30 минут ещё не прошёл
+        assert!(resign_due(false, now, now - 600, Some(now + DYNAMIC_OFFER_TTL_SECS - 600)));
+        // свежая динамическая — рано
+        assert!(!resign_due(false, now, now - 10, Some(now + DYNAMIC_OFFER_TTL_SECS - 10)));
+        // изменилось содержимое — сразу; нет карточки — сразу; прошёл период — сразу
+        assert!(resign_due(true, now, now, Some(now + OFFER_TTL_SECS)));
+        assert!(resign_due(false, now, now, None));
+        assert!(resign_due(false, now, now - RESIGN_EVERY_SECS, Some(now + OFFER_TTL_SECS)));
     }
 }

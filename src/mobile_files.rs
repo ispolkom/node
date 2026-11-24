@@ -29,6 +29,8 @@ const MAX_PENDING_PER_SENDER: usize = 20;
 /// Готовый файл лежит, пока его не заберут, но не дольше недели; недокачанный — сутки.
 const TTL_DONE_MS: u64 = 7 * 24 * 3600 * 1000;
 const TTL_PARTIAL_MS: u64 = 24 * 3600 * 1000;
+/// Нижняя граница среднего куска при проверке числа кусков (клиенты режут по 256 КБ и 1 МБ, запас вчетверо).
+const MIN_CHUNK_PLAIN: u64 = 64 * 1024;
 /// Накладные расходы шифрования одного куска (случайное число 12 байт и метка 16 байт).
 const CHUNK_OVERHEAD: u64 = 28;
 
@@ -43,6 +45,9 @@ struct Meta {
     total_chunks: u32,
     created_ms: u64,
     done: bool,
+    /// абсолютный срок (мс) для файлов гостя: назначен при создании, не продлевается сменой роли и перезапуском (0 — нет)
+    #[serde(default)]
+    exp_ms: u64,
 }
 
 fn root() -> PathBuf {
@@ -99,7 +104,33 @@ static BEGIN: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 static PUT: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 fn expired(m: &Meta) -> bool {
-    now_ms().saturating_sub(m.created_ms) > if m.done { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+    // файлы гостя (отправителя или получателя) живут сутки от создания, а не неделю; срок записан при создании и от роли не зависит
+    if m.exp_ms > 0 && now_ms() >= m.exp_ms {
+        return true;
+    }
+    let guest = crate::mobile_api::is_guest_peer(&m.from) || crate::mobile_api::is_guest_peer(&m.to);
+    now_ms().saturating_sub(m.created_ms) > if m.done && !guest && m.exp_ms == 0 { TTL_DONE_MS } else { TTL_PARTIAL_MS }
+}
+
+/// Срок файла: сутки, если на любом конце гость (иначе 0 — обычные сроки).
+fn guest_exp(from: &str, to: &str) -> u64 {
+    if crate::mobile_api::is_guest_peer(from) || crate::mobile_api::is_guest_peer(to) {
+        now_ms() + 24 * 3600 * 1000
+    } else {
+        0
+    }
+}
+
+/// Гостя удалили: его файлы (отправленные и ожидающие его) удаляются сразу, а не по сроку «обычного» файла.
+pub async fn drop_peer_files(peer: String) {
+    // под замком начала передачи: начатая параллельно передача удалённого устройства либо уже лежит (и будет удалена), либо
+    // её `start` после замка увидит, что устройства нет
+    let _g = BEGIN.lock().await;
+    for m in all_meta().await {
+        if m.from == peer || m.to == peer {
+            let _ = tokio::fs::remove_dir_all(dir_of(&m.id)).await;
+        }
+    }
 }
 
 /// Передача, если она есть и не просрочена (просроченная сразу убирается: срок соблюдается при каждом обращении, а не только при уборке).
@@ -138,6 +169,12 @@ async fn store_chunk(m: &Meta, idx: u32, body: &[u8]) -> Result<(), (StatusCode,
     let d = dir_of(&m.id);
     let tmp = d.join(format!("{}.{:016x}.tmp", chunk_name(idx), rand::random::<u64>()));
     let _g = PUT.lock().await;
+    // состояние перечитывается под замком: пока запрос ждал, DONE мог завершить передачу и открыть её получателю
+    match load_meta(&m.id).await {
+        Some(cur) if !cur.done => {}
+        Some(_) => return Err((StatusCode::CONFLICT, "передача уже завершена")),
+        None => return Err((StatusCode::NOT_FOUND, "передача не найдена")),
+    }
     if stored_bytes(&m.id, idx).await + body.len() as u64 > reserved(m) {
         return too_big;
     }
@@ -193,12 +230,39 @@ pub struct StartReq {
 /// Начать передачу: узел выдаёт номер, под которым отправитель заливает куски.
 pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Json(req): Json<StartReq>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     // получатель — другой телефон владельца или сам компьютер (переписка телефона с веб-чатом узла, см. mobile_self)
     if req.to_peer_id == me || !(is_device_peer(&req.to_peer_id) || crate::mobile_api::is_node_peer(&req.to_peer_id)) {
         return err(StatusCode::BAD_REQUEST, "файлы можно отправлять только на другое сопряжённое устройство");
     }
+    // политика содержимого: только разрешённые типы файлов (имя проверяется целиком, содержимое — приложением до шифрования)
+    // анонимное имя «file» шлёт само приложение (настоящее имя — внутри зашифрованного предложения)
+    if req.file_name != "file" {
+        if let Err(why) = crate::content_policy::attachment_allowed(&req.file_name) {
+            return err(StatusCode::UNSUPPORTED_MEDIA_TYPE, &why);
+        }
+    }
     if req.total_chunks == 0 || req.total_chunks > MAX_CHUNKS || req.file_size == 0 || req.file_size > MAX_FILE {
         return err(StatusCode::PAYLOAD_TOO_LARGE, "файл слишком большой или пустой");
+    }
+    // число кусков соответствует размеру: клиенты режут по 256 КБ / 1 МБ, поэтому кусков не больше чем по 64 КБ на кусок —
+    // крошечные куски не съедают диск и индексные узлы (аудит R9 №2)
+    if u64::from(req.total_chunks) > req.file_size.div_ceil(MIN_CHUNK_PLAIN) {
+        return err(StatusCode::BAD_REQUEST, "слишком много кусков для такого размера файла");
+    }
+    // пользователь узла и гость (не владелец): файлы только другим гостям и пользователям узла, не владельцу и не компьютеру;
+    // у гостя, кроме того, не больше 30 МБ, 20 файлов и 300 МБ в сутки
+    if crate::mobile_api::is_restricted_device(&dev) {
+        if !crate::mobile_api::is_restricted_peer(&req.to_peer_id) {
+            return err(StatusCode::FORBIDDEN, "этому устройству можно передавать файлы только другим гостям и пользователям этого узла");
+        }
+    }
+    if crate::mobile_api::is_guest_device(&dev) {
+        if let Err(why) = crate::guest::reserve_file(&dev, req.file_size) {
+            return err(StatusCode::TOO_MANY_REQUESTS, why);
+        }
     }
     // кусков не меньше, чем нужно для размера, и не вдвое больше
     let per = req.file_size.div_ceil(req.total_chunks as u64);
@@ -223,7 +287,16 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
         hex::encode(b)
     };
     let label: String = req.file_name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(64).collect();
-    let meta = Meta { id: id.clone(), from: me, to: req.to_peer_id, file_name: label, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false };
+    // пока запрос ждал замка, отправителя или получателя могли удалить (самовыход, жалобы, уборка): осиротевшая передача
+    // осталась бы на диске (аудит R9 №21)
+    if device_peer_of(&dev).as_deref() != Some(me.as_str()) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if crate::mobile_api::is_restricted_device(&dev) && !crate::mobile_api::is_restricted_peer(&req.to_peer_id) && !crate::mobile_api::is_device_peer(&req.to_peer_id) {
+        return err(StatusCode::FORBIDDEN, "получатель уже не на этом узле");
+    }
+    let exp_ms = guest_exp(&me, &req.to_peer_id);
+    let meta = Meta { id: id.clone(), from: me, to: req.to_peer_id, file_name: label, file_size: req.file_size, total_chunks: req.total_chunks, created_ms: now_ms(), done: false, exp_ms };
     if tokio::fs::create_dir_all(dir_of(&id)).await.is_err() || save_meta(&meta).await.is_err() {
         return err(StatusCode::INTERNAL_SERVER_ERROR, "не удалось создать передачу");
     }
@@ -233,6 +306,9 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 /// Залить один кусок (повторная заливка того же куска безопасна: так работает докачка).
 pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((id, idx)): Path<(String, u32)>, body: Bytes) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let Some(m) = live_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
     if m.from != me {
         return StatusCode::FORBIDDEN.into_response();
@@ -268,10 +344,15 @@ async fn present(id: &str) -> Vec<u32> {
 /// Отправитель сообщает, что все куски залиты; узел проверяет, что ни одного не потеряно.
 pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(id): Path<String>) -> Response {
     let Some(me) = device_peer_of(&dev) else { return StatusCode::UNAUTHORIZED.into_response() };
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let Some(mut m) = live_meta(&id).await else { return StatusCode::NOT_FOUND.into_response() };
     if m.from != me {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // завершение и запись куска исключают друг друга: набор кусков в момент DONE — окончательный
+    let _g = PUT.lock().await;
     let have = present(&id).await;
     let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
     if !missing.is_empty() {
@@ -381,7 +462,7 @@ pub(crate) async fn node_begin(from: &str, to: &str, file_size: u64, total_chunk
         rand::thread_rng().fill_bytes(&mut b);
         hex::encode(b)
     };
-    let meta = Meta { id: id.clone(), from: from.to_string(), to: to.to_string(), file_name: "file".into(), file_size, total_chunks, created_ms: now_ms(), done: false };
+    let meta = Meta { id: id.clone(), from: from.to_string(), to: to.to_string(), file_name: "file".into(), file_size, total_chunks, created_ms: now_ms(), done: false, exp_ms: guest_exp(from, to) };
     tokio::fs::create_dir_all(dir_of(&id)).await.map_err(|e| e.to_string())?;
     save_meta(&meta).await.map_err(|e| e.to_string())?;
     Ok(id)
@@ -413,7 +494,7 @@ mod tests {
     use super::*;
 
     fn meta(done: bool, age_ms: u64) -> Meta {
-        Meta { id: "ab".repeat(16), from: "a".into(), to: "b".into(), file_name: String::new(), file_size: 2500, total_chunks: 3, created_ms: now_ms() - age_ms, done }
+        Meta { id: "ab".repeat(16), from: "a".into(), to: "b".into(), file_name: String::new(), file_size: 2500, total_chunks: 3, created_ms: now_ms() - age_ms, done, exp_ms: 0 }
     }
 
     #[test]
@@ -430,3 +511,44 @@ mod tests {
         assert_eq!(reserved(&meta(false, 0)), 2500 + 3 * 28);
     }
 }
+
+#[cfg(test)]
+mod guest_ttl_tests {
+    use super::*;
+
+    #[test]
+    fn a_guests_ready_file_expires_in_a_day_but_an_ordinary_one_lives_longer() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let guest = crate::mobile_api::test_add_device_with_role("guest", "ttg");
+        let user = crate::mobile_api::test_add_device_with_role("user", "ttu");
+        let other = crate::mobile_api::test_add_device_with_role("user", "tto");
+        let (g, u, o) = (crate::mobile_api::device_peer_of(&guest).unwrap(), crate::mobile_api::device_peer_of(&user).unwrap(), crate::mobile_api::device_peer_of(&other).unwrap());
+        let meta = |from: &str, to: &str, age_h: u64| Meta { id: "a".repeat(32), from: from.into(), to: to.into(), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - age_h * 3600 * 1000, done: true, exp_ms: 0 };
+        assert!(expired(&meta(&g, &u, 25)), "файл от гостя старше суток просрочен");
+        assert!(expired(&meta(&u, &g, 25)), "и файл гостю тоже");
+        assert!(!expired(&meta(&g, &u, 23)));
+        assert!(!expired(&meta(&u, &o, 48)), "обычные устройства: срок прежний, неделя");
+        assert!(expired(&meta(&u, &o, 24 * 8)));
+    }
+
+    #[test]
+    fn a_guest_files_term_is_written_at_creation_and_does_not_depend_on_who_is_a_guest_later() {
+        let _g = crate::complaints::tests::SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        crate::complaints::tests::fresh();
+        let g = crate::mobile_api::test_add_device_with_role("guest", "etg");
+        let u = crate::mobile_api::test_add_device_with_role("user", "etu");
+        let (gp, up) = (crate::mobile_api::device_peer_of(&g).unwrap(), crate::mobile_api::device_peer_of(&u).unwrap());
+        assert!(guest_exp(&gp, &up) > now_ms(), "файл гостя получает срок");
+        assert_eq!(guest_exp(&up, &"z".repeat(64)), 0, "обычный файл — без гостевого срока");
+        // срок прошёл, а гостя в памяти уже нет (перезапуск, принят в пользователи): файл всё равно просрочен
+        let m = Meta { id: "a".repeat(32), from: up.clone(), to: "z".repeat(64), file_name: "f".into(), file_size: 1, total_chunks: 1, created_ms: now_ms() - 25 * 3600 * 1000, done: true, exp_ms: now_ms() - 1000 };
+        assert!(expired(&m));
+        // срок ещё не прошёл — файл жив, и неделя «обычного» срока его не продлевает сверх суток от создания
+        let live = Meta { exp_ms: now_ms() + 3600 * 1000, created_ms: now_ms() - 3600 * 1000, ..m.clone() };
+        assert!(!expired(&live));
+        let stale = Meta { exp_ms: now_ms() + 3600 * 1000, created_ms: now_ms() - 30 * 3600 * 1000, ..m };
+        assert!(expired(&stale));
+    }
+}
+

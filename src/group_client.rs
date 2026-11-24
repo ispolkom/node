@@ -30,7 +30,9 @@ pub const KIND_AUDIO: u8 = 4;
 pub const KIND_VIDEO: u8 = 5;
 pub const KIND_LINK: u8 = 6;
 pub const KIND_SYSTEM: u8 = 7;
-const KINDS: [u8; 7] = [1, 2, 3, 4, 5, 6, 7];
+/// Голос «одобряю / не одобряю» за запись: `{s: номер записи, v: 1 | -1 | 0}`; в ленту не попадает, считается в монетки под записью.
+pub const KIND_REACTION: u8 = 8;
+const KINDS: [u8; 8] = [1, 2, 3, 4, 5, 6, 7, 8];
 const VERSION: u8 = 1;
 
 fn b64(b: &[u8]) -> String {
@@ -173,6 +175,9 @@ struct GState {
     pub_sent: bool,
     #[serde(default)]
     owner_pub: Option<String>,
+    /// псевдоним закреплённого владельца: по нему передача владения подтверждается и тогда, когда прежний владелец уже вышел из группы
+    #[serde(default)]
+    owner_alias: Option<String>,
     #[serde(default)]
     keys: BTreeMap<u32, String>,
     #[serde(default)]
@@ -184,6 +189,15 @@ struct GState {
     /// курсор событий стирания на узле (до какого стирания догнал)
     #[serde(default)]
     del_cursor: u64,
+    /// человек в этой группе сам скрыл ник и картинку: по умолчанию они показываются
+    #[serde(default)]
+    card_off: bool,
+    /// отпечаток визитки, которую я уже выложил в группе (пусто — ничего не выкладывалось)
+    #[serde(default)]
+    card_sent: String,
+    /// подпись «это я» в этой группе уже приложена
+    #[serde(default)]
+    proof_sent: bool,
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -243,6 +257,29 @@ pub fn init(master: [u8; 32]) {
 
 static INIT_ERROR: Mutex<Option<String>> = Mutex::new(None);
 static LOCKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Поколение запирания: растёт при каждом `lock`. Долгие операции (скачивание файла) сверяют его после каждого await.
+static LOCK_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn lock_gen() -> u64 {
+    LOCK_GEN.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+fn check_session(gen: u64) -> Result<(), String> {
+    if lock_gen() != gen || LOCKED.load(std::sync::atomic::Ordering::SeqCst) {
+        return Err("закрытая среда заперта: операция прервана".into());
+    }
+    Ok(())
+}
+
+/// Среда стёрта: состояние групп ПК и зашифрованные ленты без ключа бесполезны — удаляются (группы начнутся с чистого листа).
+pub fn erase_encrypted() {
+    let dir = crate::util::data_dir::data_dir().join("groups_pc");
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for e in rd.flatten() {
+            let _ = std::fs::remove_file(e.path());
+        }
+    }
+}
 
 /// Перенос файлов `groups_pc` с прежнего мастер-ключа на ключ закрытой среды. Идемпотентно: что уже открывается новым ключом, остаётся.
 /// Файл, часть которого не открывается ни одним ключом, не меняется (возвращается число таких файлов). Клиент должен быть заперт.
@@ -320,6 +357,7 @@ fn rekey_dir(dir: &Path, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize, 
 
 /// Закрытая среда: убрать ключ и расшифрованное состояние из памяти; файлы на диске не трогаются, фоновая синхронизация ждёт.
 pub fn lock() {
+    LOCK_GEN.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     LOCKED.store(true, std::sync::atomic::Ordering::SeqCst);
     *cell().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
@@ -476,20 +514,76 @@ pub fn sync_all() {
         if changed {
             let _ = c.save();
         }
+        let card = pc_card();
         for g in &list {
             let gid = s(g, "id");
-            let _ = sync_group(c, &dev, g, &gid);
+            let _ = sync_group(c, &dev, g, &gid, &card);
         }
         let _ = listed;
         Ok(())
     });
 }
 
-fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str) -> Result<(), String> {
+/// Визитка ПК из единого профиля узла: (ник, маленькая картинка в base64, отпечаток). Пустой профиль — пустой отпечаток.
+/// Картинка пересобирается только когда сменились ник или сами байты картинки (обход групп идёт часто).
+fn pc_card() -> (String, String, String) {
+    use sha2::Digest;
+    static LAST: Mutex<Option<(String, (String, String, String))>> = Mutex::new(None);
+    let short = crate::core::profile::UserProfile::load().ok().flatten().map(|p| p.short_id).unwrap_or_default();
+    let nick = crate::mobile_profile::snapshot(&short)["nick"].as_str().unwrap_or("").to_string();
+    let raw = crate::mobile_profile::avatar_bytes(&short).map(|(b, _)| b);
+    let key = format!("{nick}\u{0}{}", raw.as_ref().map(|b| hex::encode(Sha256::digest(b))).unwrap_or_default());
+    if let Some((k, card)) = LAST.lock().unwrap_or_else(|e| e.into_inner()).as_ref() {
+        if *k == key {
+            return card.clone();
+        }
+    }
+    let png = raw.and_then(|b| crate::mobile_profile::sanitize_small(&b));
+    let avatar = png.map(|b| base64::engine::general_purpose::STANDARD.encode(b)).unwrap_or_default();
+    let print = if nick.is_empty() && avatar.is_empty() { String::new() } else { hex::encode(Sha256::digest(format!("{nick}\u{0}{avatar}").as_bytes())) };
+    let card = (nick, avatar, print);
+    *LAST.lock().unwrap_or_else(|e| e.into_inner()) = Some((key, card.clone()));
+    card
+}
+
+fn sync_group(c: &mut Client, dev: &str, g: &Value, gid: &str, card: &(String, String, String)) -> Result<(), String> {
     let (role, alias, epoch) = (s(g, "role"), s(g, "my_alias"), g["epoch"].as_u64().unwrap_or(0) as u32);
+    // 0) визитка по умолчанию: пока человек сам не скрыл её в этой группе, ник и картинка профиля показываются
+    {
+        let gs = c.gstate(gid);
+        if !gs.card_off && gs.card_sent != card.2 {
+            let previous = std::mem::replace(&mut gs.card_sent, card.2.clone());
+            if with_store(|st| st.set_card(gid, dev, &card.0, &card.1)).is_ok() {
+                let _ = c.save();
+            } else {
+                c.gstate(gid).card_sent = previous;
+            }
+        }
+    }
+    // 0б) подпись «это я»: ключом «компьютера как собеседника» под (группа, мой групповой ключ); один раз
+    if !c.gstate(gid).proof_sent && c.gstate(gid).pub_sent {
+        use base64::Engine;
+        let pubk = base64::engine::general_purpose::STANDARD.decode(&c.gstate(gid).pubk).unwrap_or_default();
+        let mut msg = b"YANDI-GROUP-CARD-V1\0".to_vec();
+        msg.extend_from_slice(gid.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(&pubk);
+        if let Some(sig) = crate::mobile_self::sign_identity(&msg) {
+            let proof = base64::engine::general_purpose::STANDARD.encode(sig);
+            if with_store(|st| st.set_proof(gid, dev, &proof)).is_ok() {
+                c.gstate(gid).proof_sent = true;
+                let _ = c.save();
+            }
+        }
+    }
     // 1) мой ключ группы опубликован на узле
     if !c.gstate(gid).pub_sent {
         let p = c.gstate(gid).pubk.clone();
+        // закрытая часть ключа должна лежать на диске раньше, чем публичная уйдёт на узел (иначе после перезапуска ключ новый,
+        // а опубликован старый — конверты не откроются)
+        if !c.save() {
+            return Err("не удалось сохранить закрытый ключ группы на диск".to_string());
+        }
         with_store(|st| st.set_pub(gid, dev, &p)).map_err(fail)?;
         c.gstate(gid).pub_sent = true;
         let _ = c.save();
@@ -545,7 +639,10 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
         }
     }
     c.gstate(gid).keys.insert(new_epoch, b64(&key));
-    let _ = c.save();
+    if !c.save() {
+        c.gstate(gid).keys.remove(&new_epoch); // не записали — не раздаём: ключ, которого нет на диске, не должен уйти участникам
+        return Err("не удалось сохранить ключ группы на диск".to_string());
+    }
     with_store(|st| st.put_keys(gid, dev, new_epoch, &boxes)).map_err(fail)?;
     Ok(())
 }
@@ -553,7 +650,7 @@ fn provision(c: &mut Client, dev: &str, g: &Value, gid: &str, my_alias: &str, ep
 /// Следующий ключ владельца по цепочке передач: служебная запись `handover` с ключом из `wanted`, написанная тем, чей ключ закреплён
 /// (его member_pub по списку узла совпадает с закреплённым). Сам новый владелец и рядовой участник такую запись не подтвердят.
 /// Граница: узел в сговоре с участником может выдать чужую запись за запись прежнего владельца (личных подписей нет) — см. аудит №5.
-fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &str, wanted: &HashSet<String>) -> Option<String> {
+fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &str, pinned_alias: Option<&str>, wanted: &HashSet<String>) -> Option<(String, Option<String>)> {
     log.iter().find_map(|e| {
         if e.deleted || e.kind != KIND_SYSTEM || e.body["op"] != "handover" {
             return None;
@@ -562,8 +659,13 @@ fn handover_next(log: &[Entry], members: &[(String, String, String)], pinned: &s
         if !wanted.contains(p) || p == pinned {
             return None;
         }
-        let author_pub = members.iter().find(|(alias, _, _)| alias == &e.from).map(|(_, _, p)| p.as_str())?;
-        (author_pub == pinned).then(|| p.to_string())
+        // автор есть в составе — его ключ обязан совпасть с закреплённым; автора уже нет (вышел после передачи) — принимается запись
+        // под тем псевдонимом, который был у закреплённого владельца (псевдоним заверяет узел при записи)
+        let ok = match members.iter().find(|(alias, _, _)| alias == &e.from) {
+            Some((_, _, author_pub)) => author_pub == pinned,
+            None => pinned_alias == Some(e.from.as_str()),
+        };
+        ok.then(|| (p.to_string(), e.body["to"].as_str().map(str::to_string)))
     })
 }
 
@@ -582,6 +684,9 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
             }
             let Some(p) = top_owner.clone() else { return Ok(()) };
             c.gstate(gid).owner_pub = Some(p.clone()); // закрепляю при первом получении
+            c.gstate(gid).owner_alias = with_store(|st| st.members(gid, dev)).ok().and_then(|m| {
+                m["members"].as_array().and_then(|l| l.iter().find(|x| s(x, "member_pub") == p).map(|x| s(x, "alias")))
+            });
             let _ = c.save();
             p
         }
@@ -627,10 +732,12 @@ fn collect_keys(c: &mut Client, dev: &str, gid: &str, as_owner: bool) -> Result<
             .and_then(|m| m["members"].as_array().map(|l| l.iter().map(|x| (s(x, "alias"), s(x, "role"), s(x, "member_pub"))).collect()))
             .unwrap_or_default();
         let log = c.load_log(gid).clone();
-        match handover_next(&log, &members, &pinned, &wanted) {
-            Some(next) => {
+        let pinned_alias = c.gstate(gid).owner_alias.clone();
+        match handover_next(&log, &members, &pinned, pinned_alias.as_deref(), &wanted) {
+            Some((next, next_alias)) => {
                 pinned = next.clone();
                 c.gstate(gid).owner_pub = Some(next);
+                c.gstate(gid).owner_alias = next_alias;
                 let _ = c.save();
             }
             None => {
@@ -670,14 +777,36 @@ fn sync_deletions(c: &mut Client, dev: &str, gid: &str) -> Result<bool, String> 
     if r["resync"].as_bool().unwrap_or(false) {
         seqs.extend(deleted_in_log(|after| with_store(|st| st.pull(gid, dev, after, 500)).map_err(fail))?);
     }
+    let gone: Vec<u64> = r["gone"].as_array().map(|l| l.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
     let mut changed = false;
     {
         let log = c.load_log(gid);
         for e in log.iter_mut() {
-            if seqs.contains(&e.seq) && !e.deleted {
+            if gone.contains(&e.seq) {
+                // запись удалённого с узла автора — заглушка; его реакции исчезают
+                if e.kind == KIND_REACTION {
+                    if !e.deleted {
+                        e.deleted = true;
+                        e.body = json!({});
+                        changed = true;
+                    }
+                } else if e.body.get("t").and_then(|t| t.as_str()) != Some(crate::communication::TOMBSTONE) || e.deleted {
+                    e.kind = KIND_TEXT;
+                    e.body = json!({"t": crate::communication::TOMBSTONE});
+                    e.deleted = false;
+                    changed = true;
+                }
+            } else if seqs.contains(&e.seq) && !e.deleted {
                 e.deleted = true;
                 e.body = json!({});
                 changed = true;
+            }
+            // цитата заглушённой записи — тоже заглушка
+            if let Some(s) = e.body.get("r").and_then(|r| r.get("s")).and_then(|s| s.as_u64()) {
+                if gone.contains(&s) && e.body["r"].get("t").and_then(|t| t.as_str()) != Some(crate::communication::TOMBSTONE) {
+                    e.body["r"]["t"] = json!(crate::communication::TOMBSTONE);
+                    changed = true;
+                }
             }
         }
     }
@@ -709,7 +838,10 @@ fn pull(c: &mut Client, dev: &str, gid: &str, g: &Value) -> Result<(), String> {
         for e in &entries {
             let (seq, ts, epoch, from) = (u(e, "seq"), u(e, "ts"), u(e, "epoch") as u32, s(e, "from"));
             let payload = e["payload_b64"].as_str().unwrap_or("");
-            if e["deleted"].as_bool().unwrap_or(false) || payload.is_empty() {
+            if e["gone"].as_bool().unwrap_or(false) {
+                // автор удалён с узла: заглушка вместо записи (решение владельца 2026-10-21)
+                batch.push(Entry { seq, ts, epoch, kind: KIND_TEXT, from, body: json!({"t": crate::communication::TOMBSTONE}), deleted: false });
+            } else if e["deleted"].as_bool().unwrap_or(false) || payload.is_empty() {
                 batch.push(Entry { seq, ts, epoch, kind: KIND_SYSTEM, from, body: json!({}), deleted: true });
             } else {
                 let Some(key) = c.group_key(gid, epoch) else {
@@ -820,14 +952,24 @@ pub fn refresh_entry(gid: &str, seq: u64) {
     });
 }
 
+static NUDGE: tokio::sync::Notify = tokio::sync::Notify::const_new();
+
+/// Подтолкнуть синхронизацию групп сейчас (например, профиль изменился: визитка в группах должна обновиться сразу, а не по таймеру).
+pub fn nudge() {
+    NUDGE.notify_one();
+}
+
 /// Фоновая задача: синхронизация по таймеру и по намёкам групп.
 pub fn spawn_background() {
-    tokio::spawn(async move {
+    crate::supervisor::supervise("groups-pc-sync", crate::supervisor::Policy::restart(), || async move {
         let mut rx = crate::mobile_groups::subscribe();
         let dev_wait = std::time::Duration::from_secs(2);
         loop {
             tokio::select! {
                 _ = tokio::time::sleep(std::time::Duration::from_secs(12)) => {
+                    let _ = tokio::task::spawn_blocking(sync_all).await;
+                }
+                _ = NUDGE.notified() => {
                     let _ = tokio::task::spawn_blocking(sync_all).await;
                 }
                 h = rx.recv() => {
@@ -880,7 +1022,8 @@ fn list_value(c: &mut Client, dev: &str) -> Value {
         })
         .collect();
     let gone: Vec<Value> = c.state.known.iter().filter(|(id, _)| !listed.contains(*id)).map(|(id, n)| json!({"id": id, "name": n})).collect();
-    let catalog: Vec<Value> = with_store(|st| st.open_for(dev));
+    let live = crate::mobile_api::live_owner_peers();
+    let catalog: Vec<Value> = with_store(|st| st.open_for_live(dev, &live));
     json!({"groups": groups, "gone": gone, "catalog": catalog})
 }
 
@@ -915,6 +1058,9 @@ pub fn join(gid: &str, code: Option<&str>, name: &str) -> Result<(), String> {
     let dev = pc_device()?;
     with_client(|c| {
         let p = c.gstate(gid).pubk.clone();
+        if !c.save() {
+            return Err("не удалось сохранить закрытый ключ группы на диск".to_string());
+        }
         with_store(|st| st.join(gid, &dev, code, Some(&p))).map_err(fail)?;
         let g = c.gstate(gid);
         g.pub_sent = true;
@@ -931,22 +1077,85 @@ pub fn request_invite(gid: &str, name: &str) -> Result<(), String> {
     with_store(|st| st.request_join(gid, &dev, name)).map_err(fail)
 }
 
+fn ui_body(body: &Value) -> Value {
+    let mut public = body.clone();
+    // File decryption belongs to the daemon. Neither browser nor desktop needs
+    // the attachment key; download_file reads the original internal log body.
+    if let Some(object) = public.as_object_mut() {
+        object.remove("k");
+    }
+    public
+}
+
+/// Монетки: запись → (баланс, мой голос). Один голос на человека (последний по порядку), голос за свою запись и за несуществующую
+/// не считается.
+fn tally_votes(log: &[Entry], my: &str) -> HashMap<u64, (i64, i64)> {
+    let author: HashMap<u64, &str> = log.iter().filter(|e| e.kind != KIND_REACTION).map(|e| (e.seq, e.from.as_str())).collect();
+    let mut latest: HashMap<u64, HashMap<&str, i64>> = HashMap::new();
+    for e in log.iter().filter(|e| e.kind == KIND_REACTION && !e.deleted) {
+        let (Some(t), Some(v)) = (e.body["s"].as_u64(), e.body["v"].as_i64()) else { continue };
+        if !(-1..=1).contains(&v) || author.get(&t).map_or(true, |a| *a == e.from) {
+            continue;
+        }
+        latest.entry(t).or_default().insert(e.from.as_str(), v);
+    }
+    latest.into_iter().map(|(t, m)| (t, (m.values().sum(), m.get(my).copied().unwrap_or(0)))).collect()
+}
+
+/// Проголосовать за запись: 1 — одобряю, -1 — не одобряю; тот же голос ещё раз снимает его.
+pub fn vote(gid: &str, seq: u64, v: i64) -> Result<(), String> {
+    if !(-1..=1).contains(&v) || v == 0 {
+        return Err("голос — 1 или -1".into());
+    }
+    let dev = pc_device()?;
+    let my = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).map(|g| s(&g, "my_alias")).ok_or("группа недоступна")?;
+    let cur = with_client(|c| Ok(tally_votes(c.load_log(gid), &my).get(&seq).map(|x| x.1).unwrap_or(0)))?;
+    send(gid, KIND_REACTION, json!({"s": seq, "v": if cur == v { 0 } else { v }})).map(|_| ())
+}
+
 /// Лента группы: видимые записи (стёртые, служебные и запрещённые правилами не показываются) и сведения о группе.
+/// Предел размера списка записей в одном ответе оболочке ПК (её транспорт принимает не больше 1 МиБ): старые записи отбрасываются.
+const MESSAGES_MAX_BYTES: usize = 700_000;
+
+/// Оставить самые новые записи, чьё общее JSON-представление не больше `max` байт. true — что-то отброшено.
+fn cap_newest(items: &mut Vec<Value>, max: usize) -> bool {
+    let mut total = 0usize;
+    let mut keep_from = items.len();
+    for (i, it) in items.iter().enumerate().rev() {
+        total += it.to_string().len() + 1;
+        if total > max {
+            break;
+        }
+        keep_from = i;
+    }
+    if keep_from == 0 {
+        return false;
+    }
+    items.drain(..keep_from);
+    true
+}
+
 pub fn messages(gid: &str, after: u64) -> Result<Value, String> {
     let dev = pc_device()?;
     with_client(|c| {
         let info = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
         let my = s(&info, "my_alias");
-        let names = c.names.get(gid).cloned().unwrap_or_default();
+        let mut names = c.names.get(gid).cloned().unwrap_or_default();
+        names.extend(card_nicks(gid, &dev)); // раскрытый ник важнее имени «при вступлении»
         let deny = c.rules.get(gid).cloned().unwrap_or_default();
         let log = c.load_log(gid).clone();
-        let items: Vec<Value> = log
+        let tally = tally_votes(&log, &my);
+        let mut items: Vec<Value> = log
             .iter()
-            .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && !deny.contains(&e.kind))
-            .map(|e| json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": e.body}))
+            .filter(|e| e.seq > after && !e.deleted && e.kind != KIND_SYSTEM && e.kind != KIND_REACTION && !deny.contains(&e.kind))
+            .map(|e| {
+                let (coins, mine_vote) = tally.get(&e.seq).map(|(c, m)| (json!(c), json!(m))).unwrap_or((Value::Null, json!(0)));
+                json!({"seq": e.seq, "ts": e.ts, "from": e.from, "author": names.get(&e.from).cloned().unwrap_or_else(|| e.from.clone()), "mine": e.from == my, "kind": e.kind, "body": ui_body(&e.body), "coins": coins, "my_vote": mine_vote})
+            })
             .collect();
+        let truncated = cap_newest(&mut items, MESSAGES_MAX_BYTES);
         let epoch = info["epoch"].as_u64().unwrap_or(0) as u32;
-        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items}))
+        Ok(json!({"group": info, "has_key": c.group_key(gid, epoch).is_some(), "problem": c.problems.contains(gid), "damaged": c.damaged.contains(gid), "deny": deny, "messages": items, "truncated": truncated}))
     })
 }
 
@@ -960,6 +1169,22 @@ pub fn send(gid: &str, kind: u8, body: Value) -> Result<u64, String> {
         }
         if !KINDS.contains(&kind) {
             return Err("неверный вид записи".into());
+        }
+        if kind == KIND_LINK {
+            return Err("ссылки в YANDI не передаются".into());
+        }
+        // политика содержимого: ни в тексте, ни в подписи ссылок, а у вложений — расширение из белого списка
+        for field in ["t", "caption", "text"] {
+            if let Some(t) = body.get(field).and_then(|v| v.as_str()) {
+                crate::content_policy::check_text(t)?;
+            }
+        }
+        if matches!(kind, KIND_IMAGE | KIND_FILE | KIND_AUDIO | KIND_VIDEO) {
+            for field in ["name", "filename", "file_name"] {
+                if let Some(n) = body.get(field).and_then(|v| v.as_str()) {
+                    crate::content_policy::attachment_allowed(n)?;
+                }
+            }
         }
         if !kind_allowed(c, gid, kind) {
             return Err("в этой группе запрещён такой вид сообщений".into());
@@ -1044,6 +1269,91 @@ pub fn update_settings(gid: &str, name: Option<&str>, topic: Option<&str>, about
     with_store(|st| st.update_settings(gid, &dev, name, topic, about)).map_err(fail)
 }
 
+/// Владелец включает автоочистку неактивных участников своей группы (0 — выключить).
+pub fn set_auto_clean(gid: &str, days: u32) -> Result<u32, String> {
+    let dev = pc_device()?;
+    with_store(|st| st.set_auto_clean(gid, &dev, days)).map_err(fail)
+}
+
+/// Ники, которые участники сами раскрыли в группе: псевдоним → ник. Для участника, опознанного как мой сопряжённый телефон, главнее то имя,
+/// которое Я ему задал локально (видно только мне); без локального имени виден его собственный ник, а без ника — имя устройства.
+fn card_nicks(gid: &str, dev: &str) -> HashMap<String, String> {
+    let members = with_store(|st| st.members(gid, dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
+    let mut out: HashMap<String, String> =
+        members.iter().filter_map(|x| x["nick"].as_str().filter(|n| !n.is_empty()).map(|n| (s(x, "alias"), n.to_string()))).collect();
+    for (alias, (peer, device_name)) in recognised(gid, &members) {
+        match crate::local_overrides::name(&peer) {
+            Some(local) => {
+                out.insert(alias, local);
+            }
+            None => {
+                out.entry(alias).or_insert(device_name);
+            }
+        }
+    }
+    out
+}
+
+/// Подпись «это я» в визитке участника: проверяется ключами сопряжённых устройств; чужой ключ её не проверит.
+/// Сообщение — то же, что подписывает телефон: «YANDI-GROUP-CARD-V1\0» + группа + 0 + групповой ключ участника.
+/// Результат: псевдоним → (номер устройства, имя устройства «📱 …»).
+fn recognised(gid: &str, members: &[Value]) -> HashMap<String, (String, String)> {
+    use base64::Engine;
+    use ed25519_dalek::Verifier;
+    let keys: Vec<(ed25519_dalek::VerifyingKey, String, String)> = crate::mobile_api::device_ed_keys()
+        .into_iter()
+        .filter_map(|(raw, name, peer)| Some((ed25519_dalek::VerifyingKey::from_bytes(&raw).ok()?, peer, format!("📱 {name}"))))
+        .collect();
+    let mut found = HashMap::new();
+    if keys.is_empty() {
+        return found;
+    }
+    for x in members {
+        let (Some(proof), Some(pubb)) = (x["proof"].as_str(), x["member_pub"].as_str()) else { continue };
+        let (Ok(sig), Ok(pubk)) = (base64::engine::general_purpose::STANDARD.decode(proof), base64::engine::general_purpose::STANDARD.decode(pubb)) else { continue };
+        let Ok(sig) = <[u8; 64]>::try_from(sig.as_slice()) else { continue };
+        let sig = ed25519_dalek::Signature::from_bytes(&sig);
+        let mut msg = b"YANDI-GROUP-CARD-V1\0".to_vec();
+        msg.extend_from_slice(gid.as_bytes());
+        msg.push(0);
+        msg.extend_from_slice(&pubk);
+        if let Some((_, peer, name)) = keys.iter().find(|(k, _, _)| k.verify(&msg, &sig).is_ok()) {
+            found.insert(s(x, "alias"), (peer.clone(), name.clone()));
+        }
+    }
+    found
+}
+
+/// Раскрыть (или спрятать) ник и аватар компьютера в группе — из единого профиля узла.
+pub fn share_card(gid: &str, on: bool) -> Result<(), String> {
+    let dev = pc_device()?;
+    let card = pc_card();
+    let (nick, avatar) = if on { (card.0.clone(), card.1.clone()) } else { (String::new(), String::new()) };
+    with_store(|st| st.set_card(gid, &dev, &nick, &avatar)).map_err(fail)?;
+    // явный выбор человека запоминается: «скрыть» не отменяется автоматически, «показать» снова следует за профилем
+    with_client(|c| {
+        let gs = c.gstate(gid);
+        gs.card_off = !on;
+        gs.card_sent = if on { card.2.clone() } else { String::new() };
+        c.save();
+        Ok(())
+    })
+}
+
+/// Картинка визитки участника (PNG) по псевдониму; нет визитки или картинки — `None`.
+pub fn member_avatar(gid: &str, alias: &str) -> Result<Option<Vec<u8>>, String> {
+    let dev = pc_device()?;
+    // участник опознан как мой сопряжённый телефон и я поставил ему картинку — она главнее той, что он выложил в группе
+    let members = with_store(|st| st.members(gid, &dev)).ok().and_then(|m| m["members"].as_array().cloned()).unwrap_or_default();
+    if let Some((peer, _)) = recognised(gid, &members).remove(alias) {
+        if let Some(local) = crate::local_overrides::avatar(&peer) {
+            return Ok(Some(local));
+        }
+    }
+    let b64 = with_store(|st| st.card_avatar(gid, &dev, alias)).map_err(fail)?;
+    Ok(b64.and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()))
+}
+
 /// Участники группы с отображаемыми именами (кто как назвался) и просьбы вступить (для владельца и модераторов).
 pub fn info(gid: &str) -> Result<Value, String> {
     let dev = pc_device()?;
@@ -1051,12 +1361,13 @@ pub fn info(gid: &str) -> Result<Value, String> {
         let g = with_store(|st| st.list_for(&dev)).into_iter().find(|g| s(g, "id") == gid).ok_or("группа недоступна")?;
         let m = with_store(|st| st.members(gid, &dev)).map_err(fail)?;
         let names = c.names.get(gid).cloned().unwrap_or_default();
+        let nicks = card_nicks(gid, &dev);
         let members: Vec<Value> = m["members"]
             .as_array()
             .cloned()
             .unwrap_or_default()
             .iter()
-            .map(|x| json!({"alias": s(x, "alias"), "name": names.get(&s(x, "alias")).cloned().unwrap_or_default(), "role": s(x, "role"), "muted": x["muted"], "has_key": x["has_key"]}))
+            .map(|x| json!({"alias": s(x, "alias"), "nick": nicks.get(&s(x, "alias")).cloned().unwrap_or_default(), "name": names.get(&s(x, "alias")).cloned().unwrap_or_default(), "role": s(x, "role"), "muted": x["muted"], "has_key": x["has_key"]}))
             .collect();
         let staff = s(&g, "role") != "member";
         let requests = if staff && s(&g, "kind") == "invite" {
@@ -1181,6 +1492,8 @@ pub async fn upload_file(gid: &str, name: &str, data: Vec<u8>) -> Result<u64, St
     let dev = pc_device()?;
     let name: String = name.chars().filter(|c| !c.is_control() && *c != '/' && *c != '\\').take(120).collect();
     let name = if name.trim().is_empty() { "file".to_string() } else { name };
+    // политика содержимого: разрешённое расширение и содержимое, соответствующее ему (исполняемое под любым именем отклоняется)
+    crate::content_policy::sniff_ok(&name, &data[..data.len().min(64)])?;
     let kind = kind_for_name(&name);
     // проверки до заливки: участник, не заглушён, вид разрешён, ключ есть
     with_client(|c| {
@@ -1225,6 +1538,7 @@ pub async fn upload_file(gid: &str, name: &str, data: Vec<u8>) -> Result<u64, St
 /// Скачать, расшифровать и проверить файл записи №seq. Подмена, перестановка или обрезка кусков и несовпадение суммы — ошибка.
 pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), String> {
     use sha2::Digest;
+    let gen = lock_gen();
     let dev = pc_device()?;
     let body = with_client(|c| {
         let log = c.load_log(gid).clone();
@@ -1239,25 +1553,55 @@ pub async fn download_file(gid: &str, seq: u64) -> Result<(String, Vec<u8>), Str
     let name = body["n"].as_str().unwrap_or("file").to_string();
     let size = body["z"].as_u64().unwrap_or(0);
     let total = body["c"].as_u64().unwrap_or(0) as u32;
-    let key = body["k"].as_str().and_then(unb64).and_then(|k| arr32(&k)).ok_or("неверный ключ файла")?;
+    let key = zeroize::Zeroizing::new(body["k"].as_str().and_then(unb64).and_then(|k| arr32(&k)).ok_or("неверный ключ файла")?);
     if total == 0 || size == 0 || size > crate::mobile_group_files::MAX_GROUP_FILE {
         return Err("неверное описание файла".into());
     }
-    let mut out = Vec::with_capacity(size as usize);
+    let mut out = zeroize::Zeroizing::new(Vec::with_capacity(size as usize));
     for i in 0..total {
         let wire = crate::mobile_group_files::pc_chunk(gid, &dev, &fid, i).await?;
+        // запирание среды, пока шёл запрос: ключ файла и накопленное открытое содержимое стираются (Zeroizing), ответ не отдаётся
+        check_session(gen)?;
         let part = aead_open(&key, &file_aad(&fid, i, total), &wire).ok_or("кусок файла повреждён или подменён")?;
         out.extend_from_slice(&part);
     }
+    check_session(gen)?;
     if out.len() as u64 != size || body["h"].as_str() != Some(hex::encode(sha2::Sha256::digest(&out)).as_str()) {
         return Err("файл повреждён или подменён".into());
     }
-    Ok((name, out))
+    Ok((name, std::mem::take(&mut *out)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn coins_count_one_vote_per_person_and_ignore_self_votes() {
+        let e = |seq: u64, kind: u8, from: &str, body: Value| Entry { seq, ts: 0, epoch: 1, kind, from: from.into(), body, deleted: false };
+        let log = vec![
+            e(1, KIND_TEXT, "Автор", json!({"t": "идея"})),
+            e(2, KIND_REACTION, "Боб", json!({"s": 1, "v": 1})),
+            e(3, KIND_REACTION, "Вера", json!({"s": 1, "v": 1})),
+            e(4, KIND_REACTION, "Автор", json!({"s": 1, "v": 1})),   // за себя — не считается
+            e(5, KIND_REACTION, "Боб", json!({"s": 1, "v": -1})),   // передумал: заменяет прежний
+            e(6, KIND_REACTION, "Вера", json!({"s": 99, "v": 1})),  // такой записи нет
+            e(7, KIND_REACTION, "Вера", json!({"s": 1, "v": 7})),   // неверное значение
+        ];
+        let t = tally_votes(&log, "Боб");
+        assert_eq!(t.get(&1), Some(&(0, -1)), "Вера +1, Боб −1");
+        assert!(t.get(&99).is_none());
+    }
+
+    #[test]
+    fn desktop_file_view_does_not_export_decryption_keys_or_mutate_daemon_log() {
+        let original = json!({"f": "file-id", "n": "photo.png", "z": 10, "c": 1, "k": "secret-file-key", "h": "hash", "i": "message-id"});
+        let view = ui_body(&original);
+        assert!(view.get("k").is_none());
+        for field in ["f", "n", "z", "c", "h", "i"] { assert_eq!(view[field], original[field]); }
+        assert_eq!(original["k"], "secret-file-key", "daemon download retains its key");
+        assert_eq!(ui_body(&json!({"t": "hello"})), json!({"t": "hello"}));
+    }
 
     fn vector() -> Value {
         serde_json::from_str(include_str!("../tests/data/group_vector.json")).unwrap()
@@ -1316,13 +1660,18 @@ mod tests {
         ];
         let h = |from: &str, pubk: &str| Entry { seq: 1, ts: 0, epoch: 1, kind: KIND_SYSTEM, from: from.to_string(), body: json!({"op": "handover", "to": "Новый", "pub": pubk}), deleted: false };
         let want: HashSet<String> = ["NEW".to_string()].into_iter().collect();
-        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &want).as_deref(), Some("NEW"), "от закреплённого (прежнего) владельца");
-        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &members, "OLD", &want), None, "рядовой не подтверждает");
-        assert_eq!(handover_next(&[h("Новый", "NEW")], &members, "OLD", &want), None, "сам новый себя не подтверждает");
-        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", &HashSet::new()), None, "этот ключ не нужен");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", Some("Старый"), &want).map(|x| x.0).as_deref(), Some("NEW"), "от закреплённого (прежнего) владельца");
+        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &members, "OLD", Some("Старый"), &want), None, "рядовой не подтверждает");
+        assert_eq!(handover_next(&[h("Новый", "NEW")], &members, "OLD", Some("Старый"), &want), None, "сам новый себя не подтверждает");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &members, "OLD", Some("Старый"), &HashSet::new()), None, "этот ключ не нужен");
         let mut gone = h("Старый", "NEW");
         gone.deleted = true;
-        assert_eq!(handover_next(&[gone], &members, "OLD", &want), None, "стёртая запись не считается");
+        assert_eq!(handover_next(&[gone], &members, "OLD", Some("Старый"), &want), None, "стёртая запись не считается");
+        // прежний владелец вышел из группы: передача подтверждается по его закреплённому псевдониму, чужой псевдоним не подходит
+        let left = vec![("Новый".to_string(), "owner".to_string(), "NEW".to_string()), ("Рядовой".to_string(), "member".to_string(), "MEM".to_string())];
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &left, "OLD", Some("Старый"), &want).map(|x| x.0).as_deref(), Some("NEW"), "автор вышел, псевдоним закреплён");
+        assert_eq!(handover_next(&[h("Старый", "NEW")], &left, "OLD", None, &want), None, "псевдоним не закреплён — не принимается");
+        assert_eq!(handover_next(&[h("Рядовой", "NEW")], &left, "OLD", Some("Старый"), &want), None, "чужой псевдоним");
         // каждая запись несёт свой случайный номер (защита от повторов)
         let key = [7u8; 32];
         let a = decrypt_entry(&key, &encrypt_entry(&key, "g", 1, "x", KIND_TEXT, &json!({"t": "a"})).unwrap(), "g", 1, "x").unwrap().1;
@@ -1397,6 +1746,26 @@ mod tests {
     }
 
     #[test]
+    fn a_long_history_is_cut_to_the_newest_entries_that_fit_the_shell_limit() {
+        let mut items: Vec<Value> = (1..=300u64).map(|i| json!({"seq": i, "body": {"t": "x".repeat(8000)}})).collect();
+        assert!(cap_newest(&mut items, MESSAGES_MAX_BYTES));
+        assert!(items.len() < 300 && !items.is_empty());
+        assert_eq!(items.last().unwrap()["seq"], 300, "самая новая запись осталась");
+        assert!(serde_json::to_vec(&items).unwrap().len() <= MESSAGES_MAX_BYTES + items.len());
+        let mut small = vec![json!({"seq": 1})];
+        assert!(!cap_newest(&mut small, MESSAGES_MAX_BYTES));
+        assert_eq!(small.len(), 1);
+    }
+
+    #[test]
+    fn a_lock_after_the_operation_started_invalidates_its_session() {
+        let gen = lock_gen();
+        lock(); // запирание посреди скачивания
+        LOCKED.store(false, std::sync::atomic::Ordering::SeqCst); // даже мгновенное повторное открытие не оживляет старую операцию
+        assert!(check_session(gen).is_err());
+    }
+
+    #[test]
     fn locked_client_refuses_with_a_clear_reason_and_keeps_nothing() {
         lock();
         let err = with_client(|_| Ok(())).unwrap_err();
@@ -1429,4 +1798,22 @@ mod tests {
         assert_eq!(rekey_dir(dir.path(), Some(old), new).unwrap(), 1);
         assert_eq!(std::fs::read_to_string(dir.path().join("g1.log")).unwrap(), moved);
     }
+}
+
+/// Лента ПК-участника: записи старше года удаляются (как на узле, `mobile_groups::MESSAGE_LIFETIME_MS`).
+pub fn prune_old(now: u64) {
+    let cutoff = now.saturating_sub(crate::mobile_groups::MESSAGE_LIFETIME_MS);
+    let _ = with_client(|c| {
+        let gids: Vec<String> = c.state.groups.keys().cloned().collect();
+        for gid in gids {
+            let before = c.load_log(&gid).len();
+            c.load_log(&gid).retain(|e| e.ts >= cutoff);
+            if c.load_log(&gid).len() != before {
+                let snapshot = c.load_log(&gid).clone();
+                let text: String = snapshot.iter().filter_map(|e| serde_json::to_vec(e).ok()).map(|j| c.vault.seal(&gid, &j) + "\n").collect();
+                c.vault.write_private(&Client::log_name(&gid), text.as_bytes()).map_err(|e| format!("лента не сохранена: {e}"))?;
+            }
+        }
+        Ok(())
+    });
 }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:cryptography/cryptography.dart';
 import 'package:flutter/foundation.dart';
 import '../models/avatar_msg.dart';
+import '../l10n_core.dart';
 
 /// Шифрование картинок ключом хранилища (AES-256-GCM, хэш картинки входит в проверку).
 class AvatarSealer {
@@ -47,17 +48,23 @@ class AvatarService extends ChangeNotifier {
 
   String? _mine;
   final Map<String, String> _peers = {};
+  /// Картинки, которые Я поставил контактам у себя (видны только мне, никому не отправляются): контакт → хэш. Главнее его собственной.
+  final Map<String, String> _local = {};
   /// Запрошенные картинки: принимаем только то, что просили (иначе контакт мог бы забивать нам память чем угодно).
   final Map<String, DateTime> _pending = {};
   static const _pendingTtl = Duration(minutes: 5);
+  static const _pendingPerPeer = 4;
+  static const _pendingTotal = 64;
 
   String? get myHash => _mine;
   Uint8List? get myBytes => _mine == null ? null : _bytes[_mine!];
   String? hashForPeer(String peerId) => _peers[peerId];
   Uint8List? bytesForPeer(String peerId) {
-    final h = _peers[peerId];
+    final h = _local[peerId] ?? _peers[peerId];
     return h == null ? null : _bytes[h];
   }
+
+  bool hasLocal(String peerId) => _local.containsKey(peerId);
 
   File _file(String hash) => File('${dir.path}/$hash.yav');
   File _legacyFile(String hash) => File('${dir.path}/$hash.png');
@@ -96,7 +103,9 @@ class AvatarService extends ChangeNotifier {
         _mine = (me != null && AvatarMsg.validHash(me)) ? me : null;
         _peers.clear();
         ((m['peers'] as Map?) ?? {}).forEach((k, v) { if (v is String && AvatarMsg.validHash(v)) _peers[k as String] = v; });
-        for (final h in {if (_mine != null) _mine!, ..._peers.values}) {
+        _local.clear();
+        ((m['local'] as Map?) ?? {}).forEach((k, v) { if (v is String && AvatarMsg.validHash(v)) _local['$k'] = v; });
+        for (final h in {if (_mine != null) _mine!, ..._peers.values, ..._local.values}) {
           await _loadFile(h);
         }
         // индекс прочитан: дочищаем то, что в прошлый раз не удалось затереть (при ошибке чтения неизвестные файлы не трогаем)
@@ -107,7 +116,7 @@ class AvatarService extends ChangeNotifier {
   }
 
   Future<void> _save() async {
-    await _write(jsonEncode({'me': _mine, 'peers': _peers}));
+    await _write(jsonEncode({'me': _mine, 'peers': _peers, 'local': _local}));
     await _collectGarbage();
     notifyListeners();
   }
@@ -116,7 +125,7 @@ class AvatarService extends ChangeNotifier {
   Future<void> _collectGarbage() async {
     try {
       if (!await dir.exists()) return;
-      final used = {if (_mine != null) _mine!, ..._peers.values};
+      final used = {if (_mine != null) _mine!, ..._peers.values, ..._local.values};
       _bytes.removeWhere((h, _) => !used.contains(h));
       await for (final e in dir.list(followLinks: false)) {
         if (e is! File) continue;
@@ -149,7 +158,7 @@ class AvatarService extends ChangeNotifier {
 
   /// Установить свою картинку (уже подготовленный PNG). Возвращает её хэш.
   Future<String> setMine(Uint8List png) async {
-    if (!AvatarMsg.validPng(png)) throw StateError('Некорректная картинка');
+    if (!AvatarMsg.validPng(png)) throw StateError(tr('Некорректная картинка'));
     final h = AvatarMsg.hashOf(png);
     await _store(png, h);
     _mine = h;
@@ -176,8 +185,22 @@ class AvatarService extends ChangeNotifier {
       await _save();
       return;
     }
-    _pending['$from|$hash'] = DateTime.now();
+    _notePending(from, hash);
     await send(AvatarMsg.request(hash));
+  }
+
+  /// Запомнить запрос. Просроченные убираются; от одного контакта живых запросов не больше [_pendingPerPeer] (старейшие уступают
+  /// новым), а всего — [_pendingTotal]: поток объявлений с новыми хэшами не наращивает таблицу без предела.
+  void _notePending(String from, String hash) {
+    final now = DateTime.now();
+    _pending.removeWhere((_, t) => now.difference(t) > _pendingTtl);
+    final mine = _pending.keys.where((k) => k.startsWith('$from|')).toList()
+      ..sort((x, y) => _pending[x]!.compareTo(_pending[y]!));
+    while (mine.length >= _pendingPerPeer) {
+      _pending.remove(mine.removeAt(0));
+    }
+    if (_pending.length >= _pendingTotal) return;   // таблица полна живыми запросами: новый не принимаем
+    _pending['$from|$hash'] = now;
   }
 
   /// Контакт просит нашу картинку: отдаём только если просит именно ту, что у нас сейчас.
@@ -212,6 +235,22 @@ class AvatarService extends ChangeNotifier {
   }
 
   Future<void> forgetPeer(String peerId) async {
-    if (_peers.remove(peerId) != null) await _save();
+    final a = _peers.remove(peerId) != null;
+    final b = _local.remove(peerId) != null;
+    if (a || b) await _save();
+  }
+
+  /// Поставить контакту свою картинку (уже подготовленный PNG): видна только мне.
+  Future<void> setLocal(String peerId, Uint8List png) async {
+    if (!AvatarMsg.validPng(png)) throw StateError(tr('Некорректная картинка'));
+    final h = AvatarMsg.hashOf(png);
+    await _store(png, h);
+    _local[peerId] = h;
+    await _save();
+  }
+
+  /// Снять свою картинку: снова видна та, что контакт задал себе.
+  Future<void> clearLocal(String peerId) async {
+    if (_local.remove(peerId) != null) await _save();
   }
 }

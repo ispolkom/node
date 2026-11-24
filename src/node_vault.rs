@@ -28,6 +28,32 @@ const DATA_AAD: &[u8] = b"YANDI-NODE-CLOSED-DATA-V1\0";
 static KDF_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
 #[cfg(test)]
 static KDF_CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Тестовая разметка: попытки входа, начатые внутри `KDF_TAG.scope(метка, …)`, считаются отдельно от общего счётчика, чтобы параллельные
+/// тесты не сдвигали друг другу «ни одного вызова KDF».
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static KDF_TAG: u64;
+}
+#[cfg(test)]
+thread_local! {
+    static WORKER_TAG: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+#[cfg(test)]
+static KDF_TAGGED: std::sync::Mutex<Vec<(u64, usize)>> = std::sync::Mutex::new(Vec::new());
+#[cfg(test)]
+pub(crate) fn set_worker_tag(tag: Option<u64>) {
+    WORKER_TAG.with(|c| c.set(tag));
+}
+/// Метка текущего async-контекста теста (если он внутри `KDF_TAG.scope`).
+#[cfg(test)]
+pub(crate) fn current_tag() -> Option<u64> {
+    KDF_TAG.try_with(|t| *t).ok()
+}
+/// Сколько вызовов KDF сделали попытки с этой меткой.
+#[cfg(test)]
+pub(crate) fn tagged_kdf_calls(tag: u64) -> usize {
+    KDF_TAGGED.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|(t, _)| *t == tag).map(|(_, n)| *n).unwrap_or(0)
+}
 #[cfg(test)]
 static KDF_ACTIVE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 #[cfg(test)]
@@ -96,25 +122,13 @@ fn password_ok(password: &str) -> Result<()> {
     Ok(())
 }
 
-fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
+pub(crate) fn phrase_secret(phrase: &str) -> Result<Zeroizing<Vec<u8>>> {
     if phrase.len() > MAX_SECRET {
         bail!("слишком длинная фраза");
     }
-    let words: Vec<_> = phrase.split_whitespace().collect();
-    if words.len() != 4 || words.iter().any(|w| w.chars().count() < 5) {
-        bail!("нужны четыре слова не короче пяти знаков");
-    }
-    let mut seen = std::collections::HashSet::new();
-    if !words.iter().all(|w| seen.insert(w.to_lowercase())) {
-        bail!("слова не должны повторяться");
-    }
-    // Длины сохраняют границы слов; пробелы между словами нормализуются.
-    let mut encoded = Zeroizing::new(Vec::new());
-    for word in words {
-        encoded.extend_from_slice(&(word.len() as u32).to_be_bytes());
-        encoded.extend_from_slice(word.as_bytes());
-    }
-    Ok(encoded)
+    // Сид-фраза (12 или 24 слова): ключ делается из байтов сида, а не из текста; регистр и пробелы не важны.
+    let seed = key_root::Seed::parse(phrase).map_err(|e| anyhow!("{e}"))?;
+    Ok(Zeroizing::new(seed.secret().as_bytes().to_vec()))
 }
 
 fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
@@ -125,8 +139,19 @@ fn wrapping_key(secret: &[u8], salt: &[u8; 32]) -> Result<Zeroizing<[u8; 32]>> {
     #[cfg(test)]
     KDF_CALLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     #[cfg(test)]
+    if let Some(tag) = WORKER_TAG.with(|c| c.get()) {
+        let mut g = KDF_TAGGED.lock().unwrap_or_else(|e| e.into_inner());
+        match g.iter_mut().find(|(t, _)| *t == tag) {
+            Some((_, n)) => *n += 1,
+            None => g.push((tag, 1)),
+        }
+    }
+    #[cfg(test)]
     let _probe = KdfProbe::new();
-    let params = Params::new(65536, 3, 1, Some(32)).map_err(|_| anyhow!("параметры KDF"))?;
+    // Цена подбора копии диска: в бою 256 МиБ и 3 прохода (около секунды на попытку, GPU почти не ускоряет);
+    // в тестах прежние 64 МиБ, чтобы набор не растягивался.
+    let memory_kib = if cfg!(test) { 65536 } else { 262_144 };
+    let params = Params::new(memory_kib, 3, 1, Some(32)).map_err(|_| anyhow!("параметры KDF"))?;
     // Обычный hash_password_into освобождает рабочие блоки без их стирания.
     // Владеем всей памятью KDF: Zeroizing очищает её и при ошибке/панике.
     let mut memory = Zeroizing::new(vec![argon2::Block::default(); params.block_count()]);
@@ -199,8 +224,19 @@ impl VaultEnvelope {
     pub fn create_unlocked(password: &str, recovery: Option<&str>) -> Result<(Self, NodeVault)> {
         password_ok(password)?;
         let phrase = recovery.map(phrase_secret).transpose()?;
-        let id = random();
-        let key = Zeroizing::new(random());
+        // с сид-фразой (и контрольным словом) номер и ключ среды выводятся из неё: та же фраза на новой машине даёт ту же среду, а значит и тот же
+        // ключ подписи списка узлов. Без фразы (старый путь) они случайны.
+        let (id, key): ([u8; 16], Zeroizing<[u8; 32]>) = match &phrase {
+            Some(secret) if key_root::looks_like_seed_secret(secret) => {
+                let hk = hkdf::Hkdf::<sha2::Sha256>::new(Some(b"YANDI-NODE-CLOSED-SEED-V1\0"), secret.as_slice());
+                let mut id = [0u8; 16];
+                let mut key = Zeroizing::new([0u8; 32]);
+                hk.expand(b"vault-id", &mut id).map_err(|_| anyhow!("HKDF"))?;
+                hk.expand(b"vault-key", key.as_mut()).map_err(|_| anyhow!("HKDF"))?;
+                (id, key)
+            }
+            _ => (random(), Zeroizing::new(random())),
+        };
         let mut envelope = Self {
             version: FORMAT,
             id,
@@ -441,13 +477,13 @@ mod tests {
     fn password_change_preserves_data_and_optional_recovery() {
         let envelope = VaultEnvelope::create(
             "old password",
-            Some("словоодин словодва словотри словочетыре"),
+            Some("legal winner thank year wave sausage worth useful legal winner thank yellow"),
         )
         .unwrap();
         let mut vault = NodeVault::default();
         assert!(vault.change_password(&envelope, "new password").is_err());
         vault
-            .recover(&envelope, "словоодин\nсловодва  словотри словочетыре")
+            .recover(&envelope, "Legal winner\nthank  year wave sausage worth useful legal winner thank yellow")
             .unwrap();
         let data = vault.seal("groups/state", b"group keys").unwrap();
         let next = vault.change_password(&envelope, "new password").unwrap();
@@ -463,7 +499,7 @@ mod tests {
         vault.unlock(&next, "new password").unwrap();
         assert_eq!(&**vault.open("groups/state", &data).unwrap(), b"group keys");
         vault
-            .recover(&next, "словоодин словодва словотри словочетыре")
+            .recover(&next, "legal winner thank year wave sausage worth useful legal winner thank yellow")
             .unwrap();
         assert_eq!(&**vault.open("groups/state", &data).unwrap(), b"group keys");
         // Ошибка смены не портит прежний envelope, он сохраняется до успешной публикации нового.
@@ -516,8 +552,39 @@ mod tests {
     }
 
     #[test]
-    fn recovery_words_must_differ() {
-        assert!(VaultEnvelope::create("owner password", Some("alpha1 alpha1 gamma3 delta4")).is_err());
-        assert!(VaultEnvelope::create("owner password", Some("Alpha1 alpha1 gamma3 delta4")).is_err());
+    fn recovery_phrase_must_be_a_valid_seed() {
+        // 12 слов с неверной контрольной суммой, чужое слово, неверное число слов, прежний формат из четырёх слов
+        for bad in [
+            "winner legal thank year wave sausage worth useful legal winner thank yellow",
+            "legal winner thank year wave sausage worth useful legal winner thank yelow",
+            "legal winner thank year wave sausage worth useful legal winner thank",
+            "alpha1 bravo2 charlie3 delta4",
+        ] {
+            assert!(VaultEnvelope::create("owner password", Some(bad)).is_err(), "{bad}");
+        }
+        // 24 слова тоже годятся, регистр и пробелы не важны
+        let long = format!("{}art", "abandon ".repeat(23));
+        assert!(VaultEnvelope::create("owner password", Some(&long)).is_ok());
+        assert!(VaultEnvelope::create("owner password", Some(&long.to_uppercase())).is_ok());
+    }
+
+    #[test]
+    fn the_same_seed_phrase_makes_the_same_environment_keys_on_any_machine_and_the_control_word_makes_others() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let joined = key_root::join_phrase(words, "Воробей-2026");
+        let vault_of = |phrase: Option<&str>, password: &str| VaultEnvelope::create_unlocked(password, phrase).unwrap().1;
+        let a = vault_of(Some(words), "password-one-1");
+        // другая машина, другой пароль — те же ключи области
+        let b = vault_of(Some(words), "another-pass-2");
+        assert_eq!(*a.subkey("bootstrap_signer").unwrap(), *b.subkey("bootstrap_signer").unwrap());
+        assert_eq!(*a.subkey("chat").unwrap(), *b.subkey("chat").unwrap());
+        // область данных по-прежнему отдельная
+        assert_ne!(*a.subkey("bootstrap_signer").unwrap(), *a.subkey("chat").unwrap());
+        // с контрольным словом — другая среда
+        let c = vault_of(Some(&joined), "password-one-1");
+        assert_ne!(*a.subkey("bootstrap_signer").unwrap(), *c.subkey("bootstrap_signer").unwrap());
+        // без фразы — случайная среда, как раньше
+        let d = vault_of(None, "password-one-1");
+        assert_ne!(*a.subkey("chat").unwrap(), *d.subkey("chat").unwrap());
     }
 }

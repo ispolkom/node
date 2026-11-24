@@ -20,10 +20,40 @@ async fn main() -> anyhow::Result<()> {
 
     {
         let argv: Vec<String> = std::env::args().collect();
+        // Справка и версия НЕ запускают узел: раньше неизвестный ключ (в том числе `--help`) молча стартовал полноценный узел.
+        // у подкоманд своя справка (`yandi admin --help`, `yandi setup --help`)
+        let own_help = matches!(argv.get(1).map(String::as_str), Some("admin" | "setup"));
+        if !own_help && argv.iter().skip(1).any(|a| matches!(a.as_str(), "--help" | "-h" | "help" | "-help")) {
+            // язык справки: YANDI_LANG, сохранённый выбор или язык системы
+            yandi::i18n::set(yandi::i18n::detect(None).unwrap_or(yandi::i18n::Lang::Ru));
+            let ru = "\n\nИспользование: yandi [ключи]\n  --anchor               форсировать роль Anchor\n  --lite | --mobile      лёгкий клиент\n  --anchor-url <wss://…> --anchor-fp <hex>   подключиться к anchor с закреплением отпечатка\n  --ws-bind <addr>       слушатель WebSocket\n  --jurisdiction <XX>    юрисдикция узла\n  --exit-jurisdiction <XX>\n  --anchor-store <путь>  файл paired_anchors.json\n  --import-pairing <…>   импорт приглашения\n  --version, -V          версия\n  --help, -h             эта справка\nПодкоманды: setup (первая настройка), admin (управление узлом), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nКонфигурация: переменная YANDI_CONFIG (путь к config.yaml).";
+            let en = "\n\nUsage: yandi [options]\n  --anchor               force the Anchor role\n  --lite | --mobile      light client\n  --anchor-url <wss://…> --anchor-fp <hex>   connect to an anchor with fingerprint pinning\n  --ws-bind <addr>       WebSocket listener\n  --jurisdiction <XX>    node jurisdiction\n  --exit-jurisdiction <XX>\n  --anchor-store <path>  paired_anchors.json file\n  --import-pairing <…>   import an invitation\n  --version, -V          version\n  --help, -h             this help\nSubcommands: setup (first-time setup), admin (node management), backup inspect|verify|restore, testnet up|status|down|reset, bootstrap keygen|show|verify|add|from-card|remove|sign\nConfiguration: the YANDI_CONFIG variable (path to config.yaml). Console language: --lang ru|en or YANDI_LANG.";
+            println!("YANDI v{}{}", env!("CARGO_PKG_VERSION"), yandi::t!(ru, en));
+            std::process::exit(0);
+        }
+        if !own_help && argv.iter().skip(1).any(|a| matches!(a.as_str(), "--version" | "-V" | "version")) {
+            println!("yandi {}", env!("CARGO_PKG_VERSION"));
+            std::process::exit(0);
+        }
         // `yandi testnet up|status|down|reset` — тренировочная сеть из нескольких копий узла на этом компьютере
         if argv.get(1).map(|a| a.as_str()) == Some("testnet") {
             let code = yandi::testnet::run_cli(argv[2..].to_vec()).await;
             std::process::exit(code);
+        }
+        // `yandi backup inspect|verify|restore FILE` — работа с файлом резервной копии связей без запуска узла
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("backup") {
+            let code = yandi::backup_cli::run(argv[2..].to_vec());
+            std::process::exit(code);
+        }
+        // `yandi setup` — первая настройка запущенного узла из консоли; `yandi admin` — управление им (меню и подкоманды)
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("setup") {
+            std::process::exit(yandi::admin_cli::run_setup(argv[2..].to_vec()));
+        }
+        #[cfg(unix)]
+        if argv.get(1).map(|a| a.as_str()) == Some("admin") {
+            std::process::exit(yandi::admin_cli::run_admin(argv[2..].to_vec()));
         }
         // `yandi bootstrap keygen|show|verify|add|from-card|remove|sign` — инструменты владельца списка входных узлов
         if argv.get(1).map(|a| a.as_str()) == Some("bootstrap") {
@@ -33,11 +63,20 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
+    // Каталог данных создаётся приватным раньше любых записей в него (иначе сокет оболочки откажется его принять)
+    let _ = yandi::util::data_dir::ensure_private();
+
     // Инициализируем конфигурацию
     init_config()
         .map_err(|e| anyhow::anyhow!("Failed to init config: {}", e))?;
 
     let config = get_config();
+    // автономный узел: меш (внесённые владельцем узлы) известен до запуска связи — иначе первые приветствия меша отсекались бы
+    if yandi::autonomy::enabled() {
+        let dir = yandi::web::peers::PeerDirectory::load_or_default(&yandi::web::peers::default_peer_directory_path());
+        yandi::exit_policy::set_trusted(dir.decoded().into_iter().map(|(id, _, _)| id.0));
+        println!("🔒 Автономный узел: общая сеть выключена, меш — {} узл.", dir.peers.len());
+    }
 
     // Initialize logging
     init_logging(LogLevel::Info)
@@ -69,7 +108,15 @@ async fn main() -> anyhow::Result<()> {
     let ip_service = ExternalIpService::new();
     // страна по внешнему адресу — для карточки узла в сети (город и провайдер никуда не публикуются)
     let mut ip_country: Option<String> = None;
-    let external_ip = match ip_service.get_external_ip().await {
+    // автономный узел не спрашивает внешние сервисы (ipify/ipinfo видели бы его IP и время работы): адрес — только из
+    // настроек `network.public_ip` (аудит R9 №14)
+    let autonomous_ip = if yandi::autonomy::enabled() { Some(config.network.public_ip.clone()) } else { None };
+    let lookup = match autonomous_ip.clone() {
+        Some(ip) => ip.ok_or(anyhow!("адрес не задан в настройках")),
+        None => ip_service.get_external_ip().await.map_err(|e| anyhow!("{e}")),
+    };
+    let external_ip = match lookup {
+        Ok(ip) if autonomous_ip.is_some() => Some(ip),
         Ok(ip) => {
             yandi::ip_history::observe(&ip);
             match ip_service.get_detailed_ip_info().await {
@@ -90,7 +137,7 @@ async fn main() -> anyhow::Result<()> {
     };
 
     // 3a. Detect external IPv6 (if available)
-    let external_ipv6 = match ip_service.get_external_ipv6().await {
+    let external_ipv6 = match if autonomous_ip.is_some() { Err(anyhow!("автономный узел")) } else { ip_service.get_external_ipv6().await.map_err(|e| anyhow!("{e}")) } {
         Ok(ip) => {
             Some(ip)
         }
@@ -181,9 +228,11 @@ async fn main() -> anyhow::Result<()> {
         match yandi::netlayer::pairing::PairingPayload::from_qr_string(&qr) {
             Ok(payload) => {
                 let path = yandi::netlayer::pairing::default_paired_anchors_path();
-                let mut store = yandi::netlayer::pairing::PairedAnchorStore::load_or_default(&path);
-                store.add_or_update(payload.clone(), 0);
-                match store.save(&path) {
+                // транзакция над файлом (блокировка, строгое чтение, запись): параллельный запуск не теряет чужую запись
+                match yandi::netlayer::pairing::PairedAnchorStore::update(&path, |st| {
+                    st.add_or_update(payload.clone(), 0);
+                    Ok(())
+                }) {
                     Ok(_) => {
                         println!("✅ Pairing imported:");
                         println!("   anchor_id:       {}", hex::encode(&payload.anchor_id.0[..8]));
@@ -236,7 +285,7 @@ async fn main() -> anyhow::Result<()> {
     #[cfg(unix)]
     if !auth_state.is_setup.load(std::sync::atomic::Ordering::Relaxed) {
         let port = config.ports.web_ui;
-        println!("🔐 Первый запуск: откройте http://127.0.0.1:{port} и создайте пароль входа и мастер-пароль");
+        println!("🔐 Первый запуск: откройте оболочку YANDI: сид-фраза и пароль (или восстановление из копии)");
         if let Err(e) = yandi::web::first_setup::run(auth_state.clone(), port).await {
             eprintln!("🔐 Первичная настройка не запустилась: {e}");
             std::process::exit(2);
@@ -275,6 +324,21 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     };
+    // Резервная копия связей: корень ключей есть только у работающего узла; плановая задача раз в сутки сверяет изменения
+    #[cfg(unix)]
+    {
+        let auth_for_backup = auth_state.clone();
+    // остатки секретов старого формата рядом с файлами связи (прежние сбои восстановления) очищаются при каждом старте
+    for u in yandi::node_backup::sweep_pairing_files(&yandi::node_backup::Layout::live(discovery_port)) {
+        eprintln!("[pairing] не очищено от секретов старого формата: {u}");
+    }
+        yandi::backup_api::install(yandi::node_backup::Layout::live(discovery_port), std::sync::Arc::new(move || auth_for_backup.get_master_key()));
+        tokio::task::spawn(yandi::backup_api::scheduler());
+    }
+    // срок хранения принятых и отправленных файлов: раз в сутки старое удаляется
+    tokio::task::spawn(yandi::file_retention::scheduler());
+    // проверка внешних прокси раз в сутки, по очереди
+    tokio::task::spawn(yandi::upstream_proxy::health_scheduler());
     #[cfg(unix)]
     let closed_configured = closed_env.as_ref().is_some_and(|e| e.configured());
     #[cfg(not(unix))]
@@ -299,6 +363,8 @@ async fn main() -> anyhow::Result<()> {
             yandi::mobile_group_files::cleanup_all().await;
             yandi::mobile_files::cleanup_expired().await; // и личных передач между устройствами
             yandi::mobile_groups::cleanup_requests(); // просьбы о вступлении старше недели стираются с диска
+            yandi::mobile_groups::cleanup_old_messages(); // записи групп старше года (раз в сутки)
+            yandi::mobile_groups::cleanup_inactive(); // автоочистка групп: рядовые без единой записи за срок группы исключаются
             tokio::time::sleep(std::time::Duration::from_secs(600)).await;
         }
     });
@@ -372,9 +438,6 @@ async fn main() -> anyhow::Result<()> {
     let (proxy_tunnel_tx, proxy_tunnel_rx) = mpsc::channel::<(yandi::util::HashId, yandi::proxy::ProxyTunnelData)>(100);
     let proxy_tunnel_rx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(proxy_tunnel_rx)));
 
-    // 8.75 Create NACK channel (для wagon retransmission на gateway)
-    let (nack_tx, nack_rx) = mpsc::channel::<(yandi::util::HashId, yandi::protocol::WagonNack)>(100);
-    let nack_rx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(nack_rx)));
 
     // 8.8 Create SOCKS5 channels (аналогично HTTP Proxy)
     let (socks5_req_tx, socks5_req_rx) = mpsc::channel::<(yandi::util::HashId, yandi::socks5::Socks5ProxyRequest)>(100);
@@ -397,12 +460,10 @@ async fn main() -> anyhow::Result<()> {
 
     // 8.12 Create Chat packet channel (для чата)
     let (chat_packet_tx, mut chat_packet_rx) = mpsc::channel::<(yandi::util::HashId, yandi::communication::CommPacket)>(10000);
-    let (group_packet_tx, mut group_packet_rx) = mpsc::channel::<(yandi::util::HashId, yandi::communication::GroupPacket)>(10000);
     let (media_signal_tx, mut media_signal_rx) = mpsc::channel::<(yandi::util::HashId, yandi::p2p::P2PPacketType, Vec<u8>)>(1024);
 
     // Клонируем каналы для второго транспорта
     let chat_packet_tx_for_p2p = chat_packet_tx.clone();
-    let group_packet_tx_for_p2p = group_packet_tx.clone();
     let p2p_tunnel_tx_for_p2p = p2p_tunnel_tx.clone();
 
     // 9. Create P2P Transport with exit handler and proxy channels
@@ -414,7 +475,6 @@ async fn main() -> anyhow::Result<()> {
         Some(proxy_tx),
         Some(proxy_resp_tx),
         Some(proxy_tunnel_tx),
-        Some(nack_tx), // 🔄 NACK channel
         // SOCKS5 handlers
         Some(socks5_gateway_tx), // 🧦 SOCKS5 Gateway auto-start
         Some(socks5_req_tx),
@@ -427,7 +487,6 @@ async fn main() -> anyhow::Result<()> {
         Some(p2p_tunnel_tx),
         // Chat handler
         Some(chat_packet_tx),
-        Some(group_packet_tx),
         // P2P communication transport is independent from netlayer
         None,
         None,  // external_ip
@@ -530,11 +589,11 @@ async fn main() -> anyhow::Result<()> {
             println!("[P2P] ⏭️  Нет других входных узлов для знакомства (в списке только свой адрес)");
         }
         for addr in p2p_nodes {
-            println!("[P2P] 🔗 Connecting to {}:9001...", addr);
+            println!("[P2P] 🔗 Connecting to {}:9001...", yandi::util::logsafe::a(&addr));
             if let Err(e) = p2p_transport.send_hello_request(&addr).await {
-                println!("[P2P] ⚠️  Failed to connect to {}: {}", addr, e);
+                println!("[P2P] ⚠️  Failed to connect to {}: {}", yandi::util::logsafe::a(&addr), e);
             } else {
-                println!("[P2P] ✅ Hello sent to {}", addr);
+                println!("[P2P] ✅ Hello sent to {}", yandi::util::logsafe::a(&addr));
             }
         }
     }
@@ -564,15 +623,15 @@ async fn main() -> anyhow::Result<()> {
         .map_err(|e| anyhow!("Failed to enable mDNS browser: {}", e))?;
 
     // копия из тренировочной сети не объявляет себя в домашней сети (имя yandi.local — у настоящего узла)
-    if !yandi::testnet::active() {
+    // автономный узел не объявляет себя и в локальной сети (docs/ROADMAP_R9.md §4)
+    if !yandi::testnet::active() && !yandi::autonomy::enabled() {
         mdns_service.start().await
             .map_err(|e| anyhow!("Failed to start mDNS service: {}", e))?;
     }
 
     let mdns_hostname = format!("{}.local", short_id);
     println!("✅ mDNS: This node is now accessible as:");
-    println!("   🌐 yandi.local    → Web UI (port {})", web_ui_port);
-    println!("   🌐 {}  → Web UI (port {})", mdns_hostname, web_ui_port);
+    println!("   🌐 yandi.local, {}", mdns_hostname);
     println!();
 
     // 8.6 Start Web Server in background
@@ -641,14 +700,32 @@ async fn main() -> anyhow::Result<()> {
     let chat_manager = std::sync::Arc::new(chat_manager);
     chat_manager.clone().spawn_delivery_timeout_task();
     yandi::mobile_api::init(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
+    yandi::profile_sync::spawn(chat_manager.clone(), p2p_transport.clone(), identity.node_id());
+    // уведомление об обновлениях (подписанные манифесты на сайте и GitHub; сам узел ничего не устанавливает)
+    // автономный узел обновления не проверяет и извещений не получает: владелец обновляет вручную (docs/ROADMAP_R9.md §4)
+    if !yandi::autonomy::enabled() {
+        yandi::updates::spawn();
+    }
     #[cfg(unix)]
     if let Some(env) = closed_env.as_ref() {
         env.register(std::sync::Arc::new(yandi::closed_api::ChatConsumer(chat_manager.clone())));
         env.register(std::sync::Arc::new(yandi::closed_api::GroupsConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::SelfConsumer));
         env.register(std::sync::Arc::new(yandi::closed_api::ProxyConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::BootstrapSignerConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::ComplaintsConsumer));
+        env.register(std::sync::Arc::new(yandi::closed_api::FilesConsumer));
         env.spawn_auto_lock();
         yandi::closed_api::install_global(env.clone());
+        // служебные части (ключи «Компьютера», группы ПК, жалобы) поднимаются сами, без владельца у экрана
+        env.start_service().await;
+        // пароль владельца ещё не задан: файлы переписки запечатываются рабочим ключом машины (как и чаты), чтобы узел принимал
+        // и отправлял файлы; при установке пароля они перезапечатываются ключом владельца (FilesConsumer::migrate)
+        if !closed_configured {
+            if let Some(mk) = auth_state.get_master_key() {
+                yandi::file_vault::unlock(yandi::closed_env::service_key_for(&mk, yandi::closed_env::DOMAIN_FILES));
+            }
+        }
     }
 
     // Spawn Chat packet handler
@@ -708,6 +785,8 @@ async fn main() -> anyhow::Result<()> {
                 _ => (None, "unknown"),
             };
             let power = match sys_info.power { yandi::util::NodePower::Low => "low", yandi::util::NodePower::Medium => "medium", yandi::util::NodePower::High => "high" };
+            // выбор режима (общая сеть / автономный) есть только у узла с белым адресом и не слабым железом
+            yandi::autonomy::set_capable(introspection.capabilities.has_public_ip && power != "low");
             let a = yandi::network_offers::SelfAssessment {
                 country,
                 country_source: source,
@@ -728,7 +807,15 @@ async fn main() -> anyhow::Result<()> {
                 let fmt = |port: u16| if host.contains(':') { format!("[{host}]:{port}") } else { format!("{host}:{port}") };
                 yandi::web::peers::install_my_card(&node_id_for_card, &pubkey_for_card, vec![fmt(disc_port)], vec![fmt(p2p_port_for_card)]);
             });
-            yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
+            if !yandi::autonomy::enabled() { yandi::bootstrap::apply::start(transport.clone(), identity.node_id().0, key.clone()); } // заявка во входной список: только узлам из бутстрапа
+            // автономный узел карточку в сеть не публикует и пробы не принимает
+            if !yandi::autonomy::enabled() {
+                yandi::network_offers::start(transport.clone(), identity.node_id().0, key, a, watch_ip, Some(on_change));
+            } else {
+                // меш: только слушатель запасного пути по TCP/TLS (пробы чужим он не подтверждает)
+                yandi::network_offers::start_listener(&a, identity.node_id().0, &key);
+                let _ = (watch_ip, on_change);
+            }
             yandi::reciprocity::start();
         }
         // вход для телефона по TLS (если владелец включил): байты — в локальный SOCKS5-прокси узла
@@ -744,22 +831,22 @@ async fn main() -> anyhow::Result<()> {
             }
     });
         }
+        if !yandi::autonomy::enabled() {
         yandi::relay_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key), std::env::var("YANDI_CLIENT_ONLY").map(|v| v == "1").unwrap_or(false));
         yandi::hops_net::start(transport.clone(), identity.node_id().0, ed25519_dalek::SigningKey::from_bytes(&identity.signing_private_key));
+        }
     }
 
     // Запустить CLI
     let p2p_tunnel_manager_for_cli = p2p_tunnel_manager.clone();
     let proxy_rx_for_cli = proxy_rx.clone();
     let proxy_tunnel_rx_for_cli = proxy_tunnel_rx.clone();
-    let nack_rx_for_cli = nack_rx.clone();
     let socks5_req_rx_for_cli = socks5_req_rx.clone();
     let socks5_tunnel_rx_for_cli = socks5_tunnel_rx.clone();
     let cli = P2PCli::new(transport.clone())
         .with_proxy_response_channel(proxy_resp_rx)
         .with_proxy_request_channel(proxy_rx_for_cli)
         .with_proxy_tunnel_data_channel(proxy_tunnel_rx_for_cli)
-        .with_nack_channel(nack_rx_for_cli) // 🔄 NACK channel
         .with_socks5_response_channel(socks5_resp_rx)
         .with_socks5_request_channel(socks5_req_rx_for_cli)
         .with_socks5_tunnel_data_channel(socks5_tunnel_rx_for_cli)
@@ -836,7 +923,7 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    println!("🌐 Web UI running on http://127.0.0.1:{}", web_ui_port);
+    println!("🌐 Оболочка подключается через локальный сокет");
     println!("   Proxy will run on port {} (use CLI: proxy <SHORT_ID>)", http_proxy_port);
     println!();
 
@@ -881,7 +968,6 @@ async fn main() -> anyhow::Result<()> {
         let transport_for_proxy_gateway = transport.clone();
         let proxy_rx_clone = proxy_rx.clone();
         let proxy_tunnel_rx_clone = proxy_tunnel_rx.clone();
-        let nack_rx_clone = nack_rx.clone();
 
         tokio::spawn(async move {
             println!("🌐 Proxy Gateway Auto-Start Manager started (Gateway mode)");
@@ -894,11 +980,6 @@ async fn main() -> anyhow::Result<()> {
 
             let tunnel_rx = {
                 let mut rx_lock = proxy_tunnel_rx_clone.lock().await;
-                rx_lock.take()
-            };
-
-            let nack_rx_chan = {
-                let mut rx_lock = nack_rx_clone.lock().await;
                 rx_lock.take()
             };
 
@@ -916,11 +997,6 @@ async fn main() -> anyhow::Result<()> {
             if let Some(tunnel_rx) = tunnel_rx {
                 gateway = gateway.with_tunnel_data_channel(tunnel_rx);
             }
-
-            // TODO: NACK handler - нужен публичный метод в HttpProxyGateway
-            // if let Some(nack_rx) = nack_rx_chan {
-            //     // Запускаем NACK handler
-            // }
 
             // Регистрируем Station
             transport_for_proxy_gateway.set_station(gateway.station.clone()).await;
@@ -976,7 +1052,6 @@ async fn main() -> anyhow::Result<()> {
         let transport_for_socks5_gateway = transport.clone();
         let socks5_req_rx_clone = socks5_req_rx.clone();
         let socks5_tunnel_rx_clone = socks5_tunnel_rx.clone();
-        let nack_rx_clone = nack_rx.clone();
 
         tokio::spawn(async move {
             println!("🧦 SOCKS5 Gateway Auto-Start Manager started (Gateway mode)");
@@ -1193,6 +1268,8 @@ async fn main() -> anyhow::Result<()> {
                     .map(|n| n.address.clone())
                     .collect();
 
+                // основной транспорт принимает Hello с адреса входного узла только с ключом из подписанного списка
+                transport.set_bootstrap_pins(config.fingerprint_map()).await;
                 if !bootstrap_nodes.is_empty() {
                     // Запускаем bootstrap с фильтрацией своего IP
                     if let Err(e) = transport.bootstrap(bootstrap_nodes, external_ip).await {

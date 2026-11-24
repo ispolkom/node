@@ -63,11 +63,45 @@ pub struct WagonStats {
     /// Wagons dropped (timeout, buffer full, etc.)
     pub dropped: AtomicU64,
 
-    /// Wagons retransmitted (via NACK)
-    pub retransmitted: AtomicU64,
-
     /// 🔴 Path0 wagons lost (Path1 arrived instead)
     pub path0_lost: AtomicU64,
+
+    /// Aggregate queued datagrams across physical receive sockets.
+    pub rx_queue_depth: AtomicU64,
+    pub rx_queue_bytes: AtomicU64,
+    pub rx_queue_dropped: AtomicU64,
+    /// Worker input wait, including idle time and contention between workers.
+    pub rx_worker_wait_ns: AtomicU64,
+    /// Datagram residence time until a worker starts processing it.
+    pub rx_queue_wait_ns: AtomicU64,
+    pub rx_worker_dequeued: AtomicU64,
+    /// Aggregate admitted blocks, including each writer's in-flight write.
+    pub tunnel_queue_depth: AtomicU64,
+    pub tunnel_queue_bytes: AtomicU64,
+    pub tunnel_queue_overflow: AtomicU64,
+    pub tunnel_write_failed: AtomicU64,
+    /// Копии вагонов, отправленные со второго исходного порта
+    pub tx_second_path: AtomicU64,
+    pub tunnel_reordered: AtomicU64,
+    pub tunnel_reorder_depth: AtomicU64,
+    pub tunnel_reorder_bytes: AtomicU64,
+    pub tunnel_gap_closed: AtomicU64,
+    pub tunnel_stream_overflow: AtomicU64,
+    pub tunnel_stream_duplicates: AtomicU64,
+    pub tunnel_stream_invalid: AtomicU64,
+    pub tunnel_version_rejected: AtomicU64,
+
+    /// Вторые копии датаграмм, отброшенные по счётчику сессии до расшифровки
+    pub duplicates_dropped: AtomicU64,
+}
+
+/// Убрать маршрут `id`, только если в карте лежит канал `mine`. true — убран.
+fn remove_route_if_same(routes: &mut HashMap<HashId, mpsc::Sender<Vec<u8>>>, id: &HashId, mine: &mpsc::Sender<Vec<u8>>) -> bool {
+    if routes.get(id).is_some_and(|s| s.same_channel(mine)) {
+        routes.remove(id);
+        return true;
+    }
+    false
 }
 
 impl WagonStats {
@@ -81,8 +115,28 @@ impl WagonStats {
             recv_total: AtomicU64::new(0),
             checksum_failed: AtomicU64::new(0),
             dropped: AtomicU64::new(0),
-            retransmitted: AtomicU64::new(0),
             path0_lost: AtomicU64::new(0),
+            rx_queue_depth: AtomicU64::new(0),
+            rx_queue_bytes: AtomicU64::new(0),
+            rx_queue_dropped: AtomicU64::new(0),
+            rx_worker_wait_ns: AtomicU64::new(0),
+            rx_queue_wait_ns: AtomicU64::new(0),
+            rx_worker_dequeued: AtomicU64::new(0),
+            tunnel_queue_depth: AtomicU64::new(0),
+            tunnel_queue_bytes: AtomicU64::new(0),
+            tunnel_queue_overflow: AtomicU64::new(0),
+            tunnel_write_failed: AtomicU64::new(0),
+            tx_second_path: AtomicU64::new(0),
+            tunnel_reordered: AtomicU64::new(0),
+            tunnel_reorder_depth: AtomicU64::new(0),
+            tunnel_reorder_bytes: AtomicU64::new(0),
+            tunnel_gap_closed: AtomicU64::new(0),
+            tunnel_stream_overflow: AtomicU64::new(0),
+            tunnel_stream_duplicates: AtomicU64::new(0),
+            tunnel_stream_invalid: AtomicU64::new(0),
+            tunnel_version_rejected: AtomicU64::new(0),
+
+            duplicates_dropped: AtomicU64::new(0),
         }
     }
 
@@ -98,7 +152,6 @@ impl WagonStats {
 
         let checksum_failed = self.checksum_failed.load(Ordering::Relaxed);
         let dropped = self.dropped.load(Ordering::Relaxed);
-        let retransmitted = self.retransmitted.load(Ordering::Relaxed);
         let path0_lost = self.path0_lost.load(Ordering::Relaxed);
 
         // Use signed arithmetic to handle cases where recv > sent (e.g., gateway receiving more than sending)
@@ -129,10 +182,21 @@ impl WagonStats {
             0
         };
 
+        println!("[RX-STATS] depth={} bytes={} dropped={} worker_wait_ns={} queue_wait_ns={} dequeued={} tunnel_depth={} tunnel_bytes={} tunnel_overflow={} write_failed={}",
+            self.rx_queue_depth.load(Ordering::Relaxed), self.rx_queue_bytes.load(Ordering::Relaxed),
+            self.rx_queue_dropped.load(Ordering::Relaxed), self.rx_worker_wait_ns.load(Ordering::Relaxed),
+            self.rx_queue_wait_ns.load(Ordering::Relaxed), self.rx_worker_dequeued.load(Ordering::Relaxed), self.tunnel_queue_depth.load(Ordering::Relaxed),
+            self.tunnel_queue_bytes.load(Ordering::Relaxed), self.tunnel_queue_overflow.load(Ordering::Relaxed),
+            self.tunnel_write_failed.load(Ordering::Relaxed));
+        println!("[STREAM-STATS] reordered={} depth={} bytes={} gap_closed={} overflow={} duplicates={} invalid={} version_rejected={}",
+            self.tunnel_reordered.load(Ordering::Relaxed), self.tunnel_reorder_depth.load(Ordering::Relaxed),
+            self.tunnel_reorder_bytes.load(Ordering::Relaxed), self.tunnel_gap_closed.load(Ordering::Relaxed),
+            self.tunnel_stream_overflow.load(Ordering::Relaxed), self.tunnel_stream_duplicates.load(Ordering::Relaxed),
+            self.tunnel_stream_invalid.load(Ordering::Relaxed), self.tunnel_version_rejected.load(Ordering::Relaxed));
         println!("🚂 [WAGON-STATS] Path0: sent={}, recv={}, loss={}%", sent0, recv0, loss0);
         println!("🚂 [WAGON-STATS] Path1: sent={}, recv={}, loss={}%", sent1, recv1, loss1);
-        println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, retrans={}, path0_lost={}",
-                 sent_total, recv_total, loss_total, checksum_failed, dropped, retransmitted, path0_lost);
+        println!("🚂 [WAGON-STATS] TOTAL: sent={}, recv={}, loss={}%, checksum_fail={}, dropped={}, path0_lost={}",
+                 sent_total, recv_total, loss_total, checksum_failed, dropped, path0_lost);
     }
 }
 
@@ -179,7 +243,6 @@ pub struct WebTransportMetrics {
     pub wagon_recv_total: u64,
     pub wagon_drop_total: u64,
     pub wagon_checksum_failed_total: u64,
-    pub wagon_retrans_total: u64,
     pub wagon_drop_crc_pct: f64,
     pub peer_count: usize,
 }
@@ -363,6 +426,14 @@ pub struct P2PTransport {
     data_send_socket: Arc<CSocket>,
     /// Socket manager for port rotation
     socket_manager: Arc<SocketManager>,
+    /// Второй путь: копия вагона уходит с ДРУГОГО исходного порта (соседний с портом данных, иначе любой свободный) на тот же адрес
+    /// получателя. Разные исходные порты — разные потоки для сети, свои буферы отправки; получателю ничего знать не нужно.
+    /// Если порт занять не удалось, это тот же сокет, что и основной (обе копии с одного порта, как раньше).
+    second_src: Arc<CSocket>,
+    /// Путь B подтверждён получателем (прислал PATH_B_CONFIRM после пакета с порта B): пока подтверждение свежее, копии идут с порта B.
+    path_b_ok: Arc<std::sync::Mutex<HashMap<HashId, Instant>>>,
+    /// Порт B пира, объявленный им самим (PATH_B_ANNOUNCE): подтверждаем только пакеты, пришедшие именно с него.
+    path_b_peer_port: Arc<std::sync::Mutex<HashMap<HashId, u16>>>,
     /// Port rotation notification channel
     port_rotation_tx: tokio::sync::watch::Sender<SocketPair>,
     /// Currently active rotated listeners that should be retired on next rotation
@@ -406,9 +477,6 @@ pub struct P2PTransport {
     /// SOCKS5 tunnel data sender
     socks5_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5TunnelData)>>,
 
-    /// 🔄 NACK sender (optional, for wagon retransmission) - отправляет NACK в gateway
-    nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
-
     /// YTP Station для обработки поездов
     pub station: Arc<Mutex<Option<Arc<crate::protocol::Station>>>>,
     /// RX byte counter for speed monitoring
@@ -432,8 +500,6 @@ pub struct P2PTransport {
 
     /// Chat packet sender (optional, for chat manager)
     chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    /// Group packet sender (optional, for group chat manager)
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
 
 
 
@@ -445,6 +511,9 @@ pub struct P2PTransport {
     /// Empty by default (fully permissive, matching prior behavior) until
     /// main.rs loads the peer directory and calls the setter.
     pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+    /// IP входного узла → ключ подписи из подписанного списка: Hello с этого адреса принимается только с этим ключом
+    /// (подмена узла по адресу — по DNS, маршруту — не пройдёт, как бы корректно она ни подписала Hello своим ключом).
+    bootstrap_pins: Arc<tokio::sync::RwLock<HashMap<String, [u8; 32]>>>,
 
     /// Node Identity Binding Fix — Barrier 3 (replay protection).
     /// Two-Phase Verification (`verify_peer_handshake_static`) already checks
@@ -485,10 +554,6 @@ pub struct P2PTransport {
     pub ws_outgoing: Arc<tokio::sync::Mutex<HashMap<HashId, mpsc::Sender<Vec<u8>>>>>,
 
 
-    /// 🔐 Step 4: PairedClientStore — anchor хранит session-токены спаренных клиентов.
-    /// Загружается при старте из `~/.yandi/paired_clients.json`. На mobile-стороне пуст.
-    /// Используется при обработке 0xC0 RESUME: lookup session_id → verify HMAC → refresh TTL.
-    pub paired_clients: Arc<tokio::sync::Mutex<crate::netlayer::pairing::PairedClientStore>>,
 
     /// 🔁 Step 6: PairedAnchorStore — mobile хранит список своих anchor'ов в порядке
     /// предпочтения. Загружается при старте из `~/.yandi/paired_anchors.json`.
@@ -533,7 +598,7 @@ impl P2PTransport {
     /// - 0.0.0.0:9000 for discovery (Hello)
     /// - 0.0.0.0:10000 for encrypted data
     pub async fn new(identity: NodeIdentity, capabilities: u16) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler channel
@@ -542,7 +607,7 @@ impl P2PTransport {
         capabilities: u16,
         exit_handler_tx: Option<mpsc::Sender<ExitHandlerRequest>>,
     ) -> Result<Arc<Self>, String> {
-        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
+        Self::with_handlers(identity, capabilities, exit_handler_tx, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, None, DEFAULT_DISCOVERY_PORT, DEFAULT_DATA_PORT).await
     }
 
     /// Create new P2P transport with exit handler and proxy request channels
@@ -554,7 +619,6 @@ impl P2PTransport {
         proxy_request_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyRequest)>>,
         proxy_response_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyResponse)>>,
         proxy_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyTunnelData)>>,
-        nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
         // SOCKS5 handlers (аналогично HTTP Proxy)
         socks5_gateway_tx: Option<mpsc::Sender<ProxyGatewayRequest>>,  // 🧦 SOCKS5 Gateway auto-start
         socks5_request_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5ProxyRequest)>>,
@@ -567,7 +631,6 @@ impl P2PTransport {
         p2p_tunnel_tx: Option<mpsc::Sender<(HashId, Vec<u8>)>>,
         // Chat handler
         chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
         // New peer notification (for P2P transport sync)
         new_peer_tx: Option<mpsc::Sender<PeerInfo>>,
         external_ip: Option<String>,
@@ -673,6 +736,42 @@ impl P2PTransport {
         let data_recv_socket = CSocket::new(Arc::new(data_socket), carrier.clone())
             .map_err(|e| format!("Failed to wrap data socket: {}", e))?;
         let data_send_socket = Arc::clone(&data_recv_socket);
+
+        // Второй исходный порт для копии вагона (см. поле `second_src`).
+        let second_src: Arc<CSocket> = {
+            // Порт data+1 занят другими службами узла (обнаружение, шлюзы), поэтому порт даёт система.
+            let bind = UdpSocket::bind("0.0.0.0:0").await.ok();
+            match bind.map(|s| s.into_std()) {
+                Some(Ok(std_socket)) => {
+                    #[cfg(unix)]
+                    {
+                        use std::os::unix::io::AsRawFd;
+                        let size: i32 = 4 * 1024 * 1024;
+                        unsafe {
+                            libc::setsockopt(std_socket.as_raw_fd(), libc::SOL_SOCKET, libc::SO_SNDBUF,
+                                &size as *const i32 as *const _, std::mem::size_of::<i32>() as u32);
+                        }
+                    }
+                    match tokio::net::UdpSocket::from_std(std_socket)
+                        .map_err(|e| e.to_string())
+                        .and_then(|u| CSocket::new(Arc::new(u), carrier.clone()).map_err(|e| e.to_string()))
+                    {
+                        Ok(sock) => {
+                            println!("[transport] 🛣️  Второй исходный порт для копий вагонов: {:?}", sock.local_addr().ok());
+                            sock
+                        }
+                        Err(e) => {
+                            eprintln!("[transport] ⚠️  второй исходный порт недоступен ({e}); копии идут с основного");
+                            data_recv_socket.clone()
+                        }
+                    }
+                }
+                _ => {
+                    eprintln!("[transport] ⚠️  второй исходный порт недоступен; копии идут с основного");
+                    data_recv_socket.clone()
+                }
+            }
+        };
 
         println!(
             "[transport] 🔒 Fallback data socket bound to 0.0.0.0:{}",
@@ -815,6 +914,15 @@ impl P2PTransport {
         println!("[transport] Capabilities: 0b{:016b}", capabilities);
 
         // Create transport object first
+        // Записи о праве клиентов в памяти не держатся (источник истины — файл, изменения идут транзакциями `update`); при старте файл
+        // только читается: старый формат с секретами переписывается, повреждённый блокирует выдачу и это попадает в журнал.
+        {
+            let path = crate::netlayer::pairing::default_paired_clients_path();
+            let st = crate::netlayer::pairing::PairedClientStore::load_or_default(&path);
+            if let Some(why) = &st.blocked {
+                eprintln!("[pairing] {}: выдача прав заблокирована: {why}", path.display());
+            }
+        }
         let transport = Self {
             identity,
             local_id: node_id.clone(),
@@ -837,23 +945,16 @@ impl P2PTransport {
             socks5_request_tx: socks5_request_tx.clone(),
             socks5_response_tx: socks5_response_tx.clone(),
             socks5_tunnel_data_tx: socks5_tunnel_data_tx.clone(),
-            nack_tx: nack_tx.clone(), // 🔄 NACK channel
             station: station.clone(),
             tun_wagon_tx: tun_wagon_tx.clone(),
             tun_wagon_resp_tx: tun_wagon_resp_tx.clone(),
             p2p_tunnel_tx: p2p_tunnel_tx.clone(),
             chat_packet_tx: chat_packet_tx.clone(),
-            group_packet_tx: group_packet_tx.clone(),
             new_peer_tx: new_peer_tx.clone(),
             external_ip: Arc::new(tokio::sync::RwLock::new(external_ip.clone())),
             local_nat_mapping: Arc::new(tokio::sync::RwLock::new(MappingBehavior::Unknown)),
             mapping_probes: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             ws_outgoing: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            paired_clients: {
-                let path = crate::netlayer::pairing::default_paired_clients_path();
-                let store = crate::netlayer::pairing::PairedClientStore::load_or_default(&path);
-                Arc::new(tokio::sync::Mutex::new(store))
-            },
             paired_anchors: {
                 let path = crate::netlayer::pairing::default_paired_anchors_path();
                 let store = crate::netlayer::pairing::PairedAnchorStore::load_or_default(&path);
@@ -873,6 +974,9 @@ impl P2PTransport {
             port_manager: port_manager.clone(),
             adaptive_controller: adaptive_controller.clone(),
             socket_manager: socket_manager.clone(),
+            second_src,
+            path_b_ok: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            path_b_peer_port: Arc::new(std::sync::Mutex::new(HashMap::new())),
             rx_bytes_counter: Arc::new(AtomicU64::new(0)),
             tx_bytes_counter: Arc::new(AtomicU64::new(0)),
             last_rx_bytes: Arc::new(tokio::sync::Mutex::new(0)),
@@ -881,6 +985,7 @@ impl P2PTransport {
             port_rotation_tx: port_rotation_tx.clone(),
             active_rotated_listeners: Arc::new(tokio::sync::Mutex::new(None)),
             pinned_identities: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            bootstrap_pins: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             seen_hello_nonces: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             rekey_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             resync_requested: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -930,9 +1035,11 @@ impl P2PTransport {
                 let mut server = match parsed {
                     Some(addr) => match WsServer::bind(addr, &tls).await {
                         Ok(s) => s,
-                        Err(e) if addr != fallback => {
+                        // запасной порт — только когда и так слушаем на всех интерфейсах (например, нет прав на 443). Заданный
+                        // адрес интерфейса (127.0.0.1, VPN, LAN) в «все интерфейсы» не превращается: вход просто не запускается
+                        Err(e) if ws_fallback_allowed(addr) => {
                             eprintln!("[ws-server] ⚠️  bind {} failed: {} — fallback на {}",
-                                      addr, e, fallback);
+                                      crate::util::logsafe::a(&addr), e, fallback);
                             match WsServer::bind(fallback, &tls).await {
                                 Ok(s) => s,
                                 Err(e2) => {
@@ -943,21 +1050,14 @@ impl P2PTransport {
                             }
                         }
                         Err(e) => {
-                            eprintln!("[ws-server] bind {} failed: {} — disabled", addr, e);
+                            eprintln!("[ws-server] bind {} failed: {} — disabled", crate::util::logsafe::a(&addr), e);
                             return;
                         }
                     },
                     None => {
-                        eprintln!("[ws-server] ⚠️  не парсится ws-bind {:?} — fallback на {}",
-                                  configured, fallback);
-                        match WsServer::bind(fallback, &tls).await {
-                            Ok(s) => s,
-                            Err(e) => {
-                                eprintln!("[ws-server] fallback bind {} failed: {} — disabled",
-                                          fallback, e);
-                                return;
-                            }
-                        }
+                        eprintln!("[ws-server] ⚠️  не парсится ws-bind {:?} — вход WSS не запущен (запасной адрес не подставляется)",
+                                  configured);
+                        return;
                     }
                 };
                 println!("[ws-server] 🌐 listening on {} (wss://...)", server.local_addr);
@@ -965,143 +1065,66 @@ impl P2PTransport {
                 while let Some(mut conn) = server.accept_rx.recv().await {
                     let transport_for_pump = transport_arc_ws.clone();
                     tokio::spawn(async move {
-                        // Hardening Step 2: первое сообщение — Hello ИЛИ plaintext 0xC0 RESUME.
-                        // Hello → классический flow, ECDH → session.
-                        // RESUME → fast-path: lookup session_id в paired_clients, restore session-key,
-                        //          send 0xC1 ACK encrypted. Пропускаем Hello/ECDH.
+                        // Первое сообщение соединения — подписанный Hello (эфемерный ECDH → новые ключи сеанса). Возобновления по
+                        // сохранённым секретам больше нет (docs/RESUME_REDESIGN.md): любой другой первый пакет, в том числе
+                        // прежний 0xC0, разбирается как Hello и отвергается.
                         let first_bytes = match tokio::time::timeout(
                             std::time::Duration::from_secs(5),
                             conn.incoming.recv(),
                         ).await {
                             Ok(Some(b)) => b,
                             _ => {
-                                eprintln!("[ws-server] {} no first packet in 5s, dropping", conn.peer_addr);
+                                eprintln!("[ws-server] {} no first packet in 5s, dropping", crate::util::logsafe::a(&conn.peer_addr));
                                 return;
                             }
                         };
 
-                        let peer_id: HashId = if first_bytes.first().copied() == Some(crate::netlayer::pairing::PKT_RESUME) {
-                            // ----- plaintext-RESUME fast path -----
-                            use crate::netlayer::pairing::{
-                                decode_resume, encode_resume_ack, verify_resume_mac,
-                                ResumeStatus, DEFAULT_SESSION_TTL_SECS,
-                            };
-                            let (embedded_node_id, session_id, addr, mac) = match decode_resume(&first_bytes) {
-                                Ok(t) => t,
-                                Err(e) => {
-                                    eprintln!("[ws-server] {} bad RESUME: {}", conn.peer_addr, e);
-                                    return;
-                                }
-                            };
-                            // Lookup session_id в paired_clients store
-                            let mut status = ResumeStatus::Unknown;
-                            let mut hit_pk: Option<String> = None;
-                            let mut sk: Option<[u8; 32]> = None;
-                            {
-                                let store = transport_for_pump.paired_clients.lock().await;
-                                for (pk, tok) in store.clients.iter() {
-                                    if tok.session_id == session_id {
-                                        if tok.is_expired() {
-                                            status = ResumeStatus::Expired;
-                                            hit_pk = Some(pk.clone());
-                                            break;
-                                        }
-                                        let secret = match tok.resume_secret() {
-                                            Ok(s) => s,
-                                            Err(_) => continue,
-                                        };
-                                        if verify_resume_mac(&secret, session_id, &addr, &mac)
-                                            && Self::resume_node_matches(pk, &embedded_node_id)
-                                            && tok.node_id_hex.as_deref().map_or(true, |h| h == hex::encode(embedded_node_id.0))
-                                        {
-                                            status = ResumeStatus::Ok;
-                                            hit_pk = Some(pk.clone());
-                                            sk = tok.session_key();
-                                        } else {
-                                            status = ResumeStatus::BadMac;
-                                            hit_pk = Some(pk.clone());
-                                        }
-                                        break;
-                                    }
-                                }
-                            }
-                            if !matches!(status, ResumeStatus::Ok) || sk.is_none() {
-                                eprintln!("[ws-server] RESUME from {} ({}) status={:?}, key={}",
-                                          conn.peer_addr,
-                                          hex::encode(&embedded_node_id.0[..8]),
-                                          status, sk.is_some());
-                                // Шлём plaintext ACK (mobile может его прочесть без сессии)
-                                let ack = encode_resume_ack(status, None);
-                                let _ = conn.outgoing.send(ack).await;
-                                return;
-                            }
-                            // Refresh TTL & persist
-                            if let Some(pk) = hit_pk {
-                                let path = crate::netlayer::pairing::default_paired_clients_path();
-                                let mut store = transport_for_pump.paired_clients.lock().await;
-                                store.refresh(&pk, DEFAULT_SESSION_TTL_SECS);
-                                if let Some(t) = store.clients.get_mut(&pk) {
-                                    t.node_id_hex.get_or_insert_with(|| hex::encode(embedded_node_id.0));
-                                }
-                                if let Err(e) = store.save(&path) {
-                                    eprintln!("[ws-server] persist paired_clients: {}", e);
-                                }
-                            }
-                            // Restore session-key и регистрируем peer
-                            let v = {
-                                let mut enc = transport_for_pump.encryption.lock().await;
-                                enc.restore_session(embedded_node_id, sk.unwrap())
-                            };
-                            println!("[ws-server] 🔁 RESUME {} v{} (session {:#x}, new addr {})",
-                                     hex::encode(&embedded_node_id.0[..8]), v, session_id, addr);
-                            let mut peer = PeerInfo::new(embedded_node_id, &conn.peer_addr);
-                            peer.touch();
-                            transport_for_pump.peers.lock().await.insert(embedded_node_id, peer);
-                            transport_for_pump.ws_outgoing.lock().await
-                                .insert(embedded_node_id, conn.outgoing.clone());
-                            // Encrypted 0xC1 ACK
-                            let ack_plain = encode_resume_ack(ResumeStatus::Ok, None);
-                            match transport_for_pump.send_encrypted(embedded_node_id, &ack_plain).await {
-                                Ok(_) => println!("[ws-server] 🔒 0xC1 sent encrypted to {}",
-                                                  hex::encode(&embedded_node_id.0[..8])),
-                                Err(e) => eprintln!("[ws-server] encrypted ACK send failed: {}", e),
-                            }
-                            embedded_node_id
-                        } else {
+                        let peer_id: HashId = {
                             // ----- classical Hello flow -----
                             let hello = match HelloPacket::from_bytes(&first_bytes) {
                                 Ok(h) => h,
                                 Err(e) => {
-                                    eprintln!("[ws-server] {} bad Hello: {}", conn.peer_addr, e);
+                                    eprintln!("[ws-server] {} bad Hello: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                     return;
                                 }
                             };
                             println!("[ws-server] 👋 Hello from {} ({})",
-                                     hex::encode(&hello.node_id.0[..8]), conn.peer_addr);
+                                     hex::encode(&hello.node_id.0[..8]), crate::util::logsafe::a(&conn.peer_addr));
 
                             // Same barriers as the UDP discovery path: signature + self-certifying
                             // identity + freshness, nonce replay, pinned/verified key conflict.
                             if let Err(e) = P2PTransport::verify_peer_handshake_static(&hello) {
-                                eprintln!("[ws-server] {} Hello REJECTED: {}", conn.peer_addr, e);
+                                eprintln!("[ws-server] {} Hello REJECTED: {}", crate::util::logsafe::a(&conn.peer_addr), e);
                                 return;
                             }
                             {
                                 let mut seen = transport_for_pump.seen_hello_nonces.lock().await;
                                 if !Self::check_replay(&mut seen, hello.node_id, hello.nonce) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: replayed nonce", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: replayed nonce", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
+                            }
+                            // тот же допуск, что и у UDP-входа: личности бесплатны, таблица пиров не должна расти без предела
+                            if let Err(reason) = Self::admit_peer(
+                                &transport_for_pump.admission,
+                                &transport_for_pump.peers,
+                                &transport_for_pump.pinned_identities,
+                                conn.peer_addr.parse::<std::net::SocketAddr>().map(|a| a.ip()).unwrap_or(std::net::IpAddr::V4(std::net::Ipv4Addr::UNSPECIFIED)),
+                                hello.node_id,
+                            ).await {
+                                eprintln!("[ws-server] {} Hello REJECTED: admission ({})", crate::util::logsafe::a(&conn.peer_addr), reason.name());
+                                return;
                             }
                             {
                                 let pins = transport_for_pump.pinned_identities.read().await;
                                 if Self::identity_conflict(&pins, hello.node_id, &hello.public_key) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: pinned identity conflict", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: pinned identity conflict", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
                             }
                             if let Some(existing) = transport_for_pump.peers.lock().await.get(&hello.node_id) {
                                 if matches!(existing.verified_signing_pubkey, Some(k) if k != hello.public_key) {
-                                    eprintln!("[ws-server] {} Hello REJECTED: verified key conflict", conn.peer_addr);
+                                    eprintln!("[ws-server] {} Hello REJECTED: verified key conflict", crate::util::logsafe::a(&conn.peer_addr));
                                     return;
                                 }
                             }
@@ -1112,16 +1135,30 @@ impl P2PTransport {
                             peer.verified_signing_pubkey = Some(hello.public_key);
                             peer.touch();
                             transport_for_pump.peers.lock().await.insert(hello.node_id, peer);
-                            transport_for_pump.ws_outgoing.lock().await
-                                .insert(hello.node_id, conn.outgoing.clone());
+                            // маршрут для общего трафика (gossip и т. п.) публикуется только ПОСЛЕ Hello-Ack: клиент ждёт его первым кадром
 
                             let my_node_id = transport_for_pump.identity.node_id();
                             let mut cid8 = [0u8; 8];
                             cid8.copy_from_slice(&my_node_id.0[..8]);
+                            // Сеанс поднимается так же, как по UDP: одноразовые ключи обеих сторон (прямая секретность). Раньше здесь
+                            // оба узла считали соединение установленным, а ключа сеанса не было — первая же отправка падала.
+                            let our_ephemeral = {
+                                let mut enc = transport_for_pump.encryption.lock().await;
+                                match enc.complete_hello_responder(hello.node_id, &hello.x25519_public) {
+                                    Ok(k) => k,
+                                    Err(e) => {
+                                        eprintln!("[ws-server] {} session not established: {}", crate::util::logsafe::a(&conn.peer_addr), e);
+                                        // маршрут этого канала ещё не опубликован (он встаёт после Hello-Ack); чужой действующий маршрут того же узла
+                                        // сбросить нельзя (H18-5): убирается только свой, если он вдруг уже есть
+                                        remove_route_if_same(&mut *transport_for_pump.ws_outgoing.lock().await, &hello.node_id, &conn.outgoing);
+                                        return;
+                                    }
+                                }
+                            };
                             let ack = HelloPacket::new_ack(
                                 my_node_id,
                                 transport_for_pump.identity.signing_public_key,
-                                transport_for_pump.identity.public_key,
+                                our_ephemeral,
                                 cid8,
                                 transport_for_pump.capabilities,
                                 hello.nonce,
@@ -1139,6 +1176,8 @@ impl P2PTransport {
                                         eprintln!("[ws-server] failed to send Hello-Ack: {}", e);
                                         return;
                                     }
+                                    transport_for_pump.ws_outgoing.lock().await
+                                        .insert(hello.node_id, conn.outgoing.clone());
                                 }
                                 Err(e) => {
                                     eprintln!("[ws-server] Hello-Ack to_bytes: {}", e);
@@ -1182,9 +1221,9 @@ impl P2PTransport {
                                 }
                             }
                         }
-                        // Соединение закрылось — убираем peer из ws_outgoing.
-                        transport_for_pump.ws_outgoing.lock().await.remove(&peer_id);
-                        println!("[ws-server] 🛑 connection {} closed", conn.peer_addr);
+                        // Соединение закрылось — убираем из ws_outgoing только СВОЙ маршрут (новое соединение того же узла осталось)
+                        transport_for_pump.drop_ws_route(&peer_id, &conn.outgoing).await;
+                        println!("[ws-server] 🛑 connection {} closed", crate::util::logsafe::a(&conn.peer_addr));
                     });
                 }
             });
@@ -1213,7 +1252,9 @@ impl P2PTransport {
                     }
                     // Есть ли уже live-link к какому-нибудь из наших anchor'ов?
                     let live = {
-                        let ws = transport_arc_watchdog.ws_outgoing.lock().await;
+                        let mut ws = transport_arc_watchdog.ws_outgoing.lock().await;
+                        // закрытые каналы — не соединение: убираем их, иначе переподключение никогда не начнётся
+                        ws.retain(|_, tx| !tx.is_closed());
                         store_snapshot.iter().any(|e| ws.contains_key(&e.payload.anchor_id))
                     };
                     if live {
@@ -1260,11 +1301,13 @@ impl P2PTransport {
             println!("[transport] тренировочная сеть: NAT-PMP выключен");
         } else {
         let transport_arc_pmp = transport_arc.clone();
-        let pmp_internal_port = DEFAULT_DATA_PORT;
         tokio::spawn(async move {
             // Первая попытка: тёплый старт через 3 с после стартапа.
             tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
             loop {
+                // пробрасывается порт, который сокет действительно держит сейчас (настроенный и возможно сменившийся при ротации),
+                // а не константа по умолчанию — иначе наружу открылась бы посторонняя служба на 10000
+                let pmp_internal_port = transport_arc_pmp.port_manager.current_state().data_port;
                 match crate::netlayer::nat_pmp::request_mapping(pmp_internal_port, 3600).await {
                     Ok(mapping) => {
                         let new_ip = mapping.external_ip.to_string();
@@ -1333,6 +1376,10 @@ impl P2PTransport {
             interval.tick().await; // skip первый tick (только что определили на старте)
             loop {
                 interval.tick().await;
+                // автономный узел внешние сервисы IP не спрашивает (аудит R9 №14)
+                if crate::autonomy::enabled() {
+                    continue;
+                }
                 match svc.get_external_ip().await {
                     Ok(new_ip) => {
                         crate::ip_history::observe(&new_ip);
@@ -1480,9 +1527,11 @@ impl P2PTransport {
 
         let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(5));
         let mut seq_counter: u64 = 0;
+        let mut path_b_tick: u64 = 0;
 
         loop {
             interval.tick().await;
+            path_b_tick = path_b_tick.wrapping_add(1);
             // Update control plane (adaptive behavior)
             transport.update_control_plane().await;
             // Calculate RX speed
@@ -1602,6 +1651,9 @@ impl P2PTransport {
                                          crate::util::mask_ipv4(&addr), e);
                             }
                         }
+                        if path_b_tick % 3 == 0 {
+                            transport.path_b_start(peer_id, peer.clone()).await;
+                        }
                     }
                 }
             }
@@ -1622,6 +1674,7 @@ impl P2PTransport {
         let external_ip = transport.external_ip.clone();
         let jurisdiction_index = transport.jurisdiction_index.clone();
         let pinned_identities = transport.pinned_identities.clone();
+        let bootstrap_pins = transport.bootstrap_pins.clone();
         let seen_hello_nonces = transport.seen_hello_nonces.clone();
         let admission = transport.admission.clone();
 
@@ -1636,6 +1689,7 @@ impl P2PTransport {
                 external_ip,
                 jurisdiction_index,
                 pinned_identities,
+                bootstrap_pins,
                 seen_hello_nonces,
                 admission,
                 shutdown,
@@ -1643,12 +1697,113 @@ impl P2PTransport {
         });
     }
 
-    /// How many tasks read one data socket at the same time. EXPERIMENT, off by default (1): the kernel hands each datagram to exactly one reader, so
-    /// the receive path can run on several cores, but in the lab four readers made uploads through an exit stall at ceilings where one reader
-    /// was stable (wagons of one stream handled at the same moment end up in the wrong order or half-built). Until that is understood, keep 1.
-    /// `YANDI_DATA_WORKERS` changes it.
+    /// Offset reassembly preserves tunnel order across completion workers.
+    /// Losing both full copies leaves a gap and fails that stream.
+    /// Промежуток перед второй копией, мс: `YANDI_COPY_SPACING_MS` (0..=50, по умолчанию 3).
+    fn copy_spacing() -> std::time::Duration {
+        static MS: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        let ms = *MS.get_or_init(|| std::env::var("YANDI_COPY_SPACING_MS").ok().and_then(|v| v.parse::<u64>().ok()).filter(|v| *v <= 50).unwrap_or(3));
+        std::time::Duration::from_millis(ms)
+    }
+
+    /// Служебные сообщения согласования второго пути (путь B): объявление порта, пробой, подтверждение.
+    const PKT_PATH_B_ANNOUNCE: u8 = 0x90;
+    const PKT_PATH_B_PROBE: u8 = 0x91;
+    const PKT_PATH_B_CONFIRM: u8 = 0x92;
+    /// Подтверждение живо столько; announce/probe повторяются каждые 15 с.
+    const PATH_B_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+
+    fn path_b_active(&self, peer_id: &HashId) -> bool {
+        self.path_b_ok.lock().ok()
+            .and_then(|m| m.get(peer_id).map(|t| t.elapsed() < Self::PATH_B_TTL))
+            .unwrap_or(false)
+    }
+
+    /// Раз в 15 с на пира: объявляем свой порт B обычным путём, затем шлём пробу именно с порта B.
+    /// Получатель пробивает NAT к порту B, видит пробу с объявленного порта и подтверждает; до подтверждения копии идут с основного порта.
+    async fn path_b_start(self: &Arc<Self>, peer_id: HashId, peer: PeerInfo) {
+        let Ok(second) = self.second_src.local_addr() else { return };
+        let primary = self.socket_manager.data().await;
+        if Arc::ptr_eq(&self.second_src, &primary) {
+            return;
+        }
+        let transport = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut announce = vec![Self::PKT_PATH_B_ANNOUNCE];
+            announce.extend_from_slice(&second.port().to_be_bytes());
+            if transport.send_encrypted(peer_id, &announce).await.is_err() {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+            let endpoint = if let Some(ref addr) = peer.data_addr {
+                addr.clone()
+            } else {
+                let ip = peer.addr.split(':').next().unwrap_or(&peer.addr);
+                format!("{}:{}", ip, peer.remote_data_port)
+            };
+            let probe = {
+                let enc = transport.encryption.lock().await;
+                enc.encrypt(&peer, &[Self::PKT_PATH_B_PROBE])
+            };
+            if let Ok(probe) = probe {
+                for _ in 0..2 {
+                    let _ = transport.second_src.send_to(&probe, &endpoint).await;
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+            }
+        });
+    }
+
+    /// Обработка сообщений пути B; true — сообщение наше.
+    async fn on_path_b_packet(self: &Arc<Self>, sender: HashId, plaintext: &[u8], source: &WagonSource) -> bool {
+        let from = match source {
+            WagonSource::Udp { peer_addr } => peer_addr.parse::<std::net::SocketAddr>().ok(),
+            WagonSource::Ws => None,
+        };
+        match plaintext[0] {
+            Self::PKT_PATH_B_ANNOUNCE if plaintext.len() == 3 => {
+                let port = u16::from_be_bytes([plaintext[1], plaintext[2]]);
+                if let (Some(from), true) = (from, port != 0) {
+                    if let Ok(mut m) = self.path_b_peer_port.lock() {
+                        if m.len() < 4096 || m.contains_key(&sender) {
+                            m.insert(sender, port);
+                        }
+                    }
+                    println!("[path-b] пир {} объявил порт B {}", hex::encode(&sender.0[..8]), port);
+                    // пробиваем свой NAT к порту B отправителя: пакет без смысла, нужен только след в таблице соединений
+                    let target = std::net::SocketAddr::new(from.ip(), port);
+                    let socket = self.socket_manager.data().await;
+                    for _ in 0..2 {
+                        let _ = socket.send_to(&[Self::PKT_PATH_B_PROBE], &target.to_string()).await;
+                    }
+                }
+                true
+            }
+            Self::PKT_PATH_B_PROBE if plaintext.len() == 1 => {
+                let expected = self.path_b_peer_port.lock().ok().and_then(|m| m.get(&sender).copied());
+                if let (Some(from), Some(port)) = (from, expected) {
+                    if from.port() == port {
+                        let _ = self.send_encrypted(sender, &[Self::PKT_PATH_B_CONFIRM]).await;
+                    }
+                }
+                true
+            }
+            Self::PKT_PATH_B_CONFIRM if plaintext.len() == 1 => {
+                if let Ok(mut m) = self.path_b_ok.lock() {
+                    if m.len() < 4096 || m.contains_key(&sender) {
+                        if m.insert(sender, Instant::now()).map_or(true, |t| t.elapsed() >= Self::PATH_B_TTL) {
+                            println!("[path-b] второй путь к {} подтверждён", hex::encode(&sender.0[..8]));
+                        }
+                    }
+                }
+                true
+            }
+            _ => false,
+        }
+    }
+
     fn data_workers() -> usize {
-        std::env::var("YANDI_DATA_WORKERS").ok().and_then(|v| v.parse::<usize>().ok()).filter(|n| (1..=16).contains(n)).unwrap_or(1)
+        super::rx_pipeline::env_limit("YANDI_RX_WORKERS", 1, 16)
     }
 
     fn spawn_data_listener_task(
@@ -1656,16 +1811,14 @@ impl P2PTransport {
         socket: Arc<CSocket>,
         mut shutdown: Option<oneshot::Receiver<()>>,
     ) {
-        // the extra readers stop together with the first one (when its socket is retired or the node stops)
-        let mut extra_stops: Vec<oneshot::Sender<()>> = Vec::new();
-        let mut extra_shutdowns: Vec<oneshot::Receiver<()>> = Vec::new();
-        for _ in 1..Self::data_workers() {
-            let (tx, rx) = oneshot::channel();
-            extra_stops.push(tx);
-            extra_shutdowns.push(rx);
-        }
-        for worker in 0..Self::data_workers() {
+        let stats = get_wagon_stats();
+        let (tx, queue) = super::rx_pipeline::queue(super::rx_pipeline::Limits::rx(),
+            &stats.rx_queue_depth, &stats.rx_queue_bytes);
+        let workers = Self::data_workers();
+        let mut tasks = Vec::new();
+        for _ in 0..workers {
             let socket = socket.clone();
+            let queue = queue.clone();
             let peers = transport.peers.clone();
             let encryption = transport.encryption.clone();
             let tunnels = transport.tunnels.clone();
@@ -1677,7 +1830,6 @@ impl P2PTransport {
             let proxy_request_tx = transport.proxy_request_tx.clone();
             let proxy_response_tx = transport.proxy_response_tx.clone();
             let proxy_tunnel_data_tx = transport.proxy_tunnel_data_tx.clone();
-            let nack_tx = transport.nack_tx.clone();
             let socks5_gateway_tx = transport.socks5_gateway_tx.clone();
             let socks5_request_tx = transport.socks5_request_tx.clone();
             let socks5_response_tx = transport.socks5_response_tx.clone();
@@ -1686,15 +1838,12 @@ impl P2PTransport {
             let tun_wagon_resp_tx = transport.tun_wagon_resp_tx.clone();
             let p2p_tunnel_tx = transport.p2p_tunnel_tx.clone();
             let chat_packet_tx = transport.chat_packet_tx.clone();
-            let group_packet_tx = transport.group_packet_tx.clone();
             let station = Some(transport.station.clone());
             let relay_request_tx = transport.relay_request_tx.clone();
             let relay_response_tx = transport.relay_response_tx.clone();
             let relay_data_tx = transport.relay_data_tx.clone();
             let transport_for_listener = transport.clone();
-            let (my_shutdown, stops) = if worker == 0 { (shutdown.take(), std::mem::take(&mut extra_stops)) } else { (extra_shutdowns.pop(), Vec::new()) };
-
-            tokio::spawn(async move {
+            tasks.push(tokio::spawn(async move {
                 Self::data_listener(
                     transport_for_listener,
                     socket,
@@ -1709,7 +1858,6 @@ impl P2PTransport {
                     proxy_request_tx,
                     proxy_response_tx,
                     proxy_tunnel_data_tx,
-                    nack_tx,
                     socks5_gateway_tx,
                     socks5_request_tx,
                     socks5_response_tx,
@@ -1718,18 +1866,33 @@ impl P2PTransport {
                     tun_wagon_resp_tx,
                     p2p_tunnel_tx,
                     chat_packet_tx,
-                    group_packet_tx,
                     station,
                     relay_request_tx,
                     relay_response_tx,
                     relay_data_tx,
-                    my_shutdown,
+                    queue,
                 ).await;
-                for tx in stops {
-                    let _ = tx.send(());
-                }
-            });
+            }));
         }
+        // A single reader owns this physical CSocket. Retirement cancels its workers
+        // as well, including workers blocked on an application channel.
+        tokio::spawn(async move {
+            // один приёмный буфер на читателя: раньше на каждый пакет заново обнулялись 64 КБ
+            let rx_buf = Arc::new(tokio::sync::Mutex::new(vec![0u8; 65535]));
+            let reader = super::rx_pipeline::read_datagrams(|| {
+                let socket = socket.clone();
+                let rx_buf = rx_buf.clone();
+                async move {
+                    let mut buf = rx_buf.lock().await;
+                    let (len, from) = socket.recv_from(&mut buf[..]).await?;
+                    Ok((buf[..len].to_vec(), from))
+                }
+            }, tx, &transport.rx_bytes_counter);
+            if let Some(stop) = shutdown.as_mut() {
+                tokio::select! { _ = stop => {}, _ = reader => {} }
+            } else { reader.await; }
+            for task in tasks { task.abort(); }
+        });
     }
 
     fn rewrite_unspecified_endpoint(endpoint: &str, actual_ip: &std::net::IpAddr) -> String {
@@ -2017,7 +2180,7 @@ impl P2PTransport {
                     if let Ok(data) = encrypted {
                         let addr = peer.data_addr.as_ref().unwrap_or(&peer.addr);
                         eprintln!("[stream-manager] 🔒 Encrypted to {} bytes, sending to {}",
-                                 data.len(), addr);
+                                 data.len(), crate::util::logsafe::a(&addr));
                         if let Err(e) = socket_manager.data().await.send_to(&data, addr).await {
                             eprintln!("[stream-manager] ❌ Send failed: {}", e);
                         } else {
@@ -2039,19 +2202,6 @@ impl P2PTransport {
         sig_bytes.copy_from_slice(&signature);
         hello.signature = crate::netlayer::packet::Signature(sig_bytes);
         Ok(hello)
-    }
-
-    /// RESUME binding: the node id claimed in a plaintext RESUME must be the one derived from the Ed25519 key the token was
-    /// issued to (store key = client signing key, hex); the first resume also remembers it in the token (`SessionToken::node_id_hex`).
-    fn resume_node_matches(client_pubkey_hex: &str, claimed: &HashId) -> bool {
-        match hex::decode(client_pubkey_hex) {
-            Ok(b) if b.len() == 32 => {
-                let mut k = [0u8; 32];
-                k.copy_from_slice(&b);
-                crate::util::types::id_acceptable(&claimed.0, &k)
-            }
-            _ => false,
-        }
     }
 
     /// Node Identity Binding Fix: true if `node_id` is pinned (from the
@@ -2080,7 +2230,8 @@ impl P2PTransport {
         nonce: u64,
     ) -> bool {
         let now = Instant::now();
-        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(5 * 60));
+        // окно времени симметрично (±5 мин): пакет с часами вперёд остаётся годным до 10 минут после первого приёма — помним дольше
+        seen.retain(|_, seen_at| now.duration_since(*seen_at) < std::time::Duration::from_secs(11 * 60));
         if seen.contains_key(&(node_id, nonce)) {
             return false;
         }
@@ -2101,6 +2252,7 @@ impl P2PTransport {
         external_ip: Arc<tokio::sync::RwLock<Option<String>>>,
         jurisdiction_index: Arc<crate::dht::JurisdictionIndex>,
         pinned_identities: Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+        bootstrap_pins: Arc<tokio::sync::RwLock<HashMap<String, [u8; 32]>>>,
         seen_hello_nonces: Arc<tokio::sync::Mutex<HashMap<(HashId, u64), Instant>>>,
         admission: Arc<tokio::sync::Mutex<crate::netlayer::admission::Admission>>,
         mut shutdown: Option<oneshot::Receiver<()>>,
@@ -2145,7 +2297,7 @@ impl P2PTransport {
                     // Try to parse as Hello packet
                     match HelloPacket::from_bytes(&data) {
                         Ok(hello_packet) => {
-                            println!("[transport] 📨 Received Hello packet from {}", from);
+                            println!("[transport] 📨 Received Hello packet from {}", crate::util::logsafe::a(&from));
 
                             // 🔒 Two-Phase Peer Verification (Stage 1.3)
                             match P2PTransport::verify_peer_handshake_static(&hello_packet) {
@@ -2156,6 +2308,10 @@ impl P2PTransport {
                                     println!("[transport] ⚠️  REJECTED: {}", e);
                                     continue;
                                 }
+                            }
+                            // автономный узел молчит перед всеми, кого владелец не внёс в меш
+                            if !crate::autonomy::admits(&hello_packet.node_id) {
+                                continue;
                             }
 
                             // 🚧 Допуск: подписанное приветствие от неизвестной личности ничего не доказывает (личность создаётся бесплатно),
@@ -2168,6 +2324,10 @@ impl P2PTransport {
                                 let verdict = admission.lock().await.check(from.ip(), hello_packet.node_id, known, table_len, Instant::now());
                                 let verdict = match verdict {
                                     Err(crate::netlayer::admission::Reject::TableFull) => {
+                                        // сначала квоты новой личности (с адреса и общая): вытеснение честного узла не бесплатно
+                                        if let Err(r) = admission.lock().await.quotas_for_new(from.ip(), hello_packet.node_id, Instant::now()) {
+                                            Err(r)
+                                        } else {
                                         // полна: вытесняем самого давнего неприкреплённого, не якоря; если некого — отказ
                                         let pins = pinned_identities.read().await;
                                         let mut p = peers.lock().await;
@@ -2183,6 +2343,7 @@ impl P2PTransport {
                                                 Ok(())
                                             }
                                             None => Err(crate::netlayer::admission::Reject::TableFull),
+                                        }
                                         }
                                     }
                                     other => other,
@@ -2215,7 +2376,7 @@ impl P2PTransport {
                                 if !Self::check_replay(&mut seen, hello_packet.node_id, hello_packet.nonce) {
                                     println!(
                                         "[transport] ⛔ REJECTED: REPLAY — Hello for node_id {} reuses a nonce already accepted within the freshness window (from {})",
-                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                        hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                     );
                                     continue;
                                 }
@@ -2231,11 +2392,18 @@ impl P2PTransport {
                             // update, exactly like the IPv6-spoofing check
                             // right below it.
                             {
+                                let pins = bootstrap_pins.read().await;
+                                if !Self::bootstrap_key_ok(&pins, &from.ip().to_string(), &hello_packet.public_key) {
+                                    println!("[transport] ⛔ REJECTED: BOOTSTRAP_KEY_MISMATCH — {} is a pinned bootstrap address, the Hello carries another signing key", crate::util::logsafe::a(&from));
+                                    continue;
+                                }
+                            }
+                            {
                                 let pins = pinned_identities.read().await;
                                 if Self::identity_conflict(&pins, hello_packet.node_id, &hello_packet.public_key) {
                                     println!(
                                         "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} is pinned to a different signing key than this Hello claims (from {})",
-                                        hex::encode(&hello_packet.node_id.0[..8]), from
+                                        hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                     );
                                     continue;
                                 }
@@ -2245,7 +2413,7 @@ impl P2PTransport {
                                     if known_key != hello_packet.public_key {
                                         println!(
                                             "[transport] ⛔ REJECTED: IDENTITY_CONFLICT — node_id {} previously verified with a different signing key (from {})",
-                                            hex::encode(&hello_packet.node_id.0[..8]), from
+                                            hex::encode(&hello_packet.node_id.0[..8]), crate::util::logsafe::a(&from)
                                         );
                                         continue;
                                     }
@@ -2434,10 +2602,10 @@ impl P2PTransport {
                             if e.contains("Invalid magic") {
                                 // Это не наш пакет - возможно сканирование портов или случайный трафик
                                 // Silently игнорируем чтобы не засорять логи
-                                eprintln!("[transport] 🚫 Discarding non-YANDI packet from {} (invalid magic)", from);
+                                eprintln!("[transport] 🚫 Discarding non-YANDI packet from {} (invalid magic)", crate::util::logsafe::a(&from));
                             } else {
                                 // Другие ошибки логируем полностью
-                                println!("[transport] ⚠️  Invalid Hello packet from {}: {}", from, e);
+                                println!("[transport] ⚠️  Invalid Hello packet from {}: {}", crate::util::logsafe::a(&from), e);
                             }
                         }
                     }
@@ -2465,8 +2633,6 @@ impl P2PTransport {
         proxy_request_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyRequest)>>,
         proxy_response_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyResponse)>>,
         proxy_tunnel_data_tx: Option<mpsc::Sender<(HashId, crate::proxy::ProxyTunnelData)>>,
-        // 🔄 NACK handler
-        nack_tx: Option<mpsc::Sender<(HashId, crate::protocol::WagonNack)>>,
         // SOCKS5 handlers
         socks5_gateway_tx: Option<mpsc::Sender<ProxyGatewayRequest>>,  // 🧦 SOCKS5 Gateway auto-start
         socks5_request_tx: Option<mpsc::Sender<(HashId, crate::socks5::Socks5ProxyRequest)>>,
@@ -2479,13 +2645,12 @@ impl P2PTransport {
         p2p_tunnel_tx: Option<mpsc::Sender<(HashId, Vec<u8>)>>,
         // Chat handler
         chat_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::CommPacket)>>,
-    group_packet_tx: Option<mpsc::Sender<(HashId, crate::communication::GroupPacket)>>,
         station: Option<Arc<Mutex<Option<Arc<crate::protocol::Station>>>>>,
         // Relay handlers
         relay_request_tx: Option<mpsc::Sender<(HashId, HashId)>>,
         relay_response_tx: Option<mpsc::Sender<(HashId, crate::netlayer::packet::RelayConnectResponse)>>,
         relay_data_tx: Option<mpsc::Sender<(HashId, HashId, Vec<u8>)>>,
-        mut shutdown: Option<oneshot::Receiver<()>>,
+        queue: super::rx_pipeline::Receiver<super::rx_pipeline::Datagram>,
     ) {
         let local_addr = socket.local_addr().ok();
         let listener_role = local_addr
@@ -2498,34 +2663,22 @@ impl P2PTransport {
             })
             .unwrap_or("unknown");
         println!(
-            "[transport] 🔒 Starting {} data listener on {:?}",
+            "[transport] 🔒 Starting {} RX worker on {:?}",
             listener_role, local_addr
         );
 
-        let mut buf = [0u8; 65535];
-
         loop {
-            let recv_result = if let Some(stop_rx) = shutdown.as_mut() {
-                tokio::select! {
-                    _ = stop_rx => {
-                        println!(
-                            "[transport] 📴 {} data listener stopped on {:?}",
-                            listener_role, local_addr
-                        );
-                        break;
-                    }
-                    result = socket.recv_from(&mut buf) => result,
-                }
-            } else {
-                socket.recv_from(&mut buf).await
-            };
-
-            match recv_result {
-                Ok((len, from)) => {
-                    let data = buf[..len].to_vec();
-                    // Update RX byte counter for speed monitoring
-                    transport.rx_bytes_counter.fetch_add(len as u64, Ordering::Relaxed);
-
+            let started = Instant::now();
+            let packet = queue.lock().await.recv().await;
+            get_wagon_stats().rx_worker_wait_ns.fetch_add(started.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            let Some(mut packet) = packet else { break };
+            get_wagon_stats().rx_queue_wait_ns.fetch_add(packet.enqueued_at.elapsed().as_nanos().min(u64::MAX as u128) as u64, Ordering::Relaxed);
+            let from = packet.value.from;
+            let data = std::mem::take(&mut packet.value.data);
+            let _untrusted_sender = packet.value.sender;
+            drop(packet); // release queue budget before decrypt/assembly/dispatch
+            get_wagon_stats().rx_worker_dequeued.fetch_add(1, Ordering::Relaxed);
+            {
                     // НОВЫЙ ФОРМАТ: [peer_id:32][nonce:12][encrypted_data][tag:16]
                     // peer_id PLAINTEXT - позволяет найти peer БЕЗ дешифровки
                     let mut enc = encryption.lock().await;
@@ -2696,7 +2849,7 @@ impl P2PTransport {
                                                             if let Ok(resp_data) = enc_lock.encrypt(&p, &frame_bytes) {
                                                                 let addr = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 eprintln!("[transport] 🔒 Encrypted response: {} bytes, sending to {}",
-                                                                         resp_data.len(), addr);
+                                                                         resp_data.len(), crate::util::logsafe::a(&addr));
                                                                 match socket.send_to(&resp_data, addr).await {
                                                                     Ok(n) => {
                                                                         eprintln!("[transport] ✅ Sent {} bytes of response", n);
@@ -2873,7 +3026,7 @@ impl P2PTransport {
                                                             if let Ok(encrypted_ack) = enc_lock.encrypt(&p, &ack_bytes) {
                                                                 let addr_to_use = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 let _ = socket.send_to(&encrypted_ack, addr_to_use).await;
-                                                                println!("[transport] 📤 Отправлен ProxyGatewayStarted ACK на {}", addr_to_use);
+                                                                println!("[transport] 📤 Отправлен ProxyGatewayStarted ACK на {}", crate::util::logsafe::a(&addr_to_use));
                                                             }
                                                         }
                                                     }
@@ -2940,7 +3093,7 @@ impl P2PTransport {
                                                             if let Ok(encrypted_ack) = enc_lock.encrypt(&p, &ack_bytes) {
                                                                 let addr_to_use = p.data_addr.as_ref().unwrap_or(&p.addr);
                                                                 let _ = socket.send_to(&encrypted_ack, addr_to_use).await;
-                                                                println!("[transport] 📤 Отправлен Socks5GatewayStarted ACK на {}", addr_to_use);
+                                                                println!("[transport] 📤 Отправлен Socks5GatewayStarted ACK на {}", crate::util::logsafe::a(&addr_to_use));
                                                             }
                                                         }
                                                     }
@@ -3029,7 +3182,7 @@ impl P2PTransport {
                                                         // SOCKS5 CONNECT request
                                                         if let Ok(socks5_req) = serde_json::from_slice::<crate::socks5::Socks5ProxyRequest>(&decrypted[1..]) {
                                                             println!("[transport] 📨 Socks5Request #{}: {}:{}",
-                                                                     socks5_req.request_id, socks5_req.target_host, socks5_req.target_port);
+                                                                     socks5_req.request_id, crate::util::logsafe::a(&socks5_req.target_host), crate::util::logsafe::a(&socks5_req.target_port));
 
                                                             if let Some(ref tx) = socks5_request_tx {
                                                                 let peer_id_for_tx = peer_id.clone();
@@ -3116,7 +3269,7 @@ impl P2PTransport {
                                         }
                                         // YTP packets (0x60-0x6F, 0x70 BatchedWagon)
                                         0x60 | 0x61 | 0x70 => {
-                                            use crate::protocol::{Wagon, TrainAckMessage, Station, BatchedWagon};
+                                            use crate::protocol::{Wagon, Station, BatchedWagon};
 
                                             match decrypted[0] {
                                                 0x60 => {
@@ -3149,44 +3302,31 @@ impl P2PTransport {
 
                                                         // Передаём в station для сборки (УЖЕ ДЕСЕРИАЛИЗОВАННЫЙ!)
                                                         if let Some(ref station_lock) = station {
-                                                            let station_guard = station_lock.lock().await;
-                                                            if let Some(ref st) = *station_guard {
+                                                            let st = station_lock.lock().await.clone();
+                                                            if let Some(ref st) = st {
                                                                 match st.receive_wagon_parsed(peer_id, wagon).await {
                                                                 Ok(Some(train_id)) => {
-                                                                    println!("[transport] ✅ Train #{} assembled!", train_id);
+                                                                    tracing::trace!("[transport] ✅ Train #{} assembled!", train_id);
 
                                                                     // 🔍 DEBUG: Пытаемся получить train
-                                                                    eprintln!("[transport] 🔍 Calling get_train for #{}", train_id);
+                                                                    tracing::trace!("[transport] 🔍 Calling get_train for #{}", train_id);
 
                                                                     // Получаем собранные данные
                                                                     if let Some(data) = st.get_train(train_id).await {
-                                                                        println!("[transport] 📦 Train #{} delivered: {} MB",
+                                                                        tracing::trace!("[transport] 📦 Train #{} delivered: {} MB",
                                                                                  train_id, data.len() / 1_000_000);
-                                                                        eprintln!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
+                                                                        tracing::trace!("[transport] ✅ Train #{} delivered: {} bytes", train_id, data.len());
 
-                                                                        // ⚠️ ACK/NACK DISABLED per user directive
-                                                                        // // 🔄 ПРОВЕРЯЕМ NACK (0x62 prefix)
-                                                                        // if !data.is_empty() && data[0] == 0x62u8 {
-                                                                        //     use crate::protocol::WagonNack;
-                                                                        //
-                                                                        //     if let Ok(nack) = serde_json::from_slice::<WagonNack>(&data[1..]) {
-                                                                        //         println!("[transport] 🔄 Received NACK for train #{}: {} missing wagons",
-                                                                        //                  nack.train_id, nack.missing_wagons.len());
-                                                                        //
-                                                                        //         // Отправляем NACK в gateway для обработки
-                                                                        //         if let Some(ref tx) = nack_tx {
-                                                                        //             let peer_id_for_tx = peer_id.clone();
-                                                                        //             let _ = tx.send((peer_id, nack)).await;
-                                                                        //             println!("[transport] 📤 NACK sent to gateway for retransmission");
-                                                                        //         } else {
-                                                                        //             println!("[transport] ⚠️  NACK channel not connected! Wagon retransmission disabled!");
-                                                                        //         }
-                                                                        //         continue;
-                                                                        //     }
-                                                                        // }
+
+                                                                    if super::tunnel_wire::reject_invalid(&data) { continue; }
+                                                                    // окно получателя (регулятор скорости), не данные потока
+                                                                    if let Some((k, id, c, w)) = super::tunnel_wire::decode_window(&data) {
+                                                                        super::flow::apply(k, peer_id, id, c, w);
+                                                                        continue;
+                                                                    }
 
                                                                     // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
-                                                                    if let Ok(tunnel_data) = crate::proxy::ProxyTunnelData::from_bincode(&data) {
+                                                                    if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(&data) {
                                                                             let tunnel_id = tunnel_data.tunnel_id;
                                                                             let data_len = tunnel_data.data.len();
 
@@ -3212,7 +3352,7 @@ impl P2PTransport {
                                                                             if let Some(ref tx) = socks5_tunnel_data_tx {
                                                                                 let peer_id_for_tx = peer_id.clone();
                                                                                 let _ = tx.send((peer_id, socks5_tunnel)).await;
-                                                                                println!("[transport] 📤 SOCKS5 Tunnel data #{} sent to handler", tunnel_id);
+                                                                                tracing::trace!("[transport] 📤 SOCKS5 Tunnel data #{} sent to handler", tunnel_id);
                                                                             } else {
                                                                                 println!("[transport] ⚠️  SOCKS5 Tunnel data channel not connected!");
                                                                             }
@@ -3333,34 +3473,8 @@ impl P2PTransport {
                                                         eprintln!("[transport] ❌ Failed to parse YTP Wagon");
                                                     }
                                                 }
-                                                0x61 => {
-                                                    // ⚠️ ACK/NACK DISABLED per user directive
-                                                    // YTP ACK/NACK packet
-                                                    // if let Ok(ack) = serde_json::from_slice::<TrainAckMessage>(&decrypted[1..]) {
-                                                    //     println!("[transport] 📨 YTP ACK from {}: train #{:?}",
-                                                    //              crate::util::mask_hash_id(&peer_id), ack.train_id());
-                                                    //
-                                                    //     match &ack {
-                                                    //         TrainAckMessage::Complete { .. } => {
-                                                    //             println!("[transport] ✅ Train #{} complete! ACK received from {}",
-                                                    //                      ack.train_id(), crate::util::mask_hash_id(&peer_id));
-                                                    //             // TODO: Отправить ACK в gateway для очистки sent_trains
-                                                    //         }
-                                                    //         TrainAckMessage::Missing { missing_wagons, total_wagons, .. } => {
-                                                    //             println!("[transport] ⚠️  Train #{} missing wagons: {}/{}",
-                                                    //                      ack.train_id(), missing_wagons.len(), total_wagons);
-                                                    //             // TODO: Trigger express train for missing wagons
-                                                    //         }
-                                                    //         TrainAckMessage::Progress { progress_percent, .. } => {
-                                                    //             println!("[transport] 📊 Train #{} progress: {:.1}%",
-                                                    //                      ack.train_id(), progress_percent);
-                                                    //         }
-                                                    //     }
-                                                    // } else {
-                                                    //     eprintln!("[transport] ❌ Failed to parse YTP ACK");
-                                                    // }
-                                                    println!("[transport] ⚠️ ACK/NACK disabled - ignoring 0x61 packet");
-                                                }
+                                                // 0x61: подтверждений поездов в протоколе нет; пакет старого узла игнорируется
+                                                0x61 => {}
                                                 0x70 => {
                                                     // ⚡ BatchedWagon - несколько пакетов в одном wagon
                                                     let batched_bytes = decrypted[1..].to_vec();
@@ -3382,9 +3496,14 @@ impl P2PTransport {
                                                         for packet in sorted_packets {
                                                             // Пытаемся распознать тип данных
                                                             let data = &packet.data;
+                                                            if super::tunnel_wire::reject_invalid(data) { continue; }
+                                                            if let Some((k, id, c, w)) = super::tunnel_wire::decode_window(data) {
+                                                                super::flow::apply(k, peer_id, id, c, w);
+                                                                continue;
+                                                            }
 
                                                             // СНАЧАЛА проверяем HTTP Proxy (приоритет для CONNECT tunneling)
-                                                            if let Ok(tunnel_data) = serde_json::from_slice::<crate::proxy::ProxyTunnelData>(data) {
+                                                            if let Some(tunnel_data) = crate::proxy::ProxyTunnelData::parse(data) {
                                                                 let tunnel_id = tunnel_data.tunnel_id;
                                                                 let data_len = tunnel_data.data.len();
 
@@ -3451,13 +3570,6 @@ impl P2PTransport {
                                                                 if let Some(ref tx) = proxy_response_tx {
                                                                     let peer_id_for_tx = peer_id.clone();
                                                                     let _ = tx.send((peer_id, proxy_resp)).await;
-                                                                }
-                                                            }
-                                                            // HTTP Proxy Tunnel Data
-                                                            else if let Ok(tunnel_data) = serde_json::from_slice::<crate::proxy::ProxyTunnelData>(data) {
-                                                                if let Some(ref tx) = proxy_tunnel_data_tx {
-                                                                    let peer_id_for_tx = peer_id.clone();
-                                                                    let _ = tx.send((peer_id, tunnel_data)).await;
                                                                 }
                                                             }
                                                             // TUN Wagon
@@ -3536,20 +3648,23 @@ impl P2PTransport {
 
                                                     
 
+                                                    // порядок замков везде один: сначала закрепления, потом таблица пиров (иначе обмен пирами, вытеснение
+                                                    // при полной таблице и запись закреплений блокируют друг друга навсегда)
+                                                    let pins_guard = transport.pinned_identities.read().await;
                                                     let mut peers_lock = peers.lock().await;
 
                                                     // Node Identity Binding Fix: unauthenticated
                                                     // peer-exchange hearsay carries no signing key at
                                                     // all — never let it introduce a pinned node_id.
                                                     // Only that node's OWN verified Hello may do that.
-                                                    let is_pinned = transport.pinned_identities.read().await.contains_key(&new_peer_id);
+                                                    let is_pinned = pins_guard.contains_key(&new_peer_id);
 
                                                     let hearsay = peers_lock.values().filter(|p| p.verified_signing_pubkey.is_none()).count();
                                                     if !peers_lock.contains_key(&new_peer_id) && !is_pinned && hearsay < MAX_HEARSAY_PEERS {
 
                                                         println!("[transport] ➕ Adding new peer from list: {} @ {}",
 
-                                                                 hex::encode(&new_peer_id.0[..8]), new_addr);
+                                                                 hex::encode(&new_peer_id.0[..8]), crate::util::logsafe::a(&new_addr));
 
                                                         let new_peer = PeerInfo::new(new_peer_id, &new_addr);
 
@@ -3612,6 +3727,13 @@ impl P2PTransport {
 
                                                 let target = HashId(target_bytes);
 
+                                                // [0xF2][target:32][request_id:8]: номер запроса возвращается в ответе (0 — запрос без номера)
+                                                let rpc_id: [u8; 8] = if decrypted.len() >= 41 {
+                                                    decrypted[33..41].try_into().unwrap_or([0u8; 8])
+                                                } else {
+                                                    [0u8; 8]
+                                                };
+
                                                 
 
                                                 // Ищем ближайшие узлы в ktable
@@ -3637,6 +3759,8 @@ impl P2PTransport {
                                                 if let Some(peer_info) = peer {
 
                                                     let mut resp_packet = vec![0xF3u8];
+
+                                                    resp_packet.extend_from_slice(&rpc_id);
 
                                                     let data = serde_json::to_vec(&nodes)
 
@@ -3673,6 +3797,18 @@ impl P2PTransport {
                                         0xF3 => {
 
                                             println!("[transport] 📋 DHT FindNode Response from {}", crate::util::mask_hash_id(&peer_id));
+
+                                            // [0xF3][request_id:8][json nodes]: ответ передаётся ожидающему запросу
+                                            if decrypted.len() > 9 {
+                                                let rpc_id = u64::from_be_bytes(decrypted[1..9].try_into().unwrap_or([0u8; 8]));
+                                                if let Ok(nodes) = serde_json::from_slice::<Vec<(HashId, String)>>(&decrypted[9..]) {
+                                                    let bytes = crate::dht::messages::DhtResponse::new(None, nodes).to_bytes();
+                                                    let delivered = dht.lock().await.handle_response(rpc_id, bytes);
+                                                    if !delivered {
+                                                        println!("[transport] ⚠️  DHT response without a waiting request (id {rpc_id:#x})");
+                                                    }
+                                                }
+                                            }
 
                                         }
 
@@ -4160,7 +4296,7 @@ impl P2PTransport {
                                                         for i in 0..5 {
                                                             let _ = socket_send.send_to(&probe_enc, &addr_clone).await;
                                                             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
-                                                            tracing::debug!("[punch] probe #{} → {}", i + 1, addr_clone);
+                                                            tracing::debug!("[punch] probe #{} → {}", i + 1, crate::util::logsafe::a(&addr_clone));
                                                         }
                                                         PUNCH_TASKS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
                                                     });
@@ -4237,6 +4373,11 @@ impl P2PTransport {
                                     }
                                 }
                             }
+                            // повтор датаграммы (вторая копия вагона): не ошибка, отбрасываем молча
+                            Err(e) if e.starts_with("REPLAY:") => {
+                                drop(enc);
+                                get_wagon_stats().duplicates_dropped.fetch_add(1, Ordering::Relaxed);
+                            }
                             Err(e) => {
                                 println!("[transport] ❌ Decryption failed: {}", e);
                                 println!("[transport]    Possible mismatched session keys!");
@@ -4251,17 +4392,12 @@ impl P2PTransport {
                             }
                         }
                 }
-                Err(e) => {
-                    println!("[transport] ❌ Socket error: {}", e);
-                    continue;
-                }
-            }
         }
     }
 
     /// Send Hello Request to peer
     pub async fn send_hello_request(&self, addr: &str) -> Result<(), String> {
-        println!("[transport] 📤 Sending HELLO_REQ to {}", addr);
+        println!("[transport] 📤 Sending HELLO_REQ to {}", crate::util::logsafe::a(&addr));
         // куда стучаться по TCP, если UDP до этого узла не дойдёт
         if let (Some(c), Ok(sa)) = (tcp_carrier::global(), addr.parse::<std::net::SocketAddr>()) {
             c.hint(sa);
@@ -4345,7 +4481,7 @@ impl P2PTransport {
             .await
             .map_err(|e| format!("Failed to send Hello packet: {}", e))?;
 
-        println!("[transport] ✅ HELLO_REQ sent to {} ({} bytes)", addr, data.len());
+        println!("[transport] ✅ HELLO_REQ sent to {} ({} bytes)", crate::util::logsafe::a(&addr), data.len());
 
         Ok(())
     }
@@ -4353,7 +4489,7 @@ impl P2PTransport {
     /// Ответить на приглашение: своим одноразовым ключом, сеанс поднимается сразу.
     /// Ошибка «встречное знакомство» — остаётся ключ рукопожатия узла с меньшим номером, подтверждение не отправляется.
     pub async fn send_hello_ack(&self, addr: &str, request_nonce: u64, peer_id: HashId, peer_ephemeral: [u8; 32]) -> Result<(), String> {
-        println!("[transport] 📤 Sending HELLO_ACK to {}", addr);
+        println!("[transport] 📤 Sending HELLO_ACK to {}", crate::util::logsafe::a(&addr));
         let ports = self.port_manager.current_state();
 
         // Get CID from node ID
@@ -4430,7 +4566,7 @@ impl P2PTransport {
             .await
             .map_err(|e| format!("Failed to send Hello packet: {}", e))?;
 
-        println!("[transport] ✅ HELLO_ACK sent to {} ({} bytes)", addr, data.len());
+        println!("[transport] ✅ HELLO_ACK sent to {} ({} bytes)", crate::util::logsafe::a(&addr), data.len());
 
         Ok(())
     }
@@ -4490,6 +4626,10 @@ impl P2PTransport {
     /// at most once every 5 seconds per peer. Before, such a pair stayed deaf for as long as it took some other event (the next
     /// periodic knock) to produce a handshake — a minute or more in the chaos test.
     pub async fn request_resync(&self, peer_id: HashId) {
+        // номер отправителя в пакете ещё не удостоверен: незнакомых узлов в кэш не заносим (иначе его можно раздуть выдуманными номерами)
+        let Some(addr) = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone()) else {
+            return;
+        };
         {
             let mut asked = self.resync_requested.lock().await;
             if asked.get(&peer_id).map_or(false, |t| t.elapsed() < std::time::Duration::from_secs(5)) {
@@ -4500,12 +4640,9 @@ impl P2PTransport {
                 asked.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(60));
             }
         }
-        let addr = self.peers.lock().await.get(&peer_id).map(|p| p.addr.clone());
-        if let Some(addr) = addr {
-            println!("[transport] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
-            if let Err(e) = self.send_hello_request(&addr).await {
-                println!("[transport] ⚠️  resync request failed: {}", e);
-            }
+        println!("[transport] 🔁 session with {} is out of step — asking for a new handshake", hex::encode(&peer_id.0[..8]));
+        if let Err(e) = self.send_hello_request(&addr).await {
+            println!("[transport] ⚠️  resync request failed: {}", e);
         }
     }
 
@@ -4515,6 +4652,16 @@ impl P2PTransport {
     }
 
     pub async fn send_encrypted(&self, peer_id: HashId, data: &[u8]) -> Result<(), String> {
+        // Любой трафик идёт оригиналом и копией (решение владельца); повтор отбрасывает окно повторов получателя.
+        static COPIES: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let copies = *COPIES.get_or_init(|| std::env::var("YANDI_WAGON_COPIES").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(2).clamp(2, 3));
+        self.send_encrypted_copies(peer_id, data, copies).await
+    }
+
+    /// Зашифровать один раз и отправить ту же датаграмму `copies` раз подряд (избыточность против потерь без повторного шифрования).
+    /// Получатель отбрасывает повторы по счётчику сессии до расшифровки. Через реле каждая копия шифруется отдельно, как раньше.
+    pub async fn send_encrypted_copies(&self, peer_id: HashId, data: &[u8], copies: usize) -> Result<(), String> {
+        let copies = copies.max(1);
         tracing::trace!("[transport] 📤 [SEND-START] Preparing to send {} bytes to peer: {}",
                  data.len(), hex::encode(&peer_id.0[..8]));
 
@@ -4543,6 +4690,10 @@ impl P2PTransport {
                 encryption.encrypt(&peer, data)
                     .map_err(|e| format!("WS encrypt failed: {}", e))?
             };
+            for _ in 1..copies {
+                tx.send(encrypted.clone()).await
+                    .map_err(|e| format!("WS channel closed: {}", e))?;
+            }
             tx.send(encrypted).await
                 .map_err(|e| format!("WS channel closed: {}", e))?;
             return Ok(());
@@ -4554,6 +4705,9 @@ impl P2PTransport {
         // если флаг не выставлен, идём direct (как раньше).
         if peer.use_relay {
             if let Some(relay_peer) = self.pick_relay(&peer_id).await {
+                for _ in 1..copies {
+                    self.send_via_relay(&peer, &relay_peer, data).await?;
+                }
                 return self.send_via_relay(&peer, &relay_peer, data).await;
             }
             // Нет доступного relay — деградируем в direct, чтобы не падать молча.
@@ -4586,11 +4740,45 @@ impl P2PTransport {
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
 
         // Send on SEND socket (separate from recv socket!)
-        self.socket_manager.data().await.send_to(&encrypted, &data_endpoint)
-            .await
-            .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
-
-        self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
+        // Первая копия — с основного порта, вторая — с соседнего (другой исходный порт), через короткий промежуток: потеря пачкой
+        // на одном такте не бьёт обе копии. Остальные (третья) — с основного.
+        let socket = self.socket_manager.data().await;
+        // Со второго порта копия доходит не везде: NAT/файервол получателя пропускает только пакеты от адреса и порта, куда он сам слал.
+        // Поэтому путь B включается только после подтверждения получателя (см. path_b_start); YANDI_SECOND_PATH=1 включает всегда,
+        // =0 выключает совсем.
+        static SECOND_PATH: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+        let forced = *SECOND_PATH.get_or_init(|| match std::env::var("YANDI_SECOND_PATH").ok().as_deref() {
+            Some("1") => Some(true),
+            Some("0") => Some(false),
+            _ => None,
+        });
+        let second_path = forced.unwrap_or_else(|| self.path_b_active(&peer_id));
+        let separate = second_path && !Arc::ptr_eq(&self.second_src, &socket);
+        let spacing = Self::copy_spacing();
+        for i in 0..copies {
+            if i == 1 && separate {
+                get_wagon_stats().tx_second_path.fetch_add(1, Ordering::Relaxed);
+                if spacing.is_zero() {
+                    self.second_src.send_to(&encrypted, &data_endpoint)
+                        .await
+                        .map_err(|e| format!("Failed to send encrypted data (second path): {}", e))?;
+                } else {
+                    // Отправку не задерживаем: вторая копия уходит отдельной задачей через промежуток.
+                    let second = Arc::clone(&self.second_src);
+                    let datagram = encrypted.clone();
+                    let endpoint = data_endpoint.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(spacing).await;
+                        let _ = second.send_to(&datagram, &endpoint).await;
+                    });
+                }
+            } else {
+                socket.send_to(&encrypted, &data_endpoint)
+                    .await
+                    .map_err(|e| format!("Failed to send encrypted data: {}", e))?;
+            }
+            self.tx_bytes_counter.fetch_add(encrypted.len() as u64, Ordering::Relaxed);
+        }
 
         tracing::trace!("[transport] ✅ [SEND-COMPLETE] Sent {} bytes to {} - socket should be free now",
                  encrypted.len(), crate::util::mask_ipv4(&data_endpoint));
@@ -4609,134 +4797,27 @@ impl P2PTransport {
 
         let mut conn = connect_to_anchor(anchor_url, anchor_fingerprint_hex).await
             .map_err(|e| format!("WS connect: {}", e))?;
-        println!("[ws-client] 🌐 connected to {}", conn.peer_addr);
+        println!("[ws-client] 🌐 connected to {}", crate::util::logsafe::a(&conn.peer_addr));
 
-        // 🔐 Hardening Step 2: попытка resume по сохранённому SessionToken (с session-key).
-        // Если получится — пропускаем Hello/ECDH; иначе fallback на обычный Hello flow.
-        let resume_candidate = {
-            let store = self.paired_anchors.lock().await;
-            // Ищем entry чей URL соответствует anchor_url и есть session_token с session_key.
-            store.anchors.iter().find_map(|e| {
-                if e.payload.anchor_url == anchor_url {
-                    e.session.as_ref().and_then(|tok| {
-                        if tok.is_expired() { return None; }
-                        let sk = tok.session_key()?;
-                        Some((e.payload.anchor_id, tok.session_id, tok.resume_secret().ok()?, sk))
-                    })
-                } else {
-                    None
-                }
-            })
-        };
-
-        if let Some((anchor_id, session_id, resume_secret, session_key)) = resume_candidate {
-            use crate::netlayer::pairing::{
-                compute_resume_mac, decode_resume_ack, encode_resume, ResumeStatus,
-            };
-            // Restore session-key на mobile-стороне — нужно чтобы расшифровать 0xC1 ACK.
-            {
-                let mut enc = self.encryption.lock().await;
-                let _ = enc.restore_session(anchor_id, session_key);
-            }
-            // Регистрируем peer заранее, чтобы send_encrypted/decrypt смогли его найти.
-            let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
-            peer.touch();
-            self.peers.lock().await.insert(anchor_id, peer);
-            self.ws_outgoing.lock().await.insert(anchor_id, conn.outgoing.clone());
-
-            let my_node_id = self.identity.node_id();
-            let mac = compute_resume_mac(&resume_secret, session_id, &conn.peer_addr);
-            let resume_bytes = encode_resume(my_node_id, session_id, &conn.peer_addr, &mac);
-            if let Err(e) = conn.outgoing.send(resume_bytes).await {
-                self.ws_outgoing.lock().await.remove(&anchor_id);
-                return Err(format!("RESUME send: {}", e));
-            }
-            println!("[ws-client] 🔁 RESUME sent (session {:#x})", session_id);
-
-            // Ждём 0xC1 ACK (encrypted). Один decrypt-проход.
-            let ack_bytes = tokio::time::timeout(
-                std::time::Duration::from_secs(5),
-                conn.incoming.recv(),
-            ).await
-                .map_err(|_| "RESUME_ACK timeout".to_string())?
-                .ok_or_else(|| "RESUME_ACK: connection closed".to_string())?;
-
-            // Сначала попробуем encrypted (если anchor вернул encrypted ACK).
-            let plain_ack = {
-                let mut enc = self.encryption.lock().await;
-                match enc.decrypt_by_peer_id(&ack_bytes) {
-                    Ok((_, p)) => Some(p),
-                    Err(_) => None,
-                }
-            };
-            let plain_ack = plain_ack.unwrap_or_else(|| ack_bytes.clone());
-
-            match decode_resume_ack(&plain_ack) {
-                Ok((ResumeStatus::Ok, _)) => {
-                    println!("[ws-client] ✅ RESUME accepted, skipping Hello");
-
-                    // Spawn decrypt pump — тот же что и в Hello-flow.
-                    let transport_clone = self.clone();
-                    tokio::spawn(async move {
-                        while let Some(bytes) = conn.incoming.recv().await {
-                            let dec = {
-                                let mut enc = transport_clone.encryption.lock().await;
-                                enc.decrypt_by_peer_id(&bytes)
-                            };
-                            match dec {
-                                Ok((sender_id, plain)) => {
-                                    if sender_id != anchor_id {
-                                        eprintln!("[ws-client] dropped: packet from {} on a connection bound to {}",
-                                                  hex::encode(&sender_id.0[..8]), hex::encode(&anchor_id.0[..8]));
-                                        continue;
-                                    }
-                                    if let Some(p) = transport_clone.peers.lock().await.get_mut(&sender_id) {
-                                        p.touch();
-                                    }
-                                    let handled = transport_clone
-                                        .dispatch_decrypted_wagon(sender_id, &plain, WagonSource::Ws)
-                                        .await;
-                                    if !handled {
-                                        println!("[ws-client/resume] 📥 wagon {} B from {} (0x{:02x})",
-                                                 plain.len(),
-                                                 hex::encode(&sender_id.0[..8]),
-                                                 plain.first().copied().unwrap_or(0));
-                                    }
-                                }
-                                Err(e) => eprintln!("[ws-client/resume] decrypt failed: {}", e),
-                            }
-                        }
-                        transport_clone.ws_outgoing.lock().await.remove(&anchor_id);
-                        println!("[ws-client/resume] 🛑 anchor connection closed");
-                    });
-                    return Ok(anchor_id);
-                }
-                Ok((status, _)) => {
-                    eprintln!("[ws-client] RESUME rejected: {:?}; fallback на Hello", status);
-                    // Удалим то что заранее зарегистрировали — Hello-flow зарегистрирует заново.
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
-                    // Conn потерян — нужно переподключиться. Сообщаем caller'у что нужен retry.
-                    return Err(format!("RESUME status {:?}, reconnect for Hello", status));
-                }
-                Err(e) => {
-                    eprintln!("[ws-client] RESUME_ACK decode failed: {}", e);
-                    self.ws_outgoing.lock().await.remove(&anchor_id);
-                    return Err(format!("RESUME_ACK decode: {}", e));
-                }
-            }
-        }
-
+        // Соединение всегда начинается с подписанного Hello: у каждого подключения новые эфемерные ключи (прямая секретность).
+        // Сохранённых ключей сеанса и «возобновления» нет (docs/RESUME_REDESIGN.md).
         // Шлём Hello (тот же формат что по UDP discovery).
         let my_node_id = self.identity.node_id();
         let mut cid8 = [0u8; 8];
         cid8.copy_from_slice(&my_node_id.0[..8]);
-        let hello = HelloPacket::new_request(
+        let mut hello = HelloPacket::new_request(
             my_node_id,
             self.identity.signing_public_key,
-            self.identity.public_key,
+            [0u8; 32],
             cid8,
             self.capabilities,
         );
+        // одноразовый ключ этого приглашения (до подписи: он входит в подписываемые данные)
+        hello.x25519_public = {
+            let mut enc = self.encryption.lock().await;
+            enc.generate_hello_ephemeral(hello.nonce)
+        };
+        let hello_nonce = hello.nonce;
         let hello = self.sign_hello(hello)?;
         let hello_bytes = hello.to_bytes()
             .map_err(|e| format!("Hello to_bytes: {}", e))?;
@@ -4758,9 +4839,16 @@ impl P2PTransport {
         }
         let anchor_id = ack.node_id;
         println!("[ws-client] 👋 Hello-Ack from {}", hex::encode(&anchor_id.0[..8]));
+        // сеанс из одноразового ключа приглашения и ключа ответчика
+        {
+            let mut enc = self.encryption.lock().await;
+            enc.complete_hello_initiator(hello_nonce, anchor_id, &ack.x25519_public)
+                .map_err(|e| format!("session not established: {}", e))?;
+        }
 
         // Регистрируем anchor как peer и проставляем ws_outgoing.
         let mut peer = PeerInfo::new(anchor_id, &conn.peer_addr);
+        peer.verified_signing_pubkey = Some(ack.public_key);
         peer.caps_bits = ack.capabilities;
         peer.jurisdiction = ack.jurisdiction.clone();
         peer.touch();
@@ -4801,11 +4889,17 @@ impl P2PTransport {
                     }
                 }
             }
-            transport_clone.ws_outgoing.lock().await.remove(&anchor_id);
+            transport_clone.drop_ws_route(&anchor_id, &conn.outgoing).await;
             println!("[ws-client] 🛑 anchor connection closed");
         });
 
         Ok(anchor_id)
+    }
+
+    /// Снять WS-маршрут узла, но только если в карте лежит именно этот канал: завершение старого соединения не должно удалять
+    /// маршрут нового соединения того же узла.
+    async fn drop_ws_route(&self, id: &HashId, mine: &mpsc::Sender<Vec<u8>>) {
+        remove_route_if_same(&mut *self.ws_outgoing.lock().await, id, mine);
     }
 
     /// 🛰  Узнаём свою роль через capabilities bits.
@@ -4975,7 +5069,6 @@ impl P2PTransport {
         let wagon_recv_total = wagon_stats.recv_total.load(Ordering::Relaxed);
         let wagon_drop_total = wagon_stats.dropped.load(Ordering::Relaxed);
         let wagon_checksum_failed_total = wagon_stats.checksum_failed.load(Ordering::Relaxed);
-        let wagon_retrans_total = wagon_stats.retransmitted.load(Ordering::Relaxed);
         let wagon_drop_crc_pct = if wagon_recv_total + wagon_drop_total + wagon_checksum_failed_total > 0 {
             (wagon_drop_total + wagon_checksum_failed_total) as f64 * 100.0
                 / (wagon_recv_total + wagon_drop_total + wagon_checksum_failed_total) as f64
@@ -5028,7 +5121,6 @@ impl P2PTransport {
                 wagon_recv_total,
                 wagon_drop_total,
                 wagon_checksum_failed_total,
-                wagon_retrans_total,
                 wagon_drop_crc_pct,
                 peer_count: peers.len(),
                 ..Default::default()
@@ -5093,7 +5185,6 @@ impl P2PTransport {
             wagon_recv_total,
             wagon_drop_total,
             wagon_checksum_failed_total,
-            wagon_retrans_total,
             wagon_drop_crc_pct,
             peer_count: peers.len(),
         }
@@ -5188,9 +5279,11 @@ impl P2PTransport {
 
     /// Send DHT RPC FindNode response
 
-    pub async fn dht_rpc_find_node_response(&self, peer_id: HashId, nodes: Vec<(HashId, String)>) -> Result<(), String> {
+    pub async fn dht_rpc_find_node_response(&self, peer_id: HashId, request_id: u64, nodes: Vec<(HashId, String)>) -> Result<(), String> {
 
         let mut packet = vec![0xF3u8];
+
+        packet.extend_from_slice(&request_id.to_be_bytes());
 
         let data = serde_json::to_vec(&nodes)
 
@@ -5283,12 +5376,6 @@ impl P2PTransport {
         // TODO: Need to refactor proxy_response_tx to be Arc<Mutex<Option<...>>>
     }
 
-    /// 🔄 Set NACK channel (for Wagon Retransmission)
-    pub fn set_nack_channel(&self, tx: tokio::sync::mpsc::Sender<(HashId, crate::protocol::WagonNack)>) {
-        // We need to modify nack_tx but it's in Arc<Mutex<...>>
-        // TODO: Need to refactor nack_tx to be Arc<Mutex<Option<...>>>
-    }
-
     /// Set YTP Station
     pub async fn set_station(&self, station: Arc<crate::protocol::Station>) {
         let mut station_lock = self.station.lock().await;
@@ -5311,6 +5398,11 @@ impl P2PTransport {
     /// Сколько приветствий пропустил допуск.
     pub async fn hellos_admitted(&self) -> u64 {
         self.admission.lock().await.allowed_total()
+    }
+
+    /// Забыть пира: снять из таблицы, его пакеты больше не обрабатываются (отзыв доверия в меше, аудит R9 №11).
+    pub async fn forget_peer(&self, id: &HashId) {
+        self.peers.lock().await.remove(id);
     }
 
     pub async fn get_peers(&self) -> Vec<PeerInfo> {
@@ -5351,34 +5443,23 @@ impl P2PTransport {
         plaintext: &[u8],
         source: WagonSource,
     ) -> bool {
+        // автономный узел: трафик уже установленного сеанса узла, которого владелец убрал из меша, не обрабатывается
+        if !crate::autonomy::admits(&sender) {
+            return false;
+        }
         if plaintext.is_empty() {
             return false;
         }
         match plaintext[0] {
-            // 🔐 Step 4: RESUME (0xC0). Mobile запрашивает восстановление session по session_id+HMAC.
-            crate::netlayer::pairing::PKT_RESUME => {
-                let _ = source;
-                self.handle_resume_packet(sender, plaintext).await;
-                true
-            }
-            // 🔐 Step 4: RESUME_ACK (0xC1). Mobile получает ответ от anchor'а.
-            crate::netlayer::pairing::PKT_RESUME_ACK => {
-                let _ = source;
-                self.handle_resume_ack(sender, plaintext).await;
-                true
-            }
-            // 🆕 Hardening Step 3: SESSION_ISSUE (0xC2). Mobile получает session_token
-            // от anchor'а после успешного pair'инга. Сохраняем в PairedAnchorStore.
-            crate::netlayer::pairing::PKT_SESSION_ISSUE => {
-                let _ = source;
-                self.handle_session_issue(sender, plaintext).await;
-                true
-            }
             // Цепочки через несколько узлов (0xD9..0xDC): построение, ячейки, закрытие.
             crate::hops::PKT_CREATE | crate::hops::PKT_CREATED | crate::hops::PKT_CELL | crate::hops::PKT_DESTROY => {
                 let _ = source;
                 crate::hops_net::on_packet(&sender.0, plaintext);
                 true
+            }
+            // Согласование второго пути (0x90..0x92).
+            Self::PKT_PATH_B_ANNOUNCE | Self::PKT_PATH_B_PROBE | Self::PKT_PATH_B_CONFIRM => {
+                self.on_path_b_packet(sender, plaintext, &source).await
             }
             // Записи «узел доступен через ретрансляторы» (0xDD).
             crate::relay_net::PKT_VIA => {
@@ -5387,207 +5468,18 @@ impl P2PTransport {
                 true
             }
             // Обмен карточками узлов (0xD8): списки сети по странам.
+            // Заявка узла во входной список (0xDE): принимает только узел из списка, остальные игнорируют.
+            crate::bootstrap::apply::PKT_APPLY => {
+                let _ = source;
+                crate::bootstrap::apply::on_packet(&sender.0, plaintext);
+                true
+            }
             crate::network_offers::PKT_OFFERS => {
                 let _ = source;
                 crate::network_offers::on_packet(&sender.0, plaintext);
                 true
             }
             _ => false,
-        }
-    }
-
-    /// Hardening Step 3 — mobile-сторона обработки 0xC2 SESSION_ISSUE.
-    /// Anchor прислал нам SessionToken (после QR-pair'инга). Сохраняем в store.
-    async fn handle_session_issue(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::decode_session_issue;
-        let (tok, _sk) = match decode_session_issue(plaintext) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[session-issue] decode failed from {}: {}",
-                          hex::encode(&sender.0[..8]), e);
-                return;
-            }
-        };
-        let mut store = self.paired_anchors.lock().await;
-        // Anchor должен уже быть в store (mobile делал pair-import заранее).
-        // Only an anchor paired by the owner (QR import) may issue a session; an ordinary authenticated peer must not
-        // be able to write itself into the pairing store.
-        let exists = store.anchors.iter().any(|e| e.payload.anchor_id == sender);
-        if !exists {
-            eprintln!("[session-issue] refused: {} is not a paired anchor", hex::encode(&sender.0[..8]));
-            return;
-        }
-        if !exists {
-            // Создаём placeholder с anchor_id и пустыми остальными полями. URL и fingerprint
-            // mobile получит позже (через QR-import или /pair/qr).
-            use crate::netlayer::pairing::{PairedAnchorEntry, PairingPayload};
-            store.anchors.push(PairedAnchorEntry {
-                payload: PairingPayload {
-                    anchor_id: sender,
-                    anchor_x25519_hex: String::new(),
-                    fingerprint_hex: String::new(),
-                    anchor_url: String::new(),
-                },
-                session: None,
-                preference: u32::MAX,
-            });
-        }
-        let updated = store.set_session(&sender, tok.clone());
-        let path = crate::netlayer::pairing::default_paired_anchors_path();
-        if let Err(e) = store.save(&path) {
-            eprintln!("[session-issue] persist failed: {}", e);
-        }
-        println!("[session-issue] ✅ session {:#x} from {} saved (existed={})",
-                 tok.session_id, hex::encode(&sender.0[..8]), updated);
-    }
-
-    /// Step 4 / Hardening Step 2 — anchor-сторона обработки 0xC0.
-    /// Lookup session_id во всех paired-токенах (ключ store'а — pubkey_hex клиента),
-    /// verify HMAC, refresh TTL, восстанавливаем session-key в EncryptionManager
-    /// (если он был сохранён в SessionToken на момент pair'инга), затем отвечаем
-    /// 0xC1 RESUME_ACK encrypted (status=Ok). Если session-key не сохранён —
-    /// шлём ACK plaintext (legacy-токен из старого pair'инга), mobile может его
-    /// прочитать без сессии.
-    async fn handle_resume_packet(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::{
-            decode_resume, encode_resume_ack, verify_resume_mac, ResumeStatus,
-            DEFAULT_SESSION_TTL_SECS,
-        };
-        let (embedded_node_id, session_id, addr, mac) = match decode_resume(plaintext) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[resume] decode failed: {}", e);
-                return;
-            }
-        };
-        // Если sender ещё не известен (plaintext pre-Hello flow в WS-server'е), берём
-        // node_id из payload. Иначе ожидаем что embedded совпадает с sender'ом — иначе reject.
-        let resolved_sender = if sender == HashId([0u8; 32]) {
-            embedded_node_id
-        } else {
-            if sender != embedded_node_id {
-                eprintln!("[resume] sender mismatch: ws={}, packet={}",
-                          hex::encode(&sender.0[..8]),
-                          hex::encode(&embedded_node_id.0[..8]));
-                return;
-            }
-            sender
-        };
-        let sender = resolved_sender;
-        let mut status = ResumeStatus::Unknown;
-        let mut hit_pubkey: Option<String> = None;
-        let mut saved_session_key: Option<[u8; 32]> = None;
-        {
-            let store = self.paired_clients.lock().await;
-            for (pk, tok) in store.clients.iter() {
-                if tok.session_id == session_id {
-                    if tok.is_expired() {
-                        status = ResumeStatus::Expired;
-                        hit_pubkey = Some(pk.clone());
-                        break;
-                    }
-                    let secret = match tok.resume_secret() {
-                        Ok(s) => s,
-                        Err(_) => continue,
-                    };
-                    if verify_resume_mac(&secret, session_id, &addr, &mac) {
-                        status = ResumeStatus::Ok;
-                        hit_pubkey = Some(pk.clone());
-                        saved_session_key = tok.session_key();
-                    } else {
-                        status = ResumeStatus::BadMac;
-                        hit_pubkey = Some(pk.clone());
-                    }
-                    break;
-                }
-            }
-        }
-        match (status, hit_pubkey.clone()) {
-            (ResumeStatus::Ok, Some(pk)) => {
-                let path = crate::netlayer::pairing::default_paired_clients_path();
-                let mut store = self.paired_clients.lock().await;
-                store.refresh(&pk, DEFAULT_SESSION_TTL_SECS);
-                if let Err(e) = store.save(&path) {
-                    eprintln!("[resume] persist failed: {}", e);
-                }
-                println!("[resume] ✅ session {:#x} from {} ({}): verified, TTL refreshed",
-                         session_id, hex::encode(&sender.0[..8]), addr);
-            }
-            (ResumeStatus::BadMac, _) => {
-                eprintln!("[resume] ❌ session {:#x} from {}: BadMac",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            (ResumeStatus::Expired, _) => {
-                eprintln!("[resume] ⌛ session {:#x} from {}: expired",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            (ResumeStatus::Unknown, _) => {
-                eprintln!("[resume] ❓ session {:#x} from {}: unknown",
-                          session_id, hex::encode(&sender.0[..8]));
-            }
-            _ => {}
-        }
-
-        // 🔐 Hardening Step 2: 0xC1 RESUME_ACK через encrypted-channel когда session-key
-        // resume есть, иначе — plaintext (legacy fallback для старых токенов без session-key).
-        let ack_bytes = encode_resume_ack(status, None);
-        if let Some(session_key) = saved_session_key {
-            if matches!(status, ResumeStatus::Ok) {
-                let mut enc = self.encryption.lock().await;
-                let v = enc.restore_session(sender, session_key);
-                drop(enc);
-                println!("[resume] 🔁 session-key restored v{} for {}",
-                         v, hex::encode(&sender.0[..8]));
-                if let Err(e) = self.send_encrypted(sender, &ack_bytes).await {
-                    eprintln!("[resume-ack] encrypted send failed: {}; fallback plaintext", e);
-                    let _ = self.send_plaintext_best_effort(sender, &ack_bytes).await;
-                } else {
-                    println!("[resume-ack] 🔒 0xC1 sent encrypted to {}",
-                             hex::encode(&sender.0[..8]));
-                }
-                return;
-            }
-        }
-        // Fallback: send plaintext ACK. Mobile должна уметь это переварить (см. handle_resume_ack).
-        let _ = self.send_plaintext_best_effort(sender, &ack_bytes).await;
-    }
-
-    /// Hardening Step 2: лучший доступный канал доставки plaintext-пакета
-    /// (WS-outgoing если есть, иначе UDP data-socket с last-known address).
-    /// Используется только для resume-ACK fallback'а; основной путь — encrypted.
-    async fn send_plaintext_best_effort(self: &Arc<Self>, peer_id: HashId, bytes: &[u8]) -> Result<(), String> {
-        if let Some(out) = self.ws_outgoing.lock().await.get(&peer_id).cloned() {
-            out.send(bytes.to_vec()).await
-                .map_err(|e| format!("ws send: {}", e))?;
-            return Ok(());
-        }
-        let dest = {
-            let peers = self.peers.lock().await;
-            let p = peers.get(&peer_id)
-                .ok_or_else(|| format!("peer {} not in table", hex::encode(&peer_id.0[..8])))?;
-            p.data_addr.clone().unwrap_or_else(|| p.addr.clone())
-        };
-        self.socket_manager.data().await.send_to(bytes, &dest).await
-            .map_err(|e| format!("udp send to {}: {}", dest, e))?;
-        Ok(())
-    }
-
-    /// Step 4 — mobile-сторона обработки 0xC1. Если status Ok и есть new_secret — обновить
-    /// `PairedAnchorStore`. На текущем шаге — только лог; сам store на mobile-стороне
-    /// подключим в Step 6 (auto-reconnect).
-    async fn handle_resume_ack(self: &Arc<Self>, sender: HashId, plaintext: &[u8]) {
-        use crate::netlayer::pairing::decode_resume_ack;
-        match decode_resume_ack(plaintext) {
-            Ok((status, secret)) => {
-                println!("[resume-ack] from {}: status={:?}, new_secret={}",
-                         hex::encode(&sender.0[..8]),
-                         status,
-                         secret.is_some());
-                // TODO Step 6: обновить PairedAnchorStore::set_session с новым secret.
-            }
-            Err(e) => {
-                eprintln!("[resume-ack] decode failed: {}", e);
-            }
         }
     }
 
@@ -5800,6 +5692,17 @@ impl P2PTransport {
         *self.pinned_identities.write().await = pins;
     }
 
+    /// Привязать адреса входных узлов к их ключам подписи (из подписанного списка).
+    pub async fn set_bootstrap_pins(&self, pins: HashMap<String, [u8; 32]>) {
+        println!("[transport] 🔒 {} bootstrap address(es) pinned to a signing key", pins.len());
+        *self.bootstrap_pins.write().await = pins;
+    }
+
+    /// Hello с IP, закреплённого за входным узлом, обязан нести ключ этого узла; прочие адреса не затрагиваются.
+    pub(crate) fn bootstrap_key_ok(pins: &HashMap<String, [u8; 32]>, ip: &str, key: &[u8; 32]) -> bool {
+        pins.get(ip).map_or(true, |expected| expected == key)
+    }
+
     /// Bootstrap - connect to all nodes in the list
     pub async fn bootstrap(&self, bootstrap_addrs: Vec<String>, external_ip: Option<String>) -> Result<(), String> {
         println!("[bootstrap] 🚀 Starting bootstrap with {} nodes", bootstrap_addrs.len());
@@ -5823,7 +5726,7 @@ impl P2PTransport {
 
             // Skip own address (localhost)
             if addr.contains("127.0.0.1") || addr.contains("localhost") {
-                println!("[bootstrap] ⏭️  Skipping localhost: {}", addr);
+                println!("[bootstrap] ⏭️  Skipping localhost: {}", crate::util::logsafe::a(&addr));
                 skipped += 1;
                 continue;
             }
@@ -5831,21 +5734,21 @@ impl P2PTransport {
             // Skip own external IP
             if let Some(ref ext_ip) = external_ip {
                 if peer_ip == ext_ip {
-                    println!("[bootstrap] ⏭️  Skipping own external IP: {}", addr);
+                    println!("[bootstrap] ⏭️  Skipping own external IP: {}", crate::util::logsafe::a(&addr));
                     skipped += 1;
                     continue;
                 }
             }
 
-            println!("[bootstrap] 📡 Connecting to {}...", addr);
+            println!("[bootstrap] 📡 Connecting to {}...", crate::util::logsafe::a(&addr));
 
             match self.send_hello_request(&addr).await {
                 Ok(_) => {
-                    println!("[bootstrap] ✅ Hello sent to {}", addr);
+                    println!("[bootstrap] ✅ Hello sent to {}", crate::util::logsafe::a(&addr));
                     connected += 1;
                 }
                 Err(e) => {
-                    println!("[bootstrap] ❌ Failed to connect to {}: {}", addr, e);
+                    println!("[bootstrap] ❌ Failed to connect to {}: {}", crate::util::logsafe::a(&addr), e);
                     failed += 1;
                 }
             }
@@ -6016,7 +5919,7 @@ impl P2PTransport {
                 if let Err(e) = self.socket_manager.data().await.send_to(&data, addr).await {
                     return Err(format!("Failed to send SYN: {}", e));
                 }
-                println!("[transport] 📤 Sent SYN for stream {} to {}", stream_id, addr);
+                println!("[transport] 📤 Sent SYN for stream {} to {}", stream_id, crate::util::logsafe::a(&addr));
             }
         }
 
@@ -6133,6 +6036,45 @@ impl P2PTransport {
         Ok(streams.get_stream(stream_id).map(|s| s.peer_id))
     }
 
+    /// Допуск нового пира по любому входу (UDP и WS): личность создаётся бесплатно, поэтому новых принимаем с ограничениями,
+    /// а таблица пиров не растёт выше потолка; при переполнении вытесняется самый давний неприкреплённый не-якорь.
+    async fn admit_peer(
+        admission: &Arc<tokio::sync::Mutex<crate::netlayer::admission::Admission>>,
+        peers: &Arc<Mutex<HashMap<HashId, PeerInfo>>>,
+        pinned_identities: &Arc<tokio::sync::RwLock<HashMap<HashId, [u8; 32]>>>,
+        ip: std::net::IpAddr,
+        node_id: HashId,
+    ) -> Result<(), crate::netlayer::admission::Reject> {
+        if !crate::autonomy::admits(&node_id) {
+            return Err(crate::netlayer::admission::Reject::NotInMesh);
+        }
+        let (known, table_len) = {
+            let p = peers.lock().await;
+            (p.contains_key(&node_id), p.len())
+        };
+        let verdict = admission.lock().await.check(ip, node_id, known, table_len, Instant::now());
+        match verdict {
+            Err(crate::netlayer::admission::Reject::TableFull) => {
+                let pins = pinned_identities.read().await;
+                let mut p = peers.lock().await;
+                let now_ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+                let victim = crate::netlayer::admission::pick_victim(
+                    p.values().map(|x| (x.id, x.last_seen, pins.contains_key(&x.id), (x.caps_bits & crate::netlayer::packet::hello_caps::ANCHOR) != 0)),
+                    now_ms,
+                    120_000,
+                );
+                match victim {
+                    Some(v) => {
+                        p.remove(&v);
+                        Ok(())
+                    }
+                    None => Err(crate::netlayer::admission::Reject::TableFull),
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Cleanup stale encryption sessions
 
     /// Send DHT query to a peer and wait for response
@@ -6141,17 +6083,20 @@ impl P2PTransport {
     pub async fn send_dht_query(&self, peer_id: HashId, query: &crate::dht::messages::DhtQuery) -> Result<crate::dht::messages::DhtResponse, String> {
         use crate::dht::messages::DhtResponse;
         
-        let request_id = self.dht.lock().await.next_request_id();
-        
-        // Create query with request_id
-        let mut query_with_id = query.clone();
-        query_with_id.request_id = request_id;
-        
+        // по этому каналу ходит только поиск узлов (формат на проводе: [0xF2][цель:32][номер запроса:8])
+        if query.query_type != crate::dht::messages::DhtQueryType::FindNode {
+            return Err("DHT RPC: over this channel only FindNode is supported".to_string());
+        }
+        // номер запроса случайный: ответ подставить нельзя, не зная его (ответ приходит по сеансу, номер — единственная привязка)
+        let request_id: u64 = rand::random();
+
         // Register pending response
         let rx = self.dht.lock().await.register_pending(request_id);
-        
-        // Serialize query to binary
-        let data = query_with_id.to_bytes();
+
+        let mut data = Vec::with_capacity(1 + 32 + 8);
+        data.push(0xF2u8);
+        data.extend_from_slice(query.key.as_ref());
+        data.extend_from_slice(&request_id.to_be_bytes());
         
         // Send encrypted
         if let Err(e) = self.send_encrypted(peer_id, &data).await {
@@ -6466,23 +6411,44 @@ impl PortUpdatePacket {
 // binds fixed, well-known ports that could collide with an actual running
 // node — see the prior mandate's report).
 #[cfg(test)]
+mod bootstrap_pin_tests {
+    use super::*;
+
+    #[test]
+    fn a_pinned_bootstrap_address_accepts_only_its_key() {
+        let mut pins = HashMap::new();
+        pins.insert("203.0.113.1".to_string(), [7u8; 32]);
+        assert!(P2PTransport::bootstrap_key_ok(&pins, "203.0.113.1", &[7u8; 32]));
+        assert!(!P2PTransport::bootstrap_key_ok(&pins, "203.0.113.1", &[8u8; 32]), "другой ключ на том же адресе");
+        assert!(P2PTransport::bootstrap_key_ok(&pins, "198.51.100.9", &[8u8; 32]), "незакреплённый адрес не затронут");
+    }
+}
+
+#[cfg(test)]
+mod ws_route_tests {
+    use super::*;
+
+    #[test]
+    fn a_closing_old_connection_keeps_the_route_of_the_new_one() {
+        let id = HashId([9u8; 32]);
+        let (old_tx, _old_rx) = mpsc::channel::<Vec<u8>>(1);
+        let (new_tx, _new_rx) = mpsc::channel::<Vec<u8>>(1);
+        let mut routes: HashMap<HashId, mpsc::Sender<Vec<u8>>> = HashMap::new();
+        routes.insert(id, old_tx.clone());
+        routes.insert(id, new_tx.clone()); // новое соединение заменило запись
+        assert!(!remove_route_if_same(&mut routes, &id, &old_tx), "старое соединение чужой маршрут не снимает");
+        assert!(routes.contains_key(&id));
+        assert!(remove_route_if_same(&mut routes, &id, &new_tx), "своё снимается");
+        assert!(routes.is_empty());
+    }
+}
+
+#[cfg(test)]
 mod identity_pin_tests {
     use super::*;
 
     fn key(byte: u8) -> [u8; 32] {
         [byte; 32]
-    }
-
-    #[test]
-    fn resume_is_bound_to_the_node_id_of_the_paired_key() {
-        let pk = [7u8; 32];
-        let own = HashId(crate::util::types::derive_node_id(&pk));
-        let other_bound = HashId(crate::util::types::derive_node_id(&[8u8; 32]));
-        let legacy = HashId([9u8; 32]);
-        assert!(P2PTransport::resume_node_matches(&hex::encode(pk), &own));
-        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &other_bound), "a bound id of another key is refused");
-        assert!(!P2PTransport::resume_node_matches(&hex::encode(pk), &legacy), "a random id is refused");
-        assert!(!P2PTransport::resume_node_matches("zz", &own));
     }
 
     #[test]
@@ -6562,9 +6528,24 @@ mod identity_pin_tests {
     }
 }
 
+/// Запасной порт WSS допустим, только если и заданный адрес — «все интерфейсы» (конкретный интерфейс не расширяется до wildcard).
+fn ws_fallback_allowed(addr: std::net::SocketAddr) -> bool {
+    let fallback: std::net::SocketAddr = "0.0.0.0:8443".parse().unwrap();
+    addr != fallback && addr.ip().is_unspecified()
+}
+
 #[cfg(test)]
 mod relay_policy_tests {
     use super::*;
+
+    #[test]
+    fn the_wss_fallback_never_widens_a_chosen_interface() {
+        for a in ["127.0.0.1:9443", "192.168.1.5:443", "10.8.0.2:8443", "[::1]:443"] {
+            assert!(!ws_fallback_allowed(a.parse().unwrap()), "{a}");
+        }
+        assert!(ws_fallback_allowed("0.0.0.0:443".parse().unwrap()));
+        assert!(!ws_fallback_allowed("0.0.0.0:8443".parse().unwrap()), "это уже запасной адрес");
+    }
 
     #[test]
     fn a_relay_forwards_only_to_public_socket_addresses() {

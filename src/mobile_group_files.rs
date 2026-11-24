@@ -246,6 +246,9 @@ async fn begin(gid: &str, key: &str, muted: bool, file_size: u64, total_chunks: 
 
 /// Начать заливку файла в группу.
 pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(gid): Path<String>, Json(req): Json<StartReq>) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, muted) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
@@ -258,6 +261,9 @@ pub async fn start(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, 
 
 /// Залить кусок (повтор безопасен — так работает докачка). Только тот, кто начал заливку.
 pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id, idx)): Path<(String, String, u32)>, body: Bytes) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, muted) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
@@ -273,6 +279,10 @@ pub async fn put_chunk(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKe
         return err(StatusCode::BAD_REQUEST, "неверный номер или размер куска");
     }
     let _guard = PUT.lock().await;
+    // состояние перечитывается под замком: DONE мог завершить заливку, пока запрос ждал
+    if load_meta(&gid, &id).await.map_or(true, |cur| cur.done) {
+        return err(StatusCode::CONFLICT, "заливка уже завершена");
+    }
     if !fits(&gid, &id, &m, idx, body.len()).await {
         return err(StatusCode::BAD_REQUEST, "куски больше заявленного размера файла");
     }
@@ -298,6 +308,9 @@ async fn present(gid: &str, id: &str) -> Vec<u32> {
 
 /// Все куски залиты — файл становится доступным участникам.
 pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path((gid, id)): Path<(String, String)>) -> Response {
+    if crate::mobile_api::restricted_until(&dev) > 0 {
+        return err(StatusCode::FORBIDDEN, "владелец узла ограничил отправку файлов для вас на время");
+    }
     let (key, _, _) = match member(&gid, &dev) {
         Ok(v) => v,
         Err(r) => return r,
@@ -306,6 +319,8 @@ pub async fn done(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, P
     if m.by != key {
         return StatusCode::FORBIDDEN.into_response();
     }
+    // завершение и запись куска исключают друг друга: набор кусков в момент DONE — окончательный
+    let _guard = PUT.lock().await;
     let have = present(&gid, &id).await;
     let missing: Vec<u32> = (0..m.total_chunks).filter(|i| have.binary_search(i).is_err()).take(100).collect();
     if !missing.is_empty() {
@@ -352,7 +367,8 @@ pub async fn remove(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
         Err(r) => return r,
     };
     let Some(m) = load_meta(&gid, &id).await else { return StatusCode::NOT_FOUND.into_response() };
-    if m.by != key && role == Role::Member {
+    // чужой файл стирает тот, кто выше автора по роли (как и записи): модератор не трогает файлы админа и владельца
+    if m.by != key && !crate::mobile_groups::may_override(role, crate::mobile_groups::role_of_key(&gid, &m.by)) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let _ = tokio::fs::remove_dir_all(dir_of(&gid, &id)).await;
@@ -380,6 +396,9 @@ pub(crate) async fn pc_put(gid: &str, device: &str, id: &str, idx: u32, bytes: &
         return Err("кусок не принят".into());
     }
     let _guard = PUT.lock().await;
+    if load_meta(gid, id).await.map_or(true, |cur| cur.done) {
+        return Err("заливка уже завершена".into());
+    }
     if !fits(gid, id, &m, idx, bytes.len()).await {
         return Err("куски больше заявленного размера файла".into());
     }
@@ -395,6 +414,7 @@ pub(crate) async fn pc_done(gid: &str, device: &str, id: &str) -> Result<(), Str
     if m.by != key {
         return Err("чужая заливка".into());
     }
+    let _guard = PUT.lock().await;
     let have = present(gid, id).await;
     if (0..m.total_chunks).any(|i| have.binary_search(&i).is_err()) {
         return Err("не хватает кусков".into());
@@ -419,8 +439,8 @@ pub(crate) async fn pc_chunk(gid: &str, device: &str, id: &str, idx: u32) -> Res
 pub(crate) async fn pc_remove(gid: &str, device: &str, id: &str) -> Result<(), String> {
     let (key, role, _) = pc_member(gid, device)?;
     let m = load_meta(gid, id).await.ok_or("нет такого файла")?;
-    if m.by != key && role == Role::Member {
-        return Err("стереть может залившего, модератор, админ или владелец".into());
+    if m.by != key && !crate::mobile_groups::may_override(role, crate::mobile_groups::role_of_key(gid, &m.by)) {
+        return Err("файл стирает залившего или тот, кто выше него по роли в группе".into());
     }
     let _ = tokio::fs::remove_dir_all(dir_of(gid, id)).await;
     Ok(())

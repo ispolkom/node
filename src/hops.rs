@@ -198,6 +198,9 @@ pub enum Event {
     Closed { handle: Handle },
 }
 
+/// Сколько разных меток узлов принимает обратное направление одного звена (длина цепочки намного меньше).
+const MAX_BWD_TAGS: usize = 16;
+
 /// Как верхний слой называет цепочку на этом узле.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Handle(pub NodeId, pub u64);
@@ -328,7 +331,13 @@ impl Router {
         // назад (от выхода к отправителю): звено «впереди»
         if let Some(prev) = self.by_next.get(&(from, cid)).copied() {
             if let Some(r) = self.by_prev.get_mut(&prev) {
-                if !r.bwd.entry((seq >> 32) as u32).or_default().accept(seq & 0xFFFF_FFFF) {
+                let tag = (seq >> 32) as u32;
+                // у каждого узла цепочки своя метка, а цепочка коротка: больше MAX_BWD_TAGS разных меток — это не узлы цепочки,
+                // а попытка раздуть таблицу окон повторов (ячейка не аутентифицируется на промежуточном узле)
+                if !r.bwd.contains_key(&tag) && r.bwd.len() >= MAX_BWD_TAGS {
+                    return;
+                }
+                if !r.bwd.entry(tag).or_default().accept(seq & 0xFFFF_FFFF) {
                     return;
                 }
                 r.last = now;
@@ -380,15 +389,16 @@ impl Router {
     }
 
     /// Забыть цепочки, на которых давно ничего не было.
-    pub fn gc(&mut self, now: u64) -> Vec<Out> {
+    /// Возвращает пакеты и события закрытия: верхний слой (выход) по ним закрывает сокеты и убирает записи, как при полученном DESTROY.
+    pub fn gc(&mut self, now: u64) -> (Vec<Out>, Vec<Event>) {
         let old: Vec<(NodeId, u64)> = self.by_prev.iter().filter(|(_, r)| now.saturating_sub(r.last) > IDLE_SECS).map(|(k, _)| *k).collect();
         let mut out = vec![];
+        let mut events = vec![];
         for (from, cid) in old {
-            let mut ev = vec![];
-            self.on_destroy(from, cid, &mut out, &mut ev);
+            self.on_destroy(from, cid, &mut out, &mut events);
             out.push(Out { to: from, bytes: small(PKT_DESTROY, cid, &[2]) });
         }
-        out
+        (out, events)
     }
 }
 
@@ -642,6 +652,26 @@ mod tests {
     }
 
     #[test]
+    fn a_neighbour_cannot_inflate_the_replay_windows_with_new_tags() {
+        let mut net = Net::new(&[1, 2]);
+        let (_c, ev) = net.build(&[1, 2]);
+        assert_eq!(ev, vec![ClientEvent::Ready]);
+        let (key, prev) = {
+            let r1 = &net.routers[&id(1)];
+            let (k, p) = r1.by_next.iter().next().expect("звено вперёд есть");
+            (*k, *p)
+        };
+        assert_eq!(key.0, id(2));
+        let body = [0u8; BODY];
+        for t in 0..200u64 {
+            let seq = ((1000 + t) << 32) | 1;
+            net.routers.get_mut(&id(1)).unwrap().on_packet(id(2), &cell_packet(key.1, seq, &body), 5);
+        }
+        let n = net.routers[&id(1)].by_prev[&prev].bwd.len();
+        assert!(n <= MAX_BWD_TAGS, "окон повторов {n}");
+    }
+
+    #[test]
     fn a_three_hop_circuit_is_built_and_data_travels_both_ways_but_only_the_exit_reads_it() {
         let mut net = Net::new(&[1, 2, 3]);
         let (mut c, ev) = net.build(&[1, 2, 3]);
@@ -733,8 +763,10 @@ mod tests {
         let (_s, x) = Circuit::fresh();
         r.on_packet(id(9), &small(PKT_CREATE, 5, &x), 100);
         assert_eq!(r.circuits(), 1);
-        assert!(r.gc(100 + IDLE_SECS).is_empty());
-        assert!(!r.gc(100 + IDLE_SECS + 1).is_empty());
+        assert!(r.gc(100 + IDLE_SECS).0.is_empty());
+        let (out, events) = r.gc(100 + IDLE_SECS + 1);
+        assert!(!out.is_empty());
+        assert!(events.iter().any(|e| matches!(e, Event::Closed { .. })), "событие закрытия не теряется");
         assert_eq!(r.circuits(), 0);
         for i in 0..MAX_CIRCUITS as u64 {
             r.on_packet(id(9), &small(PKT_CREATE, i, &x), 0);

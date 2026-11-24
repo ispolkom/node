@@ -1,7 +1,7 @@
 name: yandi_mobile
 description: YANDI Mobile — decentralized P2P messenger
 publish_to: 'none'
-version: 1.0.0+1
+version: 1.0.0+10
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -30,6 +30,7 @@ dependencies:
 
   # UI / QR
   mobile_scanner: ^5.2.3
+  qr_flutter: ^4.1.0
   cupertino_icons: ^1.0.8
 
   # Media / Audio
@@ -53,6 +54,8 @@ dependencies:
   intl: ^0.19.0
   uuid: ^4.5.1
   sqflite_sqlcipher: ^3.4.1
+  video_player: ^2.11.1
+  record: ^6.2.1
 
 dev_dependencies:
   flutter_test:
@@ -66,3 +69,4 @@ flutter:
   assets:
     - assets/images/
     - assets/sounds/
+    - assets/bootstrap.json

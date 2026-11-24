@@ -5,6 +5,10 @@ import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../services/call_service.dart';
 import '../theme.dart';
+import '../l10n.dart';
+
+/// Имя абонента для экрана звонка: то, что человек сам дал контакту, без значка устройства (кто отвечает — телефон или компьютер — не важно).
+String displayCallName(String name) => name.replaceFirst(RegExp(r'^[\s\u{1F4F1}\u{1F4BB}\u{1F5A5}\uFE0F]+', unicode: true), '').trim();
 
 /// Экран звонка: исходящий (идёт вызов), входящий (принять/отклонить) и разговор с видео или без.
 class CallScreen extends StatefulWidget {
@@ -64,30 +68,43 @@ class _CallScreenState extends State<CallScreen> {
           top: 24, left: 16, right: 16,
           child: Column(
             children: [
+              // звонок в сети YANDI: логотип и название над именем, чтобы не спутать с мессенджером или сотовой связью
+              Row(mainAxisSize: MainAxisSize.min, children: [
+                Image.asset('assets/images/logo.png', height: 28),
+                const SizedBox(width: 8),
+                const Text('YANDI', style: TextStyle(color: AppTheme.accent, fontSize: 20, fontWeight: FontWeight.w700, letterSpacing: 2)),
+              ]),
               if (!showVideo) ...[
-                const SizedBox(height: 40),
-                CircleAvatar(
-                  radius: 54,
-                  backgroundColor: AppTheme.surface,
-                  child: Text(
-                    c.peerName.replaceFirst(RegExp(r'^\s*📱\s*'), '').trim().characters.firstOrNull?.toUpperCase() ?? '?',
-                    style: const TextStyle(color: AppTheme.accent, fontSize: 44, fontWeight: FontWeight.bold),
-                  ),
-                ),
+                const SizedBox(height: 28),
+                Builder(builder: (context) {
+                  final bytes = c.peerId == null ? null : context.read<AppState>().avatarBytes(c.peerId!);
+                  final name = displayCallName(c.peerName);
+                  return CircleAvatar(
+                    radius: 54,
+                    backgroundColor: AppTheme.surface,
+                    backgroundImage: bytes != null ? MemoryImage(bytes) : null,
+                    onBackgroundImageError: bytes != null ? (_, __) {} : null,
+                    child: bytes != null
+                        ? null
+                        : Text(name.characters.firstOrNull?.toUpperCase() ?? '?',
+                            style: const TextStyle(color: AppTheme.accent, fontSize: 44, fontWeight: FontWeight.bold)),
+                  );
+                }),
                 const SizedBox(height: 16),
-              ],
-              Text(c.peerName, textAlign: TextAlign.center,
+              ] else
+                const SizedBox(height: 12),
+              Text(displayCallName(c.peerName), textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white, fontSize: 24, fontWeight: FontWeight.w600)),
               const SizedBox(height: 6),
               Text(_status(c), textAlign: TextAlign.center,
                   style: const TextStyle(color: Colors.white70, fontSize: 15)),
               if (c.phase == CallPhase.active || c.phase == CallPhase.connecting)
-                const Padding(
+                Padding(
                   padding: EdgeInsets.only(top: 6),
                   child: Row(mainAxisSize: MainAxisSize.min, children: [
                     Icon(Icons.lock, size: 13, color: Colors.white54),
                     SizedBox(width: 4),
-                    Text('сквозное шифрование', style: TextStyle(color: Colors.white54, fontSize: 12)),
+                    Text(tr('сквозное шифрование'), style: TextStyle(color: Colors.white54, fontSize: 12)),
                   ]),
                 ),
             ],
@@ -112,10 +129,10 @@ class _CallScreenState extends State<CallScreen> {
 
   String _status(CallService c) {
     switch (c.phase) {
-      case CallPhase.calling:    return c.video ? 'Видеозвонок · вызываю…' : 'Вызываю…';
-      case CallPhase.ringing:    return c.video ? 'Входящий видеозвонок' : 'Входящий звонок';
-      case CallPhase.connecting: return 'Соединяю…';
-      case CallPhase.active:     return CallService.formatDuration(c.elapsed);
+      case CallPhase.calling:    return c.video ? tr('Видеозвонок · вызываю…') : tr('Вызываю…');
+      case CallPhase.ringing:    return c.video ? tr('Входящий видеозвонок') : tr('Входящий звонок');
+      case CallPhase.connecting: return tr('Соединяю…');
+      case CallPhase.active:     return c.limitWarning.isEmpty ? CallService.formatDuration(c.elapsed) : '${CallService.formatDuration(c.elapsed)} · ${c.limitWarning}';
       case CallPhase.ended:      return c.endReason;
       case CallPhase.idle:       return '';
     }
@@ -126,8 +143,8 @@ class _CallScreenState extends State<CallScreen> {
       return Row(
         mainAxisAlignment: MainAxisAlignment.spaceEvenly,
         children: [
-          _round(Icons.call_end, Colors.redAccent, 'Отклонить', c.reject),
-          _round(c.video ? Icons.videocam : Icons.call, Colors.green, 'Принять', c.accept),
+          _round(Icons.call_end, Colors.redAccent, tr('Отклонить'), c.reject),
+          _round(c.video ? Icons.videocam : Icons.call, Colors.green, tr('Принять'), c.accept),
         ],
       );
     }
@@ -135,11 +152,11 @@ class _CallScreenState extends State<CallScreen> {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: [
-        _small(c.muted ? Icons.mic_off : Icons.mic, c.muted, 'Микрофон', c.toggleMute),
-        _small(c.speaker ? Icons.volume_up : Icons.hearing, c.speaker, c.speaker ? 'Динамик' : 'Разговорный', c.toggleSpeaker),
-        if (c.video) _small(c.cameraOn ? Icons.videocam : Icons.videocam_off, !c.cameraOn, 'Камера', c.toggleCamera),
-        if (c.video) _small(Icons.cameraswitch, false, 'Повернуть', c.switchCamera),
-        _round(Icons.call_end, Colors.redAccent, 'Завершить', c.hangup),
+        _small(c.muted ? Icons.mic_off : Icons.mic, c.muted, tr('Микрофон'), c.toggleMute),
+        _small(c.speaker ? Icons.volume_up : Icons.hearing, c.speaker, c.speaker ? tr('Динамик') : tr('Разговорный'), c.toggleSpeaker),
+        if (c.video) _small(c.cameraOn ? Icons.videocam : Icons.videocam_off, !c.cameraOn, tr('Камера'), c.toggleCamera),
+        if (c.video) _small(Icons.cameraswitch, false, tr('Повернуть'), c.switchCamera),
+        _round(Icons.call_end, Colors.redAccent, tr('Завершить'), c.hangup),
       ],
     );
   }

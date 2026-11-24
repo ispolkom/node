@@ -1,0 +1,39 @@
+{
+  "format": 1,
+  "network": "yandi",
+  "issued": 1792441836,
+  "expires": 1800217836,
+  "sequence": 4,
+  "entries": [
+    {
+      "id": "9b68d49bb092f71292ad76ab8fb8750d710aae5af70e43b8ec0a901d59423100",
+      "key": "0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f",
+      "addr": [
+        "203.0.113.9:9000"
+      ],
+      "region": "NL",
+      "roles": [
+        "entry",
+        "guest"
+      ],
+      "mobile": [
+        "203.0.113.9:8444",
+        "[2001:db8::9]:8444"
+      ]
+    },
+    {
+      "id": "f41bbd1c296f06d2de45e1c2bc64c9ee642b69264ec461688515ca5d59423100",
+      "key": "1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a",
+      "addr": [
+        "203.0.113.10:9000"
+      ],
+      "region": null,
+      "roles": [
+        "entry",
+        "relay"
+      ]
+    }
+  ],
+  "signer": "57a7662d45d2cbcbc855355f2154325fd6488cc834e802c5c8a16ff07352a5a5",
+  "signature": "4074b6c1df29f0d60ebfe7aa8d1f8be2b95d3cd25b9c628b19dd0ca461d2dfaa96e46b75a471ed35162c1ee6985773998261ce30616039f212592629419d0605"
+}

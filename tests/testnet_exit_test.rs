@@ -27,6 +27,15 @@ impl Drop for Down {
     }
 }
 
+/// Сеанс администратора узла (docs/ROLES.md): управленческие ручки требуют токена в заголовке `x-yandi-admin`.
+async fn admin(http: &reqwest::Client, web: &str, cookie: &str, stand: &std::path::Path) -> String {
+    let pw = std::fs::read_to_string(stand.join("passwords.txt")).unwrap();
+    let login = pw.lines().find_map(|l| l.strip_prefix("пароль входа:")).unwrap().trim().to_string();
+    let r = http.post(format!("{web}/api/admin/session")).header("cookie", cookie).json(&json!({"password": login})).send().await.unwrap();
+    assert!(r.status().is_success(), "admin session: {}", r.status());
+    r.json::<Value>().await.unwrap()["token"].as_str().unwrap().to_string()
+}
+
 async fn login(http: &reqwest::Client, stand: &Path, k: usize) -> (String, String, String) {
     let pw = std::fs::read_to_string(stand.join("passwords.txt")).unwrap();
     let login = pw.lines().find_map(|l| l.strip_prefix("пароль входа:")).unwrap().trim().to_string();
@@ -106,7 +115,8 @@ async fn a_node_goes_online_through_a_trusted_exit_but_never_into_the_exit_owner
     let http = reqwest::Client::new();
     let (web1, ck1, id1) = login(&http, &stand, 1).await;
     let (web2, ck2, _id2) = login(&http, &stand, 2).await;
-    let s: Value = http.get(format!("{web1}/api/exit/settings")).header("cookie", &ck1).send().await.unwrap().json().await.unwrap();
+    let adm1 = admin(&http, &web1, &ck1, &stand).await;
+    let s: Value = http.get(format!("{web1}/api/exit/settings")).header("cookie", &ck1).header("x-yandi-admin", &adm1).send().await.unwrap().json().await.unwrap();
     assert_eq!(s["mode"], "trusted", "the default: only trusted nodes may exit");
 
     // копия 2 открывает прокси через копию 1
@@ -151,10 +161,10 @@ async fn a_node_goes_online_through_a_trusted_exit_but_never_into_the_exit_owner
     assert!(log1.contains("адрес этого компьютера или домашней сети"), "the exit logs the refusal");
 
     // владелец выхода его выключил — никто не проходит
-    let r: Value = http.post(format!("{web1}/api/exit/settings")).header("cookie", &ck1).json(&json!({"mode": "off"})).send().await.unwrap().json().await.unwrap();
+    let r: Value = http.post(format!("{web1}/api/exit/settings")).header("cookie", &ck1).header("x-yandi-admin", &adm1).json(&json!({"mode": "off"})).send().await.unwrap().json().await.unwrap();
     assert_eq!(r["ok"], true);
     assert_eq!(socks_connect(proxy, "yandi", &pass, echo_addr).await.err(), Some(0x02), "exit switched off");
-    let bad = http.post(format!("{web1}/api/exit/settings")).header("cookie", &ck1).json(&json!({"mode": "everyone"})).send().await.unwrap();
+    let bad = http.post(format!("{web1}/api/exit/settings")).header("cookie", &ck1).header("x-yandi-admin", &adm1).json(&json!({"mode": "everyone"})).send().await.unwrap();
     assert_eq!(bad.status().as_u16(), 422);
 }
 

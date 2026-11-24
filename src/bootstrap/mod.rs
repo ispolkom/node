@@ -14,6 +14,8 @@
 //! Что здесь **не** решается: тот, кто может заблокировать GitHub (или другой источник списка), закроет вход в сеть новичку —
 //! поэтому есть копия на диске, второй адрес (`YANDI_BOOTSTRAP_URL`), приглашения со своими входами и соседи, найденные раньше.
 //! Источник видит адрес каждого, кто его запрашивает.
+pub mod apply;
+pub mod signer;
 pub mod tool;
 
 use std::path::{Path, PathBuf};
@@ -47,9 +49,29 @@ pub struct Entry {
     /// страна (ISO-3166 alpha-2), если известна
     #[serde(default)]
     pub region: Option<String>,
-    /// чем узел помогает: `entry`, `relay`, `exit`
+    /// чем узел помогает: `entry`, `relay`, `exit`, `guest` (принимает гостей-телефонов)
     #[serde(default)]
     pub roles: Vec<String>,
+    /// адреса входа для телефонов `адрес:порт` (до 2; адрес — IP или имя): по ним приложение подключается, а узел сам представляется
+    /// (`/mobile/hello`: подпись своего TLS-сертификата ключом `key` из этого списка), так что отпечаток нигде не вводится руками
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mobile: Vec<String>,
+}
+
+/// `адрес:порт` для телефона: IP или имя (буквы, цифры, точка, дефис) и порт 1–65535.
+pub fn valid_mobile_addr(a: &str) -> bool {
+    if a.len() > 262 {
+        return false;
+    }
+    if a.parse::<std::net::SocketAddr>().is_ok() {
+        return true;
+    }
+    let Some((host, port)) = a.rsplit_once(':') else { return false };
+    !host.is_empty()
+        && host.len() <= 253
+        && host.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        && !host.starts_with(['.', '-'])
+        && port.parse::<u16>().is_ok_and(|p| p > 0)
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -66,6 +88,12 @@ pub struct Doc {
     /// номер выпуска: растёт при каждой публикации
     pub sequence: u64,
     pub entries: Vec<Entry>,
+    /// отзыв сборок (docs/ROADMAP_R9.md §5): узел старше этой версии сам не входит в общую сеть и предупреждает владельца
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_node: Option<String>,
+    /// приложение старше этой версии узел просит обновиться (`/mobile/info` → `min_app`)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_app: Option<String>,
     /// ключ, которым подписано (hex) — должен быть среди закреплённых
     pub signer: String,
     /// подпись Ed25519 (128 hex) всего остального
@@ -147,8 +175,14 @@ impl Doc {
                     return Err(BootstrapError::Shape("страна"));
                 }
             }
-            if e.roles.len() > 8 || e.roles.iter().any(|r| !matches!(r.as_str(), "entry" | "relay" | "exit")) {
+            if e.roles.len() > 8 || e.roles.iter().any(|r| !matches!(r.as_str(), "entry" | "relay" | "exit" | "guest")) {
                 return Err(BootstrapError::Shape("роль"));
+            }
+            if e.mobile.len() > 2 || e.mobile.iter().any(|a| !valid_mobile_addr(a)) {
+                return Err(BootstrapError::Shape("адрес для телефона"));
+            }
+            if e.roles.iter().any(|r| r == "guest") && e.mobile.is_empty() {
+                return Err(BootstrapError::Shape("узел для гостей без адреса для телефона"));
             }
         }
         Ok(())
@@ -190,6 +224,9 @@ fn now() -> u64 {
 
 /// Сохранённая копия (если подпись сходится и список не устарел).
 pub fn load_cached(signers: &[&str], now: u64) -> Option<Doc> {
+    if crate::autonomy::enabled() {
+        return None;
+    }
     let bytes = std::fs::read(cache_path()).ok()?;
     let d = parse(&bytes).ok()?;
     d.verify(signers, now, None).ok()?;
@@ -218,6 +255,10 @@ fn urls() -> Vec<String> {
 /// Скачать список из первого ответившего источника, проверить и сохранить. Возвращает действующий список: свежий или, если
 /// скачать не удалось, сохранённый на диске.
 pub async fn fetch(signers: &[&str]) -> Option<Doc> {
+    // автономный узел общий список не берёт вовсе (docs/ROADMAP_R9.md §4)
+    if crate::autonomy::enabled() {
+        return None;
+    }
     let t = now();
     let known = load_cached(signers, 0).map(|d| d.sequence);
     let client = reqwest::Client::builder().timeout(Duration::from_secs(FETCH_TIMEOUT_SECS)).build().ok()?;
@@ -288,9 +329,47 @@ pub fn to_config(d: &Doc) -> crate::netlayer::bootstrap::BootstrapConfig {
 
 /// Настройка для запуска: подписанный список (скачанный или сохранённый) плюс **локальный** файл владельца `nodes/bootstrap.json`
 /// (его владелец правит сам, подписи не требует).
+/// Версии, ниже которых сборки отозваны, по последнему принятому подписанному списку: (узел, приложение).
+pub fn min_versions() -> (Option<String>, Option<String>) {
+    match load_cached(SIGNER_KEYS, now()) {
+        Some(d) => (d.min_node, d.min_app),
+        None => (None, None),
+    }
+}
+
+/// Отозвана ли сборка этого узла подписанным списком.
+pub fn own_build_revoked() -> bool {
+    min_versions().0.is_some_and(|m| crate::update_check::is_newer(&m, &crate::update_check::own_version()))
+}
+
+static REVOKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Запомнить решение об отзыве по последнему принятому списку (вызывается при каждой загрузке списка).
+pub fn note_revocation() {
+    REVOKED.store(own_build_revoked(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Сборка отозвана (дешёвая проверка для горячих путей: допуск узлов). Отозванный узел, как честный, не общается с узлами
+/// общей сети ни на входе, ни на выходе, пока его не обновят; свои клиенты работают.
+pub fn is_revoked() -> bool {
+    REVOKED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 pub async fn effective_config(local: &Path) -> crate::netlayer::bootstrap::BootstrapConfig {
+    // автономный узел: ни подписанного, ни локального списка входов — только внесённые владельцем автономные узлы
+    if crate::autonomy::enabled() {
+        return crate::netlayer::bootstrap::BootstrapConfig::default();
+    }
+    // сначала свежий список: в нём отзыв могли и наложить, и снять (аудит R9 №8 — решение по старому кэшу до загрузки
+    // то не видело новый отзыв, то не давало получить его отмену)
+    let fetched = fetch(SIGNER_KEYS).await;
+    note_revocation();
+    if is_revoked() {
+        eprintln!("⚠️  Эта сборка отозвана списком входных узлов: обновите узел. В общую сеть узел не входит.");
+        return crate::netlayer::bootstrap::BootstrapConfig::default();
+    }
     let mut cfg = crate::netlayer::bootstrap::BootstrapConfig::load_from_file(local).unwrap_or_default();
-    if let Some(d) = fetch(SIGNER_KEYS).await {
+    if let Some(d) = fetched {
         let signed = to_config(&d);
         for n in signed.nodes {
             // не дублируем адрес, который владелец уже указал сам
@@ -314,10 +393,10 @@ mod tests {
         hex::encode(key(n).verifying_key().to_bytes())
     }
     fn entry(n: u8) -> Entry {
-        Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()] }
+        Entry { id: hex::encode(crate::util::types::derive_node_id(&key(n).verifying_key().to_bytes())), key: hex::encode(key(n).verifying_key().to_bytes()), addr: vec![format!("203.0.113.{n}:9000")], region: Some("NL".into()), roles: vec!["entry".into(), "relay".into()], mobile: vec![] }
     }
     fn doc(seq: u64) -> Doc {
-        Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], signer: String::new(), signature: String::new() }.sign(&key(99))
+        Doc { format: 1, network: "yandi".into(), issued: NOW, expires: NOW + 86_400 * 30, sequence: seq, entries: vec![entry(1), entry(2)], min_node: None, min_app: None, signer: String::new(), signature: String::new() }.sign(&key(99))
     }
 
     #[test]

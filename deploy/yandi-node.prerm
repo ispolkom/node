@@ -1,0 +1,20 @@
+#!/bin/sh
+# prerm пакета yandi-node: перед удалением служба останавливается (данные во время затирания никто не пишет). При обновлении — нет.
+set -e
+case "$1" in
+remove|purge)
+    systemctl stop yandi-node >/dev/null 2>&1 || true
+    systemctl disable yandi-node >/dev/null 2>&1 || true
+    # Enabled or loaded instances of the template, including inactive ones.
+    for u in $(
+        {
+            systemctl list-units --all --plain --no-legend 'yandi-node@*.service' 2>/dev/null
+            systemctl list-unit-files --type=service --no-legend 'yandi-node@*.service' 2>/dev/null
+        } | awk '$1 ~ /^yandi-node@[^.]+\.service$/ {print $1}' | sort -u
+    ); do
+        systemctl stop "$u" >/dev/null 2>&1 || true
+        systemctl disable "$u" >/dev/null 2>&1 || true
+    done
+    ;;
+esac
+exit 0

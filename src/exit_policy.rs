@@ -121,6 +121,12 @@ pub fn public_destination(ip: &IpAddr) -> bool {
     public_only(ip)
 }
 
+/// Назначен ли адрес интерфейсу этого компьютера (в том числе собственный публичный): к нему соединение идёт локально, мимо внешнего
+/// файрвола, поэтому через выход туда ходить нельзя. Проверка — попытка занять адрес: она удаётся только для своих адресов.
+pub fn is_own_address(ip: &IpAddr) -> bool {
+    std::net::UdpSocket::bind((*ip, 0)).is_ok()
+}
+
 /// Разобрать `хост:порт` (IPv6 — в квадратных скобках).
 fn split_host_port(target: &str) -> Option<(String, u16)> {
     let (host, port) = target.rsplit_once(':')?;
@@ -133,7 +139,7 @@ fn split_host_port(target: &str) -> Option<(String, u16)> {
 pub async fn resolve_public(target: &str) -> std::io::Result<Vec<SocketAddr>> {
     let (host, port) = split_host_port(target).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("неверная цель {target}")))?;
     let all: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), port)).await?.collect();
-    let ok: Vec<SocketAddr> = all.iter().copied().filter(|a| public_destination(&a.ip())).collect();
+    let ok: Vec<SocketAddr> = all.iter().copied().filter(|a| public_destination(&a.ip()) && !is_own_address(&a.ip())).collect();
     if ok.is_empty() {
         return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, format!("{target}: адрес этого компьютера или домашней сети — выход туда не пускает")));
     }
@@ -227,6 +233,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn own_interface_addresses_are_recognised() {
+        assert!(is_own_address(&"127.0.0.1".parse().unwrap()));
+        assert!(!is_own_address(&"8.8.8.8".parse().unwrap()), "чужой адрес не наш");
+    }
+
+    #[test]
     fn ipv6_transition_and_reserved_ranges_are_never_public() {
         for bad in ["::127.0.0.1", "::10.0.0.1", "::1", "::", "fc00::1", "fd12::1", "fe80::1", "fec0::1", "ff02::1", "2002:7f00:1::1", "2002:c0a8:1::1",
                     "2001:0:4136:e378:8000:63bf:3fff:fdd2", "2001:db8::1", "64:ff9b::7f00:1", "::ffff:127.0.0.1", "::ffff:192.168.1.1", "3fff::1", "100::1"] {
@@ -305,7 +317,7 @@ mod tests {
     }
 }
 
-/// Публичный ли адрес (не этот компьютер, не домашняя/служебная сеть).
+/// Публичный ли адрес по виду (не этот компьютер, не домашняя/служебная сеть). Собственные адреса интерфейсов — см. [`is_own_address`].
 pub fn public_only(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v) => {

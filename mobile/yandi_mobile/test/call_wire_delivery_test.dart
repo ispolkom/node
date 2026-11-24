@@ -1,0 +1,227 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+import 'package:cryptography/cryptography.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_mobile/crypto/e2e_crypto.dart';
+import 'package:yandi_mobile/crypto/identity.dart';
+import 'package:yandi_mobile/crypto/peer_trust.dart';
+import 'package:yandi_mobile/crypto/replay_ledger.dart';
+import 'package:yandi_mobile/services/storage_service.dart';
+import 'package:yandi_mobile/services/ws_service.dart';
+import 'package:yandi_mobile/models/call_signal.dart';
+
+class ObservedLedger extends ReplayLedger {
+  final queued = Completer<void>();
+  ObservedLedger(super.file, {super.seal, super.open});
+  @override
+  Future<bool> claim(String id, int expiresMs,
+      {int? nowMs, bool urgent = false}) {
+    final result = super.claim(id, expiresMs, nowMs: nowMs, urgent: urgent);
+    if (urgent && !queued.isCompleted) queued.complete();
+    return result;
+  }
+}
+
+class ReceiverIdentity implements Identity {
+  final KeyPair key;
+  ReceiverIdentity(this.key);
+  @override
+  Future<Uint8List> ecdh(List<int> remote) async =>
+      Uint8List.fromList(await (await X25519().sharedSecretKey(
+              keyPair: key,
+              remotePublicKey:
+                  SimplePublicKey(remote, type: KeyPairType.x25519)))
+          .extractBytes());
+  @override
+  dynamic noSuchMethod(Invocation i) => super.noSuchMethod(i);
+}
+
+Future<void> until(bool Function() condition) async {
+  for (var i = 0; i < 300 && !condition(); i++) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  expect(condition(), isTrue);
+}
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late Directory dir;
+  late SimpleKeyPair recipient, sender;
+  late List<int> recipientPub, senderPub;
+  final from = 'a' * 64, to = 'b' * 64;
+  Future<Uint8List> frame(String text) async {
+    final payload = await E2ECrypto.encrypt(text, recipientPub,
+        from: from,
+        to: to,
+        kind: 2,
+        sign: (bytes) async => Uint8List.fromList(
+            (await Ed25519().sign(bytes, keyPair: sender)).bytes));
+    return (BytesBuilder()
+          ..addByte(ftLiveMsg)
+          ..add(E2ECrypto.peerBytes(from))
+          ..add((ByteData(8)
+                ..setInt64(
+                    0, DateTime.now().millisecondsSinceEpoch, Endian.little))
+              .buffer
+              .asUint8List())
+          ..add((ByteData(4)..setUint32(0, payload.length, Endian.little))
+              .buffer
+              .asUint8List())
+          ..add(payload))
+        .toBytes();
+  }
+
+  PeerKeyBundle bundle() => PeerKeyBundle(List<int>.filled(32, 1), senderPub);
+  WsService service(Future<PeerKeyBundle?> Function(String) fetch) =>
+      WsService(ReceiverIdentity(recipient),
+          getPeerBundle: fetch, ownPeerId: () async => to);
+  setUp(() async {
+    dir = await Directory.systemTemp.createTemp('yandi-call-wire-');
+    recipient = await X25519().newKeyPair();
+    sender = await Ed25519().newKeyPair();
+    recipientPub = (await recipient.extractPublicKey()).bytes;
+    senderPub = (await sender.extractPublicKey()).bytes;
+    StorageService.replayLedger = ReplayLedger(File('${dir.path}/replay.json'));
+  });
+  tearDown(() async {
+    StorageService.replayLedger = null;
+    await dir.delete(recursive: true);
+  });
+  final invite =
+      '\u0001yandi-call:{"v":1,"t":"invite","cid":"testcall0001","video":false,"ts":${DateTime.now().millisecondsSinceEpoch}}';
+
+  test('locked Android wake hint distinguishes calls from capability ping', () {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    String signal(String type, {bool video = false, int? ts}) =>
+        CallSignal(type: type, cid: 'testcall0001', video: video, ts: ts ?? now).encode();
+    final audio = liveWakeHint(signal('invite'));
+    final video = liveWakeHint(signal('invite', video: true));
+    expect(audio.length, 17);
+    expect(audio.first, 1);
+    expect(video.first, 2);
+    expect(video.sublist(1), audio.sublist(1));
+    expect(liveWakeHint(signal('hangup')).first, 3);
+    expect(liveWakeHint(signal('ice')).first, 4);
+    expect(liveWakeHint(signal('invite', ts: now - 91000)), isEmpty);
+    expect(liveWakeHint('\u0001yandi-cap:ping'), isEmpty);
+  });
+
+  test('buffered invite is decrypted before a newer live hangup', () async {
+    final ws = service((_) async => bundle());
+    ws.holdLive();
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final hangup = CallSignal.now('hangup', 'pending-call').encode();
+    final invite = CallSignal.now('invite', 'pending-call',
+        until: DateTime.now().millisecondsSinceEpoch + 45000).encode();
+    await ws.debugFeed(await frame(hangup));
+    expect(events, isEmpty);
+    await ws.releaseLiveWithBacklog([await frame(invite)]);
+    await until(() => events.length == 2);
+    expect(events.map((e) => CallSignal.tryParse(e.text)!.type), ['invite', 'hangup']);
+    ws.dispose();
+  });
+
+  test('backlog frame is acknowledged only after E2E decryption succeeds', () async {
+    var lookups = 0;
+    final ws = service((_) async => ++lookups == 1 ? null : bundle());
+    ws.holdLive();
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final pending = await frame(invite);
+    final first = await ws.releaseLiveWithBacklog([pending]);
+    expect(first, [false], reason: 'Missing peer keys must retain the Android frame');
+    expect(events, isEmpty);
+    ws.holdLive();
+    final retry = await ws.releaseLiveWithBacklog([pending]);
+    expect(retry, [true]);
+    expect(events, hasLength(1));
+    ws.dispose();
+  });
+
+  test('fresh encrypted retransmission recovers a transient key lookup failure',
+      () async {
+    var fetches = 0;
+    final ws = service((_) async => ++fetches == 1 ? null : bundle());
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final wire = await frame(invite);
+    await ws.debugFeed(wire);
+    await until(() => ws.debugLiveInFlight == 0);
+    expect(events, isEmpty);
+    final retransmission = await frame(invite);
+    await ws.debugFeed(retransmission);
+    await until(() => events.length == 1);
+    expect(events.single.text, invite);
+    expect(CallSignal.tryParse(events.single.text)?.fresh, isTrue);
+    await ws.debugFeed(retransmission);
+    await until(() => ws.debugLiveInFlight == 0);
+    expect(events.length, 1,
+        reason: 'Replay protection remains effective after recovery');
+    ws.dispose();
+  });
+
+  test('a burst of encrypted call signals is queued and delivered in order',
+      () async {
+    final gate = Completer<PeerKeyBundle?>();
+    final ws = service((_) => gate.future);
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    final signals = List.generate(24, (i) => 'call-signal-$i');
+    for (final text in signals) {
+      unawaited(ws.debugFeed(await frame(text)));
+    }
+    await until(() => ws.debugLiveInFlight == 1);
+    expect(events, isEmpty);
+    gate.complete(bundle());
+    await until(() => events.length == signals.length);
+    expect(events.map((e) => e.text).toList(), signals);
+    await until(() => ws.debugLiveInFlight == 0);
+    ws.dispose();
+  });
+
+  test(
+      'authenticated live invite passes pending history without bypassing replay protection',
+      () async {
+    final entered = Completer<void>(),
+        release = Completer<void>(),
+        historyRelease = Completer<void>();
+    var writes = 0;
+    final ledger = ObservedLedger(File('${dir.path}/shared.json'),
+        seal: (json) async {
+          writes++;
+          if (writes == 1) {
+            entered.complete();
+            await release.future;
+          } else if (writes > 2) {
+            await historyRelease.future;
+          }
+          return json;
+        },
+        open: (stored) async => stored.isEmpty ? '{}' : stored);
+    StorageService.replayLedger = ledger;
+    final exp = DateTime.now().millisecondsSinceEpoch + 60000;
+    final pending = <Future<bool>>[ledger.claim('chat-0', exp)];
+    await entered.future;
+    for (var i = 1; i <= 30; i++) {
+      pending.add(ledger.claim('chat-$i', exp));
+    }
+    final ws = service((_) async => bundle());
+    final events = <LiveSignalEvent>[];
+    ws.liveStream.listen(events.add);
+    unawaited(ws.debugFeed(await frame(invite)));
+    await ledger.queued.future.timeout(const Duration(seconds: 5));
+    expect(events, isEmpty);
+    expect(ws.debugLiveInFlight, 1);
+    release.complete();
+    await until(() => events.length == 1);
+    expect(writes, lessThanOrEqualTo(3),
+        reason: 'Live delivery precedes the thirty pending history writes');
+    historyRelease.complete();
+    await Future.wait(pending);
+    expect(writes, 32);
+    expect(events.single.text, invite);
+    ws.dispose();
+  });
+}

@@ -220,12 +220,117 @@ void main() {
     (await _make(be)).lock();
     final m = jsonDecode(be.blob!) as Map<String, dynamic>;
     m.remove('gen');
+    m.remove('gt');   // прежний файл: ни поколения, ни заверения
     be.blob = jsonEncode(m);
     be.secure.remove('vault_gen');
+    be.secure.remove('vault_gt');   // и метки заверения у старой установки не было
     be.secure.remove('vault_cnt');
     be.secure.remove('vault_fail_pw');
     expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
     expect(be.secure['vault_gen'], '0');
     expect(be.secure['vault_cnt'], '1');
   });
+
+  test('изменённый файл с завышенным поколением не поднимает метку: исправная копия после этого открывается', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final good = be.blob!;
+    final m = jsonDecode(good) as Map<String, dynamic>;
+    m['gen'] = 50;
+    (m['pw'] as Map<String, dynamic>)['wrap'] = base64.encode(List.filled(60, 1));   // замок не раскроется
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultWrongSecret>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята по файлу, который не открылся');
+    be.blob = good;
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue, reason: 'исходная исправная копия не стала «устаревшей»');
+  });
+
+  test('изменён только номер поколения (замок цел): вход отвергается, метка не поднимается, исходная копия открывается', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final good = be.blob!;
+    final m = jsonDecode(good) as Map<String, dynamic>;
+    m['gen'] = 50;
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята незаверенным номером');
+    be.blob = good;
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
+    // заверение уже было: файл без `gt` — подмена (даже с корректным замком), а не прежний формат
+    final stripped = jsonDecode(good) as Map<String, dynamic>..remove('gt');
+    be.blob = jsonEncode(stripped);
+    be.now += 100000;
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    // поколение «в долг»: прежний формат с gen выше метки больше чем на 1 не принимается
+    be.secure.remove('vault_gt');
+    final legacy = jsonDecode(good) as Map<String, dynamic>..remove('gt');
+    legacy['gen'] = 9;
+    be.blob = jsonEncode(legacy);
+    be.now += 100000;
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята');
+    // обычный прежний файл (поколение не выше метки): открывается и заверяется
+    legacy['gen'] = 1;
+    be.blob = jsonEncode(legacy);
+    be.now += 100000;
+    expect((await VaultKeys.unlock(be, 'пароль-6')).unlocked, isTrue);
+    expect((jsonDecode(be.blob!) as Map)['gt'], isNotNull, reason: 'файл заверен при входе');
+  });
+
+  test('новый vault сразу помечен заверенным: до первого входа gt не снять и gen не поднять', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    expect(be.secure['vault_gt'], '2');
+    final m = jsonDecode(be.blob!) as Map<String, dynamic>..remove('gt');
+    m['gen'] = 2;
+    be.blob = jsonEncode(m);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()));
+    expect(be.secure['vault_gen'], '1', reason: 'метка не поднята');
+  });
+
+  test('старую секцию пароля нельзя вернуть под текущий заверенный файл: тег покрывает обёртки (P7-9)', () async {
+    final be = MemoryVaultBackend();
+    (await _make(be)).lock();
+    final before = jsonDecode(be.blob!) as Map<String, dynamic>;   // файл со старым паролем
+    final v = await VaultKeys.recoverWithPhrase(be, _strong, 'новый-пароль-7');
+    v.lock();
+    final current = jsonDecode(be.blob!) as Map<String, dynamic>;
+    expect(current['pw'], isNot(before['pw']), reason: 'пароль сменился');
+    // подмена: в текущий файл (новые gen и gt) подставлена только старая секция пароля
+    final forged = Map<String, dynamic>.from(current)..['pw'] = before['pw'];
+    be.blob = jsonEncode(forged);
+    await expectLater(VaultKeys.unlock(be, 'пароль-6'), throwsA(isA<VaultCorrupt>()), reason: 'прежний пароль больше не открывает');
+    // настоящий текущий файл по-прежнему открывается новым паролем
+    be.blob = jsonEncode(current);
+    (await VaultKeys.unlock(be, 'новый-пароль-7')).lock();
+  });
+
+  test('миграция тега не удалась (диск полон): вход не ломается и метка не поднимается; со следующего раза миграция проходит (P8-3)', () async {
+    final be = FlakyBlobBackend();
+    final v = await _make(be);
+    final blobJson = jsonDecode(be.blob!) as Map<String, dynamic>;
+    blobJson['gt'] = await v.legacyTagForTest(blobJson['gen'] as int);   // файл «прежней версии» с прежним тегом
+    be.blob = jsonEncode(blobJson);
+    be.secure['vault_gt'] = '1';
+    v.lock();
+    be.failWrites = true;
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // запись нового файла не удалась, вход всё равно успешен
+    expect(be.secure['vault_gt'], '1', reason: 'метка версии 2 не поднята: файл всё ещё со старым тегом');
+    be.failWrites = false;
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // следующий вход: исправный файл принят и перезаверен
+    expect(be.secure['vault_gt'], '2');
+    expect((jsonDecode(be.blob!) as Map)['gt'], isNot(blobJson['gt']), reason: 'файл перезаверен по-новому');
+    (await VaultKeys.unlock(be, 'пароль-6')).lock();                       // и вход после миграции по-прежнему работает
+  });
+}
+
+class FlakyBlobBackend extends MemoryVaultBackend {
+  bool failWrites = false;
+  @override
+  Future<void> writeBlob(String text) async {
+    if (failWrites) throw StateError('диск полон');
+    await super.writeBlob(text);
+  }
 }

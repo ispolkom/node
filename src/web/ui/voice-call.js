@@ -16,6 +16,14 @@ class VoiceCallManager {
         this.callingAudio = null;     // incoming ringtone loop
         this.callOutAudio = null;     // outgoing ringtone loop
 
+        window.addEventListener('yandi-sound-changed', () => {
+            if (!this._soundEnabled()) {
+                const intent = this._ringIntent;
+                this._stopRingtones();
+                this._ringIntent = intent;
+            } else if (this._ringIntent) this._playRingtone(this._ringIntent);
+        });
+
         this.configuration = {
             iceServers: [
                 { urls: 'stun:stun.l.google.com:19302' },
@@ -32,6 +40,7 @@ class VoiceCallManager {
 
     _playRingtone(type) {
         this._stopRingtones();
+        this._ringIntent = type;
         if (!this._soundEnabled()) return;
         const src = type === 'calling' ? '/media/calling.mp3' : '/media/call_out.mp3';
         const audio = new Audio(src);
@@ -43,6 +52,7 @@ class VoiceCallManager {
     }
 
     _stopRingtones() {
+        this._ringIntent = null;
         if (this.callingAudio) { this.callingAudio.pause(); this.callingAudio.src = ''; this.callingAudio = null; }
         if (this.callOutAudio) { this.callOutAudio.pause(); this.callOutAudio.src = ''; this.callOutAudio = null; }
     }

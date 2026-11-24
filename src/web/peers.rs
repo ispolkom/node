@@ -259,11 +259,29 @@ fn edit_lock() -> &'static tokio::sync::Mutex<()> {
 }
 
 /// Применить список к работающему узлу: закреплённые ключи на уровне связи и список для политики выхода.
-async fn apply_live(dir: &PeerDirectory, _removed: Option<[u8; 32]>) {
+async fn apply_live(dir: &PeerDirectory, removed: Option<[u8; 32]>) {
     crate::exit_policy::set_trusted(dir.decoded().into_iter().map(|(id, _, _)| id.0));
+    // автономный узел: убранный из меша узел теряет и уже открытые сеансы, не только будущие приветствия
+    if let (Some(raw), true) = (removed, crate::autonomy::enabled()) {
+        let id = HashId(raw);
+        if let Some(t) = transport_cell().get() {
+            t.forget_peer(&id).await;
+        }
+        if let Some(p) = p2p_cell().get() {
+            p.forget_peer(&id).await;
+        }
+    }
     let Some(transport) = transport_cell().get() else { return };
     let pins: std::collections::HashMap<_, _> = dir.decoded().into_iter().map(|(id, pubkey, _)| (id, pubkey)).collect();
     transport.set_pinned_identities(pins).await;
+}
+
+/// Узлы, которые основная связь считает сейчас в сети (свежий признак жизни), — для каталога «Узлы» (аудит R9 №19).
+pub async fn online_node_ids() -> Vec<[u8; 32]> {
+    match transport_cell().get() {
+        Some(t) => t.get_peers().await.into_iter().map(|p| p.id.0).collect(),
+        None => Vec::new(),
+    }
 }
 
 /// Постучаться к доверенным пирам, которых сейчас нет в сети (по адресам из их визиток) — и по основной связи узлов, и по каналу
@@ -282,7 +300,7 @@ pub async fn knock_offline() {
         if !online.contains(&id) {
             for a in &p.addresses {
                 if let Err(e) = transport.send_hello_request(a).await {
-                    eprintln!("[peers] не достучался до {a}: {e}");
+                    eprintln!("[peers] не достучался до {}: {e}", crate::util::logsafe::a(&a));
                 }
             }
         }
@@ -290,7 +308,7 @@ pub async fn knock_offline() {
             if !p2p_known.contains(&id) {
                 for a in &p.p2p_addresses {
                     if let Err(e) = t.send_hello_request(a).await {
-                        eprintln!("[peers] канал переписки: не достучался до {a}: {e}");
+                        eprintln!("[peers] канал переписки: не достучался до {}: {e}", crate::util::logsafe::a(&a));
                     }
                 }
             }

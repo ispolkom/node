@@ -5,22 +5,25 @@ import 'dart:convert';
 class CallSignal {
   static const String marker = '\u0001yandi-call:';
 
-  /// invite — позвонить, accept — принять, reject — отклонить, busy — занят, hangup — завершить,
+  /// invite — позвонить, ringing — получатель получил приглашение, accept — принять, reject — отклонить, busy — занят, hangup — завершить,
   /// offer / answer — описание сеанса WebRTC, ice — сетевой кандидат.
   final String type;
   final String cid;
   final bool   video;
   final int    ts;
+  /// Общий срок ответа, заданный вызывающим в первом invite и повторённый в retries.
+  final int?   until;
   final String? sdp;
   final Map<String, dynamic>? cand;
 
-  const CallSignal({required this.type, required this.cid, this.video = false, required this.ts, this.sdp, this.cand});
+  const CallSignal({required this.type, required this.cid, this.video = false, required this.ts, this.until, this.sdp, this.cand});
 
-  static CallSignal now(String type, String cid, {bool video = false, String? sdp, Map<String, dynamic>? cand}) =>
-      CallSignal(type: type, cid: cid, video: video, ts: DateTime.now().millisecondsSinceEpoch, sdp: sdp, cand: cand);
+  static CallSignal now(String type, String cid, {bool video = false, int? until, String? sdp, Map<String, dynamic>? cand}) =>
+      CallSignal(type: type, cid: cid, video: video, ts: DateTime.now().millisecondsSinceEpoch, until: until, sdp: sdp, cand: cand);
 
   String encode() => marker + jsonEncode({
     'v': 1, 't': type, 'cid': cid, 'video': video, 'ts': ts,
+    if (until != null) 'until': until,
     if (sdp != null) 'sdp': sdp,
     if (cand != null) 'cand': cand,
   });
@@ -32,6 +35,7 @@ class CallSignal {
       // та же проверка, что на странице узла (phone-call.js): версия 1, тип — строка, время — целое число, video — bool
       if (m['v'] != 1 || m['t'] is! String || m['ts'] is! int) return null;
       if (m['video'] != null && m['video'] is! bool) return null;
+      if (m['until'] != null && (m['until'] is! int || m['until'] < m['ts'] || m['until'] - m['ts'] > 45000)) return null;
       final cid = m['cid'] as String;
       if (cid.length < 8 || cid.length > 64) return null;
       // кандидат ICE — только с полями нужных типов: иначе обработчик звонка упал бы на приведении типов
@@ -46,6 +50,7 @@ class CallSignal {
         cid:   cid,
         video: (m['video'] as bool?) ?? false,
         ts:    (m['ts'] as num).toInt(),
+        until: m['until'] as int?,
         sdp:   m['sdp'] as String?,
         cand:  (m['cand'] as Map?)?.cast<String, dynamic>(),
       );

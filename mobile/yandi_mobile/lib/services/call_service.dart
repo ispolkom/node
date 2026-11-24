@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../models/call_signal.dart';
+import '../l10n_core.dart';
+import 'app_sounds.dart';
 
 enum CallPhase { idle, calling, ringing, connecting, active, ended }
 
@@ -26,6 +28,10 @@ class CallService extends ChangeNotifier {
   final void Function(String peerId, String name, bool video) onIncomingNotify;
   final void Function() onIncomingCancel;
   final void Function(String peerId, bool outgoing, String text) onLog;
+  final bool Function(String kind)? soundEnabled;
+  final Future<RTCPeerConnection> Function(Map<String, dynamic>) createPeer;
+  final Future<MediaStream> Function(Map<String, dynamic>) acquireMedia;
+  final RTCVideoRenderer Function() createRenderer;
 
   CallService({
     required this.sendSignal,
@@ -36,7 +42,15 @@ class CallService extends ChangeNotifier {
     required this.onIncomingNotify,
     required this.onIncomingCancel,
     required this.onLog,
-  });
+    this.soundEnabled,
+    AudioPlayer? ringPlayer,
+    Future<RTCPeerConnection> Function(Map<String, dynamic>)? createPeer,
+    Future<MediaStream> Function(Map<String, dynamic>)? acquireMedia,
+    RTCVideoRenderer Function()? createRenderer,
+  }) : _ring = ringPlayer ?? AudioPlayer(),
+       createPeer = createPeer ?? ((config) => createPeerConnection(config)),
+       acquireMedia = acquireMedia ?? ((constraints) => navigator.mediaDevices.getUserMedia(constraints)),
+       createRenderer = createRenderer ?? RTCVideoRenderer.new;
 
   CallPhase phase = CallPhase.idle;
   String? peerId;
@@ -46,6 +60,16 @@ class CallService extends ChangeNotifier {
   String endReason = '';
   bool muted = false, speaker = false, cameraOn = true, turnMissing = false;
   DateTime? startedAt;
+  /// Гость: только аудио (видео закрыто). Выставляет AppState по роли устройства.
+  bool audioOnly = false;
+  /// Лимит звонка гостя (узел выдаёт доступ к серверу звонков на 15 минут): отсчёт от выдачи доступа.
+  Duration? _limit;
+  DateTime? _limitFrom;
+  Timer? _limitTimer, _warnTimer;
+  /// Узел отказал в доступе к серверу звонков (лимит суток / занято): готовая фраза для экрана.
+  String? refusal;
+  /// Предупреждение «через минуту звонок завершится» (только у гостя).
+  String limitWarning = '';
 
   RTCVideoRenderer? localRenderer;
   RTCVideoRenderer? remoteRenderer;
@@ -54,9 +78,60 @@ class CallService extends ChangeNotifier {
   MediaStream? _local;
   final List<RTCIceCandidate> _pendingIce = [];
   bool _remoteSet = false;
-  Timer? _ringTimer, _lostTimer, _endTimer;
-  final AudioPlayer _ring = AudioPlayer();
+  bool _mediaReady = false;
+  Future<void> _mediaClosing = Future.value();
+  Future<void> _mediaSignals = Future.value();
+  Timer? _ringTimer, _lostTimer, _endTimer, _connectTimer, _inviteRetry;
+  bool _disposed = false;
+  bool _inviteAcknowledged = false;
+  final _closedCalls = <String, DateTime>{};
+  void _rememberClosed(String peer, String id) {
+    _closedCalls.removeWhere((_, until) => until.isBefore(DateTime.now()));
+    if (_closedCalls.length >= 256)
+      _closedCalls.remove(_closedCalls.keys.first);
+    _closedCalls['$peer/$id'] = DateTime.now().add(const Duration(seconds: 90));
+  }
+
+  bool _wasClosed(String peer, String id) =>
+      _closedCalls['$peer/$id']?.isAfter(DateTime.now()) ?? false;
+
+  void _retryInvite(String peer, String id, bool withVideo, int until) {
+    var attempts = 0;
+    bool sending = false;
+    _inviteRetry = Timer.periodic(const Duration(seconds: 2), (timer) async {
+      if (_disposed ||
+          cid != id ||
+          phase != CallPhase.calling ||
+          attempts >= 10) {
+        timer.cancel();
+        return;
+      }
+      if (sending) return;
+      sending = true;
+      attempts++;
+      try {
+        await _send(
+            peer, CallSignal.now('invite', id, video: withVideo, until: until).encode());
+      } catch (_) {
+        // Retry transient transport failures until the existing ring deadline.
+      } finally {
+        sending = false;
+      }
+    });
+  }
+
+  Future<void> _acknowledge(String peer, CallSignal invite) async {
+    try {
+      await _send(peer,
+          CallSignal.now('ringing', invite.cid, video: invite.video).encode());
+    } catch (_) {
+      // A repeated invite receives a fresh acknowledgement.
+    }
+  }
+  final AudioPlayer _ring;
   bool _ringing = false;
+  int _soundGeneration = 0;
+  Future<void> _soundWork = Future<void>.value();
 
   bool get busy => phase != CallPhase.idle;
   String get peerName => peerId == null ? '' : nameOf(peerId!);
@@ -70,22 +145,28 @@ class CallService extends ChangeNotifier {
   // ── Исходящий ──────────────────────────────────────────────────────────────
 
   Future<String?> start(String toPeerId, {required bool withVideo}) async {
-    if (busy) return 'Вы уже разговариваете';
+    if (_disposed) return null;
+    if (busy) return tr('Вы уже разговариваете');
     _reset();
-    peerId = toPeerId; cid = _newCid(); video = withVideo; incoming = false;
+    final wantVideo = withVideo && !audioOnly;
+    peerId = toPeerId; cid = _newCid(); video = wantVideo; incoming = false;
     phase = CallPhase.calling; endReason = '';
-    speaker = withVideo; cameraOn = withVideo;
+    speaker = wantVideo; cameraOn = wantVideo;
     notifyListeners();
     showScreen();
-    final ok = await sendSignal(toPeerId, CallSignal.now('invite', cid!, video: video).encode());
+    final ownCid = cid!;
+    final until = DateTime.now().millisecondsSinceEpoch + 45000;
+    final ok = await _send(toPeerId, CallSignal.now('invite', ownCid, video: video, until: until).encode());
+    if (_disposed || cid != ownCid || phase != CallPhase.calling) return null;
     if (!ok) {
-      _finish('Нет связи с узлом или это не ваше устройство', log: false);
+      _finish(tr('Нет связи с узлом или это не ваше устройство'), log: false);
       return null;
     }
-    _playRing('sounds/call_out.mp3');
-    _ringTimer = Timer(const Duration(seconds: 45), () {
+    if (!_inviteAcknowledged) _retryInvite(toPeerId, ownCid, video, until);
+    _playRing('dialing');
+    _ringTimer = Timer(Duration(milliseconds: (until - DateTime.now().millisecondsSinceEpoch).clamp(0, 45000)), () {
       _signal('hangup');
-      _finish('Нет ответа', log: true);
+      _finish(tr('Нет ответа'), log: true);
     });
     return null;
   }
@@ -93,58 +174,117 @@ class CallService extends ChangeNotifier {
   // ── Входящий ───────────────────────────────────────────────────────────────
 
   /// Сигнал от другого телефона (уже расшифрованный).
-  Future<void> onSignal(String from, CallSignal s) async {
-    if (!s.fresh) return;
+  Future<void> onSignal(String from, CallSignal s) {
+    if (!const ['offer', 'answer', 'ice'].contains(s.type)) {
+      return _handleSignal(from, s).catchError((Object _) {
+        if (!_disposed && _mine(from, s)) {
+          unawaited(_signal('hangup'));
+          _finish(tr('Не удалось соединиться'), log: true);
+        }
+      });
+    }
+    final own = cid;
+    return _mediaSignals = _mediaSignals.then((_) async {
+      if (!_disposed && cid == own && _mine(from, s)) {
+        await _handleSignal(from, s);
+      }
+    }).catchError((Object _) {
+      if (!_disposed && cid == own && _mine(from, s)) {
+        unawaited(_signal('hangup'));
+        _finish(tr('Не удалось соединиться'), log: true);
+      }
+    });
+  }
+
+  Future<void> _handleSignal(String from, CallSignal s) async {
+    if (_disposed || !s.fresh) return;
+    if (const ['hangup', 'reject', 'busy'].contains(s.type)) {
+      _rememberClosed(from, s.cid);
+    }
     switch (s.type) {
       case 'invite':
+        if (_wasClosed(from, s.cid)) return;
+        final remaining = (s.until ?? s.ts + 45000) - DateTime.now().millisecondsSinceEpoch;
+        if (remaining <= 0) return;
         if (busy) {
           // встречные звонки друг другу: побеждает звонок с меньшим номером, второй уступает и принимается автоматически
           if (phase == CallPhase.calling && from == peerId && s.cid.compareTo(cid!) < 0) {
+            _inviteRetry?.cancel();
             _stopRing(); _ringTimer?.cancel();
-            cid = s.cid; video = s.video; incoming = true; phase = CallPhase.ringing;
+            // режим (аудио/видео) остаётся тем, на который согласился пользователь: чужое поле video не включает камеру
+            cid = s.cid; incoming = true; phase = CallPhase.ringing;
             notifyListeners();
             await accept();
           } else if (!(from == peerId && s.cid == cid)) {
-            await sendSignal(from, CallSignal.now('busy', s.cid).encode());
+            await _send(from, CallSignal.now('busy', s.cid, video: s.video).encode());
+          } else if (incoming) {
+            await _acknowledge(from, s);
           }
           return;
         }
         _reset();
-        peerId = from; cid = s.cid; video = s.video; incoming = true;
+        peerId = from; cid = s.cid; video = s.video && !audioOnly; incoming = true;
         phase = CallPhase.ringing; endReason = '';
-        speaker = s.video; cameraOn = s.video;
+        speaker = video; cameraOn = video;
         notifyListeners();
         onIncomingNotify(from, nameOf(from), video);
-        _playRing('sounds/calling.mp3');
-        _ringTimer = Timer(const Duration(seconds: 45), () => _finish('Пропущенный звонок', log: true));
+        _playRing(video ? 'videoCalls' : 'calls');
+        _ringTimer = Timer(Duration(milliseconds: remaining.clamp(0, 45000)), () => _finish(tr('Пропущенный звонок'), log: true));
         showScreen();
+        await _acknowledge(from, s);
+      case 'ringing':
+        if (_mine(from, s) && !incoming) {
+          _inviteAcknowledged = true;
+          _inviteRetry?.cancel();
+        }
       case 'accept':
         if (_mine(from, s) && !incoming && phase == CallPhase.calling) {
+          _inviteRetry?.cancel();
           _stopRing(); _ringTimer?.cancel();
-          phase = CallPhase.connecting; notifyListeners();
+          phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
           await _startMedia(offerer: true);
         }
       case 'offer':
         if (_mine(from, s) && incoming && s.sdp != null) await _onOffer(s.sdp!);
       case 'answer':
         if (_mine(from, s) && !incoming && s.sdp != null) {
-          await _pc?.setRemoteDescription(RTCSessionDescription(s.sdp, 'answer'));
-          await _remoteReady();
+          final connection = _pc;
+          await connection?.setRemoteDescription(RTCSessionDescription(s.sdp, 'answer'));
+          if (!_disposed && _mine(from, s) && identical(connection, _pc)) await _remoteReady();
         }
       case 'ice':
         if (_mine(from, s) && s.cand != null) await _onRemoteIce(s.cand!);
       case 'reject':
-        if (_mine(from, s)) _finish('Звонок отклонён', log: true);
+        if (_mine(from, s)) _finish(tr('Звонок отклонён'), log: true);
       case 'busy':
-        if (_mine(from, s)) _finish('Абонент занят', log: true);
+        if (_mine(from, s)) _finish(tr('Абонент занят'), log: true);
       case 'hangup':
-        if (_mine(from, s)) _finish(phase == CallPhase.ringing ? 'Пропущенный звонок' : 'Собеседник завершил звонок', log: true);
+        if (_mine(from, s)) _finish(phase == CallPhase.ringing ? tr('Пропущенный звонок') : tr('Собеседник завершил звонок'), log: true);
     }
   }
 
   /// Узел сообщил, что устройство не на связи.
   void onPeerOffline(String id) {
-    if (id == peerId && phase == CallPhase.calling) _finish('Абонент не в сети', log: true);
+    if (id == peerId && phase == CallPhase.calling) _finish(tr('Абонент не в сети'), log: true);
+  }
+
+  void onSignalingLost() {
+    if (!_disposed && const [CallPhase.calling, CallPhase.ringing,
+        CallPhase.connecting].contains(phase)) {
+      _finish(tr('Нет связи с узлом'), log: true);
+    }
+  }
+
+  /// Срок установления соединения: собеседник мог принять звонок и не прислать SDP — без срока звонок вечно «соединяется» и держит
+  /// приложение от блокировки.
+  void _armConnectDeadline() {
+    _connectTimer?.cancel();
+    _connectTimer = Timer(const Duration(seconds: 45), () {
+      if (phase == CallPhase.connecting) {
+        unawaited(_signal('hangup'));
+        _finish(tr('Не удалось соединиться'), log: true);
+      }
+    });
   }
 
   bool _mine(String from, CallSignal s) => from == peerId && s.cid == cid && phase != CallPhase.idle && phase != CallPhase.ended;
@@ -152,35 +292,58 @@ class CallService extends ChangeNotifier {
   Future<void> accept() async {
     if (phase != CallPhase.ringing || !incoming) return;
     _stopRing(); _ringTimer?.cancel(); onIncomingCancel();
-    phase = CallPhase.connecting; notifyListeners();
-    final ok = await sendSignal(peerId!, CallSignal.now('accept', cid!, video: video).encode());
-    if (!ok) { _finish('Нет связи с узлом', log: false); return; }
+    phase = CallPhase.connecting; _armConnectDeadline(); notifyListeners();
+    final own = cid;
+    final ok = await _send(peerId!, CallSignal.now('accept', cid!, video: video).encode());
+    if (_disposed || cid != own) return;
+    if (phase != CallPhase.connecting || !incoming) return;
+    if (!ok) { _finish(tr('Нет связи с узлом'), log: false); return; }
     await _startMedia(offerer: false);
   }
 
   Future<void> reject() async {
     if (phase != CallPhase.ringing) return;
-    await sendSignal(peerId!, CallSignal.now('reject', cid!).encode());
-    _finish('Звонок отклонён', log: true);
+    final own = cid;
+    await _send(peerId!, CallSignal.now('reject', cid!).encode());
+    if (_disposed || cid != own) return;
+    _finish(tr('Звонок отклонён'), log: true);
   }
 
   Future<void> hangup() async {
     if (!busy || phase == CallPhase.ended) return;
-    await _signal('hangup');
-    _finish(phase == CallPhase.calling ? 'Звонок отменён' : 'Звонок завершён', log: true);
+    final sent = _signal('hangup');
+    _finish(phase == CallPhase.calling ? tr('Звонок отменён') : tr('Звонок завершён'), log: true);
+    await sent;
+  }
+
+  Future<bool> _send(String peer, String text) async {
+    try { return await sendSignal(peer, text); } catch (_) { return false; }
   }
 
   Future<bool> _signal(String type, {String? sdp, Map<String, dynamic>? cand}) {
     if (peerId == null || cid == null) return Future.value(false);
-    return sendSignal(peerId!, CallSignal.now(type, cid!, video: video, sdp: sdp, cand: cand).encode());
+    return _send(peerId!, CallSignal.now(type, cid!, video: video, sdp: sdp, cand: cand).encode());
   }
 
   // ── WebRTC ─────────────────────────────────────────────────────────────────
 
   Future<Map<String, dynamic>> _iceConfig() async {
+    final own = cid;
     final servers = <Map<String, dynamic>>[];
     final t = await fetchTurn();
-    if (t != null) {
+    if (_disposed || cid != own || phase == CallPhase.ended || phase == CallPhase.idle) return {};
+    refusal = null;
+    final refused = t?['_refused'];
+    if (refused != null) {
+      refusal = refused == 'call_day_limit'
+          ? tr('Лимит гостевых звонков на сегодня исчерпан (60 минут в сутки)')
+          : tr('На узле сейчас много гостевых звонков. Попробуйте позже.');
+    }
+    // гость звонит только через сервер звонков узла: без него прямое соединение обошло бы лимиты времени (15 минут, 60 в сутки)
+    if (audioOnly && t == null) refusal = tr('Звонки гостю недоступны: на узле не настроен сервер звонков');
+    final lim = (t?['max_call_secs'] as num?)?.toInt();
+    if (lim != null) { _limit = Duration(seconds: lim); _limitFrom = DateTime.now(); }
+    if (t != null && refused == null) {
       final host = (t['host'] as String?) ?? nodeHost() ?? '';
       final port = (t['port'] as num?)?.toInt() ?? 3478;
       if (host.isNotEmpty) {
@@ -193,40 +356,98 @@ class CallService extends ChangeNotifier {
       }
     }
     turnMissing = servers.isEmpty;
-    return {'iceServers': servers, 'sdpSemantics': 'unified-plan', 'bundlePolicy': 'max-bundle'};
+    return {
+      'iceServers': servers, 'sdpSemantics': 'unified-plan', 'bundlePolicy': 'max-bundle',
+      // у гостя только relay: весь звук идёт через сервер звонков узла, и лимит действует
+      if (audioOnly) 'iceTransportPolicy': 'relay',
+    };
   }
 
   Future<void> _startMedia({required bool offerer}) async {
+    final own = cid, peer = peerId;
+    bool current() => !_disposed && cid == own &&
+        phase != CallPhase.idle && phase != CallPhase.ended;
+    RTCVideoRenderer? localView, remoteView;
+    RTCPeerConnection? pc;
+    MediaStream? stream;
     try {
-      localRenderer = RTCVideoRenderer();  remoteRenderer = RTCVideoRenderer();
-      await localRenderer!.initialize();   await remoteRenderer!.initialize();
-      _pc = await createPeerConnection(await _iceConfig());
-      _pc!.onIceCandidate = (c) {
-        if (c.candidate == null) return;
-        _signal('ice', cand: {'candidate': c.candidate, 'sdpMid': c.sdpMid, 'sdpMLineIndex': c.sdpMLineIndex});
+      await _mediaClosing;
+      if (!current()) return;
+      localView = createRenderer();
+      remoteView = createRenderer();
+      await localView.initialize();
+      if (!current()) return;
+      await remoteView.initialize();
+      if (!current()) return;
+      localRenderer = localView;
+      remoteRenderer = remoteView;
+      final cfg = await _iceConfig();
+      if (!current()) return;
+      if (refusal != null) {
+        unawaited(_signal('hangup'));
+        _finish(refusal!, log: true);
+        return;
+      }
+      pc = await createPeer(cfg);
+      if (!current()) return;
+      final connection = pc;
+      _pc = connection;
+      connection.onIceCandidate = (c) {
+        if (!current() || c.candidate?.isNotEmpty != true) return;
+        unawaited(_signal('ice', cand: {
+          'candidate': c.candidate, 'sdpMid': c.sdpMid,
+          'sdpMLineIndex': c.sdpMLineIndex,
+        }).catchError((Object _) => false));
       };
-      _pc!.onTrack = (e) {
-        if (e.streams.isNotEmpty) { remoteRenderer?.srcObject = e.streams.first; notifyListeners(); }
+      connection.onTrack = (e) {
+        if (current() && e.streams.isNotEmpty) {
+          remoteView?.srcObject = e.streams.first;
+          notifyListeners();
+        }
       };
-      _pc!.onConnectionState = _onConnState;
-      _local = await navigator.mediaDevices.getUserMedia({
+      connection.onConnectionState = (state) {
+        if (current()) _onConnState(state);
+      };
+      stream = await acquireMedia({
         'audio': {'echoCancellation': true, 'noiseSuppression': true, 'autoGainControl': true},
-        // старт с умеренного 360p: на слабом канале видео деградирует плавно, а не замирает
-        'video': video ? {'facingMode': 'user', 'width': {'ideal': 480}, 'height': {'ideal': 360}, 'frameRate': {'ideal': 20}} : false,
+        'video': video ? {'facingMode': 'user', 'width': {'ideal': 480},
+          'height': {'ideal': 360}, 'frameRate': {'ideal': 20}} : false,
       });
-      for (final t in _local!.getTracks()) { await _pc!.addTrack(t, _local!); }
-      localRenderer!.srcObject = _local;
-      if (video) await _tuneVideoSender();   // лимит битрейта и поведение при нехватке канала
+      if (!current()) return;
+      final captured = stream;
+      _local = captured;
+      for (final track in captured.getTracks()) {
+        await connection.addTrack(track, captured);
+        if (!current()) return;
+      }
+      localView.srcObject = captured;
+      if (video) await _tuneVideoSender();
+      if (!current()) return;
       await Helper.setSpeakerphoneOn(speaker);
+      if (!current()) return;
       unawaited(WakelockPlus.enable());
+      _mediaReady = true;
       notifyListeners();
       if (offerer) {
-        final o = await _pc!.createOffer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': video ? 1 : 0});
-        await _pc!.setLocalDescription(o);
-        if (!await _signal('offer', sdp: o.sdp)) _finish('Нет связи с узлом', log: false);
+        final offer = await connection.createOffer({
+          'offerToReceiveAudio': 1, 'offerToReceiveVideo': video ? 1 : 0,
+        });
+        if (!current()) return;
+        await connection.setLocalDescription(offer);
+        if (!current()) return;
+        final sent = await _send(peer!, CallSignal.now('offer', own!,
+            video: video, sdp: offer.sdp).encode());
+        if (current() && !sent) _finish(tr('Нет связи с узлом'), log: false);
       }
-    } catch (e) {
-      _finish('Не удалось начать звонок: ${_short(e)}', log: false);
+    } catch (_) {
+      if (current()) {
+        unawaited(_signal('hangup').catchError((Object _) => false));
+        _finish(tr('Не удалось соединиться'), log: true);
+      }
+    } finally {
+      if (!current()) {
+        await _releaseMedia(stream, pc, localView, remoteView);
+      }
     }
   }
 
@@ -256,25 +477,39 @@ class CallService extends ChangeNotifier {
   }
 
   Future<void> _onOffer(String sdp) async {
-    // предложение может прийти раньше, чем готов микрофон: ждём соединение
-    for (var i = 0; i < 100 && _pc == null && busy; i++) { await Future<void>.delayed(const Duration(milliseconds: 100)); }
+    // предложение принадлежит звонку, при котором пришло: если за время ожидания звонок сменился, оно ни к чему не применяется
+    final myCid = cid, myPeer = peerId;
+    bool same() => cid == myCid && peerId == myPeer && phase != CallPhase.idle && phase != CallPhase.ended;
+    // Предложение может прийти до разрешений и добавления локальных треков.
+    // Ответ раньше этого момента согласовал бы приём без передачи звука и видео.
+    for (var i = 0; i < 450 && !_mediaReady && same(); i++) { await Future<void>.delayed(const Duration(milliseconds: 100)); }
     final pc = _pc;
-    if (pc == null) return;
+    if (pc == null || !_mediaReady || !same()) return;
     try {
       await pc.setRemoteDescription(RTCSessionDescription(sdp, 'offer'));
+      if (!same()) return;
       await _remoteReady();
+      if (!same()) return;
       final a = await pc.createAnswer({'offerToReceiveAudio': 1, 'offerToReceiveVideo': video ? 1 : 0});
+      if (!same()) return;
       await pc.setLocalDescription(a);
-      if (!await _signal('answer', sdp: a.sdp)) _finish('Нет связи с узлом', log: false);
+      if (!same()) return;
+      if (!await _signal('answer', sdp: a.sdp)) { if (same()) _finish(tr('Нет связи с узлом'), log: false); }
     } catch (e) {
-      _finish('Не удалось ответить: ${_short(e)}', log: false);
+      if (same()) _finish(trf('Не удалось ответить: {e}', {'e': _short(e)}), log: false);
     }
   }
 
   Future<void> _remoteReady() async {
+    final connection = _pc, own = cid;
+    if (connection == null) return;
     _remoteSet = true;
-    for (final c in _pendingIce) { await _pc?.addCandidate(c); }
+    final candidates = List<RTCIceCandidate>.of(_pendingIce);
     _pendingIce.clear();
+    for (final c in candidates) {
+      if (_disposed || cid != own || !identical(_pc, connection)) return;
+      await connection.addCandidate(c);
+    }
   }
 
   Future<void> _onRemoteIce(Map<String, dynamic> m) async {
@@ -286,20 +521,47 @@ class CallService extends ChangeNotifier {
     }
   }
 
+  /// Гость: звонок обрывается, когда истёк срок доступа к серверу звонков (15 минут от выдачи); за минуту — предупреждение.
+  void _armLimit() {
+    final lim = _limit, from = _limitFrom;
+    if (lim == null || from == null) return;
+    final left = lim - DateTime.now().difference(from);
+    _limitTimer?.cancel(); _warnTimer?.cancel();
+    if (left <= Duration.zero) {
+      unawaited(_signal('hangup'));
+      _finish(tr('Лимит гостевого звонка: 15 минут'), log: true);
+      return;
+    }
+    _limitTimer = Timer(left, () {
+      unawaited(_signal('hangup'));
+      _finish(tr('Лимит гостевого звонка: 15 минут'), log: true);
+    });
+    if (left > const Duration(seconds: 60)) {
+      _warnTimer = Timer(left - const Duration(seconds: 60), () {
+        limitWarning = tr('Через минуту звонок завершится: лимит гостевого звонка 15 минут');
+        notifyListeners();
+      });
+    } else {
+      limitWarning = tr('Через минуту звонок завершится: лимит гостевого звонка 15 минут');
+    }
+  }
+
   void _onConnState(RTCPeerConnectionState s) {
     if (s == RTCPeerConnectionState.RTCPeerConnectionStateConnected) {
       _lostTimer?.cancel();
       if (phase != CallPhase.active) {
+        _connectTimer?.cancel();
         phase = CallPhase.active; startedAt = DateTime.now();
+        _armLimit();
         notifyListeners();
       }
     } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
       _lostTimer?.cancel();
-      _lostTimer = Timer(const Duration(seconds: 10), () => _finish('Связь потеряна', log: true));
+      _lostTimer = Timer(const Duration(seconds: 10), () => _finish(tr('Связь потеряна'), log: true));
     } else if (s == RTCPeerConnectionState.RTCPeerConnectionStateFailed) {
       _finish(turnMissing
-          ? 'Не удалось соединиться. Сервер звонков на узле не настроен: без него звонок работает только в одной сети'
-          : 'Не удалось соединиться', log: true);
+          ? tr('Не удалось соединиться. Сервер звонков на узле не настроен: без него звонок работает только в одной сети')
+          : tr('Не удалось соединиться'), log: true);
     }
   }
 
@@ -332,12 +594,14 @@ class CallService extends ChangeNotifier {
 
   void _finish(String reason, {required bool log}) {
     if (phase == CallPhase.idle || phase == CallPhase.ended) return;
-    _ringTimer?.cancel(); _lostTimer?.cancel(); _stopRing(); onIncomingCancel();
+    _inviteRetry?.cancel();
+    if (peerId != null && cid != null) _rememberClosed(peerId!, cid!);
+    _ringTimer?.cancel(); _lostTimer?.cancel(); _connectTimer?.cancel(); _limitTimer?.cancel(); _warnTimer?.cancel(); _stopRing(); onIncomingCancel();
     final wasActive = phase == CallPhase.active;
     final dur = elapsed;
     final p = peerId, out = !incoming, v = video;
     if (log && p != null) {
-      final what = v ? 'Видеозвонок' : 'Звонок';
+      final what = v ? tr('Видеозвонок') : tr('Звонок');
       final text = wasActive
           ? '📞 $what · ${_fmt(dur)}'
           : (out ? '📞 $what: $reason' : '📞 $reason');
@@ -346,40 +610,88 @@ class CallService extends ChangeNotifier {
     endReason = reason;
     phase = CallPhase.ended;
     notifyListeners();
-    unawaited(_closeMedia());
+    _closeMedia();
     _endTimer?.cancel();
     _endTimer = Timer(const Duration(milliseconds: 1800), () { _reset(); notifyListeners(); });
   }
 
-  Future<void> _closeMedia() async {
-    try { for (final t in _local?.getTracks() ?? <MediaStreamTrack>[]) { await t.stop(); } } catch (_) {}
-    try { await _local?.dispose(); } catch (_) {}
-    try { await _pc?.close(); } catch (_) {}
-    try { await localRenderer?.dispose(); } catch (_) {}
-    try { await remoteRenderer?.dispose(); } catch (_) {}
-    try { await Helper.setSpeakerphoneOn(false); } catch (_) {}
-    unawaited(WakelockPlus.disable());
-    _local = null; _pc = null; localRenderer = null; remoteRenderer = null;
+  void _closeMedia() {
+    // Detach before awaiting native cleanup: it must never read the next call.
+    final stream = _local, connection = _pc;
+    final localView = localRenderer, remoteView = remoteRenderer;
+    _local = null;
+    _pc = null;
+    localRenderer = remoteRenderer = null;
+    _mediaReady = false;
+    _mediaClosing = _mediaClosing.then((_) async {
+      await _releaseMedia(stream, connection, localView, remoteView);
+      try { await Helper.setSpeakerphoneOn(false); } catch (_) {}
+      try { await WakelockPlus.disable(); } catch (_) {}
+    });
+  }
+
+  static Future<void> _releaseMedia(MediaStream? stream,
+      RTCPeerConnection? connection, RTCVideoRenderer? localView,
+      RTCVideoRenderer? remoteView) async {
+    if (connection != null) {
+      connection.onIceCandidate = null;
+      connection.onTrack = null;
+      connection.onConnectionState = null;
+    }
+    for (final track in stream?.getTracks() ?? <MediaStreamTrack>[]) {
+      try { await track.stop(); } catch (_) {}
+    }
+    try { await stream?.dispose(); } catch (_) {}
+    try { await connection?.close(); } catch (_) {}
+    try { await connection?.dispose(); } catch (_) {}
+    try { await localView?.dispose(); } catch (_) {}
+    try { await remoteView?.dispose(); } catch (_) {}
   }
 
   void _reset() {
+    _inviteAcknowledged = false;
+    _mediaSignals = Future.value();
+    _inviteRetry?.cancel();
     _endTimer?.cancel();
+    _limitTimer?.cancel(); _warnTimer?.cancel(); _limit = null; _limitFrom = null; limitWarning = ''; refusal = null;
     phase = CallPhase.idle; peerId = null; cid = null; incoming = false; video = false;
-    muted = false; startedAt = null; _remoteSet = false; _pendingIce.clear(); turnMissing = false;
+    muted = false; startedAt = null; _remoteSet = false; _mediaReady = false; _pendingIce.clear(); turnMissing = false;
   }
 
-  Future<void> _playRing(String asset) async {
-    try {
-      _ringing = true;
+  Future<void> _playRing(String kind) {
+    if (soundEnabled?.call(kind) == false) return Future<void>.value();
+    final generation = ++_soundGeneration;
+    _ringing = true;
+    return _soundWork = _soundWork.catchError((Object _) {}).then((_) async {
+      if (generation != _soundGeneration) return;
       await _ring.setReleaseMode(ReleaseMode.loop);
-      await _ring.play(AssetSource(asset));
-    } catch (_) {}
+      if (generation != _soundGeneration) return;
+      await _ring.setAudioContext(AppSounds.context(kind));
+      if (generation != _soundGeneration) return;
+      await _ring.play(AssetSource('sounds/${AppSounds.assets[kind]}'));
+    }).catchError((Object _) {
+      if (generation == _soundGeneration) _ringing = false;
+      debugPrint('YANDI: call sound unavailable');
+    });
+  }
+
+  void refreshRingtone() {
+    final kind = phase == CallPhase.calling
+        ? 'dialing'
+        : phase == CallPhase.ringing
+            ? (video ? 'videoCalls' : 'calls')
+            : null;
+    if (kind == null || soundEnabled?.call(kind) == false) {
+      _stopRing();
+    } else if (!_ringing) {
+      unawaited(_playRing(kind));
+    }
   }
 
   void _stopRing() {
-    if (!_ringing) return;
+    ++_soundGeneration;
     _ringing = false;
-    unawaited(_ring.stop());
+    _soundWork = _soundWork.catchError((Object _) {}).then((_) => _ring.stop());
   }
 
   static String _fmt(Duration d) {
@@ -388,11 +700,24 @@ class CallService extends ChangeNotifier {
   }
 
   static String formatDuration(Duration d) => _fmt(d);
-  static String _short(Object e) => e.toString().replaceAll(RegExp(r'\s+'), ' ').substring(0, min(120, e.toString().length));
+  static String _short(Object e) {
+    final text = e.toString().replaceAll(RegExp(r'\s+'), ' ');
+    return text.substring(0, min(120, text.length));
+  }
 
   @override
   void dispose() {
-    _ring.dispose();
+    _disposed = true;
+    _closeMedia();
+    _inviteRetry?.cancel();
+    _ringTimer?.cancel();
+    _lostTimer?.cancel();
+    _endTimer?.cancel();
+    _connectTimer?.cancel();
+    _limitTimer?.cancel();
+    _warnTimer?.cancel();
+    _stopRing();
+    unawaited(_soundWork.then((_) => _ring.dispose()));
     super.dispose();
   }
 }

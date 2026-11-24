@@ -17,8 +17,21 @@ const COUNTER: &str = "attempts.json";
 struct Attempts {
     format: u32,
     id: [u8; 16],
+    /// неверные пароли подряд; после [`MAX_PASSWORD_FAILURES`] пароль больше не принимается, нужна сид-фраза
     failures: u32,
     next_ms: u64,
+    /// неверные сид-фразы подряд; после [`MAX_PHRASE_FAILURES`] закрытая среда стирается
+    #[serde(default)]
+    rec_failures: u32,
+}
+
+pub const MAX_PASSWORD_FAILURES: u32 = 5;
+pub const MAX_PHRASE_FAILURES: u32 = 20;
+
+impl Attempts {
+    fn total(&self) -> u32 {
+        self.failures.saturating_add(self.rec_failures)
+    }
 }
 
 fn now_ms() -> Result<u64> {
@@ -55,8 +68,65 @@ impl EnvelopeStore {
                 id: envelope.id,
                 failures: 0,
                 next_ms: 0,
+                rec_failures: 0,
             })?,
         )
+    }
+
+    /// Восстановление из резервной копии на новой машине: envelope пришёл из копии, а счётчик попыток в копию не входит.
+    /// Заводит чистый счётчик для этого envelope; существующий счётчик не трогает.
+    pub fn restore_attempts(&self) -> Result<()> {
+        let _lock = self.lock()?;
+        let snapshot = self.load_locked()?.ok_or_else(|| anyhow!("закрытая среда не создана"))?;
+        if self.read(COUNTER)?.is_some() {
+            return Ok(());
+        }
+        self.write(
+            COUNTER,
+            &serde_json::to_vec(&Attempts { format: 1, id: snapshot.envelope.id, failures: 0, next_ms: 0, rec_failures: 0 })?,
+        )
+    }
+
+    /// Криптостирание: убирает обёрнутый ключ данных и метки. Зашифрованные файлы потребителей остаются на диске, но без
+    /// ключа не читаются. Вызывается под flock, после этого среда считается не созданной.
+    fn wipe_locked(&self) {
+        for name in [super::ENVELOPE, super::PENDING, super::ANCHOR, COUNTER] {
+            if let Ok(c) = std::ffi::CString::new(name) {
+                unsafe {
+                    libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0);
+                }
+            }
+        }
+        let _ = self.dir.sync_all();
+    }
+
+    /// Экстренное стирание по команде владельца: то же крипто-стирание, что после двадцати неверных сидов (под тем же flock), без счёта
+    /// попыток. В отличие от автоматического, результат ПРОВЕРЯЕТСЯ: ошибка удаления любого файла (кроме «уже нет») и ошибка fsync
+    /// каталога — это ошибка, а не успех; в конце envelope должен действительно не читаться.
+    pub fn panic_wipe(&self) -> Result<()> {
+        let _lock = self.lock()?;
+        let mut errors: Vec<String> = Vec::new();
+        for name in [super::ENVELOPE, super::PENDING, super::ANCHOR, COUNTER] {
+            let c = std::ffi::CString::new(name)?;
+            let rc = unsafe { libc::unlinkat(self.dir.as_raw_fd(), c.as_ptr(), 0) };
+            if rc != 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() != std::io::ErrorKind::NotFound {
+                    errors.push(format!("{name}: {e}"));
+                }
+            }
+        }
+        if let Err(e) = self.dir.sync_all() {
+            errors.push(format!("запись каталога на диск: {e}"));
+        }
+        if self.load_locked()?.is_some() {
+            errors.push("запечатанный ключ данных всё ещё читается".to_string());
+        }
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            bail!("не удалось стереть: {}", errors.join("; "))
+        }
     }
 
     /// Откат первичной настройки, оборвавшейся до публикации envelope: счётчик, заведённый `prepare_attempts`, убирается,
@@ -85,24 +155,36 @@ impl EnvelopeStore {
         let mut attempts: Attempts = serde_json::from_slice(&bytes)?;
         if attempts.format != 1
             || attempts.id != snapshot.envelope.id
-            || (attempts.failures <= 3 && attempts.next_ms != 0)
-            || (attempts.failures > 3 && attempts.next_ms == 0)
+            || (attempts.total() <= 3 && attempts.next_ms != 0)
+            || (attempts.total() > 3 && attempts.next_ms == 0)
         {
             bail!("повреждён счётчик попыток; вход заблокирован до KDF");
+        }
+        // Фраза, не прошедшая собственную проверку (число слов, слово не из списка, контрольная сумма), — опечатка, а не попытка:
+        // она не расходует счётчик и не запускает KDF.
+        if recovery {
+            crate::node_vault::phrase_secret(secret)?;
         }
         let now = now_ms()?;
         if now < attempts.next_ms {
             bail!("пауза перед следующей попыткой входа");
         }
+        if !recovery && attempts.failures >= MAX_PASSWORD_FAILURES {
+            bail!("пять неверных паролей: вход только по сид-фразе");
+        }
         // Резервируем попытку до Argon2: crash/cancel не возвращают бесплатную попытку.
-        attempts.failures = attempts
-            .failures
+        let counter = if recovery {
+            &mut attempts.rec_failures
+        } else {
+            &mut attempts.failures
+        };
+        *counter = counter
             .checked_add(1)
             .ok_or_else(|| anyhow!("переполнение счётчика"))?;
-        attempts.next_ms = if attempts.failures <= 3 {
+        attempts.next_ms = if attempts.total() <= 3 {
             0
         } else {
-            now.saturating_add(delay_ms(attempts.failures))
+            now.saturating_add(delay_ms(attempts.total()))
         };
         self.write(COUNTER, &serde_json::to_vec(&attempts)?)?;
         let mut vault = NodeVault::default();
@@ -113,9 +195,16 @@ impl EnvelopeStore {
         };
         if result.is_ok() {
             attempts.failures = 0;
+            attempts.rec_failures = 0;
             attempts.next_ms = 0;
-        } else if attempts.failures > 3 {
-            attempts.next_ms = now_ms()?.saturating_add(delay_ms(attempts.failures));
+        } else {
+            if recovery && attempts.rec_failures >= MAX_PHRASE_FAILURES {
+                self.wipe_locked();
+                bail!("двадцать неверных сид-фраз: закрытая среда стёрта");
+            }
+            if attempts.total() > 3 {
+                attempts.next_ms = now_ms()?.saturating_add(delay_ms(attempts.total()));
+            }
         }
         // При ошибке записи успешный ключ наружу не отдаётся, Drop стирает DK.
         self.write(COUNTER, &serde_json::to_vec(&attempts)?)?;
@@ -131,10 +220,17 @@ impl EnvelopeStore {
         recovery: bool,
     ) -> Result<NodeVault> {
         let secret = Zeroizing::new(secret);
+        #[cfg(test)]
+        let tag = crate::node_vault::current_tag();
         let permit = queue().clone().acquire_owned().await?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            self.unlock_counted(&secret, recovery)
+            #[cfg(test)]
+            crate::node_vault::set_worker_tag(tag);
+            let r = self.unlock_counted(&secret, recovery);
+            #[cfg(test)]
+            crate::node_vault::set_worker_tag(None);
+            r
         })
         .await?
     }
@@ -190,8 +286,13 @@ impl EnvelopeStore {
 mod tests {
     use super::super::tests::{fixture, temp};
     use super::*;
-    use crate::node_vault::KDF_CALLS;
-    use std::sync::atomic::Ordering;
+    use crate::node_vault::{tagged_kdf_calls, KDF_TAG};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TAG: AtomicU64 = AtomicU64::new(1);
+    fn kdf_calls() -> usize {
+        tagged_kdf_calls(crate::node_vault::current_tag().expect("тест внутри KDF_TAG.scope"))
+    }
 
     fn installed() -> (tempfile::TempDir, Arc<EnvelopeStore>) {
         let d = temp();
@@ -204,9 +305,10 @@ mod tests {
 
     #[tokio::test]
     async fn bug_r15_missing_counter_blocks_before_any_kdf() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         std::fs::remove_file(d.path().join(COUNTER)).unwrap();
-        let calls = KDF_CALLS.load(Ordering::SeqCst);
+        let calls = kdf_calls();
         assert!(store
             .clone()
             .unlock_async("wrong password".into(), false)
@@ -217,23 +319,26 @@ mod tests {
             .unlock_async("first second third fourth".into(), true)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), calls);
+        assert_eq!(kdf_calls(), calls);
         assert!(store.prepare_attempts(&fixture().0).is_err());
+    }).await
     }
 
     #[tokio::test]
     async fn bug_r15_pause_and_corrupt_counter_block_before_any_kdf() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         let attempts = Attempts {
             format: 1,
             id: [3; 16],
             failures: 4,
             next_ms: now_ms().unwrap() + 300_000,
+            rec_failures: 0,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&attempts).unwrap())
             .unwrap();
-        let calls = KDF_CALLS.load(Ordering::SeqCst);
+        let calls = kdf_calls();
         assert!(store
             .clone()
             .unlock_async("wrong password".into(), false)
@@ -244,22 +349,27 @@ mod tests {
             .unlock_async("wrong password".into(), false)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), calls);
+        assert_eq!(kdf_calls(), calls);
+    }).await
     }
 
     #[tokio::test]
     async fn bug_r15_failure_pause_survives_reopen_and_blocks_before_kdf() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (d, store) = installed();
         let previous = Attempts {
             format: 1,
             id: [3; 16],
             failures: 3,
-            next_ms: 0,
+            // уже были неверные сид-фразы: пауза после этой попытки 16 с, а не 2 — очередь KDF общая, и в загруженном прогоне
+            // второй вход ждёт своего permit дольше короткой паузы
+            next_ms: 1,
+            rec_failures: 3,
         };
         store
             .write(COUNTER, &serde_json::to_vec(&previous).unwrap())
             .unwrap();
-        let before = KDF_CALLS.load(Ordering::SeqCst);
+        let before = kdf_calls();
         assert!(store
             .unlock_async("wrong password".into(), false)
             .await
@@ -273,7 +383,8 @@ mod tests {
             .unlock_async("wrong password".into(), false)
             .await
             .is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(kdf_calls(), before + 1);
+    }).await
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -294,11 +405,13 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn bug_r15_cancellation_does_not_release_running_worker_permit() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
         let (_one, first) = installed();
         let (_two, second) = installed();
-        let before = KDF_CALLS.load(Ordering::SeqCst);
-        let running = tokio::spawn(first.unlock_async("wrong password".into(), false));
-        while KDF_CALLS.load(Ordering::SeqCst) == before {
+        let before = kdf_calls();
+        let tag = crate::node_vault::current_tag().unwrap();
+        let running = tokio::spawn(KDF_TAG.scope(tag, first.unlock_async("wrong password".into(), false)));
+        while kdf_calls() == before {
             tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
         running.abort();
@@ -312,7 +425,8 @@ mod tests {
                 .is_err()
         );
         assert!(next.await.is_err());
-        assert_eq!(KDF_CALLS.load(Ordering::SeqCst), before + 1);
+        assert_eq!(kdf_calls(), before + 1);
+    }).await
     }
 
     #[test]
@@ -358,5 +472,94 @@ mod tests {
             serde_json::from_slice(&reopened.read(COUNTER).unwrap().unwrap()).unwrap();
         assert_eq!(counter.failures, 0);
         assert_eq!(counter.next_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn five_wrong_passwords_close_the_password_door_and_the_phrase_still_opens() {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        for _ in 0..MAX_PASSWORD_FAILURES {
+            // пауза после четвёртой попытки не мешает счёту: снимаем её вручную
+            let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+            a.next_ms = if a.total() > 3 { 1 } else { 0 };
+            store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+            assert!(store.clone().unlock_async("wrong password".into(), false).await.is_err());
+        }
+        let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        a.next_ms = 1;
+        store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+        // правильный пароль уже не принимается: нужна сид-фраза
+        let refused = match store.clone().unlock_async("correct password".into(), false).await {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("пароль после пяти неверных не должен приниматься"),
+        };
+        assert!(refused.contains("сид-фраз"), "{refused}");
+        // а сид-фраза открывает и сбрасывает оба счётчика
+        let opened = store.clone().unlock_async(phrase.into(), true).await.unwrap();
+        assert!(opened.unlocked());
+        let a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        assert_eq!((a.failures, a.rec_failures), (0, 0));
+    }
+
+    #[tokio::test]
+    async fn a_phrase_with_a_typo_is_not_a_guess() {
+        KDF_TAG.scope(NEXT_TAG.fetch_add(1, Ordering::SeqCst), async {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        let before = kdf_calls();
+        for typo in ["", "legal winner", "legal winner thank year wave sausage worth useful legal winner thank yelow", "winner legal thank year wave sausage worth useful legal winner thank yellow"] {
+            assert!(store.clone().unlock_async(typo.into(), true).await.is_err());
+        }
+        let a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+        assert_eq!((a.failures, a.rec_failures), (0, 0), "опечатки не считаются попытками");
+        assert_eq!(kdf_calls(), before, "и не запускают KDF");
+    }).await
+    }
+
+    #[tokio::test]
+    async fn twenty_wrong_phrases_erase_the_closed_environment() {
+        let d = temp();
+        let store = Arc::new(EnvelopeStore::open(d.path()).unwrap());
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let env = EnvelopeStore::create_envelope_async("correct password".into(), Some(phrase.into()))
+            .await
+            .unwrap();
+        let mut vault = NodeVault::default();
+        vault.unlock(&env, "correct password").unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        for i in 0..MAX_PHRASE_FAILURES {
+            let mut a: Attempts = serde_json::from_slice(&store.read(COUNTER).unwrap().unwrap()).unwrap();
+            a.next_ms = if a.total() > 3 { 1 } else { 0 };
+            store.write(COUNTER, &serde_json::to_vec(&a).unwrap()).unwrap();
+            let err = match store.clone().unlock_async("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(), true).await {
+                Err(e) => e.to_string(),
+                Ok(_) => panic!("чужая фраза не должна открывать"),
+            };
+            assert_eq!(err.contains("стёрта"), i + 1 == MAX_PHRASE_FAILURES, "{err}");
+        }
+        // среда стёрта: ни envelope, ни метки, ни счётчика; правильная фраза ничего не открывает
+        assert!(store.load().unwrap().is_none());
+        assert!(store.read(COUNTER).unwrap().is_none());
+        assert!(store.clone().unlock_async(phrase.into(), true).await.is_err());
+        assert!(!std::fs::read_dir(d.path()).unwrap().any(|e| {
+            let n = e.unwrap().file_name().to_string_lossy().to_string();
+            n == "envelope.json" || n == "anchor.json"
+        }));
     }
 }

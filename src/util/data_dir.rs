@@ -3,6 +3,21 @@
 use std::path::PathBuf;
 
 pub fn data_dir() -> PathBuf {
+    // в тестах каталог данных не настоящий: иначе проверки затирали бы файлы живого узла на этой же машине
+    #[cfg(test)]
+    {
+        static TEST_DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+        if std::env::var_os("XDG_DATA_HOME").is_none() {
+            return TEST_DIR
+                .get_or_init(|| {
+                    sweep_dead_test_dirs();
+                    let d = std::env::temp_dir().join(format!("yandi-unit-test-data-{}", std::process::id()));
+                    let _ = std::fs::create_dir_all(&d);
+                    d
+                })
+                .clone();
+        }
+    }
     let home = || std::env::var_os("HOME").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
     if cfg!(windows) {
         return std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(home).join("yandi");
@@ -13,5 +28,63 @@ pub fn data_dir() -> PathBuf {
     match std::env::var_os("XDG_DATA_HOME") {
         Some(x) if !x.is_empty() => PathBuf::from(x).join("yandi"),
         _ => home().join(".local/share/yandi"),
+    }
+}
+
+/// Каталоги прежних прогонов тестов (`yandi-unit-test-data-<pid>`, `yandi-chat-test-<pid>`, `yandi-closed-<имя>-<pid>`) убираются, если процесс,
+/// создавший их, уже не работает: тесты не копят мусор в системном tmp.
+#[cfg(test)]
+fn sweep_dead_test_dirs() {
+    let Ok(rd) = std::fs::read_dir(std::env::temp_dir()) else { return };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if !(name.starts_with("yandi-unit-test-data-") || name.starts_with("yandi-chat-test-") || name.starts_with("yandi-closed-")) {
+            continue;
+        }
+        let Some(pid) = name.rsplit('-').next().and_then(|p| p.parse::<u32>().ok()) else { continue };
+        #[cfg(target_os = "linux")]
+        let alive = pid == std::process::id() || std::path::Path::new(&format!("/proc/{pid}")).exists();
+        #[cfg(not(target_os = "linux"))]
+        let alive = true; // без /proc судить о чужом процессе нельзя — не трогаем
+        if !alive {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
+}
+
+/// Создаёт каталог данных (и недостающие родителей) приватным, 0700, до того как в нём что-то запишут:
+/// сокет оболочки не принимает каталог с чужими правами и никогда не чинит его сам.
+/// Уже существующие каталоги не трогает.
+pub fn ensure_private() -> std::io::Result<()> {
+    ensure_private_at(&data_dir())
+}
+
+fn ensure_private_at(path: &std::path::Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        std::fs::DirBuilder::new().recursive(true).mode(0o700).create(path)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(path)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_new_data_directory_is_private_and_an_existing_one_is_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let leaf = root.path().join("a/b/yandi");
+        super::ensure_private_at(&leaf).unwrap();
+        for p in [&leaf, &root.path().join("a/b"), &root.path().join("a")] {
+            assert_eq!(std::fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o700);
+        }
+        std::fs::set_permissions(&leaf, std::fs::Permissions::from_mode(0o755)).unwrap();
+        super::ensure_private_at(&leaf).unwrap();
+        assert_eq!(std::fs::metadata(&leaf).unwrap().permissions().mode() & 0o777, 0o755);
     }
 }

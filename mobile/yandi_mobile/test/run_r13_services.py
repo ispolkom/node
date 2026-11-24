@@ -10,7 +10,7 @@ def method(s,sig):
  start=s.index(sig);return s[start:s.index('\n  }',start)+4]
 storage=src('services/storage_service.dart')
 code="import 'dart:collection';\nimport 'dart:async';\nimport 'dart:convert';\nimport 'dart:io';\nimport 'dart:math';\nimport 'dart:typed_data';\nimport 'package:cryptography/cryptography.dart';\nimport 'package:path/path.dart' as p;\nimport 'package:crypto/crypto.dart' show sha256;\n"
-for f in ['crypto/file_vault.dart','crypto/replay_ledger.dart','models/avatar_msg.dart','models/file_offer.dart']:
+for f in ['crypto/file_vault.dart','crypto/replay_ledger.dart','models/avatar_msg.dart','models/file_offer.dart','l10n_core.dart']:
  code+=f"import '{(APP/'lib'/f).as_uri()}';\n"
 code+='''
 class ChangeNotifier {void notifyListeners(){} }
@@ -39,11 +39,13 @@ class VaultService {
 }
 '''+strip(src('services/vault_bytes_cache.dart'))
 app=src('services/app_state.dart')
+code+=strip(src('services/prep_tracker.dart'))
 code+='''
 class FakeDb {final rows=<Map<String,Object?>>[];Future<List<Map<String,Object?>>> query(String t,{List<String>? columns,String? where,List<String>? whereArgs})async=>rows;}
 class pp {static late Directory cache;static Future<Directory> getTemporaryDirectory()async=>cache;}
 class AppState extends ChangeNotifier {
  late VaultFiles vf; AvatarService? avatars; String? protectionWarning;static Future<bool> Function(String)? hook;
+ final CopyOwners _copies = CopyOwners();
  static Future<bool> wipeFile(String s)async=>await hook?.call(s)??false;
  Future<VaultFiles> vaultFiles()async=>vf;
 '''

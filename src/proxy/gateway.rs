@@ -10,60 +10,51 @@ use crate::util::HashId;
 use crate::protocol::Station;
 use std::sync::Arc;
 use std::collections::HashMap;
-use std::io::ErrorKind;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 use anyhow::{Result, Context};
 use tracing::{info, error, debug, warn};
 use reqwest::Client as HttpClient;
 
-fn is_normal_tunnel_shutdown(error: &std::io::Error) -> bool {
-    matches!(
-        error.kind(),
-        ErrorKind::BrokenPipe | ErrorKind::ConnectionReset | ErrorKind::ConnectionAborted | ErrorKind::NotConnected
-    )
-}
+/// Пределы выхода в интернет: одновременных запросов всего и от одного узла, туннелей от одного узла, размер ответа в памяти.
+const MAX_INFLIGHT_TOTAL: usize = 128;
+const MAX_INFLIGHT_PER_PEER: usize = 16;
+const MAX_TUNNELS_PER_PEER: usize = 32;
+const MAX_RESPONSE_BODY: usize = 8 * 1024 * 1024;
 
-/// Хранилище отправленных wagon-ов для retransmission
-#[derive(Debug)]
-pub struct SentTrain {
-    /// ID поезда
-    train_id: u64,
+static INFLIGHT: std::sync::Mutex<Option<HashMap<HashId, usize>>> = std::sync::Mutex::new(None);
 
-    /// Wagon-ы: wagon_num → wagon data (сериализованный)
-    wagons: HashMap<u16, Vec<u8>>,
+/// Место в очереди выхода: занято до конца обработки запроса. None — узел или весь выход загружены.
+struct InflightSlot(HashId);
 
-    /// Время отправки
-    sent_time: Instant,
-
-    /// Target node (кому отправляли)
-    pub target_node: HashId,
-}
-
-impl SentTrain {
-    /// Создать новое хранилище для поезда
-    pub fn new(train_id: u64, target_node: HashId) -> Self {
-        Self {
-            train_id,
-            wagons: HashMap::new(),
-            sent_time: Instant::now(),
-            target_node,
+impl InflightSlot {
+    fn take(peer: HashId) -> Option<Self> {
+        let mut g = INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        let m = g.get_or_insert_with(HashMap::new);
+        let total: usize = m.values().sum();
+        let mine = m.entry(peer).or_insert(0);
+        if total >= MAX_INFLIGHT_TOTAL || *mine >= MAX_INFLIGHT_PER_PEER {
+            if *mine == 0 {
+                m.remove(&peer);
+            }
+            return None;
         }
+        *mine += 1;
+        Some(Self(peer))
     }
+}
 
-    /// Добавить wagon (public для gateway)
-    pub fn add_wagon(&mut self, wagon_num: u16, wagon_data: Vec<u8>) {
-        self.wagons.insert(wagon_num, wagon_data);
-    }
-
-    /// Проверить устарел ли train (TTL 60 секунд)
-    fn is_expired(&self) -> bool {
-        self.sent_time.elapsed() > Duration::from_secs(60)
-    }
-
-    /// Получить wagon для переотправки
-    pub fn get_wagon(&self, wagon_num: u16) -> Option<&Vec<u8>> {
-        self.wagons.get(&wagon_num)
+impl Drop for InflightSlot {
+    fn drop(&mut self) {
+        let mut g = INFLIGHT.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(m) = g.as_mut() {
+            if let Some(n) = m.get_mut(&self.0) {
+                *n = n.saturating_sub(1);
+                if *n == 0 {
+                    m.remove(&self.0);
+                }
+            }
+        }
     }
 }
 
@@ -73,9 +64,7 @@ async fn send_tunnel_data(
     target_node: HashId,
     tunnel_data: ProxyTunnelData,
 ) -> Result<()> {
-    // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-    let data_bytes = tunnel_data.to_bincode()
-        .map_err(|e| anyhow::anyhow!("Failed to serialize tunnel data: {}", e))?;
+    let data_bytes = tunnel_data.encode();
 
     // ✅ Используем ОДНУ И ТУ ЖЕ Station (не создаём новую!)
     station.send_train(target_node, data_bytes).await
@@ -93,10 +82,23 @@ pub struct HttpProxyGateway {
     pub station: Arc<Station>,
     request_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyRequest)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
-    /// Отправленные wagon-ы для retransmission: train_id → SentTrain
-    pub sent_trains: Arc<Mutex<HashMap<u64, SentTrain>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// CONNECT, который уже принят, но туннель ещё не создан (идёт соединение): учитывается в квоте, иначе параллельные запросы
+    /// все видят «свободно» до await и превышают предел или заменяют друг друга
+    connecting: Arc<std::sync::Mutex<std::collections::HashSet<(HashId, u64)>>>,
+}
+
+/// Бронь места под CONNECT; снимается при выходе из функции.
+struct ConnectSlot {
+    set: Arc<std::sync::Mutex<std::collections::HashSet<(HashId, u64)>>>,
+    key: (HashId, u64),
+}
+
+impl Drop for ConnectSlot {
+    fn drop(&mut self) {
+        self.set.lock().unwrap_or_else(|e| e.into_inner()).remove(&self.key);
+    }
 }
 
 impl HttpProxyGateway {
@@ -120,7 +122,7 @@ impl HttpProxyGateway {
             request_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
-            sent_trains: Arc::new(Mutex::new(HashMap::new())),
+            connecting: Arc::new(std::sync::Mutex::new(Default::default())),
         }
     }
 
@@ -148,15 +150,6 @@ impl HttpProxyGateway {
             Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
         });
 
-        // Start sent trains cleanup task (удаляем устаревшие trains каждые 30 секунд)
-        let sent_trains_clone = self.sent_trains.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(30)).await;
-                Self::cleanup_expired_trains(sent_trains_clone.clone()).await;
-            }
-        });
-
         // Get the receiver
         let mut rx_opt = {
             let mut rx_lock = self.request_rx.lock().await;
@@ -176,8 +169,15 @@ impl HttpProxyGateway {
         // Listen for incoming requests
         while let Some((source_node, request)) = rx.recv().await {
             let gateway = self.clone_for_handler();
+            let Some(slot) = InflightSlot::take(source_node) else {
+                warn!("⚠️  Proxy request #{} dropped: too many in flight from {}", request.request_id, hex::encode(&source_node.0[..8]));
+                let busy = ProxyResponse { request_id: request.request_id, status: 503, headers: vec![], body: b"exit busy".to_vec() };
+                let _ = gateway.send_response(source_node, busy).await;
+                continue;
+            };
 
             tokio::spawn(async move {
+                let _slot = slot;
                 if let Err(e) = gateway.handle_request(source_node, request).await {
                     error!("❌ Error handling proxy request: {}", e);
                 }
@@ -197,7 +197,7 @@ impl HttpProxyGateway {
             request_rx: self.request_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             active_tunnels: self.active_tunnels.clone(),
-            sent_trains: self.sent_trains.clone(),
+            connecting: self.connecting.clone(),
         }
     }
 
@@ -211,7 +211,7 @@ impl HttpProxyGateway {
             self.send_response(source_node, refused).await?;
             return Ok(());
         }
-        debug!("🎯 Target: {} {}", request.method, request.url);
+        debug!("🎯 Target: {} {}", request.method, crate::util::logsafe::a(&request.url));
 
         // Special handling for CONNECT (HTTPS tunneling)
         if request.method == "CONNECT" {
@@ -220,15 +220,21 @@ impl HttpProxyGateway {
         }
 
         // Make real HTTP request
-        let http_response = self.make_http_request(&request).await?;
+        let mut http_response = self.make_http_request(&request).await?;
 
-        // Build proxy response
-        let proxy_response = ProxyResponse {
-            request_id: request.request_id,
-            status: http_response.status().as_u16(),
-            headers: self.extract_headers(&http_response),
-            body: http_response.bytes().await?.to_vec(),
-        };
+        // тело читаем кусками и не больше предела: ответ не раздувает память узла
+        let status = http_response.status().as_u16();
+        let headers = self.extract_headers(&http_response);
+        let mut body = Vec::new();
+        while let Some(chunk) = http_response.chunk().await? {
+            if body.len() + chunk.len() > MAX_RESPONSE_BODY {
+                let big = ProxyResponse { request_id: request.request_id, status: 502, headers: vec![], body: b"response too large".to_vec() };
+                self.send_response(source_node, big).await?;
+                return Ok(());
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let proxy_response = ProxyResponse { request_id: request.request_id, status, headers, body };
 
         debug!("✅ Response: {} {} bytes", proxy_response.status, proxy_response.body.len());
 
@@ -245,22 +251,63 @@ impl HttpProxyGateway {
         // Parse host:port from URL (format: "goodwin.su:443" or "example.com:443")
         let addr_str = request.url.clone();
 
-        info!("🔌 Connecting to {} ...", addr_str);
+        // туннелей от одного узла не больше предела; повторный номер поверх живого туннеля не принимается
+        let key = (source_node, request.request_id);
+        let reserved = {
+            let tunnels = self.active_tunnels.lock().await;
+            let mut pending = self.connecting.lock().unwrap_or_else(|e| e.into_inner());
+            let mine = tunnels.keys().filter(|(n, _)| *n == source_node).count() + pending.iter().filter(|(n, _)| *n == source_node).count();
+            if mine >= MAX_TUNNELS_PER_PEER || tunnels.contains_key(&key) || pending.contains(&key) {
+                false
+            } else {
+                pending.insert(key);
+                true
+            }
+        };
+        if !reserved {
+            let busy = ProxyResponse { request_id: request.request_id, status: 429, headers: vec![], body: Vec::new() };
+            self.send_response(source_node, busy).await?;
+            return Ok(());
+        }
+        let slot = ConnectSlot { set: self.connecting.clone(), key };
+
+        info!("🔌 Connecting to {} ...", crate::util::logsafe::a(&addr_str));
 
         // Только адрес в интернете (не этот компьютер, не домашняя сеть), соединение — ровно с проверенным адресом
         let target_stream = match crate::exit_policy::connect_public(&addr_str, Duration::from_secs(10)).await {
             Ok(stream) => {
-                info!("✅ Connected to {}", addr_str);
+                info!("✅ Connected to {}", crate::util::logsafe::a(&addr_str));
                 stream
             }
             Err(e) => {
                 let status = if e.kind() == std::io::ErrorKind::PermissionDenied { 403 } else if e.kind() == std::io::ErrorKind::TimedOut { 504 } else { 502 };
-                error!("❌ CONNECT {} refused/failed: {}", addr_str, e);
+                error!("❌ CONNECT {} refused/failed: {}", crate::util::logsafe::a(&addr_str), e);
                 let proxy_response = ProxyResponse { request_id: request.request_id, status, headers: vec![], body: Vec::new() };
                 self.send_response(source_node, proxy_response).await?;
                 return Err(anyhow::anyhow!("Failed to connect: {}", e));
             }
         };
+
+        // Приёмник данных клиента (writer) публикуется ДО подтверждения: клиент начинает передачу сразу после 200, и первые байты
+        // не должны находить пустую таблицу
+        let tunnel_id = request.request_id;
+        let transport = self.transport.clone();
+        let source_node_clone = source_node;
+
+        // Split TCP stream
+        let (mut read_half, write_half) = target_stream.into_split();
+
+        let mut writer_closed;
+        {
+            let mut tunnels = self.active_tunnels.lock().await;
+            // соединения разных узлов — раздельно: номер туннеля выбирает сам узел, чужой номер не даёт доступа к чужому соединению
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::HTTP_CONNECT, source_node, tunnel_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(write_half, self.active_tunnels.clone(), (source_node, tunnel_id), Some(credit));
+            writer_closed = writer.subscribe();
+            tunnels.insert((source_node, tunnel_id), writer);
+            drop(slot); // бронь снята: место теперь занято самим туннелем
+            info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
+        }
 
         // Send "200 Connection Established" back to client
         let proxy_response = ProxyResponse {
@@ -272,36 +319,29 @@ impl HttpProxyGateway {
             body: Vec::new(),
         };
 
-        self.send_response(source_node, proxy_response).await?;
+        if let Err(e) = self.send_response(source_node, proxy_response).await {
+            // ответ не ушёл: туннель никому не нужен, writer снимается (иначе занимал бы место до простоя)
+            self.active_tunnels.lock().await.remove(&(source_node, tunnel_id));
+            return Err(e);
+        }
         info!("📤 Sent 200 Connection Established");
 
-        // Start bi-directional forwarding
-        let tunnel_id = request.request_id;
-        let transport = self.transport.clone();
-        let source_node_clone = source_node;
-
         info!("🚇 Starting tunnel #{} bi-directional forwarding", tunnel_id);
-
-        // Split TCP stream
-        let (mut read_half, write_half) = target_stream.into_split();
-
-        // Store write_half in active_tunnels
-        {
-            let mut tunnels = self.active_tunnels.lock().await;
-            // соединения разных узлов — раздельно: номер туннеля выбирает сам узел, чужой номер не даёт доступа к чужому соединению
-            tunnels.insert((source_node, tunnel_id), write_half);
-            info!("🚇 Tunnel #{}: write_half stored in active_tunnels", tunnel_id);
-        }
 
         let active_tunnels_for_reader = self.active_tunnels.clone();
 
         // Task: Read from target and send to client via YTP
         let transport_to_client = transport.clone();
         let station_to_client = self.station.clone(); // ✅ Добавляем!
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::HTTP_CONNECT, source_node, tunnel_id);
         tokio::spawn(async move {
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; 64 * 1024]; // ⚡ 64 KB buffer for tunnel data
             loop {
-                match read_half.read(&mut buf).await {
+                match tokio::select! {
+                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                    result = read_half.read(&mut buf) => result,
+                } {
                     Ok(0) => {
                         info!("🚇 Tunnel #{}: Server closed connection", tunnel_id);
                         {
@@ -313,14 +353,30 @@ impl HttpProxyGateway {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
-                        let _ = send_tunnel_data(&station_to_client, source_node_clone, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, tunnel_data)).await;
                         break;
                     }
                     Ok(n) => {
                         debug!("🚇 Tunnel #{}: Read {} bytes from server", tunnel_id, n);
 
+                        let Ok(byte_offset) = cursor.block(n) else {
+                            active_tunnels_for_reader.lock().await.remove(&(source_node_clone, tunnel_id));
+                            break;
+                        };
+                        // регулятор скорости получателя: не читаем дальше, пока клиент не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", tunnel_id);
+                            active_tunnels_for_reader.lock().await.remove(&(source_node_clone, tunnel_id));
+                            break;
+                        }
                         let tunnel_data = ProxyTunnelData {
+                            byte_offset,
                             tunnel_id,
                             data: buf[..n].to_vec(),
                             close: false,
@@ -337,8 +393,9 @@ impl HttpProxyGateway {
                                 tunnel_id,
                                 data: Vec::new(),
                                 close: true,
+                                byte_offset: cursor.end(),
                             };
-                            let _ = send_tunnel_data(&station_to_client, source_node_clone, close_data).await;
+                            let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, close_data)).await;
                             break;
                         }
                     }
@@ -353,8 +410,9 @@ impl HttpProxyGateway {
                             tunnel_id,
                             data: Vec::new(),
                             close: true,
+                            byte_offset: cursor.end(),
                         };
-                        let _ = send_tunnel_data(&station_to_client, source_node_clone, tunnel_data).await;
+                        let _ = tokio::time::timeout(Duration::from_secs(2), send_tunnel_data(&station_to_client, source_node_clone, tunnel_data)).await;
                         break;
                     }
                 }
@@ -366,82 +424,23 @@ impl HttpProxyGateway {
 
     /// Handle incoming tunnel data from client (async method - same as client's)
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, ProxyTunnelData)>>>>,
     ) {
-        info!("🚇 Tunnel data handler started (gateway)");
-
-        // Get the receiver - take ownership
-        let mut rx_opt = {
-            let mut rx_lock = tunnel_rx.lock().await;
-            rx_lock.take()
-        };
-
-        let mut rx = match rx_opt {
-            Some(r) => r,
-            None => {
-                warn!("⚠️  No tunnel data channel configured!");
-                return;
-            }
-        };
-
-        // Listen for tunnel data packets
-        while let Some((source_node, tunnel_data)) = rx.recv().await {
-            let tunnel_id = tunnel_data.tunnel_id;
-            let key = (source_node, tunnel_id);
-            let data_len = tunnel_data.data.len();
-            let is_close = tunnel_data.close;
-
-            debug!("🚇 Received tunnel data #{}: {} bytes, close={}",
-                   tunnel_id, data_len, is_close);
-
-            // ✅ FIX: Используем get_mut() вместо remove() чтобы устранить race condition!
-            let mut tunnels = active_tunnels.lock().await;
-
-            if let Some(write_half) = tunnels.get_mut(&key) {
-                use tokio::io::AsyncWriteExt;
-
-                if is_close {
-                    info!("🚇 Tunnel #{}: close packet received", tunnel_id);
-                    // Close the connection to server
-                    let _ = write_half.shutdown().await;
-                    // Remove tunnel from active list
-                    tunnels.remove(&key);
-                    continue;
-                }
-
-                if !tunnel_data.data.is_empty() {
-                    if let Err(e) = write_half.write_all(&tunnel_data.data).await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: upstream side already closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error writing to server: {}", e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&key);
-                        continue;
-                    }
-
-                    debug!("✅ Tunnel #{}: wrote {} bytes to server", tunnel_id, data_len);
-
-                    // Flush to ensure data is sent
-                    if let Err(e) = write_half.flush().await {
-                        if is_normal_tunnel_shutdown(&e) {
-                            debug!("🚇 Tunnel #{}: upstream flush skipped, socket closed ({})", tunnel_id, e);
-                        } else {
-                            error!("❌ Error flushing server tunnel #{}: {}", tunnel_id, e);
-                        }
-                        let _ = write_half.shutdown().await;
-                        tunnels.remove(&key);
-                        continue;
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                let key = (source_node, tunnel_data.tunnel_id);
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
                 }
-            } else {
-                debug!("🚇 Tunnel #{}: data arrived after upstream close, dropping", tunnel_id);
             }
         }
-
-        warn!("⚠️  Tunnel data channel closed");
     }
 
     /// Send tunnel data packet via YTP
@@ -450,9 +449,7 @@ impl HttpProxyGateway {
         target_node: HashId,
         tunnel_data: ProxyTunnelData,
     ) -> Result<()> {
-        // ⚡ Используем bincode вместо JSON (в 3-5 раз быстрее)
-        let data_bytes = tunnel_data.to_bincode()
-            .context("Failed to serialize tunnel data")?;
+        let data_bytes = tunnel_data.encode();
 
         debug!("📤 Sending tunnel data #{} ({} bytes)", tunnel_data.tunnel_id, data_bytes.len());
 
@@ -495,7 +492,7 @@ impl HttpProxyGateway {
                 name_lower.as_str(),
                 "connection" | "keep-alive" | "proxy-authenticate" |
                 "proxy-authorization" | "te" | "trailers" |
-                "transfer-encoding" | "upgrade"
+                "transfer-encoding" | "upgrade" | "content-length"
             ) {
                 continue;
             }
@@ -552,9 +549,14 @@ impl HttpProxyGateway {
             http_req = http_req.header("Upgrade-Insecure-Requests", "1");
         }
 
+        // тело запроса (POST): доставленные байты уходят цели как есть; Content-Length выставляет клиент по фактической длине
+        if request.method == "POST" && !request.body.is_empty() {
+            http_req = http_req.body(request.body.clone());
+        }
+
         // Send request
         let response = http_req.send().await
-            .context(format!("Failed to fetch {}", request.url))?;
+            .context("Failed to fetch the requested URL")?; // адрес в текст ошибки не кладём: он попал бы в журнал
 
         Ok(response)
     }
@@ -583,29 +585,7 @@ impl HttpProxyGateway {
         headers
     }
 
-    /// Cleanup expired sent trains (вызывается каждые 30 секунд)
-    async fn cleanup_expired_trains(sent_trains: Arc<Mutex<HashMap<u64, SentTrain>>>) {
-        let mut trains = sent_trains.lock().await;
-        let before_count = trains.len();
-
-        // Удаляем устаревшие trains
-        trains.retain(|train_id, sent_train| {
-            if sent_train.is_expired() {
-                debug!("🧹 Cleaning up expired train #{}", train_id);
-                false
-            } else {
-                true
-            }
-        });
-
-        let after_count = trains.len();
-        if before_count > after_count {
-            info!("🧹 Cleaned up {} expired trains ({} → {})",
-                 before_count - after_count, before_count, after_count);
-        }
-    }
-
-    /// 🚂 Send response via YTP (DUAL-PATH с сохранением для NACK!)
+    /// 🚂 Send response via YTP (DUAL-PATH)
     async fn send_response(&self, target_node: HashId, response: ProxyResponse) -> Result<()> {
         // ⚡ Сериализуем через bincode (в 3-5 раз быстрее JSON)
         let response_bytes = response.to_bincode()
@@ -621,44 +601,28 @@ impl HttpProxyGateway {
         let mut packet = vec![0x41u8];
         packet.extend_from_slice(&response_bytes);
 
-        // 💾 СОХРАНЯЕМ packet для NACK fallback (до отправки!)
-        let packet_clone = packet.clone();
-
         // ✅ Используем station.send_train() - DUAL-PATH теперь!
         let train_id = self.station.send_train(target_node, packet).await
             .map_err(|e| anyhow::anyhow!("Failed to send response: {}", e))?;
 
-        // 💾 СОХРАНЯЕМ wagons для NACK fallback (если оба пути потеряли!)
-        let wagon_size = crate::protocol::Wagon::PAYLOAD_SIZE;
-        let mut sent_trains = self.sent_trains.lock().await;
-        let sent_train = sent_trains.entry(train_id)
-            .or_insert_with(|| SentTrain::new(train_id, target_node));
-
-        // Разбиваем данные и сохраняем каждый wagon
-        for (i, chunk) in packet_clone.chunks(wagon_size).enumerate() {
-            // Создаём wagon для сериализации
-            // Важно: используем те же параметры что и в Station::send_train
-            let wagon = crate::protocol::Wagon::new(
-                train_id,
-                i as u32,
-                crate::protocol::Train::calculate_wagon_count(&packet_clone) as u32,
-                (i * wagon_size) as u64,
-                chunk.to_vec(),
-                0  // line_id не важен для storage, wagons одинаковые для обоих путей
-            );
-
-            match wagon.to_bytes() {
-                Ok(wagon_bytes) => {
-                    sent_train.add_wagon(i as u16, wagon_bytes);
-                }
-                Err(e) => {
-                    warn!("⚠️  Failed to serialize wagon #{} for storage: {}", i, e);
-                }
-            }
-        }
-
         info!("✅ Response sent via YTP DUAL-PATH! Train #{}", train_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod limits_tests {
+    use super::*;
+
+    #[test]
+    fn inflight_slots_are_limited_per_peer_and_released() {
+        let a = HashId([0xA1; 32]);
+        let b = HashId([0xB2; 32]);
+        let held: Vec<_> = (0..MAX_INFLIGHT_PER_PEER).map(|_| InflightSlot::take(a).expect("в пределах")).collect();
+        assert!(InflightSlot::take(a).is_none(), "сверх предела узла — отказ");
+        assert!(InflightSlot::take(b).is_some(), "другой узел не страдает");
+        drop(held);
+        assert!(InflightSlot::take(a).is_some(), "после завершения место свободно");
     }
 }

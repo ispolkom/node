@@ -1,0 +1,77 @@
+#!/bin/sh
+# postinst пакета yandi-node. Шаблон службы yandi-node@.service уже лежит в /usr/lib/systemd/system/; здесь служба включается и запускается
+# для пользователя, который ставит пакет (sudo apt install → SUDO_USER; иначе — единственный обычный пользователь системы).
+#  • При первой установке служба включается и запускается; при обновлении существующий экземпляр перезапускается,
+#    а отсутствующий экземпляр создаётся для найденного пользователя.
+#  • Если рядом есть служба, созданная вручную (/etc/systemd/system/yandi-node.service), новая не включается: порты были бы заняты дважды.
+#  • Пропускается без systemd (контейнер) и при YANDI_NO_SERVICE=1.
+# Узел до `yandi setup` ждёт первой настройки, поэтому запуск до неё безопасен.
+set -e
+[ "$1" = configure ] || exit 0
+[ -d /run/systemd/system ] || exit 0
+systemctl daemon-reload >/dev/null 2>&1 || true
+
+[ "${YANDI_NO_SERVICE:-0}" = 1 ] && exit 0
+if [ -e /etc/systemd/system/yandi-node.service ]; then
+    echo "yandi-node: найдена служба yandi-node.service, созданная вручную; шаблонный экземпляр не включается." >&2
+    systemctl try-restart yandi-node.service >/dev/null 2>&1 || true
+    exit 0
+fi
+
+# Prefer an already enabled template instance so upgrades never silently switch
+# the node to another user. A fresh install then falls back to the user who ran
+# sudo/Polkit, or to the only ordinary login user.
+valid_user() {
+    [ -n "$1" ] && [ "$1" != root ] || return 1
+    getent passwd "$1" | awk -F: '$3 >= 1000 && $3 < 65534 && $7 !~ /(nologin|false)$/ {ok=1} END {exit ok ? 0 : 1}'
+}
+instance_unit() {
+    systemctl list-unit-files --type=service --no-legend 'yandi-node@*.service' 2>/dev/null |
+        awk '$1 ~ /^yandi-node@[^.]+\.service$/ {print $1; exit}'
+}
+U=""
+EXISTING=$(instance_unit || true)
+if [ -n "$EXISTING" ]; then
+    U=${EXISTING#yandi-node@}
+    U=${U%.service}
+elif valid_user "${SUDO_USER:-}"; then
+    U="$SUDO_USER"
+elif [ -n "${PKEXEC_UID:-}" ] && U=$(getent passwd "$PKEXEC_UID" | cut -d: -f1) && valid_user "$U"; then
+    :
+elif valid_user "${DOAS_USER:-}"; then
+    U="$DOAS_USER"
+else
+    N=$(getent passwd | awk -F: '$3>=1000 && $3<65534 && $7 !~ /(nologin|false)$/ {print $1}')
+    [ "$(printf '%s\n' "$N" | grep -c .)" = 1 ] && U="$N"
+fi
+if [ -z "$U" ]; then
+    echo "yandi-node: ordinary user was not determined; service was not enabled." >&2
+    echo "yandi-node: run: sudo systemctl enable --now yandi-node@USER.service" >&2
+    exit 0
+fi
+UNIT="yandi-node@$U.service"
+if [ -n "$2" ]; then
+    # An older package may have installed only the template without enabling
+    # a concrete instance. Repair that state during upgrade, then restart an
+    # already-running instance so it uses the new binary.
+    if ! systemctl enable "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to enable $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
+    if systemctl is-active --quiet "$UNIT"; then
+        systemctl restart "$UNIT" >/dev/null 2>&1 || {
+            echo "yandi-node: failed to restart $UNIT; inspect: journalctl -u $UNIT -b" >&2
+            exit 1
+        }
+    elif ! systemctl start "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to start $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
+else
+    if ! systemctl enable --now "$UNIT" >/dev/null 2>&1; then
+        echo "yandi-node: failed to enable/start $UNIT; inspect: systemctl status $UNIT and journalctl -u $UNIT -b" >&2
+        exit 1
+    fi
+fi
+echo "yandi-node: service is enabled for $U; continue setup from the Desktop." >&2
+exit 0

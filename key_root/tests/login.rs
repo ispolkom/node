@@ -67,10 +67,7 @@ fn snapshot(d: &Dir) -> Vec<(String, Vec<u8>)> {
 fn the_keys_made_from_what_the_person_typed_open_two_ways_and_the_login_password_checks() {
     let (d, root) = made();
     let bytes = key_root::keydir::read_private_file(&d.dir.auth_file()).unwrap();
-    assert_eq!(
-        key_root::legacy::auth_format(&bytes).unwrap(),
-        key_root::legacy::AuthFormat::RootV2
-    );
+    assert_eq!(RootDocument::parse(&bytes).unwrap().version, 2);
     let doc = RootDocument::parse(&bytes).unwrap();
     let key = device(&d).load().unwrap().unwrap();
     assert_eq!(
@@ -287,7 +284,7 @@ fn the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prin
         out.is_empty() && err.is_empty(),
         "nothing is printed on success: {out}{err}"
     );
-    assert!(path.join("auth.json").exists() && path.join("device.key").exists());
+    assert!(path.join("auth.json").exists() && (path.join("device.seal").exists() || path.join("device.key").exists()));
 
     let before = fs::read(path.join("auth.json")).unwrap();
     let (code, _, err) = tool(
@@ -342,4 +339,92 @@ fn the_tool_creates_the_account_checks_the_password_and_resets_it_and_never_prin
             "no secret in the output"
         );
     }
+}
+
+/// Отказ при создании корня после создания аппаратного ключа убирает и device.seal: настройку можно повторить.
+#[test]
+fn a_failed_first_setup_with_a_hardware_key_leaves_nothing_behind_and_can_be_repeated() {
+    use key_root::hw_print::HwPrint;
+    let d = dir();
+    let hw = || {
+        HardwareDeviceKey::with_print(
+            d.dir.file("device.seal"),
+            d.dir.file("device.key"),
+            Box::new(|| HwPrint {
+                parts: [
+                    vec!["Gigabyte".into(), "Z390".into()],
+                    vec!["i5".into()],
+                    vec!["aa:aa".into()],
+                    vec!["ata-SSD_1".into()],
+                ],
+            }),
+            8 * 1024,
+            1,
+        )
+    };
+    // слишком слабый KDF для боевой политики: корень не создаётся уже после создания ключа устройства
+    let failed = create_keys(&d.dir, &machine(), &hw(), LOGIN, MASTER, FAST, &KdfPolicy::production());
+    assert!(failed.is_err());
+    assert!(!d.dir.file("device.seal").exists(), "ключ устройства убран");
+    assert!(!d.dir.auth_file().exists());
+    // повтор проходит
+    create_keys(&d.dir, &machine(), &hw(), LOGIN, MASTER, FAST, &KdfPolicy::for_tests()).expect("повторная настройка");
+    assert!(d.dir.file("device.seal").exists());
+}
+
+const SEED: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+#[test]
+fn a_seed_phrase_is_the_master_secret_by_its_bytes() {
+    let d = dir();
+    let root = create_keys(&d.dir, &machine(), &device(&d), LOGIN, SEED, FAST, &KdfPolicy::for_tests()).unwrap();
+    // the same phrase typed differently (case, spacing) resets the web password, and the root stays the same
+    reset_login(&d.dir, "  LEGAL winner thank\nyear wave sausage worth useful legal winner thank yellow ", "new login 22", &KdfPolicy::for_tests()).unwrap();
+    assert!(verify_login_in(&d.dir, "new login 22").unwrap());
+    let doc = RootDocument::parse(&std::fs::read(d.dir.auth_file()).unwrap()).unwrap();
+    assert_eq!(*doc.unlock_with_password(&recovery_secret(SEED), &KdfPolicy::for_tests()).unwrap(), *root);
+    // the text of the words is not what keys the wrapper
+    assert!(doc.unlock_with_password(SEED, &KdfPolicy::for_tests()).is_err());
+    // a typo in a seed phrase is told as a typo, not as "wrong"
+    let typo = reset_login(&d.dir, "winner legal thank year wave sausage worth useful legal winner thank yellow", "another login 3", &KdfPolicy::for_tests()).unwrap_err();
+    assert!(typo.contains("опечатка"), "{typo}");
+}
+
+#[test]
+fn setup_rules_check_a_seed_as_a_seed() {
+    assert!(check_setup_inputs("12345678", "12345678", SEED, SEED).is_ok());
+    assert!(check_setup_inputs_min("123456", "123456", SEED, SEED, 6).is_ok());
+    assert!(check_setup_inputs("12345678", "12345678", SEED, SEED).is_ok());
+    let bad = "winner legal thank year wave sausage worth useful legal winner thank yellow";
+    assert!(check_setup_inputs("12345678", "12345678", bad, bad).is_err());
+    assert!(check_setup_inputs("123456", "123456", SEED, SEED).is_err(), "в боевой версии пароль не короче 8");
+}
+
+#[test]
+fn the_same_seed_on_two_machines_gives_the_same_root_and_the_control_word_makes_another() {
+    let words = SEED;
+    let make = |phrase: &str| {
+        let d = dir();
+        let root = create_keys(&d.dir, &machine(), &device(&d), LOGIN, phrase, FAST, &KdfPolicy::for_tests()).unwrap();
+        (d, root)
+    };
+    let (_a, ra) = make(words);
+    let (_b, rb) = make(words);
+    assert_eq!(*ra, *rb, "a seed phrase restores the same root on another machine");
+    // the recovery wrapper of each machine opens the same root with the phrase
+    let joined = key_root::join_phrase(words, "Воробей-2026");
+    let (_c, rc) = make(&joined);
+    let (_d, rd) = make(&joined);
+    assert_eq!(*rc, *rd);
+    assert_ne!(*rc, *ra, "with the control word it is another root");
+    // a recovery code or a free-text master keeps a random root (older behaviour)
+    let (_e, re) = make("free text master pass 1234");
+    let (_f, rf) = make("free text master pass 1234");
+    assert_ne!(*re, *rf);
+    // the phrase with the control word opens the wrapper of the node created with it, and the words alone do not
+    let d = dir();
+    let root = create_keys(&d.dir, &machine(), &device(&d), LOGIN, &joined, FAST, &KdfPolicy::for_tests()).unwrap();
+    let doc = RootDocument::parse(&std::fs::read(d.dir.auth_file()).unwrap()).unwrap();
+    assert_eq!(*doc.unlock_with_password(&recovery_secret(&joined), &KdfPolicy::for_tests()).unwrap(), *root);
+    assert!(doc.unlock_with_password(&recovery_secret(words), &KdfPolicy::for_tests()).is_err());
 }

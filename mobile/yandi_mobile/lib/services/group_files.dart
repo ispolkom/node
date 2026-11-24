@@ -8,6 +8,7 @@ import '../crypto/group_crypto.dart';
 import 'file_transfer_service.dart' show FileTransferService;
 import 'group_api.dart';
 import 'pool.dart';
+import '../l10n_core.dart';
 
 /// Файлы в группах: зашифрованные куски лежат на узле, ключ файла — внутри зашифрованной записи журнала (узел его не видит).
 class GroupFiles {
@@ -35,11 +36,11 @@ class GroupFiles {
     final size = src.length;
     if (size == 0) {
       await src.close();
-      throw const GroupApiError(400, 'Файл пустой');
+      throw GroupApiError(400, tr('Файл пустой'));
     }
     if (size > maxSize) {
       await src.close();
-      throw const GroupApiError(413, 'В группе файлы до 200 МБ');
+      throw GroupApiError(413, tr('В группе файлы до 200 МБ'));
     }
     final chunks = (size + chunkSize - 1) ~/ chunkSize;
     final key = FileCrypto.newKey();
@@ -74,6 +75,8 @@ class GroupFiles {
     final fid = d['f'] as String, chunks = d['c'] as int, size = d['z'] as int;
     final key = base64.decode(d['k'] as String);
     if (chunks < 1 || size < 1 || size > maxSize || key.length != 32) throw const FormatException('bad file description');
+    // число кусков однозначно задаётся размером: описание с огромным `c` при малом размере не вызывает миллионы запросов
+    if (chunks != (size + chunkSize - 1) ~/ chunkSize) throw const FormatException('bad file description');
     // с ключом хранилища файл пишется сразу зашифрованным; без него — как раньше (тесты)
     final name = d['n'] is String ? d['n'] as String : 'file';
     final w = vault == null ? null : await vault!.create(out, name: name, mime: FileTransferService.guessMime(name), size: size);
@@ -83,19 +86,24 @@ class GroupFiles {
     var written = 0;
     try {
       var n = 0;
+      var idx = 0;   // номер куска: onProgress может быть не задан, поэтому по n считать нельзя
       await for (final plain in orderedPrefetch<Uint8List>(chunks, 4, (i) async => FileCrypto.decryptChunk(key, fid, i, chunks, await api.fileGet(gid, fid, i)))) {
+        // точная длина каждого куска: все полные, кроме последнего, и пустых не бывает
+        final expectLen = idx < chunks - 1 ? chunkSize : size - (chunks - 1) * chunkSize;
+        if (plain.length != expectLen) throw FormatException(tr('файл повреждён или подменён'));
         hasher.add(plain);
         written += plain.length;
-        if (written > size) throw const FormatException('файл повреждён или подменён');
+        if (written > size) throw FormatException(tr('файл повреждён или подменён'));
         if (w != null) {
           await w.add(plain);
         } else {
           sink!.add(plain);
         }
+        idx++;
         onProgress?.call(++n, chunks);
       }
       hasher.close();
-      if (written != size || digest.hex != d['h']) throw const FormatException('файл повреждён или подменён');
+      if (written != size || digest.hex != d['h']) throw FormatException(tr('файл повреждён или подменён'));
       if (w != null) {
         await w.close();
       } else {
@@ -109,7 +117,7 @@ class GroupFiles {
         try { await sink!.close(); } catch (_) {}
         try { await out.delete(); } catch (_) {}
       }
-      if (e is FileVaultException) throw const FormatException('файл повреждён или подменён');
+      if (e is FileVaultException) throw FormatException(tr('файл повреждён или подменён'));
       rethrow;
     }
   }

@@ -12,6 +12,7 @@ code += '''
 class ChangeNotifier {void notifyListeners(){} }
 class DeviceVaultBackend extends MemoryVaultBackend {}
 class VaultBytesCache {static void clear(){} }
+class VideoFrames {static void clear(){} }
 class StorageService {
  static bool opened=false, failClose=false, failWrap=false;static List<int>? secure;
  static final reached=<Completer<void>>[], release=<Completer<void>>[];static int calls=0;

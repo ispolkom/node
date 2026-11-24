@@ -55,23 +55,6 @@ struct StoredIdentityV2 {
     encrypted_private_keys: EncryptedPrivateKeys,
 }
 
-// ── On-disk format v1 (legacy plaintext) ──────────────────────────────────
-// Kept only for migration; never written by this code.
-
-#[derive(Debug, Serialize, Deserialize)]
-struct StoredIdentityV1 {
-    address: [u8; 32],
-    pub public_key: [u8; 32],
-    pub private_key: [u8; 32],
-    pub signing_public_key: [u8; 32],
-    pub signing_private_key: [u8; 32],
-    #[serde(default = "default_created_at")]
-    created_at: chrono::DateTime<chrono::Utc>,
-}
-
-// Keep the old name available so call sites that reference `StoredIdentity` still compile.
-pub type StoredIdentity = StoredIdentityV1;
-
 fn default_created_at() -> chrono::DateTime<chrono::Utc> {
     chrono::Utc::now()
 }
@@ -316,7 +299,6 @@ impl NodeIdentity {
     }
 
     /// Load identity from disk, decrypting private keys.
-    /// Automatically migrates v1 (plaintext) files to v2 (encrypted) format.
     #[cfg(not(unix))]
     pub fn load_from_file(port: u16) -> Result<Self, String> {
         let keys_dir = Self::get_keys_directory()?;
@@ -330,19 +312,7 @@ impl NodeIdentity {
         let json = fs::read_to_string(&file_path)
             .map_err(|e| format!("Failed to read identity file: {}", e))?;
 
-        // Detect format by checking for 'version' field in JSON
-        let raw: serde_json::Value = serde_json::from_str(&json)
-            .map_err(|e| format!("Invalid JSON in identity file: {}", e))?;
-
-        let version = raw.get("version").and_then(|v| v.as_u64()).unwrap_or(1);
-
-        if version >= 2 {
-            Self::load_v2(&json, port, &file_path)
-        } else {
-            // V1 legacy file — load then immediately migrate
-            println!("[identity] ⚠️  Migrating plaintext identity to encrypted format (SEC-04)");
-            Self::load_v1_and_migrate(&json, port)
-        }
+        Self::load_v2(&json, port, &file_path)
     }
 
     #[cfg(not(unix))]
@@ -385,30 +355,6 @@ impl NodeIdentity {
             signing_private_key,
             _private_guard: (),
         })
-    }
-
-    #[cfg(not(unix))]
-    fn load_v1_and_migrate(json: &str, port: u16) -> Result<Self, String> {
-        let stored: StoredIdentityV1 = serde_json::from_str(json)
-            .map_err(|e| format!("Failed to parse legacy identity: {}", e))?;
-
-        let identity = Self {
-            address: bound_address(stored.address, &stored.signing_public_key),
-            public_key: stored.public_key,
-            private_key: stored.private_key,
-            signing_public_key: stored.signing_public_key,
-            signing_private_key: stored.signing_private_key,
-            _private_guard: (),
-        };
-
-        // Re-save in v2 encrypted format
-        if let Err(e) = identity.save_to_file(port) {
-            eprintln!("[identity] ❌ Migration to encrypted format failed: {}", e);
-        } else {
-            println!("[identity] ✅ Migrated to encrypted identity format");
-        }
-
-        Ok(identity)
     }
 
     pub fn get_keys_directory() -> Result<PathBuf, String> {
@@ -457,6 +403,30 @@ impl NodeIdentity {
 
 #[cfg(unix)]
 impl NodeIdentity {
+    /// The identity a root key stands for: the same root (and so the same seed phrase and control word) always gives the same keys and the
+    /// same node id, on any machine. The node id is the hash of the signing key, as for every identity.
+    pub fn derived_from_root(root: &[u8; 32]) -> Self {
+        let x = key_root::derive_domain(root, "yandi/identity-x25519/v1");
+        let e = key_root::derive_domain(root, "yandi/identity-ed25519/v1");
+        let x_secret = x25519_dalek::StaticSecret::from(*x);
+        let x_public = PublicKey::from(&x_secret);
+        let signing = ed25519_dalek::SigningKey::from_bytes(&e);
+        let verifying = signing.verifying_key();
+        Self {
+            address: HashId(crate::util::types::derive_node_id(verifying.as_bytes())),
+            public_key: *x_public.as_bytes(),
+            private_key: *x,
+            signing_public_key: *verifying.as_bytes(),
+            signing_private_key: signing.to_bytes(),
+            _private_guard: (),
+        }
+    }
+
+    /// The node id a root key leads to, without creating or storing anything (for showing it before a restore).
+    pub fn node_id_for_root(root: &[u8; 32]) -> HashId {
+        Self::derived_from_root(root).address
+    }
+
     fn to_material(&self) -> key_root::IdentityMaterial {
         use key_root::Zeroizing;
         key_root::IdentityMaterial {
@@ -484,25 +454,25 @@ impl NodeIdentity {
     ///
     /// **A failure to open an existing identity is an error, never a new identity.** The identity file is only ever created when
     /// nothing identity-like exists in the key directory, never over an existing file, and a file that cannot be opened (wrong
-    /// password, another machine, a damaged file, an unknown format, unsafe permissions) is left byte-for-byte as it was.
-    /// `root` is the node's root key when it has one (needed for the recoverable format); the legacy format needs none.
+    /// root, another machine, a damaged file, an unknown format, unsafe permissions) is left byte-for-byte as it was.
+    /// `root` is the node's root key when it has one (an identity is created and opened only with it).
     /// The error's `category()` is what may be shown outside.
     pub fn load_or_create_with_root(port: u16, root: Option<&[u8; 32]>) -> Result<Self, key_root::KeyRootError> {
         let dir = key_root::KeyDir::open(Self::get_keys_directory().map_err(|_| key_root::KeyRootError::Io)?)?;
-        let env_password = std::env::var("YANDI_KEY_PASSWORD").ok();
-        Self::load_or_create_in(&dir, &key_root::SystemMachine, env_password.as_deref(), port, root)
+        Self::load_or_create_in(&dir, port, root)
     }
 
-    /// The same, with the directory, the machine and the environment password given (so that it can be tested in a temporary directory).
+    /// The same, with the directory given (so that it can be tested in a temporary directory).
     pub(crate) fn load_or_create_in(
         dir: &key_root::KeyDir,
-        machine: &dyn key_root::MachineContext,
-        env_password: Option<&str>,
         port: u16,
         root: Option<&[u8; 32]>,
     ) -> Result<Self, key_root::KeyRootError> {
-        let ctx = key_root::OpenContext { machine, env_password, root };
-        let loaded = key_root::load_or_initialize(dir, port, &ctx, || Self::new().to_material())?;
+        let ctx = key_root::OpenContext { root };
+        let loaded = key_root::load_or_initialize(dir, port, &ctx, || match root {
+            Some(r) => Self::derived_from_root(r).to_material(),
+            None => Self::new().to_material(),
+        })?;
         let id = hex::encode(&loaded.identity.address[..8]);
         if loaded.created {
             println!("[identity] New identity created for port {} (node_id: {}) — this is a first run", port, id);
@@ -514,9 +484,57 @@ impl NodeIdentity {
 }
 
 #[cfg(all(test, unix))]
+mod derived_identity_tests {
+    use super::*;
+
+    #[test]
+    fn the_same_root_gives_the_same_node_and_another_root_another_node() {
+        let (a, b, c) = (NodeIdentity::derived_from_root(&[1u8; 32]), NodeIdentity::derived_from_root(&[1u8; 32]), NodeIdentity::derived_from_root(&[2u8; 32]));
+        assert_eq!(a.address.0, b.address.0);
+        assert_eq!(a.signing_public_key, b.signing_public_key);
+        assert_eq!(a.public_key, b.public_key);
+        assert_eq!(a.private_key, b.private_key);
+        assert_ne!(a.address.0, c.address.0);
+        // the id is bound to the signing key and the signing key signs
+        assert_eq!(a.address.0, crate::util::types::derive_node_id(&a.signing_public_key));
+        assert_eq!(NodeIdentity::node_id_for_root(&[1u8; 32]).0, a.address.0);
+        let sig: [u8; 64] = a.sign(b"hello").unwrap().try_into().unwrap();
+        assert!(NodeIdentity::verify_raw(&a.signing_public_key, &sig, b"hello"));
+        // the X25519 pair is a real pair
+        let secret = x25519_dalek::StaticSecret::from(a.private_key);
+        assert_eq!(PublicKey::from(&secret).as_bytes(), &a.public_key);
+    }
+
+    /// (корни сверены независимо: HKDF и Argon2id на Python). Известный ответ полной цепочки с настоящей стоимостью Argon2id: сид (+слово) → корень → личность. Узел, настроенный сегодня, обязан восстанавливаться
+    /// любой будущей сборкой; если этот тест красный, вывод ключей изменился.
+    #[test]
+    fn the_whole_chain_from_a_seed_has_pinned_answers() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let plain = key_root::Seed::parse(words).unwrap().root();
+        let with_word = key_root::Seed::parse(&key_root::join_phrase(words, "Воробей-2026")).unwrap().root();
+        let id = |r: &[u8; 32]| hex::encode(NodeIdentity::node_id_for_root(r).0);
+        assert_eq!(hex::encode(*plain), "a377128bf3a090f3a7318eb3f09785c6b3d97337f7fdc53caa2359f078e8b015");
+        assert_eq!(id(&plain), "11ae58db6b9486a23691fea3af83e5fcbe264463868e494b4138fa6259423100");
+        assert_eq!(hex::encode(*with_word), "11cce37704f0b5e6644c4ecaac6b75d6759996fc6cc3f5b3fed03f02565c2bce");
+        assert_eq!(id(&with_word), "6b6ffa669b75f5e9e958f2178379e2e0dacf3f611996679e2c6f3c6d59423100");
+    }
+
+    #[test]
+    fn a_seed_phrase_leads_to_the_same_node_on_two_machines() {
+        let words = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        let root1 = key_root::Seed::parse(words).unwrap().root();
+        let root2 = key_root::Seed::parse(&words.to_uppercase()).unwrap().root();
+        let with_word = key_root::Seed::parse(&key_root::join_phrase(words, "Воробей-2026")).unwrap().root();
+        let id = |r: &[u8; 32]| NodeIdentity::node_id_for_root(r).0;
+        assert_eq!(id(&root1), id(&root2));
+        assert_ne!(id(&root1), id(&with_word), "the control word makes another node");
+    }
+}
+
+#[cfg(all(test, unix))]
 mod key_root_tests {
     use super::*;
-    use key_root::{FixedMachine, KeyDir, KeyRootError};
+    use key_root::{KeyDir, KeyRootError};
 
     fn dir() -> (std::path::PathBuf, KeyDir) {
         let path = std::env::temp_dir().join(format!("yandi-identity-test-{}-{}", std::process::id(), rand::random::<u32>()));
@@ -531,27 +549,25 @@ mod key_root_tests {
     #[test]
     fn a_first_run_creates_the_identity_and_every_later_start_loads_the_same_one() {
         let (root, dir) = dir();
-        let m = FixedMachine("machine-A".into());
-        let first = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
-        let again = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let key = [7u8; 32];
+        let first = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
+        let again = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         assert!(same(&first, &again), "a second start produced a different identity");
-        // with a root (the recoverable format) it is the same identity object, stored differently only after migration
         let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
     fn an_existing_identity_that_cannot_be_opened_stops_the_node_and_changes_nothing() {
         let (root, dir) = dir();
-        let m = FixedMachine("machine-A".into());
-        let original = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let key = [7u8; 32];
+        let original = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         let file = dir.identity_file(9000);
         let before = std::fs::read(&file).unwrap();
-        // another machine, a password set later: both must fail closed and leave the file alone
-        let other = FixedMachine("machine-B".into());
-        assert!(matches!(NodeIdentity::load_or_create_in(&dir, &other, None, 9000, None), Err(KeyRootError::DecryptFailed)));
-        assert!(matches!(NodeIdentity::load_or_create_in(&dir, &m, Some("set later"), 9000, None), Err(KeyRootError::DecryptFailed)));
+        // no root, or another root: both must fail closed and leave the file alone
+        assert!(matches!(NodeIdentity::load_or_create_in(&dir, 9000, None), Err(KeyRootError::RecoveryRequired)));
+        assert!(matches!(NodeIdentity::load_or_create_in(&dir, 9000, Some(&[8u8; 32])), Err(KeyRootError::DecryptFailed)));
         assert_eq!(std::fs::read(&file).unwrap(), before, "a failed load changed the identity file");
-        let back = NodeIdentity::load_or_create_in(&dir, &m, None, 9000, None).unwrap();
+        let back = NodeIdentity::load_or_create_in(&dir, 9000, Some(&key)).unwrap();
         assert!(same(&original, &back));
         let _ = std::fs::remove_dir_all(root);
     }

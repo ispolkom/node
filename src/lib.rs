@@ -31,28 +31,59 @@
 //! - **util** - Common types and utilities
 
 pub mod bootstrap;
+/// Рукопожатие v3: исследовательская модель (кодек, ключи, автомат), к узлу не подключена — docs/HANDSHAKE_HARDENING.md.
+pub mod hs3;
 #[cfg(unix)]
 pub mod closed_api;
 #[cfg(unix)]
 pub mod closed_env;
+pub mod backup_signal;
+pub mod local_overrides;
+pub mod file_retention;
+#[cfg(unix)]
+pub mod node_backup;
+#[cfg(unix)]
+pub mod backup_api;
+#[cfg(unix)]
+pub mod admin_cli;
+#[cfg(unix)]
+pub mod setup_cli;
+pub mod i18n;
+#[cfg(unix)]
+pub mod backup_cli;
 pub mod communication;
 pub mod core;
 pub mod crypto;
 pub mod dataplane;
 pub mod dht;
+pub mod complaints;
+pub mod content_policy;
+pub mod device_profile;
 pub mod exit_policy;
+pub mod autonomy;
+pub mod node_directory;
+pub mod file_vault;
 pub mod exit_select;
 pub mod hops;
 pub mod hops_net;
+#[cfg(unix)]
+pub use key_root::hw_print;
 pub mod ip_history;
 pub mod mdns;
+pub mod guest;
+pub mod mail_policy;
+pub mod invite;
 pub mod mobile_api;
 pub mod mobile_files;
 pub mod group_client;
 pub mod mobile_group_files;
 pub mod mobile_groups;
+pub mod mobile_profile;
+pub mod profile_sync;
+pub mod chat_reactions;
 pub mod mobile_self;
 pub mod mobile_tls;
+#[cfg(unix)]
 pub mod node_vault;
 pub mod netlayer;
 pub mod network_offers;
@@ -63,6 +94,12 @@ pub mod protocol;
 pub mod proxy;
 pub mod reachability;
 pub mod reciprocity;
+pub mod release;
+pub mod update_check;
+pub mod updates;
+pub mod android_update;
+#[cfg(target_os = "linux")]
+pub mod updater;
 pub mod relay_net;
 pub mod route_rules;
 pub mod socks5;

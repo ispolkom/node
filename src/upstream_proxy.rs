@@ -294,6 +294,9 @@ struct Pool {
     file: PoolFile,
     health: HashMap<String, Health>,
     assign: HashMap<String, Assign>,
+    /// настройки прокси есть, но сейчас недоступны (файл не читается, повреждён, не открывается ключом, среда заперта):
+    /// выход прямым соединением запрещён — иначе наружу ушёл бы реальный адрес узла
+    unavailable: bool,
 }
 
 fn path() -> std::path::PathBuf {
@@ -332,13 +335,90 @@ pub fn start_locked() {
 /// Заперто: настройки убираются из памяти, файл не меняется.
 pub fn lock() {
     *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Locked;
-    *pool() = Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new() };
+    *pool() = Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: configured_on_disk() };
 }
 
 /// Выдан ключ области: настройки читаются из запечатанного файла (открытого файла в этом режиме больше нет).
 pub fn unlock(key: [u8; 32]) {
     *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = Mode::Sealed(key);
     *pool() = load_pool();
+    request_probe();
+}
+
+// ---- проверка живости: раз в сутки, по очереди, каждый добавленный прокси
+
+const PROBE_EVERY: Duration = Duration::from_secs(24 * 3600);
+
+fn last_probe() -> &'static Mutex<Option<Instant>> {
+    static L: OnceLock<Mutex<Option<Instant>>> = OnceLock::new();
+    L.get_or_init(|| Mutex::new(None))
+}
+
+/// Проверить в ближайшую минуту (после открытия среды, добавления или правки), а не ждать суток.
+fn request_probe() {
+    *last_probe().lock().unwrap_or_else(|e| e.into_inner()) = None;
+}
+
+/// Сколько прокси добавлено и сколько из них сейчас отвечает. `None` — настройки недоступны (среда заперта).
+pub fn summary() -> Option<(usize, usize)> {
+    let now = Instant::now();
+    let g = pool();
+    if g.unavailable {
+        return None;
+    }
+    let working = g.file.proxies.iter().filter(|e| entry_view(&g, e, now)["state"] == "ok").count();
+    Some((g.file.proxies.len(), working))
+}
+
+/// Один проход: соединиться через каждый добавленный прокси (по очереди) с общеизвестным адресом и ничего не передавать.
+pub async fn probe_all() {
+    // пароли не держим между проверками: список номеров, а настройки каждой записи берутся свежими перед её соединением
+    let ids: Vec<String> = pool().file.proxies.iter().map(|e| e.id.clone()).collect();
+    for id in ids {
+        if mode_is_locked() {
+            return; // среда заперта посреди прохода: новых соединений с сохранёнными паролями не открываем
+        }
+        let Some(s) = pool().file.proxies.iter().find(|e| e.id == id).map(Entry::settings) else { continue };
+        let r = connect(&s, "1.1.1.1", 443, Duration::from_secs(10)).await;
+        let now = Instant::now();
+        // результат относится к той записи, что проверяли: среду могли запереть, а адрес или вход — поменять, пока шло соединение
+        let same = !mode_is_locked() && pool().file.proxies.iter().find(|e| e.id == id).map(Entry::settings).as_ref() == Some(&s);
+        drop(s);
+        if !same {
+            continue;
+        }
+        match r {
+            Ok(_) => {
+                let mut g = pool();
+                let h = g.health.entry(id).or_default();
+                h.fails = 0;
+                h.cooldown_until = None;
+                h.last_ok = Some(now);
+                h.last_error = None;
+            }
+            Err(e) => note_fail(pool_cell(), &id, &e.to_string(), now),
+        }
+    }
+}
+
+/// Фоновая проверка: раз в сутки (и сразу после открытия среды или изменения списка).
+pub async fn health_scheduler() {
+    loop {
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let due = {
+            let last = last_probe().lock().unwrap_or_else(|e| e.into_inner());
+            last.map_or(true, |t| t.elapsed() >= PROBE_EVERY)
+        };
+        if !due || mode_is_locked() || pool().file.proxies.is_empty() {
+            continue;
+        }
+        *last_probe().lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
+        probe_all().await;
+    }
+}
+
+fn mode_is_locked() -> bool {
+    matches!(mode(), Mode::Locked)
 }
 
 /// Перенос открытого файла в запечатанный; открытая копия затирается только после проверки записанного.
@@ -360,20 +440,43 @@ fn seal_existing_at(plain: &std::path::Path, sealed: &std::path::Path, key: &[u8
     Ok(())
 }
 
-fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path) -> Option<PoolFile> {
+/// Есть ли на диске настройки прокси (любого вида).
+fn configured_on_disk() -> bool {
+    path().exists() || sealed_path().exists()
+}
+
+/// `Ok(None)` — прокси не настраивались; `Err(())` — настройки есть, но прочитать их сейчас нельзя.
+fn read_pool_file(mode: Mode, plain: &std::path::Path, sealed: &std::path::Path) -> Result<Option<PoolFile>, ()> {
+    use std::io::ErrorKind::NotFound;
     match mode {
-        Mode::Plain => std::fs::read(plain).ok().and_then(|b| parse_file(&b)),
-        Mode::Locked => None,
-        Mode::Sealed(key) => std::fs::read(sealed)
-            .ok()
-            .and_then(|b| crate::util::sealed::open(&key, SEAL_AAD, &b))
-            .and_then(|b| parse_file(&b)),
+        Mode::Plain => match std::fs::read(plain) {
+            Ok(b) => parse_file(&b).map(Some).ok_or(()),
+            // остался только запечатанный файл: настройки есть, но в этом режиме не открываются — выход закрыт
+            Err(e) if e.kind() == NotFound => if sealed.exists() { Err(()) } else { Ok(None) },
+            Err(_) => Err(()),
+        },
+        // заперто: настройки не читаются; если они есть — выход прямым соединением закрыт до входа владельца
+        Mode::Locked => {
+            if plain.exists() || sealed.exists() {
+                Err(())
+            } else {
+                Ok(None)
+            }
+        }
+        Mode::Sealed(key) => match std::fs::read(sealed) {
+            Ok(b) => crate::util::sealed::open(&key, SEAL_AAD, &b).and_then(|b| parse_file(&b)).map(Some).ok_or(()),
+            // открытый файл не перенесён (сбой миграции): настройки есть, прямой выход открывать нельзя
+            Err(e) if e.kind() == NotFound => if plain.exists() { Err(()) } else { Ok(None) },
+            Err(_) => Err(()),
+        },
     }
 }
 
 fn load_pool() -> Pool {
-    let file = read_pool_file(mode(), &path(), &sealed_path());
-    Pool { file: file.unwrap_or_default(), health: HashMap::new(), assign: HashMap::new() }
+    match read_pool_file(mode(), &path(), &sealed_path()) {
+        Ok(file) => Pool { file: file.unwrap_or_default(), health: HashMap::new(), assign: HashMap::new(), unavailable: false },
+        Err(()) => Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: true },
+    }
 }
 
 /// Прочитать файл: новый формат (со списком) или прежний (один прокси).
@@ -381,11 +484,19 @@ fn parse_file(bytes: &[u8]) -> Option<PoolFile> {
     let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     if v.get("proxies").is_some() {
         let f: PoolFile = serde_json::from_value(v).ok()?;
+        // включённая запись, не прошедшая проверку, — ошибка настроек, а не повод тихо выйти напрямую с настоящим адресом узла:
+        // отбрасываются только выключенные непригодные записи
+        if f.enabled && f.proxies.iter().any(|e| e.enabled && e.settings().check().is_err()) {
+            return None;
+        }
         let proxies = f.proxies.into_iter().filter(|e| e.settings().check().is_ok()).collect();
         return Some(PoolFile { proxies, ..f });
     }
     let s: Settings = serde_json::from_value(v).ok()?;
-    s.check().ok()?;
+    if s.check().is_err() {
+        // прежний формат (один прокси): непригодный включённый — ошибка (выход закрыт), выключенный — просто нет прокси
+        return if s.enabled { None } else { Some(PoolFile::default()) };
+    }
     Some(PoolFile { proxies: vec![Entry::new(s, None)], ..PoolFile::default() })
 }
 
@@ -405,6 +516,16 @@ fn persist(p: &Pool) -> Result<(), String> {
         Mode::Locked => Err("закрытая среда заперта: введите пароль владельца".into()),
         Mode::Sealed(key) => crate::util::sealed::write(&sealed_path(), &key, SEAL_AAD, &bytes).map_err(|e| format!("не удалось записать настройки: {e}")),
     }
+}
+
+/// Сохранить; при отказе записи вернуть прежнюю настройку в память — иначе операция, которая «не удалась», действовала бы до
+/// перезапуска (например, отказавшее удаление или выключение прокси включило бы прямой выход).
+fn persist_or_rollback(p: &mut Pool, backup: PoolFile) -> Result<(), String> {
+    let r = persist(p);
+    if r.is_err() {
+        p.file = backup;
+    }
+    r
 }
 
 impl Pool {
@@ -501,6 +622,8 @@ fn note_fail(cell: &Mutex<Pool>, id: &str, err: &str, now: Instant) {
     let mut g = cell.lock().unwrap_or_else(|e| e.into_inner());
     let h = g.health.entry(id.to_string()).or_default();
     h.fails = h.fails.saturating_add(1);
+    // известный отказ не превращается в «работает» по таймеру: пауза означает «можно пробовать», а не «исправен»; «работает» вернёт только удача
+    h.last_ok = None;
     let wait = COOLDOWN_BASE.saturating_mul(1u32 << (h.fails - 1).min(5)).min(COOLDOWN_MAX);
     h.cooldown_until = Some(now + wait);
     h.last_error = Some(err.to_string());
@@ -521,7 +644,8 @@ fn proxy_fault(e: &std::io::Error) -> bool {
 /// Включён ли выход через прокси: общий выключатель и хотя бы один включённый прокси.
 pub fn is_active() -> bool {
     let g = pool();
-    g.file.enabled && g.file.proxies.iter().any(|e| e.enabled)
+    // недоступные настройки считаются включённым прокси без единого рабочего: соединения не выходят напрямую
+    g.unavailable || (g.file.enabled && g.file.proxies.iter().any(|e| e.enabled))
 }
 
 /// Соединиться с целью от имени клиента через подходящий прокси. Если выбранный прокси не отвечает, пробуются другие (до трёх).
@@ -581,6 +705,7 @@ pub fn current() -> Option<Settings> {
 pub fn save(s: Settings) -> Result<(), String> {
     s.check()?;
     let mut g = pool();
+    let backup = g.file.clone();
     match g.file.proxies.first_mut() {
         Some(e) => {
             e.enabled = s.enabled;
@@ -594,7 +719,7 @@ pub fn save(s: Settings) -> Result<(), String> {
     if s.enabled {
         g.file.enabled = true;
     }
-    persist(&g)
+    persist_or_rollback(&mut g, backup)
 }
 
 /// Для проверок: подменить пул одним прокси в памяти, не трогая файл настроек.
@@ -688,7 +813,9 @@ fn parse_line(line: &str, default_kind: Kind) -> Result<Settings, String> {
     if let Some((scheme, r)) = line.split_once("://") {
         kind = match scheme.to_ascii_lowercase().as_str() {
             "socks5" | "socks5h" | "socks" => Kind::Socks5,
-            "http" | "https" => Kind::HttpConnect,
+            "http" => Kind::HttpConnect,
+            // TLS до прокси не реализован: принять https:// значило бы молча послать логин и пароль открытым текстом
+            "https" => return Err("https:// (TLS до прокси) не поддерживается: используйте http:// или socks5://".to_string()),
             // саму «схему» не повторяем: при ошибке вставки там может оказаться логин и пароль
             _ => return Err("неизвестная схема (поддерживаются socks5:// и http://)".to_string()),
         };
@@ -703,6 +830,17 @@ fn parse_line(line: &str, default_kind: Kind) -> Result<Settings, String> {
         let (user, password) = cred.split_once(':').ok_or("логин и пароль через двоеточие")?;
         let (h, p) = host_port(hp)?;
         (h, p, Auth::Password { user: user.to_string(), password: password.to_string() })
+    } else if let Some(r) = rest.strip_prefix('[') {
+        // IPv6 в скобках без «@»: [адрес]:порт или [адрес]:порт:логин:пароль
+        let (h, tail) = r.split_once(']').ok_or("нет закрывающей скобки адреса")?;
+        let tail = tail.strip_prefix(':').ok_or("после адреса в скобках нужен :порт")?;
+        let parts: Vec<&str> = tail.splitn(3, ':').collect();
+        let port: u16 = parts[0].parse().map_err(|_| "порт — число от 1 до 65535".to_string())?;
+        match parts.len() {
+            1 => (h.to_string(), port, Auth::None),
+            3 => (h.to_string(), port, Auth::Password { user: parts[1].to_string(), password: parts[2].to_string() }),
+            _ => return Err("ожидается [адрес]:порт или [адрес]:порт:логин:пароль".into()),
+        }
     } else {
         let parts: Vec<&str> = rest.splitn(4, ':').collect();
         match parts.len() {
@@ -856,6 +994,7 @@ async fn add_proxies(Json(r): Json<AddReq>) -> Response {
         }
     }
     let mut g = pool();
+    let backup = g.file.clone();
     let mut added = 0usize;
     for s in found {
         if g.file.proxies.len() >= MAX_PROXIES {
@@ -871,9 +1010,10 @@ async fn add_proxies(Json(r): Json<AddReq>) -> Response {
     }
     if added > 0 {
         g.file.enabled = true;
-        if let Err(e) = persist(&g) {
+        if let Err(e) = persist_or_rollback(&mut g, backup) {
             return (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response();
         }
+        request_probe();
     }
     Json(json!({"ok": added > 0 || errors.is_empty(), "added": added, "errors": errors})).into_response()
 }
@@ -886,6 +1026,48 @@ struct PatchReq {
     /// 0 — вернуть общий предел
     #[serde(default)]
     max_clients: Option<u32>,
+    /// правка адреса, вида и входа: `host`+`port` идут вместе; пустой `password` при том же логине — оставить прежний
+    #[serde(default)]
+    kind: Option<Kind>,
+    #[serde(default)]
+    host: Option<String>,
+    #[serde(default)]
+    port: Option<u16>,
+    /// "none" или "password"
+    #[serde(default)]
+    auth: Option<String>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    password: Option<String>,
+}
+
+/// Запись с применённой правкой; при любой ошибке исходная запись остаётся нетронутой (правка идёт на копии).
+fn patched(old: &Entry, r: PatchReq) -> Result<Entry, String> {
+    let mut e = old.clone();
+    if let Some(on) = r.enabled {
+        e.enabled = on;
+    }
+    if let Some(m) = r.max_clients {
+        e.max_clients = (m > 0).then_some(m);
+    }
+    if r.host.is_some() || r.port.is_some() || r.auth.is_some() || r.kind.is_some() {
+        let f = Form {
+            enabled: e.enabled,
+            kind: r.kind.unwrap_or(e.kind),
+            host: r.host.unwrap_or_else(|| e.host.clone()),
+            port: r.port.unwrap_or(e.port),
+            auth: r.auth.unwrap_or_else(|| if e.auth == Auth::None { "none".into() } else { "password".into() }),
+            user: r.user.unwrap_or_default(),
+            password: r.password.unwrap_or_default(),
+        };
+        let s = from_form(f, Some(e.settings()))?;
+        e.kind = s.kind;
+        e.host = s.host;
+        e.port = s.port;
+        e.auth = s.auth;
+    }
+    Ok(e)
 }
 
 async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Response {
@@ -895,21 +1077,30 @@ async fn patch_proxy(Path(id): Path<String>, Json(r): Json<PatchReq>) -> Respons
         }
     }
     let mut g = pool();
-    let Some(e) = g.file.proxies.iter_mut().find(|e| e.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response() };
-    if let Some(on) = r.enabled {
-        e.enabled = on;
+    let backup = g.file.clone();
+    let Some(pos) = g.file.proxies.iter().position(|e| e.id == id) else { return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response() };
+    // все поля проверяются на копии записи, рабочий пул меняется только целиком и только после успешной проверки
+    let new = match patched(&g.file.proxies[pos], r) {
+        Ok(n) => n,
+        Err(m) => return bad_request(m),
+    };
+    if new.host != g.file.proxies[pos].host || new.port != g.file.proxies[pos].port || new.auth != g.file.proxies[pos].auth || new.kind != g.file.proxies[pos].kind {
+        // у прокси другой адрес или вход: прежние итоги проверки к нему не относятся
+        g.health.remove(&id);
     }
-    if let Some(m) = r.max_clients {
-        e.max_clients = (m > 0).then_some(m);
-    }
-    match persist(&g) {
-        Ok(()) => Json(json!({"ok": true})).into_response(),
+    g.file.proxies[pos] = new;
+    match persist_or_rollback(&mut g, backup) {
+        Ok(()) => {
+            request_probe();
+            Json(json!({"ok": true})).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
 }
 
 async fn delete_proxy(Path(id): Path<String>) -> Response {
     let mut g = pool();
+    let backup = g.file.clone();
     let before = g.file.proxies.len();
     g.file.proxies.retain(|e| e.id != id);
     if g.file.proxies.len() == before {
@@ -917,7 +1108,7 @@ async fn delete_proxy(Path(id): Path<String>) -> Response {
     }
     g.health.remove(&id);
     g.assign.retain(|_, a| a.proxy != id);
-    match persist(&g) {
+    match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
@@ -929,6 +1120,44 @@ async fn test_one(Path(id): Path<String>) -> Response {
         Some(s) => test_settings(s).await.into_response(),
         None => (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response(),
     }
+}
+
+/// Показать логин и пароль одного прокси (глаз в настройках). Только для владельца, пока закрытая среда открыта: в списке пароля нет.
+async fn reveal_one(Path(id): Path<String>) -> Response {
+    let found = pool().file.proxies.iter().find(|e| e.id == id).map(|e| e.auth.clone());
+    match found {
+        Some(Auth::Password { user, password }) => {
+            let mut r = Json(json!({"ok": true, "user": user, "password": password})).into_response();
+            r.headers_mut().insert(axum::http::header::CACHE_CONTROL, axum::http::HeaderValue::from_static("no-store"));
+            r
+        }
+        Some(Auth::None) => Json(json!({"ok": true, "user": "", "password": ""})).into_response(),
+        None => (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "нет такого прокси"}))).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TestReq {
+    text: String,
+    #[serde(default)]
+    kind: Option<Kind>,
+}
+
+/// Проверка до сохранения: каждая строка списка (не больше 10) — соединение через неё; ничего не записывается.
+async fn test_text(Json(r): Json<TestReq>) -> Response {
+    let (found, errors) = parse_lines(&r.text, r.kind.unwrap_or(Kind::Socks5));
+    if found.is_empty() {
+        return bad_request(errors.first().cloned().unwrap_or_else(|| "Введите адрес прокси.".into()));
+    }
+    let mut results = Vec::new();
+    for s in found.into_iter().take(10) {
+        let label = format!("{}:{}", s.host, s.port);
+        let Json(mut v) = test_settings(s).await;
+        v["proxy"] = json!(label);
+        results.push(v);
+    }
+    Json(json!({"ok": true, "results": results, "errors": errors})).into_response()
 }
 
 #[derive(Deserialize)]
@@ -949,6 +1178,7 @@ async fn pool_settings(Json(r): Json<PoolSettingsReq>) -> Response {
         }
     }
     let mut g = pool();
+    let backup = g.file.clone();
     if let Some(v) = r.enabled {
         g.file.enabled = v;
     }
@@ -958,7 +1188,7 @@ async fn pool_settings(Json(r): Json<PoolSettingsReq>) -> Response {
     if let Some(v) = r.strict {
         g.file.strict = v;
     }
-    match persist(&g) {
+    match persist_or_rollback(&mut g, backup) {
         Ok(()) => Json(json!({"ok": true})).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, Json(json!({"ok": false, "error": e}))).into_response(),
     }
@@ -972,6 +1202,8 @@ pub fn router<S: Clone + Send + Sync + 'static>() -> Router<S> {
         // список прокси
         .route("/api/upstream-proxies", get(get_pool).post(add_proxies))
         .route("/api/upstream-proxies/settings", post(pool_settings))
+        .route("/api/upstream-proxies/test", post(test_text))
+        .route("/api/upstream-proxies/:id/reveal", post(reveal_one))
         .route("/api/upstream-proxies/:id", post(patch_proxy).delete(delete_proxy))
         .route("/api/upstream-proxies/:id/test", post(test_one))
 }
@@ -1204,6 +1436,7 @@ mod tests {
             file: PoolFile { enabled: true, max_clients: cap, strict, proxies: ids.iter().enumerate().map(|(i, id)| entry(id, 1000 + i as u16)).collect() },
             health: HashMap::new(),
             assign: HashMap::new(),
+            unavailable: false,
         }
     }
 
@@ -1334,6 +1567,57 @@ mod tests {
         assert!(cell.lock().unwrap().assign.is_empty());
     }
 
+    #[tokio::test]
+    async fn a_list_is_pinged_before_saving_and_nothing_is_stored() {
+        let (port, _rx) = fake_socks(Some(("u", "p")), 0).await;
+        let ok = test_text(Json(TestReq { text: format!("127.0.0.1:{port}:u:p"), kind: None })).await;
+        let body = axum::body::to_bytes(ok.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["results"][0]["ok"], true, "{v}");
+        assert!(v["results"][0]["ms"].is_u64());
+        // wrong password: the proxy answers, the check says so, and the password is not echoed back
+        let (port, _rx) = fake_socks(Some(("u", "p")), 0).await;
+        let bad = test_text(Json(TestReq { text: format!("127.0.0.1:{port}:u:WRONG"), kind: None })).await;
+        let body = axum::body::to_bytes(bad.into_body(), 1 << 20).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["results"][0]["ok"], false);
+        assert!(!String::from_utf8_lossy(&body).contains("WRONG"));
+        // a line that is not a proxy is refused with a sentence
+        let r = test_text(Json(TestReq { text: "not a proxy".into(), kind: None })).await;
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn editing_keeps_the_old_password_only_for_the_same_login() {
+        let old = Settings { enabled: true, kind: Kind::Socks5, host: "h.example".into(), port: 1080, auth: Auth::Password { user: "u".into(), password: "secret".into() } };
+        let form = |user: &str, password: &str| Form { enabled: true, kind: Kind::Socks5, host: "h2.example".into(), port: 1081, auth: "password".into(), user: user.into(), password: password.into() };
+        let same = from_form(form("u", ""), Some(old.clone())).unwrap();
+        assert_eq!((same.host.as_str(), same.port, same.auth), ("h2.example", 1081, Auth::Password { user: "u".into(), password: "secret".into() }));
+        let other = from_form(form("v", ""), Some(old)).unwrap();
+        assert_eq!(other.auth, Auth::Password { user: "v".into(), password: String::new() }, "a new login does not inherit the old password");
+    }
+
+    #[test]
+    fn a_rejected_edit_changes_nothing_and_an_accepted_one_changes_everything() {
+        let old = Entry { id: "a".into(), enabled: false, kind: Kind::Socks5, host: "h.example".into(), port: 1080, auth: Auth::Password { user: "u".into(), password: "pw".into() }, max_clients: None };
+        let bad = patched(&old, PatchReq { enabled: Some(true), max_clients: Some(7), kind: None, host: Some("bad host".into()), port: Some(1080), auth: None, user: None, password: None });
+        assert!(bad.is_err(), "плохой адрес отвергается целиком");
+        assert!(!old.enabled && old.max_clients.is_none(), "исходная запись не тронута");
+        let ok = patched(&old, PatchReq { enabled: Some(true), max_clients: Some(7), kind: None, host: Some("h2.example".into()), port: Some(1081), auth: None, user: Some("u".into()), password: None }).unwrap();
+        assert!(ok.enabled && ok.max_clients == Some(7) && ok.host == "h2.example" && ok.port == 1081);
+        assert_eq!(ok.auth, Auth::Password { user: "u".into(), password: "pw".into() }, "пароль при том же логине сохранён");
+    }
+
+    #[test]
+    fn ipv6_in_brackets_is_understood_with_and_without_credentials() {
+        let (ok, err) = parse_lines("[2001:db8::1]:1080\n[2001:db8::2]:1081:u:p:w\nsocks5://u:p@[2001:db8::3]:1082\n[2001:db8::4]", Kind::Socks5);
+        assert_eq!(ok.len(), 3, "{err:?}");
+        assert_eq!((ok[0].host.as_str(), ok[0].port, ok[0].auth.clone()), ("2001:db8::1", 1080, Auth::None));
+        assert_eq!(ok[1].auth, Auth::Password { user: "u".into(), password: "p:w".into() }, "двоеточие внутри пароля сохраняется");
+        assert_eq!((ok[2].host.as_str(), ok[2].port), ("2001:db8::3", 1082));
+        assert_eq!(err.len(), 1, "адрес без порта отвергнут");
+    }
+
     #[test]
     fn only_the_proxys_own_faults_are_held_against_it() {
         use std::io::{Error, ErrorKind::*};
@@ -1447,7 +1731,9 @@ mod tests {
         let off = br#"{"enabled": false, "kind": "socks5", "host": "h.example", "port": 1, "auth": {"type": "none"}}"#;
         assert!(!parse_file(off).unwrap().proxies[0].enabled);
         assert!(parse_file(b"not json").is_none());
-        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "an entry that fails the check is dropped");
+        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).is_none(), "an enabled entry that fails the check closes the exit instead of opening a direct one (P7-19)");
+        assert!(parse_file(br#"{"proxies": [{"id":"x","enabled":false,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "a disabled unusable entry is simply dropped");
+        assert!(parse_file(br#"{"enabled": false, "proxies": [{"id":"x","enabled":true,"kind":"socks5","host":"bad host","port":1,"auth":{"type":"none"}}]}"#).unwrap().proxies.is_empty(), "the owner switched the whole pool off: direct exit is intended");
     }
 
     /// Закрытая среда: заперто — настройки не читаются; после переноса открытая копия затёрта, читается только с ключом.
@@ -1458,16 +1744,46 @@ mod tests {
         let file = br#"{"proxies":[{"id":"a","enabled":true,"kind":"socks5","host":"proxy.example","port":1080,"auth":{"type":"password","user":"u","password":"hunter2-secret"}}]}"#;
         std::fs::write(&plain, file).unwrap();
         assert!(parse_file(file).is_some(), "образец разбирается");
-        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none(), "заперто: открытый файл не читается");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_err(), "заперто: открытый файл не читается, а выход закрыт");
         assert!(plain.exists());
 
         let key = [3u8; 32];
         seal_existing_at(&plain, &sealed, &key).unwrap();
         assert!(!plain.exists(), "открытая копия затёрта");
         assert!(!String::from_utf8_lossy(&std::fs::read(&sealed).unwrap()).contains("hunter2"));
-        assert_eq!(read_pool_file(Mode::Sealed(key), &plain, &sealed).unwrap().proxies[0].host, "proxy.example");
-        assert!(read_pool_file(Mode::Sealed([4u8; 32]), &plain, &sealed).is_none(), "чужой ключ");
-        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_none());
+        assert_eq!(read_pool_file(Mode::Sealed(key), &plain, &sealed).unwrap().unwrap().proxies[0].host, "proxy.example");
+        assert!(read_pool_file(Mode::Sealed([4u8; 32]), &plain, &sealed).is_err(), "чужой ключ: настройки есть, но не открываются — выход закрыт");
+        assert!(read_pool_file(Mode::Locked, &plain, &sealed).is_err());
         seal_existing_at(&plain, &sealed, &key).unwrap(); // повтор: файла нет — не ошибка
+    }
+
+    /// Нет настроек — прямой выход разрешён; есть, но не читаются — запрещён (иначе наружу уходит реальный адрес).
+    #[test]
+    fn unreadable_settings_close_the_direct_exit_instead_of_opening_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let (plain, sealed) = (dir.path().join("upstream_proxy.json"), dir.path().join("upstream_proxy.enc"));
+        assert!(matches!(read_pool_file(Mode::Plain, &plain, &sealed), Ok(None)), "ничего не настраивали");
+        assert!(matches!(read_pool_file(Mode::Locked, &plain, &sealed), Ok(None)));
+        assert!(matches!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed), Ok(None)));
+        // перенос не удался: есть только открытый файл — в режиме запечатанного он не «отсутствие настроек», а закрытый выход
+        std::fs::write(&plain, br#"{"host":"proxy.example","port":1080,"kind":"socks5"}"#).unwrap();
+        assert!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed).is_err(), "не перенесённый открытый файл: выход закрыт");
+        std::fs::remove_file(&plain).unwrap();
+        std::fs::write(&plain, b"{broken").unwrap();
+        assert!(read_pool_file(Mode::Plain, &plain, &sealed).is_err(), "повреждённый файл — выход закрыт");
+        std::fs::remove_file(&plain).unwrap();
+        std::fs::write(&sealed, b"garbage garbage garbage garbage garbage").unwrap();
+        assert!(read_pool_file(Mode::Sealed([1u8; 32]), &plain, &sealed).is_err());
+        assert!(read_pool_file(Mode::Plain, &plain, &sealed).is_err(), "есть только запечатанный файл, режим открытого: выход закрыт");
+    }
+
+    #[test]
+    fn an_https_proxy_is_refused_instead_of_being_downgraded_to_plain_http() {
+        let (ok, errors) = parse_lines("https://user:pw@proxy.example:443\nhttp://proxy.example:8080", Kind::Socks5);
+        assert_eq!(ok.len(), 1);
+        assert_eq!(ok[0].port, 8080);
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("https://"), "{errors:?}");
+        assert!(!errors[0].contains("pw"), "пароль в сообщение не попадает");
     }
 }

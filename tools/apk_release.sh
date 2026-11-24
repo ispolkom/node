@@ -11,15 +11,13 @@
 #   --show   вводить фразу видимо (проверить раскладку/опечатку глазами; делать только когда никто не видит экран).
 set -euo pipefail
 cd "$(dirname "$0")/.."
+source tools/paths.sh
 SHOW=0; CHECK=0
 for a in "$@"; do case "$a" in --show) SHOW=1;; --check) CHECK=1;; *) echo "неизвестный ключ: $a"; exit 2;; esac; done
 
 CERT=${YANDI_CERT:-mobile/yandi_mobile/android/signing/yandi-release-cert.pem}  # YANDI_CERT — только для пробного прогона
 OUT_APK=mobile/yandi_mobile/build/app/outputs/flutter-apk/app-release.apk
-export JAVA_HOME=/home/iam/.local/jdk/jdk-17.0.20.1+1
-export ANDROID_HOME=/home/iam/.local/android-sdk ANDROID_SDK_ROOT=/home/iam/.local/android-sdk
-export PATH="$JAVA_HOME/bin:$PATH"
-FLUTTER=/home/iam/.local/flutter-sdk/bin/flutter
+FLUTTER=flutter
 APKSIGNER=$(ls -d "$ANDROID_HOME"/build-tools/*/apksigner | sort -V | tail -1)
 
 env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY cargo build --release --offline --bin apk_signing_key >/dev/null 2>&1 \

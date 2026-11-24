@@ -6,6 +6,7 @@
 
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use std::collections::HashMap;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -40,8 +41,12 @@ pub struct Socks5ProxyServer {
     next_request_id: Arc<RwLock<u64>>,
     /// Pending requests: request_id -> oneshot sender
     pending_requests: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
+    /// туннели в процессе установки: ранние данные выхода ждут публикации приёмника (см. `proxy::early_tunnel`)
+    establishing: Arc<crate::proxy::early_tunnel::EarlyTunnels>,
+    /// Какому выходу отправлен каждый запрос: ответы и данные принимаются только от него
+    expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     /// Channels for responses and tunnel data
     response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -65,12 +70,12 @@ impl Socks5Server {
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    println!("[socks5] New connection from {}", addr);
+                    println!("[socks5] New connection from {}", crate::util::logsafe::a(&addr));
                     let config = self.config.clone();
 
                     tokio::spawn(async move {
                         if let Err(e) = Self::handle_client(stream, addr, config).await {
-                            eprintln!("[socks5] Error handling {}: {:?}", addr, e);
+                            eprintln!("[socks5] Error handling {}: {:?}", crate::util::logsafe::a(&addr), e);
                         }
                     });
                 }
@@ -99,7 +104,7 @@ impl Socks5Server {
         let request = tokio::time::timeout(hs, Self::read_request(&mut stream)).await
             .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
-        println!("[socks5] Request from {}: {:?}", client_addr, request.command);
+        println!("[socks5] Request from {}: {:?}", crate::util::logsafe::a(&client_addr), request.command);
 
         // Phase 4: Execute command
         match request.command {
@@ -126,11 +131,13 @@ impl Socks5Server {
 
     /// Phase 1: Authentication selection
     async fn do_auth_selection(stream: &mut TcpStream, config: &Socks5Config) -> Result<Socks5AuthMethod> {
-        let mut buf = [0u8; 256];
-
-        // Read client hello
-        let n = stream.read(&mut buf).await?;
-        let auth_select = Socks5AuthSelect::from_bytes(&buf[..n])?;
+        // Read client hello: [ver][nmethods][methods…] — ровно столько байт, сколько заявлено (TCP может дробить сообщение)
+        let mut hello = [0u8; 2];
+        stream.read_exact(&mut hello).await?;
+        let mut buf = vec![hello[0], hello[1]];
+        buf.resize(2 + hello[1] as usize, 0);
+        stream.read_exact(&mut buf[2..]).await?;
+        let auth_select = Socks5AuthSelect::from_bytes(&buf)?;
 
         // Select auth method
         let method = if config.auth_required {
@@ -163,26 +170,20 @@ impl Socks5Server {
     /// Username/password authentication (RFC 1929)
     /// Возвращает «закрепление выхода»: имя `yandi.<начало номера узла>` просит именно этот выход (так узел проверяет страну выхода).
     async fn do_username_password_auth(stream: &mut TcpStream, config: &Socks5Config) -> Result<Option<String>> {
-        let mut buf = [0u8; 512];
-
-        let n = stream.read(&mut buf).await?;
-        if n < 2 {
-            return Err(anyhow!("Auth packet too short"));
+        // RFC 1929: [ver][ulen][user][plen][pass] — читаем по заявленным длинам
+        let mut head = [0u8; 2];
+        stream.read_exact(&mut head).await?;
+        if head[0] != 0x01 {
+            return Err(anyhow!("Invalid auth subnegotiation version"));
         }
-
-        let ulen = buf[1] as usize;
-        if n < 2 + ulen {
-            return Err(anyhow!("Username too long"));
-        }
-
-        let username = String::from_utf8_lossy(&buf[2..2+ulen]).to_string();
-
-        let plen = buf[2+ulen] as usize;
-        if n < 2 + ulen + 1 + plen {
-            return Err(anyhow!("Password too long"));
-        }
-
-        let password = String::from_utf8_lossy(&buf[2+ulen+1..2+ulen+1+plen]).to_string();
+        let mut user = vec![0u8; head[1] as usize];
+        stream.read_exact(&mut user).await?;
+        let mut plen = [0u8; 1];
+        stream.read_exact(&mut plen).await?;
+        let mut pass = vec![0u8; plen[0] as usize];
+        stream.read_exact(&mut pass).await?;
+        let username = String::from_utf8_lossy(&user).to_string();
+        let password = String::from_utf8_lossy(&pass).to_string();
 
         // Verify credentials
         let mut pin: Option<String> = None;
@@ -211,10 +212,24 @@ impl Socks5Server {
 
     /// Read connection request
     async fn read_request(stream: &mut TcpStream) -> Result<Socks5Request> {
-        let mut buf = [0u8; 512];
-
-        let n = stream.read(&mut buf).await?;
-        let request = Socks5Request::from_bytes(&buf[..n])?;
+        // [ver][cmd][rsv][atyp] и адрес заявленной длины — по частям, TCP может дробить запрос
+        let mut buf = vec![0u8; 4];
+        stream.read_exact(&mut buf).await?;
+        let rest = match buf[3] {
+            0x01 => 4 + 2,
+            0x04 => 16 + 2,
+            0x03 => {
+                let mut l = [0u8; 1];
+                stream.read_exact(&mut l).await?;
+                buf.push(l[0]);
+                l[0] as usize + 2
+            }
+            other => return Err(anyhow!("Unsupported address type: {}", other)),
+        };
+        let at = buf.len();
+        buf.resize(at + rest, 0);
+        stream.read_exact(&mut buf[at..]).await?;
+        let request = Socks5Request::from_bytes(&buf)?;
 
         Ok(request)
     }
@@ -261,7 +276,7 @@ impl Socks5Server {
         let response = Socks5Response::success(bind_addr);
         stream.write_all(&response.to_bytes()).await?;
 
-        println!("[socks5] Connected to {}", target_addr);
+        println!("[socks5] Connected to {}", crate::util::logsafe::a(&target_addr));
 
         // Relay data
         let (mut client_read, mut client_write) = stream.split();
@@ -339,6 +354,8 @@ impl Socks5ProxyServer {
             next_request_id: Arc::new(RwLock::new(1)),
             pending_requests: Arc::new(Mutex::new(HashMap::new())),
             active_tunnels: Arc::new(Mutex::new(HashMap::new())),
+            establishing: crate::proxy::early_tunnel::EarlyTunnels::new(),
+            expected: Arc::new(crate::proxy::expected_peers::ExpectedPeers::new()),
             response_rx: Arc::new(Mutex::new(None)),
             tunnel_data_rx: Arc::new(Mutex::new(None)),
             station: Arc::new(station),
@@ -400,27 +417,30 @@ impl Socks5ProxyServer {
         let transport_clone = self.transport.clone();
         let pending_clone = self.pending_requests.clone();
         let response_rx_clone = self.response_rx.clone();
+        let expected_responses = self.expected.clone();
         tokio::spawn(async move {
-            Self::handle_responses(transport_clone, pending_clone, response_rx_clone).await;
+            Self::handle_responses(transport_clone, pending_clone, response_rx_clone, expected_responses).await;
         });
 
         // Subscribe to tunnel data
         let active_tunnels_clone = self.active_tunnels.clone();
         let tunnel_rx_clone = self.tunnel_data_rx.clone();
+        let expected_tunnels = self.expected.clone();
+        let establishing_clone = self.establishing.clone();
         tokio::spawn(async move {
-            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone).await;
+            Self::handle_tunnel_data(active_tunnels_clone, tunnel_rx_clone, expected_tunnels, establishing_clone).await;
         });
 
         // Accept incoming connections
         loop {
             match listener.accept().await {
                 Ok((stream, addr)) => {
-                    debug!("📥 New SOCKS5 connection from {}", addr);
+                    debug!("📥 New SOCKS5 connection from {}", crate::util::logsafe::a(&addr));
 
                     let client = self.clone_for_handler();
                     tokio::spawn(async move {
                         if let Err(e) = client.handle_client_p2p(stream, addr).await {
-                            error!("❌ Error handling SOCKS5 client {}: {}", addr, e);
+                            error!("❌ Error handling SOCKS5 client {}: {}", crate::util::logsafe::a(&addr), e);
                         }
                     });
                 }
@@ -444,6 +464,8 @@ impl Socks5ProxyServer {
             next_request_id: self.next_request_id.clone(),
             pending_requests: self.pending_requests.clone(),
             active_tunnels: self.active_tunnels.clone(),
+            establishing: self.establishing.clone(),
+            expected: self.expected.clone(),
             response_rx: self.response_rx.clone(),
             tunnel_data_rx: self.tunnel_data_rx.clone(),
             station: self.station.clone(),
@@ -455,11 +477,16 @@ impl Socks5ProxyServer {
         _transport: Arc<P2PTransport>,
         pending: Arc<Mutex<HashMap<u64, tokio::sync::oneshot::Sender<Socks5ProxyResponse>>>>,
         response_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyResponse)>>>>,
+        expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
     ) {
         let mut rx_opt = { response_rx.lock().await.take() };
 
         if let Some(mut rx) = rx_opt {
-            while let Some((_source_node, response)) = rx.recv().await {
+            while let Some((source_node, response)) = rx.recv().await {
+                if !expected.is_from_owner(response.request_id, &source_node) {
+                    warn!("⚠️  SOCKS5 ответ #{} не от того выхода, которому ушёл запрос — отброшен", response.request_id);
+                    continue;
+                }
                 debug!("📨 Received SOCKS5 response for request #{}", response.request_id);
 
                 // Find pending request
@@ -479,42 +506,29 @@ impl Socks5ProxyServer {
 
     /// Handle tunnel data from exit node
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<u64, tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<u64, crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
+        expected: Arc<crate::proxy::expected_peers::ExpectedPeers>,
+        establishing: Arc<crate::proxy::early_tunnel::EarlyTunnels>,
     ) {
-        let mut rx_opt = { tunnel_rx.lock().await.take() };
-
-        if let Some(mut rx) = rx_opt {
-            while let Some((_source_node, tunnel_data)) = rx.recv().await {
-                let tunnel_id = tunnel_data.tunnel_id;
-
-                // Check if tunnel should be closed
-                if tunnel_data.close {
-                    debug!("🔚 Tunnel #{} closed by exit node", tunnel_id);
-                    // Remove from active tunnels
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&tunnel_id);
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
+            while let Some((source_node, tunnel_data)) = rx.recv().await {
+                if !expected.is_from_owner(tunnel_data.tunnel_id, &source_node) {
+                    warn!("[rx] tunnel #{}: данные не от своего выхода, отброшены", tunnel_data.tunnel_id);
                     continue;
                 }
-
-                // Get write half for this tunnel (keep lock during write!)
-                let write_result = {
-                    let mut tunnels = active_tunnels.lock().await;
-
-                    if let Some(write_half) = tunnels.get_mut(&tunnel_id) {
-                        // Write data while holding lock
-                        write_half.write_all(&tunnel_data.data).await
-                            .map_err(|e| (e.to_string()))
-                    } else {
-                        Err("No active tunnel".to_string())
+                let key = tunnel_data.tunnel_id;
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
-                };
-
-                if let Err(e) = write_result {
-                    error!("❌ Error writing to tunnel #{}: {}", tunnel_id, e);
-                    // Remove broken tunnel
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&tunnel_id);
+                } else {
+                    // туннель ещё устанавливается: данные ждут публикации приёмника
+                    establishing.offer(key, tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset);
                 }
             }
         }
@@ -538,7 +552,7 @@ impl Socks5ProxyServer {
         let request = tokio::time::timeout(hs, Socks5Server::read_request(&mut client_stream)).await
             .map_err(|_| anyhow!("SOCKS5 request timeout"))??;
 
-        debug!("📨 SOCKS5 request from {}: {:?}", client_addr, request.command);
+        debug!("📨 SOCKS5 request from {}: {:?}", crate::util::logsafe::a(&client_addr), request.command);
 
         // Phase 4: Execute command via P2P
         match request.command {
@@ -654,7 +668,7 @@ impl Socks5ProxyServer {
             current
         };
 
-        debug!("🔌 CONNECT request #{} to {:?}", request_id, target_addr);
+        debug!("🔌 CONNECT request #{}", request_id);
 
         // 3. Парсим target address
         let (target_host, target_port) = match target_addr {
@@ -689,30 +703,42 @@ impl Socks5ProxyServer {
         // 5. Создаём oneshot для ответа
         let (tx, rx) = tokio::sync::oneshot::channel();
 
-        // 6. Сохраняем pending request
+        // 6. Сохраняем pending request и выход, от которого ждём ответ
         {
             let mut pending = self.pending_requests.lock().await;
+            let tunnels = self.active_tunnels.lock().await;
+            self.expected.retain_live(|id| pending.contains_key(&id) || tunnels.contains_key(&id) || self.establishing.is_establishing(id));
+            self.expected.expect(request_id, exit_node);
             pending.insert(request_id, tx);
         }
+        // отметка «устанавливается» живёт до публикации приёмника (снимается при любом выходе)
+        let _establishing = self.establishing.begin(request_id);
 
-        // 7. Сериализуем и отправляем через YTP
-        let request_bytes = serde_json::to_vec(&proxy_request)
-            .map_err(|e| anyhow!("Failed to serialize SOCKS5 request: {}", e))?;
+        // 7–8. Сериализуем, отправляем через YTP и ждём ответа выхода. На любом неуспехе (сбой отправки, таймаут, обрыв) запись о запросе
+        // снимается: иначе она жила бы вечно (поздний ответ — единственный другой путь удаления) и копилась при молчащем выходе.
+        let proxy_response = {
+            let outcome: Result<Socks5ProxyResponse> = async {
+                let request_bytes = serde_json::to_vec(&proxy_request)
+                    .map_err(|e| anyhow!("Failed to serialize SOCKS5 request: {}", e))?;
 
-        debug!("📤 Sending SOCKS5 request via YTP to exit node");
+                debug!("📤 Sending SOCKS5 request via YTP to exit node");
 
-        self.station.send_train_batched(exit_node, request_bytes).await
-            .map_err(|e| { report(false); anyhow!("Failed to send SOCKS5 request: {}", e) })?;
+                self.station.send_train_batched(exit_node, request_bytes).await
+                    .map_err(|e| { report(false); anyhow!("Failed to send SOCKS5 request: {}", e) })?;
 
-        debug!("⏳ Waiting for SOCKS5 response...");
+                debug!("⏳ Waiting for SOCKS5 response...");
 
-        // 8. Ждём ответа от exit node
-        let proxy_response = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            rx
-        ).await
-        .map_err(|_| { report(false); anyhow!("Timeout waiting for SOCKS5 response") })?
-        .map_err(|_| { report(false); anyhow!("Failed to receive SOCKS5 response") })?;
+                tokio::time::timeout(std::time::Duration::from_secs(10), rx).await
+                    .map_err(|_| { report(false); anyhow!("Timeout waiting for SOCKS5 response") })?
+                    .map_err(|_| { report(false); anyhow!("Failed to receive SOCKS5 response") })
+            }
+            .await;
+            if outcome.is_err() {
+                self.pending_requests.lock().await.remove(&request_id);
+                self.expected.forget(request_id);
+            }
+            outcome?
+        };
 
         // 9. Проверяем статус (2 = выход не пускает нас: отдыхает; остальное — беда цели, а не выхода)
         report(proxy_response.status != 2);
@@ -733,47 +759,66 @@ impl Socks5ProxyServer {
         debug!("🚪 Starting tunnel #{}", request_id);
 
         // 11. Разделяем клиентский stream
-        let (mut client_read, mut client_write) = client_stream.into_split();
+        let (mut client_read, client_write) = client_stream.into_split();
 
         // 12. Сохраняем write half в active_tunnels
+        let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
-            tunnels.insert(request_id, client_write);
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::SOCKS5, exit_node, request_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(client_write, self.active_tunnels.clone(), request_id, Some(credit));
+            writer_closed = writer.subscribe();
+            // ранние данные выхода передаются приёмнику по порядку
+            for (data, close, offset) in self.establishing.take(request_id) {
+                if writer.enqueue_offset(data, close, offset).is_err() {
+                    break;
+                }
+            }
+            tunnels.insert(request_id, writer);
         }
 
         // 13. Читаем данные от клиента и отправляем в туннель (в фоновом режиме!)
         let station_clone = self.station.clone();
         let exit_node_clone = exit_node;
 
+        let tunnels_for_cleanup = self.active_tunnels.clone();
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::SOCKS5, exit_node, request_id);
         // Запускаем в фоновом режиме, чтобы handle_tunnel_data мог работать параллельно!
         tokio::spawn(async move {
             const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
             let mut buf = vec![0u8; BUFFER_SIZE];
             loop {
-                match client_read.read(&mut buf).await {
+                match tokio::select! {
+                    _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                    result = client_read.read(&mut buf) => result,
+                } {
                     Ok(0) => {
                         debug!("🔚 Client closed connection");
-                        // Send close message
-                        let tunnel_close = Socks5TunnelData::close(request_id);
-                        let close_bytes = tunnel_close.encode();
-                        let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, close_bytes).await
-                            .map(|_| ())
-                            .map_err(|e| anyhow!("send_train: {}", e));
-                        if let Err(e) = send_res {
-                            error!("❌ Failed to send close message: {}", e);
-                        }
                         break;
                     }
                     Ok(n) => {
                         debug!("📤 Read {} bytes from client, sending to tunnel #{}", n, request_id);
 
                         // Send tunnel data
-                        let tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
+                        let Ok(byte_offset) = cursor.block(n) else { break; };
+                        // регулятор скорости получателя: не читаем дальше клиента, пока выход не готов принять
+                        let waited = tokio::select! {
+                            _ = writer_closed.changed() => Err(()),
+                            r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => r,
+                        };
+                        if waited.is_err() {
+                            error!("❌ Tunnel #{}: receiver window stalled or tunnel closed", request_id);
+                            break;
+                        }
+                        let mut tunnel_data = Socks5TunnelData::new(request_id, buf[..n].to_vec());
+                        tunnel_data.byte_offset = byte_offset;
                         let data_bytes = tunnel_data.encode();
 
-                        let send_res: std::result::Result<(), anyhow::Error> = station_clone.send_train(exit_node_clone, data_bytes).await
-                            .map(|_| ())
-                            .map_err(|e| anyhow!("send_train: {}", e));
+                        let send_res = tokio::select! {
+                            _ = writer_closed.changed() => Err(anyhow!("tunnel writer closed")),
+                            result = station_clone.send_train(exit_node_clone, data_bytes) => result.map(|_| ()).map_err(|e| anyhow!("send_train: {}", e)),
+                        };
                         if let Err(e) = send_res {
                             error!("❌ Failed to send tunnel data: {}", e);
                             break;
@@ -785,11 +830,58 @@ impl Socks5ProxyServer {
                     }
                 }
             }
+            tunnels_for_cleanup.lock().await.remove(&request_id);
+            // Existing close codec; notification cannot keep this local socket alive indefinitely.
+            let mut close = Socks5TunnelData::close(request_id);
+            close.byte_offset = cursor.end();
+            let _ = tokio::time::timeout(Duration::from_secs(2), station_clone.send_train(
+                exit_node_clone, close.encode())).await;
             debug!("🔚 Client-to-tunnel task finished for tunnel #{}", request_id);
         });
 
         debug!("🚇 Tunnel #{}: background task started, returning from handle_connect_p2p", request_id);
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod fragmented_handshake_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+
+    async fn pair() -> (TcpStream, TcpStream) {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let (c, s) = tokio::join!(TcpStream::connect(addr), l.accept());
+        (c.unwrap(), s.unwrap().0)
+    }
+
+    async fn dribble(mut c: TcpStream, parts: Vec<Vec<u8>>) {
+        for p in parts {
+            c.write_all(&p).await.unwrap();
+            c.flush().await.unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn a_request_split_across_reads_is_still_one_request() {
+        let (c, mut s) = pair().await;
+        let req = vec![0x05, 0x01, 0x00, 0x03, 11, b'e', b'x', b'a', b'm', b'p', b'l', b'e', b'.', b'o', b'r', b'g', 0x01, 0xbb];
+        let parts = vec![req[..4].to_vec(), req[4..8].to_vec(), req[8..].to_vec()];
+        tokio::task::spawn(dribble(c, parts));
+        let r = Socks5Server::read_request(&mut s).await.expect("request");
+        assert_eq!(r.command, Socks5Command::Connect);
+        assert!(matches!(r.address, Socks5Address::Domain(ref d, 443) if d == "example.org"));
+    }
+
+    #[tokio::test]
+    async fn a_greeting_split_across_reads_is_accepted() {
+        let (c, mut s) = pair().await;
+        tokio::task::spawn(dribble(c, vec![vec![0x05, 0x02], vec![0x00], vec![0x02]]));
+        let cfg = Socks5Config::default();
+        let m = Socks5Server::do_auth_selection(&mut s, &cfg).await.expect("greeting");
+        assert_eq!(m, Socks5AuthMethod::UserPass, "методы 00 и 02 получены целиком; по умолчанию пароль обязателен");
     }
 }

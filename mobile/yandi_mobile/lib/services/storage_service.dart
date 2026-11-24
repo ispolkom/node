@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:sqflite_sqlcipher/sqflite.dart';
 import '../models/trusted_node.dart';
 import '../models/message.dart';
+import '../models/tombstone.dart';
 import '../crypto/replay_ledger.dart';
 
 /// Единое хранилище приложения.
@@ -110,7 +111,7 @@ class StorageService {
     final hasEnc = await File(encPath).exists();
     final hasPlain = await _isPlainSqlite(plainPath);
     if (hasPlain && !hasEnc) await _migratePlain(plainPath, encPath, pass);
-    _db = await openDatabase(encPath, version: 5, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
+    _db = await openDatabase(encPath, version: 8, onCreate: _createTables, onUpgrade: _onUpgrade, password: pass);
     if (hasPlain && hasEnc) {
       // Зашифрованная база уже есть и открылась (оборванный прежний перенос или вернувшаяся копия): открытая — устаревшая, поверх
       // действующей её не переносим (новые записи пропали бы), а затираем.
@@ -154,7 +155,7 @@ class StorageService {
     Database? dst;
     try {
       final srcVersion = Sqflite.firstIntValue(await src.rawQuery('PRAGMA user_version')) ?? 0;
-      dst = await openDatabase(tmp, version: 5, onCreate: _createTables, password: pass);
+      dst = await openDatabase(tmp, version: 8, onCreate: (d, v) => _createTables(d, v, inboxIndex: false), password: pass);
       final tables = (await src.rawQuery("SELECT name FROM sqlite_master WHERE type = 'table'"))
           .map((row) => row['name']).toSet();
       for (final t in const ['nodes', 'peer_pubkeys', 'messages', 'manual_contacts', 'group_entries']) {
@@ -171,7 +172,9 @@ class StorageService {
         if (copied != rows.length) throw StateError('перенос базы: в таблице $t $copied из ${rows.length} строк');
       }
       // данные старой версии проходят те же шаги обновления, что и при обычном обновлении (сброс непроверенных ключей собеседников и т. п.)
-      if (srcVersion > 0 && srcVersion < 5) await _onUpgrade(dst, srcVersion, 5);
+      if (srcVersion > 0 && srcVersion < 8) await _onUpgrade(dst, srcVersion, 8);
+      // уникальность входящих по (собеседник, номер у отправителя) — после копирования: в старой базе могли быть дубли, их убираем здесь
+      await _ensureInboxIndex(dst);
     } finally {
       try { await src.close(); } finally { await dst?.close(); }
     }
@@ -217,7 +220,24 @@ class StorageService {
     await db.execute('CREATE INDEX IF NOT EXISTS idx_group_kind ON group_entries(gid, kind, seq)');
   }
 
+  /// Один и тот же входящий (собеседник + номер у отправителя) хранится один раз: повтор отправки после обрыва не даёт второй строки,
+  /// даже если два пути доставки (сокет и почта) обрабатывают его одновременно. Прежние дубли убираются перед созданием индекса.
+  static Future<void> _ensureInboxIndex(Database db) async {
+    await db.execute('DELETE FROM messages WHERE outgoing = 0 AND remote_id IS NOT NULL AND rowid NOT IN '
+        '(SELECT MIN(rowid) FROM messages WHERE outgoing = 0 AND remote_id IS NOT NULL GROUP BY peer_id, remote_id)');
+    await db.execute('CREATE UNIQUE INDEX IF NOT EXISTS ux_msg_in ON messages(peer_id, remote_id) WHERE outgoing = 0 AND remote_id IS NOT NULL');
+  }
+
   static Future<void> _onUpgrade(Database db, int oldVersion, int newVersion) async {
+    if (oldVersion < 7) {
+      // номер сообщения у отправителя: без него после перезапуска не работают «прочитано» и правки входящих
+      try { await db.execute('ALTER TABLE messages ADD COLUMN remote_id TEXT'); } catch (_) {}
+    }
+    if (oldVersion < 6) {
+      for (final c in const ['reply_id', 'reply_text']) {
+        try { await db.execute('ALTER TABLE messages ADD COLUMN $c TEXT'); } catch (_) {}
+      }
+    }
     if (oldVersion < 5) await _createGroupTables(db);
     if (oldVersion < 4) {
       // Ключи собеседников, закэшированные до подписанных связок, ничем не проверены: стираем, их перезапросят с проверкой подписи.
@@ -239,9 +259,11 @@ class StorageService {
         await db.update('nodes', {'token': null}, where: 'id = ?', whereArgs: [id]);
       }
     }
+    // индекс v8 — ПОСЛЕ всех прежних шагов схемы: ему нужна колонка remote_id (её добавляет шаг v7), иначе обновление с v6 падает
+    if (oldVersion < 8) await _ensureInboxIndex(db);
   }
 
-  static Future<void> _createTables(Database db, int version) async {
+  static Future<void> _createTables(Database db, int version, {bool inboxIndex = true}) async {
     await _createGroupTables(db);
     await db.execute('''
       CREATE TABLE nodes (
@@ -276,13 +298,17 @@ class StorageService {
         outgoing  INTEGER NOT NULL,
         text      TEXT NOT NULL,
         timestamp INTEGER NOT NULL,
-        status    TEXT NOT NULL DEFAULT 'pending'
+        status    TEXT NOT NULL DEFAULT 'pending',
+        reply_id  TEXT,
+        reply_text TEXT,
+        remote_id TEXT
       )
     ''');
 
     await db.execute(
       'CREATE INDEX idx_msg_peer ON messages(peer_id, timestamp)',
     );
+    if (inboxIndex) await _ensureInboxIndex(db);
 
     await db.execute('''
       CREATE TABLE manual_contacts (
@@ -315,6 +341,7 @@ class StorageService {
 
   /// Ключ защиты значений (подключ ключа данных); null — заблокировано. Задаётся при входе, стирается при блокировке.
   static void setSecureKey(List<int>? key) {
+    _cacheGen++;   // начатый до этого прогрев кэша не должен опубликовать расшифрованное после смены ключа/блокировки
     _secureKey?.fillRange(0, _secureKey!.length, 0);   // прежний ключ стирается, а не только забывается
     _secureKey = key == null ? null : Uint8List.fromList(key);
     if (key == null) _secureCache = null;
@@ -357,9 +384,16 @@ class StorageService {
   static Map<String, String>? _secureCache;
 
   /// Блокировка: расшифрованные значения защищённого хранилища из памяти убираем (при следующем входе читаются заново).
-  static void dropSecureCache() => _secureCache = null;
+  static void dropSecureCache() {
+    _cacheGen++;
+    _secureCache = null;
+  }
+
+  /// Поколение кэша: смена ключа или блокировка отменяют прогрев, который ещё не закончился.
+  static int _cacheGen = 0;
 
   static Future<void> warmSecureCache() async {
+    final gen = _cacheGen;
     try {
       final all = await _secure.readAll();
       final migrated = all[_kMigrated] == '1';
@@ -370,8 +404,10 @@ class StorageService {
           continue;
         }
         final v = await _unwrap(e.key, e.value, migrated: migrated);
+        if (gen != _cacheGen) return;   // пока дешифровали, приложение заблокировали или сменили ключ
         if (v != null) out[e.key] = v;
       }
+      if (gen != _cacheGen) return;
       _secureCache = out;
     } catch (_) {
       _secureCache = null; // не вышло — читаем по одному, как раньше
@@ -380,11 +416,18 @@ class StorageService {
 
   static Future<String?> secureRead(String key) async {
     final c = _secureCache;
-    if (c != null) return c[key];
+    if (c != null) {
+      // без ключа данных расшифрованное из кэша не отдаётся (служебные vault_… — как есть)
+      if (_secureKey == null && !_isRaw(key)) return null;
+      return c[key];
+    }
     final raw = await _secure.read(key: key);
     if (_isRaw(key)) return raw;
     return _unwrap(key, raw, migrated: (await _secure.read(key: _kMigrated)) == '1');
   }
+
+  /// В хранилище есть запись под этим именем (даже если её не удаётся расшифровать: повреждена, чужой ключ, заблокировано).
+  static Future<bool> secureHasStored(String key) async => (await _secure.read(key: key)) != null;
 
   static Future<void> secureWrite(String key, String value) async {
     await _secure.write(key: key, value: _isRaw(key) ? value : await _wrap(key, value));
@@ -503,6 +546,9 @@ class StorageService {
               text:      r['text']     as String,
               timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
               status:    _parseStatus(r['status'] as String),
+              replyId:   r['reply_id']   as String?,
+              replyText: r['reply_text'] as String?,
+              remoteId:  r['remote_id']  as String?,
             ))
         .toList();
   }
@@ -517,9 +563,88 @@ class StorageService {
         'text':      msg.text,
         'timestamp': msg.timestamp.millisecondsSinceEpoch,
         'status':    msg.status.name,
+        'reply_id':  msg.replyId,
+        'reply_text': msg.replyText,
+        'remote_id': msg.remoteId,
       },
       conflictAlgorithm: ConflictAlgorithm.ignore,
     );
+  }
+
+  /// Неотправленные исходящие не старше `sinceMs` (для автоповтора): старые вперёд, не больше `limit`.
+  static Future<List<ChatMessage>> failedOutgoing({required int sinceMs, int limit = 500, List<String> skipPrefixes = const [], List<String> skipPeers = const []}) async {
+    // служебные конверты (файлы, приглашения, карточки) и заблокированные собеседники отсекаются в самом запросе: иначе сотни
+    // таких строк заслонили бы личные тексты остальных (предел SQLite на число параметров — отсекаем в запросе не больше 400 собеседников)
+    final peers = skipPeers.length > 400 ? skipPeers.take(400).toList() : skipPeers;
+    final skip = skipPrefixes.map((_) => ' AND text NOT LIKE ?').join() + (peers.isEmpty ? '' : ' AND peer_id NOT IN (${List.filled(peers.length, '?').join(',')})');
+    final rows = await db.query(
+      'messages',
+      where: "outgoing = 1 AND status = 'failed' AND timestamp >= ?$skip",
+      whereArgs: [sinceMs, ...skipPrefixes.map((p) => '$p%'), ...peers],
+      orderBy: 'timestamp ASC',
+      limit: limit,
+    );
+    return rows
+        .map((r) => ChatMessage(
+              id: r['id'] as String,
+              peerId: r['peer_id'] as String,
+              outgoing: true,
+              text: r['text'] as String,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+              status: MessageStatus.failed,
+              replyId: r['reply_id'] as String?,
+              replyText: r['reply_text'] as String?,
+              remoteId: r['remote_id'] as String?,
+            ))
+        .toList();
+  }
+
+  /// Исходящие «ушло, квитанции нет» не старше `sinceMs` (для повтора потерянного пакета).
+  static Future<List<ChatMessage>> pendingOutgoing({required int sinceMs, int limit = 200}) async {
+    final rows = await db.query('messages', where: "outgoing = 1 AND status = 'pending' AND timestamp >= ?", whereArgs: [sinceMs], orderBy: 'timestamp ASC', limit: limit);
+    return rows
+        .map((r) => ChatMessage(
+              id: r['id'] as String,
+              peerId: r['peer_id'] as String,
+              outgoing: true,
+              text: r['text'] as String,
+              timestamp: DateTime.fromMillisecondsSinceEpoch(r['timestamp'] as int),
+              status: MessageStatus.pending,
+              replyId: r['reply_id'] as String?,
+              replyText: r['reply_text'] as String?,
+              remoteId: r['remote_id'] as String?,
+            ))
+        .toList();
+  }
+
+  /// Статус исходящего сообщения (null — такого нет: например, пользователь удалил его).
+  static Future<MessageStatus?> outgoingStatus(String id) async {
+    final rows = await db.query('messages', columns: ['status'], where: 'id = ? AND outgoing = 1', whereArgs: [id], limit: 1);
+    return rows.isEmpty ? null : _parseStatus(rows.first['status'] as String);
+  }
+
+  /// failed → pending только если оно всё ещё failed: подтверждение доставки/прочтения, пришедшее раньше, не понижается.
+  static Future<bool> markPendingIfFailed(String id) async {
+    final n = await db.update('messages', {'status': 'pending'}, where: "id = ? AND outgoing = 1 AND status = 'failed'", whereArgs: [id]);
+    return n > 0;
+  }
+
+  /// Записать входящее, если такого (собеседник + номер у отправителя, либо тот же локальный номер) ещё нет. true — записано, false —
+  /// повтор. Проверка и запись — одна операция базы: два пути доставки не могут оба «не найти» и оба записать.
+  static Future<bool> insertIncomingIfNew(ChatMessage msg) async {
+    return await db.transaction((txn) async {
+      await txn.rawInsert(
+        'INSERT OR IGNORE INTO messages (id, peer_id, outgoing, text, timestamp, status, reply_id, reply_text, remote_id) VALUES (?,?,?,?,?,?,?,?,?)',
+        [msg.id, msg.peerId, msg.outgoing ? 1 : 0, msg.text, msg.timestamp.millisecondsSinceEpoch, msg.status.name, msg.replyId, msg.replyText, msg.remoteId],
+      );
+      return (Sqflite.firstIntValue(await txn.rawQuery('SELECT changes()')) ?? 0) > 0;
+    });
+  }
+
+  /// Уже есть входящее от этого собеседника с таким номером у отправителя (повторная отправка того же сообщения).
+  static Future<bool> incomingExists(String peerId, String remoteId) async {
+    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ?', whereArgs: [peerId, remoteId], limit: 1);
+    return rows.isNotEmpty;
   }
 
   static Future<void> updateMessageStatus(String id, MessageStatus status) async {
@@ -528,6 +653,30 @@ class StorageService {
       {'status': status.name},
       where: 'id = ?', whereArgs: [id],
     );
+  }
+
+  /// Дописать номер сообщения у отправителя в уже сохранённую строку (saveMessage с IGNORE существующую строку не меняет).
+  static Future<void> setRemoteIdIfMissing(String id, String remoteId) async {
+    await db.update('messages', {'remote_id': remoteId}, where: 'id = ? AND remote_id IS NULL', whereArgs: [id]);
+  }
+
+  /// Правка входящего сообщения собеседником прямо в базе (история чата может быть не загружена): возвращает локальный id или null.
+  static Future<String?> applyIncomingEdit(String peerId, String remoteId, String text) async {
+    final rows = await db.query('messages', columns: ['id'], where: 'peer_id = ? AND outgoing = 0 AND remote_id = ? AND text != ?', whereArgs: [peerId, remoteId, Tombstone.marker], limit: 1);   // надгробие правкой не оживает
+    if (rows.isEmpty) return null;
+    final id = '${rows.first['id']}';
+    await db.update('messages', {'text': text}, where: 'id = ?', whereArgs: [id]);
+    return id;
+  }
+
+  /// Квитанция собеседника прямо в базе: статус только растёт (pending/failed → delivered → read).
+  static Future<void> raiseOutgoingStatus(String peerId, List<String> ids, MessageStatus target) async {
+    if (ids.isEmpty || target == MessageStatus.pending || target == MessageStatus.failed) return;
+    final lower = target == MessageStatus.read ? ['pending', 'failed', 'delivered'] : ['pending', 'failed'];
+    final q = List.filled(ids.length, '?').join(',');
+    final w = List.filled(lower.length, '?').join(',');
+    await db.update('messages', {'status': target.name},
+        where: 'peer_id = ? AND outgoing = 1 AND id IN ($q) AND status IN ($w)', whereArgs: [peerId, ...ids, ...lower]);
   }
 
   static Future<void> updateMessageText(String id, String text) async {
@@ -548,6 +697,38 @@ class StorageService {
     if (ids.isEmpty) return;
     final q = List.filled(ids.length, '?').join(',');
     await db.delete('messages', where: 'id IN ($q)', whereArgs: ids);
+  }
+
+  /// Устройство собеседника убрано с узла: все его входящие сообщения становятся надгробием (время и remote_id остаются: уникальный индекс
+  /// ux_msg_in не даёт сообщению вернуться повторной доставкой), а цитаты их в наших ответах — меткой. Возвращает локальные номера
+  /// входящих (для чистки смайлов и пометок «изменено») и номера наших исходящих в этом чате (на них стёрт смайл собеседника).
+  static Future<({List<String> incoming, List<String> outgoing})> tombstonePeer(String peerId) async {
+    return await db.transaction((txn) async {
+      final inc = await txn.query('messages', columns: ['id', 'remote_id', 'text'], where: 'peer_id = ? AND outgoing = 0', whereArgs: [peerId]);
+      final out = await txn.query('messages', columns: ['id', 'reply_id', 'reply_text'], where: 'peer_id = ? AND outgoing = 1', whereArgs: [peerId]);
+      final remoteIds = {for (final r in inc) if (r['remote_id'] != null) '${r['remote_id']}'};
+      // цитата без номера (узел называет сообщения телефона своими номерами): сверяем по выдержке текста, как findReplyTarget
+      final texts = [for (final r in inc) if (r['text'] != Tombstone.marker) '${r['text']}'];
+      for (final r in out) {
+        final rt = r['reply_text'] as String?;
+        if (rt == null || rt == Tombstone.marker) continue;
+        final rid = (r['reply_id'] as String?) ?? '';
+        final quoted = rid.isNotEmpty ? remoteIds.contains(rid) : texts.any((t) => t.startsWith(rt));
+        if (quoted) await txn.update('messages', {'reply_text': Tombstone.marker}, where: 'id = ?', whereArgs: [r['id']]);
+      }
+      await txn.update('messages', {'text': Tombstone.marker, 'reply_id': null, 'reply_text': null}, where: 'peer_id = ? AND outgoing = 0', whereArgs: [peerId]);
+      return (incoming: [for (final r in inc) '${r['id']}'], outgoing: [for (final r in out) '${r['id']}']);
+    });
+  }
+
+  /// Срок жизни сообщения — 365 суток с отправки (чаты и группы). Удаляет из базы всё, что отправлено раньше `cutoffMs`, и возвращает
+  /// локальные номера удалённых личных сообщений: смайлы и пометки «изменено» в памяти приложения чистит вызывающий (иначе его следующая
+  /// запись перезатрёт чистку). Файлы (хранилище, файлы групп) и их сроки не трогаются.
+  static Future<List<String>> pruneOlderThan(int cutoffMs) async {
+    final ids = [for (final r in await db.query('messages', columns: ['id'], where: 'timestamp < ?', whereArgs: [cutoffMs])) '${r['id']}'];
+    await db.delete('messages', where: 'timestamp < ?', whereArgs: [cutoffMs]);
+    await db.delete('group_entries', where: 'ts < ?', whereArgs: [cutoffMs]);
+    return ids;
   }
 
   /// Очистить всю переписку с собеседником (локально).

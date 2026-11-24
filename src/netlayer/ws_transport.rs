@@ -74,7 +74,7 @@ impl WsConnection {
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep_until(last_heard + IDLE_LIMIT) => {
-                        eprintln!("[ws] {} silent for {:?}, closing", peer_addr_for_pump, IDLE_LIMIT);
+                        eprintln!("[ws] {} silent for {:?}, closing", crate::util::logsafe::a(&peer_addr_for_pump), IDLE_LIMIT);
                         break;
                     }
                     // App кладёт байты на отправку.
@@ -82,7 +82,7 @@ impl WsConnection {
                         match msg {
                             Some(bytes) => {
                                 if let Err(e) = sink.send(Message::Binary(bytes.into())).await {
-                                    eprintln!("[ws] send to {} failed: {}", peer_addr_for_pump, e);
+                                    eprintln!("[ws] send to {} failed: {}", crate::util::logsafe::a(&peer_addr_for_pump), e);
                                     break;
                                 }
                             }
@@ -106,7 +106,7 @@ impl WsConnection {
                             }
                             Some(Ok(_)) => { /* ignore Text/Pong/Frame */ }
                             Some(Err(e)) => {
-                                eprintln!("[ws] recv from {} error: {}", peer_addr_for_pump, e);
+                                eprintln!("[ws] recv from {} error: {}", crate::util::logsafe::a(&peer_addr_for_pump), e);
                                 break;
                             }
                             None => break,
@@ -235,7 +235,7 @@ impl WsServer {
                     let tls_stream = match tokio::time::timeout(hs_timeout, acceptor_clone.accept(tcp)).await {
                         Ok(Ok(s)) => s,
                         Ok(Err(e)) => {
-                            eprintln!("[ws] TLS handshake failed from {}: {}", peer, e);
+                            eprintln!("[ws] TLS handshake failed from {}: {}", crate::util::logsafe::a(&peer), e);
                             return;
                         }
                         Err(_) => return, // молчит: закрываем без шума в журнале (иначе журнал — цель атаки)
@@ -246,7 +246,7 @@ impl WsServer {
                     let ws_stream: WebSocketStream<_> = match tokio::time::timeout(hs_timeout, accept_async_with_config(tls_stream, Some(cfg))).await {
                         Ok(Ok(ws)) => ws,
                         Ok(Err(e)) => {
-                            eprintln!("[ws] WS upgrade failed from {}: {}", peer, e);
+                            eprintln!("[ws] WS upgrade failed from {}: {}", crate::util::logsafe::a(&peer), e);
                             return;
                         }
                         Err(_) => return,

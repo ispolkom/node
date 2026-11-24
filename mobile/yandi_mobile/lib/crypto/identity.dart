@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 import 'package:cryptography/cryptography.dart';
 import '../services/storage_service.dart';
+import '../l10n_core.dart';
 
 /// Криптографическая идентичность пользователя.
 ///
@@ -57,7 +58,13 @@ class Identity {
   static Future<Identity?> loadExisting() async {
     final edB64 = await StorageService.secureRead(_kEd);
     final xB64  = await StorageService.secureRead(_kX);
-    if (edB64 == null || xB64 == null) return null;
+    if (edB64 == null || xB64 == null) {
+      // запись есть, но не читается (повреждена, чужой ключ данных): это не первый запуск, личность нельзя подменять новой
+      if (await StorageService.secureHasStored(_kEd) || await StorageService.secureHasStored(_kX)) {
+        throw StateError(tr('Ключи личности повреждены или недоступны; новая личность не создаётся, чтобы не потерять прежнюю'));
+      }
+      return null;
+    }
     return _fromSeeds(base64.decode(edB64), base64.decode(xB64));
   }
 

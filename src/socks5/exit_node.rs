@@ -21,10 +21,10 @@ use tracing::{info, error, debug, warn};
 
 /// SOCKS5 Exit Node Handler (аналог HttpProxyGateway)
 pub struct ExitNodeHandler {
-    pub transport: Arc<P2PTransport>,  // ✅ Публичный для NACK handler
+    pub transport: Arc<P2PTransport>,  // ✅ Публичный
     pub station: Arc<Station>,
-    /// Active tunnels: tunnel_id -> write half
-    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
+    /// Active tunnels: tunnel_id -> bounded writer queue
+    active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
     /// Channels
     request_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5ProxyRequest)>>>>,
     tunnel_data_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
@@ -129,7 +129,7 @@ impl ExitNodeHandler {
     /// Handle SOCKS5 CONNECT request (аналог HttpProxyGateway::handle_connect)
     pub async fn handle_request(&self, source_node: HashId, request: Socks5ProxyRequest) -> Result<()> {
         info!("📨 SOCKS5 CONNECT request #{} from {}", request.request_id, hex::encode(&source_node.0[..8]));
-        debug!("🎯 Target: {}:{}", request.target_host, request.target_port);
+        debug!("🎯 Target: {}:{}", crate::util::logsafe::a(&request.target_host), crate::util::logsafe::a(&request.target_port));
         // кто может выходить в интернет через этот узел — выбор владельца (по умолчанию только доверенные узлы)
         if !crate::exit_policy::may_exit(&source_node) {
             crate::exit_policy::refuse_log(&source_node, "SOCKS5");
@@ -151,7 +151,7 @@ impl ExitNodeHandler {
         // Connect to target: только адрес в интернете, соединение — ровно с проверенным адресом
         let target_addr = if request.target_host.contains(':') { format!("[{}]:{}", request.target_host, request.target_port) } else { format!("{}:{}", request.target_host, request.target_port) };
 
-        info!("🔌 Connecting to {} ...", target_addr);
+        info!("🔌 Connecting to {} ...", crate::util::logsafe::a(&target_addr));
 
         let target_stream = match crate::exit_policy::connect_public(&target_addr, Duration::from_secs(10)).await {
             Ok(stream) => {
@@ -162,7 +162,7 @@ impl ExitNodeHandler {
                     debug!("✅ TCP_NODELAY enabled for target");
                 }
 
-                info!("✅ Connected to {}", target_addr);
+                info!("✅ Connected to {}", crate::util::logsafe::a(&target_addr));
                 stream
             }
             Err(e) => {
@@ -172,31 +172,41 @@ impl ExitNodeHandler {
                     std::io::ErrorKind::TimedOut => 0x06,
                     _ => 0x05,
                 };
-                error!("❌ Failed to connect to {}: {}", target_addr, e);
+                error!("❌ Failed to connect to {}: {}", crate::util::logsafe::a(&target_addr), e);
                 self.send_response(source_node, Socks5ProxyResponse::error(request.request_id, code)).await?;
                 return Err(anyhow!("Failed to connect: {}", e));
             }
         };
 
-        // Send success response
-        let proxy_response = Socks5ProxyResponse::success(request.request_id);
-        self.send_response(source_node, proxy_response).await?;
-
-        info!("✅ SOCKS5 CONNECT established for tunnel #{}", request.request_id);
-
         // Split TCP stream
-        let (mut target_read, mut target_write) = target_stream.into_split();
+        let (mut target_read, target_write) = target_stream.into_split();
 
-        // Store write half in active_tunnels
+        // Приёмник данных клиента публикуется ДО подтверждения: клиент начинает передачу сразу после успеха, и первые байты не
+        // должны находить пустую таблицу
+        let mut writer_closed;
         {
             let mut tunnels = self.active_tunnels.lock().await;
             // повторная проверка под замком: за время соединения мог прийти параллельный запрос
             if !tunnel_admissible(&tunnels, &source_node, request.request_id) {
+                drop(tunnels);
+                let _ = self.send_response(source_node, Socks5ProxyResponse::error(request.request_id, 0x01)).await;
                 return Err(anyhow!("tunnel limit reached"));
             }
             // соединения разных узлов — раздельно (номер туннеля выбирает сам узел)
-            tunnels.insert((source_node, request.request_id), target_write);
+            let credit = crate::netlayer::flow::credit_sender(self.station.clone(), crate::netlayer::tunnel_wire::SOCKS5, source_node, request.request_id);
+            let writer = crate::netlayer::tunnel_writer::spawn_stream_writer_credit(target_write, self.active_tunnels.clone(), (source_node, request.request_id), Some(credit));
+            writer_closed = writer.subscribe();
+            tunnels.insert((source_node, request.request_id), writer);
         }
+
+        // Send success response
+        let proxy_response = Socks5ProxyResponse::success(request.request_id);
+        if let Err(e) = self.send_response(source_node, proxy_response).await {
+            self.active_tunnels.lock().await.remove(&(source_node, request.request_id));
+            return Err(e.into());
+        }
+
+        info!("✅ SOCKS5 CONNECT established for tunnel #{}", request.request_id);
 
         // Start reading from target and sending to client
         let station_clone = self.station.clone();
@@ -204,38 +214,55 @@ impl ExitNodeHandler {
         let tunnel_id = request.request_id;
 
         let tunnels_for_cleanup = self.active_tunnels.clone();
-        let target_to_client = async move {
-            const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
-            let mut buf = vec![0u8; BUFFER_SIZE];
-            loop {
-                let n = target_read.read(&mut buf).await?;
-                crate::reciprocity::record_served(&source_node_clone.0, n);
-                if n == 0 {
-                    debug!("🔚 Target closed connection");
-                    // Send close message
-                    let tunnel_close = Socks5TunnelData::close(tunnel_id);
-                    let close_bytes = tunnel_close.encode();
-                    station_clone.send_train(source_node_clone, close_bytes).await?;
-                    break;
-                }
-
-                debug!("📤 Read {} bytes from target, sending to tunnel #{}", n, tunnel_id);
-
-                // Send tunnel data
-                let tunnel_data = Socks5TunnelData::new(tunnel_id, buf[..n].to_vec());
-                let data_bytes = tunnel_data.encode();
-                station_clone.send_train(source_node_clone, data_bytes).await?;
-            }
-            Ok::<(), anyhow::Error>(())
-        };
-
-        // Run tunnel in background (так же как в HTTP Proxy gateway!)
+        let station_for_close = station_clone.clone();
+        let flow = crate::netlayer::flow::register(crate::netlayer::tunnel_wire::SOCKS5, source_node, tunnel_id);
         tokio::spawn(async move {
+            let mut cursor = crate::netlayer::stream_order::Cursor::new();
+            let target_to_client = async {
+                const BUFFER_SIZE: usize = 16 * 1024; // ⚡ 32 KB instead of 4 KB
+                let mut buf = vec![0u8; BUFFER_SIZE];
+                loop {
+                    let n = tokio::select! {
+                        _ = writer_closed.changed() => Err(std::io::Error::new(std::io::ErrorKind::ConnectionAborted, "tunnel writer closed")),
+                        result = target_read.read(&mut buf) => result,
+                    }?;
+                    crate::reciprocity::record_served(&source_node_clone.0, n);
+                    if n == 0 {
+                        debug!("🔚 Target closed connection");
+                        break;
+                    }
+
+                    debug!("📤 Read {} bytes from target, sending to tunnel #{}", n, tunnel_id);
+
+                    // Send tunnel data
+                    let byte_offset = cursor.block(n).map_err(|_| anyhow!("stream offset exhausted"))?;
+                    // регулятор скорости получателя: не читаем дальше, пока он не готов принять
+                    tokio::select! {
+                        _ = writer_closed.changed() => return Err(anyhow!("tunnel writer closed")),
+                        r = flow.window.wait_until(byte_offset + n as u64, crate::netlayer::flow::stall_timeout()) => {
+                            r.map_err(|_| anyhow!("receiver window stalled"))?
+                        }
+                    };
+                    let mut tunnel_data = Socks5TunnelData::new(tunnel_id, buf[..n].to_vec());
+                    tunnel_data.byte_offset = byte_offset;
+                    let data_bytes = tunnel_data.encode();
+                    tokio::select! {
+                        _ = writer_closed.changed() => return Err(anyhow!("tunnel writer closed")),
+                        result = station_clone.send_train(source_node_clone, data_bytes) => result?,
+                    };
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+
             if let Err(e) = target_to_client.await {
                 error!("❌ Tunnel #{} error: {}", tunnel_id, e);
             }
             // туннель закончился (цель закрылась или ошибка) — освободить место в таблице
             tunnels_for_cleanup.lock().await.remove(&(source_node_clone, tunnel_id));
+            let mut close = Socks5TunnelData::close(tunnel_id);
+            close.byte_offset = cursor.end();
+            let _ = tokio::time::timeout(Duration::from_secs(2), station_for_close.send_train(
+                source_node_clone, close.encode())).await;
             debug!("🔚 Target-to-client task finished for tunnel #{}", tunnel_id);
         });
 
@@ -246,51 +273,21 @@ impl ExitNodeHandler {
 
     /// Handle tunnel data from client
     async fn handle_tunnel_data(
-        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), tokio::net::tcp::OwnedWriteHalf>>>,
+        active_tunnels: Arc<Mutex<HashMap<(HashId, u64), crate::netlayer::tunnel_writer::TunnelWriter>>>,
         tunnel_rx: Arc<Mutex<Option<tokio::sync::mpsc::Receiver<(HashId, Socks5TunnelData)>>>>,
     ) {
-        debug!("🚇 [tunnel-data-handler] Starting tunnel data handler task");
-
-        let mut rx_opt = { tunnel_rx.lock().await.take() };
-
-        debug!("🚇 [tunnel-data-handler] Receiver obtained: {}", rx_opt.is_some());
-
-        if let Some(mut rx) = rx_opt {
-            debug!("🚇 [tunnel-data-handler] Ready to receive tunnel data");
+        let rx = tunnel_rx.lock().await.take();
+        if let Some(mut rx) = rx {
             while let Some((source_node, tunnel_data)) = rx.recv().await {
-                debug!("🚇 [tunnel-data-handler] Received data for tunnel #{}", tunnel_data.tunnel_id);
-                let tunnel_id = tunnel_data.tunnel_id;
-                let key = (source_node, tunnel_id);
-
-                // Check if tunnel should be closed
-                if tunnel_data.close {
-                    debug!("🔚 Tunnel #{} closed by client", tunnel_id);
-                    // Remove from active tunnels
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&key);
-                    continue;
-                }
-
-                // Get write half for this tunnel (keep lock during write!)
-                let write_result = {
-                    let mut tunnels = active_tunnels.lock().await;
-
-                    if let Some(write_half) = tunnels.get_mut(&key) {
-                        // Write data while holding lock
-                        debug!("📥 Writing {} bytes to tunnel #{}", tunnel_data.data.len(), tunnel_id);
-                        crate::reciprocity::record_served(&source_node.0, tunnel_data.data.len());
-                        write_half.write_all(&tunnel_data.data).await
-                            .map_err(|e| e.to_string())
-                    } else {
-                        Err("No active tunnel".to_string())
+                let key = (source_node, tunnel_data.tunnel_id);
+                let mut tunnels = active_tunnels.lock().await;
+                if let Some(writer) = tunnels.get(&key) {
+                    // Admission is synchronous. A stalled TCP writer can exhaust only its own queue.
+                    crate::reciprocity::record_served(&source_node.0, tunnel_data.data.len());
+                    if writer.enqueue_offset(tunnel_data.data, tunnel_data.close, tunnel_data.byte_offset).is_err() {
+                        warn!("[rx] tunnel #{} closed: delivery queue exhausted", tunnel_data.tunnel_id);
+                        tunnels.remove(&key); // abort writer and wake paired reader
                     }
-                };
-
-                if let Err(e) = write_result {
-                    error!("❌ Error writing to tunnel #{}: {}", tunnel_id, e);
-                    // Remove broken tunnel
-                    let mut tunnels = active_tunnels.lock().await;
-                    tunnels.remove(&key);
                 }
             }
         }

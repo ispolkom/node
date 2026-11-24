@@ -1,0 +1,2846 @@
+//! Резервная копия связей узла: файл `.yandibak` (этап 1 восстановления, решения владельца 2026-10-16).
+//!
+//! В копии только СВЯЗИ: ключи и сертификаты узла, реестр сопряжённых устройств, контакты и закреплённые ключи, группы (описание,
+//! участники, роли, эпоха ключей, номера журнала), аватарки, настройки маршрутов. НЕ в копии: переписка, файлы любых видов, итоги
+//! звонков, статусы доставки, счётчики непрочитанного, журналы групп, сама фраза восстановления, машинная печать `device.seal`.
+//!
+//! Файл — открытый простой JSON: `{"header": {...}, "ct": "<base64>"}`. Безопасность — от шифрования, не от «секретности формата»:
+//! тело зашифровано AES-256-GCM ключом `HKDF(корень ключей, соль файла)`. Корень открывается кодом восстановления (его обёртка —
+//! `auth.json` — лежит в заголовке, она и так защищена Argon2id), поэтому для чтения копии нужен только сам файл и код, который у
+//! владельца уже есть. Заголовок входит в AAD: подмена полей ломает расшифровку.
+//!
+//! Автокопия (раз в сутки, если изменилось содержимое; сразу при критичных изменениях) считает изменением только «структуру»:
+//! подвижные поля (последняя активность, номера журнала, признак «в сети») в сравнение не входят.
+
+use aes_gcm::aead::{Aead, KeyInit, Payload};
+use aes_gcm::{Aes256Gcm, Nonce};
+use base64::Engine as _;
+use hkdf::Hkdf;
+use rand::RngCore;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+use std::path::{Path, PathBuf};
+
+pub const MAGIC: &str = "YANDIBAK";
+pub const VERSION: u32 = 1;
+pub const FILE_EXT: &str = "yandibak";
+const INFO: &[u8] = b"yandi/backup/v1";
+/// Запас номеров журнала при восстановлении: копия могла отстать от жизни, а у телефонов в кеше записи до реального номера.
+pub const GROUP_SEQ_GAP: u64 = 1_000_000_000;
+const MAX_FILE: u64 = 4 * 1024 * 1024;
+const MAX_TOTAL: usize = 64 * 1024 * 1024;
+/// Сколько последних автокопий хранится в папке.
+pub const KEEP_AUTO: usize = 7;
+/// Сколько копий «Сохранить сейчас» хранится в папке отдельно от автокопий.
+pub const KEEP_MANUAL: usize = 5;
+/// Подпапка, которую узел создаёт в выбранном владельцем месте.
+pub const FOLDER_NAME: &str = "yandi-node";
+
+/// Что НЕ входит в копию (показывается владельцу в заметке).
+pub const EXCLUDED: [&str; 6] = ["переписка", "файлы всех видов (в том числе голосовые)", "итоги и история звонков", "статусы доставки и прочтения", "журналы групп", "recovery-фраза и машинная печать"];
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Area {
+    /// `~/.yandi_keys`
+    Keys,
+    /// каталог данных узла
+    Data,
+    /// `~/.yandi`
+    Home,
+}
+
+/// Где лежат каталоги узла.
+#[derive(Clone, Debug)]
+pub struct Layout {
+    pub keys: PathBuf,
+    pub data: PathBuf,
+    pub home: PathBuf,
+    pub port: u16,
+}
+
+impl Layout {
+    /// Настоящий узел этого пользователя.
+    pub fn live(port: u16) -> Layout {
+        let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+        Layout { keys: home.join(".yandi_keys"), data: crate::util::data_dir::data_dir(), home: home.join(".yandi"), port }
+    }
+
+    fn base(&self, a: Area) -> &Path {
+        match a {
+            Area::Keys => &self.keys,
+            Area::Data => &self.data,
+            Area::Home => &self.home,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Entry {
+    pub area: Area,
+    /// путь внутри каталога, через `/`
+    pub path: String,
+    pub data: Vec<u8>,
+}
+
+fn whitelist(l: &Layout) -> Vec<(Area, String)> {
+    let mut v: Vec<(Area, String)> = Vec::new();
+    for p in ["auth.json"] {
+        v.push((Area::Keys, p.into()));
+    }
+    v.push((Area::Keys, format!("node_identity_{}.json", l.port)));
+    for p in [
+        "contacts.json",
+        "mobile_devices.json",
+        "mobile_self.enc",
+        "mobile_self.json",
+        "mobile_self_public.json",
+        "mobile_tls.json",
+        "web_phone_status.json",
+        "web_hidden_phones.json",
+        "device_profiles/index.json",
+        "groups/index.json",
+        "groups_pc/state.enc",
+        "closed/envelope.json",
+        "closed/anchor.json",
+        "closed/settings.json",
+        "exit.json",
+        "relay.json",
+        "route_rules.json",
+        "gateways.json",
+        "upstream_proxy.enc",
+        "upstream_proxy.json",
+        "turn.json",
+        "local_overrides.enc",
+        "local_overrides.json",
+    ] {
+        v.push((Area::Data, p.into()));
+    }
+    for p in ["profile.json", "trusted_peers.json", "paired_anchors.json", "paired_clients.json", "tls/cert.pem", "tls/key.pem"] {
+        v.push((Area::Home, p.into()));
+    }
+    v
+}
+
+/// Путь `base/rel` без символических ссылок внутри `base` (сам каталог узла может быть ссылкой, например перенесённый на другой диск):
+/// иначе ссылка в родительском каталоге вывела бы чтение или запись за пределы каталогов узла.
+fn checked_path(base: &Path, rel: &str) -> Result<PathBuf, String> {
+    let mut cur = base.to_path_buf();
+    for part in rel.split('/') {
+        cur.push(part);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return Err(format!("{rel}: символическая ссылка в пути, копия её не примет")),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("{rel}: {e}")),
+        }
+    }
+    Ok(cur)
+}
+
+/// Куда на этой машине ложится файл копии: файл якорей может быть перенесён флагом `--anchor-store` — тогда это его путь.
+fn target_path(l: &Layout, area: Area, rel: &str) -> Result<PathBuf, String> {
+    target_path_with(l, area, rel, crate::netlayer::packet::anchor_store_override().as_deref())
+}
+
+fn target_path_with(l: &Layout, area: Area, rel: &str, anchors_override: Option<&str>) -> Result<PathBuf, String> {
+    if area == Area::Home && rel == "paired_anchors.json" {
+        if let Some(p) = anchors_override {
+            let p = PathBuf::from(p);
+            let (Some(dir), Some(name)) = (p.parent().filter(|d| !d.as_os_str().is_empty()), p.file_name().and_then(|n| n.to_str())) else {
+                return Err(format!("{rel}: путь --anchor-store не годится"));
+            };
+            return checked_path(dir, name);
+        }
+    }
+    checked_path(l.base(area), rel)
+}
+
+/// Файлы связи формата сопряжения: в копию и из копии они проходят очистку от секретов старого формата (docs/RESUME_REDESIGN.md).
+fn pairing_store_kind(rel: &str) -> Option<crate::netlayer::pairing::StoreKind> {
+    match rel {
+        "paired_clients.json" => Some(crate::netlayer::pairing::StoreKind::Clients),
+        "paired_anchors.json" => Some(crate::netlayer::pairing::StoreKind::Anchors),
+        _ => None,
+    }
+}
+
+/// Собрать файлы для копии. Отсутствующие пропускаются (узел мог не пользоваться возможностью); слишком большие и не-обычные файлы —
+/// ошибка, а не тихий пропуск: копия не должна молча получиться неполной.
+pub fn collect(l: &Layout) -> Result<Vec<Entry>, String> {
+    let mut out = Vec::new();
+    let mut total = 0usize;
+    let mut take = |area: Area, rel: String| -> Result<(), String> {
+        let path = target_path(l, area, &rel)?;
+        let meta = match std::fs::symlink_metadata(&path) {
+            Ok(m) => m,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("{rel}: {e}")),
+        };
+        if !meta.is_file() {
+            return Err(format!("{rel}: не обычный файл"));
+        }
+        if meta.len() > MAX_FILE {
+            return Err(format!("{rel}: слишком большой для копии ({} байт)", meta.len()));
+        }
+        let mut data = std::fs::read(&path).map_err(|e| format!("{rel}: {e}"))?;
+        if let Some(kind) = pairing_store_kind(&rel) {
+            // секретов старого формата в копии быть не должно; неразобранный файл связи в копию не кладётся (сопряжение делается заново)
+            match crate::netlayer::pairing::sanitized_store_text(kind, &data) {
+                Some(clean) => data = clean.into_bytes(),
+                None => {
+                    eprintln!("[backup] {rel}: формат не распознан, в копию не включён (после восстановления сопряжение нужно повторить)");
+                    return Ok(());
+                }
+            }
+        }
+        total += data.len();
+        if total > MAX_TOTAL {
+            return Err("копия получилась слишком большой".into());
+        }
+        out.push(Entry { area, path: rel, data });
+        Ok(())
+    };
+    for (a, p) in whitelist(l) {
+        take(a, p)?;
+    }
+    // аватарки: маленькие картинки в ~/.yandi/avatars
+    let av = l.home.join("avatars");
+    if let Ok(rd) = std::fs::read_dir(&av) {
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                [".png", ".jpg", ".jpeg", ".gif"].iter().any(|x| n.ends_with(x)) && !n.contains('/') && !n.starts_with('.')
+            })
+            .collect();
+        names.sort();
+        for n in names {
+            let big = std::fs::metadata(av.join(&n)).map(|m| m.len() > 512 * 1024).unwrap_or(true);
+            if !big {
+                take(Area::Home, format!("avatars/{n}"))?;
+            }
+        }
+    }
+    // аватарки сопряжённых устройств: ~/.local/share/yandi/device_profiles/*.png (индекс уже в белом списке)
+    let dp = l.data.join("device_profiles");
+    if let Ok(rd) = std::fs::read_dir(&dp) {
+        let mut names: Vec<String> = rd
+            .flatten()
+            .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|e| e.file_name().into_string().ok())
+            .filter(|n| {
+                let n = n.to_ascii_lowercase();
+                [".png", ".jpg", ".jpeg", ".gif"].iter().any(|x| n.ends_with(x)) && !n.starts_with('.')
+            })
+            .collect();
+        names.sort();
+        for n in names {
+            let big = std::fs::metadata(dp.join(&n)).map(|m| m.len() > 512 * 1024).unwrap_or(true);
+            if !big {
+                take(Area::Data, format!("device_profiles/{n}"))?;
+            }
+        }
+    }
+    Ok(out)
+}
+
+// ── Проверка «изменилось ли» ─────────────────────────────────────────────────
+
+fn strip(v: &mut Value, keys: &[&str]) {
+    match v {
+        Value::Object(m) => {
+            for k in keys {
+                m.remove(*k);
+            }
+            for (_, x) in m.iter_mut() {
+                strip(x, keys);
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| strip(x, keys)),
+        _ => {}
+    }
+}
+
+/// Файл без подвижных полей (то, что меняется само и не считается изменением связей).
+fn normalized(e: &Entry) -> Vec<u8> {
+    let volatile: &[&str] = match e.path.as_str() {
+        "mobile_devices.json" => &["acked_ts", "last_seen_ms"],
+        "device_profiles/index.json" => &["updated_ms"],
+        "groups/index.json" => &["first_seq", "next_seq", "last_post_ms", "last_seen_ms"],
+        "contacts.json" => &["online", "last_seen", "last_seen_ms"],
+        _ => return e.data.clone(),
+    };
+    match serde_json::from_slice::<Value>(&e.data) {
+        Ok(mut v) => {
+            strip(&mut v, volatile);
+            serde_json::to_vec(&v).unwrap_or_else(|_| e.data.clone())
+        }
+        Err(_) => e.data.clone(),
+    }
+}
+
+/// Файлы, которые перезаписываются самим узлом при обычной работе (счётчики, курсоры) и в запечатанном виде не разбираются:
+/// в копию входят, но изменением не считаются.
+fn counts_as_change(e: &Entry) -> bool {
+    !matches!(e.path.as_str(), "groups_pc/state.enc" | "mobile_self.enc")
+}
+
+/// Отпечаток логического содержимого: одинаковый, пока не изменились связи (а не шифртекст, который каждый раз другой).
+pub fn digest(entries: &[Entry]) -> String {
+    let mut parts: Vec<(String, [u8; 32])> = entries
+        .iter()
+        .filter(|e| counts_as_change(e))
+        .map(|e| (format!("{:?}/{}", e.area, e.path), Sha256::digest(normalized(e)).into()))
+        .collect();
+    parts.sort();
+    let mut h = Sha256::new();
+    h.update(b"yandi-backup-digest-v1");
+    for (name, d) in &parts {
+        h.update((name.len() as u32).to_be_bytes());
+        h.update(name.as_bytes());
+        h.update(d);
+    }
+    hex::encode(h.finalize())
+}
+
+// ── Файл ────────────────────────────────────────────────────────────────────
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Header {
+    pub magic: String,
+    pub v: u32,
+    /// случайный номер этой копии
+    pub id: String,
+    pub created_ms: u64,
+    /// монотонный номер копии этого узла (по нему видно, какая свежее)
+    pub counter: u64,
+    /// короткий номер узла, чьи связи в копии (для сверки с карточкой при восстановлении)
+    pub node_id: String,
+    /// отпечаток корня ключей: позволяет сказать «этот код не от этой копии», не раскрывая корень
+    pub root_id: String,
+    /// `auth.json` (корень ключей под кодом восстановления), base64: по нему код открывает корень на новом железе
+    pub auth_b64: String,
+    pub salt_b64: String,
+    pub nonce_b64: String,
+}
+
+#[derive(Serialize, Deserialize)]
+struct FileWire {
+    header: Header,
+    ct: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct Manifest {
+    pub entries: Vec<EntryWire>,
+    pub excluded: Vec<String>,
+    pub node_version: String,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct EntryWire {
+    pub area: Area,
+    pub path: String,
+    pub sha256: String,
+    pub data_b64: String,
+}
+
+fn b64() -> base64::engine::GeneralPurpose {
+    base64::engine::general_purpose::STANDARD
+}
+
+fn derive_key(root: &[u8; 32], salt: &[u8]) -> [u8; 32] {
+    let mut k = [0u8; 32];
+    Hkdf::<Sha256>::new(Some(salt), root).expand(INFO, &mut k).expect("32 байта — допустимая длина");
+    k
+}
+
+pub struct SealParams<'a> {
+    pub root: &'a [u8; 32],
+    pub auth_json: &'a [u8],
+    pub node_id: &'a str,
+    pub counter: u64,
+    pub now_ms: u64,
+}
+
+/// Собрать и зашифровать копию. Возвращает готовые байты файла.
+pub fn seal(entries: &[Entry], p: &SealParams) -> Result<Vec<u8>, String> {
+    let manifest = Manifest {
+        entries: entries
+            .iter()
+            .map(|e| EntryWire { area: e.area, path: e.path.clone(), sha256: hex::encode(Sha256::digest(&e.data)), data_b64: b64().encode(&e.data) })
+            .collect(),
+        excluded: EXCLUDED.iter().map(|s| s.to_string()).collect(),
+        node_version: env!("CARGO_PKG_VERSION").to_string(),
+    };
+    let plain = serde_json::to_vec(&manifest).map_err(|e| e.to_string())?;
+    let mut salt = [0u8; 16];
+    let mut nonce = [0u8; 12];
+    let mut id = [0u8; 16];
+    rand::rngs::OsRng.fill_bytes(&mut salt);
+    rand::rngs::OsRng.fill_bytes(&mut nonce);
+    rand::rngs::OsRng.fill_bytes(&mut id);
+    let header = Header {
+        magic: MAGIC.into(),
+        v: VERSION,
+        id: hex::encode(id),
+        created_ms: p.now_ms,
+        counter: p.counter,
+        node_id: p.node_id.into(),
+        root_id: key_root::wrap::root_id(p.root),
+        auth_b64: b64().encode(p.auth_json),
+        salt_b64: b64().encode(salt),
+        nonce_b64: b64().encode(nonce),
+    };
+    let aad = serde_json::to_vec(&header).map_err(|e| e.to_string())?;
+    let key = derive_key(p.root, &salt);
+    let ct = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| e.to_string())?
+        .encrypt(Nonce::from_slice(&nonce), Payload { msg: &plain, aad: &aad })
+        .map_err(|_| "шифрование".to_string())?;
+    serde_json::to_vec_pretty(&FileWire { header, ct: b64().encode(ct) }).map_err(|e| e.to_string())
+}
+
+fn parse_wire(bytes: &[u8]) -> Result<FileWire, String> {
+    if bytes.len() > (MAX_TOTAL as usize) * 2 {
+        return Err("файл слишком большой".into());
+    }
+    let w: FileWire = serde_json::from_slice(bytes).map_err(|_| "это не файл резервной копии YANDI".to_string())?;
+    if w.header.magic != MAGIC {
+        return Err("это не файл резервной копии YANDI".into());
+    }
+    if w.header.v != VERSION {
+        return Err(format!("версия копии {} не поддерживается этой программой (нужна {VERSION})", w.header.v));
+    }
+    Ok(w)
+}
+
+/// Только заголовок (без расшифровки): номер узла, время, номер копии.
+pub fn read_header(bytes: &[u8]) -> Result<Header, String> {
+    parse_wire(bytes).map(|w| w.header)
+}
+
+#[derive(Debug)]
+pub struct Opened {
+    pub header: Header,
+    pub manifest: Manifest,
+}
+
+impl Opened {
+    pub fn entries(&self) -> Result<Vec<Entry>, String> {
+        self.manifest
+            .entries
+            .iter()
+            .map(|e| {
+                let data = b64().decode(&e.data_b64).map_err(|_| "повреждённая запись в копии".to_string())?;
+                if hex::encode(Sha256::digest(&data)) != e.sha256 {
+                    return Err(format!("{}: контрольная сумма не сходится", e.path));
+                }
+                if !safe_rel(&e.path) {
+                    return Err(format!("недопустимый путь в копии: {}", e.path));
+                }
+                Ok(Entry { area: e.area, path: e.path.clone(), data })
+            })
+            .collect()
+    }
+}
+
+/// Путь внутри каталога: без `..`, абсолютных и пустых частей (копия из чужих рук не должна писать за пределы каталогов узла).
+fn safe_rel(p: &str) -> bool {
+    !p.is_empty() && !p.starts_with('/') && !p.contains('\\') && p.split('/').all(|c| !c.is_empty() && c != "." && c != ".." && !c.contains('\0'))
+}
+
+/// Расшифровать копию корнем ключей.
+pub fn open_with_root(bytes: &[u8], root: &[u8; 32]) -> Result<Opened, String> {
+    let w = parse_wire(bytes)?;
+    if w.header.root_id != key_root::wrap::root_id(root) {
+        return Err("этот код не относится к этой копии".into());
+    }
+    let salt = b64().decode(&w.header.salt_b64).map_err(|_| "повреждённый заголовок".to_string())?;
+    let nonce = b64().decode(&w.header.nonce_b64).map_err(|_| "повреждённый заголовок".to_string())?;
+    if nonce.len() != 12 {
+        return Err("повреждённый заголовок".into());
+    }
+    let ct = b64().decode(&w.ct).map_err(|_| "повреждённый файл".to_string())?;
+    let aad = serde_json::to_vec(&w.header).map_err(|e| e.to_string())?;
+    let key = derive_key(root, &salt);
+    let plain = Aes256Gcm::new_from_slice(&key)
+        .map_err(|e| e.to_string())?
+        .decrypt(Nonce::from_slice(&nonce), Payload { msg: &ct, aad: &aad })
+        .map_err(|_| "файл повреждён или изменён".to_string())?;
+    let manifest: Manifest = serde_json::from_slice(&plain).map_err(|_| "повреждённое содержимое копии".to_string())?;
+    Ok(Opened { header: w.header, manifest })
+}
+
+/// Открыть копию кодом восстановления (или мастер-паролем, на который тоже сделана обёртка): корень достаётся из `auth.json` заголовка.
+pub fn open_with_code(bytes: &[u8], code: &str) -> Result<Opened, String> {
+    open_with_code_policy(bytes, code, &key_root::KdfPolicy::production())
+}
+
+/// То же с явным нижним порогом стоимости KDF (в тестах — дешёвым; в программе всегда рабочий).
+pub fn open_with_code_policy(bytes: &[u8], code: &str, policy: &key_root::KdfPolicy) -> Result<Opened, String> {
+    let w = parse_wire(bytes)?;
+    let auth = b64().decode(&w.header.auth_b64).map_err(|_| "повреждённый заголовок".to_string())?;
+    let doc = key_root::RootDocument::parse(&auth).map_err(|e| e.to_string())?;
+    let secret = key_root::recovery_secret(code);
+    let root = doc
+        .unlock_with_password(&secret, policy)
+        .map_err(|_| "код восстановления не подходит к этой копии".to_string())?;
+    open_with_root(bytes, &root)
+}
+
+// ── Восстановление ──────────────────────────────────────────────────────────
+
+/// После восстановления журнал групп пуст, но номера записей продолжаются с запасом: у телефонов в кеше записи до реального номера.
+fn rebase_groups(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut v: Value = serde_json::from_slice(data).map_err(|_| "groups/index.json не разобран".to_string())?;
+    if let Some(list) = v.as_array_mut() {
+        for g in list {
+            let next = g.get("next_seq").and_then(Value::as_u64).unwrap_or(1).max(g.get("first_seq").and_then(Value::as_u64).unwrap_or(1));
+            let base = next.saturating_add(GROUP_SEQ_GAP);
+            if let Some(o) = g.as_object_mut() {
+                o.insert("first_seq".into(), base.into());
+                o.insert("next_seq".into(), base.into());
+            }
+        }
+    }
+    serde_json::to_vec(&v).map_err(|e| e.to_string())
+}
+
+#[derive(Debug)]
+pub struct RestoreReport {
+    pub written: Vec<String>,
+    pub kept_old: Vec<PathBuf>,
+    /// Что не удалось очистить от секретов старого формата (с точными путями) и что пропущено; пусто — всё очищено.
+    pub unclean: Vec<String>,
+    pub groups: usize,
+    pub node_id: String,
+}
+
+/// Неудача восстановления с тем, что нужно показать владельцу: предупреждения (пропущенное, неоткаченное, неподтверждённая долговечность)
+/// и признак, остались ли на диске изменённые файлы (P19-4). До записи файлов `files_changed` ложно.
+#[derive(Debug)]
+pub struct RestoreFailure {
+    pub message: String,
+    pub warnings: Vec<String>,
+    pub files_changed: bool,
+}
+
+impl From<String> for RestoreFailure {
+    fn from(message: String) -> Self {
+        Self { message, warnings: Vec::new(), files_changed: false }
+    }
+}
+
+pub struct RestoreOptions {
+    /// перезаписывать, если на этой машине уже есть ключи узла (прежние файлы сохраняются рядом)
+    pub force: bool,
+}
+
+/// Создать каталог (и недостающие родители) с правами 0700, по одному и от верхнего к нижнему; каждый созданный каталог сразу попадает в
+/// `created`, даже если следующий создать не удалось (P21-3): их имена живут в родителях и нуждаются в сбросе на диск.
+fn private_dirs(dir: &Path, created: &mut Vec<PathBuf>) -> std::io::Result<()> {
+    let mut missing: Vec<PathBuf> = Vec::new();
+    let mut cur = dir.to_path_buf();
+    while !cur.as_os_str().is_empty() && std::fs::symlink_metadata(&cur).is_err() {
+        missing.push(cur.clone());
+        match cur.parent() {
+            Some(p) => cur = p.to_path_buf(),
+            None => break,
+        }
+    }
+    for d in missing.iter().rev() {
+        #[cfg(unix)]
+        let r = {
+            use std::os::unix::fs::DirBuilderExt;
+            std::fs::DirBuilder::new().mode(0o700).create(d)
+        };
+        #[cfg(not(unix))]
+        let r = std::fs::create_dir(d);
+        match r {
+            Ok(()) => created.push(d.clone()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Сбросить на диск созданные каталоги и их имена в родителях (снизу вверх), а также каталоги, где лежали изменённые файлы. Всё, что не
+/// подтвердилось, возвращается строками для отчёта.
+fn sync_report(created: &[PathBuf], touched: &[PathBuf]) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut dirs: Vec<PathBuf> = touched.to_vec();
+    dirs.sort();
+    dirs.dedup();
+    for d in &dirs {
+        if let Err(er) = crate::util::private_file::sync_dir_checked(&d.join("x")) {
+            out.push(format!("{}: запись каталога не подтверждена на диске ({er}); после отключения питания могли вернуться прежние или новые файлы", d.display()));
+        }
+    }
+    for d in created {
+        // сам каталог и его имя в родителе
+        for target in [d.join("x"), d.clone()] {
+            if let Err(er) = crate::util::private_file::sync_dir_checked(&target) {
+                out.push(format!("{}: созданный каталог не подтверждён на диске ({er})", d.display()));
+                break;
+            }
+        }
+    }
+    out
+}
+
+/// Отказ до замены файлов: накопленные предупреждения не теряются, и прямо сказано, что проверка остатков не выполнялась (P20-4).
+fn early_fail(message: String, skipped: &[String], sync_notes: Vec<String>, leftover: bool) -> RestoreFailure {
+    let mut warnings = skipped.to_vec();
+    warnings.extend(sync_notes);
+    warnings.push("проверка остатков прежних восстановлений не выполнялась: операция прервана до замены файлов".into());
+    RestoreFailure { message, warnings, files_changed: leftover }
+}
+
+/// Записать файлы копии в каталоги узла. Узел при этом не должен работать. Журналы групп и переписка не восстанавливаются.
+/// Это остаток, который создаёт само восстановление: `<имя>.before-restore-<штамп>-<номер>` или `.<имя>.restore-<штамп>-<номер>` с числовыми
+/// компонентами. Любые другие файлы рядом (заметки, ручные копии, файлы с похожим именем) не считаются остатками и не трогаются.
+fn is_restore_leftover(own_name: &str, name: &str) -> bool {
+    fn nums(rest: &str) -> bool {
+        let mut it = rest.split('-');
+        let (Some(a), Some(b), None) = (it.next(), it.next(), it.next()) else { return false };
+        !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+    }
+    if let Some(rest) = name.strip_prefix(&format!("{own_name}.before-restore-")) {
+        return nums(rest);
+    }
+    if let Some(rest) = name.strip_prefix(&format!(".{own_name}.restore-")) {
+        return nums(rest);
+    }
+    false
+}
+
+/// Привести к безопасному виду активные файлы связи и убрать/очистить остатки восстановления рядом с ними. Возвращает всё, что сделать
+/// не удалось или пропущено (путь и причина). Остатки определяются только точным шаблоном имён, который создаёт восстановление; файл
+/// блокировки и временные файлы записи (`.…tmp…`) не трогаются. Чтение идёт без перехода по ссылкам.
+pub fn sweep_pairing_files(l: &Layout) -> Vec<String> {
+    sweep_pairing_files_with(l, crate::netlayer::packet::anchor_store_override().as_deref())
+}
+
+fn sweep_pairing_files_with(l: &Layout, anchors_override: Option<&str>) -> Vec<String> {
+    use crate::netlayer::pairing::{Cleaned, StoreKind};
+    let mut problems = Vec::new();
+    for (rel, kind) in [("paired_clients.json", StoreKind::Clients), ("paired_anchors.json", StoreKind::Anchors)] {
+        let path = match target_path_with(l, Area::Home, rel, anchors_override) {
+            Ok(p) => p,
+            Err(e) => {
+                problems.push(format!("{rel}: путь не определён ({e})"));
+                continue;
+            }
+        };
+        // 1. активный файл — под своей блокировкой: старый формат переписывается очищенным видом, неразбираемый — в отчёт
+        match crate::netlayer::pairing::sanitize_file_in_place(kind, &path, true) {
+            Ok(Cleaned::Absent | Cleaned::AlreadyClean | Cleaned::Rewritten) => {}
+            Ok(Cleaned::RewrittenDurabilityUnknown(why)) => problems.push(format!("{}: очищен, но запись каталога не подтверждена на диске ({why}); при отключении питания мог вернуться прежний файл — перезапишите или проверьте после перезагрузки", path.display())),
+            Ok(Cleaned::Unparseable) => problems.push(format!("{}: файл не разбирается по строгой схеме, возможные секреты не проверены; удалите или проверьте его вручную", path.display())),
+            Err(e) => problems.push(format!("{}: не удалось очистить ({e})", path.display())),
+        }
+        // 2. остатки восстановления рядом: очистить или удалить; каждая ошибка попадает в отчёт
+        let dir = match path.parent().filter(|d| !d.as_os_str().is_empty()) {
+            Some(d) => d.to_path_buf(),
+            None => PathBuf::from("."),
+        };
+        let Some(own_name) = path.file_name().and_then(|n| n.to_str()).map(str::to_string) else { continue };
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(e) => {
+                problems.push(format!("{}: каталог не читается, остатки не проверены ({e})", dir.display()));
+                continue;
+            }
+        };
+        for entry in rd {
+            let e = match entry {
+                Ok(e) => e,
+                Err(er) => {
+                    problems.push(format!("{}: запись каталога не прочитана ({er})", dir.display()));
+                    continue;
+                }
+            };
+            let Some(name) = e.file_name().to_str().map(str::to_string) else { continue };
+            if !is_restore_leftover(&own_name, &name) {
+                continue;
+            }
+            let p = e.path();
+            match std::fs::symlink_metadata(&p) {
+                Ok(m) if m.file_type().is_symlink() => {
+                    problems.push(format!("{}: символическая ссылка вместо остатка, не тронута", p.display()));
+                    continue;
+                }
+                Ok(m) if !m.is_file() => {
+                    problems.push(format!("{}: остаток не обычный файл, не тронут", p.display()));
+                    continue;
+                }
+                Err(er) => {
+                    problems.push(format!("{}: {er}", p.display()));
+                    continue;
+                }
+                _ => {}
+            }
+            match crate::netlayer::pairing::sanitize_file_in_place(kind, &p, false) {
+                // разобрать нельзя — проверить на секреты нельзя; а имя по шаблону не доказывает, что файл создан восстановлением (P18-2),
+                // поэтому не удаляем: сообщаем путь, решение за владельцем
+                Ok(Cleaned::RewrittenDurabilityUnknown(why)) => problems.push(format!("{}: остаток очищен, но запись каталога не подтверждена на диске ({why})", p.display())),
+                Ok(Cleaned::Unparseable) => problems.push(format!("{}: похож на остаток восстановления, но не разбирается; не тронут — проверьте и удалите вручную", p.display())),
+                Ok(_) => {}
+                Err(er) => problems.push(format!("{}: остаток не очищен ({er})", p.display())),
+            }
+        }
+    }
+    problems
+}
+
+pub fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
+    restore_detailed(opened, l, opt).map_err(|f| f.message)
+}
+
+/// То же, но с типизированной неудачей: предупреждения и признак изменённых файлов не теряются (P19-4).
+pub fn restore_detailed(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, RestoreFailure> {
+    restore_core(opened, l, opt, crate::netlayer::packet::anchor_store_override().as_deref())
+}
+
+#[cfg(test)]
+fn restore_with(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>) -> Result<RestoreReport, String> {
+    restore_core(opened, l, opt, anchors_override).map_err(|f| f.message)
+}
+
+// Пробы отказов для тестов (в рабочей сборке отсутствуют): номер замены, которая «откажет», и отказ записи при откате.
+#[cfg(test)]
+thread_local! {
+    static FAIL_SWAP_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static FAIL_ROLLBACK_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_ROLLBACK_RENAME: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static FAIL_TMP_RENAME_AT: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+    static AFTER_SWAP_HOOK: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+}
+fn inject_tmp_rename_failure(_i: usize) -> bool {
+    #[cfg(test)]
+    {
+        FAIL_TMP_RENAME_AT.with(|c| c.get() == Some(_i))
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+/// Проба: код, который тест выполняет между неудачной заменой и началом отката (пока замки ещё у восстановления).
+fn run_after_swap_hook() {
+    #[cfg(test)]
+    {
+        if let Some(h) = AFTER_SWAP_HOOK.with(|c| c.borrow_mut().take()) {
+            h();
+        }
+    }
+}
+fn inject_rollback_rename_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_ROLLBACK_RENAME.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+fn inject_swap_failure(_i: usize) -> bool {
+    #[cfg(test)]
+    {
+        FAIL_SWAP_AT.with(|c| c.get() == Some(_i))
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+fn inject_rollback_write_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_ROLLBACK_WRITE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Физическое имя цели для сравнения. Путь делается абсолютным; `.` и `..` разбираются по компонентам (после существующего каталога — по его реальному
+/// пути, внутри ещё не существующей части — лексически); затем самый глубокий существующий родитель приводится к реальному пути (ссылки раскрываются),
+/// остаток дописывается. Два разных написания одного и того же файла, в том числе через несуществующий каталог и `..`, дают один ключ (P21-1).
+/// Как файловая система каталога сравнивает имена: проба создаёт строчный файл и ищет заглавное написание.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum CaseKind {
+    Sensitive,
+    Insensitive,
+    /// Проба не удалась (нет прав, ошибка): состояние неизвестно и не считается «различает» (P23-8).
+    Unknown,
+}
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_PROBE_REMOVE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+fn inject_probe_remove_failure() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_PROBE_REMOVE.with(|c| c.get())
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+
+/// Кэш проб по каталогам и накопленные предупреждения (оставшийся пробный файл, имена, уникальность которых проверить нельзя).
+#[derive(Default)]
+struct CaseProbe {
+    cache: std::collections::HashMap<PathBuf, CaseKind>,
+    warnings: Vec<String>,
+    unverifiable: Vec<String>,
+}
+
+impl CaseProbe {
+    fn kind(&mut self, dir: &Path) -> CaseKind {
+        if let Some(k) = self.cache.get(dir) {
+            return *k;
+        }
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+        let name = format!(".yandi-case-probe-{}-{nanos:x}", std::process::id());
+        let lower = dir.join(&name);
+        let kind = match std::fs::OpenOptions::new().write(true).create_new(true).open(&lower) {
+            Err(_) => CaseKind::Unknown,
+            Ok(_) => {
+                let same = std::fs::symlink_metadata(dir.join(name.to_uppercase())).is_ok();
+                let removed = if inject_probe_remove_failure() { Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "проба отказа удаления")) } else { std::fs::remove_file(&lower) };
+                if let Err(e) = removed {
+                    self.warnings.push(format!("{}: пробный файл проверки регистра не удалён ({e}); удалите его вручную", lower.display()));
+                }
+                if same { CaseKind::Insensitive } else { CaseKind::Sensitive }
+            }
+        };
+        self.cache.insert(dir.to_path_buf(), kind);
+        kind
+    }
+}
+
+type Staged = (PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>);
+
+/// Уборка подготовленных файлов и сброс на диск всех затронутых каталогов (созданные, где лежали подготовленные файлы, где менялись имена).
+/// Возвращает строки для отчёта: что не удалось убрать (оставшийся подготовленный файл может содержать ключи) и что не подтвердилось на диске.
+fn abort_cleanup(staged: &[Staged], created: &[PathBuf], staged_dirs: &[PathBuf], touched: &[PathBuf]) -> (Vec<String>, bool) {
+    let mut notes = Vec::new();
+    let mut left = false;
+    for (_, tmp, _, _) in staged {
+        if let Err(e) = std::fs::remove_file(tmp) {
+            if e.kind() != std::io::ErrorKind::NotFound {
+                left = true;
+                notes.push(format!("{}: подготовленный файл не удалён ({e}); проверьте и удалите вручную", tmp.display()));
+            }
+        }
+    }
+    let mut dirs: Vec<PathBuf> = staged_dirs.to_vec();
+    dirs.extend_from_slice(touched);
+    notes.extend(sync_report(created, &dirs));
+    // неподтверждённая запись каталога (как и оставшийся файл) — возможное остаточное состояние: флаг консервативный (P22-3)
+    let left = left || !notes.is_empty();
+    (notes, left)
+}
+
+fn physical_key(p: &Path, cprobe: &mut CaseProbe) -> PathBuf {
+    use std::path::Component;
+    let abs = if p.is_absolute() { p.to_path_buf() } else { std::env::current_dir().map(|c| c.join(p)).unwrap_or_else(|_| p.to_path_buf()) };
+    let mut cur = PathBuf::new();
+    for c in abs.components() {
+        match c {
+            Component::Prefix(_) | Component::RootDir => cur.push(c.as_os_str()),
+            Component::CurDir => {}
+            Component::Normal(n) => cur.push(n),
+            Component::ParentDir => {
+                // существующий каталог — по реальному пути (ссылка в нём ведёт `..` на родителя цели), несуществующий — лексически
+                if let Ok(real) = std::fs::canonicalize(&cur) {
+                    cur = real;
+                }
+                cur.pop();
+            }
+        }
+    }
+    let mut rest: Vec<std::ffi::OsString> = Vec::new();
+    let mut probe = cur.clone();
+    loop {
+        if let Ok(real) = std::fs::canonicalize(&probe) {
+            // ещё не существующий хвост: на файловой системе без учёта регистра «PAIRED_CLIENTS.JSON» и «paired_clients.json» — один файл (P22-9);
+            // на системе с учётом регистра имена разные и в нижний регистр не приводятся; при неизвестном состоянии — осторожно как без учёта
+            // регистра, а имена не из ASCII (каноническая эквивалентность Unicode здесь не проверяется) названы непроверяемыми (P23-8)
+            let kind = if rest.is_empty() { CaseKind::Sensitive } else { cprobe.kind(&real) };
+            let fold = kind != CaseKind::Sensitive;
+            if kind != CaseKind::Sensitive && rest.iter().any(|c| !c.to_string_lossy().is_ascii()) {
+                cprobe.unverifiable.push(p.display().to_string());
+            }
+            let mut out = real;
+            for part in rest.iter().rev() {
+                if fold {
+                    out.push(part.to_string_lossy().to_lowercase());
+                } else {
+                    out.push(part);
+                }
+            }
+            return out;
+        }
+        match (probe.parent().map(|d| d.to_path_buf()), probe.file_name().map(|n| n.to_os_string())) {
+            (Some(parent), Some(name)) if parent != probe => {
+                rest.push(name);
+                probe = parent;
+            }
+            _ => return cur,
+        }
+    }
+}
+
+/// Проверка, что никакие две цели не ведут в один физический файл; выполняется до записи и ещё раз после создания каталогов.
+fn check_target_collisions(entries: &[Entry], targets: &[PathBuf], probe: &mut CaseProbe) -> Result<(), RestoreFailure> {
+    let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+    for (e, t) in entries.iter().zip(targets) {
+        let label = format!("{:?}/{}", e.area, e.path);
+        if let Some(first) = seen.insert(physical_key(t, probe), label.clone()) {
+            return Err(RestoreFailure::from(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено, ничего не изменено", t.display())));
+        }
+    }
+    if let Some(name) = probe.unverifiable.first() {
+        return Err(RestoreFailure::from(format!("{name}: уникальность имени не из ASCII на этой файловой системе проверить нельзя (регистр и нормализация Unicode не определены); восстановление отклонено, ничего не изменено")));
+    }
+    Ok(())
+}
+
+/// Обёртка: любой отказ без своих предупреждений (проверки до записи, недопустимые пути, права каталогов) тоже говорит, что остатки не проверялись (P21-4).
+fn restore_core(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>) -> Result<RestoreReport, RestoreFailure> {
+    // пробы регистра создают файлы в каталогах узла; их отчёт принадлежит этой обёртке и попадает в результат на ЛЮБОМ выходе (P24-5)
+    let mut probe = CaseProbe::default();
+    let result = restore_inner(opened, l, opt, anchors_override, &mut probe);
+    match result {
+        Ok(mut r) => {
+            r.unclean.extend(std::mem::take(&mut probe.warnings));
+            Ok(r)
+        }
+        Err(mut f) => {
+            if !probe.warnings.is_empty() {
+                f.files_changed = true; // на диске остался пробный файл
+                f.warnings.extend(std::mem::take(&mut probe.warnings));
+            }
+            if !f.warnings.iter().any(|w| w.contains("не выполнялась")) {
+                f.warnings.push("проверка остатков прежних восстановлений не выполнялась: операция прервана до замены файлов".into());
+            }
+            Err(f)
+        }
+    }
+}
+
+fn restore_inner(opened: &Opened, l: &Layout, opt: &RestoreOptions, anchors_override: Option<&str>, case_probe: &mut CaseProbe) -> Result<RestoreReport, RestoreFailure> {
+    let entries = opened.entries()?;
+    // пути проверяются ДО любой записи: ни ссылок внутри каталогов узла, ни (без явного разрешения) уже существующих файлов
+    let mut targets = Vec::new();
+    for e in &entries {
+        targets.push(target_path_with(l, e.area, &e.path, anchors_override)?);
+    }
+    // две записи копии (или запись и путь --anchor-store) не должны вести в один и тот же физический файл: иначе замена и откат
+    // перезаписывали бы друг друга (P20-2), а блокировки алиасов висели бы друг на друге (P20-1); проверка — до любой записи
+    check_target_collisions(&entries, &targets, case_probe)?;
+    if !opt.force {
+        let existing: Vec<String> = entries.iter().zip(&targets).filter(|(_, p)| p.exists()).map(|(e, _)| format!("{:?}/{}", e.area, e.path)).collect();
+        if !existing.is_empty() {
+            return Err(RestoreFailure::from(format!(
+                "на этой машине уже есть файлы узла ({}); восстановление не перезапишет их без явного разрешения (--force)",
+                existing.join(", ")
+            )));
+        }
+    }
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
+    // Каталоги назначения должны быть приватными (0700) и наши: узел с другими правами не запустится. Проверка и исправление — ДО любых
+    // изменений; чужой каталог, права которого исправить нельзя, отвергается сразу, а не после «успешного» восстановления.
+    #[cfg(unix)]
+    for base in [&l.keys, &l.data, &l.home] {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(m) = std::fs::metadata(base) {
+            if m.is_dir() && m.permissions().mode() & 0o777 != 0o700 {
+                std::fs::set_permissions(base, std::fs::Permissions::from_mode(0o700)).map_err(|er| {
+                    format!("каталог {} должен быть приватным (0700), но права исправить не удалось ({er}); создайте каталог от своего пользователя", base.display())
+                })?;
+            }
+        }
+    }
+    // Фаза 1: всё готовится заранее, активные файлы не трогаются. Любая ошибка здесь (неразобранный индекс групп, диск) не меняет ничего.
+    let mut groups = 0usize;
+    let mut skipped: Vec<String> = Vec::new();
+    let mut created_dirs: Vec<PathBuf> = Vec::new();
+    let mut staged: Vec<(PathBuf, PathBuf, String, Option<crate::netlayer::pairing::StoreKind>)> = Vec::new(); // (рабочий путь, подготовленный файл, подпись для отчёта, вид файла связи — по ЛОГИЧЕСКОМУ имени записи, а не по имени на диске)
+    // каталоги, где лежат (или лежали) подготовленные файлы: их имена тоже сбрасываются на диск после уборки (P21-3)
+    let mut staged_dirs: Vec<PathBuf> = Vec::new();
+    for (i, (e, path)) in entries.iter().zip(targets).enumerate() {
+        let sanitized_pairing = match pairing_store_kind(&e.path) {
+            Some(kind) => match crate::netlayer::pairing::sanitized_store_text(kind, &e.data) {
+                Some(clean) => Some(clean.into_bytes()),
+                None => {
+                    // копия с неразобранным файлом связи: он не восстанавливается (нужно новое сопряжение) — об этом говорим, а не молчим (P18-5)
+                    skipped.push(format!("{:?}/{}: файл связи в копии не разбирается по строгой схеме, не восстановлен (нужно новое сопряжение)", e.area, e.path));
+                    continue;
+                }
+            },
+            None => None,
+        };
+        let data = if let Some(clean) = sanitized_pairing {
+            clean
+        } else if e.path == "groups/index.json" {
+            match rebase_groups(&e.data) {
+                Ok(d) => {
+                    groups = serde_json::from_slice::<Value>(&d).ok().and_then(|v| v.as_array().map(|a| a.len())).unwrap_or(0);
+                    d
+                }
+                Err(er) => {
+                    let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
+                    return Err(early_fail(er, &skipped, notes, left));
+                }
+            }
+        } else {
+            e.data.clone()
+        };
+        if let Some(dir) = path.parent() {
+            // каталоги — приватные (0700): узел не стартует с каталогом данных, доступным другим пользователям
+            if let Err(er) = private_dirs(dir, &mut created_dirs) {
+                let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
+                return Err(early_fail(format!("{}: {er}", e.path), &skipped, notes, left));
+            }
+            staged_dirs.push(dir.to_path_buf());
+        }
+        let tmp = path.with_file_name(format!(".{}.restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
+        if let Err(er) = crate::util::private_file::write_private(&tmp, &data) {
+            let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
+            return Err(early_fail(format!("{}: {er}", e.path), &skipped, notes, left));
+        }
+        staged.push((path, tmp, format!("{:?}/{}", e.area, e.path), pairing_store_kind(&e.path)));
+    }
+    // создание каталогов могло само сделать два назначения одним файлом (например, путь через ещё не существовавший каталог и `..`):
+    // проверка повторяется по фактическим целям ДО замены (P21-1)
+    {
+        let mut seen: std::collections::HashMap<PathBuf, String> = std::collections::HashMap::new();
+        for (path, _, label, _) in &staged {
+            if let Some(first) = seen.insert(physical_key(path, case_probe), label.clone()) {
+                let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
+                return Err(early_fail(format!("записи копии {first} и {label} ведут в один и тот же файл ({}); восстановление отклонено до замены файлов", path.display()), &skipped, notes, left));
+            }
+        }
+    }
+    // Фаза 2: замена. Прежние файлы переименовываются под уникальными именами, новые встают на их место. Исключение — файлы связи
+    // (`paired_*.json`): их прежнее содержимое может нести секреты старого формата, поэтому сырой копии «до восстановления» не
+    // создаётся; для отката в памяти хранится только очищенный вид прежнего файла. Замки файлов связи держатся от чтения прежнего вида
+    // до конца отката (P19-1): параллельный писатель не вклинится ни между чтением и заменой, ни между заменой и откатом, ни в удаление.
+    struct Swap {
+        kept: Vec<PathBuf>,
+        written: Vec<String>,
+        done: Vec<(PathBuf, Option<PathBuf>)>, // (рабочий путь, куда ушёл прежний)
+        touched: Vec<PathBuf>,                 // каталоги, где менялись имена (переименования, удаления, откат): их нужно сбросить на диск
+        failure: Option<String>,
+        stuck: Vec<String>,
+        notes: Vec<String>,
+        durability: Vec<String>,
+        migrated: bool, // откат вернул файл связи в очищенном по смыслу виде (не совпадающем с прежним)
+    }
+    let mut lock_paths: Vec<PathBuf> = staged.iter().filter(|(_, _, _, k)| k.is_some()).map(|(p, _, _, _)| p.clone()).collect();
+    lock_paths.sort();
+    lock_paths.dedup();
+    let mut swap_body = || -> Swap {
+        let mut sw = Swap { kept: Vec::new(), written: Vec::new(), done: Vec::new(), touched: Vec::new(), failure: None, stuck: Vec::new(), notes: Vec::new(), durability: Vec::new(), migrated: false };
+        // прежний очищенный вид файла связи и признак «очистка изменила содержимое по смыслу» (сравнение разобранного JSON, а не текста: разный
+        // вид записи при том же содержимом изменением не считается)
+        let mut pairing_rollback: std::collections::HashMap<PathBuf, (Option<Vec<u8>>, bool)> = std::collections::HashMap::new();
+        for (i, (path, tmp, label, pairing_kind)) in staged.iter().enumerate() {
+            let mut old: Option<PathBuf> = None;
+            if let Some(dir) = path.parent() {
+                sw.touched.push(dir.to_path_buf()); // имя в этом каталоге будет меняться (замена, при отказе — откат)
+            }
+            let mut move_aside = !inject_swap_failure(i) && pairing_kind.is_none() && path.exists();
+            if let Some(kind) = pairing_kind {
+                use crate::netlayer::pairing::PriorFile;
+                match crate::netlayer::pairing::prior_file(path) {
+                    PriorFile::Absent => {
+                        pairing_rollback.entry(path.clone()).or_insert((None, false)); // прежнего файла нет: при откате созданный убирается
+                    }
+                    PriorFile::Text(raw) => match crate::netlayer::pairing::sanitized_store_text(*kind, &raw).map(|t| t.into_bytes()) {
+                        Some(prior) => {
+                            // сравнение разобранного JSON, а не текста: разный вид записи при том же содержимом изменением не считается
+                            let changed = serde_json::from_slice::<Value>(&raw).ok() != serde_json::from_slice::<Value>(&prior).ok();
+                            pairing_rollback.entry(path.clone()).or_insert((Some(prior), changed)); // исходное состояние запоминается один раз
+                        }
+                        // существующий файл связи не разбирается: очистить его для отката нельзя, удалять при откате нельзя — он отодвигается рядом
+                        // (как обычный файл) и возвращается переименованием; о нём скажет и обход остатков (P21-2)
+                        None => move_aside = !inject_swap_failure(i),
+                    },
+                    // есть, но не прочитан (не UTF-8, больше лимита, нет прав, ссылка, ошибка чтения): неизвестное не считается отсутствием (P22-1)
+                    PriorFile::Unreadable(_) => move_aside = !inject_swap_failure(i),
+                }
+            }
+            if move_aside {
+                let o = path.with_file_name(format!("{}.before-restore-{stamp}-{i}", path.file_name().and_then(|n| n.to_str()).unwrap_or("file")));
+                if let Err(er) = std::fs::rename(path, &o) {
+                    sw.failure = Some(format!("{label}: {er}"));
+                    break;
+                }
+                old = Some(o); // имя изменено: с этого момента откат обязан вернуть прежний файл на место
+            }
+            let renamed = if inject_swap_failure(i) || inject_tmp_rename_failure(i) { Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа замены")) } else { std::fs::rename(tmp, path) };
+            if let Err(er) = renamed {
+                if let Some(o) = &old {
+                    // прежний файл уже отодвинут: его возвращение проверяется, а не отбрасывается (P20-3)
+                    let back = if inject_rollback_rename_failure() { Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа возврата имени")) } else { std::fs::rename(o, path) };
+                    if back.is_err() {
+                        sw.stuck.push(format!("{} (прежний файл остался под именем {})", path.display(), o.display()));
+                    }
+                }
+                sw.failure = Some(format!("{label}: {er}"));
+                break;
+            }
+            sw.done.push((path.clone(), old.clone()));
+            if let Some(o) = old {
+                sw.kept.push(o);
+            }
+            sw.written.push(label.clone());
+        }
+        if sw.failure.is_some() {
+            run_after_swap_hook();
+            // откат: уже заменённые файлы возвращаются (прежний — поверх нового одним rename), не дошедшие подготовленные удаляются;
+            // что вернуть не удалось — перечисляется, а не замалчивается
+            for (path, old) in sw.done.clone().iter().rev() {
+                match old {
+                    Some(o) => {
+                        if inject_rollback_rename_failure() || std::fs::rename(o, path).is_err() {
+                            sw.stuck.push(format!("{} (прежний файл: {})", path.display(), o.display()));
+                        }
+                    }
+                    None => match pairing_rollback.get(path) {
+                        // файл связи: возвращается очищенный вид прежнего содержимого (сырых копий нет); замок уже у нас
+                        Some((Some(prior), changed)) => {
+                            let r = if inject_rollback_write_failure() {
+                                Err(std::io::Error::new(std::io::ErrorKind::Other, "проба отказа записи при откате"))
+                            } else {
+                                crate::util::private_file::write_private_checked(path, prior)
+                            };
+                            match r {
+                                Ok(committed) => {
+                                    if let crate::util::private_file::Committed::DurabilityUnknown(why) = committed {
+                                        sw.durability.push(format!("{}: откат записан, но запись каталога не подтверждена на диске ({why})", path.display()));
+                                    }
+                                    // замечание об очистке — только после подтверждённой записи
+                                    if *changed {
+                                        sw.migrated = true;
+                                        sw.notes.push(format!("{}: откат вернул очищенный вид файла связи (секреты старого формата удалены, права клиентов прежнего формата не возвращаются)", path.display()));
+                                    }
+                                }
+                                Err(e2) => sw.stuck.push(format!("{} (прежний очищенный файл связи не возвращён: {e2})", path.display())),
+                            }
+                        }
+                        _ => {
+                            // прежнего файла не было: убирается созданный восстановлением; «уже нет» — не ошибка
+                            if let Err(e2) = std::fs::remove_file(path) {
+                                if e2.kind() != std::io::ErrorKind::NotFound {
+                                    sw.stuck.push(format!("{} (новый файл не убран: {e2})", path.display()));
+                                }
+                            }
+                        }
+                    },
+                }
+            }
+        }
+        sw
+    };
+    let sw = match crate::netlayer::pairing::locked_many(&lock_paths, &mut swap_body).map_err(|e| e.to_string()) {
+        Ok(sw) => sw,
+        Err(er) => {
+            // замок взять не удалось: ни одна замена не начата
+            let (notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &[]);
+            return Err(early_fail(format!("не удалось взять блокировку файла связи: {er}"), &skipped, notes, left));
+        }
+    };
+    let Swap { kept, written, done: _, touched, failure, stuck, notes, mut durability, migrated } = sw;
+    if let Some(er) = failure {
+        // подготовленные файлы убираются ДО итогового сброса каталогов, чтобы и это удаление было подтверждено (P20-5, P21-3)
+        let (cleanup_notes, left) = abort_cleanup(&staged, &created_dirs, &staged_dirs, &touched);
+        durability.extend(cleanup_notes);
+        let mut warnings = skipped;
+        warnings.extend(stuck.iter().cloned());
+        warnings.extend(notes);
+        warnings.extend(durability.iter().cloned());
+        warnings.push("проверка остатков прежних восстановлений не выполнялась: операция откатывалась".into());
+        // «изменены» читается консервативно: true при любой неподтверждённой части, при очищенном откате и при оставшихся подготовленных файлах;
+        // false только когда откат выполнен, подтверждён и вернул прежнее содержимое по смыслу
+        let residue = !stuck.is_empty() || !durability.is_empty() || migrated || left;
+        return Err(RestoreFailure {
+            message: if !stuck.is_empty() {
+                format!("восстановление не завершено ({er}), откат прошёл не полностью: {}. Прежние файлы лежат рядом (*.before-restore-*); повторите команду с --force", stuck.join("; "))
+            } else if migrated {
+                format!("восстановление не завершено и откатено ({er}), но файл связи возвращён в очищенном виде: права клиентов прежнего формата не восстановлены")
+            } else if !durability.is_empty() {
+                format!("восстановление не завершено и откатено ({er}), но запись откатов на диск или уборка не подтверждена; возможны остаточные изменения после сбоя питания")
+            } else {
+                format!("восстановление не завершено и откатено ({er}); файлы узла остались прежними. Можно повторить команду")
+            },
+            warnings,
+            files_changed: residue,
+        });
+    }
+    durability.extend(sync_report(&created_dirs, &touched));
+    // Очистка не зависит от содержимого копии: активные файлы связи и любые остатки рядом с ними (`*.before-restore-*`, промежуточные
+    // `.restore-*`, в том числе от прежних сбоев) проверяются всегда; всё, что не удалось очистить или удалить, попадает в отчёт.
+    let mut unclean = skipped;
+    unclean.extend(sweep_pairing_files_with(l, anchors_override));
+    unclean.extend(durability);
+    if groups > 0 {
+        // узел при старте известит участников: «группа восстановлена, переписка и файлы на узле не сохранены»
+        // не обязательная часть: ключи и связи уже на месте, и сбой этой записи (диск) не должен превращать удачное восстановление в ошибку
+        let _ = crate::util::private_file::write_private(&l.data.join("restored_notice.json"), format!("{{\"groups\":{groups}}}").as_bytes());
+    }
+    Ok(RestoreReport { written, kept_old: kept, unclean, groups, node_id: opened.header.node_id.clone() })
+}
+
+// ── Состояние автокопии ─────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq)]
+pub struct BackupState {
+    /// номер последней сделанной копии
+    pub counter: u64,
+    /// отпечаток содержимого последней копии, сохранённой В ПАПКУ (для «изменилось ли»); выгрузка по кнопке без папки его не трогает
+    pub last_digest: String,
+    /// время последней успешной копии любого вида (мс)
+    pub last_ok_ms: u64,
+    /// время последней копии, записанной в папку (мс); 0 — в папку ещё ничего не записано
+    pub last_saved_ms: u64,
+    /// время последней проверки (мс): копия могла не понадобиться
+    pub last_check_ms: u64,
+    pub last_error: Option<String>,
+    /// критичное изменение (устройство, бан, владелец) ещё не отражено в сохранённой копии; снимается только успехом или подтверждением
+    /// «изменений нет» и переживает перезапуск узла
+    #[serde(default)]
+    pub critical_pending: bool,
+    /// папка для автокопий (флешка, синхронизируемая с облаком папка); пусто — автокопии выключены
+    pub dir: Option<String>,
+    pub last_file: Option<String>,
+}
+
+fn state_path(l: &Layout) -> PathBuf {
+    l.data.join("backup_state.json")
+}
+
+static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Операции над состоянием копий (копирование, смена папки) идут по одной: иначе завершившееся копирование возвращало бы старую настройку
+/// папки, а две выгрузки получали бы один номер.
+pub fn lock_state() -> std::sync::MutexGuard<'static, ()> {
+    STATE_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Прочитать-изменить-записать состояние под замком; ошибка записи возвращается вызывающему.
+pub fn update_state(l: &Layout, f: impl FnOnce(&mut BackupState)) -> Result<BackupState, String> {
+    let _g = lock_state();
+    let mut s = load_state(l);
+    f(&mut s);
+    save_state(l, &s)?;
+    Ok(s)
+}
+
+pub fn load_state(l: &Layout) -> BackupState {
+    std::fs::read_to_string(state_path(l)).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default()
+}
+
+pub fn save_state(l: &Layout, s: &BackupState) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(s).map_err(|e| e.to_string())?;
+    crate::util::private_file::write_private(&state_path(l), &bytes).map_err(|e| e.to_string())
+}
+
+/// Имя файла автокопии: узнаваемое, сортируется по номеру.
+pub fn file_name(node_id: &str, counter: u64, now_ms: u64) -> String {
+    let secs = now_ms / 1000;
+    let (y, mo, d, h, mi) = civil(secs);
+    format!("yandi-{node_id}-{counter:06}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}.{FILE_EXT}")
+}
+
+/// Имя копии «Сохранить сейчас»: хранится отдельно от автокопий и не вытесняется ими.
+pub fn file_name_manual(node_id: &str, counter: u64, now_ms: u64) -> String {
+    let secs = now_ms / 1000;
+    let (y, mo, d, h, mi) = civil(secs);
+    format!("yandi-manual-{node_id}-{counter:06}-{y:04}{mo:02}{d:02}-{h:02}{mi:02}.{FILE_EXT}")
+}
+
+/// Дата и время по UTC из секунд эпохи (без внешних зависимостей).
+pub fn civil_utc(secs: u64) -> (u64, u64, u64, u64, u64) {
+    civil(secs)
+}
+
+fn civil(secs: u64) -> (u64, u64, u64, u64, u64) {
+    let days = secs / 86_400;
+    let rem = secs % 86_400;
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as u64, m as u64, d as u64, rem / 3600, (rem % 3600) / 60)
+}
+
+/// Записать копию в папку: временный файл, проверка прочитанным обратно, переименование; старые автокопии этого узла ужимаются до
+/// [`KEEP_AUTO`].
+pub fn write_to_dir(dir: &Path, name: &str, bytes: &[u8], root: &[u8; 32], node_id: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("папка копий: {e}"))?;
+    let target = dir.join(name);
+    // временное имя случайное, файл создаётся только заново (O_EXCL: заранее подложенная ссылка или файл — ошибка, а не перезапись чужого)
+    let mut rnd = [0u8; 6];
+    rand::rngs::OsRng.fill_bytes(&mut rnd);
+    let tmp = dir.join(format!(".{name}.{}.part", hex::encode(rnd)));
+    {
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| format!("запись копии: {e}"))?;
+        f.write_all(bytes).and_then(|_| f.sync_all()).map_err(|e| format!("запись копии: {e}"))?;
+    }
+    let back = std::fs::read(&tmp).map_err(|e| format!("проверка копии: {e}"))?;
+    if back != bytes || open_with_root(&back, root).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("проверка записанной копии не прошла".into());
+    }
+    if std::fs::symlink_metadata(&target).map(|m| m.file_type().is_symlink()).unwrap_or(false) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err("на месте файла копии лежит символическая ссылка".into());
+    }
+    std::fs::rename(&tmp, &target).map_err(|e| format!("запись копии: {e}"))?;
+    // имя файла живёт в каталоге: без его fsync после отключения питания запись об успехе могла бы пережить сам файл
+    sync_dir(dir).map_err(|e| format!("закрепление записи в папке: {e}"))?;
+    if name.starts_with("yandi-manual-") {
+        prune_manual(dir, node_id, name);
+    } else {
+        prune_dir(dir, node_id, name);
+    }
+    let _ = sync_dir(dir);
+    // успех — только если новая копия реально осталась в папке (ротация её не удалила)
+    if !target.is_file() {
+        return Err("новая копия не осталась в папке после записи".into());
+    }
+    Ok(target)
+}
+
+#[cfg(unix)]
+fn sync_dir(dir: &Path) -> std::io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
+
+/// Номера в именах чужих файлов выше этого предела не учитываются (не наши): счётчик не должен прыгать и застревать из-за подброшенного имени.
+const MAX_FOLDER_COUNTER: u64 = 999_999_999;
+
+/// Наибольший номер копии этого узла, уже лежащей в папке: после восстановления на новой машине счётчик продолжается с него, а не с нуля
+/// (иначе ротация сочла бы свежую копию самой младшей).
+pub fn max_counter_in(dir: &Path, node_id: &str) -> u64 {
+    let suffix = format!(".{FILE_EXT}");
+    let Ok(rd) = std::fs::read_dir(dir) else { return 0 };
+    let names: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).collect();
+    // автокопии и «сохранить сейчас» нумеруются одним счётчиком
+    [format!("yandi-{node_id}-"), format!("yandi-manual-{node_id}-")]
+        .iter()
+        .flat_map(|prefix| {
+            let suffix = suffix.clone();
+            names.iter().filter(move |n| n.starts_with(prefix.as_str()) && n.ends_with(&suffix)).filter_map(move |n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok())).filter(|c| *c <= MAX_FOLDER_COUNTER).collect::<Vec<_>>()
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn prune_manual(dir: &Path, node_id: &str, keep: &str) {
+    let prefix = format!("yandi-manual-{node_id}-");
+    let suffix = format!(".{FILE_EXT}");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut ours: Vec<String> = rd.flatten().filter_map(|e| e.file_name().into_string().ok()).filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix)).collect();
+    ours.sort_by_key(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0));
+    while ours.len() > KEEP_MANUAL {
+        let old = ours.remove(0);
+        if old != keep {
+            let _ = std::fs::remove_file(dir.join(old));
+        }
+    }
+}
+
+/// Самая свежая копия в папке (автокопии и «сохранить сейчас» вместе), по времени изменения файла. Чужие файлы и недописанные `.part` не берутся.
+pub fn latest_in_folder(dir: &Path) -> Result<PathBuf, String> {
+    let suffix = format!(".{FILE_EXT}");
+    let rd = std::fs::read_dir(dir).map_err(|e| format!("папка недоступна: {e}"))?;
+    rd.flatten()
+        .filter(|e| {
+            let n = e.file_name().to_string_lossy().into_owned();
+            n.starts_with("yandi-") && n.ends_with(&suffix) && !n.starts_with('.') && e.file_type().map(|t| t.is_file()).unwrap_or(false)
+        })
+        .filter_map(|e| e.metadata().and_then(|m| m.modified()).ok().map(|t| (t, e.path())))
+        .max_by_key(|(t, _)| *t)
+        .map(|(_, p)| p)
+        .ok_or_else(|| "в папке нет копий связей (файлов .yandibak)".to_string())
+}
+
+fn prune_dir(dir: &Path, node_id: &str, keep: &str) {
+    let prefix = format!("yandi-{node_id}-");
+    let suffix = format!(".{FILE_EXT}");
+    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let mut ours: Vec<String> = rd
+        .flatten()
+        .filter_map(|e| e.file_name().into_string().ok())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(&suffix))
+        .collect();
+    // по номеру копии (а не по строке): старые удаляются, свежая ({keep}) не удаляется никогда
+    ours.sort_by_key(|n| n[prefix.len()..].split('-').next().and_then(|c| c.parse::<u64>().ok()).unwrap_or(0));
+    while ours.len() > KEEP_AUTO {
+        let old = ours.remove(0);
+        if old != keep {
+            let _ = std::fs::remove_file(dir.join(old));
+        }
+    }
+}
+
+/// Решение «делать ли автокопию сейчас».
+#[derive(Debug, PartialEq, Eq)]
+pub enum Decision {
+    /// содержимое не менялось
+    Unchanged,
+    /// менялось (или принудительно)
+    Make,
+}
+
+pub fn decide(state: &BackupState, current_digest: &str, force: bool) -> Decision {
+    if force || state.last_digest != current_digest || state.last_saved_ms == 0 {
+        Decision::Make
+    } else {
+        Decision::Unchanged
+    }
+}
+
+// ── Запуск копии ────────────────────────────────────────────────────────────
+
+/// Как запущена копия.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// плановая/по событию: только если папка задана и содержимое изменилось
+    Auto,
+    /// по кнопке: всегда делается, файл отдаётся владельцу (и кладётся в папку, если она задана)
+    Now,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum Skip {
+    NoFolder,
+    Unchanged,
+}
+
+#[derive(Debug)]
+pub struct Outcome {
+    pub skipped: Option<Skip>,
+    pub name: String,
+    pub bytes: Vec<u8>,
+    pub saved: Option<PathBuf>,
+    pub counter: u64,
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
+/// Сделать копию: собрать, при плановом запуске сравнить с прошлой, зашифровать, записать в папку (с проверкой), обновить состояние.
+pub fn run_backup(l: &Layout, root: &[u8; 32], node_id: &str, mode: Mode, now: u64) -> Result<Outcome, String> {
+    let _guard = lock_state();
+    let mut state = load_state(l);
+    let result = (|| -> Result<Outcome, String> {
+        let dir = state.dir.clone().filter(|d| !d.trim().is_empty()).map(PathBuf::from);
+        if mode == Mode::Auto && dir.is_none() {
+            state.last_check_ms = now;
+            return Ok(Outcome { skipped: Some(Skip::NoFolder), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
+        }
+        let entries = collect(l)?;
+        let dg = digest(&entries);
+        if mode == Mode::Auto && decide(&state, &dg, false) == Decision::Unchanged {
+            state.last_check_ms = now; // проверили: ничего нового; неудачная попытка срок «следующей проверки» НЕ сдвигает
+            state.critical_pending = false;
+            return Ok(Outcome { skipped: Some(Skip::Unchanged), name: String::new(), bytes: Vec::new(), saved: None, counter: state.counter });
+        }
+        let auth = std::fs::read(l.keys.join("auth.json")).map_err(|e| format!("auth.json: {e}"))?;
+        // номер — после наибольшего из известных: из состояния и из копий этого узла, уже лежащих в папке
+        // имя файла в папке не вправе переполнить счётчик (чужое имя с огромным номером)
+        let counter = state.counter.max(dir.as_deref().map(|d| max_counter_in(d, node_id)).unwrap_or(0)).saturating_add(1);
+        let bytes = seal(&entries, &SealParams { root, auth_json: &auth, node_id, counter, now_ms: now })?;
+        let name = if mode == Mode::Now { file_name_manual(node_id, counter, now) } else { file_name(node_id, counter, now) };
+        let saved = match &dir {
+            Some(d) => Some(write_to_dir(d, &name, &bytes, root, node_id)?),
+            None => None,
+        };
+        state.counter = counter;
+        state.last_ok_ms = now;
+        state.last_check_ms = now;
+        state.critical_pending = false;
+        state.last_error = None;
+        if let Some(p) = &saved {
+            // только копия, лежащая в папке, сдвигает «последнее сохранённое»: выгрузка по кнопке на флешку-в-руке — другое дело
+            state.last_digest = dg;
+            state.last_saved_ms = now;
+            state.last_file = Some(p.display().to_string());
+        }
+        Ok(Outcome { skipped: None, name, bytes, saved, counter })
+    })();
+    if let Err(e) = &result {
+        state.last_error = Some(e.clone());
+    }
+    // ошибка сохранения состояния не глотается: иначе «успех» не записан, а вызывающий об этом не знает
+    match (save_state(l, &state), result) {
+        (_, Err(e)) => Err(e),
+        (Err(e), Ok(_)) => Err(format!("копия записана, но состояние не сохранилось: {e}")),
+        (Ok(()), Ok(o)) => Ok(o),
+    }
+}
+
+/// Короткий номер узла (первые 8 байт адреса) по файлу личности, открытому корнем.
+pub fn node_id_from_files(l: &Layout, root: &[u8; 32]) -> Result<String, String> {
+    let bytes = std::fs::read(l.keys.join(format!("node_identity_{}.json", l.port))).map_err(|e| format!("файл личности узла: {e}"))?;
+    let m = key_root::identity_store::open_identity(&bytes, &key_root::OpenContext { root: Some(root) }).map_err(|e| e.to_string())?;
+    Ok(hex::encode(&m.address[..8]))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Тесты не должны зависеть от глобального переопределения пути файла якорей (его выставляет другой тест и оно живёт на весь процесс):
+    /// восстановление в тестах всегда идёт с путём по умолчанию внутри временного каталога.
+    fn restore(opened: &Opened, l: &Layout, opt: &RestoreOptions) -> Result<RestoreReport, String> {
+        super::restore_with(opened, l, opt, None)
+    }
+
+    fn layout() -> (tempfile::TempDir, Layout) {
+        let d = tempfile::tempdir().unwrap();
+        let l = Layout { keys: d.path().join("keys"), data: d.path().join("data"), home: d.path().join("home"), port: 9000 };
+        for p in [&l.keys, &l.data, &l.home] {
+            std::fs::create_dir_all(p).unwrap();
+        }
+        (d, l)
+    }
+
+    fn put(l: &Layout, area: Area, rel: &str, data: &[u8]) {
+        let p = l.base(area).join(rel);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, data).unwrap();
+    }
+
+    /// Настоящая обёртка корня (как у узла) под кодом восстановления: чтобы открытие кодом было настоящим.
+    fn real_root_and_auth(code: &key_root::RecoveryCode) -> ([u8; 32], Vec<u8>) {
+        use key_root::{FixedMachine, KdfParams, KdfPolicy, RootDocument};
+        let machine = FixedMachine("test-machine".into());
+        let device_key = [9u8; 32];
+        let root = [7u8; 32];
+        let fast = KdfParams { memory_kib: 64, iterations: 1, parallelism: 1 };
+        let doc = RootDocument::create(&root, "login-hash", &device_key, "test-device", &machine, code.secret(), fast, &KdfPolicy::for_tests())
+            .expect("корневой документ");
+        (root, doc.to_json())
+    }
+
+    fn sample(l: &Layout) {
+        put(l, Area::Keys, "auth.json", b"{\"auth\":1}");
+        put(l, Area::Keys, "node_identity_9000.json", b"{\"identity\":1}");
+        put(l, Area::Keys, "device.seal", b"MACHINE-BOUND-SECRET");
+        put(l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Алиса","short_id":"aaaa","online":true}]}"#.as_bytes());
+        put(l, Area::Data, "mobile_devices.json", r#"[{"token_hash":"t","name":"Телефон","acked_ts":5,"last_seen_ms":10,"role":"owner"}]"#.as_bytes());
+        put(
+            l,
+            Area::Data,
+            "groups/index.json",
+            r#"[{"id":"g1","name":"Семья","members":[{"alias":"A","last_post_ms":5}],"epoch":1,"first_seq":1,"next_seq":43}]"#.as_bytes(),
+        );
+        put(l, Area::Data, "groups/g1.log", b"{\"seq\":1,\"secret\":\"message body\"}\n");
+        put(l, Area::Home, "avatars/aa.png", b"\x89PNG\r\n");
+        put(l, Area::Home, "chats/chat_x.enc", b"CHAT HISTORY");
+        put(l, Area::Data, "files/uploads/doc.bin", b"A FILE");
+    }
+
+    #[test]
+    fn the_collection_takes_only_relationships_not_chats_files_journals_or_the_machine_seal() {
+        let (_d, l) = layout();
+        sample(&l);
+        let got = collect(&l).unwrap();
+        let names: Vec<String> = got.iter().map(|e| format!("{:?}/{}", e.area, e.path)).collect();
+        assert!(names.contains(&"Keys/auth.json".to_string()) && names.contains(&"Data/contacts.json".to_string()));
+        assert!(names.contains(&"Home/avatars/aa.png".to_string()), "аватарки входят");
+        for banned in ["device.seal", "chats", "files", ".log"] {
+            assert!(!names.iter().any(|n| n.contains(banned)), "{banned} не должно быть в копии: {names:?}");
+        }
+    }
+
+    #[test]
+    fn a_backup_opens_with_the_recovery_code_alone_and_gives_every_file_back_byte_for_byte() {
+        let (_d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let entries = collect(&l).unwrap();
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "abcd1234abcd1234", counter: 3, now_ms: 1_700_000_000_000 }).unwrap();
+        // шифртекст не содержит открытых данных
+        assert!(!String::from_utf8_lossy(&bytes).contains("Алиса"));
+        let header = read_header(&bytes).unwrap();
+        assert_eq!((header.counter, header.node_id.as_str()), (3, "abcd1234abcd1234"));
+        // открыть можно только кодом (корень достаётся из auth.json в заголовке)
+        let opened = open_with_code_policy(&bytes, &code.display(), &key_root::KdfPolicy::for_tests()).unwrap();
+        let back = opened.entries().unwrap();
+        assert_eq!(back.len(), entries.len());
+        for (a, b) in entries.iter().zip(&back) {
+            assert_eq!((a.area, &a.path, &a.data), (b.area, &b.path, &b.data));
+        }
+        // чужой код — отказ с понятной причиной
+        let other = key_root::RecoveryCode::generate().display();
+        assert!(open_with_code_policy(&bytes, &other, &key_root::KdfPolicy::for_tests()).unwrap_err().contains("код восстановления не подходит"));
+    }
+
+    #[test]
+    fn tampering_with_any_part_of_the_file_is_detected() {
+        let (_d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        // подмена номера копии (чтобы выдать старую за новую) ломает расшифровку: заголовок в AAD
+        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+        v["header"]["counter"] = 99.into();
+        assert!(open_with_root(&serde_json::to_vec(&v).unwrap(), &root).is_err());
+        // порча шифртекста
+        let mut v: Value = serde_json::from_slice(&bytes).unwrap();
+        let ct = v["ct"].as_str().unwrap().to_string();
+        let mut raw = b64().decode(ct).unwrap();
+        raw[10] ^= 1;
+        v["ct"] = b64().encode(raw).into();
+        assert!(open_with_root(&serde_json::to_vec(&v).unwrap(), &root).is_err());
+        // не наш файл
+        assert!(read_header(b"hello").is_err());
+    }
+
+    #[test]
+    fn restore_writes_files_rebases_group_numbers_and_never_restores_journals() {
+        let (_d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+
+        let d2 = tempfile::tempdir().unwrap();
+        // каталоги машины ещё не существуют: восстановление создаёт их само и обязано сделать приватными
+        let fresh = Layout { keys: d2.path().join("keys"), data: d2.path().join("share/yandi"), home: d2.path().join("dot-yandi"), port: 9000 };
+        let report = restore(&opened, &fresh, &RestoreOptions { force: false }).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for dir in [&fresh.keys, &fresh.data, &fresh.home, &fresh.data.join("groups")] {
+                assert_eq!(std::fs::metadata(dir).unwrap().permissions().mode() & 0o777, 0o700, "{} должен быть 0700: узел не стартует с открытым каталогом данных", dir.display());
+            }
+        }
+        assert!(report.written.iter().any(|w| w == "Keys/auth.json"));
+        assert_eq!(report.groups, 1);
+        assert!(fresh.data.join("restored_notice.json").exists(), "метка для извещения участников о восстановленных группах");
+        assert_eq!(std::fs::read(fresh.keys.join("auth.json")).unwrap(), b"{\"auth\":1}");
+        assert!(!fresh.keys.join("device.seal").exists(), "машинная печать не переносится");
+        assert!(!fresh.data.join("groups/g1.log").exists(), "журнал группы не восстанавливается");
+        // номера журнала продолжаются с запасом: у телефонов в кеше записи до реального номера
+        let idx: Value = serde_json::from_slice(&std::fs::read(fresh.data.join("groups/index.json")).unwrap()).unwrap();
+        assert_eq!(idx[0]["next_seq"], 43 + GROUP_SEQ_GAP);
+        assert_eq!(idx[0]["first_seq"], 43 + GROUP_SEQ_GAP);
+        // ключи уже есть: без явного разрешения не перезаписываем
+        assert!(restore(&opened, &fresh, &RestoreOptions { force: false }).unwrap_err().contains("уже есть файлы узла"));
+        // с разрешением — прежние файлы остаются рядом
+        let again = restore(&opened, &fresh, &RestoreOptions { force: true }).unwrap();
+        assert!(!again.kept_old.is_empty() && again.kept_old.iter().all(|p| p.exists()));
+    }
+
+    #[test]
+    fn a_path_that_climbs_out_of_the_node_directories_is_refused() {
+        for bad in ["../x", "/etc/passwd", "a/../../b", "a//b", "", ".", "a\\b"] {
+            assert!(!safe_rel(bad), "{bad:?}");
+        }
+        for ok in ["auth.json", "groups/index.json", "avatars/aa.png"] {
+            assert!(safe_rel(ok), "{ok:?}");
+        }
+    }
+
+    #[test]
+    fn only_a_real_change_of_relationships_makes_a_new_backup() {
+        let (_d, l) = layout();
+        sample(&l);
+        let base = digest(&collect(&l).unwrap());
+        // подвижные поля: «в сети», последняя активность, номера журнала — изменением не считаются
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Алиса","short_id":"aaaa","online":false}]}"#.as_bytes());
+        put(&l, Area::Data, "mobile_devices.json", r#"[{"token_hash":"t","name":"Телефон","acked_ts":500,"last_seen_ms":1000,"role":"owner"}]"#.as_bytes());
+        put(
+            &l,
+            Area::Data,
+            "groups/index.json",
+            r#"[{"id":"g1","name":"Семья","members":[{"alias":"A","last_post_ms":99999}],"epoch":1,"first_seq":1,"next_seq":900}]"#.as_bytes(),
+        );
+        put(&l, Area::Home, "chats/chat_x.enc", b"MORE CHAT HISTORY");
+        put(&l, Area::Data, "groups_pc/state.enc", b"cursor moved");
+        assert_eq!(digest(&collect(&l).unwrap()), base, "сообщения, активность и курсоры копию не вызывают");
+        // настоящие изменения: новый контакт, смена роли участника, новое устройство
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Алиса","short_id":"aaaa"},{"name":"Боб","short_id":"bbbb"}]}"#.as_bytes());
+        let with_contact = digest(&collect(&l).unwrap());
+        assert_ne!(with_contact, base);
+        put(
+            &l,
+            Area::Data,
+            "groups/index.json",
+            r#"[{"id":"g1","name":"Семья","members":[{"alias":"A","role":"admin","last_post_ms":1}],"epoch":1,"first_seq":1,"next_seq":900}]"#.as_bytes(),
+        );
+        assert_ne!(digest(&collect(&l).unwrap()), with_contact, "смена роли — изменение");
+        // решение
+        let st = BackupState { last_digest: base.clone(), last_ok_ms: 5, last_saved_ms: 5, ..Default::default() };
+        assert_eq!(decide(&st, &base, false), Decision::Unchanged);
+        assert_eq!(decide(&st, &base, true), Decision::Make);
+        assert_eq!(decide(&st, "other", false), Decision::Make);
+        assert_eq!(decide(&BackupState::default(), &base, false), Decision::Make, "первой копии нет — делаем");
+    }
+
+    #[test]
+    fn save_now_copies_live_apart_from_auto_ones_and_neither_evicts_the_other() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let out = d.path().join("flash");
+        let t0 = 1_700_000_000_000u64;
+        let mk = |n: u64, manual: bool| {
+            let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "nodeid00", counter: n, now_ms: t0 + n * 86_400_000 }).unwrap();
+            let name = if manual { file_name_manual("nodeid00", n, t0 + n * 86_400_000) } else { file_name("nodeid00", n, t0 + n * 86_400_000) };
+            write_to_dir(&out, &name, &bytes, &root, "nodeid00").unwrap();
+        };
+        for n in 1..=9u64 {
+            mk(n, false);
+        }
+        for n in 10..=18u64 {
+            mk(n, true);
+        }
+        for n in 19..=22u64 {
+            mk(n, false);
+        }
+        let names: Vec<String> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        let auto = names.iter().filter(|n| n.starts_with("yandi-nodeid00-")).count();
+        let manual = names.iter().filter(|n| n.starts_with("yandi-manual-nodeid00-")).count();
+        assert_eq!(auto, KEEP_AUTO, "автокопий не больше семи");
+        assert_eq!(manual, KEEP_MANUAL, "«сохранить сейчас» — последние пять, их не вытесняют автокопии");
+        // один счётчик на оба вида: после ручных копий следующая автокопия получает больший номер
+        assert_eq!(max_counter_in(&out, "nodeid00"), 22);
+        // свежайшая копия папки находится для восстановления «по папке»
+        std::fs::write(out.join("photo.jpg"), b"x").unwrap();
+        std::fs::write(out.join(".yandi-nodeid00-000099.yandibak.part"), b"x").unwrap();
+        let newest = latest_in_folder(&out).unwrap();
+        assert!(newest.file_name().unwrap().to_string_lossy().ends_with(".yandibak"), "{newest:?}");
+        assert!(!newest.file_name().unwrap().to_string_lossy().starts_with('.'));
+        assert!(latest_in_folder(d.path().join("empty-nothing").as_path()).is_err());
+        let empty = d.path().join("empty");
+        std::fs::create_dir(&empty).unwrap();
+        assert!(latest_in_folder(&empty).unwrap_err().contains("нет копий"));
+    }
+
+    #[test]
+    fn auto_copies_are_written_checked_and_trimmed_to_the_last_few() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let out = d.path().join("flash");
+        for n in 1..=10u64 {
+            let bytes = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "nodeid00", counter: n, now_ms: 1_700_000_000_000 + n * 86_400_000 }).unwrap();
+            let name = file_name("nodeid00", n, 1_700_000_000_000 + n * 86_400_000);
+            write_to_dir(&out, &name, &bytes, &root, "nodeid00").unwrap();
+        }
+        // посторонний файл в папке не трогается
+        std::fs::write(out.join("photo.jpg"), b"x").unwrap();
+        let mut names: Vec<String> = std::fs::read_dir(&out).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).collect();
+        names.sort();
+        let ours: Vec<&String> = names.iter().filter(|n| n.ends_with(".yandibak")).collect();
+        assert_eq!(ours.len(), KEEP_AUTO);
+        assert!(ours.first().unwrap().contains("-000004-"), "остались последние: {ours:?}");
+        assert!(names.contains(&"photo.jpg".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".part")), "временных файлов нет");
+    }
+
+    #[test]
+    fn run_backup_skips_without_a_folder_or_changes_and_counts_copies() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, _auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &_auth).unwrap();
+        let t = 1_700_000_000_000u64;
+        // папка не задана: плановая копия не делается, по кнопке — делается и отдаётся
+        let o = run_backup(&l, &root, "nodeid00", Mode::Auto, t).unwrap();
+        assert_eq!(o.skipped, Some(Skip::NoFolder));
+        let manual = run_backup(&l, &root, "nodeid00", Mode::Now, t + 1).unwrap();
+        assert!(manual.skipped.is_none() && manual.counter == 1 && !manual.bytes.is_empty() && manual.saved.is_none());
+        // папку задали: первая плановая — делается
+        let mut st = load_state(&l);
+        st.dir = Some(d.path().join("flash").display().to_string());
+        save_state(&l, &st).unwrap();
+        let first = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 2).unwrap();
+        assert!(first.skipped.is_none() && first.counter == 2 && first.saved.as_ref().unwrap().exists());
+        // ничего не менялось (подвижные поля не в счёт) — вторая не делается
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Алиса","short_id":"aaaa","online":false}]}"#.as_bytes());
+        let again = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 3).unwrap();
+        assert_eq!(again.skipped, Some(Skip::Unchanged));
+        assert_eq!(load_state(&l).counter, 2, "счётчик не растёт без изменений");
+        // новый контакт — делается
+        put(&l, Area::Data, "contacts.json", r#"{"contacts":[{"name":"Боб","short_id":"bbbb"}]}"#.as_bytes());
+        let third = run_backup(&l, &root, "nodeid00", Mode::Auto, t + 4).unwrap();
+        assert!(third.skipped.is_none() && third.counter == 3);
+        let st = load_state(&l);
+        assert_eq!((st.counter, st.last_ok_ms, st.last_saved_ms, st.last_error), (3, t + 4, t + 4, None));
+        // сбой (папку нельзя создать) запоминается и не портит счётчик
+        let mut bad = load_state(&l);
+        bad.dir = Some("/proc/definitely/not/writable".into());
+        bad.last_digest = String::new();
+        save_state(&l, &bad).unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, t + 5).is_err());
+        let st = load_state(&l);
+        assert_eq!(st.counter, 3);
+        assert!(st.last_error.is_some());
+    }
+
+    #[test]
+    fn file_names_are_readable_and_sort_by_number() {
+        assert_eq!(file_name("ab12", 7, 1_700_000_000_000), "yandi-ab12-000007-20231114-2213.yandibak");
+    }
+
+    // ── Найдено ревизией Codex (ANALYSIS8, пробами): все семь сценариев воспроизведены и закрыты ──
+
+    fn sealed_sample(l: &Layout) -> (Opened, [u8; 32]) {
+        sample(l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        (open_with_root(&bytes, &root).unwrap(), root)
+    }
+
+    /// P15-9: старые секреты возобновления не попадают в копию, не восстанавливаются и не остаются в файле «до восстановления».
+    #[test]
+    fn old_resume_secrets_never_enter_a_backup_or_survive_a_restore() {
+        const SECRET: &str = "11aa22bb33cc44dd55ee66ff77008899aabbccddeeff00112233445566778899";
+        let old = format!(r#"{{"clients":{{"{pk}":{{"session_id":5,"resume_secret_hex":"{SECRET}","expires_at":4102444800,"session_key_hex":"{SECRET}"}}}}}}"#, pk = "ab".repeat(32));
+        let (_d, l) = layout();
+        sample(&l);
+        put(&l, Area::Home, "paired_clients.json", old.as_bytes());
+        put(&l, Area::Home, "paired_anchors.json", b"{not json at all, but might hold a secret");
+        let got = collect(&l).unwrap();
+        for e in &got {
+            assert!(!String::from_utf8_lossy(&e.data).contains(SECRET), "{}: секрет в копии", e.path);
+            assert!(!String::from_utf8_lossy(&e.data).contains("resume_secret_hex"), "{}", e.path);
+        }
+        assert!(got.iter().any(|e| e.path == "paired_clients.json"), "очищенный файл связи в копии есть");
+        assert!(!got.iter().any(|e| e.path == "paired_anchors.json"), "неразобранный файл в копию не кладётся");
+        // восстановление поверх машины, где лежит старый файл: он не остаётся рядом со старым секретом
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut forged = got.clone();
+        forged.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() });
+        forged.retain(|e| e.path != "paired_clients.json");
+        forged.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: old.clone().into_bytes() }); // копия старой сборки с секретом
+        let bytes = seal(&forged, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let target = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&target.home).unwrap();
+        std::fs::write(target.home.join("paired_clients.json"), old.as_bytes()).unwrap();
+        restore(&opened, &target, &RestoreOptions { force: true }).unwrap();
+        let restored = std::fs::read_to_string(target.home.join("paired_clients.json")).unwrap();
+        assert!(!restored.contains(SECRET) && !restored.contains("resume_secret_hex"), "восстановленный файл очищен");
+        assert!(!target.home.join("paired_anchors.json").exists(), "неразобранный файл связи не восстановлен");
+        for entry in std::fs::read_dir(&target.home).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!text.contains(SECRET), "{:?}: остаток секрета", entry.path());
+        }
+    }
+
+    const SECRET2: &str = "11aa22bb33cc44dd55ee66ff77008899aabbccddeeff00112233445566778899";
+
+    fn old_v1() -> String {
+        format!(r#"{{"clients":{{"{pk}":{{"session_id":5,"resume_secret_hex":"{SECRET2}","expires_at":4102444800,"session_key_hex":"{SECRET2}"}}}}}}"#, pk = "ab".repeat(32))
+    }
+
+    /// P16-6/7: восстановление не оставляет сырой копии файла связи, чистит остатки рядом и активные файлы, не зависящие от содержимого копии.
+    #[test]
+    fn p16_restore_leaves_no_raw_pairing_copy_and_cleans_leftovers_even_when_the_copy_has_none() {
+        let (_d, src) = layout();
+        let (opened, _) = sealed_sample(&src); // в этой копии файлов связи нет
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&t.home).unwrap();
+        // на машине: активный старый файл, остатки прежних сбоев и посторонний файл с похожим именем
+        std::fs::write(t.home.join("paired_clients.json"), old_v1()).unwrap();
+        std::fs::write(t.home.join("paired_clients.json.before-restore-1-0"), old_v1()).unwrap();
+        std::fs::write(t.home.join(".paired_clients.json.restore-1-0"), b"{garbage that may hold a secret").unwrap();
+        std::fs::write(t.home.join("my_paired_clients.json"), b"MINE").unwrap();
+        let report = restore(&opened, &t, &RestoreOptions { force: true }).unwrap();
+        assert!(report.unclean.iter().any(|p| p.contains(".paired_clients.json.restore-1-0")), "неразбираемый остаток назван в отчёте: {:?}", report.unclean);
+        assert_eq!(report.unclean.len(), 1, "{:?}", report.unclean);
+        for entry in std::fs::read_dir(&t.home).unwrap().flatten() {
+            if entry.file_name() == ".paired_clients.json.restore-1-0" {
+                continue; // неразбираемый файл не тронут и не проверяется: он в отчёте
+            }
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!text.contains(SECRET2) && !text.contains("resume_secret_hex"), "{:?}: остаток секрета", entry.path());
+        }
+        assert!(t.home.join(".paired_clients.json.restore-1-0").exists(), "неразбираемый остаток не удаляется по одному имени (P18-2)");
+        assert_eq!(std::fs::read(t.home.join("my_paired_clients.json")).unwrap(), b"MINE", "посторонний файл не тронут");
+        let active = std::fs::read_to_string(t.home.join("paired_clients.json")).unwrap();
+        assert!(active.contains("\"version\": 2"), "активный файл переписан в формат v2: {active}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p16_what_could_not_be_cleaned_is_reported_with_the_path() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, l) = layout();
+        std::fs::create_dir_all(&l.home).unwrap();
+        std::fs::write(l.home.join("paired_anchors.json.before-restore-9-9"), b"{garbage").unwrap();
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o500)).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(problems.iter().any(|p| p.contains("before-restore-9-9")), "{problems:?}");
+    }
+
+    #[test]
+    fn p16_the_anchor_store_override_decides_where_the_anchors_file_lives() {
+        let (_d, l) = layout();
+        let custom = _d.path().join("elsewhere").join("anchors-custom.json");
+        std::fs::create_dir_all(custom.parent().unwrap()).unwrap();
+        let p = target_path_with(&l, Area::Home, "paired_anchors.json", Some(custom.to_str().unwrap())).unwrap();
+        assert_eq!(p, custom);
+        assert_eq!(target_path_with(&l, Area::Home, "paired_anchors.json", None).unwrap(), l.home.join("paired_anchors.json"));
+        // клиентские права переопределением не затрагиваются
+        assert_eq!(target_path_with(&l, Area::Home, "paired_clients.json", Some(custom.to_str().unwrap())).unwrap(), l.home.join("paired_clients.json"));
+    }
+
+    // ---- замечания проверки Sol (круг 37): P17-6…8 ----
+
+    /// P18-5: файл связи в копии, который не разбирается, не восстанавливается молча — он назван в отчёте.
+    #[test]
+    fn p18_5_a_pairing_file_skipped_during_restore_is_reported() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_anchors.json");
+        entries.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() });
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        let report = restore(&opened, &t, &RestoreOptions { force: true }).unwrap();
+        assert!(report.unclean.iter().any(|u| u.contains("paired_anchors.json") && u.contains("не восстановлен")), "{:?}", report.unclean);
+        assert!(!t.home.join("paired_anchors.json").exists(), "неразобранный файл не записан");
+    }
+
+    /// Копия с пустыми файлами связи в конце списка; возвращает (раскрытая копия, номер последней замены).
+    #[cfg(unix)]
+    fn pairing_copy() -> (Opened, usize, String) {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_clients.json" && e.path != "paired_anchors.json");
+        let empty_clients = r#"{"version":2,"clients":{}}"#.to_string();
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: empty_clients.as_bytes().to_vec() });
+        entries.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: br#"{"version":2,"anchors":[]}"#.to_vec() });
+        let last = entries.len() - 1;
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        (open_with_root(&bytes, &root).unwrap(), last, empty_clients)
+    }
+
+    #[cfg(unix)]
+    fn target_layout() -> (tempfile::TempDir, Layout) {
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&t.home).unwrap();
+        (d2, t)
+    }
+
+    /// P18-1: прежнее содержимое файла связи читается под тем же замком, что и замена; откат возвращает то, что было на самом деле
+    /// (в том числе право, выданное параллельно ПЕРЕД восстановлением), а не устаревшее чтение до замка.
+    #[cfg(unix)]
+    #[test]
+    fn p18_1_rollback_returns_what_a_concurrent_writer_committed_before_the_swap() {
+        use crate::netlayer::pairing::{locked, PairedClientStore, StoreRead};
+        let (opened, last, empty_clients) = pairing_copy();
+        let (_d2, t) = target_layout();
+        let clients = t.home.join("paired_clients.json");
+        std::fs::write(&clients, &empty_clients).unwrap();
+        let pk = "cd".repeat(32);
+        let granted = format!(r#"{{"version":2,"clients":{{"{pk}":{{"session_id_hex":"{}","expires_at":4102444800}}}}}}"#, "1".repeat(32));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (c2, g2) = (clients.clone(), granted.clone());
+        let writer = std::thread::spawn(move || {
+            locked(&c2, || {
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                std::fs::write(&c2, &g2).unwrap(); // параллельная выдача права, зафиксированная до того, как замок отпущен
+            })
+            .unwrap();
+        });
+        rx.recv().unwrap(); // замок взят писателем
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        writer.join().unwrap();
+        assert!(err.message.contains("откатено"), "{}", err.message);
+        assert!(!err.files_changed, "откат полный: изменённых файлов не осталось");
+        match PairedClientStore::read(&clients) {
+            StoreRead::Current(s) => assert!(s.get(&pk).is_some(), "право, выданное до замены, потеряно откатом"),
+            other => panic!("файл связи не читается после отката: {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    fn restore_detailed_for_test(opened: &Opened, t: &Layout) -> Result<RestoreReport, RestoreFailure> {
+        restore_core(opened, t, &RestoreOptions { force: true }, None)
+    }
+
+    /// P19-1, второй сценарий: файла связи не было — при откате созданный восстановлением файл убирается (под замком), а не остаётся.
+    #[cfg(unix)]
+    #[test]
+    fn p19_1_a_pairing_file_created_by_the_restore_is_removed_by_the_rollback() {
+        let (opened, last, _) = pairing_copy();
+        let (_d2, t) = target_layout();
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert!(!t.home.join("paired_clients.json").exists(), "созданный восстановлением файл связи после отката остался");
+    }
+
+    /// P20-2: две записи копии на один файл (текстовый дубликат) отклоняются до любого изменения.
+    #[cfg(unix)]
+    #[test]
+    fn p20_2_duplicate_entries_for_one_file_are_rejected_before_any_change() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_clients.json");
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: br#"{"version":2,"clients":{}}"#.to_vec() });
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: br#"{"version":2,"clients":{}}"#.to_vec() });
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        let before = br#"{"version":2,"clients":{}}"#;
+        std::fs::write(t.home.join("paired_clients.json"), before).unwrap();
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        assert!(err.message.contains("один и тот же файл"), "{}", err.message);
+        assert!(!err.files_changed);
+        assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), before, "ничего не изменено");
+        assert!(!t.keys.exists() && !t.data.exists(), "каталоги других областей не созданы");
+    }
+
+    /// P20-1: путь --anchor-store, который через ссылку ведёт в тот же файл, что и файл клиентов, отклоняется сразу и не зависает на блокировках.
+    #[cfg(unix)]
+    #[test]
+    fn p20_1_an_alias_of_the_clients_file_is_rejected_and_never_hangs() {
+        let (opened, _last, _) = pairing_copy();
+        let d = tempfile::tempdir().unwrap();
+        let real = d.path().join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = d.path().join("home-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let t = Layout { keys: d.path().join("keys"), data: d.path().join("data"), home: link, port: 9000 };
+        let alias = real.join("paired_clients.json"); // тот же файл, что и «home-link/paired_clients.json»
+        let alias_s = alias.to_str().unwrap().to_string();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(restore_core(&opened, &t, &RestoreOptions { force: true }, Some(&alias_s)).map(|_| ()).map_err(|f| f.message));
+        });
+        let r = rx.recv_timeout(std::time::Duration::from_secs(10)).expect("восстановление зависло на блокировках алиасов");
+        let msg = r.unwrap_err();
+        assert!(msg.contains("один и тот же файл"), "{msg}");
+        assert!(!alias.exists(), "ничего не записано");
+    }
+
+    /// P20-3: прежний обычный файл отодвинут, замена отказала, и возврат имени тоже отказал — это неудача отката, а не «файлы прежние».
+    #[cfg(unix)]
+    #[test]
+    fn p20_3_a_failed_return_of_a_moved_file_is_reported_as_residue() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "contacts.json");
+        entries.push(Entry { area: Area::Data, path: "contacts.json".into(), data: b"[]".to_vec() });
+        let idx = entries.len() - 1;
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        std::fs::create_dir_all(&t.data).unwrap();
+        std::fs::write(t.data.join("contacts.json"), b"OLD").unwrap();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(Some(idx)));
+        FAIL_ROLLBACK_RENAME.with(|c| c.set(true));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(None));
+        FAIL_ROLLBACK_RENAME.with(|c| c.set(false));
+        assert!(err.files_changed, "{err:?}");
+        assert!(err.message.contains("откат прошёл не полностью"), "{}", err.message);
+        assert!(!t.data.join("contacts.json").exists(), "файл остался отодвинутым");
+        assert!(err.warnings.iter().any(|w| w.contains("прежний файл остался под именем")), "{:?}", err.warnings);
+        // тот же отказ замены, но возврат имени удался: ничего не изменено, и файл на месте с прежними байтами
+        std::fs::remove_file(std::fs::read_dir(&t.data).unwrap().flatten().find(|e| e.file_name().to_string_lossy().contains("before-restore")).unwrap().path()).unwrap();
+        std::fs::write(t.data.join("contacts.json"), b"OLD").unwrap();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(Some(idx)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_TMP_RENAME_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert_eq!(std::fs::read(t.data.join("contacts.json")).unwrap(), b"OLD");
+    }
+
+    /// P20-4: накопленное «пропущено» не теряется, если отказ случился при подготовке; прямо сказано, что остатки не проверялись.
+    #[cfg(unix)]
+    #[test]
+    fn p20_4_skipped_files_survive_an_early_failure() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_anchors.json");
+        entries.insert(0, Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() }); // пропускается первым
+        for e in entries.iter_mut() {
+            if e.path == "groups/index.json" {
+                e.data = b"not json".to_vec(); // подготовка отказывает позже пропуска
+            }
+        }
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        assert!(!err.files_changed);
+        assert!(err.warnings.iter().any(|w| w.contains("paired_anchors.json") && w.contains("не восстановлен")), "{:?}", err.warnings);
+        assert!(err.warnings.iter().any(|w| w.contains("не выполнялась")), "{:?}", err.warnings);
+    }
+
+    /// P20-5, P21-3: созданные каталоги учитываются (сверху вниз), даже если цепочка оборвалась; не подтверждённая запись каталога попадает в отчёт.
+    #[test]
+    fn p20_5_created_directories_are_tracked_and_unconfirmed_syncs_are_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let mut created = Vec::new();
+        private_dirs(&d.path().join("a/b/c"), &mut created).unwrap();
+        assert_eq!(created.len(), 3, "{created:?}");
+        assert!(created[0].ends_with("a") && created[2].ends_with("a/b/c"), "сверху вниз: {created:?}");
+        #[cfg(unix)]
+        assert!(sync_report(&created, &[d.path().to_path_buf()]).is_empty(), "обычная запись подтверждается");
+        #[cfg(not(unix))]
+        assert!(!sync_report(&created, &[d.path().to_path_buf()]).is_empty(), "на этой платформе сброс каталога не подтверждается");
+        let notes = sync_report(&[PathBuf::from("/nonexistent-yandi/a/b")], &[PathBuf::from("/nonexistent-yandi/c")]);
+        assert_eq!(notes.len(), 2, "{notes:?}");
+        // цепочка оборвалась на последнем каталоге (слишком длинное имя): созданные раньше учтены
+        let mut partial = Vec::new();
+        let long = "x".repeat(300);
+        assert!(private_dirs(&d.path().join("p/q").join(long), &mut partial).is_err());
+        assert_eq!(partial.len(), 2, "{partial:?}");
+    }
+
+    /// P21-1: путь через ещё не существующий каталог и `..` и относительное написание дают тот же ключ, что и прямой путь.
+    #[test]
+    fn p21_1_physical_key_sees_through_missing_directories_dotdot_and_relative_paths() {
+        let d = tempfile::tempdir().unwrap();
+        let direct = d.path().join("paired_clients.json");
+        let via_missing = d.path().join("new").join("..").join("paired_clients.json");
+        let mut cp = CaseProbe::default();
+        assert_eq!(physical_key(&direct, &mut cp), physical_key(&via_missing, &mut cp));
+        let cwd = std::env::current_dir().unwrap();
+        let rel = pathdiff(&direct, &cwd);
+        assert_eq!(physical_key(&direct, &mut cp), physical_key(&rel, &mut cp), "относительное и абсолютное написание");
+        assert_ne!(physical_key(&direct, &mut cp), physical_key(&d.path().join("new").join("paired_clients.json"), &mut cp), "разные файлы не склеиваются");
+    }
+
+    fn pathdiff(target: &Path, base: &Path) -> PathBuf {
+        let t: Vec<_> = target.components().collect();
+        let b: Vec<_> = base.components().collect();
+        let common = t.iter().zip(&b).take_while(|(x, y)| x == y).count();
+        let mut out = PathBuf::new();
+        for _ in common..b.len() {
+            out.push("..");
+        }
+        for c in &t[common..] {
+            out.push(c.as_os_str());
+        }
+        out
+    }
+
+    /// P21-1: override через несуществующий каталог и `..` — тот же файл, что и clients: отклоняется до записи.
+    #[cfg(unix)]
+    #[test]
+    fn p21_1_an_override_through_a_missing_directory_is_rejected_before_any_write() {
+        let (opened, _last, _) = pairing_copy();
+        let (_d2, t) = target_layout();
+        let alias = t.home.join("new").join("..").join("paired_clients.json");
+        let err = restore_core(&opened, &t, &RestoreOptions { force: true }, Some(alias.to_str().unwrap())).unwrap_err();
+        assert!(err.message.contains("один и тот же файл"), "{}", err.message);
+        assert!(!t.home.join("new").exists() && !t.home.join("paired_clients.json").exists(), "ничего не создано");
+    }
+
+    /// P21-2: очищенный откат (прежний файл старого формата) — не «файлы прежние»: файл возвращён очищенным, это сказано и в признаке.
+    #[cfg(unix)]
+    #[test]
+    fn p21_2_a_rollback_that_returns_a_cleaned_file_is_not_reported_as_unchanged() {
+        let (opened, last, _) = pairing_copy();
+        let (_d2, t) = target_layout();
+        std::fs::write(t.home.join("paired_clients.json"), old_v1()).unwrap(); // прежний файл старого формата с секретами
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(err.files_changed, "{err:?}");
+        assert!(err.message.contains("в очищенном виде"), "{}", err.message);
+        assert!(err.warnings.iter().any(|w| w.contains("откат вернул очищенный вид")), "{:?}", err.warnings);
+        let now = std::fs::read_to_string(t.home.join("paired_clients.json")).unwrap();
+        assert!(!now.contains(SECRET2) && now.contains("\"version\""), "{now}");
+    }
+
+    /// P21-2: прежний файл связи, который не разбирается, не удаляется откатом: он отодвигается и возвращается теми же байтами.
+    #[cfg(unix)]
+    #[test]
+    fn p21_2_an_unparseable_existing_pairing_file_comes_back_byte_for_byte() {
+        let (opened, last, _) = pairing_copy();
+        let (_d2, t) = target_layout();
+        let junk = b"{not json at all, may hold a secret".to_vec();
+        std::fs::write(t.home.join("paired_clients.json"), &junk).unwrap();
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), junk, "исходные байты возвращены");
+    }
+
+    /// P22-1: прежний файл связи, который нельзя прочитать как текст (не UTF-8, больше лимита), не теряется откатом: возвращается теми же байтами.
+    #[cfg(unix)]
+    #[test]
+    fn p22_1_an_unreadable_prior_pairing_file_comes_back_byte_for_byte() {
+        let (opened, last, _) = pairing_copy();
+        let mut cases: Vec<Vec<u8>> = vec![vec![0xff, 0xfe, 0x00, b'{']];
+        cases.push(vec![b'a'; 5 * 1024 * 1024]); // больше лимита хранилища
+        for junk in cases {
+            let (_d2, t) = target_layout();
+            std::fs::write(t.home.join("paired_clients.json"), &junk).unwrap();
+            FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+            let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+            FAIL_SWAP_AT.with(|c| c.set(None));
+            assert!(!err.files_changed, "{err:?}");
+            assert_eq!(std::fs::read(t.home.join("paired_clients.json")).unwrap(), junk, "исходные байты потеряны");
+        }
+    }
+
+    /// P22-3: неподтверждённая запись каталога при уборке делает результат «изменено», а не «прежнее».
+    #[test]
+    fn p22_3_an_unconfirmed_cleanup_sync_marks_the_result_as_changed() {
+        let (notes, left) = abort_cleanup(&[], &[], &[PathBuf::from("/nonexistent-yandi/dir")], &[]);
+        assert!(!notes.is_empty());
+        assert!(left, "уборка не подтверждена — флаг консервативный");
+    }
+
+    /// P22-9: на системе с учётом регистра разные имена не склеиваются (проверка склейки на системе без учёта регистра — только на такой системе).
+    #[test]
+    fn p22_9_case_sensitive_filesystems_keep_different_missing_names_apart() {
+        let d = tempfile::tempdir().unwrap();
+        let mut cp = CaseProbe::default();
+        let a = physical_key(&d.path().join("Paired_Clients.json"), &mut cp);
+        let b = physical_key(&d.path().join("paired_clients.json"), &mut cp);
+        match cp.kind(d.path()) {
+            CaseKind::Insensitive => assert_eq!(a, b, "без учёта регистра это один файл"),
+            CaseKind::Sensitive => assert_ne!(a, b, "с учётом регистра это два разных файла"),
+            CaseKind::Unknown => panic!("проба регистра не удалась во временном каталоге"),
+        }
+        assert!(cp.warnings.is_empty() && cp.unverifiable.is_empty(), "{:?} {:?}", cp.warnings, cp.unverifiable);
+        assert!(std::fs::read_dir(d.path()).unwrap().flatten().all(|e| !e.file_name().to_string_lossy().starts_with(".yandi-case-probe")), "пробный файл убран");
+    }
+
+    /// P23-8/9, P24-6: нельзя создать пробный файл — состояние «неизвестно»: имена не из ASCII не считаются проверенными, ASCII-имена складываются
+    /// осторожно. Применимость прав проверяется В ТОМ ЖЕ режиме 0500, права возвращает защитник при любом выходе.
+    #[cfg(unix)]
+    #[test]
+    fn p23_8_an_unknown_case_state_is_not_treated_as_sensitive() {
+        use std::os::unix::fs::PermissionsExt;
+        struct Restore(PathBuf);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o700));
+            }
+        }
+        let d = tempfile::tempdir().unwrap();
+        let _g = Restore(d.path().to_path_buf());
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o500)).unwrap(); // пробный файл создать нельзя
+        if std::fs::OpenOptions::new().write(true).create_new(true).open(d.path().join(".applicable")).is_ok() {
+            return; // права не действуют (суперпользователь): проверка неприменима
+        }
+        let mut cp = CaseProbe::default();
+        let a = physical_key(&d.path().join("Резерв.json"), &mut cp);
+        let b = physical_key(&d.path().join("резерв.json"), &mut cp);
+        assert_eq!(cp.kind(d.path()), CaseKind::Unknown);
+        assert_eq!(a, b, "при неизвестном состоянии имена складываются осторожно");
+        assert!(!cp.unverifiable.is_empty(), "имя не из ASCII названо непроверяемым");
+        // и восстановление с таким именем отклоняется до записи
+        let entries = vec![Entry { area: Area::Home, path: "x.json".into(), data: vec![] }];
+        let targets = vec![d.path().join("Резерв.json")];
+        let mut cp2 = CaseProbe::default();
+        let err = check_target_collisions(&entries, &targets, &mut cp2).unwrap_err();
+        assert!(err.message.contains("проверить нельзя"), "{}", err.message);
+    }
+
+    /// P24-5: неудалённый пробный файл назван в отчёте на раннем отказе, и результат помечен «изменено».
+    #[cfg(unix)]
+    #[test]
+    fn p24_5_a_probe_file_that_could_not_be_removed_is_reported_on_an_early_refusal() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let bytes = seal(&collect(&src).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&t.keys).unwrap();
+        std::fs::write(t.keys.join("auth.json"), b"existing").unwrap();
+        FAIL_PROBE_REMOVE.with(|c| c.set(true));
+        let err = restore_core(&opened, &t, &RestoreOptions { force: false }, None).unwrap_err();
+        FAIL_PROBE_REMOVE.with(|c| c.set(false));
+        assert!(err.message.contains("уже есть файлы узла"), "{}", err.message);
+        assert!(err.warnings.iter().any(|w| w.contains("пробный файл")), "{:?}", err.warnings);
+        assert!(err.files_changed, "на диске остался пробный файл");
+    }
+
+    /// P21-3: подготовленный файл, который не удаётся убрать, называется в отчёте и делает результат «изменено».
+    #[cfg(unix)]
+    #[test]
+    fn p21_3_a_staged_file_that_cannot_be_removed_is_reported() {
+        let d = tempfile::tempdir().unwrap();
+        let stuck_dir = d.path().join(".auth.restore-1-0");
+        std::fs::create_dir_all(stuck_dir.join("inner")).unwrap(); // remove_file на каталоге не удастся
+        let staged: Vec<Staged> = vec![(d.path().join("auth.json"), stuck_dir.clone(), "Keys/auth.json".into(), None)];
+        let (notes, left) = abort_cleanup(&staged, &[], &[d.path().to_path_buf()], &[]);
+        assert!(left);
+        assert!(notes.iter().any(|n| n.contains(".auth.restore-1-0") && n.contains("не удалён")), "{notes:?}");
+    }
+
+    /// P21-4: отказ до записи (в том числе из-за уже существующих файлов) тоже говорит, что остатки не проверялись.
+    #[test]
+    fn p21_4_every_early_refusal_says_that_leftovers_were_not_checked() {
+        let (opened, _last, _) = {
+            let (_d, src) = layout();
+            sample(&src);
+            let code = key_root::RecoveryCode::generate();
+            let (root, auth) = real_root_and_auth(&code);
+            let bytes = seal(&collect(&src).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+            (open_with_root(&bytes, &root).unwrap(), 0usize, String::new())
+        };
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&t.keys).unwrap();
+        std::fs::write(t.keys.join("auth.json"), b"existing").unwrap();
+        let err = restore_core(&opened, &t, &RestoreOptions { force: false }, None).unwrap_err();
+        assert!(err.message.contains("уже есть файлы узла"), "{}", err.message);
+        assert!(err.warnings.iter().any(|w| w.contains("не выполнялась")), "{:?}", err.warnings);
+        assert!(!err.files_changed);
+    }
+
+    /// P20-6, P21-5: между неудачной заменой и откатом замок файла связи держит восстановление (проверка неблокирующей пробой, а не по времени);
+    /// писатель, начатый в этот момент, фиксируется ПОСЛЕ отката, его запись не теряется, а прежнее право A возвращено с теми же полями.
+    #[cfg(unix)]
+    #[test]
+    fn p20_6_a_concurrent_writer_waits_for_the_rollback_and_nothing_is_lost() {
+        use crate::netlayer::pairing::{lock_is_held, PairedClientStore, StoreRead};
+        let (opened, last, _) = pairing_copy(); // подготовленное состояние — пустой список клиентов
+        let (_d2, t) = target_layout();
+        let clients = t.home.join("paired_clients.json");
+        let a = "ab".repeat(32);
+        let b = "cd".repeat(32);
+        let prior = format!(r#"{{"version":2,"clients":{{"{a}":{{"session_id_hex":"{}","expires_at":4102444800}}}}}}"#, "2".repeat(32));
+        std::fs::write(&clients, &prior).unwrap();
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (c2, b2, h2, wr2) = (clients.clone(), b.clone(), held.clone(), writer.clone());
+        AFTER_SWAP_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                h2.store(lock_is_held(&c2), std::sync::atomic::Ordering::SeqCst); // детерминированно: замок у восстановления прямо сейчас
+                let (c3, b3) = (c2.clone(), b2.clone());
+                *wr2.lock().unwrap() = Some(std::thread::spawn(move || {
+                    PairedClientStore::update(&c3, |s| {
+                        s.issue(b3, 600);
+                        Ok(())
+                    })
+                    .unwrap();
+                }));
+            }));
+        });
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert!(held.load(std::sync::atomic::Ordering::SeqCst), "между заменой и откатом замок файла связи не удерживался");
+        writer.lock().unwrap().take().unwrap().join().unwrap();
+        match PairedClientStore::read(&clients) {
+            StoreRead::Current(s) => {
+                let g = s.get(&a).expect("прежнее право A после отката потеряно");
+                assert_eq!((g.session_id_hex.as_str(), g.expires_at), ("22222222222222222222222222222222", 4102444800), "поля A изменены");
+                assert!(s.get(&b).is_some(), "запись конкурирующего писателя потеряна");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// P21-5: то же, когда прежнего файла не было: откат убирает созданный файл под замком, запись писателя после отката остаётся единственной.
+    #[cfg(unix)]
+    #[test]
+    fn p21_5_a_writer_during_the_rollback_of_a_newly_created_file_keeps_only_its_own_record() {
+        use crate::netlayer::pairing::{lock_is_held, PairedClientStore, StoreRead};
+        let (opened, last, _) = pairing_copy();
+        let (_d2, t) = target_layout();
+        let clients = t.home.join("paired_clients.json");
+        let b = "cd".repeat(32);
+        let held = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let writer: std::sync::Arc<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let (c2, b2, h2, wr2) = (clients.clone(), b.clone(), held.clone(), writer.clone());
+        AFTER_SWAP_HOOK.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                h2.store(lock_is_held(&c2), std::sync::atomic::Ordering::SeqCst);
+                let (c3, b3) = (c2.clone(), b2.clone());
+                *wr2.lock().unwrap() = Some(std::thread::spawn(move || {
+                    PairedClientStore::update(&c3, |s| {
+                        s.issue(b3, 600);
+                        Ok(())
+                    })
+                    .unwrap();
+                }));
+            }));
+        });
+        FAIL_SWAP_AT.with(|c| c.set(Some(last)));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        assert!(!err.files_changed, "{err:?}");
+        assert!(held.load(std::sync::atomic::Ordering::SeqCst), "замок не удерживался во время удаления");
+        writer.lock().unwrap().take().unwrap().join().unwrap();
+        match PairedClientStore::read(&clients) {
+            StoreRead::Current(s) => assert!(s.get(&b).is_some(), "запись писателя потеряна удалением без замка"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// P19-2 и P19-4: откат не удался — это в предупреждениях и в признаке изменённых файлов; пропущенные файлы связи не теряются.
+    #[cfg(unix)]
+    #[test]
+    fn p19_4_a_failed_rollback_is_a_typed_failure_with_warnings() {
+        let (_d, src) = layout();
+        sample(&src);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_clients.json" && e.path != "paired_anchors.json");
+        entries.push(Entry { area: Area::Home, path: "paired_clients.json".into(), data: br#"{"version":2,"clients":{}}"#.to_vec() });
+        entries.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: b"{garbage".to_vec() }); // не разбирается — пропускается
+        entries.push(Entry { area: Area::Home, path: "zz_last.json".into(), data: b"{}".to_vec() });
+        let last_staged = entries.len() - 2; // anchors пропущен, значит последняя подготовленная — zz_last.json
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let (_d2, t) = target_layout();
+        std::fs::write(t.home.join("paired_clients.json"), r#"{"version":2,"clients":{}}"#).unwrap(); // прежний файл: после отката его надо вернуть
+        FAIL_SWAP_AT.with(|c| c.set(Some(last_staged)));
+        FAIL_ROLLBACK_WRITE.with(|c| c.set(true));
+        let err = restore_detailed_for_test(&opened, &t).unwrap_err();
+        FAIL_SWAP_AT.with(|c| c.set(None));
+        FAIL_ROLLBACK_WRITE.with(|c| c.set(false));
+        assert!(err.files_changed, "откат не удался: файлы изменены, это нельзя называть «ничего не записано»: {err:?}");
+        assert!(err.message.contains("откат прошёл не полностью"), "{}", err.message);
+        assert!(err.warnings.iter().any(|w| w.contains("paired_anchors.json") && w.contains("не восстановлен")), "пропущенный файл связи потерян: {:?}", err.warnings);
+        assert!(err.warnings.iter().any(|w| w.contains("не возвращён")), "неудавшийся откат не назван: {:?}", err.warnings);
+    }
+
+    #[test]
+    fn p17_7_the_sweep_touches_only_the_exact_leftovers_the_restore_creates() {
+        let (_d, l) = layout();
+        std::fs::create_dir_all(&l.home).unwrap();
+        // чужие файлы с похожими именами должны остаться байт в байт
+        let theirs: Vec<(String, &[u8])> = vec![
+            ("paired_clients.json.notes".into(), b"my note"),
+            ("paired_clients.json.json".into(), b"{}"),
+            (".paired_clients.json.config".into(), b"cfg"),
+            ("paired_clients.json.before-restore-abc-1".into(), b"not numeric"),
+            ("paired_clients.json.before-restore-1".into(), b"one number"),
+            ("paired_clients.json.before-restore-1-2-3".into(), b"three numbers"),
+            ("paired_clients.json.резерв".into(), "юникод".as_bytes()),
+            ("paired_anchors.json.manual-backup".into(), b"manual"),
+        ];
+        for (n, c) in &theirs {
+            std::fs::write(l.home.join(n), c).unwrap();
+        }
+        // настоящие остатки восстановления
+        std::fs::write(l.home.join("paired_clients.json.before-restore-123-0"), old_v1()).unwrap();
+        std::fs::write(l.home.join(".paired_anchors.json.restore-5-1"), b"garbage").unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        assert!(problems[0].contains(".paired_anchors.json.restore-5-1"), "неразбираемый остаток назван в отчёте: {problems:?}");
+        for (n, c) in &theirs {
+            assert_eq!(std::fs::read(l.home.join(n)).unwrap(), *c, "{n} тронут");
+        }
+        assert_eq!(std::fs::read(l.home.join(".paired_anchors.json.restore-5-1")).unwrap(), b"garbage", "по одному имени не удаляется (P18-2)");
+        let cleaned = std::fs::read_to_string(l.home.join("paired_clients.json.before-restore-123-0")).unwrap();
+        assert!(!cleaned.contains(SECRET2) && cleaned.contains("\"version\": 2"));
+        // нестандартное имя файла якорей: соседи с общим началом имени не затрагиваются
+        let custom = _d.path().join("elsewhere");
+        std::fs::create_dir_all(&custom).unwrap();
+        for n in ["profile.json", "profile.photo", ".profile.config"] {
+            std::fs::write(custom.join(n), b"MINE").unwrap();
+        }
+        let ov = custom.join("profile.json");
+        let problems = sweep_pairing_files_with(&l, Some(ov.to_str().unwrap()));
+        // профиль не файл связи: он разбирается как «не по схеме» и сообщается, но НЕ удаляется
+        assert!(problems.iter().any(|p| p.contains("profile.json")), "{problems:?}");
+        for n in ["profile.json", "profile.photo", ".profile.config"] {
+            assert_eq!(std::fs::read(custom.join(n)).unwrap(), b"MINE", "{n}");
+        }
+    }
+
+    #[test]
+    fn p17_6_a_nonstandard_anchor_store_name_never_gets_a_raw_before_restore_copy() {
+        let (_d, src) = layout();
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        sample(&src);
+        let mut entries = collect(&src).unwrap();
+        entries.retain(|e| e.path != "paired_anchors.json");
+        // копия старой сборки: файл якорей в старом формате с секретом
+        let payload = serde_json::to_string(&crate::netlayer::pairing::PairingPayload {
+            anchor_id: crate::util::HashId([1u8; 32]),
+            anchor_x25519_hex: "a".repeat(64),
+            fingerprint_hex: "b".repeat(64),
+            anchor_url: "wss://a.example/".into(),
+        })
+        .unwrap();
+        let old_anchors = format!(r#"{{"anchors":[{{"payload":{payload},"session":{{"session_id":7,"resume_secret_hex":"{SECRET2}","expires_at":4102444800}},"preference":1}}]}}"#);
+        entries.push(Entry { area: Area::Home, path: "paired_anchors.json".into(), data: old_anchors.clone().into_bytes() });
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let t = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        let private = d2.path().join("private");
+        std::fs::create_dir_all(&private).unwrap();
+        std::fs::create_dir_all(&t.home).unwrap();
+        let custom = private.join("anchors-custom.json");
+        std::fs::write(&custom, old_anchors.as_bytes()).unwrap(); // уже лежит старый файл по нестандартному пути
+        let report = restore_with(&opened, &t, &RestoreOptions { force: true }, Some(custom.to_str().unwrap())).unwrap();
+        assert!(report.unclean.is_empty(), "{:?}", report.unclean);
+        assert!(report.kept_old.iter().all(|k| !k.to_string_lossy().contains("anchors-custom")), "сырой before-restore для файла связи: {:?}", report.kept_old);
+        for entry in std::fs::read_dir(&private).unwrap().flatten() {
+            let text = std::fs::read_to_string(entry.path()).unwrap_or_default();
+            assert!(!text.contains(SECRET2), "{:?}: остаток секрета", entry.path());
+        }
+        assert!(std::fs::read_to_string(&custom).unwrap().contains("\"version\": 2"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn p17_8_every_failure_of_the_sweep_is_reported_and_symlinks_are_not_followed() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, l) = layout();
+        std::fs::create_dir_all(&l.home).unwrap();
+        // ссылка на чужой файл под видом остатка: не следуем, сообщаем
+        let target = _d.path().join("victim.txt");
+        std::fs::write(&target, b"IMPORTANT").unwrap();
+        std::os::unix::fs::symlink(&target, l.home.join("paired_clients.json.before-restore-1-1")).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert!(problems.iter().any(|p| p.contains("символическая ссылка")), "{problems:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"IMPORTANT");
+        // активный файл — ссылка: не читается и не переписывается, это в отчёте
+        std::fs::remove_file(l.home.join("paired_clients.json.before-restore-1-1")).unwrap();
+        std::os::unix::fs::symlink(&target, l.home.join("paired_clients.json")).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        assert!(problems.iter().any(|p| p.contains("paired_clients.json")), "{problems:?}");
+        assert_eq!(std::fs::read(&target).unwrap(), b"IMPORTANT");
+        std::fs::remove_file(l.home.join("paired_clients.json")).unwrap();
+        // каталог не читается: остатки не проверены — это не молчание
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o300)).unwrap();
+        let problems = sweep_pairing_files_with(&l, None);
+        std::fs::set_permissions(&l.home, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(problems.iter().any(|p| p.contains("не читается") || p.contains("не очищить") || p.contains("каталог")), "{problems:?}");
+    }
+
+    #[test]
+    fn restore_never_overwrites_an_existing_identity_or_any_node_file_without_force() {
+        let (_d, l) = layout();
+        let (opened, _) = sealed_sample(&l);
+        let d2 = tempfile::tempdir().unwrap();
+        let other = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&other.keys).unwrap();
+        // на машине уже есть личность узла, auth.json нет — раньше это не останавливало запись
+        std::fs::write(other.keys.join("node_identity_9000.json"), b"MY OWN IDENTITY").unwrap();
+        let err = restore(&opened, &other, &RestoreOptions { force: false }).unwrap_err();
+        assert!(err.contains("node_identity_9000.json"), "{err}");
+        assert_eq!(std::fs::read(other.keys.join("node_identity_9000.json")).unwrap(), b"MY OWN IDENTITY");
+        assert!(!other.keys.join("auth.json").exists(), "до отказа ничего не записано");
+    }
+
+    #[test]
+    fn a_symlink_in_the_path_neither_leaks_files_out_of_the_copy_nor_lets_a_restore_write_outside() {
+        use std::os::unix::fs::symlink;
+        // сбор: каталог groups — ссылка наружу; чужой index.json в копию попасть не должен
+        let (d, l) = layout();
+        let outside = d.path().join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(outside.join("index.json"), b"[\"SECRET\"]").unwrap();
+        symlink(&outside, l.data.join("groups")).unwrap();
+        assert!(collect(&l).unwrap_err().contains("символическая ссылка"));
+        // восстановление: ссылка в каталоге назначения — отказ до записи
+        let (_d1, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let (d2, dst) = layout();
+        let escape = d2.path().join("escape");
+        std::fs::create_dir_all(&escape).unwrap();
+        symlink(&escape, dst.data.join("groups")).unwrap();
+        let err = restore(&opened, &dst, &RestoreOptions { force: true }).unwrap_err();
+        assert!(err.contains("символическая ссылка"), "{err}");
+        assert!(std::fs::read_dir(&escape).unwrap().next().is_none(), "за пределы каталогов узла ничего не записано");
+        assert!(!dst.keys.join("auth.json").exists(), "проверка путей — до любой записи");
+    }
+
+    #[test]
+    fn a_preplanted_temp_link_in_the_backup_folder_cannot_clobber_another_file() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("flash");
+        std::fs::create_dir_all(&dir).unwrap();
+        let victim = d.path().join("victim");
+        std::fs::write(&victim, b"IMPORTANT").unwrap();
+        let name = file_name("node", 1, 1);
+        // старое имя временного файла (`.<имя>.part`) заранее подложено ссылкой на чужой файл
+        std::os::unix::fs::symlink(&victim, dir.join(format!(".{name}.part"))).unwrap();
+        let root = [7u8; 32];
+        let b = seal(&[], &SealParams { root: &root, auth_json: b"{}", node_id: "node", counter: 1, now_ms: 1 }).unwrap();
+        // имя временного файла случайное, создаётся только заново: подложенная ссылка не задета
+        write_to_dir(&dir, &name, &b, &root, "node").unwrap();
+        assert_eq!(std::fs::read(&victim).unwrap(), b"IMPORTANT");
+        // и сам файл копии на месте ссылки не принимается
+        let name2 = file_name("node", 2, 2);
+        std::os::unix::fs::symlink(&victim, dir.join(&name2)).unwrap();
+        assert!(write_to_dir(&dir, &name2, &b, &root, "node").is_err());
+        assert_eq!(std::fs::read(&victim).unwrap(), b"IMPORTANT");
+    }
+
+    #[test]
+    fn device_avatars_are_collected_and_a_settings_change_counts_as_a_change() {
+        let (_d, l) = layout();
+        put(&l, Area::Data, "device_profiles/index.json", b"{}");
+        put(&l, Area::Data, "device_profiles/abc.png", b"image");
+        put(&l, Area::Data, "device_profiles/notes.txt", b"not an avatar");
+        let got = collect(&l).unwrap();
+        assert!(got.iter().any(|e| e.path == "device_profiles/abc.png"), "аватарки сопряжённых устройств входят");
+        assert!(!got.iter().any(|e| e.path.ends_with("notes.txt")));
+        let a = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":900}"#.to_vec() }]);
+        let b = digest(&[Entry { area: Area::Data, path: "closed/settings.json".into(), data: br#"{"auto_lock_secs":0}"#.to_vec() }]);
+        assert_ne!(a, b, "смена настроек закрытой среды — изменение");
+    }
+
+    // ── ревью P8 ──
+
+    #[test]
+    fn after_a_restore_the_counter_continues_from_the_folder_and_the_new_copy_is_never_rotated_away() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        let out = d.path().join("cloud");
+        // в облачной папке остались копии №30–36 прежней машины
+        for n in 30..=36u64 {
+            let b = seal(&collect(&l).unwrap(), &SealParams { root: &root, auth_json: &auth, node_id: "nodeid00", counter: n, now_ms: n }).unwrap();
+            write_to_dir(&out, &file_name("nodeid00", n, n), &b, &root, "nodeid00").unwrap();
+        }
+        assert_eq!(max_counter_in(&out, "nodeid00"), 36);
+        assert_eq!(max_counter_in(&out, "other"), 0, "чужие копии не считаются");
+        // подброшенное имя с огромным номером не учитывается: счётчик не прыгает и не застревает
+        std::fs::write(out.join(format!("yandi-nodeid00-{}-x.{FILE_EXT}", u64::MAX)), b"x").unwrap();
+        std::fs::write(out.join(format!("yandi-nodeid00-1000000001-x.{FILE_EXT}")), b"x").unwrap();
+        assert_eq!(max_counter_in(&out, "nodeid00"), 36);
+        // новая машина: состояние пустое, папка выбрана снова
+        let mut st = load_state(&l);
+        st.dir = Some(out.display().to_string());
+        save_state(&l, &st).unwrap();
+        let o = run_backup(&l, &root, "nodeid00", Mode::Auto, 1_700_000_000_000).unwrap();
+        assert_eq!(o.counter, 37, "счётчик продолжился с папки, а не с единицы");
+        assert!(o.saved.as_ref().unwrap().is_file(), "свежая копия осталась после ротации");
+        assert_eq!(load_state(&l).counter, 37);
+    }
+
+    #[test]
+    fn a_failed_restore_changes_nothing_and_leaves_no_staged_files() {
+        let (_d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        // копия с повреждённым индексом групп: подготовка падает ДО замены любого файла
+        let mut entries = collect(&l).unwrap();
+        for e in entries.iter_mut() {
+            if e.path == "groups/index.json" {
+                e.data = b"{ not json".to_vec();
+            }
+        }
+        let bytes = seal(&entries, &SealParams { root: &root, auth_json: &auth, node_id: "n", counter: 1, now_ms: 1 }).unwrap();
+        let opened = open_with_root(&bytes, &root).unwrap();
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&dst.keys).unwrap();
+        std::fs::create_dir_all(&dst.data).unwrap();
+        std::fs::write(dst.data.join("contacts.json"), b"MY CONTACTS").unwrap();
+        let err = restore(&opened, &dst, &RestoreOptions { force: true }).unwrap_err();
+        assert!(err.contains("groups/index.json"), "{err}");
+        assert_eq!(std::fs::read(dst.data.join("contacts.json")).unwrap(), b"MY CONTACTS", "активные файлы не тронуты");
+        assert!(!dst.keys.join("auth.json").exists());
+        let strays: Vec<_> = std::fs::read_dir(&dst.data).unwrap().flatten().map(|e| e.file_name().into_string().unwrap()).filter(|n| n.contains(".restore-") || n.contains(".before-restore")).collect();
+        assert!(strays.is_empty(), "подготовленные файлы убраны: {strays:?}");
+    }
+
+    #[test]
+    fn restoring_into_an_existing_world_readable_directory_makes_it_private() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_d, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        for p in [&dst.keys, &dst.data, &dst.home] {
+            std::fs::create_dir_all(p).unwrap();
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        restore(&opened, &dst, &RestoreOptions { force: false }).unwrap();
+        for p in [&dst.keys, &dst.data, &dst.home] {
+            assert_eq!(std::fs::metadata(p).unwrap().permissions().mode() & 0o777, 0o700, "{} узел иначе не стартует", p.display());
+        }
+    }
+
+    #[test]
+    fn a_failed_attempt_does_not_postpone_the_next_check_and_state_changes_are_serialised() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        let mut st = load_state(&l);
+        st.dir = Some("/proc/definitely/not/writable".into());
+        save_state(&l, &st).unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, 5_000).is_err());
+        assert_eq!(load_state(&l).last_check_ms, 0, "неудача не превращается в «проверено»");
+        // смена папки идёт под замком состояния и не теряется
+        let s = update_state(&l, |s| s.dir = Some(d.path().join("ok").display().to_string())).unwrap();
+        assert!(s.dir.unwrap().ends_with("ok"));
+    }
+
+    // ── контрольный проход P9 ──
+
+    #[test]
+    fn the_notice_file_is_a_nicety_a_failure_to_write_it_does_not_fail_a_finished_restore() {
+        let (_d, src) = layout();
+        let (opened, _) = sealed_sample(&src);
+        let d2 = tempfile::tempdir().unwrap();
+        let dst = Layout { keys: d2.path().join("keys"), data: d2.path().join("data"), home: d2.path().join("home"), port: 9000 };
+        std::fs::create_dir_all(&dst.data).unwrap();
+        // на месте файла извещения — каталог: записать его нельзя
+        std::fs::create_dir_all(dst.data.join("restored_notice.json")).unwrap();
+        let r = restore(&opened, &dst, &RestoreOptions { force: false }).expect("ключи и связи установлены, извещение — не обязательная часть");
+        assert!(r.written.iter().any(|w| w == "Keys/auth.json"));
+    }
+
+    #[test]
+    fn a_critical_debt_survives_a_failure_and_clears_only_on_success() {
+        let (d, l) = layout();
+        sample(&l);
+        let code = key_root::RecoveryCode::generate();
+        let (root, auth) = real_root_and_auth(&code);
+        std::fs::write(l.keys.join("auth.json"), &auth).unwrap();
+        update_state(&l, |s| {
+            s.dir = Some("/proc/definitely/not/writable".into());
+            s.critical_pending = true;
+        })
+        .unwrap();
+        assert!(run_backup(&l, &root, "nodeid00", Mode::Auto, 10).is_err());
+        assert!(load_state(&l).critical_pending, "сбой не снимает «долг»: он остаётся в файле состояния и переживёт перезапуск");
+        update_state(&l, |s| s.dir = Some(d.path().join("flash").display().to_string())).unwrap();
+        run_backup(&l, &root, "nodeid00", Mode::Auto, 20).unwrap();
+        assert!(!load_state(&l).critical_pending, "успех снимает долг");
+    }
+}
+
+
+/// После восстановления на новой машине: если копия принесла закрытую среду, её пароль прежней установки не принимается.
+/// Среда открывается сид-фразой и заново оборачивается паролем, выбранным на этой машине (как в кошельках: пароль привязан к установке,
+/// сид — к личности). Счётчики попыток начинаются заново. Возвращает `false`, если закрытой среды в копии не было.
+#[cfg(unix)]
+pub fn finalize_vault(l: &Layout, phrase: &str, new_password: &str) -> Result<bool, String> {
+    use crate::node_vault::{store::EnvelopeStore, NodeVault};
+    let dir = l.data.join("closed");
+    if !dir.join("envelope.json").exists() {
+        return Ok(false);
+    }
+    let store = EnvelopeStore::open(&dir).map_err(|e| format!("закрытая среда: {e}"))?;
+    let snapshot = store.load().map_err(|e| format!("закрытая среда: {e}"))?.ok_or("закрытая среда в копии пуста")?;
+    store.restore_attempts().map_err(|e| format!("закрытая среда: {e}"))?;
+    let mut vault = NodeVault::default();
+    vault
+        .recover(&snapshot.envelope, phrase)
+        .map_err(|_| "сид-фраза не открывает закрытую среду из копии".to_string())?;
+    let next = vault.change_password(&snapshot.envelope, new_password).map_err(|e| format!("новый пароль: {e}"))?;
+    store.save(Some(&snapshot), &next, &vault).map_err(|e| format!("закрытая среда: {e}"))?;
+    Ok(true)
+}
+
+#[cfg(all(test, unix))]
+mod vault_tests {
+    use super::*;
+    use crate::node_vault::{store::EnvelopeStore, NodeVault, VaultEnvelope};
+
+    const SEED: &str = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+
+    #[test]
+    fn restore_on_a_new_machine_drops_the_old_password_and_sets_a_new_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let l = Layout { keys: tmp.path().join("keys"), data: tmp.path().join("data"), home: tmp.path().join("home"), port: 9000 };
+        let dir = l.data.join("closed");
+        let (env, vault) = VaultEnvelope::create_unlocked("old password", Some(SEED)).unwrap();
+        let store = EnvelopeStore::open(&dir).unwrap();
+        store.prepare_attempts(&env).unwrap();
+        store.save(None, &env, &vault).unwrap();
+        // как в копии: envelope и метка есть, счётчика попыток нет
+        std::fs::remove_file(dir.join("attempts.json")).unwrap();
+        drop(store);
+        assert!(finalize_vault(&l, "alpha bravo charlie delta", "new password").is_err(), "чужая фраза не открывает");
+        assert!(finalize_vault(&l, &SEED.to_uppercase(), "short").is_err(), "короткий пароль не принимается");
+        assert_eq!(finalize_vault(&l, &SEED.to_uppercase(), "new password"), Ok(true));
+        let store = EnvelopeStore::open(&dir).unwrap();
+        let snap = store.load().unwrap().unwrap();
+        let mut v = NodeVault::default();
+        assert!(v.unlock(&snap.envelope, "old password").is_err(), "старый пароль не действует");
+        v.unlock(&snap.envelope, "new password").unwrap();
+        assert!(dir.join("attempts.json").exists(), "счётчик попыток заведён заново");
+        // и сид-фраза по-прежнему открывает ту же среду
+        let mut r = NodeVault::default();
+        r.recover(&snap.envelope, SEED).unwrap();
+        // без закрытой среды в копии делать нечего
+        let empty = Layout { keys: tmp.path().join("k2"), data: tmp.path().join("d2"), home: tmp.path().join("h2"), port: 9000 };
+        assert_eq!(finalize_vault(&empty, SEED, "new password"), Ok(false));
+    }
+}

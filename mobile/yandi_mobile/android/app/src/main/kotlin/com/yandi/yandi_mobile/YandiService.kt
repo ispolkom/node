@@ -14,19 +14,32 @@ import android.net.ConnectivityManager
 import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
+import android.net.Uri
+import android.media.AudioAttributes
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.system.Os
 import android.util.Base64
 import android.util.Log
+import android.content.SharedPreferences
+import android.security.keystore.KeyGenParameterSpec
+import android.security.keystore.KeyProperties
 import androidx.core.app.NotificationCompat
 import java.io.ByteArrayOutputStream
 import java.io.InputStream
 import java.io.OutputStream
+import java.io.File
+import java.nio.ByteBuffer
+import java.security.MessageDigest
 import java.net.InetSocketAddress
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import javax.net.ssl.SSLContext
 import javax.net.ssl.SSLSocket
+import javax.crypto.Cipher
+import javax.crypto.KeyGenerator
+import javax.crypto.SecretKey
 import kotlin.concurrent.thread
 import kotlin.random.Random
 
@@ -46,15 +59,113 @@ class YandiChatService : Service() {
         const val ACTION_START   = "com.yandi.chat.START"
         const val ACTION_STOP    = "com.yandi.chat.STOP"
         const val CHANNEL_STATUS = "yandi_status"
-        const val CHANNEL_MSG    = "yandi_messages"
+        // New ID: Android keeps the sound of an existing channel unchanged.
+        const val CHANNEL_MSG    = "yandi_messages_icq_v1"
+        const val CHANNEL_CALLS = "yandi_calls_calling_v1"
+        const val CHANNEL_VIDEO_CALLS = "yandi_calls_video_v1"
+        const val CHANNEL_MSG_SILENT = "yandi_messages_silent"
         private const val TAG              = "YandiChat"
         private const val NOTIF_ID_STATUS  = 2
 
-        // Интервалы ping: экран вкл = 30s, выкл = 90s
+        // Интервалы ping: экран вкл = 30s, выкл = 180s, Doze = 300s
         private const val PING_INTERVAL_SCREEN_ON  = 30_000L
-        private const val PING_INTERVAL_SCREEN_OFF = 90_000L
+        private const val PING_INTERVAL_SCREEN_OFF = 180_000L
+        private const val PING_INTERVAL_DOZE = 300_000L
 
         @Volatile var running = false
+
+        private const val PENDING_LIVE_FILE = "yandi_pending_live.bin"
+        private const val PREFS = "yandi_background_service"
+        private const val KEY_LAST_LIVE_DIGEST = "last_live_digest"
+        private const val KEY_LAST_LIVE_AT = "last_live_at"
+        private const val LIVE_DEDUP_WINDOW_MS = 120_000L
+        private const val KEY_ALIAS = "yandi_background_token_v1"
+        private const val MAX_LIVE_PAYLOAD = PendingLiveQueue.MAX_PAYLOAD
+        private const val LIVE_FRAME_HEADER = PendingLiveQueue.FRAME_HEADER
+        private const val LIVE_WAKE_TRAILER = PendingLiveQueue.WAKE_TRAILER
+        private const val MAX_LIVE_FRAME = PendingLiveQueue.MAX_FRAME
+        private val pendingLiveLock = Any()
+        @Volatile private var flutterLiveReady = false
+
+        fun setFlutterLiveReady(ready: Boolean) = synchronized(pendingLiveLock) {
+            flutterLiveReady = ready
+        }
+
+        private fun readPendingLive(context: Context): ArrayList<ByteArray> {
+            val file = File(context.filesDir, PENDING_LIVE_FILE)
+            if (!file.exists()) return arrayListOf()
+            return runCatching { PendingLiveQueue.decode(file.readBytes()) }
+                .getOrDefault(arrayListOf())
+        }
+
+        // Снимок не удаляет шифротекст: если Flutter закроется во время проверки E2E,
+        // следующий вход сможет повторить попытку. Новые кадры не теряются при ack.
+        fun drainPendingLive(context: Context, ready: Boolean): ArrayList<ByteArray> = synchronized(pendingLiveLock) {
+            val frames = readPendingLive(context)
+            if (ready) flutterLiveReady = true
+            frames
+        }
+
+        fun ackPendingLive(context: Context, handled: List<ByteArray>) = synchronized(pendingLiveLock) {
+            if (handled.isEmpty()) return@synchronized
+            val frames = readPendingLive(context)
+            val remaining = frames.filterNot { frame -> handled.any { it.contentEquals(frame) } }
+            val file = File(context.filesDir, PENDING_LIVE_FILE)
+            writePendingLiveAtomically(context, remaining)
+        }
+
+        private fun writePendingLiveAtomically(context: Context, frames: Collection<ByteArray>) {
+            val target = File(context.filesDir, PENDING_LIVE_FILE)
+            val temp = File(context.filesDir, "$PENDING_LIVE_FILE.tmp")
+            try {
+                temp.outputStream().use { stream ->
+                    stream.write(PendingLiveQueue.encode(frames))
+                    stream.fd.sync()
+                }
+                if (frames.isEmpty()) target.delete()
+                else Os.rename(temp.absolutePath, target.absolutePath)
+            } finally {
+                temp.delete()
+            }
+        }
+
+        private fun secretKey(): SecretKey {
+            val ks = java.security.KeyStore.getInstance("AndroidKeyStore").apply { load(null) }
+            (ks.getKey(KEY_ALIAS, null) as? SecretKey)?.let { return it }
+            return KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, "AndroidKeyStore").apply {
+                init(KeyGenParameterSpec.Builder(KEY_ALIAS, KeyProperties.PURPOSE_ENCRYPT or KeyProperties.PURPOSE_DECRYPT)
+                    .setBlockModes(KeyProperties.BLOCK_MODE_GCM)
+                    .setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE)
+                    .setUserAuthenticationRequired(false)
+                    .build())
+            }.generateKey()
+        }
+
+        private fun encryptToken(token: String): String {
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding").apply { init(Cipher.ENCRYPT_MODE, secretKey()) }
+            val packed = cipher.iv + cipher.doFinal(token.toByteArray(Charsets.UTF_8))
+            return Base64.encodeToString(packed, Base64.NO_WRAP)
+        }
+
+        private fun decryptToken(value: String): String? = runCatching {
+            val packed = Base64.decode(value, Base64.NO_WRAP)
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, secretKey(), javax.crypto.spec.GCMParameterSpec(128, packed.copyOfRange(0, 12)))
+            cipher.doFinal(packed.copyOfRange(12, packed.size)).toString(Charsets.UTF_8)
+        }.getOrNull()
+
+        fun saveConfig(context: Context, host: String, port: Int, token: String, fingerprint: String) {
+            context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+                .putString("host", host).putInt("port", port).putString("token", encryptToken(token)).putString("fingerprint", fingerprint).apply()
+        }
+
+        fun loadConfig(context: Context): Array<String>? {
+            val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            val host = prefs.getString("host", null) ?: return null
+            val encrypted = prefs.getString("token", null) ?: return null
+            val token = decryptToken(encrypted) ?: return null
+            return arrayOf(host, prefs.getInt("port", 8766).toString(), token, prefs.getString("fingerprint", "") ?: "")
+        }
     }
 
     @Volatile private var host        = ""
@@ -63,10 +174,14 @@ class YandiChatService : Service() {
     @Volatile private var fingerprint = ""
 
     private val screenOn      = AtomicBoolean(true)
+    private val deviceIdle  = AtomicBoolean(false)
     private val lastPongMs    = AtomicLong(System.currentTimeMillis())
     private val networkReady  = AtomicBoolean(true)
+    /** Поколение соединения: потоки прежней настройки видят, что номер сменился, и выходят, не трогая новую. */
+    private val generation    = java.util.concurrent.atomic.AtomicInteger(0)
 
     @Volatile private var ws: RawWsClient? = null
+    private val activeWakes = ActiveWakeCalls()
     private var workerThread: Thread?      = null
     private var pingThread:   Thread?      = null
 
@@ -77,6 +192,10 @@ class YandiChatService : Service() {
             when (intent?.action) {
                 Intent.ACTION_SCREEN_ON  -> screenOn.set(true)
                 Intent.ACTION_SCREEN_OFF -> screenOn.set(false)
+                PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED -> {
+                    val pm = getSystemService(POWER_SERVICE) as? PowerManager
+                    deviceIdle.set(pm?.isDeviceIdleMode == true)
+                }
             }
         }
     }
@@ -103,9 +222,15 @@ class YandiChatService : Service() {
     override fun onCreate() {
         super.onCreate()
         // Регистрируем слушатель экрана (только динамически — манифест не работает)
+        val pm = getSystemService(POWER_SERVICE) as? PowerManager
+        screenOn.set(pm?.isInteractive != false)
+        deviceIdle.set(pm?.isDeviceIdleMode == true)
         registerReceiver(screenReceiver, IntentFilter().apply {
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_SCREEN_OFF)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                addAction(PowerManager.ACTION_DEVICE_IDLE_MODE_CHANGED)
+            }
         })
         // Регистрируем слушатель сети
         val cm  = getSystemService(CONNECTIVITY_SERVICE) as ConnectivityManager
@@ -118,10 +243,24 @@ class YandiChatService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_START -> {
-                host        = intent.getStringExtra("host")        ?: return START_NOT_STICKY
-                port        = intent.getIntExtra("port", 8766)
-                token       = intent.getStringExtra("token")       ?: return START_NOT_STICKY
-                fingerprint = intent.getStringExtra("fingerprint") ?: ""
+                val stored = loadConfig(this)
+                val newHost  = intent.getStringExtra("host") ?: stored?.getOrNull(0) ?: return START_NOT_STICKY
+                val newPort  = if (intent.hasExtra("port")) intent.getIntExtra("port", 8766) else stored?.getOrNull(1)?.toIntOrNull() ?: 8766
+                val newToken = intent.getStringExtra("token") ?: stored?.getOrNull(2) ?: return START_NOT_STICKY
+                val newPrint = intent.getStringExtra("fingerprint") ?: stored?.getOrNull(3) ?: ""
+                // смена узла (или токена) у работающей службы: соединение прежнего узла закрывается ДО нового запуска,
+                // иначе оно жило бы со старым токеном и продолжало получать уведомления удалённого узла
+                val changed = running && (newHost != host || newPort != port || newToken != token || newPrint != fingerprint)
+                if (changed) {
+                    generation.incrementAndGet()
+                    running = false
+                    ws?.close()
+                    ws = null
+                    pingThread?.interrupt()
+                    workerThread?.interrupt()
+                }
+                host = newHost; port = newPort; token = newToken; fingerprint = newPrint
+                saveConfig(this, newHost, newPort, newToken, newPrint)
                 start()
             }
             ACTION_STOP -> stop()
@@ -142,6 +281,7 @@ class YandiChatService : Service() {
     private fun start() {
         if (running) return
         running = true
+        generation.incrementAndGet()
         createChannels()
         startForeground(NOTIF_ID_STATUS, buildStatusNotif("Подключение…"))
         startPingThread()
@@ -150,6 +290,7 @@ class YandiChatService : Service() {
 
     private fun stop() {
         running = false
+        generation.incrementAndGet()
         ws?.close()
         ws = null
         pingThread?.interrupt()
@@ -161,24 +302,31 @@ class YandiChatService : Service() {
     // ── Worker: reconnect-loop ─────────────────────────────────────────────────
 
     private fun startWorkerThread() {
+        val gen = generation.get()
         workerThread = thread(name = "yandi-ws", isDaemon = true) {
             var delay = 5_000L
-            while (running) {
+            while (running && gen == generation.get()) {
+                var client: RawWsClient? = null
                 try {
                     updateStatusNotif("Подключено к ноде")
-                    val client = RawWsClient(host, port, fingerprint)
-                    ws = client
+                    val c = RawWsClient(host, port, fingerprint)
+                    client = c
+                    ws = c
                     lastPongMs.set(System.currentTimeMillis())
-                    client.connect("/mobile/ws", token)
+                    c.connect("/mobile/ws", token)
+                    if (gen != generation.get()) { c.close(); break }   // за время соединения узел сменили: это уже чужое поколение
                     delay = 5_000L
-                    readLoop(client)
+                    readLoop(c)
                 } catch (e: InterruptedException) {
                     break
                 } catch (e: Exception) {
-                    if (running) Log.w(TAG, "WS ошибка: $e")
+                    if (running) Log.w(TAG, "WS ошибка: ${e.javaClass.simpleName}")
+                } finally {
+                    // сокет закрывается на любом выходе (ошибка рукопожатия, кривой кадр, таймаут), иначе дескрипторы копятся до GC
+                    runCatching { client?.close() }
                 }
-                ws = null
-                if (!running) break
+                if (gen == generation.get()) ws = null
+                if (!running || gen != generation.get()) break
                 updateStatusNotif("Переподключение через ${delay / 1000}с…")
                 try { Thread.sleep(delay) } catch (_: InterruptedException) { break }
                 delay = (delay * 2).coerceAtMost(60_000L)
@@ -189,10 +337,14 @@ class YandiChatService : Service() {
     // ── Ping thread: адаптивный интервал ──────────────────────────────────────
 
     private fun startPingThread() {
+        val gen = generation.get()
         pingThread = thread(name = "yandi-ping", isDaemon = true) {
-            while (running) {
-                val interval = if (screenOn.get()) PING_INTERVAL_SCREEN_ON
-                               else                PING_INTERVAL_SCREEN_OFF
+            while (running && gen == generation.get()) {
+                val interval = when {
+                    screenOn.get() -> PING_INTERVAL_SCREEN_ON
+                    deviceIdle.get() -> PING_INTERVAL_DOZE
+                    else -> PING_INTERVAL_SCREEN_OFF
+                }
                 try {
                     Thread.sleep(interval)
                 } catch (_: InterruptedException) {
@@ -252,7 +404,55 @@ class YandiChatService : Service() {
                 if (appInForeground()) return
                 showMessageNotif(from)
             }
+
+            // FT_LIVE_MSG: сигнал звонка зашифрован для Flutter/E2E. Native-слой
+            // только сохраняет пакет и будит приложение; он не доверяет его содержимому.
+            0x13.toByte() -> {
+                if (data.size < LIVE_FRAME_HEADER || data.size > MAX_LIVE_FRAME) return
+                val payloadLen = data.slice(41..44).toByteArray().toInt32LE()
+                if (payloadLen < 1 || payloadLen > MAX_LIVE_PAYLOAD || data.size < LIVE_FRAME_HEADER + payloadLen) return
+                val hintAt = LIVE_FRAME_HEADER + payloadLen
+                if (data.size == hintAt + LIVE_WAKE_TRAILER) {
+                    val kind = data[hintAt].toInt() and 0xff
+                    if (kind in 1..4 && shouldWakeForLive(data)) {
+                        val foreground = appInForeground()
+                        if (!persistPendingLive(data, foreground)) return
+                        val callId = data.copyOfRange(hintAt + 1, hintAt + 17).toHex()
+                        when (kind) {
+                            1, 2 -> if (!foreground && activeWakes.invite(callId, kind == 2)) {
+                                getSystemService(NotificationManager::class.java).cancel(0x0CA11)
+                                showCallWakeNotif(kind == 2)
+                            }
+                            // Metadata is not E2E-authenticated. A forged/stale hangup
+                            // must never silence an invitation before Flutter verifies it.
+                            3 -> activeWakes.finish(callId)
+                        }
+                    }
+                }
+            }
         }
+    }
+
+    private fun shouldWakeForLive(data: ByteArray): Boolean {
+        val digest = MessageDigest.getInstance("SHA-256").digest(data)
+            .joinToString("") { "%02x".format(it) }
+        val prefs = getSharedPreferences(PREFS, MODE_PRIVATE)
+        val previous = prefs.getString(KEY_LAST_LIVE_DIGEST, null)
+        val previousAt = prefs.getLong(KEY_LAST_LIVE_AT, 0L)
+        val now = System.currentTimeMillis()
+        if (previous == digest && now - previousAt in 0..LIVE_DEDUP_WINDOW_MS) return false
+        prefs.edit().putString(KEY_LAST_LIVE_DIGEST, digest).putLong(KEY_LAST_LIVE_AT, now).apply()
+        return true
+    }
+
+    private fun persistPendingLive(data: ByteArray, foreground: Boolean): Boolean = synchronized(pendingLiveLock) {
+        if (foreground && flutterLiveReady) return@synchronized false
+        runCatching {
+            val file = File(filesDir, PENDING_LIVE_FILE)
+            val existing = if (file.exists()) file.readBytes() else ByteArray(0)
+            val frames = PendingLiveQueue.append(existing, data)
+            writePendingLiveAtomically(this, frames)
+        }.isSuccess
     }
 
     // ── Notifications ──────────────────────────────────────────────────────────
@@ -270,6 +470,35 @@ class YandiChatService : Service() {
             NotificationChannel(CHANNEL_MSG, "YANDI сообщения",
                 NotificationManager.IMPORTANCE_HIGH).apply {
                 description = "Входящие сообщения"
+                setSound(Uri.parse("android.resource://$packageName/raw/icq"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_CALLS, "YANDI звонки",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                description = "Входящие аудио- и видеозвонки"
+                setSound(Uri.parse("android.resource://$packageName/raw/calling"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_VIDEO_CALLS, "YANDI видеозвонки",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(Uri.parse("android.resource://$packageName/raw/sqype"),
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_NOTIFICATION_RINGTONE)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SONIFICATION).build())
+            }
+        )
+        nm.createNotificationChannel(
+            NotificationChannel(CHANNEL_MSG_SILENT, "YANDI сообщения без звука",
+                NotificationManager.IMPORTANCE_HIGH).apply {
+                setSound(null, null)
             }
         )
     }
@@ -309,7 +538,10 @@ class YandiChatService : Service() {
             },
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
-        val notif = NotificationCompat.Builder(this, CHANNEL_MSG)
+        val soundEnabled = getSharedPreferences("yandi_alerts", MODE_PRIVATE)
+            .getBoolean("messages", true)
+        val notif = NotificationCompat.Builder(this, if (soundEnabled) CHANNEL_MSG else CHANNEL_MSG_SILENT)
+            .setSound(if (soundEnabled) Uri.parse("android.resource://$packageName/raw/icq") else null)
             .setSmallIcon(android.R.drawable.ic_dialog_email)
             .setContentTitle("YANDI")
             .setContentText("🔒 Новое сообщение — откройте YANDI")
@@ -320,6 +552,27 @@ class YandiChatService : Service() {
             .build()
         getSystemService(NotificationManager::class.java)
             .notify(from.hashCode(), notif)
+    }
+
+    private fun showCallWakeNotif(video: Boolean) {
+        val intent = PendingIntent.getActivity(
+            this, System.currentTimeMillis().toInt(),
+            Intent(this, MainActivity::class.java).apply { flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP },
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
+        )
+        val notif = NotificationCompat.Builder(this, if (video) CHANNEL_VIDEO_CALLS else CHANNEL_CALLS)
+            .setSmallIcon(android.R.drawable.ic_menu_call)
+            .setContentTitle("YANDI")
+            .setContentText(if (video) "Входящий видеозвонок" else "Входящий звонок")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setOnlyAlertOnce(true)
+            .setFullScreenIntent(intent, true)
+            .setAutoCancel(true)
+            .setTimeoutAfter(45_000)
+            .setContentIntent(intent)
+            .build()
+        getSystemService(NotificationManager::class.java).notify(0x0CA11, notif)
     }
 
     // ── Helpers ────────────────────────────────────────────────────────────────
@@ -340,6 +593,9 @@ class YandiChatService : Service() {
  * TLS: javax.net.ssl + кастомный TrustManager для cert pinning по SHA-256.
  * WS: HTTP Upgrade + бинарные фреймы RFC 6455.
  */
+/** Наибольший допустимый кадр WS от узла (текст, сигналы, служебное); файлы идут по HTTP кусками. */
+private const val MAX_WS_FRAME = 4L * 1024 * 1024
+
 class RawWsClient(
     private val host:        String,
     private val port:        Int,
@@ -387,6 +643,8 @@ class RawWsClient(
             else -> payloadLen
         }
 
+        // длина кадра приходит от узла: выделять память под неё можно только в разумных пределах (кадры YANDI — текст и сигналы, файлы идут по HTTP)
+        if (payloadLen < 0 || payloadLen > MAX_WS_FRAME) throw java.io.IOException("WS frame too large: $payloadLen")
         val mask    = if (masked) ByteArray(4).also { readFully(it) } else null
         val payload = ByteArray(payloadLen.toInt()).also { readFully(it) }
         if (mask != null) {
@@ -418,9 +676,9 @@ class RawWsClient(
         synchronized(writeLock) { output.write(buf.toByteArray()) }
     }
 
+    /** Закрывает транспорт безусловно: вежливый Close-кадр не отправляется, чтобы не ждать writeLock зависшей записи. */
     fun close() {
-        runCatching { sendFrame(0x08, byteArrayOf()) }
-        runCatching { ssl.close() }
+        if (::ssl.isInitialized) runCatching { ssl.close() }
     }
 
     private fun buildTlsSocket(): SSLSocket {
@@ -428,9 +686,15 @@ class RawWsClient(
         val ctx = SSLContext.getInstance("TLS")
         ctx.init(null, arrayOf(tm), null)
         val sock = ctx.socketFactory.createSocket() as SSLSocket
-        sock.connect(InetSocketAddress(host, port), 10_000)
-        sock.soTimeout = 120_000   // 2 мин — достаточно для 90s ping интервала
-        sock.startHandshake()
+        try {
+            sock.connect(InetSocketAddress(host, port), 10_000)
+            sock.soTimeout = 360_000   // запас для 180–300s low-power ping интервала
+            sock.keepAlive = true
+            sock.startHandshake()
+        } catch (e: Exception) {
+            runCatching { sock.close() }
+            throw e
+        }
         return sock
     }
 

@@ -29,6 +29,8 @@ use crate::mobile_api::{device_peer_of, DeviceKey};
 
 const MAX_GROUPS: usize = 64;
 const MAX_MEMBERS: usize = 256;
+/// Картинка визитки в base64 — не больше (≈12 КБ PNG).
+const CARD_AVATAR_B64: usize = 16 * 1024;
 const MAX_NAME: usize = 64;
 const MAX_TOPIC: usize = 256;
 /// Самая большая запись журнала (шифртекст), байт.
@@ -84,6 +86,23 @@ struct Member {
     /// открытый ключ участника для этой группы (x25519, base64): им владелец запечатывает ключ группы
     #[serde(default)]
     member_pub: Option<String>,
+    /// добровольно раскрытая визитка: ник и маленькая картинка (вариант «А» — человек сам решает, показываться ли под именем)
+    #[serde(default)]
+    card: Option<Card>,
+    /// подпись личным ключом человека под (группа, мой групповой ключ): её проверяют его контакты, остальным это просто байты
+    #[serde(default)]
+    proof: Option<String>,
+    /// когда участник последний раз писал в группу (хранится у него, а не выводится из журнала: журнал обрезается)
+    #[serde(default)]
+    last_post_ms: u64,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct Card {
+    nick: String,
+    /// PNG до 12 КБ в base64; пусто — без картинки
+    #[serde(default)]
+    avatar_b64: String,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -118,6 +137,9 @@ const MAX_REQUESTS: usize = 20;
 /// Сколько последних событий стирания хранится для догоняющих участников.
 const MAX_DELETION_EVENTS: usize = 5000;
 const REQUEST_TTL_MS: u64 = 7 * 24 * 3600 * 1000;
+/// Автоочистка неактивных участников: допустимый срок в днях.
+const MIN_AUTO_CLEAN_DAYS: u32 = 7;
+const MAX_AUTO_CLEAN_DAYS: u32 = 365;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct ModEntry {
@@ -162,6 +184,9 @@ struct Group {
     /// журнал стираний: (номер события, номер записи). Участник, пропустивший намёк (был не в сети), догоняет стирания по курсору
     #[serde(default)]
     deletions: Vec<(u64, u64)>,
+    /// записи удалённых с узла авторов `(номер события, seq)`; общий счётчик с `deletions`
+    #[serde(default)]
+    gone: Vec<(u64, u64)>,
     #[serde(default)]
     next_deletion: u64,
     /// кто-то покинул группу после последней смены ключа: владельцу стоит сменить ключ
@@ -176,6 +201,21 @@ struct Group {
     modlog: Vec<ModEntry>,
     #[serde(default)]
     requests: Vec<JoinRequest>,
+    /// автоочистка: сколько дней без единой записи в группе терпеть рядового участника (0 — выключена); настраивает владелец
+    #[serde(default)]
+    auto_clean_days: u32,
+    /// когда журнал последний раз обрезался: активность старше этого момента из журнала не восстановить, поэтому автоочистка
+    /// не считает молчанием время до обрезки
+    #[serde(default)]
+    trimmed_ms: u64,
+    /// логотип группы: маленький PNG (пересобран из пикселей), base64; виден всем в каталоге, как название и тематика
+    #[serde(default)]
+    logo: Option<String>,
+}
+
+fn logo_hash(g: &Group) -> String {
+    use sha2::Digest;
+    g.logo.as_deref().map(|l| hex::encode(sha2::Sha256::digest(l.as_bytes()))).unwrap_or_default()
 }
 
 fn one() -> u64 {
@@ -302,6 +342,9 @@ struct JournalLine {
     p: String,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     deleted: bool,
+    /// автор удалён с узла: клиенты показывают заглушку «удалено вместе с пользователем» (решение владельца 2026-10-21)
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    gone: bool,
 }
 
 /// Намёк «в группе что-то изменилось» для подключённых телефонов-участников.
@@ -375,6 +418,19 @@ pub(crate) fn valid_gid(id: &str) -> bool {
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
+/// Название, тематика, описание, ник и подпись не могут содержать ссылку (политика содержимого сети).
+fn no_links(fields: &[&str]) -> R<()> {
+    for f in fields {
+        if crate::content_policy::find_link(f).is_some() {
+            return Err(bad("ссылки в YANDI не передаются: уберите адрес сайта из названия, тематики, описания и ника"));
+        }
+        if crate::content_policy::is_reserved_name(f) {
+            return Err(bad("это имя занято узлом: так подписывает сообщения администрация"));
+        }
+    }
+    Ok(())
+}
+
 fn clean(s: &str, max: usize) -> String {
     s.trim()
         .chars()
@@ -439,6 +495,9 @@ pub struct Store {
     broken: Option<String>,
     dir: PathBuf,
     groups: BTreeMap<String, Group>,
+    /// состояние, записанное на диск последним: при сбое записи в память возвращается оно (права и приглашения не «действуют до
+    /// перезапуска»)
+    committed: BTreeMap<String, Group>,
     /// смещения строк журнала (индекс i — запись first_seq + i), строятся при первом обращении
     offsets: HashMap<String, Vec<u64>>,
 }
@@ -458,17 +517,27 @@ impl Store {
         if let Some(b) = &broken {
             eprintln!("[groups] ⚠️  хранилище групп: {b}. Изменения групп отключены до восстановления.");
         }
-        Self {
-            dir,
-            groups: groups.into_iter().map(|g| (g.id.clone(), g)).collect(),
-            offsets: HashMap::new(),
-            broken,
-        }
+        let groups: BTreeMap<String, Group> = groups.into_iter().map(|g| (g.id.clone(), g)).collect();
+        Self { dir, committed: groups.clone(), groups, offsets: HashMap::new(), broken }
     }
 
     /// Сохранить описание групп. Ошибка записи (диск заполнен, нет прав) и повреждённый при открытии индекс — это ошибка операции, а не
     /// «успех только в памяти» (после перезапуска изменение пропало бы).
-    fn save(&self) -> R<()> {
+    fn save(&mut self) -> R<()> {
+        let r = self.write_index();
+        match &r {
+            Ok(()) => self.committed = self.groups.clone(),
+            Err(_) => {
+                // изменение не зафиксировано: откат к записанному. Кэш смещений журналов сбрасывается — номера записей
+                // пересчитываются из самих журналов (а запись, уже дописанная в журнал, остаётся в нём)
+                self.groups = self.committed.clone();
+                self.offsets.clear();
+            }
+        }
+        r
+    }
+
+    fn write_index(&self) -> R<()> {
         if self.broken.is_some() {
             return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено; изменения отключены до восстановления"));
         }
@@ -502,6 +571,8 @@ impl Store {
     fn offsets(&mut self, gid: &str) -> &mut Vec<u64> {
         if !self.offsets.contains_key(gid) {
             let mut v = Vec::new();
+            let mut first_in_log: Option<u64> = None;
+            let mut last_in_log: Option<u64> = None;
             let path = self.log_path(gid);
             if let Ok(f) = std::fs::File::open(&path) {
                 let mut pos = 0u64;
@@ -518,14 +589,26 @@ impl Store {
                         }
                         break;
                     }
+                    if let Ok(l) = serde_json::from_slice::<JournalLine>(&line) {
+                        first_in_log.get_or_insert(l.seq);
+                        last_in_log = Some(l.seq);
+                    }
                     v.push(pos);
                     pos += n as u64;
                     line.clear();
                 }
             }
             // номер следующей записи берём из журнала: описание могло не успеть сохраниться после дописывания
+            // и первый номер — тоже из журнала: сбой мог случиться между обрезкой журнала и записью описания (тогда в индексе
+            // прежний first_seq, а в файле уже начало с середины), и тогда номера записей съехали бы
             if let Some(g) = self.groups.get_mut(gid) {
+                if let Some(first) = first_in_log {
+                    g.first_seq = first;
+                }
                 g.next_seq = g.first_seq + v.len() as u64;
+                if let Some(last) = last_in_log {
+                    g.next_seq = g.next_seq.max(last + 1);
+                }
             }
             self.offsets.insert(gid.to_string(), v);
         }
@@ -583,6 +666,7 @@ impl Store {
         members: &[String],
         by_phone: bool,
     ) -> R<String> {
+        no_links(&[name, topic])?;
         let name = clean(name, MAX_NAME);
         if name.is_empty() {
             return Err(bad("нужно название группы"));
@@ -611,12 +695,16 @@ impl Store {
             key_boxes: BTreeMap::new(),
             epoch_owner: BTreeMap::new(),
             deletions: Vec::new(),
+            gone: Vec::new(),
             next_deletion: 0,
             rekey_needed: false,
             first_seq: 1,
             next_seq: 1,
             modlog: Vec::new(),
             requests: Vec::new(),
+            auto_clean_days: 0,
+            trimmed_ms: 0,
+            logo: None,
         };
         let owner = Member {
             key: member_key(&id, owner_device),
@@ -625,6 +713,9 @@ impl Store {
             muted: false,
             joined_ms: now_ms(),
             member_pub: None,
+            card: None,
+            proof: None,
+            last_post_ms: 0,
         };
         g.members.push(owner);
         for d in members {
@@ -638,6 +729,9 @@ impl Store {
                     muted: false,
                     joined_ms: now_ms(),
                     member_pub: None,
+                    card: None,
+            proof: None,
+                    last_post_ms: 0,
                 });
             }
         }
@@ -654,6 +748,7 @@ impl Store {
 
     /// Настройки группы меняют владелец и админ: название, тематика, описание. Название и тематика не бывают пустыми.
     pub fn update_settings(&mut self, gid: &str, device: &str, name: Option<&str>, topic: Option<&str>, about: Option<&str>) -> R<()> {
+        no_links(&[name.unwrap_or(""), topic.unwrap_or(""), about.unwrap_or("")])?;
         let (_, me) = self.me(gid, device)?;
         if me.role != Role::Owner && me.role != Role::Admin {
             return Err(forbidden("настройки группы меняют владелец и админ"));
@@ -686,6 +781,74 @@ impl Store {
 
 
 
+    /// Владелец включает или выключает автоочистку неактивных: 0 — выключена, иначе срок в днях (7…365).
+    pub fn set_auto_clean(&mut self, gid: &str, device: &str, days: u32) -> R<u32> {
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner {
+            return Err(forbidden("автоочистку настраивает владелец группы"));
+        }
+        let by = me.alias.clone();
+        let days = if days == 0 { 0 } else { days.clamp(MIN_AUTO_CLEAN_DAYS, MAX_AUTO_CLEAN_DAYS) };
+        let g = self.get_mut(gid)?;
+        g.auto_clean_days = days;
+        let why = days.to_string();
+        g.log(&by, "autoclean", None, None, Some(why.as_str()));
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(days)
+    }
+
+    /// Автоочистка: рядовые участники, не написавшие в группе ни одной записи за срок группы, исключаются. «Только читает» — не
+    /// участие. Владельца, админов и модераторов, заглушённых и тех, кто вступил недавно, не трогает. Ключ группы после этого
+    /// должен сменить владелец (`rekey_needed`), как после обычного изгнания. Возвращает, сколько участников исключено.
+    pub fn clean_inactive(&mut self, now: u64) -> R<usize> {
+        if self.broken.is_some() {
+            return Err(Fail(StatusCode::SERVICE_UNAVAILABLE, "хранилище групп повреждено: автоочистка не выполнена"));
+        }
+        let ids: Vec<String> = self.groups.values().filter(|g| g.auto_clean_days > 0).map(|g| g.id.clone()).collect();
+        let mut total = 0usize;
+        for gid in ids {
+            let days = self.groups.get(&gid).map(|g| g.auto_clean_days).unwrap_or(0);
+            let ttl = u64::from(days) * 24 * 3600 * 1000;
+            let mut last: HashMap<String, u64> = HashMap::new();
+            for l in self.read_lines(&gid) {
+                let e = last.entry(l.from).or_insert(0);
+                *e = (*e).max(l.ts);
+            }
+            let Some(g) = self.groups.get_mut(&gid) else { continue };
+            let trimmed = g.trimmed_ms;
+            let gone: Vec<(String, String)> = g
+                .members
+                .iter()
+                .filter(|m| m.role == Role::Member && !m.muted)
+                .filter(|m| {
+                    let seen = last.get(&m.alias).copied().unwrap_or(0).max(m.joined_ms).max(m.last_post_ms).max(trimmed);
+                    now.saturating_sub(seen) > ttl
+                })
+                .map(|m| (m.key.clone(), m.alias.clone()))
+                .collect();
+            if gone.is_empty() {
+                continue;
+            }
+            let mut notify = g.keys();
+            for (key, alias) in &gone {
+                g.drop_member(key);
+                let why = format!("{days} дн. без записей");
+                g.log("автоочистка", "inactive", Some(alias), None, Some(why.as_str()));
+            }
+            for (key, _) in &gone {
+                if !notify.contains(key) {
+                    notify.push(key.clone());
+                }
+            }
+            total += gone.len();
+            self.save()?;
+            hint(&gid, HINT_CHANGED, 0, notify);
+        }
+        Ok(total)
+    }
+
     /// Владелец передаёт группу участнику (по псевдониму). Прежний владелец становится админом, новый должен создать новое поколение ключа
     /// (`rekey_needed`). Участнику нужен ключ группы (`member_pub`), иначе он не сможет раздавать ключи.
     pub fn transfer_owner(&mut self, gid: &str, device: &str, to_alias: &str) -> R<()> {
@@ -712,6 +875,7 @@ impl Store {
                 m.muted = false;
             }
         }
+        crate::backup_signal::notify_critical(); // сменился владелец группы
         g.rekey_needed = true;
         g.log(&me_alias, "transfer", Some(&target.alias), None, None);
         let to = g.keys();
@@ -724,9 +888,10 @@ impl Store {
     pub fn delete(&mut self, gid: &str) -> R<()> {
         let g = self.groups.remove(gid).ok_or_else(not_found)?;
         self.offsets.remove(gid);
+        // сначала фиксируется новый индекс: при отказе записи save откатывает описание, а журнал и файлы остаются нетронутыми
+        self.save()?;
         let _ = std::fs::remove_file(self.log_path(gid));
         crate::mobile_group_files::drop_group(gid);
-        self.save()?;
         hint(gid, HINT_DELETED, 0, g.keys());
         Ok(())
     }
@@ -786,6 +951,9 @@ impl Store {
             muted: false,
             joined_ms: now_ms(),
             member_pub,
+            card: None,
+            proof: None,
+            last_post_ms: 0,
         });
         g.log(
             via.as_deref().unwrap_or(&alias),
@@ -835,6 +1003,51 @@ impl Store {
         self.save()?;
         hint(gid, HINT_KEYS, 0, owner);
         Ok(())
+    }
+
+    /// Участник раскрывает (или убирает) свою визитку в этой группе. Пустой ник и пустая картинка — убрать.
+    pub fn set_card(&mut self, gid: &str, device: &str, nick: &str, avatar_b64: &str) -> R<()> {
+        no_links(&[nick])?;
+        let nick: String = nick.chars().filter(|c| !c.is_control()).collect::<String>().trim().chars().take(40).collect();
+        let key = self.me(gid, device)?.1.key.clone();
+        let card = if nick.is_empty() && avatar_b64.is_empty() {
+            None
+        } else {
+            if avatar_b64.len() > CARD_AVATAR_B64 {
+                return Err(bad("картинка слишком большая"));
+            }
+            Some(Card { nick, avatar_b64: avatar_b64.to_string() })
+        };
+        let g = self.get_mut(gid)?;
+        if let Some(m) = g.members.iter_mut().find(|m| m.key == key) {
+            m.card = card;
+        }
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
+    /// Участник прикладывает подпись, по которой его узнают контакты (пустая — убрать). Только base64, до 128 знаков.
+    pub fn set_proof(&mut self, gid: &str, device: &str, proof: &str) -> R<()> {
+        if proof.len() > 128 || !proof.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=') {
+            return Err(bad("подпись не в base64"));
+        }
+        let key = self.me(gid, device)?.1.key.clone();
+        let g = self.get_mut(gid)?;
+        if let Some(m) = g.members.iter_mut().find(|m| m.key == key) {
+            m.proof = if proof.is_empty() { None } else { Some(proof.to_string()) };
+        }
+        let to = g.keys();
+        self.save()?;
+        hint(gid, HINT_CHANGED, 0, to);
+        Ok(())
+    }
+
+    /// Картинка визитки участника по псевдониму (для показа в ленте и списке).
+    pub fn card_avatar(&self, gid: &str, device: &str, alias: &str) -> R<Option<String>> {
+        let (g, _) = self.me(gid, device)?;
+        Ok(g.members.iter().find(|m| m.alias == alias).and_then(|m| m.card.as_ref()).filter(|c| !c.avatar_b64.is_empty()).map(|c| c.avatar_b64.clone()))
     }
 
     /// Владелец кладёт запечатанный ключ группы для участников (по псевдонимам). Поколение больше текущего — смена ключа.
@@ -892,8 +1105,11 @@ impl Store {
             .filter_map(|(e, b)| b.get(&m.key).map(|x| json!({"epoch": e, "box": x, "owner_pub": g.epoch_owner.get(e)})))
             .collect();
         let owner_pub = g.owner().and_then(|o| o.member_pub.clone());
-        // first_epoch — самое старое поколение, конверты которого узел ещё хранит: более старые вытеснены навсегда (MAX_EPOCHS)
-        let first_epoch = g.key_boxes.keys().min().copied().unwrap_or(g.epoch);
+        // first_epoch — самое старое поколение, ключ которого этому участнику ещё могут выдать. Старше — навсегда недоступно: либо вытеснено
+        // (MAX_EPOCHS), либо вступил позже и его ключ ему никогда не выдавался. Считается по конвертам САМОГО участника (если они есть), а не по
+        // всем конвертам группы: иначе новичок вечно ждал бы ключ поколения, которого у него не будет, и все новые записи стояли бы за ним.
+        let own_first = g.key_boxes.iter().filter(|(_, b)| b.contains_key(&m.key)).map(|(e, _)| *e).min();
+        let first_epoch = own_first.or_else(|| g.key_boxes.keys().min().copied()).unwrap_or(g.epoch);
         Ok(json!({"epoch": g.epoch, "owner_pub": owner_pub, "boxes": boxes, "first_epoch": first_epoch}))
     }
 
@@ -922,6 +1138,7 @@ impl Store {
             epoch,
             p: payload_b64.to_string(),
             deleted: false,
+            gone: false,
         };
         let mut bytes = serde_json::to_vec(&line).unwrap_or_default();
         bytes.push(b'\n');
@@ -945,6 +1162,9 @@ impl Store {
         self.offsets(gid).push(pos);
         let g = self.get_mut(gid)?;
         g.next_seq = seq + 1;
+        if let Some(mm) = g.members.iter_mut().find(|x| x.alias == line.from) {
+            mm.last_post_ms = mm.last_post_ms.max(line.ts);
+        }
         let to = g.keys();
         if pos + bytes.len() as u64 > MAX_JOURNAL_BYTES {
             self.trim(gid);
@@ -955,6 +1175,31 @@ impl Store {
     }
 
     /// Журнал вырос сверх предела: оставляем последние записи на три четверти предела.
+    /// Записи старше года — с узла долой, без исключений (решение владельца 2026-10-21). Возвращает, сколько удалено.
+    pub fn sweep_old(&mut self, now: u64) -> usize {
+        let cutoff = now.saturating_sub(MESSAGE_LIFETIME_MS);
+        let gids: Vec<String> = self.groups.keys().cloned().collect();
+        let mut removed = 0usize;
+        for gid in gids {
+            let lines = self.read_lines(&gid);
+            let keep = lines.iter().position(|l| l.ts >= cutoff).unwrap_or(lines.len());
+            if keep == 0 {
+                continue;
+            }
+            let rest = &lines[keep..];
+            if self.rewrite(&gid, rest).is_ok() {
+                if let Ok(g) = self.get_mut(&gid) {
+                    g.first_seq = rest.first().map(|l| l.seq).unwrap_or(g.next_seq);
+                }
+                removed += keep;
+            }
+        }
+        if removed > 0 {
+            let _ = self.save();
+        }
+        removed
+    }
+
     fn trim(&mut self, gid: &str) {
         let lines = self.read_lines(gid);
         let mut keep = 0usize;
@@ -968,10 +1213,26 @@ impl Store {
             }
             keep += 1;
         }
+        // последняя запись каждого участника сохраняется в нём самом до того, как строки исчезнут из журнала
+        let mut last: HashMap<String, u64> = HashMap::new();
+        for l in &lines {
+            let e = last.entry(l.from.clone()).or_insert(0);
+            *e = (*e).max(l.ts);
+        }
         let rest = &lines[lines.len() - keep..];
         if self.rewrite(gid, rest).is_ok() {
             if let Ok(g) = self.get_mut(gid) {
                 g.first_seq = rest.first().map(|l| l.seq).unwrap_or(g.next_seq);
+                for m in g.members.iter_mut() {
+                    if let Some(&ts) = last.get(&m.alias) {
+                        m.last_post_ms = m.last_post_ms.max(ts);
+                    }
+                }
+                // общая дата — только начало наблюдения для прежних участников без собственных сведений: одна, при первой обрезке;
+                // повторные обрезки не продлевают молчунам срок
+                if g.trimmed_ms == 0 {
+                    g.trimmed_ms = now_ms();
+                }
             }
         }
     }
@@ -999,7 +1260,7 @@ impl Store {
                             }
                             bytes += l.len();
                             if let Ok(e) = serde_json::from_str::<JournalLine>(&l) {
-                                out.push(json!({"seq": e.seq, "ts": e.ts, "from": e.from, "epoch": e.epoch, "payload_b64": e.p, "deleted": e.deleted}));
+                                out.push(json!({"seq": e.seq, "ts": e.ts, "from": e.from, "epoch": e.epoch, "payload_b64": e.p, "deleted": e.deleted, "gone": e.gone}));
                             }
                         }
                     }
@@ -1123,6 +1384,7 @@ impl Store {
                 }
             }
             "promote" | "demote" => {
+                crate::backup_signal::notify_critical(); // смена роли: старая копия вернула бы прежние права
                 if by_role != Role::Owner && by_role != Role::Admin {
                     return Err(forbidden("роли назначают владелец и админ"));
                 }
@@ -1144,6 +1406,7 @@ impl Store {
                     alias: target.alias.clone(),
                     ts: now_ms(),
                 });
+                crate::backup_signal::notify_critical(); // бан: старая копия вернула бы участника
             }
             _ => return Err(bad("неизвестное действие")),
         }
@@ -1207,13 +1470,42 @@ impl Store {
                     Vec::new()
                 };
                 Some(json!({
-                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted,
+                    "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "my_alias": m.alias, "role": m.role, "muted": m.muted, "logo_hash": logo_hash(g),
                     "members": g.members.len(), "epoch": g.epoch, "first_seq": g.first_seq, "last_seq": g.next_seq - 1,
-                    "rekey_needed": owner && g.rekey_needed, "pending_keys": pending,
+                    "rekey_needed": owner && g.rekey_needed, "pending_keys": pending, "auto_clean_days": g.auto_clean_days,
                     "requests": if m.role != Role::Member { g.requests.len() } else { 0 },
                 }))
             })
             .collect()
+    }
+
+    /// Логотип группы: ставят владелец и админ. Пустая строка — убрать. Картинка пересобирается из пикселей (до 12 КБ).
+    pub fn set_logo(&mut self, gid: &str, device: &str, logo_b64: &str) -> R<()> {
+        use base64::Engine;
+        let (_, me) = self.me(gid, device)?;
+        if me.role != Role::Owner && me.role != Role::Admin {
+            return Err(forbidden("логотип меняют владелец и админ"));
+        }
+        let value = if logo_b64.is_empty() {
+            None
+        } else {
+            if logo_b64.len() > 96 * 1024 {
+                return Err(bad("картинка слишком большая"));
+            }
+            let raw = base64::engine::general_purpose::STANDARD.decode(logo_b64).map_err(|_| bad("картинка не в base64"))?;
+            let png = crate::mobile_profile::sanitize_small(&raw).ok_or_else(|| bad("это не картинка или она слишком большая"))?;
+            Some(base64::engine::general_purpose::STANDARD.encode(png))
+        };
+        let g = self.get_mut(gid)?;
+        g.logo = value;
+        self.save()
+    }
+
+    /// Логотип группы (PNG), если задан: каталог публичный, поэтому любому сопряжённому устройству.
+    pub fn logo_png(&self, gid: &str) -> Option<Vec<u8>> {
+        use base64::Engine;
+        let g = self.groups.get(gid)?;
+        base64::engine::general_purpose::STANDARD.decode(g.logo.as_deref()?).ok()
     }
 
     pub fn set_about(&mut self, gid: &str, about: &str) {
@@ -1224,6 +1516,36 @@ impl Store {
     }
 
     /// Группы этого узла, куда устройство ещё не вступило: открытые (вступить сразу) и «по приглашению» (можно попросить приглашение).
+    /// Жив ли владелец группы: его устройство сопряжено с узлом (или это сам компьютер). Без владельца ключ группы никому не
+    /// выдать и нового поколения не выпустить: такая группа новым участникам не предлагается.
+    fn owner_alive(g: &Group, live: &[String]) -> bool {
+        g.owner().is_some_and(|o| live.iter().any(|p| member_key(&g.id, p) == o.key))
+    }
+
+    /// Каталог групп узла: видны все, у каждой пометка `owner_present` (владелец осиротевшей группы не может выдать ключ новичку).
+    pub fn open_for_live(&self, device: &str, live: &[String]) -> Vec<Value> {
+        self.open_for(device)
+            .into_iter()
+            .map(|mut v| {
+                let alive = v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live));
+                v["owner_present"] = json!(alive);
+                v
+            })
+            .collect()
+    }
+
+    /// Группы устройства с пометкой `owner_present`: приложение показывает «владелец отсутствует» вместо немого отказа писать.
+    pub fn list_for_live(&self, device: &str, live: &[String]) -> Vec<Value> {
+        self.list_for(device)
+            .into_iter()
+            .map(|mut v| {
+                let alive = v["id"].as_str().and_then(|id| self.groups.get(id)).is_some_and(|g| Self::owner_alive(g, live));
+                v["owner_present"] = json!(alive);
+                v
+            })
+            .collect()
+    }
+
     pub fn open_for(&self, device: &str) -> Vec<Value> {
         self.groups
             .values()
@@ -1231,7 +1553,7 @@ impl Store {
                 let k = member_key(&g.id, device);
                 g.member(&k).is_none() && !g.banned.iter().any(|b| b.key == k)
             })
-            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device)}))
+            .map(|g| json!({"id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "members": g.members.len(), "requested": g.requests.iter().any(|r| r.peer == device), "logo_hash": logo_hash(g)}))
             .collect()
     }
 
@@ -1317,7 +1639,10 @@ impl Store {
         let list: Vec<Value> = g
             .members
             .iter()
-            .map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms, "member_pub": m.member_pub, "has_key": cur.is_some_and(|b| b.contains_key(&m.key))}))
+            .map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms, "member_pub": m.member_pub, "has_key": cur.is_some_and(|b| b.contains_key(&m.key)),
+                "proof": m.proof,
+                "nick": m.card.as_ref().map(|c| c.nick.as_str()).filter(|n| !n.is_empty()),
+                "avatar": m.card.as_ref().filter(|c| !c.avatar_b64.is_empty()).map(|c| hex::encode(Sha256::digest(c.avatar_b64.as_bytes())))}))
             .collect();
         let banned: Vec<&str> = if me.role != Role::Member {
             g.banned.iter().map(|b| b.alias.as_str()).collect()
@@ -1333,7 +1658,9 @@ impl Store {
         let (g, _) = self.me(gid, device)?;
         let oldest = g.deletions.first().map(|(n, _)| *n).unwrap_or(g.next_deletion + 1);
         let list: Vec<u64> = g.deletions.iter().filter(|(n, _)| *n > after).map(|(_, s)| *s).collect();
-        Ok(json!({"deleted": list, "cursor": g.next_deletion, "resync": after + 1 < oldest && after < g.next_deletion}))
+        let gone: Vec<u64> = g.gone.iter().filter(|(n, _)| *n > after).map(|(_, s)| *s).collect();
+        let oldest = oldest.min(g.gone.first().map(|(n, _)| *n).unwrap_or(oldest));
+        Ok(json!({"deleted": list, "gone": gone, "cursor": g.next_deletion, "resync": after + 1 < oldest && after < g.next_deletion}))
     }
 
     pub fn modlog(&self, gid: &str, device: Option<&str>) -> R<Value> {
@@ -1357,7 +1684,7 @@ impl Store {
                 let bytes = std::fs::metadata(self.log_path(&g.id)).map(|m| m.len()).unwrap_or(0);
                 json!({
                     "id": g.id, "name": g.name, "topic": g.topic, "about": g.about, "kind": g.kind, "created_ms": g.created_ms, "epoch": g.epoch,
-                    "entries": g.next_seq - g.first_seq, "last_seq": g.next_seq - 1, "journal_bytes": bytes, "rekey_needed": g.rekey_needed,
+                    "entries": g.next_seq - g.first_seq, "last_seq": g.next_seq - 1, "journal_bytes": bytes, "rekey_needed": g.rekey_needed, "auto_clean_days": g.auto_clean_days,
                     "members": g.members.iter().map(|m| json!({"alias": m.alias, "role": m.role, "muted": m.muted, "joined_ms": m.joined_ms})).collect::<Vec<_>>(),
                     "banned": g.banned.iter().map(|b| b.alias.clone()).collect::<Vec<_>>(),
                     "addable": addable,
@@ -1367,28 +1694,90 @@ impl Store {
     }
 
     /// Устройство забыто узлом: убираем его из всех групп (хэш у каждой группы свой, поэтому пересчитываем).
+    /// Записи автора `alias` в журнале группы — заглушка: шифртекст стирается, `gone`, номер уходит клиентам по курсору стираний.
+    fn tombstone_alias(&mut self, gid: &str, alias: &str) {
+        let mut lines = self.read_lines(gid);
+        let mut seqs = Vec::new();
+        for l in lines.iter_mut().filter(|l| l.from == alias && !l.gone) {
+            l.p.clear();
+            l.gone = true;
+            seqs.push(l.seq);
+        }
+        if seqs.is_empty() || self.rewrite(gid, &lines).is_err() {
+            return;
+        }
+        if let Ok(g) = self.get_mut(gid) {
+            for seq in seqs {
+                g.next_deletion += 1;
+                let n = g.next_deletion;
+                g.gone.push((n, seq));
+            }
+            if g.gone.len() > MAX_DELETION_EVENTS {
+                let drop = g.gone.len() - MAX_DELETION_EVENTS;
+                g.gone.drain(..drop);
+            }
+        }
+    }
+
     pub fn forget_device(&mut self, device: &str) {
+        // сначала заглушить записи удалённого во всех группах, где он участник (кроме его собственных: те удаляются целиком)
+        let authored: Vec<(String, String)> = self
+            .groups
+            .values()
+            .filter_map(|g| {
+                let k = member_key(&g.id, device);
+                let owner = g.owner().is_some_and(|o| o.key == k);
+                g.members.iter().find(|m| m.key == k).filter(|_| !owner).map(|m| (g.id.clone(), m.alias.clone()))
+            })
+            .collect();
+        for (gid, alias) in &authored {
+            self.tombstone_alias(gid, alias);
+        }
         let mut changed = Vec::new();
+        let mut dead: Vec<String> = Vec::new();
         let mut had_request = false;
         for g in self.groups.values_mut() {
             let n = g.requests.len();
             g.requests.retain(|r| r.peer != device);
             had_request |= g.requests.len() != n;
             let k = member_key(&g.id, device);
+            let was_owner = g.owner().is_some_and(|o| o.key == k);
             if let Some(m) = g.drop_member(&k) {
-                g.log(PC, "removed_device", Some(&m.alias), None, None);
-                changed.push((g.id.clone(), g.keys()));
+                if was_owner {
+                    // владелец ушёл: ключ группы выдавать и менять больше некому, группа без него мертва и не должна висеть в списках
+                    dead.push(g.id.clone());
+                } else {
+                    g.log(PC, "removed_device", Some(&m.alias), None, None);
+                    changed.push((g.id.clone(), g.keys()));
+                }
             }
         }
-        if had_request && changed.is_empty() {
+        for gid in &dead {
+            let _ = self.delete(gid);
+        }
+        if had_request && changed.is_empty() && dead.is_empty() {
             if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
         }
         if !changed.is_empty() {
             if let Err(Fail(_, e)) = self.save() { eprintln!("[groups] ⚠️  {e}"); }
             for (gid, to) in changed {
-                hint(&gid, HINT_CHANGED, 0, to);
+                hint(&gid, HINT_CHANGED, 0, to.clone());
+                // заглушки разошлются как стирания: телефоны перечитают курсор стираний
+                if authored.iter().any(|(g, _)| *g == gid) {
+                    hint(&gid, HINT_LOG, 0, to);
+                }
             }
         }
+    }
+
+    /// Группы, чей владелец не сопряжён с узлом и не компьютер: удаляются (одноразовая уборка того, что осталось от прежних удалений).
+    /// Вызывающий обязан убедиться, что список живых устройств полон (иначе пустой список снёс бы все группы).
+    pub fn sweep_orphans(&mut self, live: &[String]) -> usize {
+        let dead: Vec<String> = self.groups.values().filter(|g| !Self::owner_alive(g, live)).map(|g| g.id.clone()).collect();
+        for gid in &dead {
+            let _ = self.delete(gid);
+        }
+        dead.len()
     }
 }
 
@@ -1418,10 +1807,56 @@ pub(crate) fn member_state(gid: &str, device: &str) -> Option<(String, Role, boo
     with_store(|s| s.get(gid).ok().and_then(|g| g.member(&key).map(|m| (key.clone(), m.role, m.muted))))
 }
 
+/// Роль участника по его ключу в группе (None — такого нет: ушёл).
+pub(crate) fn role_of_key(gid: &str, key: &str) -> Option<Role> {
+    with_store(|s| s.get(gid).ok().and_then(|g| g.member(key).map(|m| m.role)))
+}
+
+/// Может ли тот, кто в роли `by`, стирать то, что принадлежит автору с ролью `author` (та же матрица, что у записей):
+/// модератор — рядовых, админ — рядовых и модераторов, владелец — любых; чужое от ушедшего участника — любой модератор.
+pub(crate) fn may_override(by: Role, author: Option<Role>) -> bool {
+    match author {
+        None | Some(Role::Member) => by != Role::Member,
+        Some(Role::Moderator) => by == Role::Owner || by == Role::Admin,
+        Some(Role::Admin) => by == Role::Owner,
+        Some(Role::Owner) => false,
+    }
+}
+
 /// Уборка по таймеру (из main): просроченные просьбы о вступлении.
 pub fn cleanup_requests() {
     if let Err(e) = with_store(|s| s.expire_requests()) {
         eprintln!("[groups] просроченные просьбы не стёрты: {e:?}");
+    }
+}
+
+/// Автоочистка по таймеру (из main): рядовые, молчавшие дольше срока группы, исключаются.
+/// Срок жизни записи группы: год (365 суток).
+pub const MESSAGE_LIFETIME_MS: u64 = 365 * 24 * 3600 * 1000;
+
+/// Раз в сутки: записи групп старше года удаляются на узле и в ленте ПК-участника.
+pub fn cleanup_old_messages() {
+    static LAST: Mutex<u64> = Mutex::new(0);
+    let now = now_ms();
+    {
+        let mut last = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        if now.saturating_sub(*last) < 24 * 3600 * 1000 {
+            return;
+        }
+        *last = now;
+    }
+    let n = with_store(|s| Ok::<usize, Fail>(s.sweep_old(now))).unwrap_or(0);
+    if n > 0 {
+        eprintln!("[groups] удалено записей старше года: {n}");
+    }
+    crate::group_client::prune_old(now);
+}
+
+pub fn cleanup_inactive() {
+    match with_store(|s| s.clean_inactive(now_ms())) {
+        Ok(n) if n > 0 => eprintln!("[groups] автоочистка: исключено неактивных — {n}"),
+        Ok(_) => {}
+        Err(e) => eprintln!("[groups] автоочистка не выполнена: {e:?}"),
     }
 }
 
@@ -1433,6 +1868,35 @@ pub(crate) fn with_store<T>(f: impl FnOnce(&mut Store) -> T) -> T {
 
 pub fn forget_device(device: &str) {
     with_store(|s| s.forget_device(device));
+}
+
+/// Все группы узла: (номер, название, ключи участников). Нужны, чтобы известить участников о восстановлении из копии.
+pub fn all_groups() -> Vec<(String, String, Vec<String>)> {
+    with_store(|s| s.groups.values().map(|g| (g.id.clone(), g.name.clone(), g.members.iter().map(|m| m.key.clone()).collect())).collect())
+}
+
+/// Группы, которыми владеет устройство: (номер, название, ключи участников). Нужны, чтобы известить участников об удалении.
+pub fn owned_by(device: &str) -> Vec<(String, String, Vec<String>)> {
+    with_store(|s| {
+        s.groups
+            .values()
+            .filter(|g| g.owner().is_some_and(|o| o.key == member_key(&g.id, device)))
+            .map(|g| (g.id.clone(), g.name.clone(), g.members.iter().map(|m| m.key.clone()).collect()))
+            .collect()
+    })
+}
+
+/// Уборка групп без владельца (запускается узлом после старта).
+pub fn sweep_orphans(live: &[String]) -> usize {
+    with_store(|s| s.sweep_orphans(live))
+}
+
+/// Мера владельца узла по жалобе: удалить группу с узла.
+pub fn admin_delete_group(gid: &str) -> Result<(), String> {
+    if !valid_gid(gid) {
+        return Err("неверный номер группы".into());
+    }
+    with_store(|s| s.delete(gid)).map_err(|Fail(_, m)| m.to_string())
 }
 
 fn reply(r: R<Value>) -> Response {
@@ -1463,13 +1927,26 @@ fn checked(gid: &str) -> R<()> {
 pub(crate) async fn m_list(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
 ) -> Response {
-    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.list_for(&me))})))
+    let live = crate::mobile_api::live_owner_peers();
+    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.list_for_live(&me, &live))})))
+}
+
+/// `GET /mobile/groups/:gid/logo` — логотип группы (PNG) для любого сопряжённого устройства: он виден в каталоге.
+pub(crate) async fn m_logo(axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>, Path(gid): Path<String>) -> Response {
+    if device_peer_of(&dev).is_none() || !valid_gid(&gid) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match with_store(|s| s.logo_png(&gid)) {
+        Some(b) => ([(axum::http::header::CONTENT_TYPE, "image/png")], b).into_response(),
+        None => StatusCode::NOT_FOUND.into_response(),
+    }
 }
 
 pub(crate) async fn m_open(
     axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
 ) -> Response {
-    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.open_for(&me))})))
+    let live = crate::mobile_api::live_owner_peers();
+    reply(device(&dev).map(|me| json!({"groups": with_store(|s| s.open_for_live(&me, &live))})))
 }
 
 #[derive(Deserialize)]
@@ -1520,6 +1997,77 @@ pub(crate) async fn m_members(
         let me = device(&dev)?;
         with_store(|s| s.members(&gid, &me))
     })())
+}
+
+#[derive(Deserialize)]
+pub struct CardReq {
+    #[serde(default)]
+    nick: String,
+    /// PNG/JPEG любой разумной величины в base64; узел пересобирает его в маленький PNG. Пусто — без картинки.
+    #[serde(default)]
+    avatar_b64: String,
+}
+
+/// Раскрыть свой ник и картинку в группе (пустые — убрать).
+pub(crate) async fn m_card_put(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<CardReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        let avatar = if req.avatar_b64.is_empty() {
+            String::new()
+        } else {
+            use base64::Engine;
+            let raw = base64::engine::general_purpose::STANDARD.decode(&req.avatar_b64).map_err(|_| bad("картинка не в base64"))?;
+            if raw.len() > crate::mobile_profile::MAX_AVATAR_IN {
+                return Err(bad("картинка слишком большая"));
+            }
+            let png = crate::mobile_profile::sanitize_small(&raw).ok_or_else(|| bad("это не картинка"))?;
+            base64::engine::general_purpose::STANDARD.encode(png)
+        };
+        ok_json(with_store(|s| s.set_card(&gid, &me, &req.nick, &avatar)))
+    })())
+}
+
+#[derive(Deserialize)]
+pub struct ProofReq {
+    #[serde(default)]
+    proof: String,
+}
+
+/// Приложить подпись «это я» (её видят все участники, проверить могут только контакты): `POST /mobile/groups/:gid/proof`.
+pub(crate) async fn m_proof_put(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<ProofReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        ok_json(with_store(|s| s.set_proof(&gid, &me, &req.proof)))
+    })())
+}
+
+/// Картинка визитки участника: `GET /mobile/groups/:gid/members/:alias/avatar`.
+pub(crate) async fn m_card_avatar(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path((gid, alias)): Path<(String, String)>,
+) -> Response {
+    use base64::Engine;
+    let png = (|| -> R<Option<Vec<u8>>> {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        let b64 = with_store(|s| s.card_avatar(&gid, &me, &alias))?;
+        Ok(b64.and_then(|b| base64::engine::general_purpose::STANDARD.decode(b).ok()))
+    })();
+    match png {
+        Ok(Some(b)) => ([(axum::http::header::CONTENT_TYPE, "image/png")], b).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(Fail(c, _)) => c.into_response(),
+    }
 }
 
 #[derive(Deserialize)]
@@ -1614,6 +2162,9 @@ pub struct MobileCreateReq {
     #[serde(default)]
     about: String,
     kind: String,
+    /// логотип группы: картинка в base64 (необязательно)
+    #[serde(default)]
+    logo_b64: String,
 }
 
 /// Телефон создаёт группу и становится её владельцем: ключ группы и права раздаёт он, а не владелец узла.
@@ -1623,6 +2174,9 @@ pub(crate) async fn m_create(
 ) -> Response {
     reply((|| {
         let me = device(&dev)?;
+        if crate::mobile_api::restricted_until(&dev) > 0 {
+            return Err(Fail(StatusCode::FORBIDDEN, "владелец узла ограничил создание групп для вас на время"));
+        }
         let kind = match req.kind.as_str() {
             "open" => Kind::Open,
             "invite" => Kind::Invite,
@@ -1634,6 +2188,9 @@ pub(crate) async fn m_create(
             }
             let id = s.create_as(&req.name, &req.topic, kind, &me, &[], true)?;
             s.set_about(&id, &req.about);
+            if !req.logo_b64.is_empty() {
+                s.set_logo(&id, &me, &req.logo_b64)?;
+            }
             Ok(id)
         })?;
         Ok(json!({"id": id}))
@@ -1767,6 +2324,9 @@ pub struct SettingsReq {
     topic: Option<String>,
     #[serde(default)]
     about: Option<String>,
+    /// логотип: base64 картинки; пустая строка — убрать; не указан — не менять
+    #[serde(default)]
+    logo_b64: Option<String>,
 }
 
 /// Владелец меняет название, тематику и описание группы.
@@ -1778,7 +2338,31 @@ pub(crate) async fn m_settings(
     reply((|| {
         checked(&gid)?;
         let me = device(&dev)?;
-        ok_json(with_store(|s| s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())))
+        ok_json(with_store(|s| {
+            s.update_settings(&gid, &me, req.name.as_deref(), req.topic.as_deref(), req.about.as_deref())?;
+            if let Some(l) = req.logo_b64.as_deref() {
+                s.set_logo(&gid, &me, l)?;
+            }
+            Ok(())
+        }))
+    })())
+}
+
+#[derive(Deserialize)]
+pub struct AutoCleanReq {
+    days: u32,
+}
+
+/// Владелец включает автоочистку неактивных (0 — выключить).
+pub(crate) async fn m_autoclean(
+    axum::Extension(DeviceKey(dev)): axum::Extension<DeviceKey>,
+    Path(gid): Path<String>,
+    Json(req): Json<AutoCleanReq>,
+) -> Response {
+    reply((|| {
+        checked(&gid)?;
+        let me = device(&dev)?;
+        with_store(|s| s.set_auto_clean(&gid, &me, req.days)).map(|d| json!({"ok": true, "days": d}))
     })())
 }
 
@@ -1851,6 +2435,22 @@ pub async fn pc_delete(Path(gid): Path<String>) -> Response {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn file_removal_follows_the_role_ladder() {
+        use super::{may_override, Role::*};
+        assert!(!may_override(Member, Some(Member)));
+        assert!(may_override(Moderator, Some(Member)));
+        assert!(!may_override(Moderator, Some(Admin)), "модератор не стирает файл админа");
+        assert!(!may_override(Moderator, Some(Owner)), "и файл владельца");
+        assert!(!may_override(Moderator, Some(Moderator)));
+        assert!(may_override(Admin, Some(Moderator)));
+        assert!(!may_override(Admin, Some(Admin)));
+        assert!(may_override(Owner, Some(Admin)));
+        assert!(!may_override(Owner, Some(Owner)));
+        assert!(may_override(Moderator, None), "файл ушедшего — любой модератор");
+        assert!(!may_override(Member, None));
+    }
+
     use super::*;
     use base64::Engine;
 
@@ -1894,6 +2494,125 @@ mod tests {
         assert!(s.deletions_after(&gid, EVE, 0).is_err(), "посторонний не видит");
     }
 
+    /// Дочерний режим теста падения: дописывает записи в журнал группы, пока его не убьют.
+    #[test]
+    fn crash_child_appender() {
+        let Some(dir) = std::env::var_os("YANDI_GROUP_CRASH_CHILD") else { return };
+        let dir = std::path::PathBuf::from(dir);
+        let mut s = Store::open(dir.clone());
+        let gid = std::fs::read_to_string(dir.join("gid.txt")).unwrap();
+        let payload = {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD.encode(vec![7u8; 4000])
+        };
+        loop {
+            let _ = s.append(gid.trim(), OWNER, 0, &payload);
+        }
+    }
+
+    /// Падение (kill -9) во время дописывания записей: журнал открывается, номера идут без повторов, новые записи пишутся дальше.
+    #[test]
+    fn group_journal_survives_kill_during_appends() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("groups");
+        let gid = {
+            let mut s = Store::open(dir.clone());
+            let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+            std::fs::write(dir.join("gid.txt"), &gid).unwrap();
+            gid
+        };
+        let exe = std::env::current_exe().unwrap();
+        let mut last_total = 0u64;
+        for round in 0..12u64 {
+            let mut child = std::process::Command::new(&exe)
+                .args(["--exact", "mobile_groups::tests::crash_child_appender", "--nocapture", "--test-threads=1"])
+                .env("YANDI_GROUP_CRASH_CHILD", &dir)
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            std::thread::sleep(std::time::Duration::from_millis(40 + (round * 53) % 140));
+            child.kill().unwrap();
+            child.wait().unwrap();
+            // сторож: журнал читается целиком, номера строго возрастают без повторов
+            let raw = std::fs::read_to_string(dir.join(format!("{gid}.log"))).unwrap_or_default();
+            let mut prev = 0u64;
+            let mut count = 0u64;
+            for line in raw.lines() {
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                    let seq = v["seq"].as_u64().unwrap();
+                    assert!(seq > prev, "раунд {round}: номера записей повторяются или идут назад ({prev} → {seq})");
+                    prev = seq;
+                    count += 1;
+                }
+            }
+            assert!(count >= last_total, "раунд {round}: записи пропали ({count} < {last_total})");
+            last_total = count;
+            // после падения хранилище открывается и пишет дальше с верным следующим номером
+            let mut s = Store::open(dir.clone());
+            let next = s.append(&gid, OWNER, 0, "AAAA").unwrap();
+            assert!(next > prev, "раунд {round}: новая запись получила старый номер ({next} ≤ {prev})");
+        }
+        assert!(last_total > 0, "дочерний процесс должен был успеть записать");
+    }
+
+    #[test]
+    fn group_disappears_when_its_owner_device_is_forgotten_and_members_leaving_keeps_it() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, None).unwrap();
+        s.forget_device(BOB);
+        assert_eq!(s.list_for(OWNER).len(), 1, "ушёл рядовой участник — группа на месте");
+        let gid2 = s.create_as("Г2", "т", Kind::Open, "cc", &[], true).unwrap();
+        s.join(&gid2, BOB, None, None).unwrap();
+        s.forget_device("cc");
+        assert!(s.list_for(BOB).is_empty(), "владелец удалён — группа удалена, у участников её больше нет");
+        assert!(s.open_for(BOB).iter().all(|v| v["id"] != gid2.as_str()), "и в каталоге её нет");
+        // уборка: группа с владельцем, которого нет среди живых
+        let live = vec![OWNER.to_string()];
+        let _ = s.create_as("Г3", "т", Kind::Open, "dd", &[], true).unwrap();
+        assert_eq!(s.sweep_orphans(&live), 1);
+        assert_eq!(s.list_for(OWNER).len(), 1, "группа живого владельца уцелела");
+        let _ = gid;
+    }
+
+    #[test]
+    fn group_logo_is_set_by_owner_rebuilt_and_shown_in_lists() {
+        use base64::Engine;
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, BOB, None, None).unwrap();
+        let mut src = Vec::new();
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(300, 200, image::Rgba([10, 150, 40, 255])))
+            .write_to(&mut std::io::Cursor::new(&mut src), image::ImageFormat::Png)
+            .unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(&src);
+        assert!(s.set_logo(&gid, BOB, &b64).is_err(), "рядовой логотип не меняет");
+        assert!(s.set_logo(&gid, OWNER, &base64::engine::general_purpose::STANDARD.encode(b"MZ not an image")).is_err(), "не картинка");
+        s.set_logo(&gid, OWNER, &b64).unwrap();
+        let png = s.logo_png(&gid).unwrap();
+        assert_eq!(&png[..4], &[0x89, b'P', b'N', b'G']);
+        assert!(png.len() <= 12 * 1024, "пересобрана в маленькую");
+        assert_eq!(s.list_for(OWNER)[0]["logo_hash"].as_str().unwrap().len(), 64);
+        s.set_logo(&gid, OWNER, "").unwrap();
+        assert!(s.logo_png(&gid).is_none());
+    }
+
+    #[test]
+    fn a_group_whose_owner_device_is_gone_stays_visible_but_marked() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let live = vec![OWNER.to_string()];
+        assert_eq!(s.open_for_live(BOB, &live)[0]["owner_present"], json!(true), "владелец жив");
+        assert_eq!(s.list_for_live(OWNER, &live)[0]["owner_present"], json!(true));
+        let gone: Vec<String> = Vec::new();
+        let cat = s.open_for_live(BOB, &gone);
+        assert_eq!(cat.len(), 1, "группа видна всегда: людям важно видеть, что узел жив");
+        assert_eq!(cat[0]["owner_present"], json!(false), "но помечена: владельца нет");
+        assert_eq!(s.list_for_live(OWNER, &gone)[0]["owner_present"], json!(false));
+        let _ = gid;
+    }
+
     #[test]
     fn a_broken_or_unwritable_index_is_an_error_not_a_silent_success() {
         // аудит Codex №7
@@ -1909,6 +2628,22 @@ mod tests {
         std::fs::write(&file_dir, b"x").unwrap();
         let mut s2 = Store::open(file_dir);
         assert!(s2.create_as("Г", "т", Kind::Open, OWNER, &[], true).is_err());
+    }
+
+    #[test]
+    fn a_failed_index_write_does_not_destroy_the_history_of_a_group_being_deleted() {
+        let d = tempfile::tempdir().unwrap();
+        let dir = d.path().join("groups");
+        let mut s = Store::open(dir.clone());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let log = s.log_path(&gid);
+        std::fs::write(&log, b"{\"seq\":1}\n").unwrap();
+        // индекс нельзя перезаписать: на его месте каталог
+        std::fs::remove_file(dir.join("index.json")).unwrap();
+        std::fs::create_dir_all(dir.join("index.json")).unwrap();
+        assert!(s.delete(&gid).is_err(), "удаление не зафиксировано");
+        assert!(s.groups.contains_key(&gid), "группа на месте");
+        assert!(log.exists(), "журнал цел: файлы удаляются только после фиксации индекса");
     }
 
     #[test]
@@ -2143,6 +2878,28 @@ mod tests {
     }
 
     #[test]
+    fn invitations_are_issued_by_staff_only() {
+        let (_d, mut s) = store();
+        let gid = s
+            .create("Закрытая", "", Kind::Invite, OWNER, &[BOB.into(), EVE.into(), "cc".into()])
+            .unwrap();
+        let alias = |s: &Store, dev: &str| s.list_for(dev)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, eve) = (alias(&s, BOB), alias(&s, EVE));
+        s.moderate(&gid, OWNER, "make_admin", Some(&bob), None, None).unwrap();
+        s.moderate(&gid, OWNER, "promote", Some(&eve), None, None).unwrap();
+        assert!(s.invite(&gid, OWNER, 1, None).is_ok(), "владелец");
+        assert!(s.invite(&gid, BOB, 1, None).is_ok(), "админ");
+        assert!(s.invite(&gid, EVE, 1, None).is_ok(), "модератор выдаёт приглашение по просьбе");
+        assert!(s.invite(&gid, "cc", 1, None).is_err(), "рядовой не выдаёт");
+        // модератор: стирает записи рядового, банит и исключает рядового; админа не трогает
+        let seq = s.append(&gid, "cc", 0, &b64(b"x")).unwrap();
+        assert!(s.moderate(&gid, EVE, "delete_entry", None, Some(seq), None).is_ok());
+        let cc = alias(&s, "cc");
+        assert!(s.moderate(&gid, EVE, "ban", Some(&cc), None, None).is_ok());
+        assert!(s.moderate(&gid, EVE, "kick", Some(&bob), None, None).is_err());
+    }
+
+    #[test]
     fn moderation_rules_and_log() {
         let (_d, mut s) = store();
         let gid = s
@@ -2212,6 +2969,28 @@ mod tests {
     }
 
     #[test]
+    fn a_member_who_joined_later_is_not_told_to_wait_for_a_key_that_was_never_issued_to_them() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let pubkey = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        s.set_pub(&gid, OWNER, &pubkey()).unwrap();
+        s.join(&gid, BOB, None, Some(&pubkey())).unwrap();
+        let bob = s.list_for(BOB)[0]["my_alias"].as_str().unwrap().to_string();
+        // поколение 1: ключ получил только Боб
+        s.put_keys(&gid, OWNER, 1, &[(bob.clone(), b64(b"box1"))].into()).unwrap();
+        s.append(&gid, OWNER, 1, &b64(b"old message")).unwrap();
+        // Ив вступает позже, владелец меняет поколение: поколение 2 получают Боб и Ив
+        s.join(&gid, EVE, None, Some(&pubkey())).unwrap();
+        let eve = s.list_for(EVE)[0]["my_alias"].as_str().unwrap().to_string();
+        s.put_keys(&gid, OWNER, 2, &[(bob.clone(), b64(b"b2")), (eve.clone(), b64(b"e2"))].into()).unwrap();
+        let bob_keys = s.my_keys(&gid, BOB).unwrap();
+        let eve_keys = s.my_keys(&gid, EVE).unwrap();
+        assert_eq!(bob_keys["first_epoch"], 1, "Бобу поколение 1 доступно: ждать его ключ можно");
+        assert_eq!(eve_keys["first_epoch"], 2, "Иву поколение 1 не выдавалось и не будет: запись помечается недоступной, а не блокирует ленту");
+        assert_eq!(eve_keys["boxes"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
     fn keys_are_sealed_per_member_and_only_owner_hands_them_out() {
         let (_d, mut s) = store();
         let gid = s.create("G", "", Kind::Open, OWNER, &[BOB.into()]).unwrap();
@@ -2265,6 +3044,39 @@ mod tests {
     }
 
     #[test]
+    fn a_crash_between_trimming_the_log_and_saving_the_index_keeps_the_numbers() {
+        let (_d, mut s) = store();
+        let gid = s.create("G", "", Kind::Invite, OWNER, &[]).unwrap();
+        for i in 0..5 {
+            s.append(&gid, OWNER, 0, &b64(format!("m{i}").as_bytes())).unwrap();
+        }
+        // журнал уже обрезан до записей 3..5, а описание группы (first_seq = 1) сохранить не успели
+        let lines = s.read_lines(&gid);
+        assert_eq!(lines.len(), 5);
+        s.rewrite(&gid, &lines[2..]).unwrap();
+        let next = s.append(&gid, OWNER, 0, &b64(b"after")).unwrap();
+        assert_eq!(next, 6, "новая запись не получает повторный номер");
+        let p = s.pull(&gid, OWNER, 2, 10).unwrap();
+        assert_eq!(p["first_seq"].as_u64().unwrap(), 3);
+        let seqs: Vec<u64> = p["entries"].as_array().unwrap().iter().map(|e| e["seq"].as_u64().unwrap()).collect();
+        assert_eq!(seqs, vec![3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn a_failed_save_rolls_membership_back() {
+        let (d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        let idx = d.path().join("groups/index.json");
+        std::fs::remove_file(&idx).unwrap();
+        std::fs::create_dir_all(&idx).unwrap(); // запись индекса невозможна
+        let before = s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().len();
+        assert!(s.join(&gid, "bb", None, None).is_err(), "вступление не записалось — ошибка");
+        assert_eq!(s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().len(), before, "членство не действует в памяти");
+        std::fs::remove_dir_all(&idx).unwrap();
+        assert!(s.join(&gid, "bb", None, None).is_ok(), "после починки диска вступление проходит");
+    }
+
+    #[test]
     fn deleting_and_forgetting() {
         let (d, mut s) = store();
         let gid = s
@@ -2276,6 +3088,141 @@ mod tests {
         s.delete(&gid).unwrap();
         assert!(s.list_for(OWNER).is_empty());
         assert!(!d.path().join(format!("groups/{gid}.log")).exists());
+    }
+
+    #[test]
+    fn member_card_is_voluntary_cleaned_and_visible_to_members() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, "bb", None, None).unwrap();
+        let list = |s: &Store| s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().clone();
+        assert!(list(&s).iter().all(|m| m["nick"].is_null()), "по умолчанию — только псевдоним");
+        s.set_card(&gid, "bb", "  Доктор\u{0}Хаус ", "").unwrap();
+        let bob = list(&s).into_iter().find(|m| m["nick"] == "ДокторХаус").expect("ник виден участникам");
+        assert!(bob["avatar"].is_null());
+        // картинка: хэш виден, байты отдаются по псевдониму
+        s.set_card(&gid, "bb", "Хаус", "aGk=").unwrap();
+        let alias = bob["alias"].as_str().unwrap();
+        assert_eq!(s.card_avatar(&gid, OWNER, alias).unwrap().as_deref(), Some("aGk="));
+        // слишком большая картинка отвергается
+        assert!(s.set_card(&gid, "bb", "Хаус", &"A".repeat(CARD_AVATAR_B64 + 1)).is_err());
+        // убрать
+        s.set_card(&gid, "bb", "", "").unwrap();
+        assert!(list(&s).iter().all(|m| m["nick"].is_null() && m["avatar"].is_null()));
+        // не участник визитку поставить не может
+        assert!(s.set_card(&gid, "zz", "Х", "").is_err());
+    }
+
+    #[test]
+    fn identity_proof_is_attached_by_the_member_only_and_must_be_base64() {
+        let (_d, mut s) = store();
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.join(&gid, "bb", None, None).unwrap();
+        let list = |s: &Store| s.members(&gid, OWNER).unwrap()["members"].as_array().unwrap().clone();
+        assert!(list(&s).iter().all(|m| m["proof"].is_null()));
+        let sig = "A".repeat(86) + "==";
+        s.set_proof(&gid, "bb", &sig).unwrap();
+        assert_eq!(list(&s).iter().filter(|m| m["proof"] == sig.as_str()).count(), 1, "подпись видна, и только у одного");
+        assert!(s.set_proof(&gid, "bb", "не base64!").is_err());
+        assert!(s.set_proof(&gid, "bb", &"A".repeat(129)).is_err());
+        assert!(s.set_proof(&gid, "zz", &sig).is_err(), "не участник подпись приложить не может");
+        s.set_proof(&gid, "bb", "").unwrap();
+        assert!(list(&s).iter().all(|m| m["proof"].is_null()));
+    }
+
+    #[test]
+    fn auto_clean_removes_silent_regular_members_only() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        for d in ["bb", "cc", "dd", "ee", "ff"] {
+            s.join(&gid, d, None, Some(&pubk())).unwrap();
+        }
+        let alias = |s: &mut Store, d: &str| s.list_for(d)[0]["my_alias"].as_str().unwrap().to_string();
+        let (bob, carol, dan, eve, fay) = (alias(&mut s, "bb"), alias(&mut s, "cc"), alias(&mut s, "dd"), alias(&mut s, "ee"), alias(&mut s, "ff"));
+        // carol — модератор, dan заглушён, eve молчит, fay молчит, но вступила недавно; bob пишет
+        s.moderate(&gid, OWNER, "promote", Some(&carol), None, None).unwrap();
+        s.moderate(&gid, OWNER, "mute", Some(&dan), None, None).unwrap();
+        s.append(&gid, "bb", 0, &b64(b"hi")).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            if m.alias != fay {
+                m.joined_ms = now - 40 * day; // давно в группе
+            }
+        }
+        // запись bob — пять дней назад
+        let mut lines = s.read_lines(&gid);
+        for l in lines.iter_mut() {
+            l.ts = now - 5 * day;
+        }
+        s.rewrite(&gid, &lines).unwrap();
+        // выключена по умолчанию: никого не трогает
+        assert_eq!(s.clean_inactive(now).unwrap(), 0);
+        assert!(s.set_auto_clean(&gid, "bb", 30).is_err(), "настраивает только владелец");
+        assert_eq!(s.set_auto_clean(&gid, OWNER, 3).unwrap(), 7, "меньше недели не бывает");
+        assert_eq!(s.set_auto_clean(&gid, OWNER, 30).unwrap(), 30);
+        assert_eq!(s.clean_inactive(now).unwrap(), 1, "исключён только молчавший eve");
+        let members: Vec<String> = s.groups[&gid].members.iter().map(|m| m.alias.clone()).collect();
+        assert!(members.contains(&bob), "писал — остаётся");
+        assert!(members.contains(&carol), "модератора не трогает");
+        assert!(members.contains(&dan), "заглушённого не трогает");
+        assert!(members.contains(&fay), "вступил недавно — не трогает");
+        assert!(!members.contains(&eve), "молчал 40 дней — исключён");
+        assert!(s.groups[&gid].rekey_needed, "после исключения ключ стоит сменить");
+        assert!(s.groups[&gid].modlog.iter().any(|m| m.action == "inactive" && m.target.as_deref() == Some(eve.as_str())));
+        // и через 100 дней без записей остальные рядовые тоже уходят, а владелец и модератор — нет
+        assert_eq!(s.clean_inactive(now + 100 * day).unwrap(), 2, "bob и fay");
+        assert!(s.groups[&gid].members.iter().any(|m| m.role == Role::Owner));
+        assert!(s.groups[&gid].members.iter().any(|m| m.alias == carol));
+    }
+
+    /// Обрезка журнала не делает недавно писавшего «молчуном»: время последней записи хранится у участника.
+    #[test]
+    fn trimming_the_journal_does_not_turn_a_recent_writer_into_a_silent_member() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        s.join(&gid, "bb", None, Some(&pubk())).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.joined_ms = now - 60 * day;
+        }
+        s.set_auto_clean(&gid, OWNER, 30).unwrap();
+        s.append(&gid, "bb", 0, &b64(b"yesterday")).unwrap();
+        // журнал обрезан: записей bob в нём больше нет
+        s.rewrite(&gid, &[]).unwrap();
+        s.get_mut(&gid).unwrap().trimmed_ms = now;
+        assert_eq!(s.clean_inactive(now + 20 * day).unwrap(), 0, "писал только что — не молчун");
+        // без сведений об активности (старая запись без last_post_ms и без обрезки) прежний порядок: 60 дней молчания — исключён
+        s.get_mut(&gid).unwrap().trimmed_ms = 0;
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.last_post_ms = 0;
+        }
+        assert_eq!(s.clean_inactive(now + 20 * day).unwrap(), 1);
+    }
+
+    /// Повторная обрезка журнала не продлевает срок молчуну: общая дата ставится один раз.
+    #[test]
+    fn repeated_trimming_does_not_keep_a_silent_member_alive() {
+        let (_d, mut s) = store();
+        let pubk = || b64(&x25519_dalek::PublicKey::from(&x25519_dalek::StaticSecret::random_from_rng(rand::thread_rng())).to_bytes());
+        let gid = s.create_as("Г", "т", Kind::Open, OWNER, &[], true).unwrap();
+        s.set_pub(&gid, OWNER, &pubk()).unwrap();
+        s.join(&gid, "bb", None, Some(&pubk())).unwrap();
+        let day = 24 * 3600 * 1000u64;
+        let now = now_ms();
+        for m in s.groups.get_mut(&gid).unwrap().members.iter_mut() {
+            m.joined_ms = now - 100 * day;
+        }
+        s.set_auto_clean(&gid, OWNER, 30).unwrap();
+        s.get_mut(&gid).unwrap().trimmed_ms = now - 50 * day; // первая обрезка была давно
+        s.trim(&gid);
+        assert_eq!(s.groups[&gid].trimmed_ms, now - 50 * day, "повторная обрезка дату не двигает");
+        assert_eq!(s.clean_inactive(now).unwrap(), 1, "молчун исключён, хотя журнал обрезается");
     }
 
     #[test]

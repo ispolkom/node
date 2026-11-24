@@ -46,6 +46,8 @@ pub enum Reject {
     GlobalNew,
     /// таблица пиров полна и вытеснять некого
     TableFull,
+    /// автономный узел: этот узел не внесён владельцем в меш
+    NotInMesh,
 }
 
 impl Reject {
@@ -55,6 +57,7 @@ impl Reject {
             Reject::PerSourceNew => "per-source-new",
             Reject::GlobalNew => "global-new",
             Reject::TableFull => "table-full",
+            Reject::NotInMesh => "not-in-mesh",
         }
     }
 }
@@ -124,6 +127,16 @@ impl Admission {
             self.rejected += 1;
         } else {
             self.allowed += 1;
+        }
+        r
+    }
+
+    /// Квоты (с одного адреса и общая) для новой личности, когда таблица полна и ради неё хотят вытеснить кого-то:
+    /// вытеснение расходует ту же квоту, что и обычный приём — иначе полная таблица снимала бы все лимиты.
+    pub fn quotas_for_new(&mut self, ip: IpAddr, id: HashId, now: Instant) -> Result<(), Reject> {
+        let r = self.decide(ip, id, false, 0, now);
+        if r.is_err() {
+            self.rejected += 1;
         }
         r
     }
@@ -222,6 +235,18 @@ mod tests {
         let now = Instant::now();
         assert_eq!(a.check(ip(1), id(1), false, 100, now), Err(Reject::TableFull));
         assert!(a.check(ip(2), id(2), true, 100, now).is_ok(), "уже известный узел обновляется и при полной таблице");
+    }
+
+    #[test]
+    fn evicting_for_a_new_identity_spends_the_same_quota() {
+        let mut a = Admission::new(AdmissionConfig { max_peers: 10, per_ip_new_per_minute: 3, ..Default::default() });
+        let now = Instant::now();
+        // таблица полна: каждое вытеснение ради новой личности с одного адреса идёт через квоту
+        assert_eq!(a.check(ip(1), id(1), false, 10, now), Err(Reject::TableFull));
+        let granted = (0..20u32).filter(|i| a.quotas_for_new(ip(1), id(100 + i), now).is_ok()).count();
+        assert_eq!(granted, 3, "с одного адреса — не больше квоты, дальше вытеснять нельзя");
+        assert_eq!(a.quotas_for_new(ip(1), id(999), now), Err(Reject::PerSourceNew));
+        assert!(a.quotas_for_new(ip(2), id(500), now).is_ok(), "другой адрес не пострадал");
     }
 
     #[test]

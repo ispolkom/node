@@ -67,15 +67,30 @@ pub fn check_setup_inputs(
     master: &str,
     master_repeat: &str,
 ) -> Result<(), String> {
-    if login.chars().count() < 8 {
-        return Err("Пароль входа: минимум 8 символов".to_string());
+    check_setup_inputs_min(login, login_repeat, master, master_repeat, 8)
+}
+
+/// The same with a chosen shortest login password (a test installation may lower it; production passes 8).
+/// The master secret is either a seed phrase (12 or 24 words, checked as a seed: a typo is reported as a typo) or, for older tools, a
+/// free text of at least 12 characters.
+pub fn check_setup_inputs_min(
+    login: &str,
+    login_repeat: &str,
+    master: &str,
+    master_repeat: &str,
+    min_login: usize,
+) -> Result<(), String> {
+    if login.chars().count() < min_login {
+        return Err(format!("Пароль входа: минимум {min_login} символов"));
     }
     if login != login_repeat {
         return Err("Пароли входа не совпадают".to_string());
     }
-    if master.chars().count() < 12 {
+    if crate::seed::looks_like_seed(master) {
+        crate::seed::Seed::parse(master).map_err(|e| e.to_string())?;
+    } else if master.chars().count() < 12 {
         return Err(
-            "Мастер-пароль: минимум 12 символов (лучше фраза из нескольких слов)".to_string(),
+            "Сид-фраза: нужно 12, 18 или 24 слова из списка (или мастер-пароль: минимум 12 символов)".to_string(),
         );
     }
     if master != master_repeat {
@@ -100,12 +115,17 @@ pub fn create_keys(
     params: KdfParams,
     policy: &KdfPolicy,
 ) -> Result<Zeroizing<[u8; 32]>, String> {
+    // a seed phrase is keyed by its bytes (language and spacing never matter); anything else is used as typed
+    let master_secret = recovery_secret(master_password);
+    // a seed phrase gives a DETERMINISTIC root: the same words (and control word) restore the same node on any machine
+    let seed_root = crate::seed::Seed::parse(master_password).ok().map(|s| s.root());
+    let master_password: &str = &master_secret;
     let auth_path = dir.auth_file();
     ensure_no_existing_auth(&auth_path)?;
     if device.load().map(|k| k.is_some()).unwrap_or(true) {
         return Err("В каталоге ключей уже есть ключ устройства; настройка не выполнена, чтобы ничего не затереть".to_string());
     }
-    let root = Zeroizing::new(crate::wrap::random_bytes::<32>());
+    let root = seed_root.unwrap_or_else(|| Zeroizing::new(crate::wrap::random_bytes::<32>()));
     let login_hash = hash_login_password(login_password)?;
     let device_key = device
         .create()
@@ -143,6 +163,9 @@ pub fn create_keys(
     if let Err(e) = created {
         // undo only what this call has just created (nothing existed before: that was checked above)
         let _ = std::fs::remove_file(&auth_path);
+        // ключ устройства убирает его провайдер: у аппаратного это device.seal, а не только прежний device.key — иначе после
+        // сбоя остался бы ключ без корня, и повторная настройка навсегда отказывала бы
+        device.discard_created();
         let _ = std::fs::remove_file(dir.file("device.key"));
         return Err(e);
     }
@@ -158,25 +181,27 @@ pub fn reset_login(
     new_login_password: &str,
     policy: &KdfPolicy,
 ) -> Result<(), String> {
-    if new_login_password.chars().count() < 8 {
-        return Err("Новый пароль входа должен быть не короче 8 символов".to_string());
+    reset_login_min(dir, code_input, new_login_password, policy, 8)
+}
+
+/// То же с заданным минимумом длины пароля (узел с тестовым послаблением допускает 6; восстановление применяет действующую политику узла).
+pub fn reset_login_min(
+    dir: &KeyDir,
+    code_input: &str,
+    new_login_password: &str,
+    policy: &KdfPolicy,
+    min_len: usize,
+) -> Result<(), String> {
+    if new_login_password.chars().count() < min_len {
+        return Err(format!("Новый пароль входа должен быть не короче {min_len} символов"));
     }
     let bytes = crate::keydir::read_private_file(&dir.auth_file())
         .map_err(|_| "Файл ключей недоступен".to_string())?;
-    match crate::legacy::auth_format(&bytes) {
-        Ok(crate::legacy::AuthFormat::RootV2) => {}
-        Ok(_) => {
-            return Err(
-                "Ключи в старом формате: сначала выполните `yandi-keys migrate`".to_string(),
-            )
-        }
-        Err(_) => return Err("Файл ключей повреждён".to_string()),
-    }
     // Text shaped like a recovery code that fails the code's own check may be a typo in a code — or a password that merely looks like
     // one (a pass-phrase of words joined by hyphens has the same shape). It is therefore tried as typed FIRST; only if that does not
     // open the keys is it reported as a typo (rather than as "wrong").
-    let maybe_typo = crate::recovery_code::looks_like_code(code_input)
-        && RecoveryCode::parse(code_input).is_err();
+    let maybe_typo = (crate::recovery_code::looks_like_code(code_input) && RecoveryCode::parse(code_input).is_err())
+        || (crate::seed::looks_like_seed(code_input) && crate::seed::Seed::parse(code_input).is_err());
     let doc = RootDocument::parse(&bytes).map_err(|_| "Файл ключей повреждён".to_string())?;
     let secret = recovery_secret(code_input);
     let root = match doc.unlock_with_password(&secret, policy) {

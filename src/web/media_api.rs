@@ -83,7 +83,7 @@ pub async fn start_call(
         payload.to_string().into_bytes(),
     );
 
-    if let Err(e) = transport.send_packet_dual_path(peer_hash, packet).await {
+    if let Err(e) = transport.send_sealed(peer_hash, packet).await {
         eprintln!("❌ Failed to send VoiceCallRequest: {}", e);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -145,7 +145,7 @@ pub async fn end_active_call(
             false,
             payload.to_string().into_bytes(),
         );
-        let _ = transport.send_packet_dual_path(peer_hash, packet).await;
+        let _ = transport.send_sealed(peer_hash, packet).await;
     }
 
     Json(serde_json::json!({"status": "ok"}))
@@ -234,7 +234,7 @@ pub async fn accept_call(
         payload.to_string().into_bytes(),
     );
 
-    if let Err(e) = transport.send_packet_dual_path(peer_hash, packet).await {
+    if let Err(e) = transport.send_sealed(peer_hash, packet).await {
         eprintln!("❌ Failed to send VoiceCallAccept: {}", e);
         return Json(serde_json::json!({"status": "error", "message": format!("send failed: {}", e)}));
     }
@@ -282,7 +282,7 @@ pub async fn reject_call(
         payload.to_string().into_bytes(),
     );
 
-    let _ = transport.send_packet_dual_path(peer_hash, packet).await;
+    let _ = transport.send_sealed(peer_hash, packet).await;
     Json(serde_json::json!({"status": "ok", "call_id": call_id}))
 }
 
@@ -293,6 +293,17 @@ pub async fn media_websocket_handler(
     Path(peer_id): Path<String>,
 ) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_media_socket(socket, peer_id, app_state))
+}
+
+fn media_session_locked() -> bool {
+    #[cfg(unix)]
+    {
+        crate::closed_api::is_locked()
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
 }
 
 async fn handle_media_socket(
@@ -326,12 +337,23 @@ async fn handle_media_socket(
     let mut signal_rx = app_state.media_signal_bus.subscribe();
     let (mut ws_sender, mut ws_receiver) = socket.split();
     let target_short = hex::encode(&target_hash.0[..8]);
+    // запирание среды закрывает уже открытый сеанс (middleware проверяет только апгрейд): раз в секунду и перед каждой пересылкой
+    let mut lock_watch = tokio::time::interval(std::time::Duration::from_secs(1));
 
     loop {
         tokio::select! {
+            _ = lock_watch.tick() => {
+                if media_session_locked() {
+                    println!("🔒 media signaling closed: environment locked");
+                    break;
+                }
+            }
             incoming = ws_receiver.next() => {
                 match incoming {
                     Some(Ok(Message::Text(text))) => {
+                        if media_session_locked() {
+                            break;
+                        }
                         // Browser → P2P: forward signaling as VoiceData
                         let packet = P2PPacket::new(
                             P2PPacketType::VoiceData,
@@ -339,7 +361,7 @@ async fn handle_media_socket(
                             false,
                             text.as_bytes().to_vec(),
                         );
-                        if let Err(e) = transport.send_packet_dual_path(target_hash, packet).await {
+                        if let Err(e) = transport.send_sealed(target_hash, packet).await {
                             eprintln!("❌ Failed to forward media signal via P2P: {}", e);
                             break;
                         }
@@ -450,7 +472,7 @@ pub async fn start_video_call(
         payload.to_string().into_bytes(),
     );
 
-    if let Err(e) = transport.send_packet_dual_path(peer_hash, packet).await {
+    if let Err(e) = transport.send_sealed(peer_hash, packet).await {
         eprintln!("❌ Failed to send VideoCallRequest: {}", e);
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     }
@@ -519,7 +541,7 @@ pub async fn accept_video_call(
         payload.to_string().into_bytes(),
     );
 
-    if let Err(e) = transport.send_packet_dual_path(peer_hash, packet).await {
+    if let Err(e) = transport.send_sealed(peer_hash, packet).await {
         eprintln!("❌ Failed to send VideoCallAccept: {}", e);
         return Json(serde_json::json!({"status": "error", "message": format!("send failed: {}", e)}));
     }
@@ -568,7 +590,7 @@ pub async fn reject_video_call(
         payload.to_string().into_bytes(),
     );
 
-    let _ = transport.send_packet_dual_path(peer_hash, packet).await;
+    let _ = transport.send_sealed(peer_hash, packet).await;
     Json(serde_json::json!({"status": "ok", "call_id": call_id}))
 }
 
@@ -604,7 +626,7 @@ pub async fn end_active_video_call(
             false,
             payload.to_string().into_bytes(),
         );
-        let _ = transport.send_packet_dual_path(peer_hash, packet).await;
+        let _ = transport.send_sealed(peer_hash, packet).await;
     }
 
     Json(serde_json::json!({"status": "ok"}))}

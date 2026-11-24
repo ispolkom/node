@@ -6,8 +6,8 @@ import 'package:cryptography/cryptography.dart';
 /// Виды записей группы. Метка вида лежит открыто в начале записи (узел её видит и может по ней ограничивать/фильтровать), но входит в
 /// проверяемые данные: подменить вид без ключа группы нельзя — расшифровка не пройдёт.
 class GroupKind {
-  static const text = 1, image = 2, file = 3, audio = 4, video = 5, link = 6, system = 7;
-  static const all = [text, image, file, audio, video, link, system];
+  static const text = 1, image = 2, file = 3, audio = 4, video = 5, link = 6, system = 7, reaction = 8;
+  static const all = [text, image, file, audio, video, link, system, reaction];
 }
 
 /// Шифрование групп (формат — docs/CLIENT_WIRE.md «Группы»; содержимое узел не читает).

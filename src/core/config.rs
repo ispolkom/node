@@ -147,6 +147,10 @@ pub struct NetworkConfig {
     /// MTU для P2P
     #[serde(default = "default_mtu")]
     pub mtu: usize,
+
+    /// Автономный узел: без общей сети, только свои клиенты и внесённые автономные узлы (docs/ROADMAP_R9.md §4)
+    #[serde(default)]
+    pub autonomous: bool,
 }
 
 impl Default for NetworkConfig {
@@ -154,6 +158,7 @@ impl Default for NetworkConfig {
         Self {
             public_ip: None,
             mtu: default_mtu(),
+            autonomous: false,
         }
     }
 }
@@ -277,6 +282,11 @@ pub fn get_config() -> YandiConfig {
         .as_ref()
         .expect("Config not initialized")
         .clone()
+}
+
+/// Конфигурация, если уже загружена (без паники до инициализации).
+pub fn try_get_config() -> Option<YandiConfig> {
+    GLOBAL_CONFIG.read().ok()?.as_ref().cloned()
 }
 
 /// Обновить конфигурацию

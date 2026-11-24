@@ -1,46 +1,58 @@
-# Скорость выхода: разбор (2026-10-08)
+# Exit Speed: Analysis (2026-10-08)
 
-Этап C дорожной карты. Измерения: `chaos/speedtest.py` (клиент за NAT с сохранением порта → публичный узел-выход → «интернет» в песочнице лаборатории; один поток и четыре потока; загрузка и отправка; для сравнения та же передача напрямую без узлов). Лаборатория без задержек и потерь, поэтому предел виден не от канала, а от самого узла. **Ограничение владельца: полное дублирование трафика между узлами (два пути на каждый вагон) остаётся; избыточность важнее скорости.** Значит, потолок заведомо около половины канала, и все цифры ниже — с учётом дублирования.
+Roadmap stage C. Measurements used `chaos/speedtest.py`: a client behind NAT with port preservation, a public exit node, and “Internet” in a laboratory sandbox; one and four streams; download and upload; with the same transfer directly, without nodes, for comparison. The laboratory had no latency or loss, so the limit came from the node rather than the link. **Owner constraint: full traffic duplication between nodes (two paths per wagon) remains; redundancy is more important than speed.** The ceiling is therefore intentionally close to half the link capacity, and all figures below include duplication.
 
-## Что измерено
-| Путь | Скорость |
+## Measurements
+
+| Path | Speed |
 |---|---|
-| Напрямую в лаборатории, без узлов | 6–30 Гбит/с (канал лаборатории не ограничивает) |
-| Через выход (исходный код), 1 и 4 потока, вниз и вверх | **около 45 Мбит/с**, одинаково при любом числе потоков; процессор занят лишь на 50–60% одного ядра |
-| То же, журнал узла выброшен в никуда | то же самое: журнал не причина |
-| Эксперимент: убрать паузы `sleep` перед отправкой вагона | загрузка **127 Мбит/с** (процессор 100% одного ядра), но отправка на выход **встаёт** (2–8 Мбит/с): паузы были единственным, что не давало отправителю переполнить буфер приёма |
+| Directly in the laboratory, without nodes | 6–30 Gbit/s; the laboratory link is not the limit. |
+| Through an exit, original code, one and four streams, down and up | **about 45 Mbit/s**, the same for any number of streams; CPU used only 50–60% of one core. |
+| The same, with node logs discarded | The same; logging is not the cause. |
+| Experiment: remove `sleep` pauses before sending a wagon | **127 Mbit/s** download, CPU at 100% of one core, but exit upload stalls at 2–8 Mbit/s. The pauses were the only thing preventing the sender from overflowing the receive buffer. |
 
-Последний результат показывает главное: **настоящего управления потоком между узлами нет**, скорость сдерживается случайным побочным эффектом (пауза перед каждым вагоном; таймер tokio не точнее 1 мс, поэтому «пауза 92 мкс» длится миллисекунду). Уйти в «быстрее» простым удалением пауз нельзя.
+The last result shows the main issue: **there was no real flow control between nodes**. Speed was limited by an accidental side effect, a pause before each wagon; the Tokio timer is not more precise than 1 ms, so a nominal 92-microsecond pause lasts milliseconds. Simply removing the pauses is not a safe speed fix.
 
-## Что нашлось в коде до правок (путь данных SOCKS5-выхода: `socks5/exit_node.rs`, `protocol/station.rs`)
-1. Выход читает цель кусками по 16 КБ и кодирует каждый кусок **в JSON с массивом чисел** (`serde_json` для `Vec<u8>`): размер на проводе раздувается примерно в 3–4 раза, процессор тратится на кодирование.
-2. Каждый «поезд» отправляется под **общим замком** `train_send_mutex`, и следующий не начнётся, пока не отправлены все вагоны предыдущего (остановка и ожидание на каждый кусок).
-3. На **каждый вагон отдельная задача** tokio плюс пауза плюс семафор (пауза заменена общим ограничителем); каждый вагон отправляется дважды (так и задумано).
-4. **Вагон может быть до 60 КБ** (`Wagon::MAX_CARGO_SIZE`), то есть одна UDP-датаграмма режется на ~40 IP-фрагментов. Потеря любого фрагмента уничтожает всю датаграмму, а на настоящих сетях фрагментированный UDP часто режется или теряется целиком. Вероятно, это одна из причин плохой скорости в поле (70–80 из 300 Мбит); **в лаборатории без потерь это не видно, нужен опыт с потерями (следующий шаг)**.
-5. Автоматическая подстройка скорости (`RateController::adjust_rate`) закомментирована; скорость всегда равна начальной (1000 Мбит/с), то есть никакого реального ограничения нет.
-6. На каждый вагон несколько строк `println!` (на скорость не влияют, но раздувают журнал: 23 МБ за опыт).
+## Findings in the original data path
 
-## Что сделано (2026-10-08) и что получилось
-Принцип проекта (решение владельца): транспорт «отправил и забыл», **без подтверждений, запросов повтора и управления потоком по обратной связи**; надёжность даёт только полное дублирование по двум путям. Поэтому все улучшения безобратные.
+The path was `socks5/exit_node.rs` → `protocol/station.rs`:
 
-| Шаг | Скорость через выход, лаборатория, с дублированием |
+1. The exit read the destination in 16 KiB chunks and encoded each chunk **as JSON containing a number array** (`serde_json` for `Vec<u8>`). Wire size grew roughly three to four times, and the CPU spent time encoding it.
+2. Every “train” was sent under the **shared** `train_send_mutex`; the next train could not start until every wagon in the previous train was sent, so each chunk caused a stop and wait.
+3. Every wagon used a separate Tokio task, a pause, and a semaphore; the pause was later replaced by a shared limiter. Each wagon was sent twice by design.
+4. A **wagon could be up to 60 KiB** (`Wagon::MAX_CARGO_SIZE`), so one UDP datagram was split into about 40 IP fragments. Losing one fragment destroyed the datagram; on real networks fragmented UDP is often dropped as a whole. This likely explains poor field speed (70–80 of 300 Mbit/s); it was invisible in the lossless laboratory and required a loss test.
+5. Automatic rate adjustment (`RateController::adjust_rate`) was commented out. The rate always started at 1000 Mbit/s, so there was no actual limit.
+6. Every wagon generated several `println!` lines. This did not limit speed, but produced a 23 MB log during one experiment.
+
+## Changes and results (2026-10-08)
+
+Project principle, by owner decision: transport is “send and forget”, **without acknowledgements, retransmission requests, or feedback-based flow control**. Reliability comes only from full duplication over two paths. Therefore all improvements below are one-way.
+
+| Step | Exit speed in the laboratory, with duplication |
 |---|---|
-| исходно (пауза не меньше 1 мс на вагон, вагон до 60 КБ, JSON) | 45 Мбит/с |
-| вагон 1200 байт (`Wagon::PAYLOAD_SIZE`, одна датаграмма без IP-фрагментации) и компактная упаковка данных туннеля (`Socks5TunnelData::encode`, в 3–4 раза меньше JSON) | 70 Мбит/с, процессор ниже |
-| настоящий ограничитель скорости (`protocol/rate_controller.rs::Pacer`) вместо паузы на каждый вагон, потолок на проводе 300 Мбит/с (учитывает обе копии) | **122 Мбит/с стабильно**, 1 и 4 потока в обе стороны |
-| то же, потолок 450 (`YANDI_PACE_MBPS=450`) | 180 Мбит/с стабильно |
-| то же, потолок 700 | отправка рвётся: получатель (один поток обработки, ~215 Мбит/с полезных) не успевает, ядро выбрасывает датаграммы (11 тысяч за опыт) |
+| Original: at least 1 ms pause per wagon, wagon up to 60 KiB, JSON | 45 Mbit/s |
+| 1200-byte wagon (`Wagon::PAYLOAD_SIZE`, one datagram without IP fragmentation) and compact tunnel-data packing (`Socks5TunnelData::encode`, three to four times smaller than JSON) | 70 Mbit/s, lower CPU use |
+| Real rate limiter (`protocol/rate_controller.rs::Pacer`) instead of a pause per wagon, wire ceiling 300 Mbit/s including both copies | **122 Mbit/s stable**, one and four streams in both directions |
+| Same, ceiling 450 (`YANDI_PACE_MBPS=450`) | 180 Mbit/s stable |
+| Same, ceiling 700 | Upload breaks up: the receiver, with one processing worker and about 215 Mbit/s useful throughput, cannot keep up; the kernel drops datagrams (11,000 during the experiment). |
 
-Дополнительные опыты (одна и та же сборка, потолок на проводе указан):
-- Печать каждого вагона в журнал (`println!` в горячем пути отправки и приёма) переведена на уровень «трассировка» (`tracing::trace!`): в журнале при обычной работе её больше нет, процессор и общий замок вывода не занимает.
-- Несколько читателей одного сокета (`YANDI_DATA_WORKERS=4`, по умолчанию 1): скачивание чуть быстрее (250 Мбит/с), **но отправка на выход встаёт уже при потолке 550**, где один читатель стабилен. Значит, параллельная обработка вагонов одного потока нарушает сборку поездов; пока выключено, причину надо понять отдельно.
-- Один читатель, потолок 550: 207–229 Мбит/с полезных в обе стороны, один и четыре потока, стабильно. Потолок 700: одиночные потоки 240–253 Мбит/с, но четыре одновременные отправки встают. Безопасный предел этой сборки в лаборатории — около 550 на проводе.
+Additional experiments with one build and the stated wire ceiling:
 
-**Выводы.**
-1. Потолок скорости надо задавать заранее, он должен лежать ниже возможностей получателя и канала. По умолчанию 300 на проводе, примерно 120 Мбит/с полезных (консервативно, «доставка важнее скорости»); на сильной машине и хорошем канале можно поднять до ~550 (`YANDI_PACE_MBPS=550`, лаборатория: 200–230 Мбит/с полезных). Для слабых машин потолок ставить ниже.
-2. Следующий запас скорости — приём: он идёт одним потоком (параллельные читатели пока ломают отправку, см. выше) (`netlayer/transport.rs::data_listener` держит замок шифрования и обрабатывает пакеты подряд). Разделить чтение сокета и обработку по нескольким рабочим задачам и убрать печать на каждый вагон; тогда безопасный потолок вырастет.
-3. **Потери в канале**: при 2% потерь на пути поток через выход всё равно рвётся (измерено: из 256 кусков по 16 КБ теряется один, и принимающий сервер ждёт его вечно). Это прямое следствие «отправил и забыл»: дублирование снижает потерю вагона с p до p², но не до нуля. Вариант, не нарушающий принципов: дополнительная избыточность без обратной связи, например один запасной вагон (XOR) на группу из восьми, ~12% трафика, надёжность поезда вырастает примерно в 500 раз при 2% потерь. **Решение за владельцем, не сделано.**
-4. Позже: сокращать накладные расходы на пакет (задача на каждый вагон, замок на отправку целого поезда).
+- Printing every wagon in the send and receive hot paths was changed to trace level (`tracing::trace!`). It no longer appears during normal operation and does not occupy the CPU or the shared output lock.
+- Multiple readers on one socket (`YANDI_DATA_WORKERS=4`, default 1) made downloading slightly faster (250 Mbit/s), **but exit upload stalled at a ceiling of 550**, where one reader was stable. Parallel processing of wagons in one stream therefore breaks train assembly; it remains disabled until the cause is understood.
+- One reader with ceiling 550 delivered 207–229 Mbit/s useful throughput in both directions, stably, with one and four streams. At ceiling 700, single streams reached 240–253 Mbit/s, but four concurrent uploads stalled. The safe limit for this build in the laboratory is about 550 Mbit/s on the wire.
 
-## Как повторить
-`python3 chaos/speedtest.py ЗАДЕРЖКА_МС СКОРОСТЬ(например 300mbit) МЕГАБАЙТ БИНАРНИК ПАПКА` (запускать внутри обычной оболочки, лаборатория создаётся сама); `CHAOS_NOLOG=1` выбрасывает журналы узлов.
+**Conclusions.**
+
+1. Set a speed ceiling in advance, below the receiver and link capacity. The default is 300 Mbit/s on the wire, about 120 Mbit/s useful throughput; this is conservative because delivery is more important than speed. On a strong machine and good link, the ceiling can be raised to about 550 (`YANDI_PACE_MBPS=550`; laboratory result: 200–230 Mbit/s useful). Use a lower ceiling on weak machines.
+2. The next speed reserve is on receive: it currently uses one worker. Parallel readers break sending as described above (`netlayer/transport.rs::data_listener` holds the encryption lock and processes packets serially). Separating socket reads from processing workers and removing per-wagon output could raise the safe ceiling.
+3. **Channel loss:** with 2% loss on the path, an exit stream still breaks. One of 256 chunks of 16 KiB is lost, and the receiving server waits forever. This directly follows from “send and forget”: duplication reduces a wagon's loss probability from p to p², but not to zero. A possible option that preserves the principles is additional redundancy without feedback, such as one XOR parity wagon for every eight, about 12% extra traffic and roughly 500 times greater train reliability at 2% loss. **This is an owner decision and has not been implemented.**
+4. Later work: reduce packet overhead, including one task per wagon and the lock around sending an entire train.
+
+## Reproduction
+
+```text
+python3 chaos/speedtest.py DELAY_MS SPEED (for example 300mbit) MEGABYTES BINARY FOLDER
+```
+
+Run it inside the normal shell; the laboratory is created automatically. `CHAOS_NOLOG=1` discards node logs.

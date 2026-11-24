@@ -24,7 +24,13 @@ pub const DOMAIN_CHAT: &str = "chat";
 pub const DOMAIN_GROUPS: &str = "groups_pc";
 pub const DOMAIN_SELF: &str = "mobile_self";
 pub const DOMAIN_PROXY: &str = "upstream_proxy";
+pub const DOMAIN_COMPLAINTS: &str = "complaints";
+pub const DOMAIN_FILES: &str = "files";
+/// Ключ подписи списка входных узлов: только в памяти, пока среда открыта (`bootstrap/signer.rs`).
+pub const DOMAIN_BOOTSTRAP_SIGNER: &str = "bootstrap_signer";
 
+/// Автоблокировка по умолчанию при создании среды.
+pub const DEFAULT_AUTO_LOCK_SECS: u64 = 15 * 60;
 const MARKER: &str = "migration.pending";
 const SETTINGS: &str = "settings.json";
 
@@ -35,6 +41,34 @@ pub trait Consumer: Send + Sync {
     fn migrate(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> BoxFuture<'_, Result<usize, String>>;
     fn unlock(&self, key: [u8; 32]) -> BoxFuture<'_, ()>;
     fn lock(&self) -> BoxFuture<'_, ()>;
+    /// Среда стёрта (двадцать неверных сид-фраз): удалить зашифрованные файлы этой части — ключа к ним больше нет ни у кого.
+    fn erase(&self) -> BoxFuture<'_, ()> {
+        Box::pin(async {})
+    }
+    /// Что после стирания осталось на диске (пути или описания); пусто — всё удалено. Для экстренного стирания: «стёрто» говорится только
+    /// после проверки.
+    fn leftovers(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Служебная часть: нужна узлу, чтобы работать без хозяина у экрана (ключи «Компьютера», группы ПК, жалобы). Её ключ
+    /// выводится из рабочего ключа устройства, она поднимается при старте и не запирается вместе с закрытой средой.
+    fn is_service(&self) -> bool {
+        false
+    }
+    /// Служебная часть при входе владельца: данные, лежавшие под ключом закрытой среды, переносятся под служебный ключ.
+    fn adopt(&self, _owner_key: [u8; 32], _service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+        Box::pin(async { Ok(0) })
+    }
+}
+
+/// Служебный ключ области: из рабочего ключа устройства (он доступен при старте без пароля), своя область — свой ключ.
+pub fn service_key_for(master: &[u8; 32], domain: &str) -> [u8; 32] {
+    use sha2::Sha256;
+    let mut out = [0u8; 32];
+    hkdf::Hkdf::<Sha256>::new(Some(b"yandi-service-v1"), master)
+        .expand(domain.as_bytes(), &mut out)
+        .expect("32 байта — допустимая длина");
+    out
 }
 
 #[derive(Clone, Serialize)]
@@ -73,6 +107,8 @@ pub struct ClosedEnv {
     legacy_master: Box<dyn Fn() -> Option<[u8; 32]> + Send + Sync>,
     configured: std::sync::atomic::AtomicBool,
     load_error: Mutex<Option<String>>,
+    /// растёт при каждой блокировке: вход, начатый до неё (ждёт очередь или считает парольный ключ), по завершении не открывает среду
+    lock_epoch: std::sync::atomic::AtomicU64,
 }
 
 impl ClosedEnv {
@@ -103,7 +139,26 @@ impl ClosedEnv {
             legacy_master,
             configured: std::sync::atomic::AtomicBool::new(configured),
             load_error: Mutex::new(load_error),
+            lock_epoch: std::sync::atomic::AtomicU64::new(0),
         }))
+    }
+
+    /// При старте узла: служебные части получают свой ключ из рабочего ключа устройства и работают без владельца у экрана.
+    pub async fn start_service(&self) {
+        self.start_service_skipping(&[]).await
+    }
+
+    /// То же, но части из `skip` остаются запертыми (в них после стирания осталось зашифрованное содержимое: повторный вывод того же ключа
+    /// вернул бы им старые данные, P14-8).
+    async fn start_service_skipping(&self, skip: &[String]) {
+        let Some(master) = (self.legacy_master)() else {
+            eprintln!("[closed] ⚠️  рабочий ключ устройства недоступен: служебные части ждут входа владельца");
+            return;
+        };
+        let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        for c in consumers.iter().filter(|c| c.is_service() && !skip.iter().any(|d| d == c.domain())) {
+            c.unlock(service_key_for(&master, c.domain())).await;
+        }
     }
 
     pub fn register(&self, consumer: Arc<dyn Consumer>) {
@@ -148,15 +203,18 @@ impl ClosedEnv {
     /// Фоновая проверка простоя: заперто само, если владелец давно не действовал (0 — не запирать).
     pub fn spawn_auto_lock(self: &Arc<Self>) {
         let env = self.clone();
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(10)).await;
-                let idle = {
-                    let i = env.inner.lock().unwrap_or_else(|e| e.into_inner());
-                    i.vault.is_some() && !i.auto_lock.is_zero() && i.last_activity.elapsed() >= i.auto_lock
-                };
-                if idle {
-                    env.lock().await;
+        crate::supervisor::supervise("closed-env-auto-lock", crate::supervisor::Policy::restart(), move || {
+            let env = env.clone();
+            async move {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    let idle = {
+                        let i = env.inner.lock().unwrap_or_else(|e| e.into_inner());
+                        i.vault.is_some() && !i.auto_lock.is_zero() && i.last_activity.elapsed() >= i.auto_lock
+                    };
+                    if idle {
+                        env.lock().await;
+                    }
                 }
             }
         });
@@ -167,27 +225,43 @@ impl ClosedEnv {
         i.generation == generation && i.vault.is_some()
     }
 
-    /// Первичная настройка: пароль и необязательные четыре слова. Создаёт среду, переносит данные, открывает сеанс.
+    /// Первичная настройка: пароль и сид-фраза (12 или 24 слова) (обязательны: пять неверных паролей оставляют только сид).
+    /// Создаёт среду, переносит данные, открывает сеанс.
     pub async fn setup(&self, password: String, phrase: Option<String>) -> Result<()> {
+        // поколение блокировок фиксируется ДО очереди и вычисления ключа, как в unlock: запирание во время настройки отменяет вход
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if self.configured() {
             bail!("закрытая среда уже создана");
         }
+        if phrase.as_deref().map_or(true, |p| p.trim().is_empty()) {
+            bail!("нужна сид-фраза (12 или 24 слова)");
+        }
+        // счётчик без среды остаётся только от оборванной прежней настройки (стирание убирает и его): снимаем, иначе повторная
+        // настройка навсегда упрётся в «нельзя сбрасывать счётчики существующей среды». Существующую среду abort_setup не трогает.
+        let _ = self.store.abort_setup();
         let (envelope, vault) = EnvelopeStore::create_unlocked_async(password, phrase).await?;
         self.store.prepare_attempts(&envelope)?;
         // метка ДО публикации: оборванный перенос будет доделан при следующем входе
         let marker = self.dir.join(MARKER);
-        crate::util::private_file::write_private(&marker, b"1")?;
+        if let Err(e) = crate::util::private_file::write_private(&marker, b"1") {
+            let _ = self.store.abort_setup();
+            return Err(e.into());
+        }
         if let Err(e) = self.store.save(None, &envelope, &vault) {
             let _ = std::fs::remove_file(&marker);
             let _ = self.store.abort_setup();
             return Err(e);
         }
         self.configured.store(true, std::sync::atomic::Ordering::SeqCst);
-        self.install(vault).await
+        // по умолчанию среда запирается сама через 15 минут бездействия; владелец меняет это в «Настройках»
+        let _ = self.set_auto_lock(DEFAULT_AUTO_LOCK_SECS);
+        self.install(vault, Some(epoch)).await
     }
 
     pub async fn unlock(&self, password: String) -> Result<()> {
+        // поколение блокировок фиксируется ДО ожидания очереди и вычисления ключа
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if !self.configured() {
             bail!("закрытая среда не создана");
@@ -196,19 +270,107 @@ impl ClosedEnv {
             self.touch();
             return Ok(());
         }
-        let vault = self.store.clone().unlock_async(password, false).await?;
-        self.install(vault).await
+        let vault = match self.store.clone().unlock_async(password, false).await {
+            Ok(v) => v,
+            Err(e) => return Err(self.after_failed_entry(e).await),
+        };
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
+        }
+        self.install(vault, Some(epoch)).await
+    }
+
+    /// После неудачного входа: если среда стёрта (двадцать неверных сид-фраз), она считается не созданной,
+    /// ключи у потребителей отзываются, и мастер настройки откроется заново.
+    async fn after_failed_entry(&self, e: anyhow::Error) -> anyhow::Error {
+        let erased = matches!(self.store.load(), Ok(None));
+        if erased && self.configured() {
+            self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::remove_file(self.dir.join(MARKER));
+            self.lock().await;
+            let consumers: Vec<Arc<dyn Consumer>> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+            for c in consumers {
+                c.erase().await;
+            }
+            eprintln!("[closed] ⚠️  закрытая среда стёрта: двадцать неверных сид-фраз; зашифрованные файлы потребителей удалены");
+        }
+        e
+    }
+
+    /// Экстренное стирание по команде владельца (кнопка в оболочке). Порядок: (1) сначала отозвать ВСЁ в памяти — сеанс и ключи
+    /// всех потребителей, включая служебные (группы ПК, ключи «Компьютера», жалобы), и поколение долгих операций; (2) удалить ключ данных
+    /// и метки с проверкой; (3) стереть файлы потребителей; (4) проверить, что ничего не осталось; (5) поднять служебные части заново
+    /// на ключе устройства с пустым состоянием. Любая ошибка диска возвращается владельцу, а ключи из памяти отозваны всё равно.
+    /// Личность узла (сид-фраза) и резервные копии связей не затрагиваются.
+    pub async fn panic_erase(&self) -> Result<()> {
+        let _op = self.op.lock().await;
+        self.lock_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        {
+            let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            i.vault = None;
+            i.generation += 1;
+        }
+        let consumers: Vec<Arc<dyn Consumer>> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        {
+            let _apply = self.apply.lock().await;
+            for c in &consumers {
+                c.lock().await; // и служебные тоже: ключи в памяти не должны пережить стирание
+            }
+        }
+        let mut problems: Vec<String> = Vec::new();
+        if let Err(e) = self.store.panic_wipe() {
+            problems.push(e.to_string());
+        }
+        for c in &consumers {
+            c.erase().await;
+        }
+        let mut dirty: Vec<String> = Vec::new();
+        for c in &consumers {
+            for left in c.leftovers() {
+                problems.push(format!("{}: осталось {left}", c.domain()));
+                if !dirty.iter().any(|d| d == c.domain()) {
+                    dirty.push(c.domain().to_string());
+                }
+            }
+        }
+        let gone = matches!(self.store.load(), Ok(None));
+        if gone {
+            self.configured.store(false, std::sync::atomic::Ordering::SeqCst);
+            let _ = std::fs::remove_file(self.dir.join(MARKER));
+            // служебные части узла продолжают работать на ключе устройства, но с пустым состоянием; те, где осталось зашифрованное
+            // содержимое, не поднимаются: иначе они прочитали бы старые данные тем же ключом
+            self.start_service_skipping(&dirty).await;
+        } else if !problems.iter().any(|p| p.contains("ключ данных")) {
+            problems.push("запечатанный ключ данных не удалён".to_string());
+        }
+        if problems.is_empty() {
+            eprintln!("[closed] закрытая среда стёрта по команде владельца; зашифрованные файлы потребителей удалены");
+            Ok(())
+        } else {
+            eprintln!("[closed] ⚠️ экстренное стирание НЕ завершено: {}", problems.join("; "));
+            bail!("стирание не завершено: {}", problems.join("; "))
+        }
     }
 
     /// Забыли пароль: открыть словами и сразу задать новый.
     pub async fn recover(&self, phrase: String, new_password: String) -> Result<()> {
+        let epoch = self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst);
         let _op = self.op.lock().await;
         if !self.configured() {
             bail!("закрытая среда не создана");
         }
-        let vault = self.store.clone().unlock_async(phrase, true).await?;
+        let vault = match self.store.clone().unlock_async(phrase, true).await {
+            Ok(v) => v,
+            Err(e) => return Err(self.after_failed_entry(e).await),
+        };
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("восстановление отменено: среда была заперта, пока оно выполнялось"));
+        }
         let vault = self.save_new_password(vault, new_password).await?;
-        self.install(vault).await
+        if self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != epoch {
+            return Err(anyhow!("восстановление отменено: среда была заперта, пока оно выполнялось"));
+        }
+        self.install(vault, Some(epoch)).await
     }
 
     /// Смена пароля: старый проверяется заново (с теми же счётчиками и паузами). Данные не перешифровываются: DK тот же.
@@ -233,6 +395,8 @@ impl ClosedEnv {
 
     /// Отозвать ключи сразу (синхронно для вызывающего), затем стереть состояние у потребителей.
     pub async fn lock(&self) {
+        crate::web::admin::end(); // блокировка личной среды закрывает и сеанс администратора
+        self.lock_epoch.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         {
             let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
             i.vault = None; // Drop стирает DK
@@ -241,12 +405,23 @@ impl ClosedEnv {
         let _apply = self.apply.lock().await;
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         for c in consumers {
+            // служебные части продолжают работать: они не зависят от присутствия владельца
+            if self.service_active() && c.is_service() {
+                continue;
+            }
             c.lock().await;
         }
     }
 
+    /// Есть ли рабочий ключ устройства (то есть служебные части живут отдельно от закрытой среды).
+    fn service_active(&self) -> bool {
+        (self.legacy_master)().is_some()
+    }
+
     /// Принять открытый сеанс и выдать ключи потребителям.
-    async fn install(&self, vault: NodeVault) -> Result<()> {
+    /// `epoch` — поколение блокировок, с которого начался вход: оно проверяется под тем же замком, под которым `lock` отзывает сеанс,
+    /// иначе запирание между проверкой и публикацией открывало бы среду заново без пароля.
+    async fn install(&self, vault: NodeVault, epoch: Option<u64>) -> Result<()> {
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
         let mut keys: Vec<(Arc<dyn Consumer>, Zeroizing<[u8; 32]>)> = Vec::new();
         for c in consumers {
@@ -255,6 +430,9 @@ impl ClosedEnv {
         }
         let generation = {
             let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+            if epoch.is_some_and(|e| self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != e) {
+                return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
+            }
             i.generation += 1;
             i.vault = Some(vault);
             i.last_activity = Instant::now();
@@ -270,7 +448,13 @@ impl ClosedEnv {
                     return Ok(()); // заперто, пока шёл перенос: ключи не выдаём
                 }
                 c.lock().await;
-                match c.migrate(old, **key).await {
+                // служебная часть живёт под своим ключом (из рабочего ключа устройства), а не под ключом владельца: переносим
+                // сразу в него, иначе её данные не открываются ни прежним, ни ключом владельца и перенос не завершается никогда
+                let target: [u8; 32] = match (c.is_service(), old.as_ref()) {
+                    (true, Some(m)) => service_key_for(m, c.domain()),
+                    _ => **key,
+                };
+                match c.migrate(old, target).await {
                     Ok(n) => failures += n,
                     Err(e) => {
                         failures += 1;
@@ -284,9 +468,21 @@ impl ClosedEnv {
                 eprintln!("[closed] ⚠️  не всё перенесено ({failures}); метка оставлена, перенос повторится при следующем входе");
             }
         }
+        let master = (self.legacy_master)();
         for (c, key) in &keys {
             if !self.current(generation) {
                 return Ok(());
+            }
+            if c.is_service() {
+                if let Some(m) = master.as_ref() {
+                    let service = service_key_for(m, c.domain());
+                    match c.adopt(**key, service).await {
+                        Ok(_) => {}
+                        Err(e) => eprintln!("[closed] перенос служебных данных «{}» не удался: {e}", c.domain()),
+                    }
+                    c.unlock(service).await;
+                    continue;
+                }
             }
             c.unlock(**key).await;
         }
@@ -309,6 +505,9 @@ mod tests {
         migrated_with: Mutex<Vec<(Option<[u8; 32]>, [u8; 32])>>,
         fail_migration: AtomicBool,
         unlock_delay_ms: AtomicU64,
+        erased: AtomicBool,
+        service: AtomicBool,
+        adopted: Mutex<Vec<([u8; 32], [u8; 32])>>,
     }
 
     impl Mock {
@@ -319,6 +518,9 @@ mod tests {
                 migrated_with: Mutex::new(Vec::new()),
                 fail_migration: AtomicBool::new(false),
                 unlock_delay_ms: AtomicU64::new(0),
+                erased: AtomicBool::new(false),
+                service: AtomicBool::new(false),
+                adopted: Mutex::new(Vec::new()),
             })
         }
         fn key(&self) -> Option<[u8; 32]> {
@@ -350,6 +552,20 @@ mod tests {
                 *self.key.lock().unwrap() = None;
             })
         }
+        fn erase(&self) -> BoxFuture<'_, ()> {
+            Box::pin(async move {
+                self.erased.store(true, Ordering::SeqCst);
+            })
+        }
+        fn is_service(&self) -> bool {
+            self.service.load(Ordering::SeqCst)
+        }
+        fn adopt(&self, owner_key: [u8; 32], service_key: [u8; 32]) -> BoxFuture<'_, Result<usize, String>> {
+            Box::pin(async move {
+                self.adopted.lock().unwrap().push((owner_key, service_key));
+                Ok(0)
+            })
+        }
     }
 
     fn env(base: &Path, legacy: Option<[u8; 32]>) -> (Arc<ClosedEnv>, Arc<Mock>, Arc<Mock>) {
@@ -360,6 +576,70 @@ mod tests {
         (env, a, b)
     }
 
+    /// Блокировка, пришедшая во время вычисления ключа входа, отменяет этот вход: он не открывает среду заново.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lock_during_the_key_derivation_cancels_the_pending_unlock() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
+        e.lock().await;
+        assert!(!e.unlocked());
+        let e2 = e.clone();
+        let pending = tokio::task::spawn(async move { e2.unlock("owner password".into()).await });
+        tokio::time::sleep(Duration::from_millis(100)).await; // вход уже в очереди/вычислении
+        e.lock().await;
+        let r = pending.await.unwrap();
+        assert!(r.is_err(), "вход, начатый до блокировки, отменён");
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+        e.unlock("owner password".into()).await.expect("новый вход проходит");
+        assert!(e.unlocked());
+    }
+
+    /// Блокировка между проверкой поколения и публикацией сеанса: install сам сверяет поколение и не открывает среду заново.
+    #[tokio::test]
+    async fn install_with_a_stale_epoch_does_not_reopen_a_locked_environment() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
+        e.lock().await;
+        let vault = e.store.clone().unlock_async("owner password".into(), false).await.unwrap();
+        let stale = e.lock_epoch.load(Ordering::SeqCst);
+        e.lock().await; // запирание, случившееся уже после проверки поколения вызывающим
+        assert!(e.install(vault, Some(stale)).await.is_err());
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+    }
+
+    /// Запирание во время первичной настройки отменяет открытие сеанса: среда создана, но остаётся запертой до пароля.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn a_lock_during_the_first_setup_does_not_open_the_environment() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        let e2 = e.clone();
+        let pending = tokio::task::spawn(async move {
+            e2.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await
+        });
+        tokio::time::sleep(Duration::from_millis(100)).await; // настройка уже зафиксировала поколение и считает ключ
+        e.lock().await;
+        let r = pending.await.unwrap();
+        assert!(r.is_err(), "настройка, начатая до блокировки, не открывает среду");
+        assert!(!e.unlocked() && chat.key().is_none(), "среда осталась запертой");
+        e.unlock("owner password".into()).await.expect("созданная среда открывается паролем");
+    }
+
+    #[tokio::test]
+    async fn an_interrupted_first_setup_can_be_repeated() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, _chat, _groups) = env(base.path(), None);
+        // метку записать нельзя (на её месте каталог): настройка обрывается уже после создания счётчика
+        let marker = base.path().join("closed").join(MARKER);
+        std::fs::create_dir_all(&marker).unwrap();
+        let _ = e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await;
+        assert!(!e.configured(), "обрыв: среды нет");
+        std::fs::remove_dir_all(&marker).unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.expect("повторная настройка проходит");
+        assert!(e.configured() && e.unlocked());
+    }
+
     #[tokio::test]
     async fn setup_lock_restart_unlock_and_password_change() {
         let base = tempfile::tempdir().unwrap();
@@ -367,7 +647,7 @@ mod tests {
         assert!(!e.configured() && !e.unlocked());
         assert!(e.unlock("whatever1".into()).await.is_err(), "не создано");
 
-        e.setup("owner password".into(), Some("alpha1 bravo2 charlie3 delta4".into())).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         assert!(e.configured() && e.unlocked());
         let (kc, kg) = (chat.key().unwrap(), groups.key().unwrap());
         assert_ne!(kc, kg, "области разделены");
@@ -400,7 +680,7 @@ mod tests {
 
         // забыли пароль: слова + новый пароль
         e.lock().await;
-        e.recover("alpha1 bravo2 charlie3 delta4".into(), "recovered pass".into()).await.unwrap();
+        e.recover("legal winner thank year wave sausage worth useful legal winner thank yellow".into(), "recovered pass".into()).await.unwrap();
         assert_eq!(groups.key().unwrap(), kg);
         e.lock().await;
         e.unlock("recovered pass".into()).await.unwrap();
@@ -408,11 +688,58 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn service_parts_run_without_the_owner_and_survive_a_lock() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, groups) = env(base.path(), Some([9; 32]));
+        groups.service.store(true, Ordering::SeqCst);
+        // старт узла: служебная часть поднимается сама, личная — заперта
+        e.start_service().await;
+        let svc = groups.key().expect("служебная часть работает без владельца");
+        assert!(chat.key().is_none(), "личная часть ждёт пароль");
+        // владелец вошёл: личная открыта, служебная перенесена под свой ключ и осталась на нём
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
+        assert!(chat.key().is_some());
+        assert_eq!(groups.key().unwrap(), svc, "служебный ключ не меняется от входа владельца");
+        assert_eq!(groups.adopted.lock().unwrap().len(), 1, "данные под ключом среды переносятся под служебный ключ");
+        // блокировка запирает личное, служебное не трогает
+        e.lock().await;
+        assert!(chat.key().is_none());
+        assert_eq!(groups.key().unwrap(), svc);
+    }
+
+    #[tokio::test]
+    async fn twenty_wrong_phrases_erase_the_environment_and_it_can_be_created_again() {
+        let base = tempfile::tempdir().unwrap();
+        let (e, chat, _groups) = env(base.path(), None);
+        let phrase = "legal winner thank year wave sausage worth useful legal winner thank yellow";
+        e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        e.lock().await;
+        for _ in 0..crate::node_vault::store::gate::MAX_PHRASE_FAILURES {
+            // пауза растёт после четвёртой попытки; для теста подменяем её
+            let c = base.path().join("closed").join("attempts.json");
+            if let Ok(b) = std::fs::read(&c) {
+                if let Ok(mut v) = serde_json::from_slice::<serde_json::Value>(&b) {
+                    if v["next_ms"].as_u64().unwrap_or(0) > 0 {
+                        v["next_ms"] = serde_json::json!(1);
+                        std::fs::write(&c, serde_json::to_vec(&v).unwrap()).unwrap();
+                    }
+                }
+            }
+            assert!(e.recover("abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(), "new password".into()).await.is_err());
+        }
+        assert!(!e.configured(), "после стирания среда не создана");
+        assert!(chat.key().is_none());
+        assert!(chat.erased.load(Ordering::SeqCst), "потребителям велено удалить свои зашифрованные файлы");
+        e.setup("owner password".into(), Some(phrase.into())).await.unwrap();
+        assert!(e.unlocked());
+    }
+
+    #[tokio::test]
     async fn unfinished_migration_is_retried_and_lock_wins_over_late_unlock() {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), Some([1; 32]));
         chat.fail_migration.store(true, Ordering::SeqCst);
-        e.setup("owner password".into(), None).await.unwrap();
+        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
         assert!(e.status().migration_pending, "метка осталась");
         e.lock().await;
         chat.fail_migration.store(false, Ordering::SeqCst);
@@ -425,7 +752,7 @@ mod tests {
         chat.unlock_delay_ms.store(1500, Ordering::SeqCst);
         let before = e.status().generation;
         let late = e.clone();
-        let unlocking = tokio::spawn(async move { late.unlock("owner password".into()).await });
+        let unlocking = tokio::task::spawn(async move { late.unlock("owner password".into()).await });
         // ждём момента, когда сеанс уже принят и ключи выдаются (с задержкой), и только тогда блокируем
         while e.status().generation == before {
             tokio::time::sleep(Duration::from_millis(20)).await;

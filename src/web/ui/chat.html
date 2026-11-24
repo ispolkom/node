@@ -21,7 +21,6 @@
                     <a href="/chat" class="nav-link active">Чат</a>
                     <a href="/groups" class="nav-link">Группы</a>
                     <a href="/gateways" class="nav-link">Шлюзы</a>
-                    <a href="/relay" class="nav-link">Relay</a>
                     <a href="/settings" class="nav-link">Настройки</a>
                 </nav>
                 <div style="display: flex; align-items: center; gap: 1rem;">
@@ -265,7 +264,7 @@
         function showConfirm(title, message, onConfirm, onCancel) { showModal(title, message, onConfirm, onCancel, 'Да', 'Нет'); }
         function showAlert(title, message) { showModal(title, message, null, false, 'OK', null); }
         window.alert = function(message) { showAlert('Уведомление', message); };
-        window.confirm = function(message) { showConfirm('Подтверждение', message, function() {}, function() {}); return true; };
+        // confirm не подменяется: код ниже ждёт синхронный ответ, а асинхронное окно сразу разрешало действие (P7-22)
 
         // === Логика чата ===
         var currentContactId = null, currentContactShortId = null, currentContactName = null, myNodeId = null, autoRefreshInterval = null, pendingAttachment = null, lastMessageCount = 0, lastIncomingCount = 0;
@@ -310,7 +309,7 @@
             if (contactsInitialized) {
                 contacts.forEach(function(c) {
                     if (c.online && !onlineContacts.has(c.short_id)) {
-                        if (window.playOnlineSound) window.playOnlineSound();
+                        // Group activity has its own icq-online.mp3 alert.
                     }
                 });
             }

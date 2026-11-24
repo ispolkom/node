@@ -17,7 +17,6 @@
                     <a href="/chat" class="nav-link">Чат</a>
                     <a href="/groups" class="nav-link">Группы</a>
                     <a href="/gateways" class="nav-link">Шлюзы</a>
-                    <a href="/relay" class="nav-link">Relay</a>
                     <a href="/settings" class="nav-link">Настройки</a>
                 </nav>
                 <div style="display: flex; align-items: center; gap: 1rem;">
@@ -246,11 +245,7 @@
             showAlert('Уведомление', message);
         };
         
-        window.confirm = function(message) {
-            console.log('❓ Overridden confirm:', message);
-            showConfirm('Подтверждение', message, () => {}, () => {});
-            return true;
-        };
+        // confirm НЕ подменяется: вызывающий код ждёт синхронный ответ (P7-22)
 
         console.log('✅ Alert/Confirm overridden');
 

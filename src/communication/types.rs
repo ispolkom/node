@@ -28,6 +28,36 @@ pub struct ChatMessage {
     pub edit_timestamp: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attachment: Option<FileAttachment>,
+    /// Ответ-цитата: на какое сообщение отвечают (якорь) и выдержка его текста
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<ReplyRef>,
+}
+
+/// Заглушка сообщения удалённого пользователя (решение владельца 2026-10-21): клиенты показывают вместо неё
+/// «Сообщение удалено вместе с пользователем» на своём языке — и в самом сообщении, и в цитатах.
+pub const TOMBSTONE: &str = "[[yandi:deleted-with-user]]";
+
+/// Ссылка на сообщение, на которое отвечают. `msg_id` — полный HashId в hex (якорь), `text` — выдержка для показа.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplyRef {
+    pub msg_id: String,
+    pub text: String,
+}
+
+impl ReplyRef {
+    pub const MAX_TEXT_CHARS: usize = 200;
+
+    /// Привести к допустимому виду: идентификатор — 64 hex-символа, выдержка — не длиннее лимита.
+    pub fn sanitized(self) -> Option<ReplyRef> {
+        let id = self.msg_id.trim().to_ascii_lowercase();
+        if id.len() != 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return None;
+        }
+        Some(ReplyRef {
+            msg_id: id,
+            text: self.text.chars().take(Self::MAX_TEXT_CHARS).collect(),
+        })
+    }
 }
 
 /// Файл прикрепленный к сообщению
@@ -110,6 +140,7 @@ impl ChatMessage {
             edited: false,
             edit_timestamp: None,
             attachment: None,
+            reply_to: None,
         }
     }
 

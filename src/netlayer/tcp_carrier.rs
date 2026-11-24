@@ -29,6 +29,10 @@ use tokio::sync::mpsc;
 
 const FRAME_PORTS: u8 = 1;
 const FRAME_DGRAM: u8 = 2;
+/// Срок на первый кадр после TLS, простой между кадрами и дочитывание начатого кадра (секунды).
+const FIRST_FRAME_SECS: u64 = if cfg!(test) { 1 } else { 15 };
+const IDLE_SECS: u64 = 600;
+const BODY_SECS: u64 = if cfg!(test) { 1 } else { 30 };
 const MAX_FRAME: usize = 70_000;
 const QUEUE: usize = 2048;
 pub const MAX_CONNS: usize = 256;
@@ -67,7 +71,14 @@ struct Conn {
     alive: AtomicBool,
     /// порт, на который мы стучались (для входящих — не задан)
     dialed: Option<u16>,
+    /// порты-источники, объявленные в кадрах этого соединения: их число ограничено (иначе один клиент занимает тысячи маршрутов)
+    claimed: Mutex<std::collections::HashSet<u16>>,
 }
+
+/// Сколько разных портов-источников принимается от одного TCP-соединения.
+const MAX_SRC_PORTS_PER_CONN: usize = 32;
+/// Жёсткий предел таблицы «получали по TCP».
+const MAX_TCP_RX: usize = 4096;
 
 struct Health {
     first_unanswered: Option<Instant>,
@@ -287,7 +298,7 @@ impl Carrier {
         let cfg = crate::netlayer::tls_cert::build_client_config_insecure().map_err(|e| io::Error::other(e.to_string()))?;
         let name = rustls::pki_types::ServerName::try_from("localhost").map_err(|e| io::Error::other(e.to_string()))?;
         let tls = tokio::time::timeout(Duration::from_secs(8), tokio_rustls::TlsConnector::from(cfg).connect(name, tcp)).await.map_err(|_| io::Error::other("tls timeout"))??;
-        println!("[carrier] установлено TCP-соединение с {to}");
+        println!("[carrier] установлено TCP-соединение с {}", crate::util::logsafe::a(&to));
         self.run_conn(tls, to.ip(), Some(to.port())).await;
         Ok(())
     }
@@ -310,7 +321,7 @@ impl Carrier {
         let cfg = crate::netlayer::tls_cert::build_server_config(&identity).map_err(|e| io::Error::other(e.to_string()))?;
         let tls = tokio::time::timeout(Duration::from_secs(10), tokio_rustls::TlsAcceptor::from(cfg).accept(tcp)).await.map_err(|_| io::Error::other("tls timeout"))??;
         drop(_hs);
-        println!("[carrier] принято TCP-соединение от {}", peer.ip());
+        println!("[carrier] принято TCP-соединение от {}", crate::util::logsafe::a(&peer.ip()));
         self.run_conn(tls, peer.ip(), None).await;
         Ok(())
     }
@@ -320,7 +331,7 @@ impl Carrier {
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + 'static,
     {
         let (tx, mut rx) = mpsc::channel::<Vec<u8>>(QUEUE);
-        let conn = Arc::new(Conn { id: self.next_id.fetch_add(1, Ordering::Relaxed), tx, remote_ip, alive: AtomicBool::new(true), dialed });
+        let conn = Arc::new(Conn { id: self.next_id.fetch_add(1, Ordering::Relaxed), tx, remote_ip, alive: AtomicBool::new(true), dialed, claimed: Default::default() });
         self.lock().conns.push(conn.clone());
         let (mut rd, mut wr) = tokio::io::split(stream);
         // сразу сообщаем свои порты
@@ -342,24 +353,42 @@ impl Carrier {
             g.conns.retain(|c| c.id != conn.id);
         }
         writer.abort();
-        println!("[carrier] TCP-соединение с {remote_ip} закрыто");
+        println!("[carrier] TCP-соединение с {} закрыто", crate::util::logsafe::a(&remote_ip));
     }
 
     async fn read_loop<R: tokio::io::AsyncRead + Unpin>(&self, rd: &mut R, conn: &Arc<Conn>) -> io::Result<()> {
+        let mut first = true;
         loop {
             let mut len = [0u8; 4];
-            rd.read_exact(&mut len).await?;
+            // обе стороны сразу после TLS шлют кадр портов: молчащий клиент не держит слот дольше FIRST_FRAME_SECS;
+            // дальше — предел простоя, а начатый кадр обязан дойти целиком за BODY_SECS
+            let wait = Duration::from_secs(if first { FIRST_FRAME_SECS } else { IDLE_SECS });
+            tokio::time::timeout(wait, rd.read_exact(&mut len)).await.map_err(|_| io::Error::other("carrier read timeout"))??;
+            first = false;
             let n = u32::from_be_bytes(len) as usize;
             if n == 0 || n > MAX_FRAME {
                 return Err(io::Error::other("bad frame length"));
             }
             let mut body = vec![0u8; n];
-            rd.read_exact(&mut body).await?;
+            tokio::time::timeout(Duration::from_secs(BODY_SECS), rd.read_exact(&mut body)).await.map_err(|_| io::Error::other("carrier frame timeout"))??;
             match body[0] {
                 FRAME_PORTS => {
                     let cnt = *body.get(1).unwrap_or(&0) as usize;
                     if body.len() != 2 + cnt * 2 || cnt > 16 {
                         return Err(io::Error::other("bad ports frame"));
+                    }
+                    // та же квота source-портов соединения, что и для датаграмм: объявления не обходят её
+                    {
+                        let mut claimed = conn.claimed.lock().unwrap_or_else(|e| e.into_inner());
+                        for i in 0..cnt {
+                            let p = u16::from_be_bytes([body[2 + 2 * i], body[3 + 2 * i]]);
+                            if !claimed.contains(&p) {
+                                if claimed.len() >= MAX_SRC_PORTS_PER_CONN {
+                                    return Err(io::Error::other("too many source ports on one connection"));
+                                }
+                                claimed.insert(p);
+                            }
+                        }
                     }
                     let mut g = self.lock();
                     for i in 0..cnt {
@@ -376,18 +405,33 @@ impl Carrier {
                     let dst = u16::from_be_bytes([body[1], body[2]]);
                     let src = u16::from_be_bytes([body[3], body[4]]);
                     let from = SocketAddr::new(conn.remote_ip, src);
+                    // состояние (маршрут, «получали по TCP») меняется только для кадра, у которого есть получатель: пустой
+                    // неаутентифицированный кадр с выдуманным dst ничего не занимает
                     let tx = {
                         let mut g = self.lock();
-                        Self::claim_route(&mut g, from, conn);
-                        g.tcp_rx.insert(from, Instant::now());
-                        if g.tcp_rx.len() > 4096 {
-                            g.tcp_rx.retain(|_, t| t.elapsed() < TCP_RX_FRESH);
-                        }
                         g.sockets.get(&dst).cloned()
                     };
-                    if let Some(tx) = tx {
-                        let _ = tx.try_send((body[5..].to_vec(), from));
+                    let Some(tx) = tx else { continue };
+                    {
+                        let mut claimed = conn.claimed.lock().unwrap_or_else(|e| e.into_inner());
+                        if !claimed.contains(&src) {
+                            if claimed.len() >= MAX_SRC_PORTS_PER_CONN {
+                                return Err(io::Error::other("too many source ports on one connection"));
+                            }
+                            claimed.insert(src);
+                        }
                     }
+                    {
+                        let mut g = self.lock();
+                        Self::claim_route(&mut g, from, conn);
+                        if g.tcp_rx.len() >= MAX_TCP_RX {
+                            g.tcp_rx.retain(|_, t| t.elapsed() < TCP_RX_FRESH);
+                        }
+                        if g.tcp_rx.len() < MAX_TCP_RX || g.tcp_rx.contains_key(&from) {
+                            g.tcp_rx.insert(from, Instant::now());
+                        }
+                    }
+                    let _ = tx.try_send((body[5..].to_vec(), from));
                 }
                 _ => return Err(io::Error::other("unknown frame")),
             }
@@ -536,7 +580,7 @@ mod tests {
     fn a_live_route_is_not_stolen_by_another_connection_but_a_dead_one_is_replaced() {
         let mk = |id: u64| {
             let (tx, _rx) = mpsc::channel::<Vec<u8>>(1);
-            Arc::new(Conn { id, tx, remote_ip: "198.51.100.1".parse().unwrap(), alive: AtomicBool::new(true), dialed: None })
+            Arc::new(Conn { id, tx, remote_ip: "198.51.100.1".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() })
         };
         let (a, b) = (mk(1), mk(2));
         let addr: SocketAddr = "198.51.100.1:10000".parse().unwrap();
@@ -551,8 +595,97 @@ mod tests {
 
     use super::*;
 
+    /// Кадры без получателя ничего не занимают; источников у одного соединения ограниченное число.
+    #[tokio::test]
+    async fn frames_without_a_recipient_claim_nothing_and_source_ports_are_capped() {
+        let (carrier, sock, _addr) = node(Mode::Auto, "cc44cc44").await;
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let conn = Arc::new(Conn { id: 7, tx, remote_ip: "198.51.100.9".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
+        let known_dst = sock.local_addr().unwrap().port();
+        let frame = |dst: u16, src: u16| {
+            let mut f = vec![FRAME_DGRAM];
+            f.extend_from_slice(&dst.to_be_bytes());
+            f.extend_from_slice(&src.to_be_bytes());
+            let mut out = (f.len() as u32).to_be_bytes().to_vec();
+            out.extend_from_slice(&f);
+            out
+        };
+        // 300 кадров на несуществующий порт с разными источниками
+        let mut bytes = Vec::new();
+        for src in 1..=300u16 {
+            bytes.extend(frame(1, src));
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.is_err(), "поток кончился");
+        {
+            let g = carrier.lock();
+            assert!(g.by_dest.is_empty() && g.tcp_rx.is_empty(), "маршруты и таблица приёма не заняты");
+        }
+        // кадры на существующий порт: источников принимается не больше предела, потом соединение закрывается
+        let mut bytes = Vec::new();
+        for src in 1..=(MAX_SRC_PORTS_PER_CONN as u16 + 5) {
+            bytes.extend(frame(known_dst, src));
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.unwrap_err().to_string().contains("too many source ports"));
+        assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN);
+    }
+
+    /// Молчащий после TLS клиент и обрыв посреди кадра не держат слот соединения бесконечно.
+    #[tokio::test]
+    async fn a_silent_client_and_a_half_sent_frame_are_dropped_by_deadline() {
+        let (carrier, _sock, _addr) = node(Mode::Auto, "ee66ee66").await;
+        let mk = || {
+            let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+            Arc::new(Conn { id: 9, tx, remote_ip: "198.51.100.7".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() })
+        };
+        // клиент ничего не шлёт
+        let (_keep_open, mut silent) = tokio::io::duplex(64);
+        let r = carrier.read_loop(&mut silent, &mk()).await;
+        assert!(r.unwrap_err().to_string().contains("carrier read timeout"));
+        // клиент прислал длину кадра и замолчал
+        let (mut client, mut server) = tokio::io::duplex(64);
+        tokio::io::AsyncWriteExt::write_all(&mut client, &100u32.to_be_bytes()).await.unwrap();
+        let r = carrier.read_loop(&mut server, &mk()).await;
+        assert!(r.unwrap_err().to_string().contains("carrier frame timeout"));
+    }
+
+    /// Кадры FRAME_PORTS не обходят квоту source-портов соединения.
+    #[tokio::test]
+    async fn ports_frames_are_capped_by_the_same_connection_quota() {
+        let (carrier, _sock, _addr) = node(Mode::Auto, "dd55dd55").await;
+        let (tx, _rx) = mpsc::channel::<Vec<u8>>(8);
+        let conn = Arc::new(Conn { id: 9, tx, remote_ip: "198.51.100.10".parse().unwrap(), alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
+        let mut bytes = Vec::new();
+        for chunk in 0..8u16 {
+            let mut f = vec![FRAME_PORTS, 16];
+            for i in 0..16u16 {
+                f.extend_from_slice(&(1000 + chunk * 16 + i).to_be_bytes());
+            }
+            bytes.extend_from_slice(&(f.len() as u32).to_be_bytes());
+            bytes.extend_from_slice(&f);
+        }
+        let mut rd = std::io::Cursor::new(bytes);
+        let r = carrier.read_loop(&mut rd, &conn).await;
+        assert!(r.unwrap_err().to_string().contains("too many source ports"));
+        assert!(carrier.lock().by_dest.len() <= MAX_SRC_PORTS_PER_CONN, "маршрутов занято не больше квоты");
+    }
+
     async fn node(mode: Mode, name: &str) -> (Arc<Carrier>, Arc<CSocket>, SocketAddr) {
-        let udp = Arc::new(UdpSocket::bind("127.0.0.1:0").await.unwrap());
+        // порт UDP должен быть пригоден и для TCP (на Windows часть портов закрыта правилами: WSAEACCES 10013) — берём другой
+        let udp = {
+            let mut tries = 0;
+            loop {
+                let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+                let port = udp.local_addr().unwrap().port();
+                if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() || tries >= 100 {
+                    break Arc::new(udp);
+                }
+                tries += 1;
+            }
+        };
         let addr = udp.local_addr().unwrap();
         let carrier = Arc::new(Carrier { inner: Mutex::new(Inner::default()), mode, node_hex: name.to_string(), next_id: AtomicU64::new(1), handshakes: Default::default() });
         let sock = CSocket::new(udp, carrier.clone()).unwrap();
@@ -625,7 +758,7 @@ mod tests {
             let mut g = ca.lock();
             g.health.insert(ip, Health { first_unanswered: Some(Instant::now() - UNHEALTHY_AFTER - Duration::from_secs(1)), unanswered: 3, last_udp_probe: Instant::now() });
             let (tx, _rx) = mpsc::channel(8);
-            let c = Arc::new(Conn { id: 1, tx, remote_ip: ip, alive: AtomicBool::new(true), dialed: None });
+            let c = Arc::new(Conn { id: 1, tx, remote_ip: ip, alive: AtomicBool::new(true), dialed: None, claimed: Default::default() });
             g.by_dest.insert(dest, c);
         }
         assert!(matches!(ca.route(dest), Route::Tcp(_)), "no replies over UDP: use the TCP connection");

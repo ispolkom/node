@@ -1,4 +1,6 @@
+import 'dart:typed_data';
 import 'dart:convert';
+import 'package:cryptography/cryptography.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:yandi_mobile/crypto/group_crypto.dart';
 import 'package:yandi_mobile/models/group.dart';
@@ -50,8 +52,14 @@ class _Api implements GroupApi {
   Future<List<Map<String, dynamic>>> openGroups() async => n.members.containsKey(dev)
       ? []
       : [{'id': n.gid, 'name': 'Тест', 'topic': 'тема', 'kind': 'invite', 'members': n.members.length, 'requested': n.reqs.any((r) => r['dev'] == dev)}];
+  int autoCleanDays = 0;
   @override
-  Future<void> settings(String gid, {String? name, String? topic, String? about}) async {
+  Future<void> autoClean(String gid, int days) async {
+    if (me['role'] != 'owner') throw const GroupApiError(403, 'автоочистку настраивает владелец группы');
+    autoCleanDays = days;
+  }
+  @override
+  Future<void> settings(String gid, {String? name, String? topic, String? about, String? logoB64}) async {
     if (me['role'] != 'owner' && me['role'] != 'admin') throw const GroupApiError(403, 'настройки группы меняют владелец и админ');
     if (name != null && name.trim().isEmpty) throw const GroupApiError(400, 'нужно название группы');
     if (name != null) n.name = name;
@@ -88,7 +96,7 @@ class _Api implements GroupApi {
     n.reqs.removeWhere((r) => r['id'] == rid);
   }
   @override
-  Future<String> create(String name, String topic, String about, String kind) async => n.gid;
+  Future<String> create(String name, String topic, String about, String kind, {String? logoB64}) async => n.gid;
   @override
   Future<String> join(String gid, {String? inviteCode, String? memberPub}) async {
     if (inviteCode != 'AAAA-BBBB-CCCC') throw const GroupApiError(403, 'неверное приглашение');
@@ -100,10 +108,24 @@ class _Api implements GroupApi {
   Future<void> leave(String gid) async { n.members.remove(dev); n.rekeyNeeded = true; }
   @override
   Future<Map<String, dynamic>> members(String gid) async => {
-        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
+        'members': [for (final m in n.members.values) {'alias': m['alias'], 'role': m['role'], 'muted': m['muted'], 'member_pub': m['pub'], 'nick': m['nick'], 'proof': m['proof'], 'avatar': (m['avatar'] as String?)?.isEmpty ?? true ? null : m['avatar'], 'has_key': n.boxes[n.epoch]?.containsKey(m['alias']) ?? false}]
       };
   @override
   Future<void> setPub(String gid, String memberPub) async => me['pub'] = memberPub;
+  @override
+  Future<void> setCard(String gid, String nick, String avatarB64) async {
+    me['nick'] = nick.isEmpty ? null : nick;
+    me['avatar'] = avatarB64;
+  }
+  @override
+  Future<void> setProof(String gid, String proofB64) async => me['proof'] = proofB64.isEmpty ? null : proofB64;
+  @override
+  Future<List<int>?> cardAvatar(String gid, String alias) async {
+    for (final m in n.members.values) {
+      if (m['alias'] == alias && (m['avatar'] as String?)?.isNotEmpty == true) return base64.decode(m['avatar'] as String);
+    }
+    return null;
+  }
   @override
   Future<Map<String, dynamic>> keys(String gid) async => {
         'epoch': n.epoch,
@@ -159,6 +181,8 @@ class _Api implements GroupApi {
     return n.files[fileId]![idx]!;
   }
   @override
+  Future<Uint8List?> logo(String gid) async => null;
+  @override
   Future<void> fileDelete(String gid, String fileId) async { me; n.files.remove(fileId); n.doneFiles.remove(fileId); }
 }
 
@@ -181,6 +205,27 @@ void main() {
     await owner.sync();                 // владелец видит ключ Боба и раздаёт группу
     await bob.syncAndAnnounce();        // Боб забирает ключ, пишет имя
   }
+
+  test('group activity sound ignores archive and own entries, signals fresh messages and events once', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.send(node.gid, GroupKind.text, {'t': 'archive'});
+    final events = <String>[];
+    final observed = GroupService(node.as('bob'), bobStore, onActivity: events.add);
+    await observed.sync();
+    expect(events, isEmpty, reason: 'first synchronization is an archive baseline');
+    await owner.send(node.gid, GroupKind.text, {'t': 'new'});
+    await observed.sync();
+    expect(events, [node.gid]);
+    await observed.sync();
+    expect(events, [node.gid], reason: 'repeated polling is silent');
+    await observed.send(node.gid, GroupKind.text, {'t': 'own'});
+    await observed.sync();
+    expect(events, [node.gid], reason: 'own entries are silent');
+    await owner.setRules(node.gid, const GroupRules({GroupKind.image}));
+    await observed.sync();
+    expect(events, [node.gid, node.gid], reason: 'remote group events have a group sound');
+  });
 
   test('кривые данные узла и подлинные записи с неверными типами не ломают ленту', () async {
     await owner.sync();
@@ -263,6 +308,17 @@ void main() {
     expect(bob.hasProblem(node.gid), isTrue);
   });
 
+  test('подмена ключа участника узлом: групповой ключ под чужим ключом не выдаётся', () async {
+    await owner.sync();
+    await bobJoins();                       // ключ Боба закреплён у владельца при первой раздаче
+    // узел подсовывает чужой ключ вместо ключа Боба и требует нового поколения
+    node.members.values.firstWhere((m) => m['alias'] != 'Хозяин-1')['pub'] = base64.encode(List.filled(32, 9));
+    node.rekeyNeeded = true;
+    await owner.sync();
+    expect(owner.keyConflicts(node.gid), isNotEmpty);
+    expect(node.boxes.values.every((b) => !b.containsValue(base64.encode(List.filled(32, 9)))), isTrue);
+  });
+
   test('смена ключа после выхода участника: оставшиеся читают новое, вышедший — нет', () async {
     await owner.sync();
     await bobJoins();
@@ -311,6 +367,9 @@ void main() {
     final out = File('${dir.path}/out.bin');
     await GroupFiles(node.as('bob')).download(node.gid, d, out);
     expect(out.readAsBytesSync(), src.readAsBytesSync());
+    // описание с числом кусков, не соответствующим размеру, отвергается до первого запроса
+    final fake = {...d, 'c': 5000000, 'z': 1};
+    await expectLater(GroupFiles(node.as('bob')).download(node.gid, fake, File('${dir.path}/fake.bin')), throwsA(isA<FormatException>()));
     // чужой (не участник) не скачивает
     await expectLater(GroupFiles(node.as('eve')).download(node.gid, d, File('${dir.path}/e.bin')), throwsA(anything));
     // подмена куска узлом
@@ -344,23 +403,84 @@ void main() {
     expect(owner.byId(gid)!.epoch, 1);
   });
 
-  test('группа удалена на узле: пропадает из списка, помечается «удалена», локальные данные чистятся по команде', () async {
+  test('переключение на другой узел не стирает группы прежнего узла: «известные группы» ведутся по узлам', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    await a.syncAndAnnounce();
+    await a.send(node.gid, GroupKind.text, {'t': 'привет'});
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull);
+    // телефон переключился на узел B, где этих групп нет (список пуст)
+    final b = GroupService(FakeNode('other').as('bob'), bobStore, nodeKey: 'B');
+    await b.sync();
+    expect(b.groups, isEmpty);
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история группы узла A на месте');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи группы узла A на месте');
+  });
+
+  test('снятый с работы сервис (узел сменился) не стирает группы, даже если его API уже смотрит на другой узел', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    await a.syncAndAnnounce();
+    await a.send(node.gid, GroupKind.text, {'t': 'привет'});
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull);
+    a.retire();
+    node.members.remove('bob'); // «узел» (уже другой) этих групп не показывает
+    await a.sync();
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история на месте');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи на месте');
+  });
+
+  test('снятый сервис не принимает список групп и не пишет «известные группы» нового узла', () async {
+    final a = GroupService(node.as('bob'), bobStore, nodeKey: 'A');
+    owner = GroupService(node.as('owner'), ownerStore);
+    await owner.sync();
+    await a.join(node.gid, inviteCode: 'AAAA-BBBB-CCCC', displayName: 'Боб');
+    await owner.sync();
+    final fresh = MemoryGroupStore();
+    final old = GroupService(node.as('bob'), fresh, nodeKey: 'OLD');
+    old.retire();
+    await old.sync();
+    expect(fresh.kv.containsKey('grp_known_OLD'), isFalse, reason: 'снятый сервис ничего не записал о чужом узле');
+    expect(old.groups, isEmpty);
+  });
+
+  test('группа пропала с узла: остаётся заглушкой и данные целы 30 дней (узел могли потерять и восстановить); потом стираются сами', () async {
+    var t = DateTime(2026, 10, 16, 12);
+    bob.clock = () => t;
     await owner.sync();
     await bobJoins();
     await bob.send(node.gid, GroupKind.text, {'t': 'привет'});
     await bob.sync();                                 // своя запись вернулась из журнала
     expect(bob.gone, isEmpty);
-    node.members.remove('bob');                       // узел группу для Боба больше не показывает
+    expect(bobStore.log[node.gid], isNotNull);
+    final savedBob = node.members.remove('bob')!;       // узел группу для Боба больше не показывает
     await bob.sync();
     expect(bob.groups, isEmpty);
-    expect(bob.gone.map((g) => g.$1), [node.gid]);
-    expect(bobStore.log[node.gid], isNotNull, reason: 'история пока на месте');
-    await bob.forgetLocal(node.gid);
-    expect(bob.gone, isEmpty);
-    expect(bobStore.log[node.gid], isNull);
-    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty, reason: 'ключи группы стёрты');
+    expect(bob.gone.map((g) => g.$1), [node.gid], reason: 'заглушка «пропала на узле»: единственная копия ключей и ленты — на телефоне');
+    expect(bobStore.log[node.gid], isNotNull, reason: 'история цела');
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isNotEmpty, reason: 'ключи группы целы');
+    // узел восстановлен из копии — группа вернулась: заглушка исчезает, ничего не потеряно
+    t = t.add(const Duration(days: 10));
+    node.members['bob'] = savedBob;
     await bob.sync();
-    expect(bob.gone, isEmpty, reason: 'забытая группа не возвращается');
+    expect(bob.gone, isEmpty);
+    // снова пропала и не вернулась больше 30 дней — стирается сама
+    node.members.remove('bob');
+    await bob.sync();
+    expect(bob.gone, isNotEmpty);
+    t = t.add(const Duration(days: 31));
+    await bob.sync();
+    expect(bob.gone, isEmpty, reason: 'через 30 дней отсутствия группа стёрта сама');
+    expect(bobStore.log[node.gid], isNull);
+    expect(bobStore.kv.keys.where((k) => k.endsWith(node.gid)), isEmpty);
   });
 
   test('просьба о приглашении: гость видит группу, просит, владелец видит и закрывает; рядовой участник не видит', () async {
@@ -424,6 +544,12 @@ void main() {
     await expectLater(owner.updateSettings(node.gid, name: '  '), throwsA(isA<GroupApiError>()));
   });
 
+  test('автоочистка: настраивает только владелец', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.setAutoClean(node.gid, 30);
+    await expectLater(bob.setAutoClean(node.gid, 7), throwsA(isA<GroupApiError>()));
+  });
   test('админ: владелец назначает, админ меняет настройки и задаёт правила, остальные клиенты принимают правила от админа', () async {
     await owner.sync();
     await bobJoins();
@@ -470,11 +596,16 @@ void main() {
       {'alias': 'Новый', 'role': 'owner', 'member_pub': 'NEW'},
       {'alias': 'Рядовой', 'role': 'member', 'member_pub': 'MEM'},
     ];
-    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), 'NEW', reason: 'от закреплённого (прежнего) владельца');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'NEW'})?.$1, 'NEW', reason: 'от закреплённого (прежнего) владельца');
     expect(GroupService.handoverNext([h('Рядовой', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'рядовой не подтверждает');
     expect(GroupService.handoverNext([h('Новый', 'Новый', 'NEW')], members, 'OLD', {'NEW'}), isNull, reason: 'сам новый себя не подтверждает');
     expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], members, 'OLD', {'OTHER'}), isNull, reason: 'ключ не тот, что нужен');
     expect(GroupService.handoverNext([], members, 'OLD', {'NEW'}), isNull);
+    // прежний владелец вышел: передача подтверждается по закреплённому псевдониму, чужой псевдоним и отсутствие псевдонима — нет
+    final left = [for (final m in members) if (m['alias'] != 'Старый') m];
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], left, 'OLD', {'NEW'}, pinnedAlias: 'Старый')?.$1, 'NEW');
+    expect(GroupService.handoverNext([h('Старый', 'Новый', 'NEW')], left, 'OLD', {'NEW'}), isNull);
+    expect(GroupService.handoverNext([h('Рядовой', 'Новый', 'NEW')], left, 'OLD', {'NEW'}, pinnedAlias: 'Старый'), isNull);
   });
 ;
 
@@ -529,5 +660,89 @@ void main() {
     node.log.add({...orig, 'seq': node.log.length + 1, 'ts': 9999});   // узел (или кто-то) переложил тот же шифртекст
     await bob.sync();
     expect((await bob.messages(node.gid)).where((e) => e.body['t'] == 'один раз').length, 1);
+  });
+
+  test('визитка показывается всегда и следует за профилем; картинка участника доходит', () async {
+    await owner.sync();
+    await bobJoins();
+    await owner.sync();
+    final bobAlias = bob.byId(node.gid)!.myAlias;
+    final before = owner.displayName(node.gid, bobAlias);   // имя, названное при вступлении, или псевдоним
+    bob.setProfile('Доктор Хаус', [1, 2, 3]);
+    await bob.sync();                                        // визитку выкладывает сам обход, без действий человека
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Доктор Хаус');
+    expect(owner.memberAvatar(node.gid, bobAlias), isNull);  // первая загрузка идёт в фоне
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(owner.memberAvatar(node.gid, bobAlias), [1, 2, 3]);
+    await bob.refreshCards('Хаус', null);                    // профиль сменился — визитка обновилась
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Хаус');
+    expect(owner.memberAvatar(node.gid, bobAlias), isNull);  // картинки в профиле больше нет
+  });
+
+  test('контакт узнаётся в группе по подписи: свой ключ в контактах — имя из контактов, без ключа — как был', () async {
+    await owner.sync();
+    await bobJoins();
+    final kp = await Ed25519().newKeyPair();
+    final pub = (await kp.extractPublicKey()).bytes;
+    bob.signer = (m) async => (await Ed25519().sign(m, keyPair: kp)).bytes;
+    await bob.sync();                                  // подпись прикладывается при обходе
+    final bobAlias = bob.byId(node.gid)!.myAlias;
+    owner.contactKeys = () async => const [];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isFalse);   // чужой ключ подпись не проверит
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xff), 'Сосед', 'p-neighbour'), (pub, 'Мама', 'p-mama')];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isTrue);
+    expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    // имя из книжки главнее ника: Боб назвал себя «Кор», я сохранил его как «Мама» — у меня он «Мама», у остальных «Кор»
+    bob.setProfile('Кор', null);
+    await bob.sync();
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Мама');
+    // моя картинка контакту главнее той, что он выложил в группе; без неё — его собственная
+    expect(owner.memberAvatar(node.gid, bobAlias), isNot(equals(Uint8List.fromList([7, 7, 7]))));
+    owner.contactAvatar = (peer) => peer == 'p-mama' ? Uint8List.fromList([7, 7, 7]) : null;
+    expect(owner.memberAvatar(node.gid, bobAlias), [7, 7, 7], reason: 'локальная картинка контакта главнее');
+    owner.contactAvatar = null;
+    owner.contactKeys = () async => const [];             // не мой контакт — виден его собственный ник
+    await owner.sync();
+    expect(owner.displayName(node.gid, bobAlias), 'Кор');
+    owner.contactKeys = () async => [(pub, 'Мама', 'p-mama')];
+    await owner.sync();
+    // чужая подпись под тем же именем не годится: ключ контакта другой
+    owner.contactKeys = () async => [(List<int>.filled(32, 0xaa), 'Мама', 'p-mama')];
+    await owner.sync();
+    expect(owner.isKnownContact(node.gid, bobAlias), isFalse);
+  });
+
+  test('монетки одобрения: один голос на человека, свой голос не считается, повтор снимает, голоса не показываются сообщениями', () async {
+    await owner.sync();
+    await bobJoins();
+    final seq = await owner.send(node.gid, GroupKind.text, {'t': 'идея'});
+    await bob.sync();
+    await bob.vote(node.gid, seq, 1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 1);
+    expect(bob.coins(node.gid, seq), 1);
+    expect(bob.myVote(node.gid, seq), 1);
+    // автор за себя не голосует (даже обойдя интерфейс)
+    await owner.vote(node.gid, seq, 1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 1);
+    // передумал: «не одобряю» заменяет прежний голос, повтор снимает
+    await bob.vote(node.gid, seq, -1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), -1);
+    await bob.vote(node.gid, seq, -1);
+    await owner.sync();
+    expect(owner.coins(node.gid, seq), 0);
+    // голоса не попадают в ленту
+    expect((await owner.messages(node.gid)).map((e) => e.body['t']), ['идея']);
+    // владелец выключил голосование правилами
+    await owner.setRules(node.gid, const GroupRules({GroupKind.reaction}));
+    await bob.sync();
+    expect(() => bob.vote(node.gid, seq, 1), throwsA(isA<GroupSendRefused>()));
   });
 }

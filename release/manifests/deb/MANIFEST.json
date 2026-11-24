@@ -1,0 +1,23 @@
+{
+  "format": 1,
+  "product": "yandi-node",
+  "version": "0.2.0+g899",
+  "seq": 65,
+  "created": 1793378097,
+  "key_id": "037e04346f99cc00",
+  "files": [
+    {
+      "name": "yandi-desktop_0.2.0-g899_amd64.deb",
+      "sha256": "5b011d1153e63d976a652291a5e3ff3621333acc194bd866d4423daf65c301fd",
+      "size": 32232828
+    },
+    {
+      "name": "yandi-node_0.2.0-g899_amd64.deb",
+      "sha256": "ebd435195647539341b76c3909298501d5502a9240798514368c4303bd92d425",
+      "size": 7297764
+    }
+  ],
+  "platform": "deb",
+  "expires": 1803746097,
+  "notes": ""
+}

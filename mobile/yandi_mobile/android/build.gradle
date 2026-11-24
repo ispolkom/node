@@ -3,6 +3,15 @@ allprojects {
         google()
         mavenCentral()
     }
+    // video_player_android тянет ограничения kotlin-stdlib 1.8.x, из-за которых Gradle 8.9 падает с
+    // «Corrupt serialized resolution result»: приводим все модули stdlib к одной версии.
+    configurations.configureEach {
+        resolutionStrategy.eachDependency { details ->
+            if (details.requested.group == 'org.jetbrains.kotlin' && details.requested.name.startsWith('kotlin-stdlib')) {
+                details.useVersion '2.1.20'
+            }
+        }
+    }
 }
 
 rootProject.buildDir = '../build'

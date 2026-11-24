@@ -5,7 +5,6 @@
 //! Единица передачи в YTP. Один вагон = один UDP пакет.
 
 use serde::{Serialize, Deserialize};
-use sha2::{Sha256, Digest};
 
 /// Вагон поезда - единица передачи в YTP
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -34,8 +33,9 @@ pub struct Wagon {
     /// Флаги вагона
     pub flags: WagonFlags,
 
-    /// Контрольная сумма груза (SHA256)
-    pub checksum: [u8; 32],
+    /// Версия формата вагона (`Wagon::FORMAT`). Целостность груза обеспечивает AEAD сессии (вагон ходит только внутри
+    /// зашифрованной датаграммы); отдельная сумма груза на вагон была лишней работой (≈31% CPU на пути данных) и 32 байтами.
+    pub format: u8,
 
     /// Груз (данные)
     pub cargo: Vec<u8>,
@@ -97,6 +97,9 @@ impl Wagon {
     /// перекрывается клоном на path1. См. NETWORK_EVOLUTION discussion с автором.
     pub const MAX_CARGO_SIZE: usize = 61440;
 
+    /// Версия формата вагона на проводе (1 — с суммой SHA-256 груза, 2 — без неё).
+    pub const FORMAT: u8 = 2;
+
     /// Сколько груза кладёт в вагон отправитель. Выбрано так, чтобы вагон со всеми заголовками и шифрованием помещался в ОДНУ UDP-датаграмму
     /// без IP-фрагментации (MTU 1500): при вагоне в 60 КБ потеря любого из ~40 фрагментов уничтожает копию, и при 1% потерь обе копии пропадают
     /// у каждого девятого вагона. Дублирование по двум путям остаётся полным. `MAX_CARGO_SIZE` — предел того, что принимает получатель.
@@ -143,8 +146,6 @@ impl Wagon {
             WagonFlags::CONT
         };
 
-        // Вычисляем checksum
-        let checksum = Self::compute_checksum(&cargo);
 
         Self {
             train_id,
@@ -155,7 +156,7 @@ impl Wagon {
             line_id,
             cargo_size,
             flags,
-            checksum,
+            format: Self::FORMAT,
             cargo,
         }
     }
@@ -191,8 +192,6 @@ impl Wagon {
             WagonFlags::CONT
         };
 
-        // Вычисляем checksum
-        let checksum = Self::compute_checksum(&truncated);
 
         Self {
             train_id,
@@ -203,31 +202,21 @@ impl Wagon {
             line_id,
             cargo_size: truncated.len() as u32,
             flags,
-            checksum,
+            format: Self::FORMAT,
             cargo: truncated,
         }
     }
 
-    /// Вычислить SHA256 от груза
-    pub fn compute_checksum(data: &[u8]) -> [u8; 32] {
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let result = hasher.finalize();
-        let mut checksum = [0u8; 32];
-        checksum.copy_from_slice(&result);
-        checksum
-    }
-
-    /// Проверить checksum
+    /// Формат вагона известен этому узлу (вагон другого формата отбрасывается).
     pub fn verify(&self) -> bool {
-        self.checksum == Self::compute_checksum(&self.cargo)
+        self.format == Self::FORMAT
     }
 
     /// Размер вагона в байтах (сериализованный)
     pub fn serialized_size(&self) -> usize {
         // train_id (8) + wagon_num (4) + total_wagons (4) +
-        // offset (8) + cargo_size (4) + flags (1) + checksum (32) + cargo.len()
-        8 + 4 + 4 + 8 + 4 + 1 + 32 + self.cargo.len()
+        // offset (8) + cargo_size (4) + flags (1) + format (1) + cargo.len()
+        8 + 4 + 4 + 8 + 4 + 1 + 1 + self.cargo.len()
     }
 
     /// Создать decoy wagon (пустышка для маскировки)
@@ -243,7 +232,7 @@ impl Wagon {
             line_id: 0, // Декои используют line 0
             cargo_size: random_cargo.len() as u32,
             flags: WagonFlags::DECOY | WagonFlags::LAST,
-            checksum: Self::compute_checksum(&random_cargo),
+            format: Self::FORMAT,
             cargo: random_cargo,
         }
     }
@@ -281,11 +270,13 @@ mod tests {
     }
 
     #[test]
-    fn test_checksum_verification() {
+    fn test_format_is_checked() {
         let cargo = b"Hello, YANDI!";
-        let wagon = Wagon::new(999, 0, 1, 0, cargo.to_vec(), 0);
+        let mut wagon = Wagon::new(999, 0, 1, 0, cargo.to_vec(), 0);
 
         assert!(wagon.verify());
+        wagon.format = Wagon::FORMAT.wrapping_add(1);
+        assert!(!wagon.verify(), "вагон другого формата не принимается");
     }
 
     #[test]

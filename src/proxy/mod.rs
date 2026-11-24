@@ -76,6 +76,8 @@
 //! ```
 
 pub mod client;
+pub mod early_tunnel;
+pub mod expected_peers;
 pub mod gateway;
 pub mod url_mapper;
 
@@ -139,7 +141,7 @@ impl ProxyResponse {
 }
 
 /// Tunnel data for CONNECT (bi-directional streaming)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct ProxyTunnelData {
     /// Tunnel ID (matches CONNECT request_id)
     pub tunnel_id: u64,
@@ -147,17 +149,20 @@ pub struct ProxyTunnelData {
     pub data: Vec<u8>,
     /// Close flag (true if this is the last chunk)
     pub close: bool,
+    /// Absolute byte offset in this direction; close carries the final offset.
+    pub byte_offset: u64,
 }
 
 impl ProxyTunnelData {
-    /// ⚡ Сериализовать через bincode (в 3-5 раз быстрее JSON)
-    pub fn to_bincode(&self) -> Result<Vec<u8>, bincode::Error> {
-        bincode::serialize(self)
+    pub fn encode(&self) -> Vec<u8> {
+        crate::netlayer::tunnel_wire::encode(crate::netlayer::tunnel_wire::HTTP_CONNECT,
+            self.tunnel_id, self.byte_offset, self.close, &self.data)
     }
 
-    /// ⚡ Десериализовать из bincode
-    pub fn from_bincode(data: &[u8]) -> Result<Self, bincode::Error> {
-        bincode::deserialize(data)
+    pub fn parse(bytes: &[u8]) -> Option<Self> {
+        let (tunnel_id, byte_offset, close, data) = crate::netlayer::tunnel_wire::decode(
+            bytes, crate::netlayer::tunnel_wire::HTTP_CONNECT)?;
+        Some(Self { tunnel_id, byte_offset, close, data: data.to_vec() })
     }
 }
 

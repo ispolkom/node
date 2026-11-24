@@ -1,0 +1,101 @@
+import 'dart:io';
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:yandi_desktop/app.dart';
+import 'package:yandi_desktop/theme.dart';
+import '../tool/design_fixture.dart';
+import 'widget_test.dart' show click, stop, admin;
+
+void main() {
+  setUpAll(() async {
+    // The bundled panel font.
+    final loader = FontLoader('YandiSans');
+    loader.addFont(
+      Future.value(
+        ByteData.sublistView(
+          File(
+            'assets/fonts/LiberationSans-Regular.ttf',
+          ).readAsBytesSync(),
+        ),
+      ),
+    );
+    await loader.load();
+    final icons = FontLoader('MaterialIcons');
+    icons.addFont(
+      Future.value(
+        ByteData.sublistView(
+          File(
+            '${File(Platform.resolvedExecutable).parent.parent.parent.path}/material_fonts/MaterialIcons-Regular.otf',
+          ).readAsBytesSync(),
+        ),
+      ),
+    );
+    await icons.load();
+  });
+  for (final size in [const Size(1280, 800), const Size(900, 600)]) {
+    for (final scene in [
+      'offline',
+      'login',
+      'setup',
+      'unlock',
+      'Главная',
+      'Статус узла',
+      'Чат',
+      'Группы',
+      'Шлюзы',
+      'Настройки',
+    ]) {
+      testWidgets('$scene ${size.width.toInt()}x${size.height.toInt()}', (
+        t,
+      ) async {
+        t.view.physicalSize = size;
+        t.view.devicePixelRatio = 1;
+        addTearDown(t.view.resetPhysicalSize);
+        addTearDown(t.view.resetDevicePixelRatio);
+        await t.binding.setSurfaceSize(size);
+        addTearDown(() => t.binding.setSurfaceSize(null));
+        await t.pumpWidget(DesktopApp(api: DesignApi(scene)));
+        await t.pumpAndSettle();
+        if (!['offline', 'login', 'setup'].contains(scene)) {
+          await click(t, 'Войти');
+          if (scene == 'unlock')
+            await click(t, 'Настройки');
+          else if (scene == 'Статус узла' || scene == 'Шлюзы')
+            await admin(t, scene);
+          else if (scene != 'Главная')
+            await click(t, scene);
+          if (scene == 'Чат') await click(t, 'Открыть чат');
+          if (scene == 'Группы') await click(t, 'Семья · владелец');
+        }
+        if (scene == 'Главная') {
+          // блок поддержки читает вшитый файл адресов асинхронно: ждём, пока строки с адресами реально появятся (а не фиксированную паузу),
+          // иначе снимок зависит от порядка запуска и загруженности машины
+          final firstAddress = find.text('TPeLtLuE9qx64neroHn14LjWwRn5jmupHY');
+          for (var i = 0; i < 50 && firstAddress.evaluate().isEmpty; i++) {
+            await t.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 100)));
+            await t.pump();
+          }
+          expect(firstAddress, findsOneWidget, reason: 'кошельки проекта загружены до снимка');
+        }
+        expect(
+          t.takeException(),
+          isNull,
+          reason: 'No overflow or rendering errors',
+        );
+        expect(find.byType(NavigationRail), findsNothing);
+        expect(
+          Theme.of(t.element(find.byType(Scaffold))).scaffoldBackgroundColor,
+          Icq.background,
+        );
+        final key =
+            '${scene.replaceAll(' ', '_')}_${size.width.toInt()}x${size.height.toInt()}';
+        await expectLater(
+          find.byType(Scaffold),
+          matchesGoldenFile('goldens/$key.png'),
+        );
+        await stop(t);
+      });
+    }
+  }
+}

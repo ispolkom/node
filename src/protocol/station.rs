@@ -11,7 +11,6 @@ use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
 
 use super::{Train, TrainId, Wagon, WagonFlags};
-use super::express::{ExpressTrain, TrainAckMessage};
 use super::rate_controller::{RateController, RateAction, Pacer};
 use crate::util::HashId;
 use crate::netlayer::{P2PTransport, transport::get_wagon_stats};
@@ -115,6 +114,8 @@ pub struct StationConfig {
     /// 🚦 Потолок скорости отправки на провод, Мбит/с (учитывает обе копии каждого вагона). Отправитель «отправил и забыл», обратной связи нет,
     /// поэтому потолок задаётся заранее: по умолчанию 300, `YANDI_PACE_MBPS` меняет. Выше канала ставить нельзя: излишек теряется и поток рвётся.
     pub pace_mbps: u64,
+    /// Сколько раз подряд уходит одна и та же зашифрованная датаграмма вагона (2..=3; по умолчанию 2; меньше двух нельзя). `YANDI_WAGON_COPIES`.
+    pub wagon_copies: usize,
 }
 
 impl Default for StationConfig {
@@ -130,6 +131,7 @@ impl Default for StationConfig {
             rtt_window_size: 10,
             batch_timeout_ms: 50,  // ⚡ 50ms batching window (увеличено для лучшей агрегации)
             enable_batching: true,  // ⚡ Batching включен по умолчанию
+            wagon_copies: std::env::var("YANDI_WAGON_COPIES").ok().and_then(|v| v.parse().ok()).unwrap_or(2),
             pace_mbps: std::env::var("YANDI_PACE_MBPS").ok().and_then(|v| v.parse().ok()).filter(|v| *v > 0).unwrap_or(300),
         }
     }
@@ -331,133 +333,86 @@ impl Station {
         let current_rate = self.rate_controller.current_rate_mbps();
         let max_concurrent = self.rate_controller.concurrent_wagons_for_rate();
 
-        println!("🔄 DUAL-PATH: {} wagons × 2 paths = {} packets (Rate: {} Mbps)",
-                 total_wagons, total_wagons * 2, current_rate);
+        tracing::trace!("🔄 {} wagons × {} copies (Rate: {} Mbps)",
+                 total_wagons, self.config.wagon_copies, current_rate);
 
         // 🔄 DUAL-PATH: semaphore для ОБЕИХ путей
         let semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent * 2));
         let mut send_tasks = Vec::new();
         let rate_controller = self.rate_controller.clone();
 
-        // 🔄 Для каждого wagon создаём ДВА клона (Path0 и Path1)
+        // Вагон строится, сериализуется и шифруется ОДИН раз; готовая датаграмма уходит `copies` раз подряд. Получатель принимает первую
+        // дошедшую копию, остальные отбрасывает по счётчику сессии до расшифровки (окно повторов); потерю одной копии закрывает другая.
+        // полный дубль — решение владельца: меньше двух экземпляров не бывает
+        let copies = self.config.wagon_copies.clamp(2, 3);
         for (i, chunk) in wagons {
             let wagon_num = i as u32;
             let offset = (i * wagon_size) as u64;
             let chunk_len = chunk.len();
 
-            // 🚦 Место каждой копии в общем потоке на проводе (в каждой копии накладные расходы вагона и шифрования ~150 байт)
-            let wire_bytes = chunk_len + 150;
+            // 🚦 Место в общем потоке на проводе: каждая копия — вагон с накладными расходами вагона и шифрования ~150 байт
+            let wire_bytes = (chunk_len + 150) * copies;
 
-            // 🔄 Path0: ОРИГИНАЛ
-            {
-                let wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
-                let dest = dest;
-                let transport = self.transport.clone();
-                let sem = semaphore.clone();
-                let wait = self.pacer.reserve(wire_bytes);
+            let wagon = Wagon::new(train_id, wagon_num, total_wagons, offset, chunk.to_vec(), 0);
+            let dest = dest;
+            let transport = self.transport.clone();
+            let sem = semaphore.clone();
+            let wait = self.pacer.reserve(wire_bytes);
 
-                let task = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
-                    if wait >= std::time::Duration::from_micros(500) {
-                        tokio::time::sleep(wait).await;
-                    }
+            let task = tokio::spawn(async move {
+                let _permit = sem.acquire().await.unwrap();
+                // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
+                if wait >= std::time::Duration::from_micros(500) {
+                    tokio::time::sleep(wait).await;
+                }
 
-                    let wagon_bytes = wagon.to_bytes()
-                        .map_err(|e| StationError::SerializationError(e.to_string()))?;
-                    let mut packet = vec![0x60u8];
-                    packet.extend_from_slice(&wagon_bytes);
+                let wagon_bytes = wagon.to_bytes()
+                    .map_err(|e| StationError::SerializationError(e.to_string()))?;
+                let mut packet = vec![0x60u8];
+                packet.extend_from_slice(&wagon_bytes);
 
-                    transport.send_encrypted(dest, &packet).await
-                        .map_err(|e| StationError::SendError(e.to_string()))?;
+                transport.send_encrypted_copies(dest, &packet, copies).await
+                    .map_err(|e| StationError::SendError(e.to_string()))?;
 
-                    tracing::trace!("📦 [WAGON {}/{}] ORIG sent ({} B) → Path#0",
-                             wagon_num + 1, total_wagons, chunk_len);
+                tracing::trace!("📦 [WAGON {}/{}] sent ({} B) × {} copies",
+                         wagon_num + 1, total_wagons, chunk_len, copies);
 
-                    use crate::netlayer::transport::get_wagon_stats;
-                    let stats = get_wagon_stats();
-                    stats.sent_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats.sent_path0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                use crate::netlayer::transport::get_wagon_stats;
+                let stats = get_wagon_stats();
+                stats.sent_total.fetch_add(copies as u64, std::sync::atomic::Ordering::Relaxed);
+                stats.sent_path0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if copies > 1 {
+                    stats.sent_path1.fetch_add(copies as u64 - 1, std::sync::atomic::Ordering::Relaxed);
+                }
 
-                    Ok::<(), StationError>(())
-                });
+                Ok::<(), StationError>(())
+            });
 
-                send_tasks.push(task);
-            }
-
-            // 🔄 Path1: КЛОН (тот же train_id, is_clone=true)
-            {
-                let wagon = Wagon::with_clone(
-                    train_id,  // ⭐ ТОТ ЖЕ train_id!
-                    true,      // ⭐ is_clone=true
-                    wagon_num,
-                    total_wagons,
-                    offset,
-                    chunk.to_vec(),
-                    1
-                );
-                let dest = dest;
-                let transport = self.transport.clone();
-                let sem = semaphore.clone();
-                let wait = self.pacer.reserve(wire_bytes);
-
-                let task = tokio::spawn(async move {
-                    let _permit = sem.acquire().await.unwrap();
-                    // wait only for a place in the stream that is still in the future (the timer is only a millisecond accurate)
-                    if wait >= std::time::Duration::from_micros(500) {
-                        tokio::time::sleep(wait).await;
-                    }
-
-                    let wagon_bytes = wagon.to_bytes()
-                        .map_err(|e| StationError::SerializationError(e.to_string()))?;
-                    let mut packet = vec![0x60u8];
-                    packet.extend_from_slice(&wagon_bytes);
-
-                    transport.send_encrypted(dest, &packet).await
-                        .map_err(|e| StationError::SendError(e.to_string()))?;
-
-                    tracing::trace!("📦 [WAGON {}/{}] CLONE sent ({} B) → Path#1",
-                             wagon_num + 1, total_wagons, chunk_len);
-
-                    use crate::netlayer::transport::get_wagon_stats;
-                    let stats = get_wagon_stats();
-                    stats.sent_total.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    stats.sent_path1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                    Ok::<(), StationError>(())
-                });
-
-                send_tasks.push(task);
-            }
+            send_tasks.push(task);
         }
 
         // Ждём завершения всех отправок (обоих путей)
+        let mut failed = 0usize;
         for task in send_tasks {
-            if let Err(e) = task.await {
-                eprintln!("❌ Wagon send failed: {}", e);
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(e)) => {
+                    failed += 1;
+                    eprintln!("❌ Wagon send failed: {}", e);
+                }
+                Err(e) => {
+                    failed += 1;
+                    eprintln!("❌ Wagon send task failed: {}", e);
+                }
             }
+        }
+        if failed > 0 {
+            return Err(StationError::SendError(format!("поезд #{train_id}: не отправлено вагонов: {failed}")));
         }
 
         tracing::trace!("✅ Train #{} sent on DUAL-PATH! (Path#0 + Path#1)", train_id);
 
         Ok(train_id)
-    }
-
-    /// Отправить один вагон
-    async fn send_wagon(&self, dest: HashId, wagon: &Wagon) -> Result<(), StationError> {
-        // Упаковываем вагон
-        let wagon_bytes = wagon.to_bytes()
-            .map_err(|e| StationError::SerializationError(e.to_string()))?;
-
-        // Добавляем префикс YTP (0x60 = YTP wagon)
-        let mut packet = vec![0x60u8];
-        packet.extend_from_slice(&wagon_bytes);
-
-        // Отправляем через P2P transport
-        self.transport.send_encrypted(dest, &packet).await
-            .map_err(|e| StationError::SendError(e.to_string()))?;
-
-        Ok(())
     }
 
     /// Принять вагон (вызывается из transport при получении пакета)
@@ -466,9 +421,9 @@ impl Station {
         let wagon: Wagon = Wagon::from_bytes(wagon_bytes)
             .map_err(|e| StationError::DeserializationError(e.to_string()))?;
 
-        // Проверяем checksum
+        // Проверяем формат вагона (целостность груза обеспечивает AEAD сессии)
         if !wagon.verify() {
-            println!("⚠️  Wagon {}/{} has invalid checksum! Dropping.",
+            println!("⚠️  Wagon {}/{}: неизвестный формат вагона, отброшен.",
                      wagon.wagon_num, wagon.total_wagons);
             return Ok(None);
         }
@@ -527,11 +482,6 @@ impl Station {
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;
 
-            // ⚠️ ACK/NACK DISABLED per user directive
-            // // 🎉 ОТПРАВЛЯЕМ ACK source node!
-            // if let Err(e) = self.send_train_ack(source_id, train_id).await {
-            //     eprintln!("⚠️  Failed to send ACK for train #{}: {}", train_id, e);
-            // }
 
             Ok(Some(train_id))
         } else {
@@ -597,11 +547,6 @@ impl Station {
             // Обновляем RTT статистику и адаптивную задержку
             self.update_rtt_statistics(train_id).await;
 
-            // ⚠️ ACK/NACK DISABLED per user directive
-            // // 🎉 ОТПРАВЛЯЕМ ACK source node!
-            // if let Err(e) = self.send_train_ack(source_id, train_id).await {
-            //     eprintln!("⚠️  Failed to send ACK for train #{}: {}", train_id, e);
-            // }
 
             Ok(Some(train_id))
         } else {
@@ -718,76 +663,6 @@ impl Station {
     }
 
     /// Отправить экспресс-поезд (высокий приоритет)
-    pub async fn send_express_train(
-        &self,
-        dest: HashId,
-        express: ExpressTrain,
-    ) -> Result<(), StationError> {
-        println!("🚄 STATION[{}] → EXPRESS TRAIN #{}-EXPRESS ({} wagons, HIGH PRIORITY) → STATION[{}]",
-                 self.id_short(),
-                 express.original_train_id,
-                 express.len(),
-                 Self::format_hash_id(dest)
-        );
-
-        for wagon in &express.wagons {
-            // Отправляем с минимальной задержкой (высокий приоритет!)
-            self.send_wagon(dest, wagon).await?;
-            println!("📦 [EXPRESS WAGON] Sent ({} KB)", wagon.cargo.len() / 1024);
-        }
-
-        println!("✅ Express train sent!");
-
-        Ok(())
-    }
-
-    /// ⚠️ DISABLED: Отправить ACK сообщение
-    #[allow(dead_code)]
-    pub async fn send_ack(
-        &self,
-        dest: HashId,
-        ack: TrainAckMessage,
-    ) -> Result<(), StationError> {
-        let ack_bytes = serde_json::to_vec(&ack)
-            .map_err(|e| StationError::SerializationError(e.to_string()))?;
-
-        // Добавляем префикс YTP ACK (0x61 = YTP ACK)
-        let mut packet = vec![0x61u8];
-        packet.extend_from_slice(&ack_bytes);
-
-        self.transport.send_encrypted(dest, &packet).await
-            .map_err(|e| StationError::SendError(e.to_string()))?;
-
-        Ok(())
-    }
-
-    /// ⚠️ DISABLED: Отправить ACK когда train полностью собран
-    #[allow(dead_code)]
-    async fn send_train_ack(&self, source: HashId, train_id: TrainId) -> Result<(), StationError> {
-        use super::TrainAckMessage;
-
-        eprintln!("🎉 [ACK] PREPARING ACK for train #{} to source {}", train_id, hex::encode(&source.0[..8]));
-
-        // Вычисляем checksum собранного train'а
-        let checksum = {
-            let depot = self.depot.lock().await;
-            let train = depot.get_train(train_id);
-            train.map(|t| {
-                eprintln!("[ACK] Got train for checksum, calculating...");
-                t.calculate_checksum()
-            })
-                .unwrap_or_else(|| {
-                    eprintln!("[ACK] ⚠️  Train #{} not found in depot!", train_id);
-                    [0u8; 32]
-                })
-        };
-
-        let ack = TrainAckMessage::complete(train_id, checksum);
-
-        println!("🎉 [ACK] Sending ACK for train #{} to source", train_id);
-
-        self.send_ack(source, ack).await
-    }
 
     // ==================== ⚡ BATCHING METHODS ====================
 
@@ -1092,7 +967,7 @@ impl Depot {
                 .ok_or(StationError::TrainNotFound)?;
             self.current_bytes = self.current_bytes.saturating_sub(train_size);
             self.total_evicted_trains += 1;
-            println!("🗑️  Evicted oldest train #{} ({} bytes)", id, train_size);
+            tracing::trace!("🗑️  Evicted oldest train #{} ({} bytes)", id, train_size);
         }
         Ok(())
     }
@@ -1127,9 +1002,6 @@ impl Depot {
     }
 
     /// 🎉 Получить train (для ACK checksum)
-    fn get_train(&self, train_id: TrainId) -> Option<&super::Train> {
-        self.trains.get(&train_id)
-    }
 
     /// Получить прогресс сборки
     fn get_progress(&self, train_id: TrainId) -> Option<f64> {
