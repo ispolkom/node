@@ -45,13 +45,29 @@ Date: 24 November 2026. Baseline: `origin/main` at `c91a743`. Audit worktree: `c
 - **STYLE CHECK:** `cargo fmt --all -- --check` exits nonzero on existing formatting differences across unrelated files (including `src/communication/file_transfer.rs`); this audit did not reformat unrelated production code.
 - **NOT TESTED:** full Debian package transaction with systemd and a physical Android run of this experimental package. These require a separate isolated VM and device respectively.
 
-There is no remaining confirmed production-code defect from this audit. The branch is ready for merge review. Publication as a fully verified DEB upgrade still requires the isolated `dpkg`/systemd transaction above; its absence is a verification gate, not a reproduced data-loss failure. The developer's earlier physical PC↔phone calls remain valid field evidence for the artifacts used then.
+The preceding standard suite did not run tests marked `#[ignore]`. A subsequent release-gate check exposed unresolved R16 defects; the branch is **not cleared for merge or release**. Publication as a fully verified DEB upgrade also requires the isolated `dpkg`/systemd transaction above. The developer's earlier physical PC↔phone calls remain valid field evidence for the artifacts used then.
+
+### Classification of 28 ignored checks
+
+Command: `CARGO_TARGET_DIR=/mnt/ssd480/yandi-e2e-target cargo test --locked --lib bug_r16 -- --ignored --test-threads=1`. Among 11 R16 checks, **3 passed**, **4 reproduced product defects**, and **4 are inconclusive because their setup or trigger failed**:
+
+| R16 check | Result | Evidence / release relevance |
+| --- | --- | --- |
+| Locked clear history and clear all (R16-5), locked proxy save (R16-9) | PASS (3) | The protected operations behaved as expected in their synthetic fixtures. |
+| Failed outbox persistence during lock (R16-10) | FAIL, confirmed | A queued message disappeared after a failed write and unlock. **Data-loss blocker.** |
+| Locked chat list (R16-6) | FAIL, confirmed | `list_chats()` returned a correspondent ID without an unlocked key. **Privacy blocker.** |
+| Rekey unlocks storage (R16-7) | FAIL, confirmed | `rekey_to()` made a previously locked store readable. **Lock-boundary blocker.** |
+| Rekey removes a distinct plaintext identity (R16-8) | FAIL, confirmed | A distinct sole plaintext key pair disappeared. **Data-loss blocker.** |
+| Lock during KDF, cancelled lock, setup retry after crash (R16-1/2/4) | INCONCLUSIVE | Their `setup()` call was rejected before the intended race because the fixture omitted the now-required 12/24-word seed phrase. |
+| Failed migration must not publish an open session (R16-3) | INCONCLUSIVE | The fixture's migration-failure trigger did not reach `migration_pending`; the asserted condition was never reproduced. |
+
+The other **17 ignored checks** comprise 14 opt-in tests that start real node processes, one child decoder helper invoked by another test, and two deliberately skipped proxy documentation examples. Selected real-process tests were run earlier in this audit, but the default suite does not establish a pass for all 14. None of these 17 is a confirmed current blocker on the available evidence; that does not erase the four confirmed R16 blockers above. The normal suite's 951 PASS result must be read together with this classification.
 
 Read-only merge check: GitHub `main` was `c91a743` when checked and is an ancestor of this experimental branch, so that ref can fast-forward. The separate local `main` ref is `832814f` and has diverged; `git merge-tree main HEAD` reports a conflict in `release/SEQ`. No merge or conflict resolution was performed, and the release sequence was not edited.
 
 ## Release gate and branch inventory
 
-1. The outbox data-loss defect is fixed and its regression test is enabled. The synthetic populated-profile binary upgrade passed; the full package transaction remains untested here.
+1. The failed-key-migration `outbox.enc` deletion is fixed and its regression test is enabled. **A separate R16-10 outbox loss on a failed persistence operation remains confirmed.** The synthetic populated-profile binary upgrade passed; the full package transaction remains untested here.
 2. Public E2EE claims are now path-specific: paired devices have E4, PC nodes have YSE1, and an owner's node reads a phone's message to a remote ordinary contact. First-contact TOFU remains a trust limitation and needs independent fingerprint verification.
 3. The developer reported successful physical PC↔phone calls and earlier screen-off calls/messages. Those observations are retained as field evidence, not relabeled as a test of this experimental package. No further exploratory matrix is required to close this audit.
 
