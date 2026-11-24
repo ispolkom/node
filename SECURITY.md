@@ -15,7 +15,7 @@ Examples include reading or altering another user's traffic; bypassing signature
 The promises guarded by tests are listed in [`docs/INVARIANTS.md`](docs/INVARIANTS.md). Known limitations and the plan for addressing them are in [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md). In short:
 
 - the project **has not undergone an independent audit**;
-- encryption is applied per link between neighboring nodes, not end-to-end from person to person (the end-to-end layer is not complete);
+- paired devices use E4 encryption between devices, while PC-to-PC chat uses recipient-bound YSE1 between nodes in addition to encrypted transport. A phone's own node can read messages sent to ordinary remote contacts; first-contact TOFU needs independent fingerprint verification. See [`docs/PRIVACY.md`](docs/PRIVACY.md);
 - the network **must not be considered anonymous** against an observer who can see a significant part of it;
 - an exit node is visible as the source of traffic leaving through it, so the exit owner is responsible for traffic sent through that node.
 

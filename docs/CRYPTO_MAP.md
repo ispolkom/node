@@ -1,6 +1,6 @@
 # Encryption Map (Audit 2026-10-05, Updated After Fixes)
 
-How each traffic type is currently protected, what remains weak, and the order of fixes. This is based on reading the code, not speculation; line numbers refer to the audit snapshot.
+How each traffic type is currently protected, what remains weak, and the order of fixes. The original audit is from October 2026; the communication trust boundaries below were corrected on 24 November 2026. Older line numbers refer to the audit snapshot, and this document is not an independent security certification.
 
 ## What protects what
 
@@ -9,8 +9,12 @@ How each traffic type is currently protected, what remains weak, and the order o
 | Messages, files, and calls (`p2p::P2PTransport`) | `p2p/encryption_manager.rs`, AES-256-GCM | Handshake with **one-time** X25519 keys for every hello | yes | Good by design; minor defects remain below. |
 | Core node network: DHT, relaying, proxies/tunnels, station/train (`netlayer::P2PTransport`, `protocol::*`) | `netlayer/encryption.rs` → `crypto/handshake.rs`, AES-256-GCM | One-time keys for every handshake (**fixed**; previously one key per process) | yes | Good by design. |
 | Multi-node circuits (`hops.rs`, `hops_net.rs`) | X25519 handshake per link using a telescope; the node's reply is **signed with its long-term card key**; layer keys use HKDF-SHA256; layers use BLAKE3 stream encryption by cell number with an internal `MAC`; cells have equal size | One-time keys on both sides | yes | Good by design; no cover traffic or entry pinning (see I21). |
-| End-to-end encryption between people | `communication/encryption.rs`, `p2p/encryption.rs` | — | — | **Stubs** (“transport encryption is used for the prototype”). |
-| Resumption-session keys (QR pairing) | **Removed** (stage 2a, `docs/RESUME_REDESIGN.md`): v2 `paired_clients.json` / `paired_anchors.json` contain permission records without secrets | Session key stored in plaintext on disk | no | Defect: the file was first created with ordinary permissions and only then changed to `0600`. |
+| Paired-phone messages and files, and phone groups | E4 in the mobile client | Device keys | No ratchet or forward secrecy for stored content is claimed | Encrypted between paired devices; owner nodes and relays see ciphertext for this path. |
+| PC-to-PC chat content | Recipient-bound YSE1 envelope inside encrypted node transport | Communicating nodes' identity keys | No forward secrecy for stored content is claimed | The receiving node can read content; the tested UDP relay cannot open the YSE1 envelope. |
+| Phone message to an ordinary remote contact | Own node receives plaintext, then sends recipient-bound content toward the remote node | Phone-to-own-node TLS; node-to-node YSE1 | No end-to-end guarantee between the two people's devices | The phone's own node is a trusted plaintext endpoint for this path. |
+| Internet proxy and multi-hop exit | Transport and layered circuit protections (`hops.rs`, `hops_net.rs`) | Route keys; HTTPS separately uses client-to-site TLS | Depends on the external connection | Internet exit and messenger E2EE are separate trust models. |
+| Legacy `communication/encryption.rs`, `p2p/encryption.rs` interfaces | Stub implementations | — | — | Fail closed; they are not the active PC chat path and do not by themselves prove chat plaintext. |
+| Resumption-session keys (QR pairing) | Saved RESUME secrets were removed in stage 2a (`docs/RESUME_REDESIGN.md`); v2 permission records contain no session key | — | No resumed-session forward secrecy is claimed | Legacy cleanup and handshake hardening have separate status in `docs/SECURITY_STATUS.md`. |
 | Node identity on disk | Argon2id + AES-GCM | Owner password | — | Good (SEC-04 closed). |
 | Hello | Ed25519 signature | Identity key | — | Good (SEC-03 closed). |
 
@@ -19,7 +23,7 @@ How each traffic type is currently protected, what remains weak, and the order o
 ### Critical
 
 - **C1. Circuit keys derived from public data — CLOSED.** The circuit prototype (`derive_hop_key` from public data) was removed. `hops.rs` now uses real key exchange and signed handshakes. It is still not correct to call the network anonymous (I21: no cover traffic or entry pinning).
-- **C2. No end-to-end encryption between people.** Direct node connections benefit from transport encryption with forward secrecy, but a relay or a “client separate from node” intermediary can read the traffic. Fix: a separate E2E layer between people's devices (phases 3 and 5).
+- **C2. No universal person-to-person E2EE across all paths.** Paired phones use E4 and PC-to-PC chat uses recipient-bound YSE1 between owner nodes. The tested UDP relay cannot read that YSE1 content. A phone's own node does read plaintext sent to an ordinary remote contact. First-contact TOFU accepts the first supplied key until the user independently verifies its fingerprint. Additional endpoint coverage, offline-delivery guarantees, and a ratchet are not claimed; see `docs/PRIVACY.md`.
 - **C3. Core network without one-time keys.** `netlayer/encryption.rs` used `HKDF(ECDH(process key, neighbor key))` as the session key. A process-secret leak could reveal all packets recorded during its lifetime. Fix: one shared encryption implementation for both transports with one-time keys for every handshake.
 
 ### High
@@ -54,7 +58,7 @@ How each traffic type is currently protected, what remains weak, and the order o
 | C3 core network without one-time keys | **fixed**: both networks use shared `crypto::handshake` with one-time keys per handshake, invitation → confirmation, and simultaneous discovery resolved by the lower node number. The process-static key was removed; verified on a real three-node network. |
 | H3 session key on disk (old QR phone pairing) | **fixed in code** (stage 2a); independent review (round 36) found cleanup weaknesses and is rechecking them. The handshake is stage 2b. |
 | Key rotation in a live network lost messages | **fixed** (2026-10-06): responder pending key, winner rule for simultaneous rotation, and fallback-key ordering; see the roadmap log. |
-| C2 end-to-end encryption between people | **open** (phases 3 and 5). |
+| C2 universal person-to-person E2EE | **open for the paths and guarantees listed above**; E4 and YSE1 already protect their stated paths. |
 
 Packet format (version 2): `[sender number:32][version:1 | salt:5 | counter:6][ciphertext with tag]`; inside the ciphertext: `[length:4][data][padding]`; directional keys from HKDF-SHA256 (`yandi-v2 key low->high / high->low`); AAD = `[version] ‖ sender number`. The golden vector was checked by an independent implementation (Node.js/OpenSSL).
 
@@ -66,4 +70,4 @@ Known behavior: when two nodes discover each other simultaneously, the first pro
 2. C1 (circuits): **done** — `hops.rs`; cover traffic and entry pinning remain (I21).
 3. M2 + C3 + H4 + H5 + M1 + M3: one shared encryption module with one-time keys, counters, a window, key rotation, and AAD; migrate both transports to it.
 4. H3: completed in code and under recheck; the on-disk key is removed and the handshake is stage 2b.
-5. C2: end-to-end encryption between devices, including the “client — node” protocol.
+5. C2: define and verify any additional device-to-device coverage without changing the existing E4, YSE1, or Internet-proxy trust boundaries by implication.
