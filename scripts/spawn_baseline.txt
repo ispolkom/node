@@ -1,4 +1,6 @@
 src/autonomy.rs:1
+src/closed_env.rs:1
+src/closed_env/audit_round16.rs:3
 src/communication/chat.rs:1
 src/dht/kademlia.rs:2
 src/hops_net.rs:3

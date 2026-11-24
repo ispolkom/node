@@ -121,7 +121,7 @@ jobs:
           cache: true
       - name: build node package
         run: |
-          cargo build --release
+          cargo build --release --workspace --bins
           bash tools/build_deb.sh
       - name: build desktop package
         working-directory: desktop/yandi_desktop
