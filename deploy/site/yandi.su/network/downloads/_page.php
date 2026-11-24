@@ -1,14 +1,13 @@
 <?php
 require_once __DIR__ . '/../../includes/releases.php';
-$pageTitle = 'Download YANDI for ' . $downloadPlatform . ' — test build';
-$pageDescription = 'Download YANDI for ' . $downloadPlatform . ': installation instructions, version, release date and checksums. ' . $downloadStatus . '. Test build for finding bugs.';
+$pageTitle = 'Download YANDI for ' . $downloadPlatform;
+$pageDescription = 'Download YANDI for ' . $downloadPlatform . ': installation instructions, version, release date and checksums. ' . $downloadStatus . '.';
 $activeNav = 'network';
 require __DIR__ . '/../../includes/header.php';
 $rel = $downloadRelease !== null ? (YANDI_RELEASES[$downloadRelease] ?? null) : null;
 ?>
 <section class="hero"><div class="container"><h1><?= e($downloadPlatform) ?></h1><p class="lead"><?= e($downloadStatus) ?></p></div></section>
 <section><div class="container"><div class="download-detail">
-    <div class="notice"><strong>Test version.</strong> This version is a test build. It is meant for checking the software and finding bugs. Do not rely on it for important data or critical communication, and please report any problems you find.</div>
     <span class="platform-icon-shell"><img class="platform-icon" src="<?= e($downloadIcon) ?>" alt="<?= e($downloadPlatform) ?>"></span>
     <h2>YANDI Network for <?= e($downloadPlatform) ?></h2>
     <p><?= e($downloadDescription) ?></p>

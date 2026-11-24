@@ -10,7 +10,7 @@ require __DIR__ . '/../includes/header.php';
     <p>YANDI Network — одно из направлений экосистемы YANDI, а не вся YANDI. Участники могут разворачивать собственные ноды и устанавливать соединения между доверенными устройствами.</p>
 </div></section>
 <section class="downloads-section"><div class="container">
-    <h2>Загрузки</h2><div class="notice"><strong>Тестовая версия.</strong> Данная версия тестовая и служит для проверки и выявления багов. Не доверяйте ей важные данные и критически важную связь, а о найденных ошибках сообщайте.</div>
+    <h2>Загрузки</h2>
     <p>Загрузки клиента YANDI и материалы для платформ. Тестовые сборки есть для Android, Debian, Ubuntu и Windows; для остальных платформ сборок пока нет.</p>
     <div class="download-grid">
 <article class="card download-card is-ready"><span class="platform-icon-shell"><img class="platform-icon" src="/assets/icons/android.svg" alt="Android"></span><div><h3>Android</h3><p class="download-status">Тестовая сборка доступна</p></div><a class="card-link" href="/ru/network/downloads/android/">Подробнее</a></article>
