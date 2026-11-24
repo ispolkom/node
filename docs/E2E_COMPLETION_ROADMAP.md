@@ -30,3 +30,10 @@ No live keys or owner data may enter the stand. Keep `release/SEQ`, signed artif
 - NOT TESTED: forced relay routing between separate node processes in isolated network namespaces, hostile relay packet modification in the live route, Android physical lifecycle, and end-to-end confidentiality between a phone and a remote contact's phone.
 
 The first relay socket test run dropped the sender's datagram before the receiver address was pinned. The test now waits for the receiver's pin datagram to be processed before sending. This was a stand setup race, not evidence of lost production chat traffic.
+
+## Follow-up results and decisions pending
+
+- PASS: `CARGO_TARGET_DIR=/mnt/ssd480/yandi-e2e-target cargo test --locked --lib relay_outage_drops_datagrams_and_recovery_restores_forwarding`. With the forwarding task stopped, a datagram is not delivered. A fresh relay allocation restores forwarding. This checks the UDP relay mechanism, not the application outbox or a live node route switch.
+- NOT TESTED: preservation and eventual delivery of a chat message across a relay outage between three separate node processes. The training network binds all three nodes to `127.0.0.1`; its client mode does not enforce use of node 2, so loopback delivery cannot establish this property.
+- Confirmed limitation: the Flutter TOFU test in `mobile/yandi_mobile/test/e2e_security_test.dart` shows that a substituted first key is pinned and a later genuine key is rejected. Key continuity after pinning works, but first-contact identity is not authenticated independently. Fingerprints already exist in chat for manual comparison (`docs/CLIENT_WIRE.md`). A product decision is needed on whether first-contact verification must be mandatory before sending sensitive content.
+- Confirmed trust boundary: `src/mobile_api.rs::send` and the WebSocket message path pass plaintext from a phone to its owner's node for a remote contact. YSE1 then protects node-to-node delivery. Whether the owner's node is an allowed endpoint must be decided explicitly before designing an additional phone-to-phone envelope.

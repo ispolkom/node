@@ -450,6 +450,31 @@ mod tests {
         relay_task.abort();
     }
 
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn relay_outage_drops_datagrams_and_recovery_restores_forwarding() {
+        let (relay, a, b, task) = rig().await;
+        let (ra, rb) = (relay[1].local_addr().unwrap(), relay[3].local_addr().unwrap());
+        b.send_to(b"pin", rb).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        a.send_to(b"before", ra).await.unwrap();
+        assert_eq!(recv(&b).await.unwrap().0, b"before");
+
+        task.abort();
+        let _ = task.await;
+        a.send_to(b"during", ra).await.unwrap();
+        assert!(recv(&b).await.is_none(), "relay forwarded during outage");
+
+        drop(relay);
+        let (new_relay, new_a, new_b, recovered) = rig().await;
+        let (new_ra, new_rb) = (new_relay[1].local_addr().unwrap(), new_relay[3].local_addr().unwrap());
+        new_b.send_to(b"pin-again", new_rb).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        new_a.send_to(b"after", new_ra).await.unwrap();
+        assert_eq!(recv(&new_b).await.unwrap().0, b"after");
+        recovered.abort();
+    }
+
     // extra loopback addresses (127.0.0.2 and up) exist only on Linux: the relay itself does not depend on the platform
     #[cfg(target_os = "linux")]
     #[tokio::test]
