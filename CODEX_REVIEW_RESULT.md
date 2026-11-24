@@ -1,5 +1,7 @@
 # CODEX review result
 
+> **Historical audit snapshot (9 October 2026).** The findings below describe the code examined on that date, not the current `main` branch. Some issues were subsequently changed or fixed. For current trust boundaries and open findings, read [`docs/CRYPTO_MAP.md`](docs/CRYPTO_MAP.md), [`docs/PRIVACY.md`](docs/PRIVACY.md), and [`docs/SECURITY_STATUS.md`](docs/SECURITY_STATUS.md). This internal AI-assisted review is not an independent security audit.
+
 Дата проверки: 2026-10-09
 Репозиторий: `/home/iam/node`
 Объект: Rust-нода и Flutter-приложение YANDI
