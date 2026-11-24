@@ -5,7 +5,7 @@
 # YANDI
 
 **A peer-to-peer network for free communication.**<br>
-Chats, files, groups and calls through a node you own — encrypted end-to-end between devices, no central server, no accounts.
+Chats, files, groups and calls through a node you own — encryption boundaries depend on the communicating devices and nodes, with no central server or accounts.
 
 [![Website](https://img.shields.io/badge/website-yandi.su-1f6feb)](https://yandi.su/)
 [![Downloads](https://img.shields.io/badge/downloads-Debian%20%C2%B7%20Ubuntu%20%C2%B7%20Android-2ea043)](https://yandi.su/network/)
@@ -92,7 +92,7 @@ Removing: `sudo apt remove yandi-node` keeps your data; `sudo apt purge yandi-no
 | **Two languages everywhere**: English and Russian — console, installer, desktop shell, phone app | works |
 | **Signed releases and installer** (`tools/install.sh`): signature and every file hash checked before anything is installed; rollback protection | works |
 | **Backup of connections** (`.yandibak`) restored with the seed phrase | in progress |
-| Chat, files and call signalling between nodes, encrypted per link (X25519 + AES-256-GCM, fresh keys for every handshake, replay protection) | works, verified on 3 nodes |
+| Chat between PC nodes uses a recipient-bound YSE1 envelope inside encrypted transport; files and call signalling use their own protected paths | works in tested local-node scenarios; forced relay route not verified |
 | **Internet exit** through another node (SOCKS5 on your computer): automatic choice by country and quality, exit country checked by measurement, rotation of failing exits, route rules | works |
 | **"Anonymous" mode**: entry → middle → exit circuit with layered encryption (equal-size cells, signed handshakes) | works, verified on 4 nodes |
 | **"Fast" mode**: a single exit, close to a normal connection | works |
@@ -103,7 +103,7 @@ Removing: `sudo apt remove yandi-node` keeps your data; `sudo apt purge yandi-no
 
 ## How it works
 
-- **Node** — the `yandi` program on a machine with a reachable address. It publishes a signed **card**; neighbours verify it and exchange cards like peers in a torrent swarm. In the simplified design the node is a **carrier and presence board**: it moves encrypted packets and tells whether the addressee is online; content is encrypted on the clients ([`docs/SIMPLE_DESIGN.md`](docs/SIMPLE_DESIGN.md)).
+- **Node** — the `yandi` program on a machine with a reachable address. It publishes a signed **card**; neighbours verify it and exchange cards like peers in a torrent swarm. It carries encrypted packets and presence information. For PC-to-PC chat, the communicating nodes are the YSE1 endpoints; for paired phones, E4 protects content between devices. A phone's own node is trusted with plaintext when sending to an ordinary remote contact ([`docs/PRIVACY.md`](docs/PRIVACY.md)).
 - **Client** — a phone or a node that cannot be reached from outside (NAT). It keeps links to two relays and announces a signed record "reach me through them".
 - **Exit** — a node through which traffic leaves to the internet from its own address. The owner decides who may use it: nobody / trusted nodes (default) / everyone.
 - **Circuit** — a path through several nodes with layered encryption: the entry knows you but not the target; the exit knows the target but not you; the middle knows neither.
@@ -120,7 +120,7 @@ The console, the installer, `yandi --help`, the desktop shell and the phone app 
 **A working prototype, not a finished product.** The main features are verified on real processes, but there has been no independent security audit and the network is tiny.
 
 - **No independent security audit.**
-- **No asynchronous end-to-end layer between nodes yet**: no sealed envelopes for offline delivery, no forward secrecy for stored content, no ratchet, no human key verification. Plan: [`docs/E2E_ARCHITECTURE.md`](docs/E2E_ARCHITECTURE.md).
+- **E2EE boundaries differ by path**: paired phones use E4 between devices; PC nodes seal chat content for the receiving node with YSE1. A phone's own node reads messages it sends to an ordinary remote contact before sealing them for that contact's node. First-contact TOFU needs an independent fingerprint check; there is no ratchet or human key verification enforced by the app. See [`docs/PRIVACY.md`](docs/PRIVACY.md).
 - **Circuits do not protect against an observer who sees the whole network** (no cover traffic, no entry-node pinning).
 - **Metadata is not hidden**: the node of the addressee learns who subscribes to its presence and when ([`docs/PRIVACY.md`](docs/PRIVACY.md)).
 - UDP is throttled by some providers at peak hours; a TCP fallback path is planned (the TLS entry for phones already exists).
