@@ -57,6 +57,8 @@ pub struct ChatManager {
     pending_acks: Arc<Mutex<HashMap<HashId, PendingAck>>>,
     /// the queue changed since it was last written to disk
     outbox_dirty: Arc<std::sync::atomic::AtomicBool>,
+    /// Ciphertext retained across lock when the outgoing queue cannot be written to disk.
+    unsaved_outbox: Mutex<Option<Vec<u8>>>,
     /// ids of recent incoming messages (a resend of one we already have is acknowledged again but not stored twice)
     seen_incoming: Arc<
         Mutex<(
@@ -111,19 +113,53 @@ impl ChatManager {
         for (id, p) in restored {
             pending.entry(id).or_insert(p);
         }
+        let mut snapshot = self.unsaved_outbox.lock().await;
+        if let Some(bytes) = snapshot.as_ref() {
+            match self.storage.open_outbox_snapshot(bytes) {
+                Ok(entries) => {
+                    for (id, p) in Self::restore_entries(entries) {
+                        pending.entry(id).or_insert(p);
+                    }
+                    self.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    *snapshot = None;
+                }
+                Err(e) => error!("could not restore encrypted outgoing queue snapshot: {e}"),
+            }
+        }
     }
 
     /// Отозвать ключ. Очередь сначала записывается (пока ключ есть), затем ключ и расшифрованные копии в памяти стираются.
     pub async fn lock(&self) {
-        self.persist_outbox_if_dirty().await;
+        let mut pending = self.pending_acks.lock().await;
+        if self.outbox_dirty.swap(false, std::sync::atomic::Ordering::Relaxed) {
+            let entries: Vec<_> = pending.values().map(|p| super::storage::OutboxEntry {
+                peer: p.peer, msg: p.msg.clone(), first_sent: p.first_sent,
+            }).collect();
+            if let Err(e) = self.storage.save_outbox(&entries) {
+                error!("could not write the outgoing queue before lock: {e}");
+                match self.storage.seal_outbox_snapshot(&entries) {
+                    Ok(bytes) => *self.unsaved_outbox.lock().await = Some(bytes),
+                    Err(e) => error!("could not seal outgoing queue before lock: {e}"),
+                }
+            }
+        }
         self.storage.lock();
-        self.pending_acks.lock().await.clear();
+        pending.clear();
         self.outbox_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Перенос чатов и очереди на ключ закрытой среды (см. [`ChatStorage::rekey_to`]); возвращает число файлов с ошибкой.
     pub fn rekey_to(&self, old: Option<[u8; 32]>, new: [u8; 32]) -> Result<usize> {
-        self.storage.rekey_to(old, new)
+        let mut snapshot = self.unsaved_outbox.try_lock()
+            .map_err(|_| anyhow::anyhow!("outbox snapshot is busy; retry migration"))?;
+        let rekeyed = snapshot.as_ref()
+            .map(|bytes| self.storage.rekey_outbox_snapshot(bytes, old, new))
+            .transpose()?;
+        let failures = self.storage.rekey_to(old, new)?;
+        if failures == 0 {
+            *snapshot = rekeyed;
+        }
+        Ok(failures)
     }
 
     /// Среда стёрта: зашифрованные файлы чатов (история, очередь, журналы статусов) без ключа бесполезны — удаляются.
@@ -138,8 +174,12 @@ impl ChatManager {
     /// messages that were still waiting for their recipients when the node last stopped
     fn restore_outbox(storage: &ChatStorage) -> HashMap<HashId, PendingAck> {
         // messages that were still waiting for their recipients when the node last stopped
+        Self::restore_entries(storage.load_outbox())
+    }
+
+    fn restore_entries(entries: Vec<super::storage::OutboxEntry>) -> HashMap<HashId, PendingAck> {
         let mut restored = HashMap::new();
-        for e in storage.load_outbox() {
+        for e in entries {
             let age = unix_now().saturating_sub(e.first_sent);
             if age < MAX_DELIVERY_AGE.as_secs() {
                 restored.insert(
@@ -182,6 +222,7 @@ impl ChatManager {
             file_transfer_manager: None,
             pending_acks: Arc::new(Mutex::new(restored)),
             outbox_dirty: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            unsaved_outbox: Mutex::new(None),
             seen_incoming: Arc::new(Mutex::new((Default::default(), Default::default()))),
         })
     }
@@ -328,11 +369,8 @@ impl ChatManager {
         {
             return;
         }
-        let entries: Vec<super::storage::OutboxEntry> = self
-            .pending_acks
-            .lock()
-            .await
-            .values()
+        let pending = self.pending_acks.lock().await;
+        let entries: Vec<super::storage::OutboxEntry> = pending.values()
             .map(|p| super::storage::OutboxEntry {
                 peer: p.peer,
                 msg: p.msg.clone(),
@@ -1103,7 +1141,7 @@ mod tests {
     /// delivery-timeout scenarios below share ONE ChatManager/transport
     /// instead of racing each other over the same env vars in parallel
     /// test threads.
-    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>) {
+    async fn test_chat_manager() -> (ChatManager, tokio::sync::MutexGuard<'static, ()>, tempfile::TempDir) {
         // порты берутся из переменных окружения процесса: проверки, которым нужен транспорт, идут строго по одной
         static SERIAL: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
         let guard = SERIAL.lock().await;
@@ -1118,9 +1156,40 @@ mod tests {
             .await
             .expect("start transport");
         // чаты проверки — во временной папке, не в ~/.yandi/chats владельца
-        let dir = std::env::temp_dir().join(format!("yandi-chat-test-{}", std::process::id()));
-        let storage = ChatStorage::in_dir(my_node_id, dir).expect("storage");
-        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard)
+        let dir = tempfile::tempdir().expect("temporary chat storage");
+        let storage = ChatStorage::in_dir(my_node_id, dir.path().to_path_buf()).expect("storage");
+        (ChatManager::new_inner(my_node_id, transport, storage).expect("create ChatManager"), guard, dir)
+    }
+
+    #[tokio::test]
+    async fn bug_r16_lock_preserves_outbox_when_persist_fails() {
+        let dir = tempfile::Builder::new().prefix("r16_outbox_io_").tempdir().unwrap();
+        std::env::set_var("YANDI_P2P_DISCOVERY_PORT", "19401");
+        std::env::set_var("YANDI_P2P_DATA_PORT", "19402");
+        let identity = NodeIdentity::new();
+        let me = identity.node_id();
+        let transport = P2PTransport::new(identity, 0).await.unwrap();
+        let storage = ChatStorage::in_dir(me, dir.path().to_path_buf()).unwrap();
+        storage.set_master([7; 32]);
+        let cm = ChatManager::new_inner(me, transport, storage).unwrap();
+        let peer = HashId([2; 32]);
+        let msg = ChatMessage::new(me, peer, "очередь должна пережить ошибку диска".into());
+        cm.storage.save_outgoing(&peer, &msg).unwrap();
+        cm.pending_acks.lock().await.insert(msg.msg_id, pending(peer, msg.clone(), Duration::ZERO, Duration::from_secs(3600)));
+        cm.outbox_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+        // Самодостаточная ошибка rename: файл outbox заменить непустым каталогом невозможно.
+        let outbox = dir.path().join("outbox.enc");
+        std::fs::create_dir(&outbox).unwrap();
+        std::fs::write(outbox.join("occupied"), b"test").unwrap();
+        cm.lock().await;
+        assert!(cm.is_locked());
+        assert!(cm.pending_acks.lock().await.is_empty(), "plaintext queue must be cleared on lock");
+        cm.unlock([7; 32]).await;
+        assert!(cm.pending_acks.lock().await.contains_key(&msg.msg_id), "lock уничтожил единственную очередь повторной доставки после ошибки записи");
+        std::fs::remove_file(outbox.join("occupied")).unwrap();
+        std::fs::remove_dir(&outbox).unwrap();
+        cm.persist_outbox_if_dirty().await;
+        assert_eq!(cm.storage.load_outbox().len(), 1, "the restored queue must be written once disk access recovers");
     }
 
     fn pending(peer: HashId, msg: ChatMessage, age: Duration, due_in: Duration) -> PendingAck {
@@ -1138,7 +1207,7 @@ mod tests {
     /// unconfirmed one is NOT failed — it stays in the queue and is sent again (it used to be marked Failed after 45 seconds, and lost).
     #[tokio::test]
     async fn a_deleted_or_cleared_message_leaves_the_retry_queue_and_the_outbox() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
         let mk = |peer: HashId, text: &str| {
             let m = ChatMessage::new(cm.my_node_id, peer, text.to_string());
             (m.msg_id, m)
@@ -1171,7 +1240,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_queue_fails_only_day_old_messages_and_keeps_young_ones_for_resending() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
 
         let old_peer = crate::util::HashId::new_random();
         let old_msg = ChatMessage::new(cm.my_node_id, old_peer, "hello?".to_string());
@@ -1307,7 +1376,7 @@ mod tests {
     /// Закрытая среда: пока заперто, входящее не принимается и не считается «уже виденным»; после разблокировки повтор сохраняется.
     #[tokio::test(flavor = "multi_thread")]
     async fn locked_chat_does_not_swallow_incoming_and_keeps_outbox() {
-        let (cm, _serial) = test_chat_manager().await;
+        let (cm, _serial, _dir) = test_chat_manager().await;
         cm.storage.set_master([9; 32]);
         let peer = crate::util::HashId::new_random();
         let queued = ChatMessage::new(cm.my_node_id, peer, "в очереди".to_string());
@@ -1352,7 +1421,7 @@ mod tests {
     /// E2E v1: содержимое чата запечатывается на ключ собеседника; чужой, подмена отправителя и прежний открытый вид отвергаются.
     #[tokio::test]
     async fn chat_content_is_sealed_end_to_end_and_plaintext_is_refused() {
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[77u8; 32]);
         let peer = HashId([77u8; 32]);
         let other = HashId([78u8; 32]);
@@ -1378,7 +1447,7 @@ mod tests {
     #[tokio::test]
     async fn call_signals_are_accepted_only_sealed_signed_and_with_the_right_type() {
         use crate::p2p::P2PPacketType as T;
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[91u8; 32]);
         let peer = HashId([91u8; 32]);
         let me_vk = cm.transport.sealing_key().verifying_key();
@@ -1420,7 +1489,7 @@ mod tests {
     #[tokio::test]
     async fn a_replayed_or_stale_call_signal_is_refused() {
         use crate::p2p::P2PPacketType as T;
-        let (cm, _g) = test_chat_manager().await;
+        let (cm, _g, _dir) = test_chat_manager().await;
         let peer_key = ed25519_dalek::SigningKey::from_bytes(&[93u8; 32]);
         let peer = HashId([93u8; 32]);
         cm.transport.test_add_peer_key(peer, peer_key.verifying_key().to_bytes()).await;

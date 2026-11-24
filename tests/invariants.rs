@@ -28,9 +28,9 @@ fn every_invariant_points_at_a_real_test_or_says_it_is_pending() {
         let id = line.split('|').nth(1).unwrap_or("").trim().to_string();
         let status = line.split('|').nth(3).unwrap_or("").trim().to_lowercase();
         let refs = references(line);
-        if status.starts_with("ждёт") {
-            if !(status.contains("фаз")) {
-                problems.push(format!("{id}: «ждёт» без указания фазы плана"));
+        if status.starts_with("ждёт") || status.starts_with("waiting") {
+            if !(status.contains("фаз") || status.contains("phase")) {
+                problems.push(format!("{id}: waiting without a plan phase"));
             }
             if !refs.is_empty() {
                 // ссылки у ожидающих необязательны, но если есть — должны быть настоящими

@@ -1213,6 +1213,26 @@ mod tests {
     use super::*;
     use tokio::net::TcpListener;
 
+    #[test]
+    fn bug_r16_locked_proxy_save_has_no_memory_side_effects() {
+        struct Restore { mode: Mode, pool: Option<Pool> }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                *mode_cell().lock().unwrap_or_else(|e| e.into_inner()) = self.mode;
+                *pool() = self.pool.take().unwrap();
+            }
+        }
+        let old_mode = mode();
+        *mode_cell().lock().unwrap() = Mode::Locked;
+        // Инициализация при Locked не читает файлы. Сохраняем и возвращаем глобальное состояние даже при панике.
+        let old_pool = std::mem::replace(&mut *pool(), Pool { file: PoolFile::default(), health: HashMap::new(), assign: HashMap::new(), unavailable: false });
+        let _restore = Restore { mode: old_mode, pool: Some(old_pool) };
+        let result = save(Settings { enabled: true, kind: Kind::Socks5, host: "127.0.0.1".into(), port: 12345, auth: Auth::Password { user: "test".into(), password: "test-only-password".into() } });
+        assert!(result.is_err(), "запись действительно запрещена до пароля");
+        assert!(!is_active(), "несмотря на отказ записи, выход через прокси включился без разблокировки");
+        assert!(pool().file.proxies.is_empty(), "секреты отвергнутой записи остались в пуле");
+    }
+
     fn settings(kind: Kind, port: u16, auth: Auth) -> Settings {
         Settings { enabled: true, kind, host: "127.0.0.1".into(), port, auth }
     }

@@ -145,6 +145,19 @@ void main() {
         throwsA(isA<FileSystemException>()));
   });
 
+  test('first contact TOFU accepts the first supplied key without external proof', () async {
+    final pins = <String, String>{};
+    final trust = PeerTrust(
+      read: (key) async => pins[key],
+      write: (key, value) async { pins[key] = value; },
+    );
+    final substituted = List<int>.filled(32, 7);
+    final genuine = List<int>.filled(32, 8);
+    await trust.accept('synthetic-peer', substituted);
+    expect(pins['peer_ed25519_pin_synthetic-peer'], base64.encode(substituted));
+    await expectLater(trust.accept('synthetic-peer', genuine), throwsStateError);
+  });
+
   test('replay ledger: «seen» reads without writing; the number is taken only by claim', () async {
     final ledger = ReplayLedger(File('${dir.path}/replay.json'));
     final exp = DateTime.now().millisecondsSinceEpoch + 60000;

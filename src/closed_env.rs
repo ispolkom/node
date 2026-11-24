@@ -102,7 +102,9 @@ pub struct ClosedEnv {
     /// настройка, смена пароля, вход: по одной операции
     op: tokio::sync::Mutex<()>,
     /// применение ключей потребителям и блокировка не пересекаются
-    apply: tokio::sync::Mutex<()>,
+    apply: Arc<tokio::sync::Mutex<()>>,
+    revocations: Arc<std::sync::atomic::AtomicUsize>,
+    revocation_done: Arc<tokio::sync::Notify>,
     consumers: Mutex<Vec<Arc<dyn Consumer>>>,
     legacy_master: Box<dyn Fn() -> Option<[u8; 32]> + Send + Sync>,
     configured: std::sync::atomic::AtomicBool,
@@ -134,7 +136,9 @@ impl ClosedEnv {
                 auto_lock: Duration::from_secs(settings.auto_lock_secs),
             }),
             op: tokio::sync::Mutex::new(()),
-            apply: tokio::sync::Mutex::new(()),
+            apply: Arc::new(tokio::sync::Mutex::new(())),
+            revocations: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            revocation_done: Arc::new(tokio::sync::Notify::new()),
             consumers: Mutex::new(Vec::new()),
             legacy_master,
             configured: std::sync::atomic::AtomicBool::new(configured),
@@ -222,7 +226,7 @@ impl ClosedEnv {
 
     fn current(&self, generation: u64) -> bool {
         let i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
-        i.generation == generation && i.vault.is_some()
+        i.generation == generation
     }
 
     /// Первичная настройка: пароль и сид-фраза (12 или 24 слова) (обязательны: пять неверных паролей оставляют только сид).
@@ -402,14 +406,30 @@ impl ClosedEnv {
             i.vault = None; // Drop стирает DK
             i.generation += 1;
         }
-        let _apply = self.apply.lock().await;
         let consumers: Vec<_> = self.consumers.lock().unwrap_or_else(|e| e.into_inner()).clone();
-        for c in consumers {
-            // служебные части продолжают работать: они не зависят от присутствия владельца
-            if self.service_active() && c.is_service() {
-                continue;
+        let service_active = self.service_active();
+        let apply = self.apply.clone();
+        self.revocations.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let revocations = self.revocations.clone();
+        let revocation_done = self.revocation_done.clone();
+        // Revocation must finish even if the caller is cancelled while a consumer awaits.
+        let cleanup = tokio::spawn(async move {
+            struct Completed(Arc<std::sync::atomic::AtomicUsize>, Arc<tokio::sync::Notify>);
+            impl Drop for Completed {
+                fn drop(&mut self) {
+                    self.0.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+                    self.1.notify_waiters();
+                }
             }
-            c.lock().await;
+            let _completed = Completed(revocations, revocation_done);
+            let _apply = apply.lock().await;
+            for c in consumers {
+                if service_active && c.is_service() { continue; }
+                c.lock().await;
+            }
+        });
+        if let Err(e) = cleanup.await {
+            eprintln!("[closed] consumer key revocation did not complete: {e}");
         }
     }
 
@@ -434,10 +454,17 @@ impl ClosedEnv {
                 return Err(anyhow!("вход отменён: среда была заперта, пока он выполнялся"));
             }
             i.generation += 1;
-            i.vault = Some(vault);
+            i.vault = None;
             i.last_activity = Instant::now();
             i.generation
         };
+        loop {
+            let notified = self.revocation_done.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.revocations.load(std::sync::atomic::Ordering::SeqCst) == 0 { break; }
+            notified.await;
+        }
         let _apply = self.apply.lock().await;
         let marker = self.dir.join(MARKER);
         if marker.exists() {
@@ -445,7 +472,7 @@ impl ClosedEnv {
             let mut failures = 0usize;
             for (c, key) in &keys {
                 if !self.current(generation) {
-                    return Ok(()); // заперто, пока шёл перенос: ключи не выдаём
+                    return Err(anyhow!("вход отменён: среда была заперта во время переноса"));
                 }
                 c.lock().await;
                 // служебная часть живёт под своим ключом (из рабочего ключа устройства), а не под ключом владельца: переносим
@@ -465,13 +492,25 @@ impl ClosedEnv {
             if failures == 0 {
                 let _ = std::fs::remove_file(&marker);
             } else {
-                eprintln!("[closed] ⚠️  не всё перенесено ({failures}); метка оставлена, перенос повторится при следующем входе");
+                for (c, _) in &keys {
+                    if c.is_service() {
+                        if let Some(master) = old.as_ref() {
+                            c.unlock(service_key_for(master, c.domain())).await;
+                            continue;
+                        }
+                    }
+                    c.lock().await;
+                }
+                let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+                i.vault = None;
+                i.generation += 1;
+                return Err(anyhow!("перенос данных не завершён ({failures}); вход отклонён"));
             }
         }
         let master = (self.legacy_master)();
         for (c, key) in &keys {
             if !self.current(generation) {
-                return Ok(());
+                return Err(anyhow!("вход отменён: среда была заперта во время выдачи ключей"));
             }
             if c.is_service() {
                 if let Some(m) = master.as_ref() {
@@ -486,9 +525,18 @@ impl ClosedEnv {
             }
             c.unlock(**key).await;
         }
+        let mut i = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if i.generation != generation || epoch.is_some_and(|e| self.lock_epoch.load(std::sync::atomic::Ordering::SeqCst) != e) {
+            return Err(anyhow!("вход отменён: среда была заперта во время выдачи ключей"));
+        }
+        i.vault = Some(vault);
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "closed_env/audit_round16.rs"]
+mod audit_round16;
 
 #[cfg(test)]
 mod tests {
@@ -735,7 +783,7 @@ mod tests {
         let base = tempfile::tempdir().unwrap();
         let (e, chat, _groups) = env(base.path(), Some([1; 32]));
         chat.fail_migration.store(true, Ordering::SeqCst);
-        e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.unwrap();
+        assert!(e.setup("owner password".into(), Some("legal winner thank year wave sausage worth useful legal winner thank yellow".into())).await.is_err());
         assert!(e.status().migration_pending, "метка осталась");
         e.lock().await;
         chat.fail_migration.store(false, Ordering::SeqCst);
