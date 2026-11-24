@@ -1,8 +1,14 @@
-# End-to-end encryption completion plan
+# Communication E2EE and internet proxy verification plan
 
 Status: in progress. Baseline: `c91a743` (24 November 2026). This plan does not change a wire format or promise that every path is already end-to-end encrypted.
 
-## Verified boundaries
+## Scope and data paths
+
+YANDI has two independent product functions. User communication goes from a PC/browser/phone through the owner's node to the other user's node. The P2P chat path is `mobile_api::send` or web chat → `ChatService::send_message_full` → `ChatService::send_once` → `P2PTransport::send_packet_dual_path` → direct peer or `p2p::punch` / `p2p::relay` → recipient `ChatService`. The YSE1 envelope protects node-to-node content. Files and call signals have their own handling in `communication/file_transfer.rs`, `web/media_api.rs` and `p2p/transport.rs`; verify them separately. A relay is a fallback when a direct path cannot be established. A multi-hop exit circuit is not required for messaging.
+
+Internet access is a separate path through `src/proxy/`, `src/socks5/`, `src/upstream_proxy.rs`, `src/route_rules.rs`, `src/hops.rs` and `src/hops_net.rs` to an exit node and an external destination. Verify SOCKS5/HTTP authentication, route selection, exit policy, per-link transport protection, direct exit, automatic exit and multi-hop operation on their own terms. The exit node can observe traffic towards the Internet destination as allowed by the proxy design; HTTPS also has client-to-site TLS. Messenger E2EE guarantees must not be asserted for arbitrary proxied Internet traffic.
+
+## Communication E2EE boundaries
 
 | Path | Current state | Evidence | Remaining work |
 | --- | --- | --- | --- |
@@ -11,7 +17,7 @@ Status: in progress. Baseline: `c91a743` (24 November 2026). This plan does not 
 | Phone ↔ ordinary remote contact | Phone submits text to its owner's node; node seals it for the remote node with YSE1 | `src/mobile_api.rs::send`, `src/communication/chat.rs::send_once` | Decide if trust in the owner's node is acceptable; device-to-device E2E requires a separate client envelope |
 | Group messages and calls | Group keys and E4 call signalling exist for paired devices | `docs/CLIENT_WIRE.md`, `mobile/yandi_mobile/lib/crypto/group_crypto.dart` | Test hostile key distribution, membership changes, and media identity binding on real devices |
 
-## Work sequence and acceptance gates
+## Communication work sequence and acceptance gates
 
 1. **Baseline and threat model.** Run synthetic sender, receiver and relay tests. Record distinct outcomes for paired devices, ordinary contacts, files, groups and calls. The production YSE1 test passes; a live three-process stand delivered a message from node 1 to node 3, but no forced relay forwarding was observed on node 2. Live relay content isolation remains NOT TESTED. Gate: repeatable commands and retained redacted evidence.
 2. **Identity verification.** Define how independently owned devices authenticate one another before first use and after key rotation. Preserve existing paired device IDs. Gate: a malicious first-contact node cannot substitute a key without a visible verification failure; recovery and revocation are tested.
@@ -19,6 +25,26 @@ Status: in progress. Baseline: `c91a743` (24 November 2026). This plan does not 
 4. **Files, receipts and edits.** Encrypt all content and metadata that should be private at the endpoints, and bind attachments to the message identity. Gate: intermediary cannot recover filenames or file keys; retries and crash recovery do not lose or duplicate accepted content.
 5. **Groups and calls.** Verify member keys, rekey after removals, and bind the media channel to verified call signalling. Gate: removed members cannot read new content and a hostile relay cannot substitute a call endpoint.
 6. **Migration and release.** Dual-version testing, downgrade refusal after migration, physical Android Doze tests, PC background-call tests and independent review. Gate: update documentation/site claims only after all supported communication paths pass.
+
+## Internet proxy verification (separate track)
+
+1. Direct exit: SOCKS5 and HTTP requests through a selected exit node; authentication, deny rules and return traffic. Existing real-process coverage: `tests/testnet_exit_test.rs`.
+2. Automatic exit selection: verify candidate choice, route changes, failures, and policy without assuming the same endpoint identity or content visibility as chat.
+3. Multi-hop exit: verify entry, intermediate and exit roles, encrypted transport between neighbors, route integrity and recovery. Existing real-process coverage: `tests/testnet_hops_test.rs`. No message-delivery claim follows from these proxy tests.
+4. External HTTPS: verify that TLS still terminates at the destination site; record which metadata and any non-TLS content an exit can see. Do not describe the exit as a messenger participant.
+
+For both tracks, distinguish source inspection, isolated unit tests, real node processes, and physical-device tests. A PASS only covers its named path. No change to routing or cryptographic architecture follows from this plan without a reproduced defect and owner agreement.
+
+### Verification on this branch (24 November 2026)
+
+| Track | Command / scenario | Result | Limit |
+| --- | --- | --- | --- |
+| Communication | `CARGO_TARGET_DIR=/mnt/ssd480/yandi-e2e-target cargo test --locked --test testnet_comms_test -- --ignored` | PASS, 1 real-process integration test (67.86 s) | Two local nodes; no forced relay, mobile device, or network outage |
+| Internet proxy | `cargo test --locked --lib hops::tests` with the isolated target directory above | PASS, 12 unit tests | No real external route |
+| Internet proxy | `cargo test --locked --lib hops_net::tests` | PASS, 4 unit tests | No real external route |
+| Internet proxy | `cargo test --locked --lib socks5::` | PASS, 14 unit tests | No real external route |
+| Internet proxy | `cargo test --locked --lib route_rules::tests` | PASS, 1 unit test | No real external route |
+| Internet proxy | `tests/testnet_exit_test.rs` and `tests/testnet_hops_test.rs` | NOT TESTED in this isolated run | Their fixtures bind an echo server on the host's public IP; use a private VM/network before running |
 
 No live keys or owner data may enter the stand. Keep `release/SEQ`, signed artifacts and production nodes untouched. A PASS applies to its exact scenario only. Physical device behavior remains NOT TESTED until exercised on the devices.
 
