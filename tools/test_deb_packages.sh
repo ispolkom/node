@@ -13,7 +13,7 @@ DESKTOP_DEB=$(find "$PKG_DIR" -maxdepth 1 -name 'yandi-desktop_*.deb' -print -qu
 
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends systemd systemd-sysv xvfb dbus-x11
+apt-get install -y --no-install-recommends systemd systemd-sysv xvfb xauth dbus-x11
 apt-get install -y "/packages/$(basename "$NODE_DEB")" "/packages/$(basename "$DESKTOP_DEB")"
 
 dpkg-query -W -f='${Status}\n' yandi-node | grep -qx 'install ok installed'
