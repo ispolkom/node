@@ -109,7 +109,7 @@ jobs:
       - name: build dependencies
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends ca-certificates curl git jq unzip xz-utils zip build-essential pkg-config libssl-dev fakeroot imagemagick clang cmake ninja-build libasound2-dev libgtk-3-dev libmpv-dev
+          apt-get install -y --no-install-recommends ca-certificates curl git jq unzip xz-utils zip build-essential pkg-config libssl-dev fakeroot imagemagick clang lld cmake ninja-build libasound2-dev libgtk-3-dev libmpv-dev
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
