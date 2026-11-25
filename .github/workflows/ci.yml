@@ -122,6 +122,9 @@ jobs:
           cache: true
       - name: build Debian 12 compatible packages
         run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$(dirname "$(dirname "$(command -v flutter)")")"
+          test "$(git rev-list --count HEAD)" -gt 0
           cargo build --release --workspace --bins
           bash tools/build_deb.sh
           (cd desktop/yandi_desktop && flutter pub get && flutter build linux --release --no-pub)
