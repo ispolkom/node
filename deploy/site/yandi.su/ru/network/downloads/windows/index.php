@@ -1,12 +1,12 @@
 <?php
 $downloadPlatform = 'Windows'; $downloadIcon = '/assets/icons/windows.svg'; $downloadRelease = null;
 $downloadStatus = 'Экспериментальная сборка x64 доступна';
-$downloadDescription = 'Консольная нода собрана для Windows на Debian из коммита 2a94ffe (узел 0.2.0+g961). В архиве есть необходимая DLL и инструкция. Отдельная оболочка ПК в комплект не входит.';
+$downloadDescription = 'Консольная нода собрана для Windows на Debian из коммита 474361e (узел 0.2.0+g970). В архиве есть необходимая DLL и инструкция. Отдельная оболочка ПК в комплект не входит.';
 $downloadTestFile = [
-    'href' => '/update/windows/yandi-node_0.2.0-g961_windows-x64-test.zip',
-    'name' => 'yandi-node_0.2.0-g961_windows-x64-test.zip',
+    'href' => '/update/windows/yandi-node_0.2.0-g970_windows-x64-test.zip',
+    'name' => 'yandi-node_0.2.0-g970_windows-x64-test.zip',
     'size' => '9,9',
-    'sha256' => 'ee1f065ae09690d4ba83e75dfe0996afe25a821e6f9ea1731a74bb1e8042cf22',
+    'sha256' => 'e754915a8874c6af74c1e8889f40662cab2e8acd873d903a8f87a66d116597e0',
 ];
 $downloadSteps = [
     'Скачайте ZIP и распакуйте в папку с правом записи. Держите <code>libssp-0.dll</code> рядом с <code>yandi.exe</code>.',

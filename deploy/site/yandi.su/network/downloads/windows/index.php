@@ -1,12 +1,12 @@
 <?php
 $downloadPlatform = 'Windows'; $downloadIcon = '/assets/icons/windows.svg'; $downloadRelease = null;
 $downloadStatus = 'Experimental x64 test build available';
-$downloadDescription = 'The console node was cross-compiled on Debian from source revision 2a94ffe (node 0.2.0+g961). It includes the required DLL and a setup guide. The separate desktop shell is not included.';
+$downloadDescription = 'The console node was cross-compiled on Debian from source revision 474361e (node 0.2.0+g970). It includes the required DLL and a setup guide. The separate desktop shell is not included.';
 $downloadTestFile = [
-    'href' => '/update/windows/yandi-node_0.2.0-g961_windows-x64-test.zip',
-    'name' => 'yandi-node_0.2.0-g961_windows-x64-test.zip',
+    'href' => '/update/windows/yandi-node_0.2.0-g970_windows-x64-test.zip',
+    'name' => 'yandi-node_0.2.0-g970_windows-x64-test.zip',
     'size' => '9.9',
-    'sha256' => 'ee1f065ae09690d4ba83e75dfe0996afe25a821e6f9ea1731a74bb1e8042cf22',
+    'sha256' => 'e754915a8874c6af74c1e8889f40662cab2e8acd873d903a8f87a66d116597e0',
 ];
 $downloadSteps = [
     'Download the ZIP and extract it to a writable folder. Keep <code>libssp-0.dll</code> next to <code>yandi.exe</code>.',
